@@ -157,7 +157,7 @@ Both are required — mode detection never consults the token by itself, so a bo
 nx doctor
 ```
 
-All items should show `✓`. Fix anything marked `✗` before proceeding.
+All items should show `✓`. A `⚠` row is a soft warning and does not fail the run (for example `Orphan uv install` right after `nx self install`, which clears once the uv copy is reaped). Fix anything marked `✗` before proceeding.
 
 ### 3. Index and search
 

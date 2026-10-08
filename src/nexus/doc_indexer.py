@@ -26,7 +26,7 @@ _log = structlog.get_logger(__name__)
 from nexus.checkpoint import delete_checkpoint
 from nexus.corpus import ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
-from nexus.embed_window import window_for_model
+from nexus.embed_window import window_for_collection
 from nexus.retry import _vector_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
@@ -2265,8 +2265,14 @@ def _pdf_chunks(
     allow_degraded_extraction: bool = False,
     extraction_stats: dict | None = None,
     title_override: str = "",
+    collection_name: str = "",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
+
+    *collection_name* decides the token window (the model token the engine
+    embeds the collection with), not *target_model*: on a service-backed
+    local install the Python EF reports MiniLM while the engine embeds
+    bge-768. Empty falls back to *target_model* (nexus-25wlq).
 
     *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
     and ``pages_with_text`` from the extraction result.
@@ -2316,7 +2322,7 @@ def _pdf_chunks(
         extraction_stats["page_count"] = int(result.metadata.get("page_count", 0) or 0)
         _pwt = result.metadata.get("pages_with_text")
         extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
-    window = window_for_model(target_model)  # nexus-spujb
+    window = window_for_collection(collection_name, target_model)  # nexus-spujb, nexus-25wlq
     chunker = (
         PDFChunker(chunk_chars=chunk_chars, token_window=window)
         if chunk_chars is not None
@@ -2402,8 +2408,11 @@ def _markdown_chunks(
     git_meta: dict | None = None,
     doc_id: str = "",
     extraction_source: str = "file",
+    collection_name: str = "",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a Markdown file and return (id, text, metadata) tuples.
+
+    *collection_name* decides the token window; see :func:`_pdf_chunks`.
 
     *git_meta* — flat ``git_*`` provenance dict. ``None`` triggers
     auto-detection from *md_path* via
@@ -2432,7 +2441,7 @@ def _markdown_chunks(
         "corpus": corpus,
     }
     chunks = SemanticMarkdownChunker(
-        token_window=window_for_model(target_model),  # nexus-spujb
+        token_window=window_for_collection(collection_name, target_model),  # nexus-spujb, nexus-25wlq
     ).chunk(body, base_meta)
     if not chunks:
         return []
@@ -3101,6 +3110,7 @@ def index_pdf(
         _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom,
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
         extraction_stats=_extraction_stats, title_override=title_override,
+        collection_name=col_name,
     )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
@@ -3770,8 +3780,10 @@ def index_markdown(
         base_path=base_path,
         doc_id=doc_id,
         extraction_source=extraction_source,
+        collection_name=col_name,
     ) if base_path else partial(
         _markdown_chunks, doc_id=doc_id, extraction_source=extraction_source,
+        collection_name=col_name,
     )
     source_key = make_relative(md_path, base_path) if base_path else None
     # The write's completion stamp is sent below, after the catalog enrichment (RDR-223,

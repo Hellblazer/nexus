@@ -305,6 +305,12 @@ def search_cmd(
     # same CSV form that MCP search(corpus=...) documents (#538 /
     # nexus-v8cj). Mixed forms work: `--corpus a,b --corpus c` expands
     # to ["a", "b", "c"].
+    # RDR-224 guest walk: the untouched default spans knowledge, code and docs,
+    # and an install that indexed only a repo has no knowledge collection. A
+    # leg the user never named is not worth a warning; the closing "no
+    # matching collections found" line still covers the case where NOTHING
+    # matched. Anything the user typed (--corpus knowledge) warns as before.
+    corpus_is_default = tuple(corpus) == ("knowledge", "code", "docs")
     expanded_corpus: list[str] = []
     for raw in corpus:
         for part in raw.split(","):
@@ -337,8 +343,10 @@ def search_cmd(
             raise click.ClickException(
                 f"--repo {', '.join(repos)}: the owner has no indexed collections yet"
             )
-        corpus_was_default = tuple(corpus) == ("knowledge", "code", "docs")
-        expanded_corpus = repo_collections if corpus_was_default else expanded_corpus + repo_collections
+        expanded_corpus = repo_collections if corpus_is_default else expanded_corpus + repo_collections
+        # The collections named now are the user's own scope (--repo), so a
+        # missing one is worth the warning even when --corpus was left alone.
+        corpus_is_default = False
 
     # nexus-d9xt2: GET /v1/vectors/stats (db.list_collections()) costs
     # ~1.1s and, unlike the long-lived MCP process (which caches it —
@@ -371,7 +379,8 @@ def search_cmd(
             except VectorServiceError as exc:
                 raise click.ClickException(str(exc)) from exc
             if not exists:
-                click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
+                if not corpus_is_default:
+                    click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
                 continue
             target_collections.append(c)
     else:
@@ -393,7 +402,7 @@ def search_cmd(
         target_collections = []
         for c in expanded_corpus:
             matched = resolve_corpus(c, all_collections)
-            if not matched:
+            if not matched and not corpus_is_default:
                 click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
             target_collections.extend(matched)
         target_collections = list(dict.fromkeys(target_collections))

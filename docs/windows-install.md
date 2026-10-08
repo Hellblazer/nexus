@@ -110,6 +110,14 @@ search worked, and `nx self gc` then removed the uv copy and its launchers. The
 installed version has no `av` and no `opencv-python` package, which a plain
 `uv tool install` still pulls in.
 
+`nx self install` ends with a line about `nx upgrade` that applies only when it
+upgraded an existing install. On the fresh install in this page you do not run
+`nx upgrade`: `nx init` below normally leaves the data directory already migrated (its
+last step walks the same migration ladder), and `nx doctor` shows no pending
+rung afterwards. If `nx init` instead prints "Upgrade-ladder convergence
+deferred", run `nx upgrade` once. Run `nx upgrade` after a later `nx self install` that
+brought a newer version.
+
 Open a new window, then:
 
 ```powershell
@@ -128,7 +136,10 @@ nx daemon service status
 ```
 
 `nx doctor` should end with "All checks passed", and `status` should show
-`health: ok` and `pg: up`.
+`health: ok` and `pg: up`. A ⚠ row is a soft warning and does not fail the run.
+Right after `nx self install` the one to expect is "Orphan uv install", which
+clears once the uv copy is reaped (see above); any other ⚠ or ✗ row is worth
+reading.
 
 Downloads for conexus 7.72.1: about 0.67 GB for `uv tool install` (653 MB of
 packages and a 21 MB Python), and about 0.58 GB for `nx init` (engine 42 MB,
@@ -236,18 +247,33 @@ the `NexusStorageService` task and `%LOCALAPPDATA%\nexus`, takes
 `tools\current\bin`, which `nx self install` added, off your user PATH, and
 deletes `%USERPROFILE%\.config\nexus`, which holds the database, notes, plans
 and catalog, and `%USERPROFILE%\.cache\nexus`, which holds the search models
-(about 500 MB). The PATH edit keeps every other entry as written, `%VAR%`
-entries included, and keeps the value's registry type. Windows that are already
+(about 500 MB; in releases after 7.74.0 the engine's tokenizer library lives under
+it, in `djl`). In those releases, with
+`--remove-data` it also removes the `onnxruntime-java<n>` folder in the temp
+directory (the one `TMP` names, else `TEMP`; normally `%TEMP%`) that the
+engine's last run left: the engine deletes older ones at its next start, so
+the last one always outlives a stop. Only a folder the engine's own cleanup
+would delete goes, and only one named `onnxruntime-java` plus digits, so a
+folder of yours such as `onnxruntime-java-backup` stays; it goes only after the
+stack has stopped. The PATH edit keeps
+every other entry as written, `%VAR%` entries included, and keeps the value's
+registry type. Windows that are already
 open keep their old PATH. `nx uninstall` without flags only shows what it would
 do. `nx store export --all -o <dir>` keeps a copy of the knowledge store first
 if you want one.
 
 The `Remove-Item` lines remove the program itself, which `nx` cannot delete
-while it runs. On an install that `nx self install` converted,
-`uv tool uninstall conexus` prints "`conexus` is not installed" because the uv
-copy is already gone; that is expected. On an install made only with
-`uv tool install`, `uv tool uninstall conexus` already removes the five `.exe`
-files and `.local\share\nexus` never exists; the `Remove-Item` lines skip
+while it runs. What `uv tool uninstall conexus` prints depends on whether the uv
+copy that `nx self install` left behind has been reaped yet. It is reaped by a
+later `nx self install`, by `nx self gc`, or at the start of a Claude Code
+session with the plugin. If none of those has run since step 3, the uv copy is
+still there and the command removes it, printing "Uninstalled 5 executables"
+(measured on the 7.74.0 candidate walk). If one has, the copy is gone and the
+command prints "`conexus` is not installed". Both are fine; either way the
+`nx` you were running comes from `tools\current\bin`, which the
+`Remove-Item -Recurse` line on `.local\share\nexus` removes. On an install made
+only with `uv tool install`, `uv tool uninstall conexus` already removes the five
+`.exe` files and `.local\share\nexus` never exists; the `Remove-Item` lines skip
 missing files quietly.
 
 Releases up to 7.73.0 do less. They leave the search models, the aspect worker
@@ -263,6 +289,16 @@ $kind = $k.GetValueKind('Path')
 $path = ($k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';' | Where-Object { $_ -and $_ -notlike '*\.local\share\nexus\tools\current\bin' }) -join ';'
 Set-ItemProperty 'HKCU:\Environment' -Name Path -Value $path -Type $kind
 ```
+
+Those releases, and 7.74.0, also leave two folders the lines above do not name.
+`%TEMP%\onnxruntime-java<n>` (about 11 MB) holds the engine's last run's ONNX
+Runtime libraries; delete the folders with that name once the stack is stopped.
+`%USERPROFILE%\.djl.ai\tokenizers` (about 13 MB) is the engine's tokenizer
+library; releases after 7.74.0 keep it under `.cache\nexus` instead, but do not touch
+a `.djl.ai` an earlier engine already made. `nx uninstall --remove-data` reports that folder
+and never deletes it, because `.djl.ai` is the default cache of every program built on DJL,
+a Java deep-learning library, and nexus cannot tell whether another one uses it.
+Delete it yourself if nothing else on the machine does.
 
 Measured on the clean machine (test build, 2026-10-07, non-elevated window) on
 an install converted by `nx self install`, with the stack running and an aspect

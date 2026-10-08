@@ -67,3 +67,46 @@ def service_onnx_models_root() -> Path:
     if env:
         return Path(env)
     return nexus_cache_root() / "onnx_models"
+
+
+# ── DJL tokenizer-library cache (RDR-224 guest walk) ─────────────────────────
+#
+# The engine tokenizes with DJL's HuggingFace tokenizers, which extract their
+# native library into a cache directory on first use. DJL resolves that
+# directory (``ai.djl.util.Utils.getEngineCacheDir``, djl 0.30.0) as
+# ``ENGINE_CACHE_DIR``, else ``DJL_CACHE_DIR``, else ``<user.home>/.djl.ai``,
+# each read as an environment variable or a system property. Left alone it
+# lands in ``~/.djl.ai/tokenizers``, a directory no nexus uninstall knows
+# about and one other DJL programs share. The supervisor points the engine at
+# a directory under the nexus cache instead, so ``nx uninstall --remove-data``
+# removes it with the rest of ``~/.cache/nexus``.
+
+#: DJL's cache-root variable and its engine-specific override.
+ENV_DJL_CACHE_DIR = "DJL_CACHE_DIR"
+ENV_DJL_ENGINE_CACHE_DIR = "ENGINE_CACHE_DIR"
+
+
+def djl_cache_root() -> Path:
+    """``<nexus cache>/djl``: where the engine's DJL native libraries extract."""
+    return nexus_cache_root() / "djl"
+
+
+def apply_djl_cache_env(env: dict[str, str]) -> None:
+    """Point the engine's DJL cache under the nexus cache, in the spawn env *env*.
+
+    An operator's own ``DJL_CACHE_DIR`` or ``ENGINE_CACHE_DIR`` (non-blank) is
+    a directory they chose and wins, exactly as DJL itself would honour it.
+    """
+    if env.get(ENV_DJL_CACHE_DIR, "").strip() or env.get(ENV_DJL_ENGINE_CACHE_DIR, "").strip():
+        return
+    env[ENV_DJL_CACHE_DIR] = str(djl_cache_root())
+
+
+def legacy_djl_tokenizer_cache() -> Path:
+    """``~/.djl.ai/tokenizers``, where engines before this change extracted.
+
+    DJL's default root is shared by every DJL program on the machine, so
+    nothing in it can be shown to be nexus's; uninstall reports it and never
+    removes it. Resolved from the home directory DJL reads (``user.home``).
+    """
+    return Path.home() / ".djl.ai" / "tokenizers"

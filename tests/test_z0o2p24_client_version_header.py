@@ -194,6 +194,7 @@ _NOT_SENDERS: dict[str, str] = {
     "nexus/db/data_token.py": "token mint (POST to the mint endpoint)",
     "nexus/db/http_engine_status.py": "engine probe: GET /v1/status",
     "nexus/db/managed_endpoint.py": "engine probe: GET /version",
+    "nexus/db/pooled_http.py": "connection-pool transport of http_vector_client; the sender is that module's _request_once",
     "nexus/health.py": "probes: PyPI, GET /v1/_whoami, health",
     "nexus/mcp/channel.py": "engine probe: GET /version",
     "nexus/migration/pg_read.py": "migration read of the engine's own tables",

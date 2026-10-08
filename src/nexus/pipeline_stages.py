@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 import structlog
 
-from nexus.embed_window import window_for_model
+from nexus.embed_window import window_for_collection
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
@@ -367,7 +367,7 @@ def chunker_loop(
     Caches accumulated page text in memory to avoid O(pages²) re-reads from
     SQLite. Only NEW pages are fetched on each iteration via ``read_pages_from``.
     """
-    chunker = PDFChunker(chunk_chars=chunk_chars, token_window=window_for_model(target_model))
+    chunker = PDFChunker(chunk_chars=chunk_chars, token_window=window_for_collection(corpus, target_model))
     written_up_to = db.count_embedded_chunks(content_hash)
     total_embedded = written_up_to
     now_iso = datetime.now(UTC).isoformat()

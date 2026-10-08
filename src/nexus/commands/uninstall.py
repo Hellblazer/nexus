@@ -295,7 +295,7 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
         *managed_warnings, *lease_warnings, *beads_warnings, *path_warnings,
     )
     if local_present:
-        report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
+        report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data, cli=True)
         click.echo(report.message)
         warnings = (*warnings, *report.warnings)
     else:

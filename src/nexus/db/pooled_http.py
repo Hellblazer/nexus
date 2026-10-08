@@ -1,0 +1,590 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""Persistent-connection transport for the vector client (nexus-qjjlz).
+
+``urllib``'s ``AbstractHTTPHandler.do_open`` forces ``Connection: close`` and
+closes the socket after every response, and ``http_vector_client`` built a
+fresh opener per request, so every ``/v1/vectors`` call paid a TCP (+TLS)
+handshake and started TCP slow-start cold: measured against the real cloud,
+0.23-0.43 s on a new connection against 0.073 s on a reused one, and a search
+issues ~28 such requests, many of them in parallel.
+
+This module keeps urllib's machinery (proxy resolution from the environment,
+redirects, the ``HTTPErrorProcessor`` that raises ``urllib.error.HTTPError``)
+and replaces only the one step that opens and discards a connection. The
+handler classes below override ``do_open`` to take a connection from a
+process-wide pool keyed by the RESOLVED endpoint, so:
+
+* the error taxonomy is urllib's own, unchanged: a failed connect or send is
+  ``URLError(OSError)``, a failure while waiting for the status line is the raw
+  ``ConnectionResetError`` / ``RemoteDisconnected`` / ``TimeoutError``, and a
+  non-2xx status is ``HTTPError`` with a readable body and headers;
+* endpoint rotation (RDR-149 lease rotation) still works: the endpoint is
+  resolved on every request, a changed endpoint is a different pool key, and
+  the stale key's idle connections age out;
+* the pool is thread-safe (search fans out on 8 threads) and fork-safe
+  (reset in the child, so a pooled socket is never shared across a fork);
+* a connection the server closed while it sat idle is replaced transparently:
+  one retry on a fresh connection, only when the failure is the "peer closed
+  before answering" family, the connection was reused, and the failure came
+  within seconds of the send. Every such retry is logged
+  (``pooled_http_stale_retry``). A request marked with
+  :func:`mark_non_replayable` (GC sweeps, store-delete: the server may already
+  have run it) never takes a pooled connection and is never replayed here;
+* a pooled connection is discarded when it idled longer than
+  :data:`MAX_IDLE_SECONDS` on EITHER the monotonic or the wall clock (the
+  monotonic clock stops during macOS sleep);
+* responses are read eagerly and decoded (``Content-Encoding: gzip``), then
+  the connection goes back to the pool in the same call. Every caller read the
+  whole body anyway.
+
+Imports of ``urllib.request`` are deferred to :func:`build_opener` (module-load
+cost; see the deferred-import convention in ``http_vector_client``).
+"""
+from __future__ import annotations
+
+import http.client
+import io
+import os
+import select
+import threading
+import time
+import zlib
+from collections.abc import Callable
+from typing import Any
+
+import structlog
+
+_log = structlog.get_logger(__name__)
+
+#: Idle connections kept per endpoint. Search fans out on 8 threads; the cap
+#: only bounds what is retained, never what is opened.
+MAX_IDLE_PER_ENDPOINT = 16
+
+#: A pooled connection idle longer than this is discarded at checkout rather
+#: than risked. It must sit STRICTLY below the tightest idle timeout on the
+#: path: the engine is a JDK ``com.sun.net.httpserver`` whose idle-connection
+#: reaper defaults to ``sun.net.httpserver.idleInterval`` = 30 s (nothing in
+#: ``service/`` overrides it, and the reaper ticks about once a second), and the
+#: managed edge's ALB idles out at 60 s. 20 s leaves 10 s for the reaper tick,
+#: the round trip and clock skew between the two ends; the dead-peer probe and
+#: the one-shot retry cover the remainder. Age is judged on BOTH the monotonic
+#: and the wall clock (see :func:`_idle_expired`).
+MAX_IDLE_SECONDS = 20.0
+
+#: A reused connection that fails this soon after the send was closed by the
+#: server while idle. Later than this the server may have been working on the
+#: request, and replaying it is the caller's retry policy, not ours.
+_STALE_FAILURE_WINDOW_S = 5.0
+
+#: The "peer closed before answering" family: what a request on a reused
+#: connection raises when the server dropped it while idle. Windows reports
+#: an abort as ConnectionAbortedError, a sibling of ConnectionResetError.
+_STALE_ERRORS: tuple[type[BaseException], ...] = (
+    http.client.RemoteDisconnected,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+)
+
+#: Ceiling on a gzip response body AFTER decoding (a decompression bomb from a
+#: hostile or broken peer must not exhaust memory). The largest legitimate
+#: response is a 300-row page of chunk text and embeddings, a few MiB.
+MAX_DECODED_BYTES = 256 * 1024 * 1024
+
+#: Attribute set on a ``urllib.request.Request`` by :func:`mark_non_replayable`.
+_NON_REPLAYABLE_ATTR = "nexus_non_replayable"
+
+
+def mark_non_replayable(req: Any) -> None:
+    """Mark ``req`` as one the transport must never send twice (a sweep or a
+    delete: the server may have run it before the connection dropped). Such a
+    request never takes a pooled connection, so the stale-peer retry cannot
+    apply to it: a fresh connection is not stale, and any failure surfaces."""
+    setattr(req, _NON_REPLAYABLE_ATTR, True)
+
+
+#: ``(is_https, host[:port], tunnel_host, ssl-context identity)``. ``host`` is
+#: the PROXY when a proxy is in play, so a proxy change is a different key.
+_Key = tuple[bool, str, str | None, int | None]
+
+OnConnect = Callable[[Any], None]
+
+
+def _looks_dead(sock: Any) -> bool:
+    """True when an idle pooled socket is already readable: an idle HTTP
+    connection has nothing to say, so readable means the peer sent FIN/RST
+    (or stray bytes), and either way it is not reusable. Best-effort."""
+    if sock is None:
+        return True
+    try:
+        if sock.fileno() < 0:
+            return True
+        readable, _, _ = select.select([sock], [], [], 0)
+        return bool(readable)
+    except ValueError:  # fd beyond select()'s range: cannot tell; the retry covers it
+        return False
+    except OSError:
+        return True
+
+
+#: ``(monotonic, wall)`` reading. Two clocks because ``time.monotonic()`` is
+#: ``mach_absolute_time()`` on macOS and stops while the machine sleeps, so a
+#: connection that idled through a lid-close looks fresh on it; the wall clock
+#: keeps counting. Neither alone is enough: the wall clock can be stepped.
+_Stamp = tuple[float, float]
+
+
+def _stamp() -> _Stamp:
+    return time.monotonic(), time.time()
+
+
+#: Two threads stamp the wall clock a few microseconds apart (and a slew can
+#: nudge it back by about as much); only a backwards move larger than this is a
+#: clock STEP. Without the slack a release and a checkout racing on two threads
+#: read as "the clock went backwards" and a healthy connection was discarded
+#: (measured: 9-10 connections for 8 threads, intermittently).
+_CLOCK_STEP_TOLERANCE_S = 1.0
+
+
+def _idle_expired(since: _Stamp, now: _Stamp) -> bool:
+    """True when a connection stamped ``since`` must not be reused at ``now``:
+    either clock says it idled longer than :data:`MAX_IDLE_SECONDS`, or the
+    wall clock stepped backwards (the stamp cannot be trusted)."""
+    mono = now[0] - since[0]
+    wall = now[1] - since[1]
+    return (
+        mono > MAX_IDLE_SECONDS
+        or wall > MAX_IDLE_SECONDS
+        or wall < -_CLOCK_STEP_TOLERANCE_S
+    )
+
+
+def _quick(sent_at: _Stamp) -> bool:
+    """True when less than :data:`_STALE_FAILURE_WINDOW_S` passed since
+    ``sent_at`` on BOTH clocks (and the wall clock did not step back)."""
+    now = _stamp()
+    mono = now[0] - sent_at[0]
+    wall = now[1] - sent_at[1]
+    return 0 <= mono < _STALE_FAILURE_WINDOW_S and 0 <= wall < _STALE_FAILURE_WINDOW_S
+
+
+def _close_quietly(conn: http.client.HTTPConnection) -> None:
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 — closing a dead socket must never raise
+        pass
+
+
+class _ConnectionPool:
+    """Idle connections by endpoint key, LIFO (the warmest connection first).
+
+    Only IDLE connections live here: a connection is removed on checkout and
+    re-added on release, so one thread owns it for the whole exchange.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._idle: dict[_Key, list[tuple[http.client.HTTPConnection, _Stamp]]] = {}
+        self._pid = os.getpid()
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def reset_after_fork(self) -> None:
+        """Forget every connection without touching its peer state.
+
+        The child shares the parent's file descriptors; a pooled connection
+        used from both processes would interleave two request streams on one
+        TCP stream. Dropping the references closes only the child's copy of
+        each descriptor. The lock is replaced too: a thread in the parent may
+        have held it at fork time.
+        """
+        self._lock = threading.Lock()
+        self._idle = {}
+        self._pid = os.getpid()
+
+    def close_all(self) -> None:
+        with self._lock:
+            conns = [c for entries in self._idle.values() for c, _ in entries]
+            self._idle = {}
+        for c in conns:
+            _close_quietly(c)
+
+    def idle_count(self) -> int:
+        with self._lock:
+            return sum(len(v) for v in self._idle.values())
+
+    # -- checkout / release -------------------------------------------------
+
+    def take(self, key: _Key) -> http.client.HTTPConnection | None:
+        """The warmest usable idle connection for ``key``, or None."""
+        if self._pid != os.getpid():  # a fork the at-fork hook could not see
+            self.reset_after_fork()
+        stale: list[http.client.HTTPConnection] = []
+        found: http.client.HTTPConnection | None = None
+        with self._lock:
+            now = _stamp()  # inside the lock: never earlier than a release's stamp
+            entries = self._idle.get(key)
+            while entries:
+                conn, since = entries.pop()
+                if _idle_expired(since, now) or _looks_dead(conn.sock):
+                    stale.append(conn)
+                    continue
+                found = conn
+                break
+            if entries is not None and not entries:
+                self._idle.pop(key, None)
+            self._sweep_locked(now, stale)
+        for c in stale:
+            _close_quietly(c)
+        return found
+
+    def release(self, key: _Key, conn: http.client.HTTPConnection) -> None:
+        if self._pid != os.getpid():
+            self.reset_after_fork()
+        overflow: http.client.HTTPConnection | None = None
+        with self._lock:
+            entries = self._idle.setdefault(key, [])
+            if len(entries) >= MAX_IDLE_PER_ENDPOINT:
+                overflow = conn
+            else:
+                entries.append((conn, _stamp()))
+        if overflow is not None:
+            _close_quietly(overflow)
+
+    def drop_endpoint(self, key: _Key) -> None:
+        """Discard every idle connection for ``key``: one of them was found
+        dead, and the rest of a batch idled through the same server restart
+        or idle-timeout sweep."""
+        with self._lock:
+            entries = self._idle.pop(key, [])
+        for c, _ in entries:
+            _close_quietly(c)
+
+    def _sweep_locked(
+        self, now: _Stamp, out: list[http.client.HTTPConnection]
+    ) -> None:
+        """Age out every endpoint's over-age idle connections (a rotated lease
+        leaves its old key behind). Caller holds the lock."""
+        for key in list(self._idle):
+            keep: list[tuple[http.client.HTTPConnection, _Stamp]] = []
+            for conn, since in self._idle[key]:
+                if _idle_expired(since, now):
+                    out.append(conn)
+                else:
+                    keep.append((conn, since))
+            if keep:
+                self._idle[key] = keep
+            else:
+                del self._idle[key]
+
+
+_POOL = _ConnectionPool()
+
+def _after_fork_in_child() -> None:
+    """Make the child safe to use the transport: an empty pool, and fresh
+    module locks (a thread that does not exist in the child may have held any
+    of them at fork time, and it will never release it)."""
+    global _ssl_context_lock, _handler_classes_lock
+    _POOL.reset_after_fork()
+    _ssl_context_lock = threading.Lock()
+    _handler_classes_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; Windows has no fork to guard
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
+def reset_pool() -> None:
+    """Close every pooled connection (tests; endpoint teardown)."""
+    _POOL.close_all()
+
+
+def idle_connection_count() -> int:
+    return _POOL.idle_count()
+
+
+# ── response ──────────────────────────────────────────────────────────────────
+
+def _is_success(status: int) -> bool:
+    return 200 <= status < 300
+
+
+def _is_gzip(headers: Any) -> bool:
+    return (headers.get("Content-Encoding") or "").strip().lower() in ("gzip", "x-gzip")
+
+
+class _GzipBodyError(Exception):
+    """A gzip body that cannot be decoded: ``truncated`` (stream ended early),
+    ``corrupt``, or ``too_large`` (decoded size over :data:`MAX_DECODED_BYTES`)."""
+
+    def __init__(self, kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.kind = kind
+
+
+def _gunzip(raw: bytes) -> bytes:
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        out = decoder.decompress(raw, MAX_DECODED_BYTES + 1)
+    except zlib.error as exc:
+        raise _GzipBodyError("corrupt", str(exc)) from exc
+    if len(out) > MAX_DECODED_BYTES:
+        raise _GzipBodyError("too_large", f"decoded size exceeds {MAX_DECODED_BYTES} bytes")
+    if not decoder.eof:
+        raise _GzipBodyError("truncated", "incomplete or truncated gzip stream")
+    return out
+
+
+def _buffered_response(
+    resp: http.client.HTTPResponse, raw: bytes, url: str
+) -> Any:
+    """A urllib-compatible response over an already-read body: ``read()``,
+    ``code``/``status``, ``headers``, ``msg`` (the reason, as urllib sets it),
+    context manager. ``HTTPErrorProcessor`` and ``HTTPError`` take it as-is.
+    A gzip body is decoded and its encoding/length headers dropped, so a
+    reader sees the same thing it would from an identity response.
+
+    A body that cannot be decoded never surfaces as a bare ``OSError`` (outside
+    every caller's taxonomy). On a non-2xx status the raw bytes are kept and
+    the real status survives (``HTTPError``, so a 502's gateway retry still
+    sees a 502). On a 2xx it is a transport failure: ``ConnectionResetError``
+    for a truncated or corrupt stream (the restart classifier retries it),
+    ``URLError`` for an over-size one (a retry would not help)."""
+    import urllib.error  # noqa: PLC0415 — deferred import — keeps module load light
+    import urllib.response  # noqa: PLC0415 — deferred import — keeps module load light
+
+    headers = resp.msg  # http.client puts the parsed header Message here
+    body = raw
+    if _is_gzip(headers):
+        decoded: bytes | None = raw  # an empty body is empty, not corrupt
+        if raw:
+            try:
+                decoded = _gunzip(raw)
+            except _GzipBodyError as exc:
+                if _is_success(resp.status):
+                    if exc.kind == "too_large":
+                        raise urllib.error.URLError(
+                            f"decompressed response body exceeds {MAX_DECODED_BYTES} bytes"
+                        ) from exc
+                    raise ConnectionResetError(
+                        f"truncated or undecodable gzip response body ({exc.kind}): {exc}"
+                    ) from exc
+                decoded = None  # non-2xx: keep the raw bytes AND the encoding header
+        if decoded is not None:
+            body = decoded
+            del headers["Content-Encoding"]
+            del headers["Content-Length"]
+    out = urllib.response.addinfourl(io.BytesIO(body), headers, url, resp.status)
+    out.reason = resp.reason  # type: ignore[attr-defined]
+    out.msg = resp.reason  # type: ignore[attr-defined]
+    out.version = resp.version  # type: ignore[attr-defined]
+    return out
+
+
+# ── the handlers ──────────────────────────────────────────────────────────────
+
+_ssl_context_lock = threading.Lock()
+_ssl_context_slot: tuple[tuple[Any, ...], Any] | None = None
+
+
+def _shared_ssl_context() -> Any:
+    """The process-wide client SSL context, rebuilt when the trust environment
+    (``SSL_CERT_FILE`` / ``SSL_CERT_DIR``) or the default-context factory
+    (``ssl._create_default_https_context``, which a caller may replace to
+    install its own trust policy) changes. Same construction as
+    ``http.client``'s own default, which is what ``HTTPSHandler`` would build."""
+    import ssl  # noqa: PLC0415 — deferred import — keeps module load light
+
+    global _ssl_context_slot
+    env = (
+        os.environ.get("SSL_CERT_FILE"),
+        os.environ.get("SSL_CERT_DIR"),
+        ssl._create_default_https_context,  # noqa: SLF001 — the documented override point
+    )
+    with _ssl_context_lock:
+        if _ssl_context_slot is None or _ssl_context_slot[0] != env:
+            create = getattr(http.client, "_create_https_context", None)
+            if create is not None:
+                ctx = create(http.client.HTTPSConnection._http_vsn)  # noqa: SLF001
+            else:  # pragma: no cover — future CPython without the private helper
+                import ssl  # noqa: PLC0415 — deferred import — keeps module load light
+
+                ctx = ssl.create_default_context()
+            _ssl_context_slot = (env, ctx)
+        return _ssl_context_slot[1]
+
+
+_handler_classes: dict[OnConnect, tuple[type, type]] = {}
+_handler_classes_lock = threading.Lock()
+
+
+def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
+    import urllib.error  # noqa: PLC0415 — deferred import — keeps module load light
+    import urllib.request  # noqa: PLC0415 — deferred import — keeps module load light
+
+    class _HTTPConnection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            super().connect()
+            on_connect(self.sock)
+
+    class _HTTPSConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            super().connect()
+            on_connect(self.sock)
+
+    def _pooled_open(
+        http_class: type[http.client.HTTPConnection],
+        req: Any,
+        debuglevel: int,
+        **conn_args: Any,
+    ) -> Any:
+        host = req.host
+        if not host:
+            raise urllib.error.URLError("no host given")
+        context = conn_args.get("context")
+        tunnel_host = req._tunnel_host  # noqa: SLF001 — urllib's own proxy bookkeeping
+        key: _Key = (
+            issubclass(http_class, http.client.HTTPSConnection),
+            host,
+            tunnel_host,
+            id(context) if context is not None else None,
+        )
+
+        # The same header assembly as urllib's do_open, minus "Connection:
+        # close".
+        headers = dict(req.unredirected_hdrs)
+        headers.update({k: v for k, v in req.headers.items() if k not in headers})
+        headers = {name.title(): val for name, val in headers.items()}
+        tunnel_headers: dict[str, str] = {}
+        if tunnel_host and "Proxy-Authorization" in headers:
+            tunnel_headers["Proxy-Authorization"] = headers.pop("Proxy-Authorization")
+
+        timeout = req.timeout
+        encode_chunked = req.has_header("Transfer-encoding")
+
+        def _fresh() -> http.client.HTTPConnection:
+            conn = http_class(host, timeout=timeout, **conn_args)
+            conn.set_debuglevel(debuglevel)
+            if tunnel_host:
+                conn.set_tunnel(tunnel_host, headers=tunnel_headers)
+            return conn
+
+        # A non-replayable request (sweep, delete) never takes a pooled
+        # connection, so no stale-peer retry can apply to it. Everything else
+        # gets ONE transparent retry on a fresh connection, and afterwards
+        # fresh connections only.
+        allow_reuse = not getattr(req, _NON_REPLAYABLE_ATTR, False)
+        method = req.get_method()
+
+        def _log_retry(stage: str, err: BaseException) -> None:
+            _log.warning(
+                "pooled_http_stale_retry",
+                method=method,
+                path=req.selector,
+                host=host,
+                stage=stage,
+                error=type(err).__name__,
+            )
+        while True:
+            conn = _POOL.take(key) if allow_reuse else None
+            reused = conn is not None
+            if conn is None:
+                conn = _fresh()
+            else:
+                conn.timeout = timeout
+                if conn.sock is not None:
+                    conn.sock.settimeout(timeout)
+            sent_at = _stamp()
+            try:
+                try:
+                    conn.request(
+                        method, req.selector, req.data, headers,
+                        encode_chunked=encode_chunked,
+                    )
+                except OSError as err:
+                    if reused and isinstance(err, _STALE_ERRORS) and _quick(sent_at):
+                        _log_retry("send", err)
+                        _close_quietly(conn)
+                        _POOL.drop_endpoint(key)
+                        allow_reuse = False
+                        continue
+                    raise urllib.error.URLError(err) from err
+                try:
+                    resp = conn.getresponse()
+                except _STALE_ERRORS as err:
+                    if reused and _quick(sent_at):
+                        _log_retry("response", err)
+                        _close_quietly(conn)
+                        _POOL.drop_endpoint(key)
+                        allow_reuse = False
+                        continue
+                    raise
+                truncated: http.client.IncompleteRead | None = None
+                try:
+                    raw = resp.read()
+                except http.client.IncompleteRead as exc:
+                    raw, truncated = exc.partial, exc
+            except BaseException:
+                _close_quietly(conn)
+                raise
+            break
+
+        # Decode BEFORE deciding the connection's fate: a body that fails to
+        # decode, or one cut short, means the peer is not behaving and the
+        # connection must not go back to the pool.
+        try:
+            if truncated is not None:
+                if _is_success(resp.status):
+                    raise ConnectionResetError(
+                        f"truncated response body: {truncated}"
+                    ) from truncated
+                # Non-2xx: the status is the information; keep it, with the
+                # partial body, so the gateway retry still sees the 502.
+                _close_quietly(conn)
+                return _buffered_response(resp, raw, req.get_full_url())
+            out = _buffered_response(resp, raw, req.get_full_url())
+        except BaseException:
+            _close_quietly(conn)
+            raise
+        if resp.will_close or conn.sock is None:
+            _close_quietly(conn)
+        else:
+            _POOL.release(key, conn)
+        return out
+
+    class _PooledHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: Any) -> Any:
+            return _pooled_open(_HTTPConnection, req, self._debuglevel)
+
+    class _PooledHTTPSHandler(urllib.request.HTTPSHandler):
+        def __init__(self) -> None:
+            # urllib builds a new SSLContext (a CA-bundle load) per handler
+            # instance, i.e. per opener, i.e. per request here -- and a new
+            # context is a new pool key. One shared context fixes both.
+            super().__init__(context=_shared_ssl_context())
+
+        def https_open(self, req: Any) -> Any:
+            return _pooled_open(
+                _HTTPSConnection, req, self._debuglevel, context=self._context
+            )
+
+    return _PooledHTTPHandler, _PooledHTTPSHandler
+
+
+def build_opener(on_connect: OnConnect) -> Any:
+    """A urllib opener whose HTTP(S) handlers use the process-wide pool.
+
+    ``on_connect(sock)`` runs right after every NEW connection's ``connect()``
+    (TCP keepalive options live there); pass a stable module-level function,
+    the handler classes are built once per distinct callable. The OPENER is
+    built per call, as before: it carries the proxy handler, which reads the
+    environment fresh each time.
+    """
+    import urllib.request  # noqa: PLC0415 — deferred import — keeps module load light
+
+    with _handler_classes_lock:
+        classes = _handler_classes.get(on_connect)
+        if classes is None:
+            classes = _handler_classes[on_connect] = _make_handler_classes(on_connect)
+    return urllib.request.build_opener(*classes)
