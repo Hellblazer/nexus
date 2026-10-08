@@ -3069,6 +3069,11 @@ class HttpVectorClient:
                     "path may be intercepted or stubbed; refusing to treat "
                     "the write as durable"
                 )
+        if n:
+            # Same rule as the combined write (HttpCatalogClient._post_embedding_write): a
+            # collection's first stored chunk adds it to the engine's listing.
+            from nexus.mcp_infra import note_collection_written  # noqa: PLC0415 — circular-dep avoidance (mcp_infra imports this module)
+            note_collection_written(collection)
         _log.debug(
             "http_vector_upsert_chunks",
             collection=collection,

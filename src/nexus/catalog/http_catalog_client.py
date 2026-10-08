@@ -3815,6 +3815,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if pending is not None:
             raise CombinedWriteEmbedTimeoutError(
                 collection=collection or "", chunk_count=chunk_count, original=str(pending))
+        # The first chunk a collection holds adds it to the engine's listing; the process's
+        # collection cache may have been refilled without it since its registration.
+        from nexus.mcp_infra import note_collection_written  # noqa: PLC0415 — deferred: mcp_infra imports back into catalog code
+        note_collection_written(collection or "")
         return result
 
     def get_manifest(self, doc_id: str) -> list[ManifestRow]:
