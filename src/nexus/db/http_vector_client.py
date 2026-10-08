@@ -3581,6 +3581,7 @@ class HttpVectorClient:
         where: dict | None = None,
         include_source_uri: bool = False,
         include_embeddings: bool = False,
+        embeddings_limit: int | None = None,
         rerank: bool = False,
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
@@ -3640,6 +3641,12 @@ class HttpVectorClient:
         Both keys are ABSENT when the engine did not answer with the
         ``embedding_encoding`` / ``embedding_dim`` echo (an engine that predates
         the field ignores it); the caller then fetches by id as before.
+
+        *embeddings_limit* (with *include_embeddings*) caps how many of the final
+        rows carry a vector, best first: a caller that keeps fewer rows than the
+        route returns (``limit`` is 1000 under rerank) does not pay to transfer the
+        vectors of rows it will drop. The rest come back without one, and the caller
+        fetches those by id like any other row without a vector.
         """
         if self._per_collection_written_off():
             return None
@@ -3662,6 +3669,8 @@ class HttpVectorClient:
             body["include_source_uri"] = True
         if include_embeddings:
             body["include_embeddings"] = True
+            if embeddings_limit is not None:
+                body["embeddings_limit"] = int(embeddings_limit)
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:

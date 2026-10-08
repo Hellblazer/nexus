@@ -377,6 +377,32 @@ class VectorHandlerSearchPerCollectionTest {
         }
     }
 
+    /**
+     * nexus-92q1p review L6: {@code embeddings_limit} keeps the vector on only the first N rows of the final
+     * order, so a client that keeps a pool smaller than {@code limit} (1000 under rerank) does not transfer
+     * vectors for rows it drops. The rows past N stay in the result, without {@code embedding_b64}.
+     */
+    @Test
+    void includeEmbeddings_embeddingsLimit_keepsTheVectorOnTheFirstNRowsOnly() throws Exception {
+        Map<String, Object> req = ok();
+        req.put("include_embeddings", true);
+        req.put("limit", 6);
+        req.put("embeddings_limit", 2);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode results = json(r).get("results");
+        assertThat(results).as("the rows are all still there").hasSize(6);
+        for (int i = 0; i < results.size(); i++) {
+            assertThat(results.get(i).has("embedding_b64")).as("row %d of 6, embeddings_limit 2", i).isEqualTo(i < 2);
+        }
+        assertThat(json(r).get("embedding_dim").asInt()).isEqualTo(384);
+
+        Map<String, Object> bad = ok();
+        bad.put("include_embeddings", true);
+        bad.put("embeddings_limit", 0);
+        assertThat(post(bad).statusCode()).as("embeddings_limit must be positive").isEqualTo(400);
+    }
+
     @Test
     void includeEmbeddings_isOptIn_theDefaultResponseIsUnchanged() throws Exception {
         for (Object flag : new Object[] {null, false}) {

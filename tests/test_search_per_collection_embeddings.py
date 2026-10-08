@@ -154,6 +154,19 @@ class TestTheRowsCarryTheVectors:
             assert "embedding_b64" not in r.metadata
             assert all(not isinstance(v, (bytes, bytearray)) for v in r.metadata.values())
 
+    def test_the_request_caps_the_vectors_at_the_enrichment_pool(self, monkeypatch):
+        """review L6: the route may return up to ``limit`` rows (1000 under rerank) but the client keeps
+        max(300, 4n) of them; the vectors it can use are no more than that, so it says so."""
+        cols = _cols("code", _BGE, 2)
+        engine = _EmbeddingEngine(monkeypatch, _data(cols))
+        _search(engine, cols)   # n_results = 20 -> max(300, 80)
+        assert engine.route_calls()
+        assert all(b.get("embeddings_limit") == 300 for b in engine.route_calls())
+
+        big = _EmbeddingEngine(monkeypatch, _data(cols))
+        search_cross_corpus("q", cols, 100, big.client, threshold_override=float("inf"), cluster_by="semantic")
+        assert all(b.get("embeddings_limit") == 400 for b in big.route_calls()), "4n once n passes 75"
+
     def test_the_field_is_not_requested_when_nothing_needs_the_vectors(self, monkeypatch):
         cols = _cols("code", _BGE, 2)
         engine = _EmbeddingEngine(monkeypatch, _data(cols))

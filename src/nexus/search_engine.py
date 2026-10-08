@@ -1427,7 +1427,14 @@ def search_cross_corpus(
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
-                **({"include_embeddings": True} if want_embeddings else {}),
+                **(
+                    {
+                        "include_embeddings": True,
+                        # Only the rows _cap_enrichment_pool can keep are worth a vector.
+                        "embeddings_limit": max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
+                    }
+                    if want_embeddings else {}
+                ),
             )
         except PerCollectionEnvelopeError as exc:
             _log.warning(
