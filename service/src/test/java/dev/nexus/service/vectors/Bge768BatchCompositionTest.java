@@ -314,6 +314,33 @@ class Bge768BatchCompositionTest {
     }
 
     /**
+     * Length grouping: a batch that fits the area budget used to run as ONE call padded to its
+     * longest row; the embedder now groups rows by length, so a mixed batch must make more than
+     * one call (non-vacuity: with grouping disabled it is exactly one) and every result must
+     * still be the embedding of ITS OWN input row (the scatter back to input order; an
+     * off-by-one there collapses the cosine to unrelated-text levels, 0.1-0.4).
+     */
+    @Test
+    void mixedLengthBatch_isGroupedByLength_andResultsKeepInputOrder() {
+        // Interleaved long/short so input order differs from length order.
+        List<String> mixed = List.of(LONG_A, SHORT_A, MEDIUM, LONG_B, SHORT_B, SHORT_C, LONG_A + " tail", SHORT_A + " again");
+
+        embedder.resetOnnxInvocationCount();
+        List<float[]> batched = embedder.embed(mixed);
+        assertThat(batched).hasSize(mixed.size());
+        assertThat(embedder.onnxInvocationCount())
+                .as("rows of very different lengths must not share one padded tensor")
+                .isGreaterThan(1);
+
+        for (int i = 0; i < mixed.size(); i++) {
+            double cos = cosine(batched.get(i), embedder.embedOne(mixed.get(i)));
+            assertThat(cos)
+                    .as("result[%d] must be the embedding of input[%d] (scatter to input order)", i, i)
+                    .isGreaterThan(COSINE_TOLERANCE);
+        }
+    }
+
+    /**
      * Bead nexus-s71lr — the engine-side half of "bulk indexing is silent for minutes":
      * {@code embedSubBatched} must emit a structured INFO progress line when it internally
      * splits an oversize batch, not stay silent above DEBUG. Reuses the exact oversize-batch

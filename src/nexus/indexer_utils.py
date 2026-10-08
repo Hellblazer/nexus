@@ -1352,12 +1352,25 @@ def build_doc_id_resolver(
 
 # ── Bounded file-level concurrency (nexus-cfc72) ─────────────────────────────
 
+#: Default file workers for ``nx index repo`` against the service. Four, from a measured sweep
+#: (900-chunk repo slice, local engine, bge-768 ONNX on 16 cores, T2
+#: ``nexus/index-embedding-throughput-2026-10-08``): wall time 114 s at 2 workers (mean 1.13
+#: requests in flight, nothing in flight 34% of the time), 93 s at 3, 92 s at 4 (mean 2.1 in
+#: flight), 82 s at 6 and 80 s at 8. The step from 2 to 4 cuts wall time 19%; 4 to 6 cuts 11% more for two more
+#: engine-side embeds in flight (each up to about 1 GB at the 512-token worst case,
+#: ``Bge768Embedder.MAX_ATTENTION_TENSOR_BYTES``). The workers share the per-collection concurrent
+#: write quota with the ChunkBatcher's flush pool (``nexus.indexer.FLUSH_CONCURRENCY``); a test
+#: keeps ``workers + flush workers`` inside ``QUOTAS.MAX_CONCURRENT_WRITES``. A source file over
+#: the 16-chunk local cap is written one request at a time by its own worker, so this number, not
+#: the flush pool, is what keeps more than one embedding batch in flight in local mode.
+DEFAULT_SERVICE_INDEX_CONCURRENCY: int = 4
+
 
 def resolve_index_concurrency() -> int:
     """Resolve the per-file indexing concurrency for ``nx index repo``.
 
     ``NX_INDEX_CONCURRENCY`` (>=1) wins when set and parseable. Otherwise
-    the default is 2 when BOTH the vectors and catalog backends are the
+    the default is :data:`DEFAULT_SERVICE_INDEX_CONCURRENCY` when BOTH the vectors and catalog backends are the
     HTTP service (thread-safe httpx clients; the engine's TenantScope
     admission control bounds bursts to typed 503s) and 1 everywhere else
     — the direct-SQLite catalog on the legacy ``=sqlite`` opt-out is not
@@ -1402,7 +1415,7 @@ def resolve_index_concurrency() -> int:
         # nexus-i711w: the catalog conjunct collapsed — the catalog is
         # service-backed in every mode.
         if is_vector_service_mode():
-            return 2
+            return DEFAULT_SERVICE_INDEX_CONCURRENCY
         return 1
 
     raw = os.environ.get("NX_INDEX_CONCURRENCY", "").strip()

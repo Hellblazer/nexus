@@ -37,11 +37,13 @@ class TestResolveIndexConcurrency:
 
         monkeypatch.setenv("NX_INDEX_CONCURRENCY", "two")
         # Backend envs cleared -> hard defaults are SERVICE for both
-        # vectors (is_vector_service_mode) and catalog -> exactly 2.
+        # vectors (is_vector_service_mode) and catalog -> the service default.
+        from nexus.indexer_utils import DEFAULT_SERVICE_INDEX_CONCURRENCY
+
         monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND_CATALOG", raising=False)
-        assert resolve_index_concurrency() == 2
+        assert resolve_index_concurrency() == DEFAULT_SERVICE_INDEX_CONCURRENCY
 
     def test_override_onto_non_service_backend_warns_but_wins(self, monkeypatch):
         """Forcing concurrency onto a non-service backend is allowed but loud.
@@ -64,12 +66,14 @@ class TestResolveIndexConcurrency:
             for l in logs
         )
 
-    def test_service_backends_default_two(self, monkeypatch):
+    def test_service_backends_default_is_the_named_constant(self, monkeypatch):
         from nexus.indexer_utils import resolve_index_concurrency
+
+        from nexus.indexer_utils import DEFAULT_SERVICE_INDEX_CONCURRENCY
 
         monkeypatch.delenv("NX_INDEX_CONCURRENCY", raising=False)
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-        assert resolve_index_concurrency() == 2
+        assert resolve_index_concurrency() == DEFAULT_SERVICE_INDEX_CONCURRENCY
 
     # test_non_service_catalog_defaults_one RETIRED (nexus-i711w terminal
     # deletion): the catalog conjunct of the concurrency gate collapsed — the
