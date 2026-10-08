@@ -39,7 +39,15 @@ def test_init_really_converges_the_ladder_so_the_hint_is_true() -> None:
     from nexus.commands import init
 
     assert callable(init._converge_ladder_best_effort)
-    src = (Path(init.__file__)).read_text(encoding="utf-8")
-    assert src.count("_converge_ladder_best_effort()") >= 2, (
+    import ast
+
+    tree = ast.parse(Path(init.__file__).read_text(encoding="utf-8"))
+    # Call nodes only: the def line and a docstring mention are not call sites.
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "_converge_ladder_best_effort"
+    ]
+    assert len(calls) >= 2, (
         "nx init must call the ladder convergence on its service paths"
     )

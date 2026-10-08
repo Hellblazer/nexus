@@ -477,7 +477,9 @@ def test_doctor_python_version_too_old_fails(runner, mock_reg):
     assert result.exit_code == 2
     assert "\u2717" in result.output
     assert "3.12" in result.output
-    assert "python.org" in result.output
+    # The exact fix line doctor prints, matched as a whole stripped line (not a
+    # URL substring of the output, which CodeQL reads as a host check).
+    assert "https://www.python.org/downloads/" in [ln.strip() for ln in result.output.splitlines()]
 
 
 # ── Hooks ───────────────────────────────────────────────────────────────────

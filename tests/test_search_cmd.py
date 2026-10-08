@@ -202,9 +202,11 @@ def test_a_corpus_that_merely_lists_the_default_legs_in_another_order_warns(
 ) -> None:
     """Only the untouched default is silent: anything the user typed is theirs."""
     result, _ = _search_with(
-        runner, ["code__myrepo"], "--corpus", "code", "--corpus", "knowledge",
+        runner, ["code__myrepo"],
+        "--corpus", "code", "--corpus", "docs", "--corpus", "knowledge",
     )
     assert "no collections match --corpus 'knowledge'" in result.output
+    assert "no collections match --corpus 'docs'" in result.output
 
 
 # ── nexus-d9xt2: skip GET /v1/vectors/stats for explicit collection names ──
