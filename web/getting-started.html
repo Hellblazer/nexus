@@ -604,7 +604,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <h3>Health check</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
-<p>Every line must show ✓. One line may say "credentials not set", which is normal for a local install. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
+<p>No line may show ✗. A ⚠ line is a soft warning. Right after <code>nx self install</code>, "Orphan uv install" is normal, and it goes away once the old uv copy is removed. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
 <h3>Update</h3>
 <div class="see">You might say</div>
