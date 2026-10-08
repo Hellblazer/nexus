@@ -9,7 +9,10 @@ the rows, the search makes none.
 
 The real ``HttpVectorClient`` and ``search_cross_corpus`` run against a fake transport (the module
 ``_request`` every ``_post`` funnels through), as ``tests/test_search_per_collection_route.py`` does;
-the engine half is pinned by ``VectorHandlerSearchPerCollectionTest`` (Java). The fake engine here
+the engine half is pinned by ``VectorHandlerSearchPerCollectionTest`` (Java). Only semantic clustering
+asks the route for vectors now; the contradiction check fetches its few candidates by id
+(``tests/test_contradiction_scope.py``), and these tests run with ``cluster_by="semantic"`` unless
+they say otherwise. The fake engine here
 stores one deterministic vector per ``(collection, id)`` and serves it both ways, so a run that
 reads the vectors from the rows and a run that fetches them by id see the SAME vectors and must
 produce the same flags and clusters.

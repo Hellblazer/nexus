@@ -1017,9 +1017,13 @@ def search_cross_corpus(
     # (``include_embeddings``), so the 14 to 22 per-collection ``get-embeddings`` round
     # trips of ``_fetch_embeddings_for_results`` are only the fallback for the rows the
     # route did not carry. Keyed by (collection, id): the raw little-endian float32 bytes.
-    want_embeddings = bool(
-        cfg.get("search", {}).get("contradiction_check", True) or cluster_by == "semantic"
-    )
+    #
+    # The contradiction check no longer asks for them (search latency, nexus-92q1p
+    # follow-up, Sam 2026-10-08): it runs on the DISPLAYED rows only and needs a vector
+    # for the few rows that could actually flag, which :func:`_contradiction_candidates`
+    # names after the results are back and a ``get-embeddings`` call fetches (normally none).
+    # Only the opt-in semantic clustering still wants a vector per pooled row.
+    want_embeddings = cluster_by == "semantic"
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
@@ -1835,15 +1839,13 @@ def search_cross_corpus(
         except Exception:  # noqa: BLE001 — best-effort topic assignment; failure logged at debug, boost/grouping skipped
             _log.debug("topic_assignments_failed", exc_info=True)
 
-    # Fetch embeddings once if either contradiction detection OR clustering
-    # needs them — avoids double fetching (F1 fix). Per-collection failures
-    # are isolated: failed indices are excluded from feature processing but
-    # do not suppress the features for successfully-fetched collections (R3-1).
+    # Semantic clustering needs a vector per pooled row (Ward fallback), fetched once here.
+    # Per-collection failures are isolated: failed indices are excluded from clustering but
+    # do not suppress it for successfully-fetched collections (R3-1).
     contradiction_enabled = cfg.get("search", {}).get("contradiction_check", True)
-    needs_embeddings = (contradiction_enabled or cluster_by == "semantic") and all_results
     fetched_embeddings = None
     failed_indices: set[int] = set()
-    if needs_embeddings:
+    if cluster_by == "semantic" and all_results:
         call_deadline.check("search_cross_corpus:before_embeddings")
         fetched_embeddings, failed_indices = _embeddings_for_results(
             all_results, t3, prefetched_embeddings,
@@ -1851,9 +1853,13 @@ def search_cross_corpus(
         call_deadline.check("search_cross_corpus:after_embeddings")
 
     # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
-    # search.contradiction_check=false in .nexus.yml.
-    if contradiction_enabled and all_results and fetched_embeddings is not None:
-        all_results = _flag_contradictions(all_results, fetched_embeddings, failed_indices)
+    # search.contradiction_check=false in .nexus.yml. Scoped to the rows a caller can
+    # display (the top n_results) and, within them, to the rows that can flag.
+    if contradiction_enabled and all_results:
+        all_results = _flag_scoped_contradictions(
+            all_results, n_results, t3,
+            pool_embeddings=(fetched_embeddings, failed_indices) if cluster_by == "semantic" else None,
+        )
 
     if cluster_by == "semantic" and all_results:
         topic_grouped = False
@@ -2083,6 +2089,19 @@ def apply_file_diversity_cap(
 _ENRICHMENT_POOL_HEADROOM: int = 4
 
 
+def _enrichment_rank_key(r: SearchResult) -> tuple[int, float]:
+    """Sort key for "best first" at the point :func:`search_cross_corpus` has no final
+    ranking yet: rows carrying a server ``rerank_score`` by that score, ahead of unscored
+    rows, which go by vector distance. The callers' hybrid/frecency/quality scoring
+    (``apply_ranking_boosts``) runs after the engine returns and can reorder what this
+    key ranks, so it is the best available approximation of the displayed order here,
+    not the displayed order itself."""
+    score = r.metadata.get("rerank_score")
+    if score is not None:
+        return (0, -float(score))
+    return (1, r.distance)
+
+
 def _cap_enrichment_pool(
     results: list[SearchResult],
     lexical_ids: set[str],
@@ -2116,13 +2135,7 @@ def _cap_enrichment_pool(
     if len(ranked) <= limit:
         return results
 
-    def _key(i: int) -> tuple[int, float]:
-        score = results[i].metadata.get("rerank_score")
-        if score is not None:
-            return (0, -float(score))
-        return (1, results[i].distance)
-
-    keep = set(sorted(ranked, key=_key)[:limit])
+    keep = set(sorted(ranked, key=lambda i: _enrichment_rank_key(results[i]))[:limit])
     _log.debug(
         "search_enrichment_pool_capped",
         pool=len(results),
@@ -2307,6 +2320,86 @@ def _fetch_embeddings_for_results(
     return embeddings, failed_indices
 
 
+#: Search review I-8: cap the O(n²) pairwise contradiction check per collection. At 30
+#: indices the pair count is 435; above that the pairwise signal is rarely informative
+#: and the cost grows quadratically.
+_CONTRADICTION_MAX_PER_COLLECTION: int = 30
+
+
+def _contradiction_candidates(results: list[SearchResult], scope: int) -> list[int]:
+    """Indices (ascending) of the rows in the top *scope* of *results* that could be flagged.
+
+    Search latency (nexus-92q1p follow-up, Sam 2026-10-08, measured at 7.9 s for a
+    limit-10 default-corpus search with up to 300 pooled vectors per call): RDR-057
+    Phase 3a designed the contradiction check over the RETURNED results ("~2 ms for
+    N=10"), and the flag renders only on displayed rows, so the check looks at the *scope*
+    best rows (``scope`` is the caller's ``n_results``; the order is
+    :func:`_enrichment_rank_key`, the best available here, since the caller's final
+    ranking runs after this function returns).
+
+    :func:`_flag_contradictions` flags a pair only when both rows share a collection and
+    both carry a non-empty, different ``source_agent``. A row is therefore a candidate
+    only if it has a ``source_agent`` and its collection also holds, inside the scope, a
+    row with a different one. The indexer stamps every code/docs/rdr chunk with one agent
+    (``nexus-indexer``), so those collections yield none and need no vector; only a
+    knowledge collection holding notes from two or more agents does. A collection with
+    more candidates than :data:`_CONTRADICTION_MAX_PER_COLLECTION` is skipped by the check
+    and so is not fetched for.
+    """
+    ranked = sorted(range(len(results)), key=lambda i: _enrichment_rank_key(results[i]))[:scope]
+    by_col: dict[str, list[int]] = {}
+    for i in ranked:
+        if results[i].metadata.get("source_agent"):
+            by_col.setdefault(results[i].collection, []).append(i)
+    out: list[int] = []
+    for idxs in by_col.values():
+        if len({results[i].metadata["source_agent"] for i in idxs}) < 2:
+            continue
+        if len(idxs) > _CONTRADICTION_MAX_PER_COLLECTION:
+            continue
+        out.extend(idxs)
+    return sorted(out)
+
+
+def _flag_scoped_contradictions(
+    results: list[SearchResult],
+    scope: int,
+    t3: Any,
+    *,
+    pool_embeddings: "tuple[np.ndarray | None, set[int]] | None" = None,
+) -> list[SearchResult]:
+    """:func:`_flag_contradictions` over :func:`_contradiction_candidates` only.
+
+    Returns *results* in the same length and order; a row outside the candidates is
+    returned as is. With *pool_embeddings* (the ``(matrix, failed_indices)`` semantic
+    clustering already fetched for the whole pool) the candidates' rows are sliced out of
+    it; without, their vectors come from :func:`_fetch_embeddings_for_results`, one
+    ``get-embeddings`` call per collection that holds a candidate, and none when there are
+    no candidates.
+    """
+    cands = _contradiction_candidates(results, scope)
+    if not cands:
+        return results
+    sub = [results[i] for i in cands]
+    if pool_embeddings is not None:
+        matrix, pool_failed = pool_embeddings
+        if matrix is None:
+            return results
+        sub_emb = matrix[cands]
+        sub_failed = {k for k, i in enumerate(cands) if i in pool_failed}
+    else:
+        call_deadline.check("search_cross_corpus:before_embeddings")
+        sub_emb, sub_failed = _fetch_embeddings_for_results(sub, t3)
+        call_deadline.check("search_cross_corpus:after_embeddings")
+        if sub_emb is None:
+            return results
+    flagged = _flag_contradictions(sub, sub_emb, sub_failed)
+    out = list(results)
+    for k, i in enumerate(cands):
+        out[i] = flagged[k]
+    return out
+
+
 def _flag_contradictions(
     results: list[SearchResult],
     embeddings: "np.ndarray",
@@ -2339,12 +2432,9 @@ def _flag_contradictions(
 
     flagged: set[int] = set()
     pairs_checked = 0
-    # Search review I-8: cap the O(n²) pairwise check to keep a single
-    # noisy collection (near-duplicate chunks, e.g. a knowledge__* corpus
-    # with repeated boilerplate) from dominating search-engine latency.
-    # At 30 indices, the pair count is 435 — above that the pairwise
-    # signal is rarely informative and the cost grows quadratically.
-    _CONTRADICTION_MAX_PER_COLLECTION = 30
+    # Search review I-8: the per-collection cap (_CONTRADICTION_MAX_PER_COLLECTION)
+    # keeps a single noisy collection (near-duplicate chunks, e.g. a knowledge__*
+    # corpus with repeated boilerplate) from dominating search-engine latency.
     for col, indices in col_groups.items():
         if len(indices) < 2:
             continue

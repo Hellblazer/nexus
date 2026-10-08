@@ -105,7 +105,7 @@ Through 6.x they were read by the ladder's substrate rung so `nx upgrade` could 
 | `search.distance_threshold.rdr` | — | `0.65` | Maximum distance for RDR corpus results |
 | `search.distance_threshold.default` | — | `0.55` | Maximum distance for unknown corpus types |
 | `search.cluster_by` | — | `null` | Set to `semantic` to group search results by Ward hierarchical clustering. Disabled by default |
-| `search.contradiction_check` | — | `true` | JIT contradiction detection (RDR-057). Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output. Set to `false` to disable. The check fetches embeddings for flagged candidates and adds a network round-trip per flagged collection |
+| `search.contradiction_check` | — | `true` | JIT contradiction detection (RDR-057). Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output. Set to `false` to disable. The check looks only at the displayed rows and fetches embeddings only for rows that can flag, one round trip per collection holding mixed-agent notes (none for code, docs and RDR collections) |
 
 Embedding models are selected automatically based on collection type (see [Storage Tiers](storage-tiers.md)): `voyage-code-3` for code, `voyage-context-3` (CCE) for docs/rdr/knowledge. All collections use the same model for both index and query.
 

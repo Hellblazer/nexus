@@ -247,7 +247,7 @@ When two results from the same collection have near-identical embeddings (cosine
 
 Two agents recorded conflicting claims; investigate and consolidate. The flag is informational; neither result is dropped.
 
-Enabled by default. Opt out via `search.contradiction_check: false` in `.nexus.yml`. The check adds one extra embedding fetch per collection (shared with clustering when both are enabled). See [Configuration](configuration.md).
+Enabled by default. Opt out via `search.contradiction_check: false` in `.nexus.yml`. The check looks only at the rows the search can display and fetches vectors only for the rows that can flag (a row with a `source_agent` whose collection holds a different agent's row in the same result). Code, docs and RDR collections are indexed under one agent, so they cost nothing; a knowledge collection holding notes from two or more agents adds one fetch for those few rows. See [Configuration](configuration.md).
 
 ## See also
 
