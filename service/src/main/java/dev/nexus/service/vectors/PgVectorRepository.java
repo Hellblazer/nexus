@@ -1837,14 +1837,16 @@ public final class PgVectorRepository {
 
     /**
      * Resolve the per-request fan-out parallelism: {@code NX_SEARCH_FANOUT_CONCURRENCY} when it is
-     * a positive integer, else {@code max(1, poolSize / 2)}, never above the pool size. A malformed
+     * a positive integer, else {@link #fanoutArmPermitCeiling} ({@code max(1, poolSize - 2)}), never above
+     * the pool size. The default matches the arm permits' default, so one request can use every permit
+     * (Sam, 2026-10-08: half the pool ran a 61-collection search in 12 waves of 5). A malformed
      * or non-positive value takes the default with a warning, never a crash at boot.
      *
      * @param raw      the env value, or {@code null}
      * @param poolSize the connection pool size the default derives from and the override clamps to
      */
     static int fanoutParallelism(String raw, int poolSize) {
-        int dflt = Math.max(1, poolSize / 2);
+        int dflt = fanoutArmPermitCeiling(poolSize);
         return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_CONCURRENCY_ENV, raw, dflt), poolSize));
     }
 
@@ -1863,14 +1865,15 @@ public final class PgVectorRepository {
 
     /**
      * Resolve the cross-request cap on fan-out arms in flight: {@code NX_SEARCH_FANOUT_ARM_PERMITS}
-     * when it is a positive integer, else {@code max(1, poolSize / 2)}, in both cases never above
-     * {@link #fanoutArmPermitCeiling} ({@code max(1, poolSize - 2)}). The default is half the pool, which
-     * leaves at least the other half for {@code /health}, writes and plain search however many fan-out
-     * requests are running; the ceiling is what an override or a different default is held to, so the cap
-     * follows the pool instead of a number that was right for one pool size.
+     * when it is a positive integer, else the ceiling, {@link #fanoutArmPermitCeiling}
+     * ({@code max(1, poolSize - 2)}), which an override is also held to. The default was half the pool
+     * until 2026-10-08; Sam moved it to the ceiling (a single-tenant deployment, where the half the pool
+     * kept back for other requests' {@code /health}, writes and plain search was idle while one search ran
+     * 61 arms in 12 waves). The ceiling still leaves {@link #FANOUT_ARM_POOL_HEADROOM} connections to
+     * everything that is not an arm, and follows the pool instead of a number right for one pool size.
      */
     static int fanoutArmPermits(String raw, int poolSize) {
-        int dflt = Math.max(1, poolSize / 2);
+        int dflt = fanoutArmPermitCeiling(poolSize);
         return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt),
                                     fanoutArmPermitCeiling(poolSize)));
     }
@@ -1886,7 +1889,7 @@ public final class PgVectorRepository {
     public int startupFanoutArmPermits() {
         int pool = tenantScope.poolSize();
         String raw = System.getenv(FANOUT_ARM_PERMITS_ENV);
-        int dflt = Math.max(1, pool / 2);
+        int dflt = fanoutArmPermitCeiling(pool);
         int ceiling = fanoutArmPermitCeiling(pool);
         int configured = positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt);
         int effective = fanoutArmPermits(raw, pool);
@@ -2013,9 +2016,9 @@ public final class PgVectorRepository {
      *
      * <p><strong>Concurrency across requests.</strong> Every arm takes one permit from a gate that
      * is shared by ALL fan-out requests on the same pool ({@link TenantScope#fanoutArmGate}, default
-     * {@code max(1, pool/2)}) BEFORE it asks for an admission permit or a connection. An arm waiting
-     * for its slot therefore holds nothing, and at least half the pool stays free for {@code /health},
-     * writes and plain search however many fan-outs run at once.
+     * {@code max(1, pool - 2)}) BEFORE it asks for an admission permit or a connection. An arm waiting
+     * for its slot therefore holds nothing, and at least {@link #FANOUT_ARM_POOL_HEADROOM} connections
+     * stay free for {@code /health}, writes and plain search however many fan-outs run at once.
      *
      * <p><strong>Time.</strong> A statement's bound is {@code min(search bound, fan-out budget
      * remaining, request budget remaining)}, computed INSIDE the transaction at the moment the bound

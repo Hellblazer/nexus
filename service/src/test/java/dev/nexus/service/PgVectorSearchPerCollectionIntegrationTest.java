@@ -424,14 +424,15 @@ class PgVectorSearchPerCollectionIntegrationTest {
     }
 
     @Test
-    void concurrency_theDefaultIsHalfThePool() throws Exception {
+    void concurrency_theDefaultIsThePoolLessHeadroom() throws Exception {
         String tenant = "tu8wp-cc";
         List<String> cols = tinyCollections(tenant, 12);
         probe.reset();
         probe.holdMs = 60;
-        // A non-Hikari DataSource is sized at the TenantScope default pool of 10: default is 5.
+        // A non-Hikari DataSource is sized at the TenantScope default pool of 10: default is max(1, 10 - 2) = 8
+        // (half the pool, 5, until Sam's 2026-10-08 change). 12 collections, so 8 can be in flight at once.
         probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false);
-        assertThat(probe.peak.get()).isEqualTo(5);
+        assertThat(probe.peak.get()).isEqualTo(8);
     }
 
     @Test
@@ -452,7 +453,7 @@ class PgVectorSearchPerCollectionIntegrationTest {
                 .as("clamped to the pool size (10); a clamp to the admission limit (20) would reach the 12 the pool holds")
                 .isEqualTo(10);
         } finally {
-            probeScope.replaceFanoutArmGateForTests(5);
+            probeScope.replaceFanoutArmGateForTests(8); // the engine default at pool 10, max(1, 10 - 2)
         }
     }
 
@@ -486,7 +487,7 @@ class PgVectorSearchPerCollectionIntegrationTest {
                 .isLessThanOrEqualTo(3);
             assertThat(probe.peak.get()).as("non-vacuity: the gate was actually saturated").isEqualTo(3);
         } finally {
-            probeScope.replaceFanoutArmGateForTests(5);
+            probeScope.replaceFanoutArmGateForTests(8); // the engine default at pool 10, max(1, 10 - 2)
         }
     }
 
