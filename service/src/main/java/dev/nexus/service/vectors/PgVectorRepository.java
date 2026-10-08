@@ -2225,7 +2225,18 @@ public final class PgVectorRepository {
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
         if (includeEmbeddings) {
-            attachEmbeddings(tenant, model, queryDim, rows);
+            // The fill enriches results that are already finished: a failure in it (a DB error, a
+            // statement timeout) costs the vectors, never the rows. The client fetches by id any row
+            // that arrives without embedding_b64 (nexus-92q1p review M2).
+            try {
+                attachEmbeddings(tenant, model, queryDim, rows);
+            } catch (RuntimeException e) {
+                for (Map<String, Object> row : rows) {
+                    row.remove(EMBEDDING_ROW_KEY);
+                }
+                log.warn("event=search_per_collection_embedding_fill_failed rows={} error_class={} error={}",
+                         rows.size(), e.getClass().getSimpleName(), e.getMessage());
+            }
         }
         final long embeddingFillMs = includeEmbeddings ? (System.nanoTime() - fillStartNanos) / 1_000_000L : 0L;
         List<PerCollectionStat> stats = merger.stats();

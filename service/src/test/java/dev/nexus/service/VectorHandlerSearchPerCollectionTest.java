@@ -350,6 +350,33 @@ class VectorHandlerSearchPerCollectionTest {
         }
     }
 
+    /**
+     * nexus-92q1p review M2: the by-id vector fill is an enrichment of finished results. A DB error in it must
+     * not discard them: the rows come back without embedding_b64 (the client fetches those by id) and the
+     * request is a 200, not the whole-request 503 an unwrapped failure becomes.
+     */
+    @Test
+    void includeEmbeddings_aFailedFill_keepsTheFinishedRows_withoutVectors() throws Exception {
+        probe.reset();
+        probe.failEmbeddingFill = true;
+        probe.failure = () -> new SQLException("canceling statement due to statement timeout", "57014");
+        try {
+            Map<String, Object> req = ok();
+            req.put("include_embeddings", true);
+            req.put("limit", 6);
+            var r = post(req);
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.get("results")).as("the search results survive the failed fill").hasSize(6);
+            for (JsonNode row : body.get("results")) {
+                assertThat(row.has("embedding_b64")).as("no vector on %s", row.get("id")).isFalse();
+            }
+            assertThat(body.get("embedding_encoding").asText()).isEqualTo("f32-le-b64");
+        } finally {
+            probe.reset();
+        }
+    }
+
     @Test
     void includeEmbeddings_isOptIn_theDefaultResponseIsUnchanged() throws Exception {
         for (Object flag : new Object[] {null, false}) {
