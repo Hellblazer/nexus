@@ -1200,6 +1200,29 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     return row
 
 
+def note_collection_written(name: str) -> None:
+    """A chunk write to *name* has committed: drop the cache if it does not name *name*.
+
+    The engine's listing names only collections that physically hold a chunk. Registering a new
+    collection drops this cache, but the combined writer reads it again (for its per-request chunk
+    cap) before the first chunk lands, which refills it with a listing that cannot name the new
+    collection. Without this call that listing served every in-process reader for up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds after a successful write (found through
+    ``tests/integration/test_rdr_196_p2c_retrieval_bench.py``: an empty collection list after 15
+    in-process ``nx index rdr`` runs that finished inside the window).
+
+    A write to a collection the cache already names changes no membership, so the hot write path
+    costs a set lookup and no refetch. Dropping also bumps the generation, so a fetch that began
+    before this write cannot install its older listing afterwards.
+    """
+    if not name:
+        return
+    with _collections_cache_lock:
+        listed = name in _collections_cache[2] or name in _collections_cache[0]
+    if not listed:
+        invalidate_collections_cache()
+
+
 def invalidate_collections_cache() -> None:
     """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
     call to refetch from T3 rather than serving up to
