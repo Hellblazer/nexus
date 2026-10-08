@@ -53,7 +53,6 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
-    _COLLECTIONS_CACHE_TTL,
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
     get_collection_counts as _get_collection_counts,
@@ -3581,6 +3580,12 @@ def _reset_page_cache_for_tests() -> None:
 #: preferred here over precise coverage of only part of the corpus.
 _FANOUT_MIN_COLLECTION_CHUNK_COUNT = 3
 
+#: How fresh the chunk counts must be when they are PRINTED (``store_list``'s "N entries"). Only
+#: the fan-out floor tolerates the 15 minute counts window (Sam, 2026-10-08); printed sizes keep
+#: the 60 s freshness they always had, on their own constant so a names-TTL change cannot loosen
+#: them.
+_PRINTED_COUNTS_MAX_AGE: float = 60.0
+
 
 def _fanout_exclusions_for_group(fanned_out: list[str], counts: dict[str, int]) -> set[str]:
     """Pure function: which members of one bare-prefix fan-out group are
@@ -6336,7 +6341,7 @@ def store_list(
         if len(scope) > 1:
             # The sizes are printed, so keep the 60 s freshness they always had; only the
             # fan-out floor tolerates the 15 minute counts window.
-            counts = _get_collection_counts(max_age=_COLLECTIONS_CACHE_TTL)
+            counts = _get_collection_counts(max_age=_PRINTED_COUNTS_MAX_AGE)
             lines = [
                 f"{len(scope)} knowledge collections "
                 "(pass one as collection= to list its entries):"

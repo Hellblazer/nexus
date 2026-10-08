@@ -188,3 +188,32 @@ def test_a_non_default_tenants_listing_never_marks_the_counts_fresh(monkeypatch)
         assert mcp_infra._collections_counts_ts > 0.0
     finally:
         mcp_infra.invalidate_collections_cache()
+
+
+def test_a_fetch_that_began_before_a_write_does_not_install_its_pre_write_counts(world, monkeypatch):
+    # Review of 1d57bb6cd, minor 1: a search's full listing in flight while a store_put
+    # invalidates must not install its (pre-write) counts for the next 15 minutes.
+    seen, clock, state = world
+    client = mcp_infra.get_t3()
+    real = client.list_collections
+
+    def racing_list_collections(*args, **kwargs):
+        rows = real(*args, **kwargs)              # the engine answered with the pre-write count
+        if not kwargs.get("routing"):
+            state["count"] = 11                   # a write lands and invalidates mid-fetch
+            mcp_infra.invalidate_collections_cache()
+        return rows
+
+    monkeypatch.setattr(client, "list_collections", racing_list_collections)
+    mcp_infra.get_collection_counts()
+    monkeypatch.setattr(client, "list_collections", real)
+    assert mcp_infra.get_collection_counts()[_LIVE] == 11
+
+
+def test_reset_singletons_leaves_no_fresh_counts_behind(world):
+    # Review of 1d57bb6cd, minor 2: reset_singletons used to mark the counts loaded with an
+    # empty map, which the 15 minute clock would then serve as fresh.
+    seen, clock, state = world
+    assert mcp_infra.get_collection_counts()[_LIVE] == 10
+    mcp_infra.reset_singletons()
+    assert not mcp_infra._counts_are_fresh(mcp_infra._COLLECTION_COUNTS_TTL)
