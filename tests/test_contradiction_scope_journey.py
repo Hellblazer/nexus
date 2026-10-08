@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Search latency (nexus-92q1p follow-up): the contradiction-scope flow against the REAL engine.
+"""Search latency (nexus-92q1p follow-up): the contradiction-flag flow against the REAL engine.
 
-``tests/test_contradiction_scope.py`` pins the client against a fake transport. The scoped check
-reads ``source_agent`` off each returned row's metadata, so this file closes the one gap a fake
-cannot: that the engine's ``search-per-collection`` route AND the batched ``/search`` leg both carry
-the stored ``source_agent`` on the row (the engine flattens a chunk's stored metadata into the row),
-and that the flag comes out of real vectors, with ``get-embeddings`` asked for the mixed-agent
-collection only.
+``tests/test_contradiction_scope.py`` pins the client against a fake transport. The check reads
+``source_agent`` off each returned row's metadata, so this file closes the one gap a fake cannot:
+that the engine's ``search-per-collection`` route AND the batched ``/search`` leg both carry the
+stored ``source_agent`` on the row (the engine flattens a chunk's stored metadata into the row),
+that ``search_cross_corpus`` itself neither flags nor fetches a vector for the check, and that
+``flag_displayed_contradictions`` (what the MCP ``search`` render calls on the page it displays)
+produces the flag from real vectors, with ``get-embeddings`` asked for the mixed-agent collection
+only.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ import hashlib
 import pytest
 
 import nexus.db.http_vector_client as hvc
-from nexus.search_engine import search_cross_corpus
+from nexus.search_engine import flag_displayed_contradictions, search_cross_corpus
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
 from tests._chunk_seed import seed_chunks_direct
 
@@ -74,6 +76,11 @@ def test_the_rows_carry_source_agent_and_only_the_mixed_collection_is_fetched(se
     assert {r.metadata.get("source_agent") for r in by_col[_NOTES]} == {"agent-x", "agent-y"}
     assert {r.metadata.get("source_agent") for r in by_col[_CODE]} == {"nexus-indexer"}
 
+    assert fetched == [], "search_cross_corpus makes no vector call for the check"
+    assert not any(r.metadata.get("_contradiction_flag") for r in results)
+
+    page = flag_displayed_contradictions(results, client)
     assert fetched == [(_NOTES, sorted(note_ids))], "vectors for the mixed-agent collection only"
-    assert all(r.metadata.get("_contradiction_flag") for r in by_col[_NOTES]), "near-identical notes, two agents"
-    assert not any(r.metadata.get("_contradiction_flag") for r in by_col[_CODE])
+    flagged = {r.collection for r in page if r.metadata.get("_contradiction_flag")}
+    assert flagged == {_NOTES}, "near-identical notes, two agents; the single-agent code collection is clean"
+    assert all(r.metadata.get("_contradiction_flag") for r in page if r.collection == _NOTES)

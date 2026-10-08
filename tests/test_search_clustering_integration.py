@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from nexus.search_engine import search_cross_corpus
+from nexus.search_engine import flag_displayed_contradictions, search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -78,12 +78,18 @@ class TestFullPipeline:
     constructing their own test context. They ensure the full search pipeline
     exercises all features simultaneously, catching regressions like F1 (double
     embedding fetch) and interaction bugs like metadata flag propagation.
+
+    The contradiction flag is no longer set by ``search_cross_corpus``: the MCP
+    ``search`` render computes it on the displayed page with
+    ``flag_displayed_contradictions`` (search latency, nexus-92q1p follow-up), so
+    the tests below chain the two the way that render does.
     """
 
     def test_single_fetch_when_contradiction_and_clustering_both_enabled(
         self, monkeypatch
     ) -> None:
-        """Regression for F1: both features share one embedding fetch per collection."""
+        """Regression for F1: with the check enabled, clustering's one embedding fetch per
+        collection is the only fetch ``search_cross_corpus`` makes."""
         monkeypatch.setattr(
             "nexus.search_engine.load_config",
             lambda: {"search": {"contradiction_check": True}},
@@ -107,8 +113,9 @@ class TestFullPipeline:
         assert fetched_cols.count("docs__b") == 1
         assert len(t3.get_embeddings_calls) == 2
 
-    def test_contradiction_flag_survives_clustering(self, monkeypatch) -> None:
-        """R3-5 regression: clustering must preserve _contradiction_flag in metadata."""
+    def test_contradiction_flag_is_set_on_a_clustered_page_and_keeps_the_cluster_labels(self, monkeypatch) -> None:
+        """R3-5 regression, in the order the render applies them: cluster first, then flag
+        the displayed rows. Flagging a clustered page must keep every cluster label."""
         monkeypatch.setattr(
             "nexus.search_engine.load_config",
             lambda: {"search": {"contradiction_check": True}},
@@ -143,15 +150,18 @@ class TestFullPipeline:
                 return np.array(rows, dtype=np.float32)
 
         t3 = _ContradictingT3()
-        results = search_cross_corpus(
+        clustered = search_cross_corpus(
             "q", ["code__test"], 10, t3, cluster_by="semantic",
         )
-        # At least one result should still carry the contradiction flag after clustering
-        flagged = [r for r in results if r.metadata.get("_contradiction_flag")]
-        assert len(flagged) >= 2, (
-            "Clustering dropped _contradiction_flag — the metadata-preservation "
-            "invariant between _flag_contradictions and _apply_clustering broke"
+        assert not any(r.metadata.get("_contradiction_flag") for r in clustered), (
+            "search_cross_corpus no longer flags; the render does, on the displayed page"
         )
+        results = flag_displayed_contradictions(clustered, t3)
+        flagged = {r.id for r in results if r.metadata.get("_contradiction_flag")}
+        assert flagged == {"chunk-a", "chunk-b"}
+        assert [r.metadata.get("_cluster_label") for r in results] == [
+            r.metadata.get("_cluster_label") for r in clustered
+        ], "flagging keeps the clusters"
 
     def test_partial_collection_failure_does_not_suppress_other_flags(
         self, monkeypatch
@@ -164,7 +174,9 @@ class TestFullPipeline:
 
         class _PartialT3:
             _voyage_client = "fake"
-            get_embeddings_calls = []
+
+            def __init__(self) -> None:
+                self.get_embeddings_calls: list = []
 
             def search(self, query, collection_names, n_results=10, where=None):
                 col = collection_names[0]
@@ -193,15 +205,21 @@ class TestFullPipeline:
                 ], dtype=np.float32)
 
         t3 = _PartialT3()
-        results = search_cross_corpus(
-            "q", ["code__good", "code__broken"], 10, t3,
+        pooled = search_cross_corpus(
+            "q", ["code__good", "code__broken"], 10, t3, cluster_by=None,
         )
+        assert t3.get_embeddings_calls == [], "search_cross_corpus makes no vector call for the check"
+        results = flag_displayed_contradictions(pooled, t3)
+        assert {c for c, _ in t3.get_embeddings_calls} == {"code__good", "code__broken"}
         # good collection should still have contradiction flags despite broken one
         good_results = [r for r in results if r.collection == "code__good"]
         flagged_good = [r for r in good_results if r.metadata.get("_contradiction_flag")]
         assert len(flagged_good) >= 2, (
             "R3-1 regression: partial collection failure suppressed contradiction "
             "flags on successfully-fetched collections"
+        )
+        assert not any(
+            r.metadata.get("_contradiction_flag") for r in results if r.collection == "code__broken"
         )
 
 

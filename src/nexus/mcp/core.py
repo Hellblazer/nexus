@@ -2955,6 +2955,7 @@ def _search_render(
         from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             apply_file_diversity_cap,
             apply_ranking_boosts,
+            flag_displayed_contradictions,
             search_cross_corpus,
         )
 
@@ -3198,6 +3199,16 @@ def _search_render(
         # expiry (context_annotations); the contradiction flag stays on the
         # title line where it has always been.
         from nexus.context_annotations import READER_INSTRUCTION, annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+        # Contradiction flag (RDR-057 Phase 3a; search latency, nexus-92q1p follow-up,
+        # Sam 2026-10-08). Computed HERE, on `page`: the rows in final display order after
+        # apply_ranking_boosts, the topic boost, the file-diversity cap and the offset/limit
+        # slice, so a row a boost lifted onto the page is considered and a row the page
+        # dropped is not. Not on the cached list (every page turn renders its own slice)
+        # and not for structured output, which carries no flag. One get-embeddings call
+        # per collection that holds a mixed-agent pair on this page, none otherwise.
+        if cfg.get("search", {}).get("contradiction_check", True):
+            page = flag_displayed_contradictions(page, t3)
 
         lines: list[str] = [READER_INSTRUCTION]
         current_cluster: str | None = None

@@ -247,7 +247,7 @@ When two results from the same collection have near-identical embeddings (cosine
 
 Two agents recorded conflicting claims; investigate and consolidate. The flag is informational; neither result is dropped.
 
-Enabled by default. Opt out via `search.contradiction_check: false` in `.nexus.yml`. The check looks only at the rows the search can display and fetches vectors only for the rows that can flag (a row with a `source_agent` whose collection holds a different agent's row in the same result). Code, docs and RDR collections are indexed under one agent, so they cost nothing; a knowledge collection holding notes from two or more agents adds one fetch for those few rows. See [Configuration](configuration.md).
+Enabled by default. Opt out via `search.contradiction_check: false` in `.nexus.yml`. The check runs in the MCP `search` tool over the page it renders, after ranking, the file-diversity cap and paging, so a pair flags only when both rows are on one page; `nx search`, `query` and `structured=True` output do not show the flag. It fetches vectors only for rows on the page that carry a `source_agent` while another row from the same collection on that page carries a different one. That costs one fetch per such collection on the page, and none when no collection on the page holds a mixed-agent pair. The indexer stamps every code, docs and RDR chunk with one agent (an import can add a second), so those collections hold such a pair only when an import added one; a knowledge collection holding notes from two or more agents is a case that does. A collection with more than 30 such rows on the page is skipped. See [Configuration](configuration.md).
 
 ## See also
 

@@ -73,8 +73,8 @@ over time:
   or `action=overlap_detected` when a full-text scan (Postgres, server-side)
   finds a similar entry under a different title. The promoted row is still
   written; the report only signals that a manual merge may be warranted.
-- **Contradiction flagging** during T3 search: `search_cross_corpus`
-  adds `[CONTRADICTS ANOTHER RESULT]` to any result pair where two
+- **Contradiction flagging** during T3 search: the MCP `search` tool
+  adds `[CONTRADICTS ANOTHER RESULT]` to any pair on the page it renders where two
   high-similarity chunks come from different `source_agent` provenance,
   surfacing inconsistencies for human review. Default-on; opt out via
   `search.contradiction_check: false`. See
