@@ -604,6 +604,7 @@ public final class VectorHandler implements HttpHandler {
      *   "where":              {"key": "val"},   // optional, applied in every collection's arm
      *   "include_source_uri": false,
      *   "include_embeddings": false,            // optional; each row then carries its stored vector, see below
+     *   "embeddings_limit": 300,                // optional, with include_embeddings: only the first N rows keep the vector
      *   "rerank":             false,            // optional; then limit must be &lt;= 1000
      *   "rerank_top_k":       null              // optional; requires rerank
      * }
@@ -666,6 +667,10 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where = optMap(body, "where");
         boolean includeSourceUri  = optBool(body, "include_source_uri", false);
         boolean includeEmbeddings = optBool(body, "include_embeddings", false);
+        Integer embeddingsLimit   = optInteger(body, "embeddings_limit");
+        if (embeddingsLimit != null && embeddingsLimit < 1) {
+            throw new IllegalArgumentException("field 'embeddings_limit' must be at least 1, got " + embeddingsLimit);
+        }
         boolean rerank            = optBool(body, "rerank", false);
         Integer rerankTopK        = optInteger(body, "rerank_top_k");
         if (!rerank && rerankTopK != null) {
@@ -702,6 +707,15 @@ public final class VectorHandler implements HttpHandler {
             m.put("error", stat.error());
             m.put("error_kind", stat.errorKind() == null ? null : stat.errorKind().wire());
             perCollection.add(m);
+        }
+        if (includeEmbeddings && embeddingsLimit != null && envelope.get("results") instanceof List<?> finalRows) {
+            // nexus-92q1p review L6: the vectors were read for every surviving row, before the rerank. The
+            // caller keeps only its first N in the final order, so the rest do not travel.
+            for (int i = embeddingsLimit; i < finalRows.size(); i++) {
+                if (finalRows.get(i) instanceof Map<?, ?> row) {
+                    row.remove(PgVectorRepository.EMBEDDING_ROW_KEY);
+                }
+            }
         }
         envelope.put("per_collection", perCollection);
         envelope.put("per_collection_k", perK);

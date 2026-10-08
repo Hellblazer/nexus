@@ -350,6 +350,59 @@ class VectorHandlerSearchPerCollectionTest {
         }
     }
 
+    /**
+     * nexus-92q1p review M2: the by-id vector fill is an enrichment of finished results. A DB error in it must
+     * not discard them: the rows come back without embedding_b64 (the client fetches those by id) and the
+     * request is a 200, not the whole-request 503 an unwrapped failure becomes.
+     */
+    @Test
+    void includeEmbeddings_aFailedFill_keepsTheFinishedRows_withoutVectors() throws Exception {
+        probe.reset();
+        probe.failEmbeddingFill = true;
+        probe.failure = () -> new SQLException("canceling statement due to statement timeout", "57014");
+        try {
+            Map<String, Object> req = ok();
+            req.put("include_embeddings", true);
+            req.put("limit", 6);
+            var r = post(req);
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.get("results")).as("the search results survive the failed fill").hasSize(6);
+            for (JsonNode row : body.get("results")) {
+                assertThat(row.has("embedding_b64")).as("no vector on %s", row.get("id")).isFalse();
+            }
+            assertThat(body.get("embedding_encoding").asText()).isEqualTo("f32-le-b64");
+        } finally {
+            probe.reset();
+        }
+    }
+
+    /**
+     * nexus-92q1p review L6: {@code embeddings_limit} keeps the vector on only the first N rows of the final
+     * order, so a client that keeps a pool smaller than {@code limit} (1000 under rerank) does not transfer
+     * vectors for rows it drops. The rows past N stay in the result, without {@code embedding_b64}.
+     */
+    @Test
+    void includeEmbeddings_embeddingsLimit_keepsTheVectorOnTheFirstNRowsOnly() throws Exception {
+        Map<String, Object> req = ok();
+        req.put("include_embeddings", true);
+        req.put("limit", 6);
+        req.put("embeddings_limit", 2);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode results = json(r).get("results");
+        assertThat(results).as("the rows are all still there").hasSize(6);
+        for (int i = 0; i < results.size(); i++) {
+            assertThat(results.get(i).has("embedding_b64")).as("row %d of 6, embeddings_limit 2", i).isEqualTo(i < 2);
+        }
+        assertThat(json(r).get("embedding_dim").asInt()).isEqualTo(384);
+
+        Map<String, Object> bad = ok();
+        bad.put("include_embeddings", true);
+        bad.put("embeddings_limit", 0);
+        assertThat(post(bad).statusCode()).as("embeddings_limit must be positive").isEqualTo(400);
+    }
+
     @Test
     void includeEmbeddings_isOptIn_theDefaultResponseIsUnchanged() throws Exception {
         for (Object flag : new Object[] {null, false}) {

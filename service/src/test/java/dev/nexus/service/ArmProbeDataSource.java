@@ -50,6 +50,11 @@ final class ArmProbeDataSource {
     volatile Supplier<? extends Exception> failure = () -> new SQLException("probe failure");
     /** Time every arm borrow sleeps BEFORE it gets its connection (an admission or pool wait). */
     volatile long borrowDelayMs = 0L;
+    /**
+     * Fail every borrow made under {@code PgVectorRepository#attachEmbeddings} (the include_embeddings fill,
+     * nexus-92q1p): stands in for a DB error or statement timeout in the by-id vector read.
+     */
+    volatile boolean failEmbeddingFill = false;
     /** Every statement_timeout value an arm connection was given, in the order it was set. */
     final List<Integer> statementTimeouts = new CopyOnWriteArrayList<>();
     /**
@@ -82,6 +87,7 @@ final class ArmProbeDataSource {
         holdMs = 0L;
         failFromArm = 0;
         borrowDelayMs = 0L;
+        failEmbeddingFill = false;
         failure = () -> new SQLException("probe failure");
         statementTimeouts.clear();
         armStatements.clear();
@@ -93,9 +99,17 @@ final class ArmProbeDataSource {
             frames -> frames.anyMatch(f -> f.getMethodName().equals("runArm")));
     }
 
+    private static boolean inEmbeddingFill() {
+        return StackWalker.getInstance().walk(
+            frames -> frames.anyMatch(f -> f.getMethodName().equals("attachEmbeddings")));
+    }
+
     private Object onDataSource(Object proxy, java.lang.reflect.Method m, Object[] args) throws Throwable {
         if (!m.getName().equals("getConnection")) {
             return invoke(delegate, m, args);
+        }
+        if (failEmbeddingFill && inEmbeddingFill()) {
+            throw failure.get();
         }
         boolean arm = inArm();
         if (arm) {

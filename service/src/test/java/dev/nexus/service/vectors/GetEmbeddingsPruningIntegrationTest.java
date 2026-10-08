@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.RecordingDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
@@ -273,6 +274,73 @@ class GetEmbeddingsPruningIntegrationTest {
         assertThat((List<?>) repo.getAllMetadata(tenant, coll, Map.of()).get("ids")).hasSize(ROWS);
         assertThat(repo.selectExistingChashes(tenant, coll, ids)).containsExactlyInAnyOrderElementsOf(ids);
         assertThat(repo.fetchChunkText(tenant, coll, ids.get(0))).isEqualTo("gep fixture row 0");
+    }
+
+    /**
+     * nexus-68bsx review: the sibling reads' scope, in two halves, because a plan cannot be read off the
+     * statement a repository method sent (jOOQ cannot parse back its own table-function SQL, and EXPLAINing
+     * captured text would be raw SQL in a test file).
+     *
+     * <p>Plan half: {@code chunkScope} is the one predicate every sibling read puts in its WHERE, and a read
+     * built on it plans to the one (model, tenant) leaf.
+     *
+     * <p>Statement half: each of {@code get}, {@code getWhere} and {@code list} runs through the real
+     * repository method over a recording DataSource, and the chunk read it sent names {@code embedding_model}
+     * and {@code tenant_id} with the collection's own model and tenant bound. Together: dropping either
+     * predicate from {@code chunkScope} fails the plan half, and a method that stops using the scope fails
+     * its statement half. ({@link #siblingReads_areScopedToTheCollectionsOwnLeaf} cannot: collection and RLS
+     * already return the same rows without them.)
+     */
+    @Test
+    void siblingReads_planToTheOneLeafOfTheirModelAndTenant() {
+        int t = 1, m = 1;
+        String coll = collections.get(key(t, m));
+        String tenant = TENANTS[t];
+        String model = MODELS[m];
+
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
+        String plan = tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setSearchPlanCacheMode(ctx);
+            return ctx.explain(ctx.select(ch.chash()).from(ch.table())
+                .where(PgVectorRepository.chunkScope(ch, tenant, model, coll))).plan();
+        });
+        String own = leaves.get(key(t, m));
+        assertThat(names(plan, own)).as("the scope reads its own leaf %s. Plan:%n%s", own, plan).isTrue();
+        for (var e : leaves.entrySet()) {
+            if (e.getKey().equals(key(t, m))) continue;
+            assertThat(names(plan, e.getValue()))
+                .as("the scope must not plan against leaf %s of %s. Plan:%n%s", e.getValue(), e.getKey(), plan)
+                .isFalse();
+        }
+
+        var recorder = new RecordingDataSource(svcDs);
+        Embedder none = new Embedder() {
+            @Override public List<float[]> embed(List<String> texts) {
+                throw new UnsupportedOperationException("the read routes never embed");
+            }
+            @Override public void close() { }
+        };
+        var recordingRepo = new PgVectorRepository(new TenantScope(recorder.dataSource()), none, none);
+        List<String> ids = chashes.subList(0, 3);
+        Map<String, Runnable> reads = new LinkedHashMap<>();
+        reads.put("get", () -> recordingRepo.get(tenant, coll, ids, 10, 0, false));
+        reads.put("getWhere", () -> recordingRepo.getWhere(tenant, coll, Map.of(), 10, 0, false, false));
+        reads.put("list", () -> recordingRepo.list(tenant, coll, 10, 0));
+        for (var read : reads.entrySet()) {
+            recorder.clear();
+            read.getValue().run();
+            var sent = recorder.executed().stream()
+                .filter(e -> e.sql().contains("\"chunks\"") && e.sql().toLowerCase().startsWith("select"))
+                .reduce((first, second) -> second)
+                .orElseThrow(() -> new AssertionError(read.getKey() + " sent no chunk read: " + recorder.executed()));
+            String text = sent.sql().toLowerCase();
+            assertThat(text).as("%s names the model partition key: %s", read.getKey(), sent)
+                .contains("\"embedding_model\" = ");
+            assertThat(text).as("%s names the tenant partition key: %s", read.getKey(), sent)
+                .contains("\"tenant_id\" = ");
+            assertThat(sent.binds()).as("%s binds its collection's model and tenant: %s", read.getKey(), sent)
+                .contains(model, tenant, coll);
+        }
     }
 
     /**

@@ -7,6 +7,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.Embedder;
+import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -273,5 +275,33 @@ class CollectionVectorStatsSetBasedTest {
             return ctx.select(DSL.function("current_setting", org.jooq.impl.SQLDataType.VARCHAR, DSL.inline("jit"))).fetchOne(0, String.class);
         });
         assertThat(inside).isEqualTo("off");
+    }
+
+    /**
+     * nexus-mz9jv review: the test above pins the helper, not that the stats route CALLS it. Run the real
+     * {@code collectionStats} over a statement-recording DataSource: the {@code set_config('jit','off')} must
+     * precede the read of the view, so deleting the call from {@code collectionStats} fails here.
+     */
+    @Test
+    void collectionStats_disablesJitBeforeReadingTheView() {
+        var recorder = new RecordingDataSource(svcDs);
+        Embedder none = new Embedder() {
+            @Override public List<float[]> embed(List<String> texts) {
+                throw new UnsupportedOperationException("stats never embed");
+            }
+            @Override public void close() { }
+        };
+        var repo = new PgVectorRepository(new TenantScope(recorder.dataSource()), none, none);
+        assertThat(repo.collectionStats(TENANT_A)).as("the fixture has collections").isNotEmpty();
+        List<String> log = recorder.executed().stream().map(RecordingDataSource.Executed::toString).toList();
+        int jit = -1, view = -1;
+        for (int i = 0; i < log.size(); i++) {
+            String e = log.get(i);
+            if (jit < 0 && e.contains("set_config") && e.contains("jit, off")) jit = i;
+            if (view < 0 && e.contains("collection_vector_stats")) view = i;
+        }
+        assertThat(view).as("the view was read: %s", log).isGreaterThanOrEqualTo(0);
+        assertThat(jit).as("jit was switched off in the transaction: %s", log).isGreaterThanOrEqualTo(0);
+        assertThat(jit).as("jit off BEFORE the view is read: %s", log).isLessThan(view);
     }
 }
