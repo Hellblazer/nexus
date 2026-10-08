@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.74.0] - 2026-10-07
+
+Plugin version aligned with conexus 7.74.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied):
+
+- **Hooks never run a `.venv` interpreter** (nexus-f9bgu.36). `conexus/hooks/hooks.json` and `sn/hooks/hooks.json` launch every uv entry as `uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python <script>`. `uv run --no-project` used a `.venv` Python found in the starting directory or a parent, so a cloned repository, `~/.venv` or a `C:\.venv` could supply the interpreter for every hook.
+- **Hooks never execute a binary from the cwd** (nexus-f9bgu.36). The new `_exec_path.which_off_cwd` resolves `nx-hook`, `uv`, `nx`, `git` and `python3.1x` on PATH alone and spawns the absolute path; on Windows a bare name is searched in the cwd first and a hook's cwd is the project. The hook scripts take the project from the payload's `cwd`, else `CLAUDE_PROJECT_DIR`, since their own cwd is now the plugin root. No behaviour change on POSIX.
+- **The lockstep markers live in the nexus config dir** (nexus-f9bgu). `cli_lockstep_marker`, `ref_drift_lockstep_marker` and `lockstep.log` follow `NEXUS_CONFIG_DIR` (else `~/.config/nexus`), so the hook, the action and `nx upgrade`'s precondition use one file.
+- **The MCP servers need no Node.js** (nexus-f9bgu). sequential-thinking runs from `conexus/mcp/sequential_thinking.py`, a standard-library Python port of the upstream server's one tool with the same schema and result; context7 is declared as the hosted endpoint `https://mcp.context7.com/mcp`. `/nx-preflight` drops its Node.js row.
+- **Windows hook output** (nexus-f9bgu). `nx_hook_shim.py` recognises an older CLI's unknown-verb line ending in CRLF, and sn's `session_start.py` writes its section as UTF-8 bytes rather than cp1252 text.
+- **A smaller SubagentStart injection** (nexus-wd0at). The Serena and Context7 sections are shorter with every instruction kept, and the stray `CONTEXT7` heredoc line is gone.
+- **The shared-tree lock snippet claims by an exclusive pid write** (nexus-bo01z). `resources/agent-shared/CONTEXT_PROTOCOL.md`; uutils `mkdir` on Ubuntu 26.04 reports a lost create race as success. This was deferred to this client release because the bead also changes the generation installer.
+
 ## [7.73.0] - 2026-10-07
 
 Plugin version aligned with conexus 7.73.0. No plugin-side changes:
