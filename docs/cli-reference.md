@@ -3937,7 +3937,11 @@ check the service log tail and `pg.log` next.
 `stop` stops the supervisor + service but **leaves Postgres running by
 design** (it is independently managed and may serve other clients) — the
 command says so; pass `--with-pg` to stop the cluster too (`pg_ctl -m
-fast`).
+fast`). `--with-pg` is the full-stack stop: it also stops the MinerU server that
+indexing auto-starts, when `mineru.pid` names one (what `nx mineru stop` and
+`nx uninstall` key on), and prints `MinerU server stopped (PID n)`. A
+`mineru-api` you started without nexus has no pid file and is left alone, and a
+`--config-dir` other than the default never reaches the default dir's MinerU.
 
 On Windows (RDR-224), `stop` sends the supervisor CTRL_BREAK and waits;
 a supervisor that does not exit in time is ended through its Job Object, which
@@ -3950,7 +3954,7 @@ the engine and PostgreSQL itself (nexus-f9bgu.51).
 | `--foreground` | Block until SIGTERM (for launchd/systemd supervision). On Windows the supervisor stops on CTRL_BREAK (`SIGBREAK`). |
 | `--config-dir` | Config directory override. |
 | `--json` | (`status`) Raw JSON output. |
-| `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
+| `--with-pg` | (`stop`) Full-stack stop: also stop the nx-managed Postgres cluster and the MinerU server nexus started. |
 | `--announce-stdout` | (`start`) Emit the discovery JSON on stdout at startup. |
 
 **Memory-constrained hosts.** Set `NX_SERVICE_MAX_HEAP` (e.g. `NX_SERVICE_MAX_HEAP=1g`)

@@ -1016,8 +1016,10 @@ def _refused_stop_lines(refusals: object) -> list[str]:
     "with_pg",
     is_flag=True,
     default=False,
-    help="Also stop the nx-managed Postgres cluster via pg_ctl -m fast "
-    "(terminates open connections immediately; left running by default).",
+    help="Full-stack stop: also stop the nx-managed Postgres cluster via "
+    "pg_ctl -m fast (terminates open connections immediately; left running "
+    "by default), and the MinerU server nexus started (named by mineru.pid; "
+    "a server you started yourself is left alone).",
 )
 def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     """Stop the running storage-service supervisor (SIGTERM -> SIGKILL).
@@ -1025,6 +1027,10 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     Postgres is INTENTIONALLY left running (it is independently managed and
     may serve other clients) — nexus-pebfx.5 makes that visible instead of
     surprising: the command says so and offers --with-pg.
+
+    ``--with-pg`` makes this the full-stack stop: it also ends the MinerU
+    server that indexing auto-starts (about 420 MB resident), found from
+    ``mineru.pid`` the way ``nx mineru stop`` and ``nx uninstall`` find it.
 
     The aspect-worker daemon is likewise left running, on every platform: it
     belongs to the store path, not to the service (RDR-224), and idles with
@@ -1163,6 +1169,11 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         )
         sys.exit(1)
 
+    if with_pg:
+        # Before the Postgres branches: they return early when PG is absent,
+        # and a full-stack stop still owes the MinerU server its stop.
+        _stop_mineru_with_stack(config_dir)
+
     creds_path = config_dir / "pg_credentials"
     if not creds_path.exists():
         return
@@ -1214,6 +1225,41 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         click.echo(f"--with-pg: failed to stop Postgres: {exc}", err=True)
         sys.exit(2)
     click.echo(f"Postgres stopped (port {port_str}).")
+
+
+def _stop_mineru_with_stack(config_dir: Path) -> None:
+    """Stop the MinerU server nexus started, as part of a full-stack stop.
+
+    "Nexus started it" means ``mineru.pid`` names it: that file is written by
+    ``nx mineru start`` and by the on-demand spawn alike, and it is what
+    ``nx uninstall`` already keys on. A ``mineru-api`` with no pid file is the
+    user's own and is never matched by name. The verb itself re-checks the live
+    command before it signals, so a pid file left behind by an unclean death
+    that names a reused pid signals nothing.
+
+    MinerU state is not config-dir-parameterised (it reads the default config
+    dir), so a sandbox ``--config-dir`` must not reach the real user's server:
+    when *config_dir* is not the default, say so and leave it. Best-effort: a
+    failure here is a warning, the stack stop has already happened.
+    """
+    from nexus._mineru_pid import read_pid_file  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.commands.mineru import stop as _mineru_stop  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    default_dir = _config.nexus_config_dir()
+    if config_dir.resolve() != default_dir.resolve():
+        if (default_dir / "mineru.pid").exists():
+            click.echo(
+                f"MinerU not stopped: {config_dir} is not the default config dir "
+                f"({default_dir}), which holds the MinerU pid file. "
+                "Run 'nx mineru stop' to stop it."
+            )
+        return
+    if read_pid_file() is None:
+        return
+    try:
+        click.get_current_context().invoke(_mineru_stop)
+    except Exception as exc:  # noqa: BLE001 — best-effort; the service stop above already succeeded
+        click.echo(f"--with-pg: failed to stop MinerU: {exc}", err=True)
 
 
 def _probe_health(host: str, port: int, timeout: float = 3.0) -> str:
