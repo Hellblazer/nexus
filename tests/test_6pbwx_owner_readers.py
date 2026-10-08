@@ -26,7 +26,7 @@ def _sibling_names(monkeypatch, name: str, others: list[str], row_owner: str) ->
         m = MagicMock()
         m.name = n
         colls.append(m)
-    monkeypatch.setattr("nexus.db.http_vector_client.live_collection_rows", lambda _client: colls)
+    monkeypatch.setattr("nexus.db.http_vector_client.live_collection_rows", lambda _client, **_kw: colls)
     from nexus.repo_identity import list_sibling_collections
 
     return list_sibling_collections(name, MagicMock())
