@@ -307,8 +307,11 @@ List the entries this release carries:
 git merge-base --is-ancestor <sha> HEAD   # for each ## Unshipped sha; true = it ships in this release
 uv run python scripts/check_wire_contract_pairing.py   # must report clean after the move
 ```
-`tests/e2e/release-preflight.sh` refuses a release tree that still carries one
-(nexus-mm3u5, its `wire-ledger-shipped` leg; until that lands, this step is manual).
+`tests/e2e/release-preflight.sh` enforces this: its `wire-ledger-shipped` leg
+(`check_wire_contract_pairing.py --release-tree`, nexus-mm3u5) fails a release
+tree (pyproject newer than the newest `v*` tag) that still carries an
+`## Unshipped` entry whose commit is an ancestor of HEAD, naming each sha and
+bead. It reports NOT-APPLICABLE on any other tree.
 
 ### 4a. Set the privacy-policy effective date (nexus-5zv4j)
 
