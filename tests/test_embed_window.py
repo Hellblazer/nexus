@@ -108,7 +108,7 @@ def test_the_window_follows_the_collection_name_token_not_the_python_ef(
 
 
 def test_a_voyage_collection_name_needs_no_window_whatever_the_ef_says(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, cloud_mode
 ) -> None:
     """The MiniLM tokenizer is PRESENT here, so a lookup keyed on the EF's
     model would return a 256-token window; only the collection name's
@@ -127,7 +127,7 @@ def test_a_voyage_collection_name_needs_no_window_whatever_the_ef_says(
     ) is None
 
 
-def test_a_non_conformant_collection_falls_back_to_the_given_model(tmp_path, monkeypatch) -> None:
+def test_a_non_conformant_collection_falls_back_to_the_given_model(tmp_path, monkeypatch, cloud_mode) -> None:
     """A legacy two-segment name carries no token to read."""
     _synthetic_tokenizer(tmp_path / "tokenizer.json")
     monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(tmp_path))
