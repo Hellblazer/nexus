@@ -33,6 +33,7 @@ credential-bare spawn path is forbidden.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -611,8 +612,6 @@ class AspectWorkerDaemon:
 def _claude_available() -> bool:
     """Whether the ``claude`` binary is on ``PATH``: the one precondition the
     daemon's extraction needs and the spawner can check before it forks."""
-    import shutil  # noqa: PLC0415 - branch-local; trivial stdlib
-
     return shutil.which("claude") is not None
 
 

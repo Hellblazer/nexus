@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from structlog.testing import capture_logs
 
 import nexus.aspect_worker as aw
 import nexus.daemon.aspect_worker_daemon as awd
@@ -38,6 +39,7 @@ from nexus.daemon.service_registry import (
     ttl_for_tier,
 )
 from nexus.db import storage_mode
+from tests._module_seam import setattr_in
 
 
 #: The real predicate, captured before the autouse fixture stubs it.
@@ -221,8 +223,6 @@ def test_no_spawn_without_claude(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_the_absence_is_logged_once_per_process(tmp_path: Path, monkeypatch) -> None:
-    from structlog.testing import capture_logs
-
     monkeypatch.setattr(awd, "_claude_available", lambda: False)
     _FakePopen.reset()
 
@@ -239,8 +239,6 @@ def test_the_absence_is_logged_once_per_process(tmp_path: Path, monkeypatch) -> 
 
 def test_a_spawn_happens_when_claude_exists(tmp_path: Path, monkeypatch) -> None:
     """The same call, claude present: it spawns and logs no absence."""
-    from structlog.testing import capture_logs
-
     monkeypatch.setattr(awd, "_claude_available", lambda: True)
     _FakePopen.reset()
 
@@ -268,9 +266,9 @@ def test_a_running_daemon_is_reported_up_even_when_claude_is_not_on_this_path(
 def test_the_availability_check_reads_path(monkeypatch) -> None:
     """The real predicate, not the stub: it is what both the spawner and the
     daemon's own guard ask."""
-    monkeypatch.setattr("shutil.which", lambda name: None)
+    setattr_in(monkeypatch, awd, "shutil.which", lambda name: None)
     assert _REAL_CLAUDE_AVAILABLE() is False
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/claude" if name == "claude" else None)
+    setattr_in(monkeypatch, awd, "shutil.which", lambda name: "/usr/local/bin/claude" if name == "claude" else None)
     assert _REAL_CLAUDE_AVAILABLE() is True
 
 
@@ -292,8 +290,8 @@ def test_the_spawner_and_the_daemon_guard_share_one_predicate(
     agree on a stub would diverge here; a stub-only test could not see it.
     """
     monkeypatch.setattr(awd, "_claude_available", _REAL_CLAUDE_AVAILABLE)
-    monkeypatch.setattr(
-        "shutil.which", lambda name: "/usr/local/bin/claude" if claude_on_path else None,
+    setattr_in(
+        monkeypatch, awd, "shutil.which", lambda name: "/usr/local/bin/claude" if claude_on_path else None,
     )
     _FakePopen.reset()
 
