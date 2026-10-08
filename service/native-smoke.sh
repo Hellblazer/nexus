@@ -198,6 +198,31 @@ assert "telemetry/hook_failures/list" 200 "${A[@]}" "$U/v1/telemetry/hook_failur
 assert "taxonomy/assignments/details" 200 "${A[@]}" "${J[@]}" -X POST -d '{"doc_ids":["5dfa67d7a291e17721dd5e656b9d2459dad589592cff1dc27ff083ca252c7138"]}' "$U/v1/taxonomy/assignments/details"
 assert "taxonomy/hubs (staleness)"    200 "${A[@]}" "$U/v1/taxonomy/hubs?min_collections=2"
 
+# nexus-tjyzn: gzip in the NATIVE image (java.util.zip needs zlib linked in). A body of
+# 1 KiB or more to a client sending Accept-Encoding: gzip must come back compressed and
+# decode to the identity body; a fresh DB serves only small bodies, so store one 3 KB note.
+echo "gzip response path:"
+BIGNOTE=$(python3 -c "print('native gzip smoke ' * 170)")
+assert "memory/put (3 KB note)" 200 "${A[@]}" "${J[@]}" -X POST \
+  -d "{\"project\":\"smoke\",\"title\":\"gzip\",\"content\":\"$BIGNOTE\",\"tags\":\"t\",\"ttl\":30}" "$U/v1/memory/put"
+# memory/get counts reads, so two reads differ (access count, last access): the check
+# decodes ONE gzip response and compares the stored note, not two bodies.
+curl -s -D "$SMOKE_TMP/gz.hdr" -o "$SMOKE_TMP/gz.raw" -H "Accept-Encoding: gzip" "${A[@]}" "$U/v1/memory/get?project=smoke&title=gzip"
+if grep -qi '^content-encoding: *gzip' "$SMOKE_TMP/gz.hdr" \
+   && python3 -c "
+import gzip, json, sys
+raw = open(sys.argv[1], 'rb').read()
+body = gzip.decompress(raw)
+sys.exit(0 if json.loads(body).get('content', '').strip() == sys.argv[2].strip() and len(raw) < len(body) else 1)
+" "$SMOKE_TMP/gz.raw" "$BIGNOTE"; then
+  echo "  ok   gzip: $(wc -c < "$SMOKE_TMP/gz.raw" | tr -d ' ') compressed bytes decode to the stored 3 KB note"
+else
+  echo "  FAIL gzip: no Content-Encoding: gzip, or the body does not decode to the stored note"; head -12 "$SMOKE_TMP/gz.hdr"; fail=1
+fi
+if grep -q 'gzip_response_unavailable' "$SMOKE_TMP/svc.log"; then
+  echo "  FAIL gzip fell back to identity in the native image:"; grep gzip_response_unavailable "$SMOKE_TMP/svc.log" | head -3; fail=1
+fi
+
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
 # T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
 # dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every
