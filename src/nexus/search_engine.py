@@ -2461,7 +2461,7 @@ def _apply_clustering(
     """Cluster results using pre-fetched embeddings, returning flat list with labels.
 
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
-    duplicate ChromaDB round-trips when contradiction detection also runs.
+    a second embedding fetch.
     """
     from nexus.search_clusterer import cluster_results  # noqa: PLC0415 — branch-local; only when clustering applied
 

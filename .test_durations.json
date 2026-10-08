@@ -21396,7 +21396,7 @@
     "tests/test_search_clustering_integration.py::TestConfigDefault::test_cluster_by_not_in_default_config": 0.15241666603833437,
     "tests/test_search_clustering_integration.py::TestFullPipeline::test_contradiction_flag_survives_clustering": 0.15640245896065608,
     "tests/test_search_clustering_integration.py::TestFullPipeline::test_partial_collection_failure_does_not_suppress_other_flags": 0.2037902069860138,
-    "tests/test_search_clustering_integration.py::TestFullPipeline::test_single_fetch_when_contradiction_and_clustering_both_enabled": 0.15399283298756927,
+    "tests/test_search_clustering_integration.py::TestFullPipeline::test_single_embedding_fetch_for_semantic_clustering": 0.15399283298756927,
     "tests/test_search_clustering_integration.py::TestTopicGrouping::test_explicit_none_disables_all_clustering": 0.1551155830384232,
     "tests/test_search_clustering_integration.py::TestTopicGrouping::test_topic_grouping_when_majority_assigned": 0.17088583298027515,
     "tests/test_search_clustering_integration.py::TestTopicGrouping::test_ward_fallback_when_few_assignments": 0.15348675101995468,

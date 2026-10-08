@@ -3651,7 +3651,7 @@ class HttpVectorClient:
 
         *include_embeddings* (nexus-92q1p) asks the engine for each surviving
         row's stored vector, read once after the merge, so a caller that needs
-        the vectors (the contradiction check, semantic clustering) makes no
+        the vectors (semantic clustering) makes no
         ``get-embeddings`` round trip per collection afterward. The rows come
         back with ``embedding_b64`` (base64 of little-endian float32), which
         this method DECODES and REMOVES from the rows, so a vector never lands

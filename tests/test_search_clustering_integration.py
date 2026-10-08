@@ -85,7 +85,7 @@ class TestFullPipeline:
     the tests below chain the two the way that render does.
     """
 
-    def test_single_fetch_when_contradiction_and_clustering_both_enabled(
+    def test_single_embedding_fetch_for_semantic_clustering(
         self, monkeypatch
     ) -> None:
         """Regression for F1: with the check enabled, clustering's one embedding fetch per
