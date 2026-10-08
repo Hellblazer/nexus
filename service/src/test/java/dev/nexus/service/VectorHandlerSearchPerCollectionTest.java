@@ -678,7 +678,7 @@ class VectorHandlerSearchPerCollectionTest {
             assertThat(f2.get().statusCode()).isEqualTo(200);
             assertThat(probe.peak.get()).as("arm connections in flight across both requests").isLessThanOrEqualTo(3);
         } finally {
-            probeScope.replaceFanoutArmGateForTests(8); // the engine default at pool 10, max(1, 10 - 2)
+            probeScope.replaceFanoutArmGateForTests(5);
             probe.reset();
         }
     }

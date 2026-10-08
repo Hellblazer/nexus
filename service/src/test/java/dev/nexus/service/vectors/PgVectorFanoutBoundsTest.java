@@ -17,14 +17,10 @@ class PgVectorFanoutBoundsTest {
     private static final long MS = 1_000_000L;
 
     @Test
-    void parallelismDefaultsToThePoolLessHeadroom_neverBelowOne() {
-        // Sam 2026-10-08: the default is the ceiling, max(1, pool - 2), so one request can use every arm
-        // permit; half the pool left a lone search running 61 arms in 12 waves of 5.
-        assertThat(PgVectorRepository.fanoutParallelism(null, 10)).isEqualTo(8);
-        assertThat(PgVectorRepository.fanoutParallelism("", 10)).isEqualTo(8);
-        assertThat(PgVectorRepository.fanoutParallelism("  ", 10)).isEqualTo(8);
-        assertThat(PgVectorRepository.fanoutParallelism(null, 20)).isEqualTo(18);
-        assertThat(PgVectorRepository.fanoutParallelism(null, 4)).isEqualTo(2);
+    void parallelismDefaultsToHalfThePool_neverBelowOne() {
+        assertThat(PgVectorRepository.fanoutParallelism(null, 10)).isEqualTo(5);
+        assertThat(PgVectorRepository.fanoutParallelism("", 10)).isEqualTo(5);
+        assertThat(PgVectorRepository.fanoutParallelism("  ", 10)).isEqualTo(5);
         assertThat(PgVectorRepository.fanoutParallelism(null, 1)).isEqualTo(1);
         assertThat(PgVectorRepository.fanoutParallelism(null, 3)).isEqualTo(1);
     }
@@ -43,15 +39,15 @@ class PgVectorFanoutBoundsTest {
     @Test
     void aMalformedOrNonPositiveValueTakesTheDefault_neverACrash() {
         for (String bad : new String[] {"abc", "0", "-4", "3.5", "8x", "NaN"}) {
-            assertThat(PgVectorRepository.fanoutParallelism(bad, 10)).as("raw=%s", bad).isEqualTo(8);
-            assertThat(PgVectorRepository.fanoutArmPermits(bad, 10)).as("raw=%s", bad).isEqualTo(8);
+            assertThat(PgVectorRepository.fanoutParallelism(bad, 10)).as("raw=%s", bad).isEqualTo(5);
+            assertThat(PgVectorRepository.fanoutArmPermits(bad, 10)).as("raw=%s", bad).isEqualTo(5);
         }
     }
 
     @Test
-    void armPermitsDefaultToTheCeiling_andClampToIt() {
-        assertThat(PgVectorRepository.fanoutArmPermits(null, 10)).isEqualTo(8);
-        assertThat(PgVectorRepository.fanoutArmPermits("", 10)).isEqualTo(8);
+    void armPermitsDefaultToHalfThePool_andClampToIt() {
+        assertThat(PgVectorRepository.fanoutArmPermits(null, 10)).isEqualTo(5);
+        assertThat(PgVectorRepository.fanoutArmPermits("", 10)).isEqualTo(5);
         assertThat(PgVectorRepository.fanoutArmPermits(null, 1)).isEqualTo(1);
         assertThat(PgVectorRepository.fanoutArmPermits("3", 10)).isEqualTo(3);
         assertThat(PgVectorRepository.fanoutArmPermits("99", 10))
@@ -63,13 +59,13 @@ class PgVectorFanoutBoundsTest {
 
     @Test
     void armPermitsFollowThePool_withTheHeadroomClamp() {
-        // nexus-wym0l: the ceiling is max(1, pool - 2) and never goes under 1. Since 2026-10-08 (Sam) the
-        // default IS the ceiling, so an unset pool of 20 gets 18.
+        // nexus-wym0l: the ceiling is max(1, pool - 2); the default stays half the pool, below the ceiling
+        // for every pool of 4 or more, and the ceiling never goes under 1.
         assertThat(PgVectorRepository.fanoutArmPermitCeiling(10)).isEqualTo(8);
         assertThat(PgVectorRepository.fanoutArmPermitCeiling(3)).isEqualTo(1);
         assertThat(PgVectorRepository.fanoutArmPermitCeiling(2)).isEqualTo(1);
         assertThat(PgVectorRepository.fanoutArmPermitCeiling(1)).isEqualTo(1);
-        assertThat(PgVectorRepository.fanoutArmPermits(null, 20)).isEqualTo(18);
+        assertThat(PgVectorRepository.fanoutArmPermits(null, 20)).isEqualTo(10);
         assertThat(PgVectorRepository.fanoutArmPermits("50", 20)).isEqualTo(18);
         assertThat(PgVectorRepository.fanoutArmPermits(null, 4)).isEqualTo(2);
         assertThat(PgVectorRepository.fanoutArmPermits("4", 4)).isEqualTo(2);
