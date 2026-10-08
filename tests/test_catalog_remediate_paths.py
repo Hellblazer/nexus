@@ -26,6 +26,7 @@ from nexus.commands.catalog_cmds.remediation import (
     _entry_needs_remediation,
     _resolve_candidate,
 )
+from tests._module_seam import setattr_in
 
 # nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
 # JSONL / .catalog.db projection), which service mode deliberately opens
@@ -467,7 +468,7 @@ class TestRemediateViaDevonthink:
         monkeypatch.setattr(
             "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
         )
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.aspect_readers", "nexus.commands.catalog_cmds.remediation"), "sys.platform", "darwin")
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -505,7 +506,7 @@ class TestRemediateViaDevonthink:
         monkeypatch.setattr(
             "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
         )
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.aspect_readers", "nexus.commands.catalog_cmds.remediation"), "sys.platform", "darwin")
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -548,7 +549,7 @@ class TestRemediateViaDevonthink:
         monkeypatch.setattr(
             "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
         )
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.aspect_readers", "nexus.commands.catalog_cmds.remediation"), "sys.platform", "darwin")
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -587,7 +588,7 @@ class TestRemediateViaDevonthink:
         monkeypatch.setattr(
             "nexus.aspect_readers._devonthink_resolver_default", tracking_resolver,
         )
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.aspect_readers", "nexus.commands.catalog_cmds.remediation"), "sys.platform", "darwin")
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -622,7 +623,7 @@ class TestRemediateViaDevonthink:
         monkeypatch.setattr(
             "nexus.aspect_readers._devonthink_resolver_default", tracking_resolver,
         )
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, ("nexus.aspect_readers", "nexus.commands.catalog_cmds.remediation"), "sys.platform", "linux")
 
         runner = CliRunner()
         result = runner.invoke(main, [
@@ -659,7 +660,7 @@ class TestRemediateViaDevonthink:
         monkeypatch.setattr(
             "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
         )
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.aspect_readers", "nexus.commands.catalog_cmds.remediation"), "sys.platform", "darwin")
 
         runner = CliRunner()
         result = runner.invoke(main, [

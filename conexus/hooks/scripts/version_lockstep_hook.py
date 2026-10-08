@@ -94,6 +94,7 @@ import sys
 # `_run_python_hook.sh` used to perform, before anything that needs 3.12
 # or `nexus` is imported. See _interpreter.py for what is at stake.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
 import _interpreter  # noqa: E402 -- must follow the sys.path insert
 
 _interpreter.reexec_if_needed()
@@ -111,6 +112,8 @@ import os
 import subprocess
 import time
 from pathlib import Path
+
+import _endpoint_resolve  # noqa: E402 -- stdlib-only; sys.path set above
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 
@@ -172,14 +175,16 @@ def debug(msg: str) -> None:
 def marker_path() -> Path:
     """Per-user marker recording the last CLI version confirmed in lockstep.
 
-    Lives under ``~/.config/nexus/`` so it survives ``/plugin update``
-    (CLAUDE_PLUGIN_ROOT is replaced wholesale on update). ``NX_LOCKSTEP_MARKER``
-    overrides the location for tests.
+    Lives in the nexus config dir (``NEXUS_CONFIG_DIR``, else
+    ``~/.config/nexus/``, resolved as the CLI does through
+    ``_endpoint_resolve.default_config_dir``, nexus-f9bgu) so it survives
+    ``/plugin update`` (CLAUDE_PLUGIN_ROOT is replaced wholesale on update).
+    ``NX_LOCKSTEP_MARKER`` overrides the location for tests.
     """
     override = os.environ.get("NX_LOCKSTEP_MARKER")
     if override:
         return Path(override)
-    return Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+    return _endpoint_resolve.default_config_dir() / "cli_lockstep_marker"
 
 
 def read_plugin_version() -> str | None:
@@ -446,9 +451,13 @@ def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | 
     absent, timeout). *timeout* is the caller's REMAINING share of the
     shared ``_GIT_TIMEOUT_S`` budget (nexus-konsk fix round 2), never
     the full constant -- see ``detect_ref_drift``."""
+    # PATH-only lookup: a bare name is searched in the cwd first on Windows.
+    git = _exec_path.which_off_cwd("git")
     try:
+        if git is None:
+            raise FileNotFoundError("git not found on PATH")
         proc = subprocess.run(
-            ["git", "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
+            [git, "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
             capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
@@ -559,13 +568,13 @@ def ref_drift_marker_path() -> Path:
     """Per-user marker recording, per plugin id, the target sha of the
     LAST ref-drift dispatch attempted for that plugin (nexus-konsk fix
     round 2). Mirrors ``marker_path()``'s shape and override convention
-    -- lives beside the CLI-version marker under ``~/.config/nexus/`` so
+    -- lives beside the CLI-version marker in the nexus config dir so
     it too survives ``/plugin update``. ``NX_LOCKSTEP_REF_DRIFT_MARKER``
     overrides the location for tests."""
     override = os.environ.get(_REF_DRIFT_MARKER_ENV, "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".config" / "nexus" / "ref_drift_lockstep_marker"
+    return _endpoint_resolve.default_config_dir() / "ref_drift_lockstep_marker"
 
 
 def read_ref_drift_marker() -> dict[str, str]:

@@ -15,7 +15,10 @@ what the qwentescence live run in nexus-6y4e0's closing report is for.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import os
+import signal
 
 import pytest
 
@@ -100,6 +103,49 @@ class _FakeKernel32:
         self._maybe_raise("GenerateConsoleCtrlEvent")
         return 1 if self.ctrl_break_ok else 0
 
+    def opened_pids(self) -> list[int]:
+        """Pids of the REAL children ``win_job`` asked to contain.
+
+        The fake closes job handles without terminating anything, so a
+        test that spawns a real child through this fake owns that child's
+        death: see :func:`reap_live_children` and :func:`live_children`.
+        """
+        return [c[3] for c in self.calls if c[0] == "OpenProcess"]
+
+
+def live_children(pids: list[int]) -> list[int]:
+    """The pids in ``pids`` that are still this process's un-reaped children.
+
+    ``waitpid(WNOHANG)`` rather than ``kill(pid, 0)``: a zombie answers
+    signal 0 as alive, and a pid that was already reaped (and possibly
+    reused by an unrelated process) raises ``ChildProcessError`` here
+    instead of being mistaken for ours. A child that has exited but was not
+    yet reaped is reaped by this call and does not count as live. POSIX
+    only; these Windows-shaped tests run on macOS/Linux.
+    """
+    live: list[int] = []
+    for pid in pids:
+        try:
+            done, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            continue
+        if done == 0:
+            live.append(pid)
+    return live
+
+
+def reap_live_children(pids: list[int]) -> None:
+    """SIGKILL and reap every pid in ``pids`` that is still our live child.
+
+    Only pids :func:`live_children` confirms as this process's own
+    children are signalled, so a reused pid is never touched.
+    """
+    for pid in live_children(pids):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+
 
 @pytest.fixture
 def windows_shaped(monkeypatch: pytest.MonkeyPatch) -> _FakeKernel32:
@@ -155,6 +201,7 @@ class TestWin32ConstantsArePinnedAsLiterals:
         assert win_job.CTRL_BREAK_EVENT == 1  # wincon.h: CTRL_BREAK_EVENT
         assert win_job.CREATE_NEW_PROCESS_GROUP == 0x00000200
         assert win_job.CREATE_NO_WINDOW == 0x08000000
+        assert win_job.CREATE_BREAKAWAY_FROM_JOB == 0x01000000
 
     def test_the_job_object_and_process_access_values(self) -> None:
         assert win_job._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0x00002000

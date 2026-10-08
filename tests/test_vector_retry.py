@@ -19,6 +19,7 @@ from nexus.retry import (
     _is_retryable_vector_error,
     _vector_with_retry,
 )
+from tests._module_seam import module_time, patch_in, patch_time, setattr_in
 
 class _FakeClock:
     """Self-advancing fake clock: sleep() immediately advances `now` and
@@ -246,8 +247,7 @@ def test_retry_connect_error_twice_then_success() -> None:
         return "ok"
     # nexus-8g79.32: pin random.random()=0.5 so jittered delay equals
     # the deterministic base (jitter factor = 1 + (0.5 - 0.5) * 0.4 = 1.0).
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         result = _vector_with_retry(flaky_fn)
     assert result == "ok" and call_count == 3
@@ -260,14 +260,14 @@ def test_retry_connect_error_twice_then_success() -> None:
 
 def test_all_attempts_exhausted_on_persistent_504() -> None:
     fn = MagicMock(side_effect=Exception("504 Gateway Time-out"))
-    with patch("nexus.retry.time.sleep"), pytest.raises(Exception, match="504"):
+    with patch_time("nexus.retry", "sleep"), pytest.raises(Exception, match="504"):
         _vector_with_retry(fn, max_attempts=5)
     assert fn.call_count == 5
 
 
 def test_non_retryable_400_raises_immediately() -> None:
     fn = MagicMock(side_effect=Exception("400 Bad Request: invalid collection name"))
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(Exception, match="400"):
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(Exception, match="400"):
         _vector_with_retry(fn)
     fn.assert_called_once()
     mock_sleep.assert_not_called()
@@ -282,8 +282,7 @@ def test_backoff_curve_2_4_8_16() -> None:
             raise Exception("503 Service Unavailable")
         return "done"
     # nexus-8g79.32: pin random.random()=0.5 so jitter = 1.0.
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(fn_succeeds_on_5th, max_attempts=5) == "done"
     assert mock_sleep.call_args_list == [call(2.0), call(4.0), call(8.0), call(16.0)]
@@ -429,8 +428,7 @@ def test_429_trips_shared_brake_and_floors_sleep_at_retry_after(monkeypatch) -> 
 
     # Local jittered backoff (2.0) < retry_after (5.0) -> sleep_for uses the
     # brake's floor.
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(flaky) == "ok"
     assert call_count == 2
@@ -458,8 +456,7 @@ def test_second_caller_pays_the_first_callers_shared_pause(monkeypatch) -> None:
             raise _make_vector_service_error(429, retry_after="3")
         return "a-ok"
 
-    with patch("nexus.retry.time.sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(caller_a_fn) == "a-ok"
     assert test_brake.trips == 1
@@ -467,7 +464,7 @@ def test_second_caller_pays_the_first_callers_shared_pause(monkeypatch) -> None:
     assert resume_at_after_a > 0.0
 
     caller_b_fn = MagicMock(return_value="b-ok")
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _vector_with_retry(caller_b_fn) == "b-ok"
     # Caller B's fn never raised, so any pause it paid came only from
     # brake.wait() consuming the shared deadline A set — proven by the
@@ -499,8 +496,7 @@ def test_503_without_retry_after_now_trips_brake_with_escalating_default(
             raise _make_vector_service_error(503)  # no Retry-After header
         return "ok"
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(flaky) == "ok"
     test_brake.trip.assert_called_once_with(None, source="vector")
@@ -528,8 +524,7 @@ def test_admission_refusal_503_retry_after_floors_the_shared_brake(monkeypatch) 
             raise _make_vector_service_error(503, retry_after="7")
         return "ok"
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(refused_once) == "ok"
     test_brake.trip.assert_called_once_with(7.0, source="vector")
@@ -562,7 +557,7 @@ def test_a_deadline_abort_503_gets_the_ordinary_budget(
         calls += 1
         raise _make_vector_service_error(503, retry_after="5", deadline_outcome=outcome)
 
-    with patch("nexus.retry.time.sleep"), patch("nexus.retry.random.random", return_value=0.5):
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5):
         with pytest.raises(VectorServiceError):
             _vector_with_retry(always_503, max_attempts=5)
     assert calls == expected_calls
@@ -580,8 +575,7 @@ def test_502_no_retry_after_trips_brake_and_is_retried(monkeypatch) -> None:
     monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
 
     fn = MagicMock(side_effect=[_make_vector_service_error(502), "ok"])
-    with patch("nexus.retry.time.sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(fn) == "ok"
     test_brake.trip.assert_called_once_with(None, source="vector")
@@ -595,7 +589,7 @@ def test_500_does_not_trip_brake_and_is_not_retried(monkeypatch) -> None:
     monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
 
     fn = MagicMock(side_effect=_make_vector_service_error(500))
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(VectorServiceError):
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(VectorServiceError):
         _vector_with_retry(fn)
     fn.assert_called_once()
     mock_sleep.assert_not_called()
@@ -607,7 +601,7 @@ def test_success_calls_brake_release() -> None:
     test_brake.wait.return_value = 0.0
     with patch.object(retry_mod, "get_brake", return_value=test_brake):
         fn = MagicMock(return_value="ok")
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             assert _vector_with_retry(fn) == "ok"
     test_brake.wait.assert_called_once()
     test_brake.release.assert_called_once()
@@ -627,12 +621,12 @@ def test_exhaustion_does_not_strand_brake_escalated_forever(monkeypatch) -> None
     # must route through the same fake clock, or this test would sleep for
     # real — see the identical pattern in test_upsert_chunks_concurrent_
     # second_call_waits_for_shared_pause below.
-    monkeypatch.setattr(retry_mod.time, "sleep", fc.sleep)
+    module_time(monkeypatch, retry_mod).sleep = fc.sleep
 
     # First call: persistently fails, exhausts max_attempts, raises. Each
     # attempt trips the brake and escalates (2.0 -> 4.0 -> ... over 4 sleeps).
     failing_fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
-    with patch("nexus.retry.random.random", return_value=0.5), pytest.raises(Exception, match="503"):
+    with patch_in("nexus.retry", "random.random", return_value=0.5), pytest.raises(Exception, match="503"):
         _vector_with_retry(failing_fn, max_attempts=5)
     assert test_brake.trips == 4  # 4 sleeps before the 5th (final) attempt raises
     escalated_delay = test_brake._last_delay
@@ -641,7 +635,7 @@ def test_exhaustion_does_not_strand_brake_escalated_forever(monkeypatch) -> None
     # Second call: succeeds on the FIRST attempt (upstream has recovered).
     # It still calls brake.release() in its success branch.
     healthy_fn = MagicMock(return_value="ok")
-    with patch("nexus.retry.random.random", return_value=0.5):
+    with patch_in("nexus.retry", "random.random", return_value=0.5):
         assert _vector_with_retry(healthy_fn) == "ok"
 
     # Recovery proof: a FRESH trip after the healthy call starts back at the
@@ -654,7 +648,7 @@ def test_non_retryable_error_does_not_touch_brake() -> None:
     test_brake.wait.return_value = 0.0
     with patch.object(retry_mod, "get_brake", return_value=test_brake):
         fn = MagicMock(side_effect=Exception("400 Bad Request"))
-        with patch("nexus.retry.time.sleep"), pytest.raises(Exception, match="400"):
+        with patch_time("nexus.retry", "sleep"), pytest.raises(Exception, match="400"):
             _vector_with_retry(fn)
     test_brake.trip.assert_not_called()
     test_brake.release.assert_not_called()
@@ -670,7 +664,7 @@ def test_non_retryable_error_does_not_touch_brake() -> None:
 
 def test_vector_with_retry_retries_on_bare_timeout_error() -> None:
     fn = MagicMock(side_effect=[TimeoutError("timed out"), TimeoutError("timed out"), "ok"])
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _vector_with_retry(fn, max_attempts=3) == "ok"
     assert fn.call_count == 3
 
@@ -682,7 +676,7 @@ def test_vector_with_retry_retries_on_vector_service_error_code_none(monkeypatch
         urllib.error.URLError("Connection refused")
     )
     fn = MagicMock(side_effect=[wrapped, "ok"])
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _vector_with_retry(fn, max_attempts=3) == "ok"
     assert fn.call_count == 2
 
@@ -697,8 +691,7 @@ def test_connectivity_error_trips_shared_brake(monkeypatch) -> None:
     monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
 
     fn = MagicMock(side_effect=[ConnectionError("reset"), "ok"])
-    with patch("nexus.retry.time.sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(fn) == "ok"
     test_brake.trip.assert_called_once_with(None, source="vector")
@@ -735,7 +728,7 @@ def test_upsert_timeout_is_not_retried_at_the_ordinary_schedule() -> None:
     read-phase stall; the transport raises the same exception for both
     (see the module comment above), so one test covers both phases."""
     fn = MagicMock(side_effect=TimeoutError("timed out"))
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(
         VectorUpsertTimeoutError, match="GET /v1/status",
     ):
         _vector_with_retry(fn, max_attempts=5, retry_on_timeout=False)
@@ -749,7 +742,7 @@ def test_upsert_timeout_wrapped_in_vector_service_error_is_not_retried() -> None
     must be narrowed identically to the unwrapped local/lease shape."""
     wrapped = _make_connectivity_vector_service_error(TimeoutError("timed out"))
     fn = MagicMock(side_effect=wrapped)
-    with patch("nexus.retry.time.sleep"), pytest.raises(VectorUpsertTimeoutError):
+    with patch_time("nexus.retry", "sleep"), pytest.raises(VectorUpsertTimeoutError):
         _vector_with_retry(fn, retry_on_timeout=False)
     fn.assert_called_once()
 
@@ -769,7 +762,7 @@ def test_upsert_connection_level_failure_still_retried(exc: BaseException) -> No
     retried_at_the_ordinary_schedule above; only a refusal/reset is a
     genuinely different signature."""
     fn = MagicMock(side_effect=[exc, "ok"])
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _vector_with_retry(fn, max_attempts=3, retry_on_timeout=False) == "ok"
     assert fn.call_count == 2
 
@@ -784,7 +777,7 @@ def test_search_timeout_retry_is_unchanged() -> None:
     itself, not on some parallel path that happens to also retry 3 times
     when the classifier is not being exercised at all."""
     fn = MagicMock(side_effect=[TimeoutError("timed out"), TimeoutError("timed out"), "ok"])
-    with patch("nexus.retry.time.sleep"), patch(
+    with patch_time("nexus.retry", "sleep"), patch(
         "nexus.retry._is_bare_timeout", return_value=True,
     ) as mock_classifier:
         assert _vector_with_retry(fn, max_attempts=3, retry_on_timeout=True) == "ok"
@@ -860,8 +853,7 @@ def test_upsert_chunks_429_retry_after_then_success_real_server(
     # (2.0) equals the brake floor exactly (both start at 2.0) — otherwise
     # jitter can push the local value above 2.0, and max() would pick the
     # (non-deterministic) local value instead of proving Retry-After won.
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         client = hvc.HttpVectorClient()
         client.upsert_chunks("code__test", ["id-1"], ["def hello(): pass"], [{"k": "v"}])
@@ -907,12 +899,10 @@ def test_upsert_chunks_504_no_retry_after_escalating_default_real_server(
     test_brake = RateLimitBrake(clock=fc.time, sleep=fc.sleep, jitter=lambda: 0.0)
     monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
 
-    # ``nexus.retry.time`` and ``nexus.db.http_vector_client.time`` are the
-    # SAME stdlib ``time`` module object — patching ``nexus.retry.time.sleep``
-    # mutates the module attribute both modules see, so this ALSO fakes the
-    # lower gateway-retry layer's sleeps (no separate patch needed).
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    # ``patch_time("nexus.retry", ...)`` shares its proxy with
+    # ``nexus.db.http_vector_client`` (``tests/_time_seam.py`` _COUPLED), so
+    # this ALSO fakes the lower gateway-retry layer's sleeps.
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         client = hvc.HttpVectorClient()
         client.upsert_chunks("code__test", ["id-1"], ["def hello(): pass"], [{"k": "v"}])
@@ -936,7 +926,7 @@ def test_upsert_chunks_500_not_retried_real_server(upsert_server, monkeypatch) -
     host, port = httpd.server_address
     monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (f"http://{host}:{port}", "tok"))
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(VectorServiceError):
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(VectorServiceError):
         client = hvc.HttpVectorClient()
         client.upsert_chunks("code__test", ["id-1"], ["def hello(): pass"], [{"k": "v"}])
 
@@ -1010,8 +1000,8 @@ def test_upsert_chunks_concurrent_second_call_waits_for_shared_pause(
     # brake.wait()) must route through the SAME synchronizing clock, or
     # caller A's post-trip sleep would use real time.sleep and desync from
     # caller B's brake.wait().
-    monkeypatch.setattr(retry_mod.time, "sleep", fc.sleep)
-    monkeypatch.setattr(retry_mod.random, "random", lambda: 0.5)
+    module_time(monkeypatch, retry_mod).sleep = fc.sleep
+    setattr_in(monkeypatch, retry_mod, "random.random", lambda: 0.5)
 
     results: dict[str, str] = {}
 

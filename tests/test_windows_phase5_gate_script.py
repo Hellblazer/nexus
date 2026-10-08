@@ -150,3 +150,50 @@ def test_no_k_result_is_wrapped_in_an_array_subexpression() -> None:
     # that way on the 2026-10-06 run.
     import re as _re
     assert not _re.search(r"@\(\s*K\s", _text())
+
+
+LAUNCH: Path = Path(__file__).resolve().parent / "e2e" / "windows-guest" / "launch.sh"
+
+
+def test_v0_requires_claude_ancestry_and_polls_for_the_launching_call() -> None:
+    text = _text()
+    v0 = text[text.index("# V0:"):text.index("Run-Assertion 2 ")]
+    assert "if (-not $claudePid) { Fail" in v0
+    assert "$deadline = (Get-Date).AddSeconds(60)" in v0
+    fn = text[text.index("function Claude-Ancestor"):text.index("# V0:")]
+    assert "if ($cur.Name -eq 'claude.exe') { return [int]$cur.ProcessId }" in fn
+    assert "return $null" in fn
+
+
+def test_plugin_entries_take_the_first_install_record() -> None:
+    assert "$pv = K $(if ($entries -is [array]) { $entries[0] } else { $entries }) 'version'" in _text()
+
+
+def test_launcher_consumes_its_one_shot_args_and_preaccepts_trust() -> None:
+    launcher = LAUNCHER.read_text(encoding="utf-8")
+    assert "Remove-Item $argsFile -Force" in launcher, "a later plain launch must not repeat the args"
+    assert "FromBase64String" in launcher, "one base64 argument per line keeps a multi-line prompt whole"
+    assert "hasTrustDialogAccepted" in launcher and "hasCompletedOnboarding" in launcher
+    assert "[void]$sb.Append('\\', 2 * $bs)" in launcher, "trailing backslashes are doubled before the closing quote"
+
+
+def test_launch_sh_cleans_up_without_failing_and_empties_the_stage_dir() -> None:
+    sh = LAUNCH.read_text(encoding="utf-8")
+    assert '[[ -z "${argsdir:-}" ]] || rm -rf "$argsdir"' in sh
+    assert '"(if not exist C:\\build\\guest\\nxgate\\stage mkdir C:\\build\\guest\\nxgate\\stage) & del /q' in sh
+    assert '${claude_args[@]+"${claude_args[@]}"}' in sh, "bash 3.2 under set -u rejects an empty array expansion"
+
+
+def test_aspect_worker_survivors_are_observed_with_the_rdr_citation_not_asserted() -> None:
+    """nexus-g5rz5: RDR-224 records that `service stop` leaves the aspect-worker
+    daemon running (it belongs to the store path), so assertion 4 reports it
+    with the citation and CPU seconds and does not fail on it. Asserting it gone
+    would contradict the recorded decision; this pins the observation shape."""
+    text = _text()
+    a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
+    assert "by design per RDR-224" in a4
+    assert "aspect-worker processes left" in a4 and "cpu=" in a4
+    # observation only: no Fail and no Assert-Absent over the aspect kind
+    assert not re.search(r"Assert-Absent\s+@\([^)]*'aspect'", text)
+    assert not re.search(r"Wait-Gone\s+@\([^)]*'aspect'", text)
+    assert not re.search(r"\$k\.aspect\.Count[^\n]*\bFail\b|\bFail\b[^\n]*\$k\.aspect", a4)

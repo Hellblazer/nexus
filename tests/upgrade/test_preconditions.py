@@ -25,6 +25,8 @@ from click.testing import CliRunner
 
 import pytest
 
+from nexus.daemon.service_registry import service_identity
+
 import nexus.upgrade_ladder.preconditions as pre_mod
 from nexus.cli import main
 from nexus.commands.upgrade import _converge_preconditions, upgrade
@@ -594,7 +596,7 @@ def test_default_lease_feeding_the_ladder_deferred_read_marks_evidence(
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     registry.publish(
-        str(os.getuid()),
+        service_identity(),
         endpoint={"host": "127.0.0.1", "port": 18102},
         version="7.40.0",
         owner_token=mint_owner_token(),

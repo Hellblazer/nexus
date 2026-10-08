@@ -19,12 +19,12 @@ MCP hook catches (``tests/test_stale_host.py``).
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 from nexus import install_layout, upgrade_finish
+from tests._module_seam import setattr_in
 
 
 def _generation(tools: Path, stamp: str) -> Path:
@@ -98,14 +98,14 @@ def test_generation_of_accepts_a_receipt_less_tree(layout) -> None:
 
 
 def test_running_generation_reads_sys_prefix(layout, monkeypatch) -> None:
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     assert upgrade_finish.running_generation() == layout["old"]
 
 
 def test_running_generation_is_none_from_a_checkout(
     layout, monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr(sys, "prefix", str(tmp_path / "checkout" / ".venv"))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(tmp_path / "checkout" / ".venv"))
     assert upgrade_finish.running_generation() is None
 
 
@@ -115,7 +115,7 @@ def test_running_generation_is_none_from_a_checkout(
 def test_silent_when_the_running_generation_is_current(
     layout, logged, monkeypatch
 ) -> None:
-    monkeypatch.setattr(sys, "prefix", str(layout["new"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["new"]))
     upgrade_finish.spawn_tripwire()
     assert logged == [], "a shim-launched spawn must say nothing"
 
@@ -123,7 +123,7 @@ def test_silent_when_the_running_generation_is_current(
 def test_logs_when_the_running_generation_differs(
     layout, logged, monkeypatch
 ) -> None:
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     upgrade_finish.spawn_tripwire()
     assert len(logged) == 1
     assert logged[0]["running"] == str(layout["old"])
@@ -133,7 +133,7 @@ def test_logs_when_the_running_generation_differs(
 def test_logs_exactly_once_per_process(layout, logged, monkeypatch) -> None:
     """Not "at least once" -- a per-invocation line on a long-lived host is
     log spam, and design point 6 says once."""
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     upgrade_finish.spawn_tripwire()
     upgrade_finish.spawn_tripwire()
     upgrade_finish.spawn_tripwire()
@@ -156,7 +156,7 @@ def test_the_message_names_both_causes_and_promises_neither(
     and this test pinned the false wording in place (substantive-critic,
     2026-08-26).
     """
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     upgrade_finish.spawn_tripwire()
     detail = logged[0]["detail"].lower()
     assert "intact" in detail, "the consistency the bead asks for is unstated"
@@ -167,7 +167,7 @@ def test_the_message_names_both_causes_and_promises_neither(
 
 def test_silent_from_a_dev_checkout(layout, logged, monkeypatch, tmp_path) -> None:
     """Not this rule's business: a checkout has no generation to compare."""
-    monkeypatch.setattr(sys, "prefix", str(tmp_path / "checkout" / ".venv"))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(tmp_path / "checkout" / ".venv"))
     upgrade_finish.spawn_tripwire()
     assert logged == []
 
@@ -179,7 +179,7 @@ def test_no_current_pointer_is_silent_and_raises_nothing(
     that as InstallLayoutError rather than a verdict; a spawn must absorb
     it, not die on it."""
     (layout["tools"] / "current").unlink()
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     upgrade_finish.spawn_tripwire()
     assert logged == []
 
@@ -192,7 +192,7 @@ def test_a_dangling_current_pointer_logs_rather_than_raising(
     import shutil
 
     shutil.rmtree(layout["new"])
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     upgrade_finish.spawn_tripwire()
     assert len(logged) == 1
     assert logged[0]["current"] == str(layout["new"])
@@ -205,7 +205,7 @@ def test_never_raises_when_the_layout_is_unreadable(
     def _boom(*a, **kw):
         raise RuntimeError("layout unreadable")
 
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     monkeypatch.setattr(install_layout, "current_generation", _boom)
     upgrade_finish.spawn_tripwire()
     assert logged == []
@@ -227,7 +227,7 @@ def test_a_broken_logger_does_not_fail_the_spawn(layout, monkeypatch) -> None:
         attempts.append(1)
         raise RuntimeError("logger exploded")
 
-    monkeypatch.setattr(sys, "prefix", str(layout["old"]))
+    setattr_in(monkeypatch, "nexus.upgrade_finish", "sys.prefix", str(layout["old"]))
     monkeypatch.setattr(upgrade_finish, "_tripwire_log", _boom)
     upgrade_finish.spawn_tripwire()
     upgrade_finish.spawn_tripwire()

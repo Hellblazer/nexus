@@ -618,7 +618,13 @@ from __future__ import annotations
 #: transaction, irreversible on a local install) and the model and tenant
 #: predicates in every search family (vectors-031) (nexus-3wh8d). All seven
 #: wire entries are [additive]; the engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 150)
+#:
+#: 7.74.0 pairs with engine-service-v0.1.151 (tagged 2026-10-07 on
+#: da58bf11a): the default hnsw.ef_search serving floor rises from 200 to
+#: 600 so recall holds on the RDR-225 per-leaf HNSW graphs (nexus-3wh8d.31).
+#: No changesets, no wire entries; deployed and gated in the cloud
+#: (2026-10-07 21:59Z) BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 151)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -12,6 +11,7 @@ from nexus.config import (
     load_config,
     set_config_value,
 )
+from tests._module_seam import patch_in
 
 
 @pytest.fixture
@@ -106,8 +106,8 @@ def test_set_credential_cleans_up_temp_on_write_failure(home: Path) -> None:
         raise IOError("simulated write failure")
 
     with (
-        patch("nexus.config.os.fdopen", side_effect=failing_fdopen),
-        patch("nexus.config.os.unlink", side_effect=tracking_unlink),
+        patch_in("nexus.config", "os.fdopen", side_effect=failing_fdopen),
+        patch_in("nexus.config", "os.unlink", side_effect=tracking_unlink),
     ):
         with pytest.raises(IOError, match="simulated write failure"):
             set_credential("voyage_api_key", "test-key")

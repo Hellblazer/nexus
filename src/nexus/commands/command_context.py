@@ -507,9 +507,9 @@ def claude_md_block(root: Path) -> list[str]:
         root: The project root to inspect.
 
     Returns:
-        List of lines for the ### 6. CLAUDE.md Agent Readiness section.
+        List of lines for the ### 5. CLAUDE.md Agent Readiness section.
     """
-    heading = "### 6. CLAUDE.md Agent Readiness"
+    heading = "### 5. CLAUDE.md Agent Readiness"
     lines: list[str] = [heading, ""]
     claude_md = root / "CLAUDE.md"
     if not claude_md.exists():
@@ -566,7 +566,7 @@ def claude_md_block(root: Path) -> list[str]:
 def render_nx_preflight(cwd: Path) -> str:
     """Compose the nx-preflight check markdown string.
 
-    Runs dynamic checks for nx, bd, uv, npx, and CLAUDE.md readiness.
+    Runs dynamic checks for nx, bd, uv, and CLAUDE.md readiness.
 
     Args:
         cwd: The project root (used for CLAUDE.md check).
@@ -604,19 +604,10 @@ def render_nx_preflight(cwd: Path) -> str:
         "Install: curl -LsSf https://astral.sh/uv/install.sh | sh",
     )
 
-    # 5. Node.js / npx
-    parts += tool_check_block(
-        "npx",
-        "### 5. Node.js / npx (required by plugin MCP servers)",
-        "npx not found in PATH - the plugin's sequential-thinking and context7 MCP\n"
-        "servers are spawned via 'npx -y ...' and will silently fail to start.\n"
-        "Install:\n"
-        "  brew install node                         (macOS)\n"
-        "  apt install nodejs npm                    (Ubuntu/Debian)\n"
-        "  https://nodejs.org/                       (other platforms)",
-    )
+    # No Node.js check: since nexus-f9bgu no plugin MCP server is started with
+    # npx (sequential-thinking runs on uv, context7 is a hosted HTTP endpoint).
 
-    # 6. CLAUDE.md
+    # 5. CLAUDE.md
     parts += claude_md_block(cwd)
 
     return "\n".join(parts)
@@ -690,6 +681,17 @@ def compute_continuation_path(
         hhmm = now.strftime("%H%M")
         return out_dir / f"nexus-continuation-{repo_safe}-{slug}-{date_str}-{hhmm}.md"
     return base
+
+
+def _continuation_dir() -> Path:
+    """Where a continuation handoff is written: ``/tmp`` on POSIX, the user's
+    temp directory on Windows, where ``/tmp`` names ``\\tmp`` on the current
+    drive, a directory that does not normally exist (RDR-224)."""
+    if os.name == "nt":
+        import tempfile  # noqa: PLC0415 — Windows-only branch
+
+        return Path(tempfile.gettempdir())
+    return Path("/tmp")
 
 
 def _git_working_state(cwd: Path) -> list[str]:
@@ -1506,7 +1508,7 @@ def test_validate(args: tuple[str, ...]) -> None:
 def nx_preflight(args: tuple[str, ...]) -> None:
     """Print the conexus plugin preflight check output.
 
-    Runs dynamic checks for nx CLI, nx doctor, bd, uv, npx, and CLAUDE.md
+    Runs dynamic checks for nx CLI, nx doctor, bd, uv, and CLAUDE.md
     agent readiness.  Reports PASS/FAIL/WARN per dependency.
     """
     print(render_nx_preflight(Path.cwd()))
@@ -1548,7 +1550,7 @@ def continuation(args: tuple[str, ...]) -> None:
         repo_safe=repo_safe,
         slug=slug,
         now=datetime.now(),
-        out_dir=Path("/tmp"),
+        out_dir=_continuation_dir(),
         exists=Path.exists,
     )
 

@@ -1366,10 +1366,18 @@ def _check_tools() -> list[HealthResult]:
         fatal=True,
     )
     if not git_path:
+        # Windows: Git for Windows' installer always asks for elevation, through
+        # winget too (`--scope user` and an `/CURRENTUSER` override included,
+        # measured on a clean Windows 11 guest 2026-10-07). PortableGit
+        # extracted under %LOCALAPPDATA% needs no admin rights and carries the
+        # Git Bash Claude Code uses, so it is the hint; the guide has the
+        # PowerShell that does it.
         r.fix_suggestions = [
             "brew install git                                              (macOS)",
             "apt install git                                               (Ubuntu/Debian)",
-            "winget install --id Git.Git --scope user                      (Windows)",
+            "PortableGit in %LOCALAPPDATA%\\Programs\\Git, cmd\\ on the user PATH (Windows, no admin)",
+            "  steps: https://github.com/Hellblazer/nexus/blob/main/docs/windows-install.md#2-install-git",
+            "winget install --id Git.Git -e --source winget                (Windows, asks for admin)",
             "https://git-scm.com/downloads",
         ]
     results.append(r)
@@ -1390,28 +1398,9 @@ def _check_tools() -> list[HealthResult]:
             ],
         ))
 
-    # npx (Node.js, plugin-only)
-    # Required by the conexus Claude Code plugin, which spawns the
-    # ``sequential-thinking`` and ``context7`` MCP servers via ``npx -y …``.
-    # The CLI alone does not need it, so this is non-fatal — but a missing
-    # ``npx`` causes silent MCP-server failures the moment a plugin tool is
-    # invoked. Reported as informational so plugin users see the gap before
-    # they hit it at runtime.
-    npx_path = shutil.which("npx")
-    if npx_path:
-        results.append(HealthResult(label="npx (Node.js, plugin-only)", ok=True, detail=npx_path))
-    else:
-        results.append(HealthResult(
-            label="npx (Node.js, plugin-only)",
-            ok=True,
-            detail="not found — plugin MCP servers (sequential-thinking, context7) will fail",
-            fix_suggestions=[
-                "brew install node                                              (macOS)",
-                "apt install nodejs npm                                         (Ubuntu/Debian)",
-                "winget install --id OpenJS.NodeJS.LTS --scope user             (Windows)",
-                "https://nodejs.org/                                            (other platforms)",
-            ],
-        ))
+    # No npx (Node.js) row: since nexus-f9bgu no plugin MCP server is started
+    # with npx (sequential-thinking runs on uv, context7 is a hosted HTTP
+    # endpoint). Node.js is not a prerequisite for anything nexus ships.
 
     return results
 
@@ -1669,6 +1658,16 @@ def _probe_mcp_server(
     return True, f"serverInfo.name={server_name!r}"
 
 
+def _own_prefix_is_generation() -> bool:
+    """Whether ``sys.prefix`` is a side-by-side generation. Never raises."""
+    try:
+        from nexus.upgrade_finish import generation_of  # noqa: PLC0415 — deferred to avoid circular import
+
+        return generation_of(Path(sys.prefix)) is not None
+    except Exception:  # noqa: BLE001 — unreadable layout: not a generation
+        return False
+
+
 def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     """Resolve *binary_name* on PATH, preferring an entry NOT under this
     running process's own ``sys.prefix``.
@@ -1715,9 +1714,17 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     ``test_home_scoping_tradeoff_outside_home_install_loses_to_own_venv``
     so a future change to this choice is deliberate, not accidental.
 
+    GENERATION EXCEPTION (RDR-224, nexus-7xzc1): when this process runs from
+    a side-by-side generation (``<tools>/gen-*``), its prefix is the
+    installed artifact, not a dev venv, and the plain first PATH hit is what
+    the plugin launches. On Windows ``current\\bin`` is a junction into the
+    running generation, so every hit there resolves under ``sys.prefix``;
+    demoting it probed uv's legacy launcher, which survives until the reap.
+
     Returns ``(path_or_none, is_own_venv)``.
     """
     own_prefix = str(Path(sys.prefix).resolve())
+    own_is_generation = _own_prefix_is_generation()
     try:
         home = str(Path.home().resolve())
     except (OSError, RuntimeError):
@@ -1754,6 +1761,8 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
             resolved_dir = str(Path(hit).resolve().parent)
         except OSError:
             resolved_dir = str(Path(directory).resolve())
+        if own_is_generation:
+            return hit, False
         if resolved_dir == own_prefix or resolved_dir.startswith(own_prefix + os.sep):
             if own_prefix_hit is None:
                 own_prefix_hit = hit
@@ -3812,6 +3821,8 @@ def _run_psql(
     """
     cmd = [
         str(psql_bin),
+        # -w: never prompt. A missing password key reads as "", which libpq treats as no password, and psql would then block on the terminal (nexus-ja4pq).
+        "-w",
         "-h", host,
         "-p", str(port),
         "-U", user,
@@ -4404,6 +4415,124 @@ def _check_config_dir_user_access(
         detail=f"{config_dir} {reason}" + (" (made by an elevated process)" if reason.startswith("grants only") else ""),
         fix_suggestions=[
             f'from an elevated Command Prompt: icacls "{config_dir}" /grant "%USERDOMAIN%\\%USERNAME%:(OI)(CI)F" /T',
+        ],
+    )]
+
+
+def _check_local_pg_auth(config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-ja4pq: does the nx-managed local PostgreSQL demand a password?
+
+    The bundled cluster listens on 127.0.0.1 only, but until nexus-ja4pq it was
+    created ``--auth=trust``, so any OS account on the box could open a
+    superuser session on that port. New clusters are ``scram-sha-256`` from
+    creation, and an existing trust cluster is converted on the next service
+    start. This row reads the cluster's own ``pg_hba.conf`` (no connection, no
+    password) and fails while any active line is still ``trust``, which is also
+    what a migration that failed and rolled back looks like; the reason is in
+    the log under ``pg_auth_migration_failed``.
+
+    Not applicable (no row) where there is no bundled cluster to check: a
+    virgin box, or a managed/BYO Postgres (no ``PG_DATA`` in ``pg_credentials``).
+    A cluster whose ``pg_hba.conf`` cannot be read does get a row, since "could
+    not look" must not read as "fine".
+    """
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        from nexus.db.pg_auth import cluster_auth_state  # noqa: PLC0415 — deferred, light module
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 — deferred, heavy module
+
+        creds_path = config_dir / CREDENTIALS_FILENAME
+        if not creds_path.is_file():
+            return []
+        pg_data = _read_credentials(creds_path).get("PG_DATA", "").strip()
+        if not pg_data:
+            return []
+        state = cluster_auth_state(Path(pg_data))
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_local_pg_auth_check_failed", error=str(exc))
+        return []
+    label = "Local PostgreSQL authentication"
+    if state == "scram":
+        return [HealthResult(
+            label=label, ok=True,
+            detail="password authentication (scram-sha-256) on every pg_hba.conf line",
+        )]
+    if state == "trust":
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                "pg_hba.conf still has a 'trust' line: any local OS account can connect to the "
+                "bundled PostgreSQL port without a password"
+            ),
+            fix_suggestions=[
+                "nx daemon service start   # converts the cluster to scram-sha-256 on the way up",
+                "if it stays trust, read the 'pg_auth_migration_failed' line in the nx log for the reason",
+            ],
+        )]
+    if state == "absent":
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"cannot read pg_hba.conf under {pg_data}; the cluster's authentication is unknown",
+            fix_suggestions=["check that the PostgreSQL data directory named by PG_DATA exists and is readable"],
+        )]
+    return [HealthResult(
+        label=label, ok=True,
+        detail="pg_hba.conf has no trust line (operator-managed methods)",
+    )]
+
+
+#: Microsoft's VC++ redistributable, the manual remedy (nexus-lqjll).
+VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+
+
+def _check_vc_runtime(
+    config_dir: Path | None = None,
+    *,
+    platform: str | None = None,
+    system_dir: str | None = None,
+) -> list[HealthResult]:
+    """nexus-lqjll: on Windows, can the client's own extension modules (onnxruntime,
+    pymupdf, torch, fasttext) find ``msvcp140.dll`` and ``msvcp140_1.dll``?
+
+    Passes when System32 has both or an app-local directory does (the engine dir,
+    the PG bundle's ``bin``, or ``<config>/vcrt``, which ``nx init`` and
+    ``nx upgrade --auto`` fill); fails, with both remedies, when neither does.
+    Silent (``[]``) off Windows, the not-applicable shape of the sibling Windows
+    rows, so a POSIX box and the fresh-install MVV never see it. A probe crash
+    never breaks doctor.
+    """
+    from nexus import _vcrt  # noqa: PLC0415 - cheap, stdlib-only
+
+    if not _vcrt.is_windows(platform):
+        return []
+    label = "VC++ runtime for the client's extension modules"
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 - deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        kind, where = _vcrt.runtime_source(platform, str(config_dir), system_dir)
+    except Exception as exc:  # noqa: BLE001 - best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_vc_runtime_check_failed", error=str(exc))
+        return []
+    names = " and ".join(_vcrt.VC_RUNTIME_DLLS)
+    if kind == _vcrt.SYSTEM:
+        return [HealthResult(label=label, ok=True, detail=f"{names} found in {where}")]
+    if kind == _vcrt.APP_LOCAL:
+        return [HealthResult(label=label, ok=True, detail=f"{names} found app-local in {where}")]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        detail=(
+            f"{names} not found in System32 or under {config_dir}; PDF extraction and local "
+            "embedding (onnxruntime, pymupdf, torch, fasttext) fail to import"
+        ),
+        fix_suggestions=[
+            "nx init    # downloads the two DLLs into the config directory",
+            f"or install Microsoft's VC++ redistributable: {VC_REDIST_URL}",
         ],
     )]
 
@@ -10103,6 +10232,8 @@ def run_health_checks(
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
+    results.extend(_check_local_pg_auth())  # nexus-ja4pq
+    results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-225 Day 2 (bead nexus-3wh8d.16): token tenants against leaves, embedding_models against model

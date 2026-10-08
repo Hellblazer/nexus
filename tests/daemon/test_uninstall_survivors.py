@@ -31,6 +31,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from tests._module_seam import patch_in
 
 
 @pytest.fixture
@@ -44,8 +45,7 @@ def installed_unit(tmp_path: Path):
     dest.write_text("<plist/>")
     with patch(
         "nexus.commands.daemon._autostart_install_dir", return_value=install_dir,
-    ), patch(
-        "nexus.daemon.installer.subprocess.run",
+    ), patch_in("nexus.daemon.installer", "subprocess.run",
     ) as run, patch(
         # nexus-k9i56: _run_manager's deactivate call always routes through
         # run_bounded now (never the stock subprocess.run once its timeout

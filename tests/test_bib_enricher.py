@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from tests._module_seam import patch_time
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,7 +120,7 @@ def test_enrich_rate_limit_429():
     mock_resp = _make_response(429, {"message": "Too Many Requests"})
     with (
         patch("httpx.get", return_value=mock_resp),
-        patch("time.sleep", side_effect=sleep_calls.append),
+        patch_time("nexus.bib_enricher", "sleep", side_effect=sleep_calls.append),
     ):
         result = enrich("Attention Is All You Need")
 

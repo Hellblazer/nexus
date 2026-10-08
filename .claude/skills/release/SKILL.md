@@ -264,7 +264,7 @@ and sn, plus any plugin added later — no longer sn-only), or the
 uv-lock-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
-- `mcpb/pyproject.toml`: `version` **and** the `conexus[local]>=X.Y.Z` dependency pin (the `[local]` extra is required — without it the .mcpb's venv resolves without `fastembed` and `LocalEmbeddingFunction` silently falls back to the 384-dim ONNX MiniLM against 768/1024-dim collections; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version. T2 [22511] gap 11 — this line previously said `conexus>=X.Y.Z`, missing the extra.)
+- `mcpb/pyproject.toml`: `version` **and** the `conexus>=X.Y.Z` dependency pin (bare `conexus`, no extra, the same distribution the plugin's `nx-mcp` runs from: the engine embeds T3, so the `[local]` extra the bundle once pinned only fetched a second bge copy; `tests/test_plugin_structure.py::test_mcpb_pins_bare_conexus` enforces the bare pin and that it tracks the version.)
 - `mcpb/manifest.json`: `version`
 - `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus and sn; a loop, not a fixed pair)
 - `.claude-plugin/marketplace.json`: **`plugins[].source.ref` for every plugin the file lists** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**

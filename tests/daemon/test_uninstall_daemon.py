@@ -32,6 +32,7 @@ pytestmark = pytest.mark.usefixtures("launchd_uid")
 from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer
 from nexus.mcp import _first_run
+from tests._module_seam import patch_in, setattr_in
 
 
 def _set_platform(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
@@ -40,8 +41,13 @@ def _set_platform(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
 
 @pytest.fixture
 def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Isolated config dir + stubbed autostart paths + a legacy T2 unit."""
+    """Isolated config dir + stubbed autostart paths + a legacy T2 unit.
+
+    HOME moves too: a confirmed ``remove_data`` uninstall removes
+    ``nexus_cache_root()`` (``$HOME/.cache/nexus``), which under the suite is the
+    shared model cache every engine-booting test reads."""
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _set_platform(monkeypatch, "darwin")
     monkeypatch.setattr(
         daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "units"
@@ -68,7 +74,7 @@ class TestDryRun:
         marker = _first_run._first_run_marker_path()
         assert unit.exists() and marker.exists()
 
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             report = installer.uninstall_daemon(confirm=False)
 
@@ -88,7 +94,7 @@ class TestConfirmedUninstall:
         marker = _first_run._first_run_marker_path()
         config_dir = _env / "cfg"
 
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -130,7 +136,7 @@ class TestConfirmedUninstall:
         unit = _env / "units" / "com.nexus.t2.plist"
         assert unit.exists()
 
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 3  # `Boot-out failed: 3: No such process`
             mock_run.return_value.stderr = "Boot-out failed: 3: No such process"
@@ -150,7 +156,7 @@ class TestConfirmedUninstall:
     def test_successful_deactivation_still_reports_stopped(self, _env: Path) -> None:
         """Non-vacuity partner for the test above: the AND must not have
         turned ``daemon_stopped`` into a constant False."""
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -167,7 +173,7 @@ class TestConfirmedUninstall:
         # reaches it -- that used to work only because subprocess is one
         # shared module object across both. Patch both, as every other
         # install-mocking helper in this test module already does.
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -184,7 +190,7 @@ class TestConfirmedUninstall:
         t2_unit = _env / "units" / "com.nexus.t2.plist"
         assert service_unit.exists() and t2_unit.exists()
 
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -209,7 +215,7 @@ class TestConfirmedUninstall:
         # RDR-165 eu4u4: uninstall_daemon must tear down the engine-service/PG
         # stack, not only `nx daemon t2 stop` (the installer.py:241 gap). Assert
         # the exact `service stop --with-pg` argv is issued AND reported.
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -231,7 +237,7 @@ class TestConfirmedUninstall:
         config_dir = _env / "cfg"
         assert config_dir.exists()
 
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -252,15 +258,14 @@ class TestConfirmedUninstall:
         and Linux (2 parts) and is shallow enough to trip the guard.
         rmtree is mocked so a future guard regression can never delete a
         real directory from this test."""
-        import shutil
 
         # ``/tmp`` does not exist on Windows (the guard only runs on a data dir that
         # does), so a Windows host uses the drive root: as shallow as a path gets.
         shallow = "/tmp" if sys.platform != "win32" else Path.home().anchor
         monkeypatch.setenv("NEXUS_CONFIG_DIR", shallow)
         rmtree_calls: list = []
-        monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: rmtree_calls.append(a))
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        setattr_in(monkeypatch, "nexus.daemon.installer", "shutil.rmtree", lambda *a, **k: rmtree_calls.append(a))
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -276,7 +281,7 @@ class TestConfirmedUninstall:
         # Remove the unit out from under it first.
         (_env / "units" / "com.nexus.t2.plist").unlink()
 
-        with patch.object(installer.subprocess, "run") as mock_run, \
+        with patch_in(installer, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""

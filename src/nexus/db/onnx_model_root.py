@@ -50,9 +50,20 @@ def _home_base() -> Path:
         return Path.home()
 
 
+def nexus_cache_root() -> Path:
+    """``<home>/.cache/nexus``: the directory nexus owns for model and scratch caches.
+
+    Holds the default ``onnx_models`` root and MinerU's fallback output dir
+    (``nexus._mineru_spawn``). ``nx uninstall --yes --remove-data`` removes this
+    directory (RDR-224, nexus-f9bgu). On Windows HOME is normally unset and
+    there is no ``pwd``, so it is ``%USERPROFILE%\\.cache\\nexus``.
+    """
+    return _home_base() / ".cache" / "nexus"
+
+
 def service_onnx_models_root() -> Path:
     """The root directory the per-model ``<model>/onnx/`` dirs live under."""
     env = os.environ.get(ENV_MODEL_DIR, "").strip()
     if env:
         return Path(env)
-    return _home_base() / ".cache" / "nexus" / "onnx_models"
+    return nexus_cache_root() / "onnx_models"

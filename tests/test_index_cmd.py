@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._module_seam import module_time
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -1657,7 +1658,7 @@ def test_phase_heartbeat_touch_resets_elapsed_without_new_thread(monkeypatch) ->
     import nexus.commands.index as index_mod
 
     fake_now = [0.0]
-    monkeypatch.setattr(index_mod.time, "monotonic", lambda: fake_now[0])
+    module_time(monkeypatch, index_mod).monotonic = lambda: fake_now[0]
 
     calls: list[str] = []
     hb = index_mod._PhaseHeartbeat(

@@ -26,6 +26,7 @@ from tests.prose_edit.test_brief import (
     run_brief,
     seed,
 )
+from tests._module_seam import setattr_in
 
 REVIEW = BRIEF.with_name("review.py")
 PLAIN = "Plain editable sentence stays."
@@ -673,7 +674,7 @@ def test_a_work_directory_never_has_a_work_directory_name_before_its_sentinel_ex
         seen.append(Path(path).name)
         return path
 
-    monkeypatch.setattr(mod.tempfile, "mkdtemp", spy)
+    setattr_in(monkeypatch, mod, "tempfile.mkdtemp", spy)
     monkeypatch.chdir(tmp_path)  # not a git repository: no containment check
     work = Path(mod.cmd_tmpdir())
     assert (work / ".prose-edit-work").is_file() and work.parent == base.resolve()

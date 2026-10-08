@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -912,8 +913,6 @@ def _read_devonthink_uri(
     without launching osascript; production calls fall through to
     :func:`_devonthink_resolver_default`.
     """
-    import sys  # noqa: PLC0415  — stdlib deferred to call site (sys)
-
     if dt_resolver is None:
         if sys.platform != "darwin":
             return ReadFail(
@@ -1414,7 +1413,6 @@ def _stat_devonthink_uri(
 
     macOS-only; returns ``StatFail`` on other platforms (same as the full reader).
     """
-    import sys  # noqa: PLC0415 — deferred, matches _read_devonthink_uri
     if dt_resolver is None:
         if sys.platform != "darwin":
             return StatFail(

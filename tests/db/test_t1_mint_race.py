@@ -46,12 +46,13 @@ that is the correct TDD-red state. Implementation (green) is nexus-jwqjm.2.
 
 from __future__ import annotations
 
-import fcntl
 import os
 import threading
 from pathlib import Path
 
 import pytest
+
+from nexus._locking import lock_fd, unlock_fd
 
 # ── Test 1: concurrent stale-lease recoverers converge to exactly one mint ──
 
@@ -204,14 +205,14 @@ def test_mint_failure_still_releases_lock_and_raises(
     fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd(fd, blocking=False)
         except BlockingIOError:
             pytest.fail(
                 "lock was still held after a mint failure -- "
                 "_lock_guarded_mint_or_borrow must release it even on error"
             )
         else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_fd(fd)
     finally:
         os.close(fd)
 

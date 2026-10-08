@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 from tuf.ngclient import updater as tuf_updater
+from tests._module_seam import setattr_in
 
 
 class _PrivilegeNotHeld(OSError):
@@ -31,7 +32,7 @@ def test_root_json_is_written_when_the_symlink_is_refused(tmp_path: Path, monkey
     def refuse(src: str, dst: str, *a: object, **k: object) -> None:
         raise _PrivilegeNotHeld(1314, "A required privilege is not held by the client")
 
-    monkeypatch.setattr(tuf_updater.os, "symlink", refuse)
+    setattr_in(monkeypatch, tuf_updater, "os.symlink", refuse)
     fake = SimpleNamespace(_dir=str(tmp_path), _trusted_set=SimpleNamespace(root=SimpleNamespace(version=15)))
 
     tuf_updater.Updater._update_root_symlink(fake)  # type: ignore[arg-type]
@@ -48,7 +49,7 @@ def test_any_other_symlink_error_still_raises(tmp_path: Path, monkeypatch: pytes
     def broken(src: str, dst: str, *a: object, **k: object) -> None:
         raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(tuf_updater.os, "symlink", broken)
+    setattr_in(monkeypatch, tuf_updater, "os.symlink", broken)
     fake = SimpleNamespace(_dir=str(tmp_path), _trusted_set=SimpleNamespace(root=SimpleNamespace(version=3)))
     with pytest.raises(OSError):
         tuf_updater.Updater._update_root_symlink(fake)  # type: ignore[arg-type]

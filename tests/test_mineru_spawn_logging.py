@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
+from tests._module_seam import patch_in
 
 
 # ── nx mineru start: behavioral — Popen receives the child-log handle ──
@@ -54,8 +55,7 @@ def test_start_routes_server_output_to_child_log(
         # name is fetched from nexus.logging_setup at call time.
         "nexus.logging_setup.open_child_log_or_devnull",
         return_value=log_handle,
-    ) as mock_open_log, patch(
-        "nexus._mineru_spawn.subprocess.Popen", return_value=proc,
+    ) as mock_open_log, patch_in("nexus._mineru_spawn", "subprocess.Popen", return_value=proc,
     ) as mock_popen, patch(
         "nexus.commands.mineru.httpx.get", return_value=healthy_resp,
     ):
@@ -106,8 +106,7 @@ def test_restart_server_routes_output_to_child_log(
     ), patch(
         "nexus.logging_setup.open_child_log_or_devnull",
         return_value=log_handle,
-    ) as mock_open_log, patch(
-        "subprocess.Popen", return_value=proc,
+    ) as mock_open_log, patch_in("nexus._mineru_spawn", "subprocess.Popen", return_value=proc,
     ) as mock_popen, patch(
         "nexus.pdf_extractor.httpx.get", return_value=healthy_resp,
     ):

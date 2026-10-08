@@ -153,7 +153,9 @@ jobs:
             "(skips pg_provision). Consumed by conexus deploy/engine (build the" \
             "runtime image FROM the linux-amd64 binary). Per-platform assets +" \
             "sha256 attached: nexus-service-linux-amd64, nexus-service-linux-arm64," \
-            "nexus-service-mac-arm64." \
+            "nexus-service-mac-arm64. Each also ships as nexus-service-<arch>.txz" \
+            "(xz tar, one member nexus-service, about a quarter of the size, with its own" \
+            ".sha256 and .sigstore.json): the local install fetches that one." \
             "" \
             "NOTE: the mac-arm64 binary is built + smoke-tested on the hellmini" \
             "self-hosted runner (Mac mini M5 Pro, Docker via colima; nexus-yd9po)." \
@@ -538,6 +540,8 @@ jobs:
 
       - name: Stage artifact + sha256
         id: stage
+        env:
+          ARCH: ${{ matrix.target.arch }}
         run: |
           set -euo pipefail
           src="service/target/nexus-service"
@@ -551,6 +555,12 @@ jobs:
           cp "$src" "dist/$ASSET"
           # sha256sum on linux, shasum -a 256 on macOS (identical file format).
           ( cd dist && { command -v sha256sum >/dev/null && sha256sum "$ASSET" || shasum -a 256 "$ASSET"; } > "$ASSET.sha256" )
+          # The same bytes as an xz tar (one member nexus-service, mode 0755), which
+          # the local install downloads instead (about 41 MB against 163). Packaged
+          # from the signed and notarized file, after those steps, so both assets
+          # carry one binary. The script checks its own output and writes the
+          # .sha256 sidecar; the single-file asset stays for the cloud deploy.
+          python3 scripts/package_engine_posix.py package --binary "$src" --arch "$ARCH" --out-dir dist
           ls -la dist
           file "dist/$ASSET" || true
 
@@ -751,7 +761,10 @@ jobs:
           #      command) land together or local verification is non-functional.
           cosign sign-blob "dist/$ASSET" --bundle "dist/$ASSET.cosign.bundle"
           cosign sign-blob "dist/$ASSET" --new-bundle-format --bundle "dist/$ASSET.sigstore.json"
-          # Self-verify BOTH before publishing so a malformed bundle fails the
+          # The .txz the local install downloads: the new protobuf bundle only, as
+          # for the Windows archive and the PG bundles (nothing consumes an old one).
+          cosign sign-blob "dist/$ASSET.txz" --new-bundle-format --bundle "dist/$ASSET.txz.sigstore.json"
+          # Self-verify ALL THREE before publishing so a malformed bundle fails the
           # build, not the consumer. Identity = this workflow at this tag ref.
           cosign verify-blob "dist/$ASSET" \
             --bundle "dist/$ASSET.cosign.bundle" \
@@ -762,7 +775,12 @@ jobs:
             --bundle "dist/$ASSET.sigstore.json" \
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
-          echo "cosign signatures verified for $ASSET (.cosign.bundle + .sigstore.json)"
+          cosign verify-blob "dist/$ASSET.txz" \
+            --new-bundle-format \
+            --bundle "dist/$ASSET.txz.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-service-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          echo "cosign signatures verified for $ASSET (.cosign.bundle + .sigstore.json) and $ASSET.txz (.sigstore.json)"
 
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -787,7 +805,8 @@ jobs:
           # bytes + sha256 under the same download URL. Cut a fresh tag.
           gh release upload "$tag" --clobber \
             "dist/$ASSET" "dist/$ASSET.sha256" \
-            "dist/$ASSET.cosign.bundle" "dist/$ASSET.sigstore.json"
+            "dist/$ASSET.cosign.bundle" "dist/$ASSET.sigstore.json" \
+            "dist/$ASSET.txz" "dist/$ASSET.txz.sha256" "dist/$ASSET.txz.sigstore.json"
 
   # RDR-161 P2 (nexus-9yt2p): publish the relocatable PostgreSQL+pgvector bundle
   # as a release asset so `nx daemon service install-binary` / `nx init --service`

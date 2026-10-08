@@ -16,7 +16,6 @@ The preflight output above is the command's own gathered data when the `!` pream
 | nx doctor | — | — |
 | bd (beads) | — | — |
 | uv | — | — |
-| Node.js / npx | — | — |
 | CLAUDE.md | — | — |
 
 Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.

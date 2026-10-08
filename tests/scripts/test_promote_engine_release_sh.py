@@ -28,6 +28,7 @@ def _all_assets() -> list[str]:
     for arch in ARCHES:
         b = f"nexus-service-{arch}"
         out += [b, f"{b}.sha256", f"{b}.cosign.bundle", f"{b}.sigstore.json"]
+        out += [f"{b}.txz", f"{b}.txz.sha256", f"{b}.txz.sigstore.json"]
         p = f"nexus-pg-{arch}.txz"
         out += [p, f"{p}.sha256", f"{p}.sigstore.json"]
     return out
@@ -94,10 +95,13 @@ def test_complete_asset_set_promotes_exactly_once(tmp_path: Path) -> None:
     calls = log.read_text().splitlines()
     edits = [c for c in calls if c.startswith("release edit")]
     assert len(edits) == 1 and "--draft=false" in edits[0], calls
-    assert "all 21 expected assets present" in r.stdout
+    assert "all 30 expected assets present" in r.stdout
 
 
-@pytest.mark.parametrize("missing", ["nexus-service-linux-amd64", "nexus-service-mac-arm64.cosign.bundle", "nexus-pg-linux-arm64.txz.sigstore.json"])
+@pytest.mark.parametrize("missing", [
+    "nexus-service-linux-amd64", "nexus-service-mac-arm64.cosign.bundle", "nexus-pg-linux-arm64.txz.sigstore.json",
+    "nexus-service-linux-arm64.txz", "nexus-service-mac-arm64.txz.sha256", "nexus-service-linux-amd64.txz.sigstore.json",
+])
 def test_one_missing_asset_fails_and_leaves_the_draft(tmp_path: Path, missing: str) -> None:
     assets = [a for a in _all_assets() if a != missing]
     bindir, log = _stub_gh(tmp_path, assets)
@@ -134,7 +138,7 @@ def test_unreadable_sizes_leave_the_draft(tmp_path: Path) -> None:
 
 
 def test_a_failing_json_release_view_fails_closed_and_leaves_the_draft(tmp_path: Path) -> None:
-    """All 21 names are present, then the second `gh release view --json assets` (the one that
+    """All 30 names are present, then the second `gh release view --json assets` (the one that
     carries the sizes) fails: the draft must stay, because the sizes were never read."""
     bindir, log = _stub_gh(tmp_path, _all_assets(), json_view_fails=True)
     r = _run(bindir)
@@ -176,12 +180,12 @@ def _edits(log: Path) -> list[str]:
     return [c for c in log.read_text().splitlines() if c.startswith("release edit")]
 
 
-def test_switch_off_is_the_default_and_expects_the_21_assets(tmp_path: Path) -> None:
-    """No third argument and an explicit "off" behave the same: 21 assets, no Windows."""
+def test_switch_off_is_the_default_and_expects_the_30_assets(tmp_path: Path) -> None:
+    """No third argument and an explicit "off" behave the same: 30 assets, no Windows."""
     bindir, log = _stub_gh(tmp_path, _all_assets())
     r = _run(bindir, "off")
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "all 21 expected assets present" in r.stdout
+    assert "all 30 expected assets present" in r.stdout
     assert len(_edits(log)) == 1
 
 
@@ -200,14 +204,14 @@ def test_switch_off_ignores_windows_assets_that_happen_to_be_attached(tmp_path: 
     bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_ASSETS)
     r = _run(bindir, "off")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "all 21 expected assets present" in r.stdout
+    assert "all 30 expected assets present" in r.stdout
 
 
 def test_switch_on_with_the_full_windows_set_promotes_exactly_once(tmp_path: Path) -> None:
     bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_ASSETS)
     r = _run(bindir, "on")
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "all 27 expected assets present" in r.stdout
+    assert "all 36 expected assets present" in r.stdout
     edits = _edits(log)
     assert len(edits) == 1 and "--draft=false" in edits[0], edits
 
@@ -273,7 +277,7 @@ def test_switch_off_does_not_hold_an_attached_windows_archive_to_its_ceiling(tmp
 
 
 def test_the_floor_checks_asset_sets_are_the_ones_promotion_expects(tmp_path: Path) -> None:
-    """scripts/check_engine_release_floor.py --require-windows (nexus-f9bgu.28) names the same 21 and 27
+    """scripts/check_engine_release_floor.py --require-windows (nexus-f9bgu.28) names the same 30 and 36
     assets this script waits for: compared as sets, and driven through the script itself, so a name
     added to one and not the other fails here."""
     import check_engine_release_floor as floor
@@ -282,4 +286,4 @@ def test_the_floor_checks_asset_sets_are_the_ones_promotion_expects(tmp_path: Pa
     assert set(floor.expected_engine_assets(windows=True)) == set(_all_assets()) | set(WINDOWS_ASSETS)
     bindir, _ = _stub_gh(tmp_path, list(floor.expected_engine_assets(windows=True)))
     r = _run(bindir, "on")
-    assert r.returncode == 0 and "all 27 expected assets present" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0 and "all 36 expected assets present" in r.stdout, r.stdout + r.stderr

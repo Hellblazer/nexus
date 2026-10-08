@@ -481,6 +481,35 @@ def test_a_linked_worktree_agent_owns_its_tree(linked_worktree):
         assert "permissionDecision" not in out, f"linked-worktree agent was gated on {cmd!r}: {out}"
 
 
+def test_a_payload_without_cwd_takes_the_project_from_claude_project_dir(linked_worktree, tmp_path):
+    """uv launches this script with ``--directory ${CLAUDE_PLUGIN_ROOT}`` (finding C,
+    nexus-f9bgu.36), so the process cwd is not the project. A payload with no
+    ``cwd`` falls back to ``CLAUDE_PROJECT_DIR``, never to the process cwd."""
+    elsewhere = tmp_path / "plugin-root"
+    elsewhere.mkdir()
+    payload = json.dumps(_payload("git commit -m msg"))
+    env = {**os.environ, "NX_HOOK_PYTHON": sys.executable, "CLAUDE_PROJECT_DIR": str(linked_worktree)}
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)], input=payload, capture_output=True, text=True,
+        timeout=20, env=env, cwd=str(elsewhere),
+    )
+    assert "permissionDecision" not in _hso(proc), proc.stdout
+
+
+def test_the_process_cwd_is_never_the_project(linked_worktree):
+    """The control for the case above: the process cwd IS a linked worktree, the payload
+    names no cwd and CLAUDE_PROJECT_DIR is unset, so the project is unknown and the
+    verdict is the fail-closed one. Reading the process cwd would have exempted it."""
+    payload = json.dumps(_payload("git commit -m msg"))
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env["NX_HOOK_PYTHON"] = sys.executable
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)], input=payload, capture_output=True, text=True,
+        timeout=20, env=env, cwd=str(linked_worktree),
+    )
+    assert _hso(proc).get("permissionDecision") == "deny", proc.stdout
+
+
 @pytest.mark.parametrize("cmd", ["git commit -m msg", "git add -A", "git checkout -- x.py"])
 def test_an_undeterminable_worktree_fails_closed(cmd, tmp_path):
     """A non-repo cwd makes ``git rev-parse`` fail. Not being able to tell

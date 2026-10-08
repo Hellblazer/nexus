@@ -35,7 +35,10 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,7 +49,7 @@ import structlog
 
 from nexus._winsec import grant_user_tree_access
 from nexus.daemon.binary_lifecycle import (
-    WINDOWS_ENGINE_EXE,
+    WINDOWS_ENGINE_EXE,  # noqa: F401 - part of this module's asset contract, read by the Windows release leg's tests
     WINDOWS_RUNTIME_DLLS,
     well_known_binary_path,
 )
@@ -57,11 +60,13 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "BinaryAssetAbsentError",
     "BinaryDownloadError",
     "BinaryVerificationError",
     "CERT_IDENTITY_REGEXP",
     "CERT_OIDC_ISSUER",
     "TAG_NAMESPACE_PREFIX",
+    "archive_asset_name",
     "asset_name",
     "binary_sidecar_path",
     "compute_sha256",
@@ -145,6 +150,17 @@ class BinaryDownloadError(BinaryVerificationError):
     connection reset during the sigstore-attestation download used to
     name-match "Verification" and abort pytest collection with zero tests
     run (PR #1474, 2026-08-23)."""
+
+
+class BinaryAssetAbsentError(BinaryDownloadError):
+    """The release answered HTTP 404 for an asset: it does not carry it.
+
+    The one download failure :func:`install_binary` acts on rather than
+    propagates, and only for the first request of a POSIX install (the
+    archive's ``.sha256``), where a 404 means the pinned release predates the
+    POSIX ``.txz`` assets and the single-file asset is fetched instead. Every
+    other caller sees a :class:`BinaryDownloadError` as before.
+    """
 
 
 # ── sha256 gate ─────────────────────────────────────────────────────────────
@@ -360,6 +376,20 @@ def asset_name(platform_tag: str | None = None) -> str:
     return f"nexus-service-{tag}{suffix}"
 
 
+def archive_asset_name(platform_tag: str | None = None) -> str:
+    """The compressed engine asset: ``nexus-service-<platform>.txz``.
+
+    The only engine asset on Windows. On Linux and macOS it holds the one file
+    ``nexus-service`` (mode 0755), and engine releases carry it beside the
+    single-file :func:`asset_name` asset from the first tag that publishes it;
+    older releases carry only the single file. :func:`install_binary` takes the
+    archive when the release has it (about 41 MB against about 160 MB) and the
+    single file otherwise, so one client works against both kinds of release.
+    """
+    tag = platform_tag if platform_tag is not None else current_platform_tag()
+    return f"nexus-service-{tag}.txz"
+
+
 def release_asset_url(tag: str, name: str) -> str:
     """GitHub release download URL for *name* at *tag*."""
     return f"{_RELEASE_DOWNLOAD_BASE}/{tag}/{name}"
@@ -545,7 +575,18 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
         with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as out:
             for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
                 out.write(block)
-    except Exception as exc:  # network, 404 for a bad tag/platform, timeout
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise BinaryAssetAbsentError(
+                f"failed to download {url}: HTTP 404, the release does not carry "
+                "this asset. Check the tag exists and the asset was published for "
+                "this platform."
+            ) from exc
+        raise BinaryDownloadError(
+            f"failed to download {url}: {exc}. Check the tag exists, the "
+            "asset was published for this platform, and the network is up."
+        ) from exc
+    except Exception as exc:  # network, timeout
         raise BinaryDownloadError(
             f"failed to download {url}: {exc}. Check the tag exists, the "
             "asset was published for this platform, and the network is up."
@@ -571,6 +612,15 @@ def install_binary(
     verification failure — the well-known location is only ever updated with a
     binary that passed BOTH gates.
 
+    On Linux and macOS the asset is ``nexus-service-<platform>.txz`` when the
+    release carries it, else the single file ``nexus-service-<platform>`` (every
+    release before the POSIX archives, so a client pinned to one keeps working).
+    The choice is made by what the release serves: a 404 on the archive's
+    ``.sha256``, and nothing else, selects the single file. Either way both gates
+    run on the downloaded bytes; an archive's one member ``nexus-service`` is then
+    staged, given mode 0755 and moved into place by one rename, and the receipt
+    records the archive digest in ``sha256`` and the binary's in ``installed_sha256``.
+
     On Windows (*platform_tag* ``windows-x64``) the asset is one archive; both
     gates run on the ARCHIVE bytes, then ``nexus-service.exe`` and the four
     runtime DLLs are placed side by side (RDR-224 P0.4). Windows refuses to
@@ -586,37 +636,59 @@ def install_binary(
     """
     _validate_tag(tag)
     ptag = platform_tag if platform_tag is not None else current_platform_tag()
-    name = asset_name(ptag)
-    asset_url = release_asset_url(tag, name)
-    archive_layout = _is_windows_tag(ptag)
+    windows = _is_windows_tag(ptag)
     extra: dict = {}
 
     with tempfile.TemporaryDirectory(
         dir=str(download_dir) if download_dir else None, prefix="nx_install_binary_"
     ) as td:
         tmp = Path(td)
+        if windows:
+            name = asset_name(ptag)
+            archive_layout = True
+            _download(release_asset_url(tag, name), tmp / name)
+            _download(f"{release_asset_url(tag, name)}.sha256", tmp / f"{name}.sha256")
+        else:
+            # Linux and macOS: the .txz when the release carries it, else the single
+            # file. The archive's .sha256 is the probe (a few bytes): a 404 on it,
+            # and only on it, means a release from before the POSIX archives. Any
+            # other failure, and a 404 on a later request, fails closed as before.
+            name = archive_asset_name(ptag)
+            archive_layout = True
+            try:
+                _download(f"{release_asset_url(tag, name)}.sha256", tmp / f"{name}.sha256")
+            except BinaryAssetAbsentError:
+                name = asset_name(ptag)
+                archive_layout = False
+                _download(f"{release_asset_url(tag, name)}.sha256", tmp / f"{name}.sha256")
+            _download(release_asset_url(tag, name), tmp / name)
+        asset_url = release_asset_url(tag, name)
         asset = tmp / name
         sha_sidecar = tmp / f"{name}.sha256"
         bundle = tmp / f"{name}.sigstore.json"
-
-        _download(asset_url, asset)
-        _download(f"{asset_url}.sha256", sha_sidecar)
         _download(f"{asset_url}.sigstore.json", bundle)
 
         # Gate 1: cheap integrity check first — a corrupt download fails here
-        # before the (heavier) crypto verify.
+        # before the (heavier) crypto verify. Both gates run on the bytes that were
+        # downloaded, the archive itself when the asset is one.
         digest = verify_sha256(asset, sha_sidecar)
         # Gate 2: provenance.
         verify_signature(asset, bundle, checker=checker)
 
         dest = well_known_binary_path(config_dir, platform_tag=ptag)
-        if archive_layout:
+        if windows:
             guard = quiesce if quiesce is not None else _engine_quiesce(
                 config_dir, restart_after=restart_after, host_platform=host_platform,
             )
             # The archive is verified and extracted with the service still up; only
             # the swap runs inside the stop (nexus-f9bgu.49, as the PG bundle does).
             extra = _place_engine_archive(asset, dest, platform=host_platform, guard=guard)
+        elif archive_layout:
+            # POSIX replaces a running executable by rename, so nothing is stopped,
+            # exactly as for the single file below.
+            extra = _place_engine_archive(
+                asset, dest, support_names=(), platform=host_platform, guard=quiesce,
+            )
         else:
             _atomic_copy(asset, dest, executable=True)
 
@@ -685,18 +757,22 @@ def _place_engine_archive(
     archive: Path,
     exe_dest: Path,
     *,
+    support_names: tuple[str, ...] = WINDOWS_RUNTIME_DLLS,
     platform: str | None = None,
     guard: AbstractContextManager[object] | None = None,
 ) -> dict:
-    """Extract the Windows engine archive and place its files beside *exe_dest*.
+    """Extract an engine archive and place its files beside *exe_dest*.
 
     The archive is already sha256- and signature-verified; this is defence in
-    depth. The layout is FLAT: ``nexus-service.exe`` plus the four runtime DLLs
-    in the archive root. Members stream out of the tar (no ``extractall``), so
-    no member name ever reaches the filesystem unless it is one of the five
-    required names. Any other regular file (a third-party notice, P0.6) is
-    tolerated and ignored; any unsafe member, link, device or nested path fails
-    the whole archive before anything is placed.
+    depth. The layout is FLAT: the engine (named ``exe_dest.name``:
+    ``nexus-service.exe`` on Windows, ``nexus-service`` on Linux and macOS) plus
+    *support_names* (the four runtime DLLs on Windows, none elsewhere) in the
+    archive root. Members stream out of the tar (no ``extractall``), so no
+    member name ever reaches the filesystem unless it is a required name. Any
+    other regular file (a third-party notice, P0.6) is tolerated and ignored;
+    any unsafe member, link, device or nested path fails the whole archive
+    before anything is placed. The staged engine gets mode 0755 before it is
+    moved, so the executable bit never depends on the archive's own mode.
 
     Staged beside the destination, then moved into place as one set with the
     DLLs first and the exe last (:func:`~nexus.daemon.replace_guard.
@@ -708,7 +784,8 @@ def _place_engine_archive(
     service still running (nexus-f9bgu.49). Returns the receipt fields
     ``installed_sha256`` (exe), ``support_files`` (DLL digests) and ``layout``.
     """
-    required = (WINDOWS_ENGINE_EXE, *WINDOWS_RUNTIME_DLLS)
+    exe_name = exe_dest.name
+    required = (exe_name, *support_names)
     exe_dest.parent.mkdir(parents=True, exist_ok=True)
     _grant_user_ace(exe_dest.parent, platform)
     stage = Path(tempfile.mkdtemp(dir=exe_dest.parent, prefix=".nx_stage_"))
@@ -766,9 +843,10 @@ def _place_engine_archive(
                 f"{', '.join(missing)}; not installing."
             )
 
+        os.chmod(stage / exe_name, 0o755)
         with guard if guard is not None else contextlib.nullcontext():
             place_set_with_rollback(
-                stage, exe_dest.parent, (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE),
+                stage, exe_dest.parent, (*support_names, exe_name),
                 platform=platform,
             )
     finally:
@@ -776,8 +854,8 @@ def _place_engine_archive(
 
     return {
         "layout": "archive",
-        "installed_sha256": digests[WINDOWS_ENGINE_EXE],
-        "support_files": {dll: digests[dll] for dll in WINDOWS_RUNTIME_DLLS},
+        "installed_sha256": digests[exe_name],
+        "support_files": {name: digests[name] for name in support_names},
     }
 
 
@@ -854,6 +932,28 @@ def pg_bundle_dest(config_dir: Path, *, platform_tag: str | None = None) -> Path
     return config_dir / "service" / pg_bundle_asset_name(platform_tag)
 
 
+def _fetch_verified(
+    tag: str, name: str, tmp: Path, checker: _SignatureChecker | None,
+) -> tuple[Path, str, str]:
+    """Download release asset *name* at *tag* into *tmp* and pass it through BOTH
+    fail-closed gates (sha256, then sigstore signature). Returns
+    ``(asset_path, sha256_hex, asset_url)``; raises
+    :class:`BinaryVerificationError` otherwise. The one verified seam the PG
+    bundle install and :func:`ensure_vc_runtime` share (RDR-161 Open Question 2)."""
+    asset_url = release_asset_url(tag, name)
+    asset = tmp / name
+    sha_sidecar = tmp / f"{name}.sha256"
+    bundle = tmp / f"{name}.sigstore.json"
+
+    _download(asset_url, asset)
+    _download(f"{asset_url}.sha256", sha_sidecar)
+    _download(f"{asset_url}.sigstore.json", bundle)
+
+    digest = verify_sha256(asset, sha_sidecar)
+    verify_signature(asset, bundle, checker=checker)
+    return asset, digest, asset_url
+
+
 def install_pg_bundle(
     tag: str,
     config_dir: Path,
@@ -872,22 +972,12 @@ def install_pg_bundle(
     """
     _validate_tag(tag)
     name = pg_bundle_asset_name(platform_tag)
-    asset_url = release_asset_url(tag, name)
 
     with tempfile.TemporaryDirectory(
         dir=str(download_dir) if download_dir else None, prefix="nx_install_pgbundle_"
     ) as td:
         tmp = Path(td)
-        asset = tmp / name
-        sha_sidecar = tmp / f"{name}.sha256"
-        bundle = tmp / f"{name}.sigstore.json"
-
-        _download(asset_url, asset)
-        _download(f"{asset_url}.sha256", sha_sidecar)
-        _download(f"{asset_url}.sigstore.json", bundle)
-
-        digest = verify_sha256(asset, sha_sidecar)
-        verify_signature(asset, bundle, checker=checker)
+        asset, digest, asset_url = _fetch_verified(tag, name, tmp, checker)
 
         dest = pg_bundle_dest(config_dir, platform_tag=platform_tag)
         _atomic_copy(asset, dest, executable=False)  # a tarball, not an executable
@@ -907,3 +997,172 @@ def install_pg_bundle(
         sha256=digest[:12],
     )
     return dest, provenance
+
+
+# ── VC++ runtime for the client's extension modules (nexus-lqjll) ───────────
+
+#: Where the two runtime DLLs sit inside the Windows PG bundle archive
+#: (``scripts/build_pg_bundle_windows.py``: every member under ``bundle/``).
+_PG_BUNDLE_BIN_PREFIX = "bundle/bin/"
+
+_VCRT_SIDECAR_NAME = "vcrt.meta.json"
+#: Stamped (empty file, mtime is the signal) when a provisioning attempt fails, so
+#: the automatic upgrade path does not repeat the PG bundle download (7.4 MB for
+#: windows-x64 at engine v0.1.149) every session.
+_VCRT_FAILED_SENTINEL = ".vcrt_provision_failed"
+_WINDOWS_PLATFORM_TAG = "windows-x64"
+
+
+@dataclass(frozen=True)
+class VcRuntimeResult:
+    """What :func:`ensure_vc_runtime` did. ``status`` is one of
+    ``not_applicable`` (not Windows), ``present_system``, ``present_app_local``,
+    ``provisioned``, ``deferred`` (a recent attempt failed and the caller asked
+    for a backoff) or ``failed``; ``detail`` is a one-line account."""
+
+    status: str
+    detail: str = ""
+    dir: Path | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status != "failed"
+
+
+def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -> dict[str, str]:
+    """Copy exactly *names* out of the verified PG-bundle *archive* into *dest_dir*.
+
+    Members stream out of the tar (no ``extractall``): a member's name is only
+    compared against ``bundle/bin/<name>`` and never reaches the filesystem, and
+    only a regular file with an exact match is taken. Each file lands by
+    :func:`_atomic_copy` (temp, then rename), so a crash leaves no half-written
+    DLL. Returns ``{name: sha256}``; raises :class:`BinaryVerificationError` when
+    the archive is unreadable or lacks a name.
+    """
+    wanted = {f"{_PG_BUNDLE_BIN_PREFIX}{n}": n for n in names}
+    digests: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="nx_vcrt_") as td:
+        stage = Path(td)
+        try:
+            with tarfile.open(archive, "r:xz") as tf:
+                for member in tf:
+                    key = member.name[2:] if member.name.startswith("./") else member.name
+                    name = wanted.get(key)
+                    if name is None or name in digests or not member.isreg():
+                        continue
+                    src = tf.extractfile(member)
+                    if src is None:  # defensive: isreg() members always have data
+                        continue
+                    sha = hashlib.sha256()
+                    with src, (stage / name).open("wb") as out:
+                        for block in iter(lambda: src.read(_HASH_BLOCK), b""):
+                            sha.update(block)
+                            out.write(block)
+                    digests[name] = sha.hexdigest()
+                    if len(digests) == len(wanted):
+                        break  # the rest of the archive is PostgreSQL itself
+        except (tarfile.TarError, lzma.LZMAError, EOFError) as exc:
+            raise BinaryVerificationError(
+                f"PG bundle {archive.name} could not be read: {exc}"
+            ) from exc
+        missing = [n for n in names if n not in digests]
+        if missing:
+            raise BinaryVerificationError(
+                f"PG bundle {archive.name} has no {_PG_BUNDLE_BIN_PREFIX}"
+                f"{', '.join(missing)}; not installing."
+            )
+        for name in names:
+            _atomic_copy(stage / name, dest_dir / name, executable=False)
+    return digests
+
+
+def ensure_vc_runtime(
+    config_dir: Path,
+    *,
+    platform: str | None = None,
+    system_dir: str | None = None,
+    tag: str | None = None,
+    installed_by: str = "",
+    checker: _SignatureChecker | None = None,
+    download_dir: Path | None = None,
+    failure_backoff_s: float = 0.0,
+    fetch: Callable[[str, str, Path, _SignatureChecker | None], tuple[Path, str, str]] | None = None,
+) -> VcRuntimeResult:
+    """Make the client's extension modules importable on a Windows machine that
+    lacks Microsoft's VC++ redistributable (nexus-lqjll, RDR-224 Step 0.6).
+
+    Does nothing off Windows, when the system has ``msvcp140.dll`` and
+    ``msvcp140_1.dll``, or when the engine dir, the PG bundle's ``bin`` or
+    ``<config>/vcrt`` already holds both. Otherwise it downloads the PG bundle
+    asset for the pinned engine tag through the same sha256 + sigstore gates
+    :func:`install_pg_bundle` uses, and copies ONLY those two DLLs into
+    ``<config_dir>/vcrt`` (PostgreSQL is not provisioned or started). The bundle
+    is the signed asset Sam's licensing reading covers (app-local, unmodified).
+
+    Idempotent, and NEVER raises: a failure comes back as ``status="failed"``
+    with a one-line reason the caller reports. When it provisions, the directory
+    joins this process's DLL search path too. A failed attempt stamps
+    ``<config_dir>/.vcrt_provision_failed``; with *failure_backoff_s* > 0 a later
+    call inside that many seconds returns ``deferred`` without touching the
+    network (the automatic upgrade path; ``nx init`` retries every time).
+    *platform*, *system_dir* and *fetch* (default :func:`_fetch_verified`) are
+    test seams.
+    """
+    from nexus import _vcrt  # noqa: PLC0415 - cheap; keeps this module's import graph unchanged
+
+    dest_dir = config_dir / _vcrt.VCRT_SUBDIR
+    try:
+        kind, where = _vcrt.runtime_source(platform, str(config_dir), system_dir)
+        if kind == _vcrt.NOT_APPLICABLE:
+            return VcRuntimeResult("not_applicable")
+        if kind == _vcrt.SYSTEM:
+            return VcRuntimeResult("present_system", f"found in {where}", Path(where) if where else None)
+        if kind == _vcrt.APP_LOCAL:
+            return VcRuntimeResult("present_app_local", f"found in {where}", Path(where) if where else None)
+
+        sentinel = config_dir / _VCRT_FAILED_SENTINEL
+        if failure_backoff_s > 0:
+            try:
+                age = time.time() - sentinel.stat().st_mtime
+            except OSError:
+                age = None
+            if age is not None and age < failure_backoff_s:
+                return VcRuntimeResult("deferred", f"the last attempt failed {int(age)}s ago; not retrying yet")
+
+        tag = tag if tag is not None else resolve_service_tag()
+        if not tag:
+            return VcRuntimeResult("failed", "no engine-service tag is pinned for this build")
+        _validate_tag(tag)
+        name = pg_bundle_asset_name(_WINDOWS_PLATFORM_TAG)
+        # make_user_dir resolves the REAL host platform (ACLs): a faked "win32"
+        # on a POSIX box must not reach icacls.
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 - deferred, Windows ACL helper
+
+        make_user_dir(dest_dir)
+        with tempfile.TemporaryDirectory(
+            dir=str(download_dir) if download_dir else None, prefix="nx_vcrt_dl_"
+        ) as td:
+            asset, digest, asset_url = (fetch or _fetch_verified)(tag, name, Path(td), checker)
+            digests = _extract_vc_runtime(asset, dest_dir, _vcrt.VC_RUNTIME_DLLS)
+        provenance = _provenance(tag, name, digest, asset_url, installed_by)
+        provenance["dlls"] = digests
+        try:
+            _atomic_write_json(dest_dir / _VCRT_SIDECAR_NAME, provenance)
+        except OSError as exc:  # informational, like the engine and bundle sidecars
+            _log.warning("vc_runtime_sidecar_write_failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - the contract: never raise to the caller
+        _log.warning("vc_runtime_provision_failed", error_type=type(exc).__name__, error=str(exc))
+        with contextlib.suppress(OSError):
+            (config_dir / _VCRT_FAILED_SENTINEL).touch()
+        return VcRuntimeResult("failed", f"{type(exc).__name__}: {exc}")
+
+    with contextlib.suppress(OSError):
+        (config_dir / _VCRT_FAILED_SENTINEL).unlink(missing_ok=True)
+    try:
+        import nexus  # noqa: PLC0415 - the DLL search path of THIS process
+
+        nexus._add_vc_runtime_dirs(platform=platform, config_dir=str(config_dir), system_dir=system_dir)
+    except Exception as exc:  # noqa: BLE001 - later processes pick it up at import regardless
+        _log.debug("vc_runtime_activate_failed", error=str(exc))
+    _log.info("vc_runtime_provisioned", dest=str(dest_dir), tag=tag, sha256=digest[:12])
+    return VcRuntimeResult("provisioned", f"{', '.join(_vcrt.VC_RUNTIME_DLLS)} placed in {dest_dir}", dest_dir)

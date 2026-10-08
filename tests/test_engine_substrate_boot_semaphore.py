@@ -30,6 +30,7 @@ from tests._engine_substrate import (
     _boot_semaphore_slot,
     _try_acquire_boot_slot,
 )
+from tests._module_seam import patch_time
 
 
 @pytest.fixture
@@ -220,7 +221,7 @@ class TestTimeoutNamesTheBead:
                 sleep_calls.append(seconds)
                 real_sleep(seconds)  # unchanged real timing -- only counted
 
-            with patch("time.sleep", side_effect=_counting_sleep):
+            with patch_time("tests._engine_substrate", "sleep", side_effect=_counting_sleep):
                 with pytest.raises(RuntimeError):
                     with _boot_semaphore_slot(
                         max_concurrent=1, lock_dir=tmp_path,

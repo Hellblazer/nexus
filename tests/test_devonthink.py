@@ -25,7 +25,7 @@ Coverage:
   scope falls through; single-DB scoping.
 
 All tests run unconditionally on Linux/CI by patching ``run_bounded`` or
-``nexus.devonthink._run_osascript`` and ``monkeypatch.setattr("sys.platform", ...)``.
+``nexus.devonthink._run_osascript`` and ``setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", ...)``.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ import subprocess
 from unittest.mock import patch
 
 import pytest
+from tests._module_seam import setattr_in
 
 
 # ── DTNotAvailableError ──────────────────────────────────────────────────────
@@ -103,7 +104,7 @@ class TestPlatformGate:
     def test_dt_selection_non_darwin_raises(self, monkeypatch):
         from nexus.devonthink import DTNotAvailableError, _dt_selection
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "linux")
         with pytest.raises(DTNotAvailableError, match="macOS-only"):
             _dt_selection()
 
@@ -112,28 +113,28 @@ class TestPlatformGate:
     ):
         from nexus.devonthink import DTNotAvailableError, _dt_uuid_record
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "linux")
         with pytest.raises(DTNotAvailableError, match="macOS-only"):
             _dt_uuid_record("ANY-UUID")
 
     def test_dt_tag_records_non_darwin_raises(self, monkeypatch):
         from nexus.devonthink import DTNotAvailableError, _dt_tag_records
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "linux")
         with pytest.raises(DTNotAvailableError, match="macOS-only"):
             _dt_tag_records("any-tag")
 
     def test_dt_group_records_non_darwin_raises(self, monkeypatch):
         from nexus.devonthink import DTNotAvailableError, _dt_group_records
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "linux")
         with pytest.raises(DTNotAvailableError, match="macOS-only"):
             _dt_group_records("/Inbox")
 
     def test_dt_smart_group_records_non_darwin_raises(self, monkeypatch):
         from nexus.devonthink import DTNotAvailableError, _dt_smart_group_records
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "linux")
         with pytest.raises(DTNotAvailableError, match="macOS-only"):
             _dt_smart_group_records("Recent PDFs")
 
@@ -145,7 +146,7 @@ class TestDtSelection:
     def test_returns_records_from_canned_output(self, monkeypatch):
         from nexus.devonthink import _dt_selection
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         canned = "UUID-A\t/Users/x/A.pdf\nUUID-B\t/Users/x/B.md\n"
         monkeypatch.setattr(
             "nexus.devonthink._run_osascript",
@@ -160,7 +161,7 @@ class TestDtSelection:
     def test_empty_selection_returns_empty_list(self, monkeypatch):
         from nexus.devonthink import _dt_selection
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         monkeypatch.setattr(
             "nexus.devonthink._run_osascript",
             lambda script, timeout: "",
@@ -172,7 +173,7 @@ class TestDtSelection:
         nexus_rdr/099-research-5)."""
         from nexus.devonthink import _dt_selection
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -214,7 +215,7 @@ class TestDtUuidRecord:
         rather than re-implementing the single-UUID osascript path."""
         from nexus.devonthink import _dt_uuid_record
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         seen: list[str] = []
 
         def fake_default(uuid):
@@ -240,7 +241,7 @@ class TestDtTagRecords:
         without spawning osascript."""
         from nexus.devonthink import _dt_tag_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
 
         def must_not_spawn(*args, **kwargs):
             pytest.fail("_run_osascript should not be called for empty tag")
@@ -251,7 +252,7 @@ class TestDtTagRecords:
     def test_multi_database_iteration_when_database_none(self, monkeypatch):
         from nexus.devonthink import _dt_tag_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -271,7 +272,7 @@ class TestDtTagRecords:
     def test_single_database_scoping(self, monkeypatch):
         from nexus.devonthink import _dt_tag_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -289,7 +290,7 @@ class TestDtTagRecords:
         dedupes — caller sees each UUID once."""
         from nexus.devonthink import _dt_tag_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         canned = "DUP\t/lib1/file.pdf\nDUP\t/lib2/file.pdf\nOTHER\t/x.md\n"
         monkeypatch.setattr(
             "nexus.devonthink._run_osascript",
@@ -308,7 +309,7 @@ class TestDtGroupRecords:
     def test_multi_database_iteration_when_database_none(self, monkeypatch):
         from nexus.devonthink import _dt_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -322,7 +323,7 @@ class TestDtGroupRecords:
     def test_trash_root_is_valid(self, monkeypatch):
         from nexus.devonthink import _dt_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         monkeypatch.setattr(
             "nexus.devonthink._run_osascript",
             lambda *a, **kw: "T1\t/tr/a.pdf\n",
@@ -333,7 +334,7 @@ class TestDtGroupRecords:
     def test_tags_root_is_valid(self, monkeypatch):
         from nexus.devonthink import _dt_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         monkeypatch.setattr(
             "nexus.devonthink._run_osascript",
             lambda *a, **kw: "G1\t/tg/a.pdf\n",
@@ -344,7 +345,7 @@ class TestDtGroupRecords:
     def test_single_database_scoping(self, monkeypatch):
         from nexus.devonthink import _dt_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -368,7 +369,7 @@ class TestDtSmartGroupRecords:
         same scope rather than collapsing to root-of-database."""
         from nexus.devonthink import _dt_smart_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -393,7 +394,7 @@ class TestDtSmartGroupRecords:
         """
         from nexus.devonthink import _dt_smart_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):
@@ -410,7 +411,7 @@ class TestDtSmartGroupRecords:
     def test_single_database_scoping(self, monkeypatch):
         from nexus.devonthink import _dt_smart_group_records
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
         scripts: list[str] = []
 
         def fake(script, timeout):

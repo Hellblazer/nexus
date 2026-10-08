@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._module_seam import setattr_in
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,7 +242,7 @@ class TestKillOrphanTrackerPidsGoneShapes:
         def _gone(pid, sig):
             raise OSError(22, "The parameter is incorrect")  # the WinError 87 shape
 
-        monkeypatch.setattr(session.os, "kill", _gone)
+        setattr_in(monkeypatch, session, "os.kill", _gone)
         monkeypatch.setattr(session, "_is_pid_alive", lambda pid: False)
         assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 0
 
@@ -254,7 +255,7 @@ class TestKillOrphanTrackerPidsGoneShapes:
 
         sigterms: list[int] = []
         hard: list[int] = []
-        monkeypatch.setattr(session.os, "kill", lambda pid, sig: sigterms.append(pid))
+        setattr_in(monkeypatch, session, "os.kill", lambda pid, sig: sigterms.append(pid))
         monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
         monkeypatch.setattr(
             registry, "hard_kill_pid", lambda pid: hard.append(pid) or True
@@ -292,10 +293,15 @@ class TestKillOrphanTrackerPidsGoneShapes:
             if len(calls) > 1:  # the SIGKILL step: the pid is already gone
                 raise gone_exc
 
-        monkeypatch.setattr(session.os, "kill", _kill)
+        # The SIGTERM goes through session's os, the SIGKILL through
+        # service_registry's (hard_kill_pid), so both bindings see the fake.
+        # Faking only session's let the hard kill reach the real os.kill(4242):
+        # a real signal to whatever owns that pid on POSIX, WinError 87 on Windows.
+        setattr_in(monkeypatch, (session, registry), "os.kill", _kill)
         monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
         monkeypatch.setattr(
             registry, "hard_kill_pid",
             functools.partial(registry.hard_kill_pid, platform=platform),
         )
         assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 1
+        assert len(calls) == 2, calls  # both the SIGTERM and the hard kill hit the fake

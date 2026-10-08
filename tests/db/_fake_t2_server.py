@@ -78,7 +78,24 @@ class FakeT2HandlerBase(BaseHTTPRequestHandler):
             return False
         return True
 
+    def parse_request(self) -> bool:
+        self._request_body: bytes | None = None
+        return super().parse_request()
+
+    def _raw_body(self) -> bytes:
+        """The request body, read off the socket once per request.
+
+        Every response path drains it first (``_send``): a handler that answers
+        401/404 before reading the body closes the connection with unread bytes
+        in its receive buffer, and Windows turns that close into a TCP reset, so
+        the client reads WinError 10053/10054 instead of the response."""
+        if getattr(self, "_request_body", None) is None:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            self._request_body = self.rfile.read(length) if length else b""
+        return self._request_body
+
     def _send(self, status: int, body: Any, no_content: bool = False) -> None:
+        self._raw_body()
         self.send_response(status)
         if no_content:
             self.send_header("Content-Length", "0")
@@ -91,10 +108,10 @@ class FakeT2HandlerBase(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _read_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length == 0:
+        raw = self._raw_body()
+        if not raw:
             return {}
-        return json.loads(self.rfile.read(length))
+        return json.loads(raw)
 
     # Alias: telemetry/plan_library/chash_index name this method ``_body``.
     _body = _read_body

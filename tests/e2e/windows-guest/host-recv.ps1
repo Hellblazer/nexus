@@ -89,7 +89,23 @@ $psi = New-Object System.Diagnostics.ProcessStartInfo("$HOME\.local\bin\claude.e
 # consumed and deleted so a later plain launch does not repeat them.
 $argsFile = "$HOME\nx-gate\claude-args.txt"
 if (Test-Path $argsFile) {
-    $parts = @(Get-Content -Encoding UTF8 $argsFile | Where-Object { $_ -ne '' } | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' })
+    # Each line is one base64-encoded argument. Quote it by the Windows argv
+    # rules (CommandLineToArgvW): backslashes before a quote or the closing
+    # quote are doubled, and a quote is escaped, so no argument can end early.
+    $quote = {
+        param([string]$a)
+        $sb = New-Object System.Text.StringBuilder; [void]$sb.Append('"'); $bs = 0
+        foreach ($ch in $a.ToCharArray()) {
+            if ($ch -eq '\') { $bs++; continue }
+            if ($ch -eq '"') { [void]$sb.Append('\', 2 * $bs + 1); [void]$sb.Append('"'); $bs = 0; continue }
+            if ($bs) { [void]$sb.Append('\', $bs); $bs = 0 }
+            [void]$sb.Append($ch)
+        }
+        if ($bs) { [void]$sb.Append('\', 2 * $bs) }
+        [void]$sb.Append('"'); $sb.ToString()
+    }
+    $parts = @(Get-Content $argsFile | Where-Object { $_ -ne '' } | ForEach-Object {
+        & $quote ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_))) })
     $psi.Arguments = $parts -join ' '
     Remove-Item $argsFile -Force
 }

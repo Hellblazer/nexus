@@ -30,6 +30,7 @@ from tests._fence_home import (
     fence_home,
     install_fence,
 )
+from tests._module_seam import patch_in
 
 _SHELL_FENCE = Path(__file__).parent / "e2e" / "lib" / "fence_home.sh"
 
@@ -139,7 +140,7 @@ def test_install_fence_makes_the_user_manager_unreachable(
     real_runtime = tmp_path / "run-user-1000"
     real_runtime.mkdir()
 
-    with patch.dict(os.environ), patch("tests._fence_home.sys.platform", "linux"):
+    with patch.dict(os.environ), patch_in("tests._fence_home", "sys.platform", "linux"):
         monkeypatch.setenv("HOME", str(real))
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(real_runtime))
         monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={real_runtime}/bus")

@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._module_seam import patch_in
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -229,8 +230,7 @@ def test_index_rdr_single_file_fallback_layout(
     target = repo_with_rdrs / "docs" / "rdr" / "002-adopt-click.md"
 
     with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
-        with patch(
-            "nexus.commands.index.subprocess.check_output",
+        with patch_in("nexus.commands.index", "subprocess.check_output",
             side_effect=FileNotFoundError("git not available"),
         ):
             result = runner.invoke(main, ["index", "rdr", str(target)])

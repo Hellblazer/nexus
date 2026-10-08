@@ -17,11 +17,13 @@ No T2/chroma opens; no epsilon-allow needed (RDR-128 lint must stay clean).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
+from tests._module_seam import setattr_in
 
 
 # ---------------------------------------------------------------------------
@@ -1226,7 +1228,7 @@ def stub_preflight_subprocess(monkeypatch) -> None:
     """Stub subprocess so nx-preflight tests are fast and deterministic.
 
     nx-preflight shells to ``nx --version``, ``nx doctor``, ``bd --version``,
-    ``uv --version``, ``npx --version``.  ``nx doctor`` in particular spawns
+    ``uv --version``.  ``nx doctor`` in particular spawns
     the T2 daemon and touches storage, so running it once per test is slow
     and has side effects (orphan daemons, WAL contention).  Stubbing both
     subprocess entry points keeps these tests exercising the render
@@ -1243,8 +1245,8 @@ def stub_preflight_subprocess(monkeypatch) -> None:
     def _fake_run(cmd, *args, **kwargs):
         return _sp.CompletedProcess(cmd, 0, stdout="doctor: ok\n", stderr="")
 
-    monkeypatch.setattr(cc.subprocess, "check_output", _fake_check_output)
-    monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, cc, "subprocess.check_output", _fake_check_output)
+    setattr_in(monkeypatch, cc, "subprocess.run", _fake_run)
 
 
 def test_nx_preflight_exits_zero(
@@ -1307,28 +1309,31 @@ def test_nx_preflight_has_uv_section(
     assert "### 4. uv (package manager)" in result.output
 
 
-def test_nx_preflight_has_node_section(
+def test_nx_preflight_has_no_node_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
-    """nx-preflight output contains ### 5. Node.js / npx section."""
+    """nexus-f9bgu: no plugin MCP server needs Node.js, so nx-preflight no
+    longer checks for npx (it would send users to install Node for nothing)."""
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     from nexus.cli import main
 
     result = runner.invoke(main, ["command-context", "nx-preflight"])
-    assert "### 5. Node.js / npx" in result.output
+    assert "### 4. uv (package manager)" in result.output
+    assert "npx" not in result.output
+    assert "Node.js" not in result.output
 
 
 def test_nx_preflight_has_claude_md_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
-    """nx-preflight output contains ### 6. CLAUDE.md Agent Readiness section."""
+    """nx-preflight output contains ### 5. CLAUDE.md Agent Readiness section."""
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     from nexus.cli import main
 
     result = runner.invoke(main, ["command-context", "nx-preflight"])
-    assert "### 6. CLAUDE.md Agent Readiness" in result.output
+    assert "### 5. CLAUDE.md Agent Readiness" in result.output
 
 
 def test_nx_preflight_double_dash_terminator(
@@ -1607,8 +1612,8 @@ def stub_continuation_subprocess(monkeypatch) -> None:
     def _fake_run(cmd, *args, **kwargs):  # noqa: ANN001
         return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(cc.subprocess, "check_output", _fake_check_output)
-    monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, cc, "subprocess.check_output", _fake_check_output)
+    setattr_in(monkeypatch, cc, "subprocess.run", _fake_run)
 
 
 # ---------------------------------------------------------------------------
@@ -1862,7 +1867,13 @@ def test_continuation_target_file_is_in_tmp(
     from nexus.cli import main
 
     result = runner.invoke(main, ["command-context", "continuation"])
-    assert "/tmp/nexus-continuation-" in result.output
+    if os.name == "nt":
+        # Windows has no /tmp: the handoff goes to the user's temp directory.
+        import tempfile
+
+        assert f"{Path(tempfile.gettempdir()) / 'nexus-continuation-'}" in result.output
+    else:
+        assert "/tmp/nexus-continuation-" in result.output
 
 
 # ---------------------------------------------------------------------------

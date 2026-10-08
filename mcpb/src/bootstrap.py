@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Resolve-with-retry bootstrap for the Claude Desktop .mcpb bundle (nexus-r433b).
 
-Claude Desktop launches this file via ``uv run --no-project`` (see
-manifest.json's mcp_config). The bundle's real dependency resolution — the
+Claude Desktop launches this file via ``uv tool run ... --python >=3.12
+python`` (see manifest.json's mcp_config), outside the bundle's project. The
+launcher is a tool run, not ``uv run --no-project``, because ``uv run`` searches
+the bundle directory and every parent for a ``.venv`` and runs the first one: a
+``~/.venv`` or a ``C:\\.venv`` above the bundle supplied the interpreter
+(nexus-92gxf). A tool environment is built from a managed or PATH interpreter
+only. The bundle's real dependency resolution — the
 step that pulls ``conexus[local]>=X.Y.Z`` from PyPI — used to happen inside
 the ``uv run src/server.py`` invocation itself, which meant a resolver
 failure killed the extension before any of our code ran. PyPI's simple
@@ -26,8 +31,8 @@ output: behavior unchanged from before this file existed.
 Set ``NX_MCPB_SKIP_RESOLVE_RETRY=1`` to skip the sync-with-retry and hand
 off to the server directly (the pre-r433b behavior).
 
-Deliberately conservative syntax: under ``--no-project`` uv runs this on
-whatever Python it discovers, which need not satisfy the bundle's own
+Deliberately conservative syntax: the launcher runs this on whatever Python
+>=3.12 uv finds, which need not satisfy the bundle's own
 ``requires-python`` (that constraint governs the project venv ``uv sync``
 creates, not this file). Standard library only, for the same reason: conexus
 is not installed yet when this runs.
@@ -80,16 +85,46 @@ def _is_resolution_unavailable(output: str) -> bool:
     )
 
 
+def _has_opencv_python(bundle_dir):
+    """True when the bundle venv still carries opencv-python's metadata.
+
+    Both OpenCV dists write ``cv2/``. The bundle now overrides opencv-python
+    out and keeps opencv-python-headless; uninstalling opencv-python from a
+    venv that had both deletes ``cv2/`` and leaves headless installed with no
+    files, so the sync that removes it must also reinstall headless.
+    """
+    venv = os.path.join(bundle_dir, ".venv")
+    candidates = [os.path.join(venv, "Lib", "site-packages")]
+    lib = os.path.join(venv, "lib")
+    if os.path.isdir(lib):
+        candidates += [os.path.join(lib, d, "site-packages") for d in os.listdir(lib)]
+    for site in candidates:
+        if os.path.isdir(site) and any(
+            n.startswith("opencv_python-") and n.endswith(".dist-info") for n in os.listdir(site)
+        ):
+            return True
+    return False
+
+
 def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_RETRY_SLEEPS, uv="uv"):
     """``uv sync`` the bundle env, retrying only the propagation-window
     failure class. Raises SystemExit on terminal failure."""
     attempts = len(sleeps) + 1
     output = ""
+    cmd = [uv, "sync", "--directory", bundle_dir]
+    if _has_opencv_python(bundle_dir):
+        cmd += ["--reinstall-package", "opencv-python-headless"]
     for i in range(attempts):
         proc = run(
-            [uv, "sync", "--directory", bundle_dir],
+            cmd,
             capture_output=True,
-            text=True,
+            # uv must not read the host's protocol stdin (the MCP stream).
+            stdin=subprocess.DEVNULL,
+            # Not text=True: that decodes with the Windows locale codepage, so
+            # an odd byte in uv's output would turn a retryable resolver
+            # failure into a UnicodeDecodeError traceback.
+            encoding="utf-8",
+            errors="replace",
         )
         if proc.returncode == 0:
             return
@@ -163,12 +198,17 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
 
 # ── Windows Job Object (kill-on-close) ──────────────────────────────────────
 #
-# Standard library only: this file runs under ``uv run --no-project`` BEFORE
+# Standard library only: this file runs under the tool-run launcher BEFORE
 # conexus is installed, so it cannot import nexus.util.win_job. The constants
 # and struct layout below duplicate that module's; tests/test_mcpb_bootstrap.py
 # pins the two against drift.
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+# A child spawned with CREATE_BREAKAWAY_FROM_JOB may leave the job. Everything
+# else still joins it: the MCP server tree keeps the kill-on-close guarantee,
+# and only a daemon that must outlive the extension (the aspect worker, spawned
+# by nexus.daemon.aspect_worker_daemon) asks to leave.
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
@@ -254,7 +294,9 @@ class _KillOnCloseJob(object):
         if not handle:
             raise OSError("CreateJobObjectW failed")
         info = _job_struct()()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        )
         # ctypes.pointer, not byref: a test double can read .contents back.
         ok = self._k.SetInformationJobObject(
             handle,

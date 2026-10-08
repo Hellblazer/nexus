@@ -34,6 +34,7 @@ import sys
 import types
 
 import pytest
+from tests._module_seam import module_time, setattr_in
 
 pytestmark = pytest.mark.lint
 
@@ -132,7 +133,7 @@ def _run_one_with_fake_subprocess(monkeypatch, tmp_path: pathlib.Path):
     # answers "ready" on its first call, and turn_timeout=0 means the
     # Stop-wait loop body never runs; time.sleep is stubbed out entirely
     # so the hardcoded end-of-run sleeps (0.3s/1s/3s) cost nothing either.
-    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    module_time(monkeypatch, mod).sleep = lambda _s: None
     calls: list[dict] = []
 
     def fake_run(cmd, *a, **kw):
@@ -140,7 +141,7 @@ def _run_one_with_fake_subprocess(monkeypatch, tmp_path: pathlib.Path):
         stdout = "Bypass permissions on\n" if isinstance(cmd, list) and "capture-pane" in cmd else ""
         return types.SimpleNamespace(stdout=stdout, returncode=0, args=cmd)
 
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
     args = types.SimpleNamespace(
         out=str(tmp_path / "out"), python=sys.executable, hook_python="python3",
         claude="fake-claude-binary-not-executed", sock="test-veh77-sock",
@@ -236,7 +237,7 @@ def test_server_is_killed_when_run_one_raises(monkeypatch, tmp_path: pathlib.Pat
     during a sleep propagates out of run_one(); the server still has to go."""
     mod = _load_run_ladder()
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", FAKE_TOKEN)
-    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    module_time(monkeypatch, mod).sleep = lambda _s: None
     calls: list[list[str]] = []
 
     def fake_run(cmd, *a, **kw):
@@ -246,7 +247,7 @@ def test_server_is_killed_when_run_one_raises(monkeypatch, tmp_path: pathlib.Pat
         stdout = "Bypass permissions on\n" if "capture-pane" in cmd else ""
         return types.SimpleNamespace(stdout=stdout, returncode=0, args=cmd)
 
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
     args = types.SimpleNamespace(
         out=str(tmp_path / "out"), python=sys.executable, hook_python="python3",
         claude="fake-claude-binary-not-executed", sock="test-veh77-sock",

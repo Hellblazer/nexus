@@ -33,7 +33,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -42,6 +41,10 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from nexus.db.pg_provision import bootstrap_superuser
+
+from tests._child_process import java_available, java_executable, pg_data_tempdir, stop_group
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     create_tenant_token,
@@ -49,6 +52,7 @@ from tests.db._service_fixture import (
     spawn_service,
     wait_for_service,
 )
+from tests._pg_ctl import pg_ctl_start
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -56,14 +60,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 _PG_BIN    = pg_bin_dir()
 
-_INITDB   = _PG_BIN / "initdb"
-_PG_CTL   = _PG_BIN / "pg_ctl"
-_PSQL     = _PG_BIN / "psql"
-_CREATEDB = _PG_BIN / "createdb"
+_INITDB   = _PG_BIN / exe_name("initdb")
+_PG_CTL   = _PG_BIN / exe_name("pg_ctl")
+_PSQL     = _PG_BIN / exe_name("psql")
+_CREATEDB = _PG_BIN / exe_name("createdb")
 
 # Java binary: honour JAVA_HOME if set, fall back to PATH
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = Path(_JAVA_HOME) / "bin" / "java" if _JAVA_HOME else Path(shutil.which("java") or "java")
+_JAVA = java_executable()
 
 _ALL_PREREQS = (
     _JAR.exists()
@@ -71,7 +74,7 @@ _ALL_PREREQS = (
     and _PG_CTL.exists()
     and _PSQL.exists()
     and _CREATEDB.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
 )
 
 pytestmark = [
@@ -122,15 +125,15 @@ def pg_instance():
     - Unix socket dir set to pgdata so it doesn't collide with any running system PG.
     - Torn down with ``pg_ctl stop -m immediate`` even on failure.
     """
-    pgdata = tempfile.mkdtemp(prefix="nexus_inttest_pg_")
+    pgdata = pg_data_tempdir("nexus_inttest_pg_")
     pg_port = _free_port()
     pglog = os.path.join(pgdata, "pg.log")
-    pg_user = os.environ["USER"]   # initdb creates a superuser with this name
+    pg_user = bootstrap_superuser()   # initdb creates a superuser with this name
 
     try:
         # 1. initdb — trust auth everywhere (no password prompts)
         subprocess.run(
-            [str(_INITDB), "-D", pgdata, "--no-locale", "-E", "UTF8", "--auth=trust"],
+            [str(_INITDB), "-D", pgdata, "-U", pg_user, "--no-locale", "-E", "UTF8", "--auth=trust"],
             check=True, capture_output=True,
         )
 
@@ -140,12 +143,7 @@ def pg_instance():
 
         # 3. Start and WAIT until server is ready (-w flag)
         #    -o passes extra options to postmaster; -k sets the Unix socket dir.
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}",
-             "start", "-w"],
-            check=True, capture_output=True,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
 
         # 4. Create the test database (trust auth means no -W needed)
         subprocess.run(
@@ -227,17 +225,7 @@ def service(pg_instance):
         yield f"http://127.0.0.1:{svc_port}", token, proc
     finally:
         # Kill the entire process group (JVM may spawn child threads)
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_group(proc, grace_s=5)
 
 
 @pytest.fixture(scope="module")

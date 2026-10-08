@@ -43,12 +43,16 @@ def bge_dir(tmp_path, monkeypatch):
 
 
 def _fake_downloader(payloads: dict[str, bytes]):
-    """Returns a downloader that writes a fixed payload keyed by URL suffix."""
+    """Returns a downloader that writes a fixed payload keyed by URL suffix.
+    ``model.onnx.xz`` is a 404 unless a payload names it: a release without the
+    compressed copy, the shape every test written before it assumed."""
     def _dl(url: str, dest: Path) -> None:
         for suffix, blob in payloads.items():
             if url.endswith(suffix):
                 dest.write_bytes(blob)
                 return
+        if url.endswith("/model.onnx.xz"):
+            raise sbm.BgeAssetAbsentError(f"404 {url}")
         raise AssertionError(f"unexpected download URL: {url}")
     return _dl
 
@@ -133,6 +137,8 @@ def test_partial_failure_cleans_orphan_model(bge_dir, monkeypatch):
     _pin_digests(monkeypatch, model=b"MODEL")
 
     def _dl(url, dest):
+        if url.endswith("/model.onnx.xz"):
+            raise sbm.BgeAssetAbsentError("404")
         if url.endswith("/model.onnx"):
             dest.write_bytes(b"MODEL")
             return
@@ -224,11 +230,13 @@ def test_urls_are_self_hosted_github_assets(bge_dir, monkeypatch):
 
     def _dl(url, dest):
         urls.append(url)
+        if url.endswith(".xz"):
+            raise sbm.BgeAssetAbsentError("404")
         dest.write_bytes(b"M" if url.endswith("/model.onnx") else b"T")
 
     sbm.fetch_service_bge_onnx(downloader=_dl)
     base = "https://github.com/Hellblazer/nexus/releases/download/ci-assets-bge-768-v1/"
-    assert urls == [base + "model.onnx", base + "tokenizer.json"]
+    assert urls == [base + "model.onnx.xz", base + "model.onnx", base + "tokenizer.json"]
     assert not any("huggingface" in u for u in urls)
 
 
@@ -350,3 +358,98 @@ def test_default_downloader_exhausts_retries_and_raises(tmp_path, monkeypatch):
     with pytest.raises(httpx.ConnectError):
         sbm._httpx_stream("https://example.invalid/f", tmp_path / "f")
     assert len(attempts) == sbm._RETRY_ATTEMPTS
+
+
+# ── model.onnx.xz: the compressed copy on the same tag ───────────────────────
+
+_MODEL = b"".join(hashlib.sha256(i.to_bytes(4, "big")).digest() for i in range(2048))  # 64 KB, incompressible
+
+
+def _xz(data: bytes) -> bytes:
+    import lzma as _lzma  # noqa: PLC0415 - test-local helper
+
+    return _lzma.compress(data, preset=6)
+
+
+def test_xz_present_is_decompressed_and_gated_on_the_raw_digest(bge_dir, monkeypatch):
+    _pin_digests(monkeypatch, model=_MODEL, tokenizer=b"TOK")
+    urls: list[str] = []
+    payloads = {"/model.onnx.xz": _xz(_MODEL), "/tokenizer.json": b"TOK"}
+    inner = _fake_downloader(payloads)
+
+    def _dl(url, dest):
+        urls.append(url)
+        inner(url, dest)
+
+    sbm.fetch_service_bge_onnx(downloader=_dl)
+    base = "https://github.com/Hellblazer/nexus/releases/download/ci-assets-bge-768-v1/"
+    assert urls == [base + "model.onnx.xz", base + "tokenizer.json"]  # raw never fetched
+    assert (bge_dir / "model.onnx").read_bytes() == _MODEL
+    assert sorted(p.name for p in bge_dir.iterdir()) == ["model.onnx", "tokenizer.json"]
+
+
+def test_xz_whose_content_misses_the_pin_fails_and_leaves_nothing(bge_dir, monkeypatch):
+    _pin_digests(monkeypatch, model=_MODEL, tokenizer=b"TOK")
+    dl = _fake_downloader({"/model.onnx.xz": _xz(b"EVIL" * 100), "/tokenizer.json": b"TOK"})
+    with pytest.raises(RuntimeError, match="sha256 mismatch for model.onnx.xz after decompression"):
+        sbm.fetch_service_bge_onnx(downloader=dl)
+    assert list(bge_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("blob", "needle"),
+    [
+        (b"not an xz file at all", "not a readable xz file"),
+        (_xz(_MODEL)[:200], "truncated"),
+        (_xz(_MODEL) + b"trailing", "after the end of its xz stream"),
+    ],
+    ids=["garbage", "truncated", "trailing-data"],
+)
+def test_corrupt_xz_fails_loud_without_falling_back(bge_dir, monkeypatch, blob, needle):
+    """A broken compressed asset is a failure, never a reason to try the raw one."""
+    _pin_digests(monkeypatch, model=_MODEL, tokenizer=b"TOK")
+    urls: list[str] = []
+    inner = _fake_downloader({"/model.onnx.xz": blob, "/model.onnx": _MODEL, "/tokenizer.json": b"TOK"})
+
+    def _dl(url, dest):
+        urls.append(url)
+        inner(url, dest)
+
+    with pytest.raises(RuntimeError, match=needle):
+        sbm.fetch_service_bge_onnx(downloader=_dl)
+    assert not any(u.endswith("/model.onnx") for u in urls)
+    assert list(bge_dir.iterdir()) == []
+
+
+def test_xz_output_cap_stops_a_bomb(bge_dir, monkeypatch):
+    big = b"\0" * (2 << 20)
+    _pin_digests(monkeypatch, model=big, tokenizer=b"TOK")
+    monkeypatch.setattr(sbm, "_MAX_MODEL_BYTES", 1 << 20)
+    monkeypatch.setattr(sbm, "_XZ_OUT_BLOCK", 1 << 16)
+    dl = _fake_downloader({"/model.onnx.xz": _xz(big), "/tokenizer.json": b"TOK"})
+    with pytest.raises(RuntimeError, match="decompresses past"):
+        sbm.fetch_service_bge_onnx(downloader=dl)
+    assert list(bge_dir.iterdir()) == []
+
+
+def test_a_transport_failure_on_the_xz_is_not_a_fallback(bge_dir, monkeypatch):
+    _pin_digests(monkeypatch, model=_MODEL, tokenizer=b"TOK")
+    urls: list[str] = []
+
+    def _dl(url, dest):
+        urls.append(url)
+        raise OSError("connection reset")
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        sbm.fetch_service_bge_onnx(downloader=_dl)
+    assert len(urls) == 1 and urls[0].endswith("/model.onnx.xz")
+
+
+def test_default_downloader_404_counts_as_absent():
+    req = httpx.Request("GET", "https://example.invalid/model.onnx.xz")
+    gone = httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+    busy = httpx.HTTPStatusError("503", request=req, response=httpx.Response(503, request=req))
+    assert sbm._is_absent(gone) is True
+    assert sbm._is_absent(busy) is False
+    assert sbm._is_absent(OSError("x")) is False
+    assert sbm._is_absent(sbm.BgeAssetAbsentError("x")) is True

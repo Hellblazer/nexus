@@ -21,7 +21,7 @@ Coverage:
   exit non-zero with operator-friendly messages on stdout/stderr.
 
 Tests run on every platform via fake-helper monkeypatching plus
-``monkeypatch.setattr("sys.platform", ...)``.
+``setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", ...)``.
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog
 from click.testing import CliRunner
+from tests._module_seam import setattr_in
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -664,7 +665,7 @@ class TestErrorHandling:
         ``macOS-only`` message."""
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "linux")
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code != 0
         assert "macOS-only" in result.output
@@ -1482,7 +1483,7 @@ def fake_open(monkeypatch) -> list[list[str]]:
         calls.append(list(argv))
         return _subprocess.CompletedProcess(args=argv, returncode=0)
 
-    monkeypatch.setattr("nexus.commands.dt.subprocess.run", fake_run)
+    setattr_in(monkeypatch, "nexus.commands.dt", "subprocess.run", fake_run)
     return calls
 
 
@@ -1517,7 +1518,7 @@ class TestDtOpenUuidForm:
         when the operator already has the UUID in hand."""
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "darwin")
         uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
         result = runner.invoke(main, ["dt", "open", uuid])
         assert result.exit_code == 0, result.output
@@ -1531,7 +1532,7 @@ class TestDtOpenUuidForm:
         operator-friendly message the index command uses."""
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "linux")
         uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
         result = runner.invoke(main, ["dt", "open", uuid])
         assert result.exit_code != 0
@@ -1558,7 +1559,7 @@ class TestDtOpenUuidForm:
             "nexus.commands.dt._resolve_dt_uri_from_tumbler",
             must_not_resolve,
         )
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "linux")
         result = runner.invoke(main, ["dt", "open", "1.2.3"])
         assert result.exit_code != 0
         assert "macOS-only" in result.output
@@ -1575,7 +1576,7 @@ class TestDtOpenTumblerForm:
         URI we open."""
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "darwin")
         fake_resolve_tumbler["uri"] = "x-devonthink-item://META-UUID"
         result = runner.invoke(main, ["dt", "open", "1.2.3"])
         assert result.exit_code == 0, result.output
@@ -1591,7 +1592,7 @@ class TestDtOpenTumblerForm:
         and source_uri second."""
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "darwin")
         fake_resolve_tumbler["uri"] = "x-devonthink-item://SOURCE-UUID"
         result = runner.invoke(main, ["dt", "open", "1.2.3"])
         assert result.exit_code == 0, result.output
@@ -1602,7 +1603,7 @@ class TestDtOpenTumblerForm:
     ):
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "darwin")
         fake_resolve_tumbler["uri"] = None  # no DT URI on the entry
         result = runner.invoke(main, ["dt", "open", "1.2.3"])
         assert result.exit_code != 0
@@ -1614,7 +1615,7 @@ class TestDtOpenTumblerForm:
     ):
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "darwin")
         fake_resolve_tumbler["error"] = "tumbler not found: 9.9.9"
         result = runner.invoke(main, ["dt", "open", "9.9.9"])
         assert result.exit_code != 0
@@ -1628,7 +1629,7 @@ class TestDtOpenMalformedArg:
     ):
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, ("nexus.devonthink", "nexus.aspect_readers"), "sys.platform", "darwin")
         result = runner.invoke(main, ["dt", "open", "not-a-tumbler-or-uuid"])
         assert result.exit_code != 0
         # Hint mentions both accepted shapes so the operator can correct it.

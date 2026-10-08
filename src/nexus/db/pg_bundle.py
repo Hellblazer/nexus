@@ -16,7 +16,8 @@ end to end by ``tests/db/test_pg_bundle_relocation.py``). This module owns only 
 LOCATE + idempotent EXTRACT + SELECT orchestration.
 
 Artifact contract (RDR-157 P3.1, bead nexus-vwvv5.10): the ``.txz`` extracts to a
-``bundle/`` tree containing ``bin/ include/ lib/ share/``; the CI artifact is named
+``bundle/`` tree containing ``bin/ lib/ share/`` (``include/`` too in bundles built
+before the build scripts pruned build-only files); the CI artifact is named
 ``nexus-pg-<target>`` for targets ``mac-arm64`` / ``linux-amd64`` / ``linux-arm64`` /
 ``windows-x64``.
 """

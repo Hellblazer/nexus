@@ -229,6 +229,30 @@ class TestAllowlist:
         # nested is still reported -- only the config-dir-root file is ambient.
         assert _is_allowlisted_config_dir_path("sub/mineru.pid") is False
 
+    def test_lockstep_markers_are_allowlisted(self) -> None:
+        """The conexus SessionStart lockstep hook writes ``cli_lockstep_marker``
+        (through ``version_lockstep_action.write_marker``) on the first session
+        after a plugin update, and ``ref_drift_lockstep_marker`` on a ref drift,
+        both under ``Path.home()``. MEASURED 2026-10-07: an engine-substrate run
+        failed this guard on ``MODIFIED cli_lockstep_marker``; the marker's mtime
+        (11:47:52 PDT, content 7.73.0) is the SessionStart:startup of the only
+        Claude Code session born that hour (18:47:51.9Z, cwd the primary,
+        entrypoint cli), the first after the 7.73.0 plugin landed (11:37:29).
+        Exact names: a sibling file is still reported."""
+        assert _is_allowlisted_config_dir_path("cli_lockstep_marker") is True
+        assert _is_allowlisted_config_dir_path("ref_drift_lockstep_marker") is True
+        assert _is_allowlisted_config_dir_path("sub/cli_lockstep_marker") is False
+        assert _is_allowlisted_config_dir_path("lockstep_state.json") is False
+
+    def test_lockstep_log_is_append_only_not_allowlisted(self) -> None:
+        """``lockstep.log`` is the same action's append-only record of a real
+        upgrade. It belongs to the append-only rule, which still fails a
+        truncation, never to the allowlist."""
+        from tests.conftest import _APPEND_ONLY_REAL_CONFIG_LOGS
+
+        assert "lockstep.log" in _APPEND_ONLY_REAL_CONFIG_LOGS
+        assert _is_allowlisted_config_dir_path("lockstep.log") is False
+
     def test_service_registry_election_flocks_are_allowlisted(self) -> None:
         """ServiceRegistry per-scope election flocks churn independently of
         pytest and must not trip the guard.

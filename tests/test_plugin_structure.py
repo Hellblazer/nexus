@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 import pytest
+from packaging.requirements import Requirement
 
 from plugin_channel import (
     assert_tag_visibility,
@@ -878,15 +879,18 @@ class TestMarketplaceVersion:
             f"!= pyproject.toml {pv!r}"
         )
 
-    def test_mcpb_pins_conexus_local_extra(self) -> None:
-        """#1068: the .mcpb bundle MUST depend on ``conexus[local]`` (not bare
-        ``conexus``) so its venv resolves fastembed → the Tier-1 bge-768 local
-        embedder. With bare ``conexus`` the embedder silently falls back to the
-        384-dim ONNX MiniLM while collections are indexed at 768/1024-dim, so
-        every Desktop T3 search hits a dimension mismatch and returns zero
-        results. The .mcpb cannot run the interactive ``nx init`` choice, so the
-        extra must be pinned. Also assert the pin version tracks the mcpb
-        version, so a release bump can't silently drop or stale it."""
+    def test_mcpb_pins_bare_conexus(self) -> None:
+        """The .mcpb bundle depends on bare ``conexus``, the same distribution
+        the Claude Code plugin's ``nx-mcp`` runs from (a generation built
+        without extras). #1068 pinned ``conexus[local]`` because the client
+        once embedded T3 queries itself; since the service-vector cutover the
+        engine embeds every T3 write and search, and collection names follow
+        the service's bge-768 token whether or not fastembed is importable
+        (nexus-xq8f9, ``corpus.effective_embedding_model_for_writes``). With
+        fastembed present the extension's ``LocalEmbeddingFunction`` (plan
+        session cache) picked a different model than the plugin's and fetched
+        its own bge copy on first use. Also assert the pin version tracks the
+        mcpb version, so a release bump can't silently drop or stale it."""
         mcpb_pyproject = REPO_ROOT / "mcpb" / "pyproject.toml"
         assert mcpb_pyproject.exists()
         with mcpb_pyproject.open("rb") as f:
@@ -894,9 +898,9 @@ class TestMarketplaceVersion:
         deps = mcpb_proj["dependencies"]
         conexus_dep = next((d for d in deps if d.startswith("conexus")), None)
         assert conexus_dep is not None, "mcpb/pyproject.toml has no conexus dependency"
-        assert "conexus[local]" in conexus_dep, (
-            f"mcpb/pyproject.toml must pin conexus[local] (the fastembed extra), "
-            f"got {conexus_dep!r} — #1068: bare conexus breaks Desktop T3 search."
+        assert Requirement(conexus_dep).extras == set(), (
+            f"mcpb/pyproject.toml must pin bare conexus, got {conexus_dep!r}: an "
+            "extra makes the extension's environment differ from the plugin's."
         )
         # The pin version must equal the mcpb version (release bump must update
         # both the [project].version AND this dependency pin in lock-step).

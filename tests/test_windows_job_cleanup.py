@@ -20,6 +20,7 @@ import yaml
 
 import windows_job_cleanup as cleanup
 from windows_job_cleanup import Proc
+from tests._module_seam import setattr_in
 
 REPO = Path(__file__).resolve().parent.parent
 TEMP = r"C:\actions-runner\_work\_temp"
@@ -112,7 +113,7 @@ def _taskkill(monkeypatch: pytest.MonkeyPatch, rc: int, out: str = "", err: str 
         seen.append(cmd)
         return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
 
-    monkeypatch.setattr(cleanup.subprocess, "run", fake_run)
+    setattr_in(monkeypatch, cleanup, "subprocess.run", fake_run)
     return seen
 
 

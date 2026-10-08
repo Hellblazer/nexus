@@ -29,6 +29,7 @@ _spec = importlib.util.spec_from_file_location("measure_search_per_collection", 
 drv = importlib.util.module_from_spec(_spec)
 # registered before exec: the dataclasses in the script resolve their module by name
 import sys  # noqa: E402
+from tests._module_seam import module_time
 
 sys.modules[_spec.name] = drv
 _spec.loader.exec_module(drv)
@@ -210,7 +211,7 @@ def test_a_batched_run_that_reaches_the_route_is_not_a_baseline(monkeypatch):
 def test_the_exit_code_for_an_unserved_route_is_three(monkeypatch):
     engine, cols, make_client = _world(monkeypatch, route=False)
     monkeypatch.setattr(drv, "_live_world", lambda: (cols, make_client, search_cross_corpus, SearchDiagnostics))
-    monkeypatch.setattr(drv.time, "sleep", lambda _s: None)
+    module_time(monkeypatch, drv).sleep = lambda _s: None
     assert drv.main(["latency", "--rounds", "1", "--warmup", "0", "--shapes", "mcp", "--pause", "0"]) == 3
     assert drv.EXIT_ROUTE_NOT_SERVED == 3
 

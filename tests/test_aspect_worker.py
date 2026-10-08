@@ -39,6 +39,7 @@ import pytest
 from nexus.db.t2 import T2Database
 
 from tests._catalog_fixture_ops import register_real_doc_id
+from tests._module_seam import module_time
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id (and,
 # since the same turn, aspect_extraction_queue.doc_id via the engine's
@@ -1738,7 +1739,7 @@ class TestWaitForWakeOrTimeoutBackstopDeadline:
         from nexus.aspect_worker import AspectExtractionWorker, DEFAULT_POLL_INTERVAL_S
 
         fake_now = [0.0]
-        monkeypatch.setattr(mod.time, "monotonic", lambda: fake_now[0])
+        module_time(monkeypatch, mod).monotonic = lambda: fake_now[0]
 
         class _FakeEvent:
             def wait(self, timeout: float) -> bool:

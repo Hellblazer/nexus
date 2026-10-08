@@ -3,8 +3,8 @@
 
 nexus-efk2h (RDR-224 Phase 4): the plugin-resident hooks were launched as
 ``python3``, which is not on PATH on stock Windows, so they never fired there.
-They now launch through ``uv run --no-project --no-config --quiet``, and each
-script's PEP 723 block carries the 3.12 floor. ``tests/test_hooks_json_shape_lint.py``
+They now launch through ``uv tool run ... --python >=3.12 python`` (the argv is
+``tests/_hook_wiring.UV_LAUNCHER_ARGV``), which carries the 3.12 floor. ``tests/test_hooks_json_shape_lint.py``
 pins the SHAPE and the blocks; this file
 runs the real argv, with the plugin root substituted, and checks the outcome:
 
@@ -23,6 +23,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+from collections.abc import Callable, Mapping
+from pathlib import Path
 
 import pytest
 
@@ -35,7 +38,6 @@ _CRED_READ = {
     "tool_name": "Bash",
     "tool_input": {"command": "cat ~/.claude/.credentials.json"},
     "session_id": "launcher-test",
-    "cwd": "/tmp",
 }
 
 
@@ -57,12 +59,33 @@ def _argv(hook: dict) -> list[str]:
     ]
 
 
-def _run(hook: dict, payload: dict) -> subprocess.CompletedProcess[str]:
-    # A scrubbed env: no VIRTUAL_ENV, no PYTHON*, only what a hook has anyway.
-    env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
+def _hook_env(base: Mapping[str, str], platform: str) -> dict[str, str]:
+    """The environment a hook runs in: no VIRTUAL_ENV, no PYTHON*, only what a
+    hook has anyway.
+
+    POSIX gets exactly PATH and HOME, which is all uv needs there. Windows has
+    no HOME and a bare PATH is not enough: uv finds its managed Pythons and its
+    cache through USERPROFILE, LOCALAPPDATA and APPDATA, and Python itself needs
+    SYSTEMROOT, so the Windows arm keeps the rest of the host's environment and
+    drops only the interpreter-selection variables. Claude Code's own hook env
+    carries all of it. *platform* is injectable so both arms run on any host.
+    """
+    if platform != "win32":
+        return {"PATH": base["PATH"], "HOME": base.get("HOME", "")}
+    return {
+        k: v
+        for k, v in base.items()
+        if k.upper() != "VIRTUAL_ENV" and not k.upper().startswith("PYTHON")
+    }
+
+
+def _run(hook: dict, payload: dict, cwd: Path) -> subprocess.CompletedProcess[str]:
+    # The project directory is the hook's cwd; a tmp_path stands in for it on
+    # every host (there is no /tmp on Windows).
     return subprocess.run(
-        _argv(hook), input=json.dumps(payload), capture_output=True, text=True,
-        timeout=120, env=env, cwd="/tmp",
+        _argv(hook), input=json.dumps({**payload, "cwd": str(cwd)}), capture_output=True,
+        text=True, encoding="utf-8", timeout=120, env=_hook_env(os.environ, sys.platform),
+        cwd=cwd,
     )
 
 
@@ -88,9 +111,9 @@ def test_the_walk_finds_the_launcher_entries() -> None:
     }
 
 
-def test_the_credential_guard_still_denies_through_the_launcher() -> None:
+def test_the_credential_guard_still_denies_through_the_launcher(tmp_path: Path) -> None:
     (hook,) = [h for _, h in _launcher_entries() if _script(h) == "credential_print_guard.py"]
-    proc = _run(hook, _CRED_READ)
+    proc = _run(hook, _CRED_READ, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "requires Python 3.12" not in proc.stderr
     verdict = json.loads(proc.stdout)["hookSpecificOutput"]
@@ -101,20 +124,21 @@ def test_the_credential_guard_still_denies_through_the_launcher() -> None:
     "script",
     ["subagent_git_write_requires_orchestrator.py", "credential_print_guard.py"],
 )
-def test_the_bash_gates_run_and_allow_a_benign_command(script: str) -> None:
+def test_the_bash_gates_run_and_allow_a_benign_command(script: str, tmp_path: Path) -> None:
     (hook,) = [h for _, h in _launcher_entries() if _script(h) == script]
     payload = {**_CRED_READ, "tool_input": {"command": "ls"}}
-    proc = _run(hook, payload)
+    proc = _run(hook, payload, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "requires Python 3.12" not in proc.stderr
     assert "deny" not in proc.stdout
 
 
-def test_the_mailbox_drain_runs_under_the_floor_and_fails_open() -> None:
+def test_the_mailbox_drain_runs_under_the_floor_and_fails_open(tmp_path: Path) -> None:
     (hook,) = [h for _, h in _launcher_entries() if _script(h) == "mailbox_drain.py"]
     proc = _run(
         hook,
-        {"hook_event_name": "UserPromptSubmit", "prompt": "hi", "session_id": "launcher-test", "cwd": "/tmp"},
+        {"hook_event_name": "UserPromptSubmit", "prompt": "hi", "session_id": "launcher-test"},
+        tmp_path,
     )
     assert proc.returncode == 0, proc.stderr
     assert "requires Python 3.12" not in proc.stderr
@@ -122,7 +146,7 @@ def test_the_mailbox_drain_runs_under_the_floor_and_fails_open() -> None:
 
 @pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
 @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
-def test_auto_approve_allows_through_uv_and_the_shim(event: str) -> None:
+def test_auto_approve_allows_through_uv_and_the_shim(event: str, tmp_path: Path) -> None:
     (hook,) = [
         h for e, h in _launcher_entries()
         if e == event and launcher_script_args(h)[-1] == "auto-approve"
@@ -130,6 +154,135 @@ def test_auto_approve_allows_through_uv_and_the_shim(event: str) -> None:
     proc = _run(
         hook,
         {"hook_event_name": event, "tool_name": "mcp__plugin_conexus_nexus__search", "session_id": "launcher-test"},
+        tmp_path,
     )
     assert proc.returncode == 0, proc.stderr
     assert "allow" in proc.stdout, proc.stdout
+
+
+def test_the_hook_env_is_posix_minimal_and_windows_keeps_what_uv_needs() -> None:
+    """Both arms run here. The POSIX arm must stay scrubbed (so an ambient
+    VIRTUAL_ENV cannot make the launcher look as though it works), and the
+    Windows arm must carry the user-profile variables uv resolves its Pythons
+    through."""
+    base = {
+        "PATH": "p", "HOME": "h", "VIRTUAL_ENV": "v", "PYTHONPATH": "x", "UV_CACHE_DIR": "c",
+        "USERPROFILE": "C:\\Users\\u", "SYSTEMROOT": "C:\\Windows", "LOCALAPPDATA": "l",
+        "PythonHome": "y",
+    }
+    assert _hook_env(base, "linux") == {"PATH": "p", "HOME": "h"}
+    win = _hook_env(base, "win32")
+    assert {"PATH", "USERPROFILE", "SYSTEMROOT", "LOCALAPPDATA", "UV_CACHE_DIR"} <= set(win)
+    assert not {"VIRTUAL_ENV", "PYTHONPATH", "PythonHome"} & set(win)
+
+
+# -- the known blocking failure (RDR-224 review finding B, nexus-f9bgu.36) -----------
+
+#: Events on which Claude Code treats a hook's exit 2 as BLOCKING: the tool call,
+#: the permission request, or the prompt is refused.
+_BLOCKING_EVENTS = {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}
+
+
+def _alias_executable(src: Path, bindir: Path, symlink: Callable[[Path, Path], None] = os.symlink) -> Path:
+    """Put *src* into *bindir* under its own name (``uv.exe`` keeps its suffix on
+    Windows) and return the alias.
+
+    A symlink where the token may create one; otherwise a hard link, otherwise a
+    copy. A non-elevated Windows token holds no SeCreateSymbolicLinkPrivilege, so
+    ``os.symlink`` raises WinError 1314 there (the win-release runner, nexus-f9bgu),
+    and a hard link fails across volumes. The caller needs only a runnable uv in
+    *bindir*, which all three give. *symlink* is injectable so a test can model
+    the refusing token without patching ``os`` process-wide. The fallbacks take the
+    resolved target: Linux ``link(2)`` does not follow a symlink, so hard-linking a
+    pipx-installed ``uv`` (itself a symlink) would make another symlink."""
+    dst = bindir / src.name
+    try:
+        symlink(src, dst)
+    except OSError:
+        try:
+            os.link(src.resolve(), dst)
+        except OSError:
+            shutil.copy2(src.resolve(), dst)
+    return dst
+
+
+def _no_interpreter_env(tmp_path, *, symlink: Callable[[Path, Path], None] = os.symlink) -> dict[str, str]:
+    """uv alone on PATH, an empty managed-Python directory, downloads off, offline:
+    a box where uv can find no interpreter and cannot fetch one.
+
+    ``UV_PYTHON_PREFERENCE=only-managed`` is what makes that hold on Windows: there
+    uv also discovers interpreters through the PEP 514 registry (every Python uv or
+    python.org installed registers there) and the py launcher, neither of which
+    reads PATH, so on a host that has any Python the run found one and exited 0
+    (measured on qwentescence, 2026-10-07). Restricting discovery to the empty
+    managed directory models a box with no Python on every platform; on POSIX,
+    where PATH was already the only source, it changes nothing."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _alias_executable(Path(shutil.which("uv")), bindir, symlink)
+    pydir = tmp_path / "py"
+    pydir.mkdir()
+    return {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "UV_PYTHON_INSTALL_DIR": str(pydir),
+        "UV_PYTHON_PREFERENCE": "only-managed",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_OFFLINE": "1",
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+    }
+
+
+def test_the_uv_alias_needs_no_symlink_privilege(tmp_path) -> None:
+    """The no-interpreter box puts uv alone on PATH through an alias. A non-elevated
+    Windows token (the win-release runner's account, ghwin, is not an Administrator)
+    cannot create a symlink: os.symlink raises WinError 1314. The alias only has to
+    be a runnable uv in that directory, so a refused symlink falls back to a hard
+    link or a copy. Refusing the symlink here models that token on any host."""
+    def _refuse(*_a, **_k):
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    env = _no_interpreter_env(tmp_path, symlink=_refuse)
+    alias = Path(env["PATH"]) / Path(shutil.which("uv")).name
+    assert alias.is_file() and not alias.is_symlink(), alias
+    proc = subprocess.run([str(alias), "--version"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0 and proc.stdout.startswith("uv "), (proc.returncode, proc.stderr)
+
+
+def test_uv_with_no_interpreter_exits_2_which_blocks_five_entries(tmp_path) -> None:
+    """MEASURED, not fixed: hooks.json launches in exec form (``args`` set, so no
+    shell), and an exec-form entry cannot map a launcher failure to a non-blocking
+    code. With no Python 3.12+ findable and none fetchable (offline, proxied,
+    air-gapped), ``uv run`` exits 2; Claude Code reads exit 2 as a block on
+    PreToolUse, PermissionRequest and UserPromptSubmit. The test pins that premise
+    so a uv release that changes the code, or a hooks.json change that moves an
+    entry across the blocking line, is noticed; conexus/README.md documents the
+    remedy and the finding's record (nexus_rdr/224-phase4-fix-A-B) the options."""
+    env = _no_interpreter_env(tmp_path)
+    entries = _launcher_entries()
+    blocking = [(e, h) for e, h in entries if e in _BLOCKING_EVENTS]
+    assert len(blocking) == 5, [(e, _script(h)) for e, h in blocking]
+    # The plugin root is a copy outside the repo: `--directory <plugin root>` makes uv
+    # discover interpreters from there, and the repo's own .venv above conexus/ would
+    # supply one.
+    root = tmp_path / "plugin"
+    shutil.copytree(REPO_ROOT / "conexus" / "hooks", root / "hooks")
+    for event, hook in entries:
+        argv = [
+            hook["command"],
+            *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in hook["args"]),
+        ]
+        proc = subprocess.run(
+            argv, input="{}", capture_output=True, text=True, timeout=60,
+            env=env, cwd=str(tmp_path),
+        )
+        assert proc.returncode == 2, (event, _script(hook), proc.returncode, proc.stderr)
+        assert "No interpreter found" in proc.stderr, (event, _script(hook), proc.stderr)
+
+
+def test_the_readme_documents_the_blocking_failure_and_its_remedy() -> None:
+    text = (REPO_ROOT / "conexus" / "README.md").read_text()
+    assert "exits 2" in text and "uv python install 3.12" in text, (
+        "conexus/README.md must say that uv exits 2 when it finds no Python and cannot "
+        "fetch one, that this blocks, and the remedy"
+    )

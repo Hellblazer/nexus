@@ -105,7 +105,10 @@ _RECEIVED_TENANTS: list[str] = []
 import httpx
 import pytest
 
+from nexus.daemon.service_registry import service_identity
+
 from nexus.daemon.service_registry import ServiceRegistry
+from tests._module_seam import module_time
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
 
@@ -257,7 +260,24 @@ class _FakeHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: A002 — matches BaseHTTPRequestHandler signature
         pass  # suppress test noise
 
+    def parse_request(self) -> bool:
+        self._request_body: bytes | None = None
+        return super().parse_request()
+
+    def _raw_body(self) -> bytes:
+        """The request body, read off the socket once per request.
+
+        Every response path drains it first (``_send``): a handler that answers
+        401/404 before reading the body closes the connection with unread bytes
+        in its receive buffer, and Windows turns that close into a TCP reset, so
+        the client reads WinError 10053/10054 instead of the response."""
+        if getattr(self, "_request_body", None) is None:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            self._request_body = self.rfile.read(length) if length else b""
+        return self._request_body
+
     def _send(self, status: int, body: Any) -> None:
+        self._raw_body()
         payload = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -290,8 +310,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
     def _handle_mint(self) -> None:
         global _MINTED_DATA_TOKEN, _MINT_CALLS
         _MINT_CALLS += 1
-        length = int(self.headers.get("Content-Length", "0"))
-        _ = json.loads(self.rfile.read(length)) if length else {}
+        _ = json.loads(self._raw_body() or b"{}")
         if _MINT_FORCE_STATUS is not None:
             self._send(_MINT_FORCE_STATUS, {"error": "forced mint failure"})
             return
@@ -330,8 +349,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
             # open for that long before responding 200.
             if _HOOK_FAILURE_RECORD_DELAY_S:
                 time.sleep(_HOOK_FAILURE_RECORD_DELAY_S)
-            length = int(self.headers.get("Content-Length", "0"))
-            _ = json.loads(self.rfile.read(length)) if length else {}
+            _ = json.loads(self._raw_body() or b"{}")
             self._send(200, {"ok": True})
             return
         if path != "/v1/echo":
@@ -345,8 +363,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
             return
         _RECEIVED_TENANTS.append(self.headers.get("X-Nexus-Tenant", ""))
         self._maybe_hold()
-        length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length)) if length else {}
+        body = json.loads(self._raw_body() or b"{}")
         self._send(200, {"echo": body})
 
     def do_GET(self):  # noqa: N802
@@ -422,7 +439,7 @@ def _config_dir() -> Path:
 def _publish_lease(*, host: str = "127.0.0.1", port: int, token: str) -> None:
     reg = ServiceRegistry(dir=_config_dir(), tier="storage_service")
     reg.publish(
-        str(os.getuid()),
+        service_identity(),
         endpoint={"host": host, "port": port, "token": token},
         version="test",
         owner_token="refreshable-client-test-owner",
@@ -1041,7 +1058,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/catalog/manifest/write_many",
             json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
@@ -1068,7 +1085,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/catalog/manifest/write_many",
             json={"docs": [], "collection": "docs__o__x__v1"},
@@ -1094,7 +1111,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/catalog/manifest/write_many",
             json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
@@ -1120,7 +1137,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/memory/put", json={"chunks": [{"chash": "a"}]},
         )
@@ -1144,7 +1161,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        module_time(monkeypatch, mod).sleep = lambda s: None
         with capture_logs() as logs:
             store._once_with_gateway_retry(
                 "POST", "/v1/catalog/manifest/write_many",
@@ -1170,7 +1187,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             raise self._http_error(504)
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        module_time(monkeypatch, mod).sleep = lambda s: None
         with pytest.raises(httpx.HTTPStatusError):
             store._once_with_gateway_retry(
                 "POST", "/v1/catalog/manifest/write_many",

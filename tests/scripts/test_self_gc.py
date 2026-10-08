@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +21,7 @@ from _generation_harness import SAFE_BASE_PATH, stub_uv
 from click.testing import CliRunner
 
 from test_self_install import _hosting_generation
+from tests._module_seam import setattr_in
 
 
 def _stub_ps(bin_dir: Path, lines: list[str]) -> None:
@@ -58,7 +58,7 @@ def test_gc_reaps_without_installing(bed, monkeypatch) -> None:
 
     tools, _, _ = bed
     gens = _five_generations(tools)
-    monkeypatch.setattr(sys, "prefix", str(gens[-1]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[-1]))
 
     lines = perform_self_gc(keep=2)
 
@@ -75,7 +75,7 @@ def test_a_held_generation_is_kept_and_named(bed, monkeypatch) -> None:
     tools, _, stub_bin = bed
     gens = _five_generations(tools)
     _stub_ps(stub_bin, [f" 4242 {gens[0]}/bin/python -m nexus.mcp"])
-    monkeypatch.setattr(sys, "prefix", str(gens[-1]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[-1]))
 
     lines = perform_self_gc(keep=2)
 
@@ -91,7 +91,7 @@ def test_gc_never_reaps_the_generation_it_runs_from(bed, monkeypatch) -> None:
 
     tools, _, _ = bed
     gens = _five_generations(tools)
-    monkeypatch.setattr(sys, "prefix", str(gens[0]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[0]))
 
     perform_self_gc(keep=1)
 
@@ -104,7 +104,7 @@ def test_dry_run_deletes_nothing(bed, monkeypatch) -> None:
 
     tools, _, _ = bed
     gens = _five_generations(tools)
-    monkeypatch.setattr(sys, "prefix", str(gens[-1]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[-1]))
 
     lines = perform_self_gc(keep=1, dry_run=True)
 
@@ -118,7 +118,7 @@ def test_no_generation_layout_is_a_silent_no_op(bed, monkeypatch) -> None:
     from nexus.commands.self_cmd import perform_self_gc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
-    monkeypatch.setattr(sys, "prefix", str(tools.parent / "checkout" / ".venv"))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(tools.parent / "checkout" / ".venv"))
 
     assert perform_self_gc() is None
     assert not any(p.name.startswith("gen-") for p in tools.iterdir())
@@ -129,7 +129,7 @@ def test_the_click_surface(bed, monkeypatch) -> None:
 
     tools, _, _ = bed
     gens = _five_generations(tools)
-    monkeypatch.setattr(sys, "prefix", str(gens[-1]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[-1]))
 
     result = CliRunner().invoke(self_group, ["gc", "--keep", "2"])
 
@@ -143,7 +143,7 @@ def test_prune_uv_cache_flag_runs_uv_cache_prune(bed, monkeypatch) -> None:
 
     tools, _, stub_bin = bed
     gens = _five_generations(tools)
-    monkeypatch.setattr(sys, "prefix", str(gens[-1]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[-1]))
     calls: list[list[str]] = []
     # nexus-t10nc: prune_uv_cache calls bounded_subprocess.run_bounded, bound
     # in the self_cmd module. The passthrough has to be run_bounded too: it
@@ -173,7 +173,7 @@ def test_install_prunes_the_uv_cache_after_a_flip(bed, monkeypatch) -> None:
 
     tools, _, _ = bed
     gens = _five_generations(tools)
-    monkeypatch.setattr(sys, "prefix", str(gens[-1]))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(gens[-1]))
     monkeypatch.setattr(self_cmd, "perform_self_install", lambda **kw: gens[-1])
     pruned: list[bool] = []
     monkeypatch.setattr(self_cmd, "prune_uv_cache", lambda: pruned.append(True) or "uv cache prune: ok")

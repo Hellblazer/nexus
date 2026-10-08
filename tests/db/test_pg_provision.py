@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     CREDENTIALS_FILENAME,
     NEXUS_DB_NAME,
@@ -39,6 +40,7 @@ from nexus.db.pg_provision import (
     _port_accepting,
     _psql,
     _read_credentials,
+    bootstrap_superuser,
     discover_pg_binaries,
     is_provisioned,
     provision,
@@ -56,8 +58,12 @@ from nexus.db.pg_provision import (
 # project never does. Enforced by tests/db/test_pg_gate_is_self_provisioning.py.
 from tests.db._service_fixture import pg_bin_dir  # noqa: E402 — gate needs it here
 
+from nexus._install.layout_core import exe_name  # noqa: E402
+
 _PG_BIN = pg_bin_dir()
-_INITDB = _PG_BIN / "initdb"
+# initdb.exe on Windows: a bare "initdb" never exists there, so the gate
+# skipped every test on the one host the Windows paths need (nexus-ja4pq).
+_INITDB = _PG_BIN / exe_name("initdb")
 
 pytestmark = [
     pytest.mark.integration,
@@ -107,7 +113,7 @@ def _pin_discovery_to_the_built_bundle():
 def _query(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
     """Run a psql query and return stdout."""
     result = subprocess.run(
-        [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+        [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
         capture_output=True, text=True, check=True,
     )
@@ -152,7 +158,7 @@ def provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Pa
     Yields ``(result, config_dir)``.
     """
     config_dir = tmp_path_factory.mktemp("nexus_provision_test")
-    os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+    os_user = bootstrap_superuser()
 
     # Override NEXUS_CONFIG_DIR so provision() uses the tmp dir.
     old_env = os.environ.get("NEXUS_CONFIG_DIR")
@@ -165,7 +171,10 @@ def provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Pa
         else:
             os.environ["NEXUS_CONFIG_DIR"] = old_env
 
-    yield result, config_dir
+    # nexus-ja4pq: the cluster demands passwords; the raw psql calls in this
+    # module present the superuser's recorded one through PGPASSFILE.
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
 
     # Teardown: stop the cluster.
     pgdata = config_dir / "postgres"
@@ -186,21 +195,21 @@ class TestProvisionCreatesClusterAndRoles:
 
     def test_nexus_db_exists(self, provisioned, bins):
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(bins, result.port, "postgres", os_user,
                      f"SELECT 1 FROM pg_database WHERE datname = '{NEXUS_DB_NAME}'")
         assert row == "1", f"nexus database not found after provision"
 
     def test_nexus_admin_role_exists(self, provisioned, bins):
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(bins, result.port, "postgres", os_user,
                      "SELECT 1 FROM pg_roles WHERE rolname = 'nexus_admin'")
         assert row == "1", "nexus_admin role not found"
 
     def test_nexus_svc_role_exists(self, provisioned, bins):
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(bins, result.port, "postgres", os_user,
                      "SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc'")
         assert row == "1", "nexus_svc role not found"
@@ -218,7 +227,7 @@ class TestVectorExtensionProvisioned:
 
     def test_vector_extension_exists_in_nexus_db(self, provisioned, bins):
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(bins, result.port, NEXUS_DB_NAME, os_user,
                      "SELECT 1 FROM pg_extension WHERE extname = 'vector'")
         assert row == "1", "pgvector 'vector' extension not created in nexus DB"
@@ -265,7 +274,7 @@ class TestRoleAttributes:
     """nexus_admin and nexus_svc have the required NOSUPERUSER / NOBYPASSRLS attributes."""
 
     def _os_user(self) -> str:
-        return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        return bootstrap_superuser()
 
     def test_nexus_admin_nosuperuser(self, provisioned, bins):
         result, _ = provisioned
@@ -343,6 +352,13 @@ class TestCredentialsFile:
     def test_credentials_file_permissions(self, provisioned):
         result, config_dir = provisioned
         creds_path = config_dir / CREDENTIALS_FILENAME
+        if os.name == "nt":
+            # Mode bits read 0o666 for every Windows file; restrict_to_owner's
+            # protected DACL is the control, and it names the current user only.
+            from nexus._winsec import _windows_dacl_trustees, _windows_user_sid  # noqa: PLC0415 — Windows-only
+
+            assert _windows_dacl_trustees(str(creds_path)) == [_windows_user_sid()]
+            return
         mode = stat.S_IMODE(creds_path.stat().st_mode)
         assert mode == 0o600, (
             f"credentials file must be 0600, got {oct(mode)}"
@@ -437,7 +453,7 @@ class TestIdempotency:
         exists are safe regardless of collection order.
         """
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         # Drop the extension to simulate a pre-fix cluster.
         _psql(bins, result.port, NEXUS_DB_NAME, os_user, "DROP EXTENSION vector")
         assert _query(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -483,7 +499,7 @@ class TestIdempotency:
         the identical reason before its own role drop.
         """
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         creds_path = result.credentials_path
 
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -536,7 +552,7 @@ class TestIdempotency:
         grant via the very backfill under test, so sibling order is safe.
         """
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
 
         # Simulate a pre-round-2 install: nexus_admin holds no pg_monitor
         # membership at all (a from-scratch _create_roles run only ever grants
@@ -584,7 +600,7 @@ class TestIdempotency:
         attribute via the very backfill under test, so sibling order is safe.
         """
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
 
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "ALTER ROLE nexus_svc INHERIT")
@@ -627,7 +643,7 @@ class TestHealDiagViewGrantsAndOwnership:
         grant repair, which does not care about the view's SELECT list.
         """
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "CREATE SCHEMA IF NOT EXISTS nexus")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -648,7 +664,7 @@ class TestHealDiagViewGrantsAndOwnership:
         from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
 
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         assert _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT 1 FROM pg_class c JOIN pg_namespace n "
@@ -862,7 +878,7 @@ class TestReassignDiagViewOwnerBeforeRestart:
         nexus) are unaffected.
         """
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "CREATE SCHEMA IF NOT EXISTS nexus")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -892,7 +908,7 @@ class TestReassignDiagViewOwnerBeforeRestart:
         from nexus.db.pg_provision import reassign_diag_view_owner_before_restart
 
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         assert _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT 1 FROM pg_class c JOIN pg_namespace n "
@@ -1013,7 +1029,7 @@ class TestProvisionFastPathReassignsDiagView:
         and this fixture would silently stop reproducing the crash-loop
         shape it exists to prove."""
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "CREATE SCHEMA IF NOT EXISTS nexus")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -1183,12 +1199,13 @@ class TestFreshProvisionCreatesVectorDirectly:
                 os.environ.pop("NEXUS_CONFIG_DIR", None)
             else:
                 os.environ["NEXUS_CONFIG_DIR"] = old_env
-        yield result, config_dir
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
         _stop_pg(bins, config_dir / "postgres")
 
     def test_vector_is_owned_by_os_user_after_fresh_provision(self, provisioned, bins):
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         # Bare pg_roles.rolname, not ::regrole::text — the latter double-quotes
         # any role name that is not a valid unquoted SQL identifier (e.g. a
         # macOS account name containing a dot, "hal.hildebrand"), which broke
@@ -1206,7 +1223,7 @@ class TestFreshProvisionCreatesVectorDirectly:
 
     def test_pg_trgm_is_owned_by_os_user_after_fresh_provision(self, provisioned, bins):
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         owner = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT r.rolname FROM pg_extension e JOIN pg_roles r ON r.oid = e.extowner "
@@ -1220,12 +1237,12 @@ class TestFreshProvisionCreatesVectorDirectly:
         does, later, in-band, calling the SECURITY DEFINER function this
         test's sibling proves exists."""
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
 
     def test_pg_trgm_stays_in_public_after_fresh_provision(self, provisioned, bins):
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
 
     def test_relocate_function_exists_after_fresh_provision(self, provisioned, bins):
@@ -1234,7 +1251,7 @@ class TestFreshProvisionCreatesVectorDirectly:
         been relocated yet — this is what lets search-path-001's guard
         succeed on a from-scratch install's first-ever walk."""
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
@@ -1248,7 +1265,7 @@ class TestFreshProvisionCreatesVectorDirectly:
         CALL the function, or search-path-001's guard cannot reach it
         either."""
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT has_function_privilege('nexus_admin', "
@@ -1266,7 +1283,7 @@ class TestFreshProvisionCreatesVectorDirectly:
         extension at will. Regression pin for the explicit REVOKE ... FROM
         PUBLIC in relocate_vector_extensions_to_nexus_schema."""
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT has_function_privilege('public', "
@@ -1277,7 +1294,7 @@ class TestFreshProvisionCreatesVectorDirectly:
     def test_public_has_no_execute_on_unrelocate_function(self, provisioned, bins):
         """Companion to the above for the rollback-direction function."""
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         row = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
             "SELECT has_function_privilege('public', "
@@ -1291,7 +1308,7 @@ class TestFreshProvisionCreatesVectorDirectly:
         NOSUPERUSER nexus_admin trigger a relocation it cannot perform
         directly."""
         result, _ = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         # Bare pg_roles.rolname via a join, not ::regrole::text — see
         # test_vector_is_owned_by_os_user_after_fresh_provision's comment
         # for why the cast form breaks on a dotted os_user.
@@ -1343,7 +1360,7 @@ class TestRelocateVectorExtensionsToNexusSchema:
 
     @pytest.fixture()
     def os_user(self):
-        return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        return bootstrap_superuser()
 
     @pytest.fixture()
     def pre_existing_install_shape(self, provisioned, bins, os_user):
@@ -1366,7 +1383,8 @@ class TestRelocateVectorExtensionsToNexusSchema:
               "CREATE EXTENSION pg_trgm;")
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
-        yield result, config_dir
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
 
     def test_relocate_never_moves_the_extension_itself(
         self, pre_existing_install_shape, bins, os_user,
@@ -1532,7 +1550,7 @@ class TestProvisionDiagConformanceViewDefersToExisting:
         from nexus.db.chash_tables import CHASH_BEARING_TABLES
 
         result, config_dir = provisioned
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()
         _psql(bins, result.port, NEXUS_DB_NAME, os_user, "CREATE SCHEMA IF NOT EXISTS nexus")
         names = [t.table.split(".", 1)[1] for t in CHASH_BEARING_TABLES]
         for name, t in zip(names, CHASH_BEARING_TABLES):
@@ -1693,7 +1711,7 @@ def _psql_as(bins: PgBinaries, port: int, user: str, password: str, db: str, sql
     """Run psql as *user* with explicit password via PGPASSWORD env."""
     env = {**os.environ, "PGPASSWORD": password}
     result = subprocess.run(
-        [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+        [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
         capture_output=True, text=True, env=env, check=False,
     )
@@ -1713,7 +1731,8 @@ def e2e_provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult
     """
     config_dir = tmp_path_factory.mktemp("nexus_e2e_test")
     result = provision(config_dir, force_new_port=True)
-    yield result, config_dir
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
     pgdata = config_dir / "postgres"
     _stop_pg(bins, pgdata)
 
@@ -1815,7 +1834,8 @@ def grant_proof_cluster(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionRe
     """
     config_dir = tmp_path_factory.mktemp("nexus_grant_proof")
     result = provision(config_dir, force_new_port=True)
-    yield result, config_dir
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
     pgdata = config_dir / "postgres"
     _stop_pg(bins, pgdata)
 
@@ -1834,7 +1854,7 @@ class TestPublicSchemaGrantIsLoadBearing:
     """
 
     def _os_user(self) -> str:
-        return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        return bootstrap_superuser()
 
     def test_without_public_grant_nexus_admin_cannot_create_table(
         self, grant_proof_cluster, bins
@@ -1852,7 +1872,7 @@ class TestPublicSchemaGrantIsLoadBearing:
         # Attempt to CREATE TABLE in public as nexus_admin — must fail.
         env = {**os.environ, "PGPASSWORD": admin_pass}
         proc = subprocess.run(
-            [str(bins.psql), "-h", "127.0.0.1", "-p", str(result.port),
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(result.port),
              "-U", "nexus_admin", "-d", NEXUS_DB_NAME, "-t", "-A",
              "-c", "CREATE TABLE IF NOT EXISTS public.nx_grant_proof (id INT)"],
             capture_output=True, text=True, env=env,

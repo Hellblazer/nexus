@@ -14,6 +14,7 @@ Set ``OPENALEX_MAILTO`` to your email for the OpenAlex 'polite pool'
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import httpx
@@ -275,7 +276,6 @@ def _direct_lookup(url: str, *, expected_title: str = "") -> dict[str, Any]:
     The transient ``_lookup_title`` field is stripped from the
     returned dict regardless.
     """
-    import time  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     params = {}
     mailto = os.environ.get("OPENALEX_MAILTO", "").strip()
@@ -374,7 +374,6 @@ def enrich(title: str) -> dict[str, Any]:
     Retries up to 3 times on HTTP 429 (rate-limit) with the same
     5s/10s/20s backoff schedule as the Semantic Scholar enricher.
     """
-    import time  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     params = _params(title)
     for attempt in range(_MAX_RETRIES + 1):

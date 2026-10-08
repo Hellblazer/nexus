@@ -1,9 +1,17 @@
 {
   "sequential-thinking": {
-    "command": "npx",
+    "command": "uv",
     "args": [
-      "-y",
-      "@modelcontextprotocol/server-sequential-thinking"
+      "tool",
+      "run",
+      "--directory",
+      "${CLAUDE_PLUGIN_ROOT}",
+      "--no-config",
+      "--quiet",
+      "--python",
+      ">=3.12",
+      "python",
+      "${CLAUDE_PLUGIN_ROOT}/mcp/sequential_thinking.py"
     ],
     "alwaysLoad": true
   },

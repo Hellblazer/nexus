@@ -15,7 +15,7 @@ discipline):
 
 1. ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` env — each INDEPENDENTLY
    overrides its half (operator/test override).
-2. ServiceRegistry lease — tier="storage_service", scope=str(os.getuid()),
+2. ServiceRegistry lease — tier="storage_service", scope=service_identity(),
    exactly what the supervisor publishes.
 3. FAIL LOUD. The hardcoded ``http://127.0.0.1:8080`` default is retired —
    a silent wrong-port fallback is a correctness hazard, not a convenience.
@@ -38,6 +38,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.daemon.service_registry import service_identity
+
 from nexus.daemon.service_registry import ServiceRegistry
 
 
@@ -54,7 +56,7 @@ def _config_dir() -> Path:
 def _publish_lease(*, host: str = "127.0.0.1", port: int, token: str) -> None:
     reg = ServiceRegistry(dir=_config_dir(), tier="storage_service")
     reg.publish(
-        str(os.getuid()),
+        service_identity(),
         endpoint={"host": host, "port": port, "token": token},
         version="test",
         owner_token="pebfx1-test-owner",
@@ -228,7 +230,7 @@ class TestResolutionOrder:
             ttl=10.0, clock=lambda: 100.0,  # published "in the past"
         )
         reg.publish(
-            str(os.getuid()),
+            service_identity(),
             endpoint={"host": "127.0.0.1", "port": 4242, "token": "stale"},
             version="test",
             owner_token="pebfx1-test-owner",
@@ -533,6 +535,22 @@ class TestDualReviewFixes:
             assert result["ok"] is True
         finally:
             srv.shutdown()
+
+
+    def test_a_windows_connection_abort_is_a_mid_flight_reset(self):
+        """On Windows a connection the server drops mid-request surfaces as
+        ``ConnectionAbortedError`` (WinError 10053), a sibling of
+        ``ConnectionResetError`` rather than a subclass, so the reset arm never
+        fired there and the restart retry did not happen (RDR-224). Built here
+        directly, so every host pins it."""
+        import urllib.error
+
+        from nexus.db import http_vector_client as hvc
+
+        assert hvc._is_retryable_endpoint_error(ConnectionAbortedError(10053, "aborted"))
+        assert hvc._is_retryable_endpoint_error(
+            urllib.error.URLError(ConnectionAbortedError(10053, "aborted"))
+        )
 
 
 # ── nexus-7dsgp: bounded-wait retry for the supervisor-respawn gap ───────────

@@ -38,17 +38,20 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from nexus._hook_runtime._io import HookResult
 from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.hooks import self_gc, upgrade_auto
+from nexus.util.nx_argv import nx_argv
+from tests._module_seam import setattr_in
+from tests._platform import IS_WINDOWS, posix_only
 
 
 class _FakeCompleted:
@@ -73,7 +76,7 @@ def spy(monkeypatch):
         )
         return _FakeCompleted(state["rc"], state["stdout"], state["stderr"])
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, "nexus.hooks.self_gc", "subprocess.run", _fake_run)
     return calls, state
 
 
@@ -96,26 +99,66 @@ def emitted(monkeypatch):
     return events
 
 
-_posix_only = pytest.mark.skipif(not hasattr(os, "getsid"), reason="session ids are POSIX")
+_posix_only = posix_only("os.getsid: the child runs in a POSIX session of its own")
+
+
+#: An absolute path on every platform (``C:\\gen\\bin\\nx`` on Windows). A
+#: drive-less ``/gen/bin/nx`` is relative to Windows, so ``which_off_cwd`` reads
+#: it as a current-directory hit and refuses it.
+_FAKE_NX = str(Path(os.path.abspath(os.sep)) / "gen" / "bin" / "nx")
+
+
+def _which(found):
+    """A ``shutil.which`` stand-in; ``which_off_cwd`` also passes ``path=``."""
+    return lambda *_a, **_k: found
 
 
 @pytest.fixture
 def fake_nx(tmp_path, monkeypatch):
-    """Install a fake `nx` whose body the test supplies. The script records
-    its argv and pid first, so a test can find the child afterwards."""
+    """Install a fake `nx` the test describes. It records its argv and pid
+    first, so a test can find the child afterwards.
+
+    POSIX: a ``/bin/sh`` script on PATH, spawned as the product spawns the
+    real one. Windows never spawns a looked-up ``nx`` (``nx_argv_for`` returns
+    ``python -m nexus.cli``), so there the fake is a Python script and
+    ``nx_argv_for`` hands the product its argv; the spawn itself (flags,
+    stderr log, wait) is the product's real Windows path."""
     argv_file = tmp_path / "argv"
     pid_file = tmp_path / "pid"
 
-    def install(body: str):
-        script = tmp_path / "nx"
+    def install(*, rc: int = 0, stdout: str = "", stderr: str = "", sleep: float = 0.0):
+        if not IS_WINDOWS:
+            script = tmp_path / "nx"
+            body = [f'echo "{stdout}"'] if stdout else []
+            body += [f'echo "{stderr}" >&2'] if stderr else []
+            body += [f"exec sleep {sleep:g}"] if sleep else [f"exit {rc}"]
+            script.write_text(
+                "#!/bin/sh\n"
+                f'echo "$@" > "{argv_file}"\n'
+                f'echo $$ > "{pid_file}"\n'
+                + "\n".join(body) + "\n"
+            )
+            script.chmod(0o755)
+            setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(str(script)))
+            return argv_file, pid_file
+        script = tmp_path / "nx_fake.py"
         script.write_text(
-            "#!/bin/sh\n"
-            f'echo "$@" > "{argv_file}"\n'
-            f'echo $$ > "{pid_file}"\n'
-            f"{body}\n"
+            "import os, sys, time\n"
+            f"open({str(argv_file)!r}, 'w').write(' '.join(sys.argv[1:]))\n"
+            f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            f"sys.stdout.write({stdout!r} + '\\n') if {stdout!r} else None\n"
+            f"sys.stderr.write({stderr!r} + '\\n') if {stderr!r} else None\n"
+            f"time.sleep({sleep!r})\n"
+            f"sys.exit({rc})\n"
         )
-        script.chmod(0o755)
-        monkeypatch.setattr(shutil, "which", lambda _: str(script))
+        setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+        monkeypatch.setattr(
+            "nexus.util.nx_argv.nx_argv_for",
+            # The base interpreter, not a venv's python.exe: that is a launcher
+            # that runs the real interpreter as a second process, so the pid
+            # the fake records would not be the pid the product spawned.
+            lambda _resolved, *args: [getattr(sys, "_base_executable", sys.executable), str(script), *args],
+        )
         return argv_file, pid_file
 
     return install
@@ -131,7 +174,7 @@ def _wait_for(path, seconds=5.0):
 
 
 def test_upgrade_auto_spawns_nx_upgrade_auto(fake_nx):
-    argv_file, _ = fake_nx("exit 0")
+    argv_file, _ = fake_nx(rc=0)
     result = upgrade_auto.run(None)
     assert _wait_for(argv_file) == "upgrade --auto"
     assert isinstance(result, HookResult)
@@ -140,7 +183,7 @@ def test_upgrade_auto_spawns_nx_upgrade_auto(fake_nx):
 def test_upgrade_auto_is_silent_on_success(fake_nx, capfd):
     """2>/dev/null, and stdout never reaches the decision channel: checked at
     the FILE DESCRIPTOR, which is what a real child writes to."""
-    fake_nx('echo "on stdout"; echo "a warning the shell form sent to /dev/null" >&2; exit 0')
+    fake_nx(stdout="on stdout", stderr="a warning the shell form sent to /dev/null")
     result = upgrade_auto.run(None)
     captured = capfd.readouterr()
     assert result.stdout is None, "never writes to the decision channel"
@@ -160,7 +203,7 @@ def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys
     """The `|| echo ... >&2` half. --auto exits 0 always, so nonzero means
     skew; an `nx` too old to know the flag fails in about 0.17 s, well inside
     the bounded wait."""
-    fake_nx("exit 2")
+    fake_nx(rc=2)
     result = upgrade_auto.run(None)
     captured = capsys.readouterr()
     assert result.stdout is None
@@ -174,8 +217,8 @@ def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys
 def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, capsys):
     """`nx` absent was exit 127 under the shell, which fired the same `||`."""
     spawned: list[object] = []
-    monkeypatch.setattr(shutil, "which", lambda _: None)
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(None))
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", lambda *a, **k: spawned.append(a))
     result = upgrade_auto.run(None)
     captured = capsys.readouterr()
     assert spawned == [], "nothing is spawned when there is no nx to spawn"
@@ -185,12 +228,12 @@ def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, cap
 
 def test_upgrade_auto_swallows_a_spawn_failure(monkeypatch, capsys, emitted):
     """An OSError from the spawn itself is still a hook that must not fail."""
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
 
     def _boom(cmd, **kwargs):
         raise OSError("no fork for you")
 
-    monkeypatch.setattr(subprocess, "Popen", _boom)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _boom)
     result = upgrade_auto.run(None)
     assert result.stdout is None
     assert upgrade_auto.SKEW_GUIDANCE in capsys.readouterr().err
@@ -210,7 +253,7 @@ def test_upgrade_auto_returns_while_a_long_upgrade_runs_on_in_its_own_session(
     return within its short wait while the child keeps running, in a session
     of its own that a kill aimed at the hook's process tree does not reach."""
     monkeypatch.setattr(upgrade_auto, "_SKEW_WAIT_S", 0.3)
-    _, pid_file = fake_nx("exec sleep 4")
+    _, pid_file = fake_nx(sleep=4)
     started = time.monotonic()
     result = upgrade_auto.run(None)
     elapsed = time.monotonic() - started
@@ -224,7 +267,7 @@ def test_upgrade_auto_returns_while_a_long_upgrade_runs_on_in_its_own_session(
         (level, event, fields), = emitted
         assert (level, event) == ("info", "upgrade_auto_child_spawned")
         assert fields["pid"] == pid
-        assert fields["argv"][1:] == ["upgrade", "--auto"]
+        assert fields["argv"][-2:] == ["upgrade", "--auto"]
         assert fields["returncode"] is None, "still running when the hook returned"
     finally:
         with contextlib.suppress(ProcessLookupError):
@@ -235,13 +278,13 @@ def test_upgrade_auto_logs_the_spawn_with_the_childs_pid_and_exit_status(fake_nx
     """nexus-wozn6: the detached child runs unattended, so its start is on
     record in hook.log: pid and argv, and the exit status when it exited
     inside the wait."""
-    _, pid_file = fake_nx("exit 0")
+    _, pid_file = fake_nx(rc=0)
     upgrade_auto.run(None)
     pid = int(_wait_for(pid_file))
     (level, event, fields), = emitted
     assert (level, event) == ("info", "upgrade_auto_child_spawned")
     assert fields["pid"] == pid
-    assert fields["argv"][1:] == ["upgrade", "--auto"]
+    assert fields["argv"][-2:] == ["upgrade", "--auto"]
     assert fields["returncode"] == 0
     assert fields["stderr_log"] == str(upgrade_auto._child_log_path())
 
@@ -277,14 +320,14 @@ def test_an_unopenable_child_log_falls_back_to_the_null_device(monkeypatch, tmp_
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
     monkeypatch.setattr(upgrade_auto, "_child_log_path", lambda: blocker / "logs" / "child.log")
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
     seen: list[dict] = []
 
     def _popen(argv, **kwargs):
         seen.append(kwargs)
         raise OSError("stop here")
 
-    monkeypatch.setattr(subprocess, "Popen", _popen)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _popen)
     upgrade_auto.run(None)
     assert seen[0]["stderr"] == subprocess.DEVNULL
 
@@ -307,7 +350,7 @@ def _windows_popen(monkeypatch, *, refuse_first: int = 0):
             raise PermissionError("breakaway not permitted by the job")
         return object()
 
-    monkeypatch.setattr(subprocess, "Popen", _popen)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _popen)
     return seen
 
 
@@ -347,9 +390,10 @@ def test_windows_spawn_raises_when_both_attempts_fail(monkeypatch):
 
 def test_self_gc_spawns_nx_self_gc(spy, monkeypatch):
     calls, _ = spy
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
     result = self_gc.run(None)
-    assert calls == [["/gen/bin/nx", "self", "gc"]]
+    # Windows spawns the interpreter form, never the looked-up path (nx_argv_for).
+    assert calls == [nx_argv("self", "gc") if IS_WINDOWS else [_FAKE_NX, "self", "gc"]]
     assert isinstance(result, HookResult)
 
 
@@ -360,7 +404,7 @@ def test_self_gc_is_silent_on_every_exit_code(spy, monkeypatch, capsys, rc):
     state["rc"] = rc
     state["stdout"] = "reclaimed 3 generations"
     state["stderr"] = "could not stat gen-20260101"
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert result.stdout is None
@@ -371,7 +415,7 @@ def test_self_gc_is_silent_on_every_exit_code(spy, monkeypatch, capsys, rc):
 def test_self_gc_is_silent_when_nx_is_not_on_path(spy, monkeypatch, capsys):
     """Unlike upgrade-auto, self-gc has no guidance to emit: it was `|| true`."""
     calls, _ = spy
-    monkeypatch.setattr(shutil, "which", lambda _: None)
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(None))
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert calls == []
@@ -381,12 +425,12 @@ def test_self_gc_is_silent_when_nx_is_not_on_path(spy, monkeypatch, capsys):
 
 
 def test_self_gc_swallows_a_spawn_failure(monkeypatch, capsys):
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
 
     def _boom(cmd, **kwargs):
         raise OSError("no fork for you")
 
-    monkeypatch.setattr(subprocess, "run", _boom)
+    setattr_in(monkeypatch, "nexus.hooks.self_gc", "subprocess.run", _boom)
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert result.stdout is None

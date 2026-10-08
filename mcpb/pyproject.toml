@@ -1,16 +1,18 @@
 [project]
 name = "conexus-mcpb"
-version = "7.73.0"
+version = "7.74.0"
 description = "Conexus packaged as Claude Desktop .mcpb (Desktop Extension)"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    # #1068: the [local] extra (fastembed) MUST be present so the Desktop
-    # extension's venv resolves the Tier-1 bge-768 local embedder. Without it,
-    # LocalEmbeddingFunction silently falls back to the 384-dim ONNX MiniLM
-    # while collections are indexed at 768/1024-dim, so every T3 search hits a
-    # dimension mismatch and returns zero results. The .mcpb cannot run the
-    # interactive `nx init` embedder choice, so it must pin [local] explicitly.
-    "conexus[local]>=7.73.0",
+    # Bare conexus, the same distribution the Claude Code plugin's nx-mcp runs
+    # from. #1068 once required the [local] extra (fastembed) because the
+    # client embedded T3 queries itself; the engine now embeds every T3 write
+    # and search, and collection names follow the service's bge-768 token
+    # whatever the client has installed (nexus-xq8f9). With fastembed present
+    # the extension's plan cache picked a different embedder than the plugin's
+    # and downloaded its own bge copy. Pinned by
+    # tests/test_plugin_structure.py::test_mcpb_pins_bare_conexus.
+    "conexus>=7.74.0",
 ]
 
 [tool.uv]
@@ -24,4 +26,16 @@ override-dependencies = [
     # pyproject.toml and src/nexus/_install/overrides.txt -- pdftext 0.7.x
     # broke mineru's span_pre_proc.py (see root pyproject.toml for detail).
     "pdftext>=0.6.3,<0.7",
+    # One OpenCV: drop opencv-python, keep the headless build albumentations
+    # requires (see root pyproject.toml for detail).
+    "opencv-python; sys_platform == 'never'",
 ]
+
+# nexus-92gxf: the bundle is its own workspace root. Without this table uv walks
+# up from the bundle for a pyproject.toml whose [tool.uv.workspace] members match
+# it, and a match (~/pyproject.toml, or C:\pyproject.toml, which any local Windows
+# user may create) makes that ancestor the root: its .venv becomes the server's
+# environment and its settings drive the sync. Pinned by
+# tests/test_mcpb_launcher_venv.py.
+[tool.uv.workspace]
+members = []

@@ -33,6 +33,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.mcp_infra import get_t1_plan_cache
+from tests._module_seam import patch_time
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +132,7 @@ def test_http_shaped_library_repopulates_after_ttl_elapses():
     with patch("nexus.mcp_infra.get_t1", return_value=_stub_t1()), \
          patch("nexus.plans.session_cache.PlanSessionCache",
                return_value=fake_cache), \
-         patch.object(pcr.time, "monotonic", _fake_monotonic):
+         patch_time(pcr, "monotonic", _fake_monotonic):
         get_t1_plan_cache(populate_from=lib)
         assert fake_cache.populate.call_count == 1
 

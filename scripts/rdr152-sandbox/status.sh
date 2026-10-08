@@ -43,6 +43,17 @@ CREDS_FILE="${SANDBOX_HOME}/.config/nexus/pg_credentials"
 if [[ -f "${CREDS_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${CREDS_FILE}"
+    # nexus-ja4pq: the sandbox cluster demands passwords (scram-sha-256). Hand libpq the
+    # ones pg_credentials records, through a private pgpass file, never on a command line.
+    PGPASSFILE="$(mktemp)"
+    chmod 600 "${PGPASSFILE}"
+    {
+        echo "127.0.0.1:${PG_PORT}:*:${USER:-$(id -un)}:${PG_SUPERUSER_PASS:-}"
+        echo "127.0.0.1:${PG_PORT}:*:${NX_DB_ADMIN_USER:-nexus_admin}:${NX_DB_ADMIN_PASS:-}"
+        echo "127.0.0.1:${PG_PORT}:*:${NX_DB_USER:-nexus_svc}:${NX_DB_PASS:-}"
+    } > "${PGPASSFILE}"
+    export PGPASSFILE
+    trap 'rm -f "${PGPASSFILE}"' EXIT
     PSQL_BIN="$(cd "${REPO_ROOT}" && uv run python "${SCRIPT_DIR}/sandbox_helper.py" pg-bin psql 2>/dev/null | grep -v '^\[' || echo '')"
     if [[ -n "${PSQL_BIN}" && -x "${PSQL_BIN}" ]]; then
         # Liquibase table name varies: quoted uppercase "DATABASECHANGELOG" (PG/standard) or
@@ -90,7 +101,7 @@ if [[ -f "${CREDS_FILE}" ]]; then
         done
 
         # ── POSTGRES TABLE COUNTS ─────────────────────────────────────────────
-        # Query as OS superuser (trust auth) to bypass FORCE RLS.
+        # Query as the OS superuser (password via PGPASSFILE) to bypass FORCE RLS.
         # nexus_admin is a NOSUPERUSER role subject to FORCE RLS and returns
         # 0 rows without a tenant GUC; the OS superuser sees all rows.
         echo ""

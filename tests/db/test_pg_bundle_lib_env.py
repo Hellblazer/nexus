@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-4mm24 — relocatable PG bundle binaries have no RPATH; _bundle_lib_env
 points the loader at the bundle's sibling lib/ so initdb/pg_ctl find libpq.so.5
-on a minimal base."""
+on a minimal base.
+
+The loader-path arm is POSIX; every call here injects ``platform="linux"`` so
+it runs on every host. The Windows arm (DLLs beside the .exe, env untouched)
+is pinned by ``test_windows_leaves_env_untouched``."""
 from __future__ import annotations
 
 import os
@@ -20,13 +24,13 @@ def _bundle(tmp_path: Path) -> Path:
 
 def test_sets_ld_library_path_to_sibling_lib(tmp_path: Path) -> None:
     initdb = _bundle(tmp_path)
-    env = _bundle_lib_env([str(initdb)], {})
+    env = _bundle_lib_env([str(initdb)], {}, platform="linux")
     assert env["LD_LIBRARY_PATH"] == str(tmp_path / "bundle" / "lib")
 
 
 def test_prepends_to_existing_ld_library_path(tmp_path: Path) -> None:
     initdb = _bundle(tmp_path)
-    env = _bundle_lib_env([str(initdb)], {"LD_LIBRARY_PATH": "/existing"})
+    env = _bundle_lib_env([str(initdb)], {"LD_LIBRARY_PATH": "/existing"}, platform="linux")
     parts = env["LD_LIBRARY_PATH"].split(os.pathsep)
     assert parts[0] == str(tmp_path / "bundle" / "lib")
     assert "/existing" in parts
@@ -37,7 +41,7 @@ def test_no_lib_dir_leaves_env_untouched(tmp_path: Path) -> None:
     (tmp_path / "bin").mkdir()
     initdb = tmp_path / "bin" / "initdb"
     initdb.write_text("")
-    env = _bundle_lib_env([str(initdb)], {"FOO": "bar"})
+    env = _bundle_lib_env([str(initdb)], {"FOO": "bar"}, platform="linux")
     assert "LD_LIBRARY_PATH" not in env
     assert env["FOO"] == "bar"
 
@@ -49,6 +53,14 @@ def test_defaults_to_os_environ_when_env_none(tmp_path: Path, monkeypatch) -> No
     # this exact-equality assert would inherit via env=None.
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     initdb = _bundle(tmp_path)
-    env = _bundle_lib_env([str(initdb)], None)
+    env = _bundle_lib_env([str(initdb)], None, platform="linux")
     assert env["SENTINEL_VAR"] == "present"  # inherited os.environ
     assert env["LD_LIBRARY_PATH"] == str(tmp_path / "bundle" / "lib")
+
+
+def test_windows_leaves_env_untouched(tmp_path: Path) -> None:
+    """Windows loads a DLL from the executable's own directory, so the guard
+    sets no loader variable there even when a sibling lib/ exists."""
+    initdb = _bundle(tmp_path)
+    env = _bundle_lib_env([str(initdb)], {"FOO": "bar"}, platform="win32")
+    assert env == {"FOO": "bar"}

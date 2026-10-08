@@ -1025,6 +1025,10 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     Postgres is INTENTIONALLY left running (it is independently managed and
     may serve other clients) — nexus-pebfx.5 makes that visible instead of
     surprising: the command says so and offers --with-pg.
+
+    The aspect-worker daemon is likewise left running, on every platform: it
+    belongs to the store path, not to the service (RDR-224), and idles with
+    the stack down. ``nx daemon restart-stale`` cycles it; ``nx uninstall`` stops it.
     """
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         _port_accepting,

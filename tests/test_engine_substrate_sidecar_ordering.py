@@ -40,6 +40,7 @@ from pathlib import Path
 
 from nexus.daemon import service_registry
 from tests import _engine_substrate as sub
+from tests._module_seam import setattr_in
 
 
 class TestSidecarWrittenBeforeTcpWait:
@@ -61,7 +62,7 @@ class TestSidecarWrittenBeforeTcpWait:
             created.append(Path(d))
             return d
 
-        monkeypatch.setattr(sub.tempfile, "mkdtemp", _fake_mkdtemp)
+        setattr_in(monkeypatch, sub, "tempfile.mkdtemp", _fake_mkdtemp)
         # Never touch the box's real stray population, and never wait on
         # the real cross-process boot semaphore for this ordering-only test
         # (the semaphore itself has its own dedicated test file).
@@ -75,7 +76,7 @@ class TestSidecarWrittenBeforeTcpWait:
         def _fake_run(args, **_kwargs):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, (sub, "tests._pg_ctl"), "subprocess.run", _fake_run)
         # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
         # which now spawns through run_bounded. The shared-module patch above
         # used to cover it by accident; name it, or run_bounded builds a real
@@ -86,7 +87,7 @@ class TestSidecarWrittenBeforeTcpWait:
             def __init__(self, *_args, **_kwargs) -> None:
                 self.pid = 424242
 
-        monkeypatch.setattr(sub.subprocess, "Popen", _FakePopen)
+        setattr_in(monkeypatch, sub, "subprocess.Popen", _FakePopen)
 
         # _read_postmaster_pid reads a real postmaster.pid file our fake
         # pg_ctl never writes -- feed it a deterministic fake identity
@@ -134,7 +135,7 @@ class TestSidecarWrittenBeforeTcpWait:
             created.append(Path(d))
             return d
 
-        monkeypatch.setattr(sub.tempfile, "mkdtemp", _fake_mkdtemp)
+        setattr_in(monkeypatch, sub, "tempfile.mkdtemp", _fake_mkdtemp)
         monkeypatch.setattr(
             sub, "sweep_stale_substrate_clusters", lambda **_kw: sub.SweepResult(),
         )
@@ -145,7 +146,7 @@ class TestSidecarWrittenBeforeTcpWait:
         def _fake_run(args, **_kwargs):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, (sub, "tests._pg_ctl"), "subprocess.run", _fake_run)
         # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
         # which now spawns through run_bounded. The shared-module patch above
         # used to cover it by accident; name it, or run_bounded builds a real
@@ -156,7 +157,7 @@ class TestSidecarWrittenBeforeTcpWait:
             def __init__(self, *_args, **_kwargs) -> None:
                 self.pid = 424242
 
-        monkeypatch.setattr(sub.subprocess, "Popen", _FakePopen)
+        setattr_in(monkeypatch, sub, "subprocess.Popen", _FakePopen)
         monkeypatch.setattr(sub, "_read_postmaster_pid", lambda _pgdata: 313131)
 
         sidecar_at_wait_tcp: list[dict] = []
@@ -219,7 +220,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
             created.append(Path(d))
             return d
 
-        monkeypatch.setattr(sub.tempfile, "mkdtemp", _fake_mkdtemp)
+        setattr_in(monkeypatch, sub, "tempfile.mkdtemp", _fake_mkdtemp)
         monkeypatch.setattr(
             sub, "sweep_stale_substrate_clusters", lambda **_kw: sub.SweepResult(),
         )
@@ -230,7 +231,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
             def __init__(self, *_args, **_kwargs) -> None:
                 self.pid = 424242
 
-        monkeypatch.setattr(sub.subprocess, "Popen", _FakePopen)
+        setattr_in(monkeypatch, sub, "subprocess.Popen", _FakePopen)
         monkeypatch.setattr(sub, "_read_postmaster_pid", lambda _pgdata: 313131)
         monkeypatch.setattr(sub, "_wait_tcp", lambda *_a, **_kw: None)
 
@@ -243,7 +244,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
         def _fake_run(args, **_kwargs):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, (sub, "tests._pg_ctl"), "subprocess.run", _fake_run)
         # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
         # which now spawns through run_bounded. The shared-module patch above
         # used to cover it by accident; name it, or run_bounded builds a real
@@ -306,7 +307,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
                     )
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, (sub, "tests._pg_ctl"), "subprocess.run", _fake_run)
         # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
         # which now spawns through run_bounded. The shared-module patch above
         # used to cover it by accident; name it, or run_bounded builds a real

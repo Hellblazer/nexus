@@ -76,10 +76,14 @@ scripts whose whole purpose is to be reachable from a 3.9 interpreter.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import time
+
+# PATH-only lookup for the named interpreters (RDR-224 finding A,
+# nexus-f9bgu.36): a bare ``shutil.which`` searches the cwd first on Windows.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
 
 _PROBE_TIMEOUT_S = 1.5
 """Per-probe ceiling. A healthy interpreter starts in tens of ms; a probe
@@ -136,21 +140,28 @@ def _runs(exe: str, *, probe: str = "") -> bool:
 
 
 def _venv_python_for_this_checkout() -> str | None:
-    """An active venv whose ``nexus`` is the checkout under the cwd.
+    """An active venv whose ``nexus`` is the checkout under the project directory.
 
     A developer's editable install must win over the installed generation,
     or every nexus-importing hook silently reads production while the tree
     is being edited (critique [24988]). A stale ``VIRTUAL_ENV`` from another
     worktree, or one with a packaged ``nexus``, does not qualify.
+
+    The project directory is ``CLAUDE_PROJECT_DIR``, never the process cwd: hooks
+    are launched with ``uv tool run --directory ${CLAUDE_PLUGIN_ROOT}`` so uv
+    cannot execute an interpreter planted in a ``.venv`` (finding C,
+    nexus-f9bgu.36), and the process cwd is therefore the plugin root. Unset (not under Claude Code)
+    means there is no checkout to match and the answer is None.
     """
     venv = os.environ.get("VIRTUAL_ENV")
-    if not venv:
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not venv or not project:
         return None
     exe = os.path.join(venv, "bin", "python")
     probe = (
         "import os, sys, nexus; "
         "sys.exit(0 if os.path.realpath(nexus.__file__)"
-        ".startswith(os.path.realpath(os.getcwd()) + os.sep) else 1)"
+        f".startswith(os.path.realpath({project!r}) + os.sep) else 1)"
     )
     return exe if _runs(exe, probe=probe) else None
 
@@ -197,7 +208,7 @@ def resolve() -> str | None:
     if time.monotonic() >= deadline:
         return None
     for name in ("python3.13", "python3.12"):
-        found = shutil.which(name)
+        found = _exec_path.which_off_cwd(name)
         if found:
             return found
     return None

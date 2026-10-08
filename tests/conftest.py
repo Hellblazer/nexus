@@ -724,6 +724,11 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     "routing_log.jsonl",
     "index.log",
     "dropped_writes.jsonl",
+    # version_lockstep_action.log_event: one line per real CLI upgrade the
+    # SessionStart lockstep hook starts, appended in the config dir of any
+    # session on the box, the real one for a session without NEXUS_CONFIG_DIR
+    # (see the cli_lockstep_marker allowlist entry).
+    "lockstep.log",
 })
 
 #: Directories under the real config dir that hold AMBIENT DAEMON OUTPUT --
@@ -1237,6 +1242,27 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # via `monkeypatch.setenv` first -- none `delenv`s it -- so the writer
     # never reaches the real path from a test.
     "mineru.pid",
+    # The conexus plugin's SessionStart:startup lockstep hook
+    # (conexus/hooks/scripts/version_lockstep_hook.py) dispatches
+    # version_lockstep_action.py when the marker differs from the plugin
+    # version; the action's fast path rewrites ``cli_lockstep_marker`` in the
+    # session's config dir. The same hook writes ``ref_drift_lockstep_marker``
+    # on a ref drift. Both follow NEXUS_CONFIG_DIR since nexus-f9bgu, but a
+    # developer's live Claude Code session normally has no NEXUS_CONFIG_DIR,
+    # so its config dir IS the real one this guard watches: any session
+    # starting on this box fires the hook, and the first session after a
+    # plugin update rewrites the marker mid-run. That is why the entries stay. MEASURED 2026-10-07: an
+    # engine-substrate run failed on ``MODIFIED cli_lockstep_marker``; the
+    # marker's mtime (11:47:52 PDT, content 7.73.0) is the SessionStart of the
+    # only session born that hour (transcript first entry 18:47:51.9Z,
+    # entrypoint cli, cwd the primary), the first after the 7.73.0 plugin
+    # landed in the plugin cache at 11:37:29. The same file set re-run under
+    # the guard left the marker untouched. Unit tests of the hook and action
+    # pin NX_LOCKSTEP_MARKER to tmp, and the HOME fence shadows .config/nexus.
+    # Exact names; the action's ``lockstep.log`` is append-only and lives in
+    # _APPEND_ONLY_REAL_CONFIG_LOGS instead.
+    "cli_lockstep_marker",
+    "ref_drift_lockstep_marker",
 )
 
 

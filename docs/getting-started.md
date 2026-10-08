@@ -5,23 +5,40 @@
 - **Python 3.12 or 3.13** (3.14 is not yet supported — [upstream dependency issue](https://github.com/pydantic/pydantic/issues))
 - **[uv](https://docs.astral.sh/uv/)** — Python package manager
 - **git**
-- **[Node.js](https://nodejs.org/)** — required *only* if you install the Claude Code plugin(s). The conexus plugin bundles the `sequential-thinking` MCP server, spawned via `npx -y …`; the companion `sn` plugin bundles `context7` the same way. Either requires `node` and `npm` on PATH. The `nx` CLI alone does not need it. Install with `brew install node` (macOS) or follow the [Node.js installer](https://nodejs.org/) for your platform.
 
-- **Hardware** — an Apple Silicon Mac (arm64), or Linux on x86-64 or arm64.
+- **Hardware** — an Apple Silicon Mac (arm64), Linux on x86-64 or arm64, or
+  Windows 11 on x64.
   Nexus ships its own PostgreSQL and **never** uses a host install: there is
   no fallback leg (`_NO_HOST_FALLBACK`, `nexus.db.pg_provision`), because the
   bundle is a specific PG17 carrying pgvector and a Homebrew or distro
   PostgreSQL is a different server with a different contrib set. The bundle
-  is built for those three targets only, so an **Intel Mac** or **Windows**
-  cannot run a local install: `nx init` stops with an error naming how to get
-  a bundle, rather than falling back to anything.
+  is built for those four targets only, so an **Intel Mac** or **Windows on
+  ARM** cannot run a local install: `nx init` stops with an error naming how to
+  get a bundle, rather than falling back to anything.
+  Native Windows x64 works through the same two steps as the other platforms,
+  `uv tool install conexus` and `nx init --service`, using the published
+  windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
+  clean Windows 11 x64 machine (conexus 7.72.1: `nx init --service`, a live
+  Claude Code session with MCP store and search, hooks, stop and restart), but
+  Windows is **not yet declared supported**. The step-by-step path, with what
+  was and was not measured, is [Installing nexus on Windows](windows-install.md).
+  Known gaps: the Claude Desktop install dialog has not been walked (the
+  extension itself was run headless, nexus-ijue9.21); the Windows binaries are
+  not code-signed (nexus-dj01b), and a machine with Smart App Control enforcing
+  was not tested; Windows on ARM is out of scope.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
-  the tree). On Linux the installer additionally pins torch to its CPU build,
-  because the PyPI wheel is the CUDA one and drags about 4.5 GB of nvidia
-  packages that nothing on this path uses; set `NX_TORCH_BACKEND` (to `auto`,
-  `cu130`, and so on) to opt a GPU box back in. macOS wheels carry no CUDA
-  payload, so nothing is pinned there.
+  the tree). On Linux, torch is pinned to its CPU build at both install steps:
+  the first command is `uv tool install conexus --python 3.12 --torch-backend cpu`
+  (uv 0.9.19 or newer; uv warns that the flag is experimental), and
+  `nx self install` passes the same backend to every generation it builds.
+  Without the flag, uv takes the CUDA torch from PyPI on x86-64 and with it 15
+  nvidia packages and triton that nothing on this path uses: measured
+  2026-10-07 in a fresh ubuntu:24.04 container, 4,264 MB downloaded and
+  7,955 MB unpacked, against 688 MB and 2,250 MB with the flag. Set
+  `NX_TORCH_BACKEND` (to `auto`, `cu130`, and so on) to opt a GPU box back in
+  at `nx self install`. macOS and Windows wheels carry no CUDA payload, so
+  nothing is pinned there.
 
   **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack
   processes' own RSS (never a whole-machine reading, which a shared box's
@@ -101,8 +118,6 @@ See [Document Catalog](catalog.md) for details.
 ## Claude Code plugin (optional)
 
 The conexus plugin gives Claude Code agents access to all three storage tiers, 10 specialized agents, and 44 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
-
-**Plugin-only prerequisite: [Node.js](https://nodejs.org/).** The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail to start without `node`/`npm` on PATH. Install with `brew install node` (macOS) or your platform's installer before running the plugin commands below.
 
 ```bash
 /plugin marketplace add Hellblazer/nexus

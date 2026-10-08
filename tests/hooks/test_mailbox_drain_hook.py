@@ -29,7 +29,12 @@ from pathlib import Path
 
 import pytest
 
+from nexus._locking import lock_fd, unlock_fd
+from nexus._winsec import restrict_to_owner
+from nexus.daemon.service_registry import service_identity
 from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
+from tests._module_seam import setattr_in
+from tests._platform import make_group_readable
 
 #: ``-m`` rather than the installed ``nx-hook`` console script, so these run
 #: against this checkout's code, through the same ``main()`` the shim calls.
@@ -236,7 +241,7 @@ def _hook_log(tmp_path: Path) -> str:
 
 def _write_storage_lease(config_dir: Path, *, host: str, port: int) -> None:
     record = {
-        "scope_key": str(os.getuid()),
+        "scope_key": service_identity(),
         "generation": 1,
         "owner_token": "test-owner",
         "heartbeat_epoch": time.time(),
@@ -248,9 +253,9 @@ def _write_storage_lease(config_dir: Path, *, host: str, port: int) -> None:
         "format_version": 1,
     }
     config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / f"storage_service_addr.{os.getuid()}"
+    path = config_dir / f"storage_service_addr.{service_identity()}"
     path.write_text(json.dumps(record))
-    path.chmod(0o600)
+    restrict_to_owner(path)
 
 
 def _row(tuple_id: str, *, sender: str = "peer-a", body: str = "hello",
@@ -978,7 +983,7 @@ class TestCredentialPolicy:
         eng = engine()
         eng.rows = [_row("ll22", body="should not be delivered")]
         _wired(tmp_path, eng)
-        (tmp_path / "config" / f"storage_service_addr.{os.getuid()}").chmod(0o644)
+        make_group_readable(tmp_path / "config" / f"storage_service_addr.{service_identity()}")
         res = _run(tmp_path=tmp_path)
         assert res.returncode == 0
         assert "should not be delivered" not in res.stdout
@@ -1036,7 +1041,9 @@ class TestPartialFailureNeverLosesDeliveredMail:
                 assert proc.poll() is None, "the drain exited before reaching the parked claim"
                 assert time.monotonic() < deadline, "the drain never reached the parked claim"
                 time.sleep(0.02)
-            proc.send_signal(signal.SIGKILL)
+            # SIGKILL on POSIX, TerminateProcess (exit status 1) on Windows:
+            # both end the process with no chance to flush or clean up.
+            proc.kill()
             out, _err = proc.communicate(timeout=60)
         finally:
             eng.release.set()
@@ -1044,7 +1051,8 @@ class TestPartialFailureNeverLosesDeliveredMail:
                 proc.kill()
                 proc.wait()
 
-        assert proc.returncode == -signal.SIGKILL, "the kill must land mid-drain, not after it"
+        killed = 1 if os.name == "nt" else -signal.SIGKILL
+        assert proc.returncode == killed, "the kill must land mid-drain, not after it"
         assert "/v1/tuples/ack" in eng.paths()
         assert b"acked before the kill" in out
         assert b"never claimed" not in out
@@ -1679,8 +1687,6 @@ class TestClearedRecordDrain:
         behaviour of running the pass unlocked past the timeout, which
         could duplicate a delivery.
         """
-        import fcntl  # noqa: PLC0415 — deferred: POSIX-only, this test only
-
         eng = engine()
         eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
         _wired(tmp_path, eng)
@@ -1688,11 +1694,11 @@ class TestClearedRecordDrain:
         lock_path = tmp_path / "config" / "tuple-watch" / "old-sess-id.pending.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_fd(fd, blocking=True)
         try:
             res = _run(tmp_path=tmp_path)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_fd(fd)
             os.close(fd)
 
         assert res.returncode == 0, res.stderr
@@ -1854,11 +1860,11 @@ def test_drain_claimant_length_is_independent_of_address_and_pid(monkeypatch) ->
     """
     module = _load_module()
 
-    monkeypatch.setattr(module.os, "getpid", lambda: 7)
+    setattr_in(monkeypatch, module, "os.getpid", lambda: 7)
     short_pid_short_addr = module._drain_claimant("a")
     short_pid_long_addr = module._drain_claimant("a" * 248)
 
-    monkeypatch.setattr(module.os, "getpid", lambda: 2147483647)  # max signed-32-bit pid
+    setattr_in(monkeypatch, module, "os.getpid", lambda: 2147483647)  # max signed-32-bit pid
     long_pid_short_addr = module._drain_claimant("a")
 
     lengths = {
@@ -1878,7 +1884,7 @@ def test_drain_claimant_pid_of_maximum_width_still_fits(monkeypatch) -> None:
     fixed pid width instead of allowed to grow the string.
     """
     module = _load_module()
-    monkeypatch.setattr(module.os, "getpid", lambda: 999999999999999999999)  # 21 digits
+    setattr_in(monkeypatch, module, "os.getpid", lambda: 999999999999999999999)  # 21 digits
 
     claimant = module._drain_claimant("a" * 248)
 
@@ -1891,21 +1897,19 @@ def test_pending_lock_with_almost_no_budget_skips_at_once(tmp_path) -> None:
     almost nothing -- it must give up at once, not after the lock's own 2s
     ceiling regardless of how little budget the caller actually has left.
     """
-    import fcntl  # noqa: PLC0415 — deferred: POSIX-only, this test only
-
     module = _load_module()
     address = "addr-almost-no-budget"
     lock_path = tmp_path / "tuple-watch" / f"{address}.pending.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    lock_fd(fd, blocking=True)
     try:
         start = time.monotonic()
         with module._pending_lock(tmp_path, address, deadline=start + 0.05) as acquired:
             elapsed = time.monotonic() - start
             assert acquired is False
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_fd(fd)
         os.close(fd)
 
     assert elapsed < 0.5, f"lock wait took {elapsed:.2f}s despite an almost-exhausted deadline"
@@ -1916,21 +1920,19 @@ def test_pending_lock_with_ample_budget_waits_up_to_its_own_ceiling(tmp_path) ->
     the caller's own budget left, the lock still waits up to its own
     ``_PENDING_LOCK_TIMEOUT_S`` ceiling, not forever and not zero.
     """
-    import fcntl  # noqa: PLC0415 — deferred: POSIX-only, this test only
-
     module = _load_module()
     address = "addr-ample-budget"
     lock_path = tmp_path / "tuple-watch" / f"{address}.pending.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    lock_fd(fd, blocking=True)
     try:
         start = time.monotonic()
         with module._pending_lock(tmp_path, address, deadline=start + 60.0) as acquired:
             elapsed = time.monotonic() - start
             assert acquired is False
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_fd(fd)
         os.close(fd)
 
     assert elapsed >= module._PENDING_LOCK_TIMEOUT_S * 0.9

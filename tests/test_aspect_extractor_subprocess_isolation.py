@@ -36,6 +36,8 @@ import pytest
 
 import nexus.aspect_extractor as ax
 import nexus.pdeathsig as pdeathsig
+from tests._module_seam import delattr_in, setattr_in
+from tests.test_win_job import live_children, reap_live_children
 
 
 def _pid_alive(pid: int) -> bool:
@@ -226,7 +228,7 @@ def test_run_claude_isolated_arms_pdeathsig_preexec(monkeypatch) -> None:
         captured.update(kw)
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("x", timeout=1, _argv=["python", "-c", "pass"])
     assert captured.get("start_new_session") is True
     if pdeathsig.LIBC is not None:
@@ -259,7 +261,7 @@ def test_run_claude_isolated_redirects_stdin_from_file_not_pipe(monkeypatch) -> 
         captured["popen_kwargs"] = kw
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("race-free-prompt", timeout=1, _argv=["python", "-c", "pass"])
 
     stdin_arg = captured["popen_kwargs"].get("stdin")
@@ -301,7 +303,7 @@ def test_default_argv_carries_strict_mcp_config(monkeypatch) -> None:
         captured_argv.append(argv)
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("x", timeout=1)  # no _argv -- exercises the real default
     assert len(captured_argv) == 1
     assert "--strict-mcp-config" in captured_argv[0], (
@@ -323,7 +325,7 @@ def test_default_argv_pins_the_config_model(monkeypatch) -> None:
         def communicate(self, *a, **k):
             return ('{"result": "{}"}', "")
 
-    monkeypatch.setattr(ax.subprocess, "Popen", lambda argv, **kw: captured.append(argv) or _Reaped())
+    setattr_in(monkeypatch, ax, "subprocess.Popen", lambda argv, **kw: captured.append(argv) or _Reaped())
     ax._run_claude_isolated("x", timeout=1, model="claude-haiku-4-5-20251001")
     ax._run_claude_isolated("x", timeout=1)
     assert captured[0][captured[0].index("--model") + 1] == "claude-haiku-4-5-20251001"
@@ -546,13 +548,20 @@ def windows_shaped_real_spawn(monkeypatch: pytest.MonkeyPatch):
     from nexus.util import win_job
     from tests.test_win_job import _FakeKernel32
 
-    monkeypatch.delattr(os, "killpg", raising=False)
-    monkeypatch.delattr(os, "getpgid", raising=False)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=False)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.getpgid", raising=False)
     monkeypatch.setattr(win_job, "IS_WINDOWS", True)
     fake = _FakeKernel32()
     monkeypatch.setattr(win_job, "_kernel32", fake)
     monkeypatch.setattr(pg, "isolation_popen_kwargs", lambda: {})
-    return fake
+    yield fake
+    # The fake kernel32 closes the job without terminating anything, so a
+    # child the code under test "killed" is in fact still running. Each
+    # test reaps its own children; this check fails the test if one is
+    # still alive afterwards, and kills it anyway so a failure leaks nothing.
+    leaked = live_children(fake.opened_pids())
+    reap_live_children(leaked)
+    assert not leaked, f"child pid(s) {leaked} still alive after the test"
 
 
 def _job_handle_from(fake) -> int:
@@ -595,11 +604,15 @@ class TestJobHandleClosesOnEveryOutcome:
         self, windows_shaped_real_spawn,
     ) -> None:
         fake = windows_shaped_real_spawn
-        with pytest.raises(subprocess.TimeoutExpired):
-            ax._run_claude_isolated(
-                "x", timeout=0.2,
-                _argv=[sys.executable, "-c", "import time; time.sleep(999)"],
-            )
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                ax._run_claude_isolated(
+                    "x", timeout=0.2,
+                    _argv=[sys.executable, "-c", "import time; time.sleep(999)"],
+                )
+        finally:
+            # The fake job close terminated nothing: the child is ours to kill.
+            reap_live_children(fake.opened_pids())
         job = _job_handle_from(fake)
         assert fake.closed_handles.count(job) == 1, (
             f"job {job} closed {fake.closed_handles.count(job)} times on "

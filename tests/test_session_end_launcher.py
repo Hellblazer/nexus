@@ -21,6 +21,8 @@ import sys
 from unittest.mock import patch
 
 import pytest
+from tests._module_seam import patch_in
+from tests._platform import posix_only, scrubbed_env
 
 
 @pytest.fixture(autouse=True)
@@ -117,6 +119,7 @@ def test_run_session_end_synchronously_swallows_exceptions() -> None:
         launcher._run_session_end_synchronously()  # must not raise
 
 
+@posix_only("_daemonize_and_run is the POSIX double fork (os.fork); Windows takes _spawn_detached_cleanup")
 def test_cleanup_not_called_in_daemonize_parent_path() -> None:
     """The first-fork parent must return without running the storage
     flush -- it lives only in the grandchild."""
@@ -128,7 +131,7 @@ def test_cleanup_not_called_in_daemonize_parent_path() -> None:
         return 12345  # simulate parent side of first fork
 
     with (
-        patch("os.fork", side_effect=fake_fork),
+        patch_in("nexus._session_end_launcher", "os.fork", side_effect=fake_fork),
         patch.object(
             launcher, "_run_session_end_synchronously",
             side_effect=lambda: cleanup_calls.append(None),
@@ -263,14 +266,41 @@ def test_spawn_detached_cleanup_asks_for_breakaway_first_then_retries_without() 
     with patch.object(subprocess, "Popen", side_effect=_popen):
         assert launcher._spawn_detached_cleanup() is True
 
-    base = launcher._DETACHED_PROCESS | launcher._CREATE_NEW_PROCESS_GROUP
+    base = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     assert [c["creationflags"] for c in seen] == [
-        base | launcher._CREATE_BREAKAWAY_FROM_JOB, base,
+        base | 0x01000000, base,  # first attempt adds CREATE_BREAKAWAY_FROM_JOB
     ]
     for call in seen:
         assert call["argv"] == [sys.executable, "-c", launcher._DETACHED_CHILD_CODE]
         assert call["stdin"] == call["stdout"] == call["stderr"] == subprocess.DEVNULL
         assert call["close_fds"] is True
+
+
+def test_spawn_detached_cleanup_never_uses_detached_process() -> None:
+    """``sys.executable`` on a uv tool install is the venv launcher
+    (``Scripts\\python.exe``), which starts the real interpreter as its own
+    child. Started with DETACHED_PROCESS, that child never ran a line on the
+    clean Windows 11 guest (conexus 7.72.1, CPython 3.13.16): launcher and
+    child were both still alive 20 s later and the cleanup never happened.
+    CREATE_NO_WINDOW ran the same child in 0.11 s (T2
+    nexus_rdr/224-windows-session-end-launcher). No attempt may carry
+    DETACHED_PROCESS, and every attempt carries CREATE_NO_WINDOW."""
+    import subprocess
+
+    import nexus._session_end_launcher as launcher
+
+    seen: list[int] = []
+
+    def _popen(argv, **kwargs):
+        seen.append(kwargs["creationflags"])
+        raise OSError("refused")
+
+    with patch.object(subprocess, "Popen", side_effect=_popen):
+        assert launcher._spawn_detached_cleanup() is False
+    assert len(seen) == 2
+    for flags in seen:
+        assert not flags & 0x00000008, f"DETACHED_PROCESS in 0x{flags:08x}"
+        assert flags & 0x08000000, f"CREATE_NO_WINDOW missing from 0x{flags:08x}"
 
 
 def test_spawn_detached_cleanup_reports_failure_when_both_attempts_fail() -> None:
@@ -293,11 +323,11 @@ def test_detached_child_code_runs_the_cleanup(tmp_path) -> None:
 
     proc = subprocess.run(
         [sys.executable, "-c", launcher._DETACHED_CHILD_CODE],
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(tmp_path / "home"),
-            "NEXUS_CONFIG_DIR": str(tmp_path / "config"),
-        },
+        env=scrubbed_env(
+            PATH=os.environ.get("PATH", ""),
+            HOME=str(tmp_path / "home"),
+            NEXUS_CONFIG_DIR=str(tmp_path / "config"),
+        ),
         capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
@@ -306,6 +336,7 @@ def test_detached_child_code_runs_the_cleanup(tmp_path) -> None:
     assert "session_end_storage_error" in proc.stdout + proc.stderr
 
 
+@posix_only("_daemonize_and_run is the POSIX double fork (os.fork); Windows takes _spawn_detached_cleanup")
 def test_daemonize_parent_path_returns_without_running_cleanup() -> None:
     """The first-fork parent returns immediately so Claude Code sees
     exit 0 in single-digit milliseconds. Cleanup does NOT run in the
@@ -320,7 +351,7 @@ def test_daemonize_parent_path_returns_without_running_cleanup() -> None:
         return 12345
 
     with (
-        patch("os.fork", side_effect=fake_fork),
+        patch_in("nexus._session_end_launcher", "os.fork", side_effect=fake_fork),
         patch.object(launcher, "_run_session_end_synchronously",
                      side_effect=lambda: cleanup_calls.append(None)),
     ):
@@ -331,6 +362,7 @@ def test_daemonize_parent_path_returns_without_running_cleanup() -> None:
     )
 
 
+@posix_only("_daemonize_and_run is the POSIX double fork (os.fork); Windows takes _spawn_detached_cleanup")
 def test_daemonize_falls_through_to_sync_on_oserror() -> None:
     """If ``os.fork`` raises (e.g. fork rate-limit), fall through to
     synchronous cleanup rather than drop it.
@@ -339,7 +371,7 @@ def test_daemonize_falls_through_to_sync_on_oserror() -> None:
 
     calls: list[str] = []
     with (
-        patch("os.fork", side_effect=OSError("fork unavailable")),
+        patch_in("nexus._session_end_launcher", "os.fork", side_effect=OSError("fork unavailable")),
         patch.object(launcher, "_run_session_end_synchronously",
                      side_effect=lambda: calls.append("sync")),
     ):

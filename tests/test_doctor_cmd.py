@@ -12,6 +12,7 @@ from nexus.cli import main
 from nexus.commands.hooks import _stanza_for
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog, only_document
+from tests._module_seam import patch_in
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
@@ -122,10 +123,10 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
         # `which=` callable keeps working unchanged.
         def _which_side_effect(name, *_args, **_kwargs):
             return which(name)
-        patches.append(patch("nexus.health.shutil.which",
+        patches.append(patch_in("nexus.health", "shutil.which",
                              side_effect=_which_side_effect))
     else:
-        patches.append(patch("nexus.health.shutil.which",
+        patches.append(patch_in("nexus.health", "shutil.which",
                              return_value=which))
     # nexus-l2ku5: `which` above is faked to a placeholder path for every
     # binary name (including nx-mcp / nx-mcp-catalog) that doesn't
@@ -404,17 +405,27 @@ def test_doctor_missing_git_includes_winget_hint(runner, mock_reg):
     def which_side(name):
         return None if name == "git" else f"/usr/bin/{name}"
     result = _invoke(runner, mock_reg, which=which_side)
-    assert "winget install --id Git.Git --scope user" in result.output
+    assert "winget install --id Git.Git -e --source winget" in result.output
 
 
-def test_doctor_missing_npx_includes_winget_hint(runner, mock_reg):
-    """nexus-njmg: Node.js (npx) Fix-line must include winget so
-    Windows plugin users can install the MCP-server runtime.
+def test_doctor_missing_git_hint_leads_windows_with_no_admin_portablegit(runner, mock_reg):
+    """nexus-f9bgu: Git for Windows' installer raises UAC through winget,
+    with ``--scope user`` and an ``/CURRENTUSER`` override alike (measured
+    on a clean Windows 11 guest, 2026-10-07). The Windows hint must lead
+    with the no-admin PortableGit path, point at the guide's Git section,
+    and label the winget line as needing admin, never pair it with
+    ``--scope user`` as if that avoided elevation.
     """
     def which_side(name):
-        return None if name == "npx" else f"/usr/bin/{name}"
-    result = _invoke(runner, mock_reg, which=which_side)
-    assert "winget install --id OpenJS.NodeJS.LTS --scope user" in result.output
+        return None if name == "git" else f"/usr/bin/{name}"
+    out = _invoke(runner, mock_reg, which=which_side).output
+    assert "--scope user" not in out.split("git:", 1)[1].split("bd (beads", 1)[0]
+    portable = out.index("PortableGit in %LOCALAPPDATA%\\Programs\\Git")
+    winget = out.index("winget install --id Git.Git")
+    assert portable < winget
+    assert "(Windows, no admin)" in out
+    assert "(Windows, asks for admin)" in out
+    assert "docs/windows-install.md#2-install-git" in out
 
 
 def test_doctor_missing_bd_includes_release_zip_hint(runner, mock_reg):
@@ -445,17 +456,15 @@ def test_doctor_missing_bd_output(runner, mock_reg):
     assert "BeadsProject/beads" in result.output
 
 
-def test_doctor_missing_npx_is_non_fatal_with_plugin_hint(runner, mock_reg):
-    """Missing npx is plugin-only — non-fatal for the CLI but reported with
-    a clear hint that the plugin's MCP servers will fail without it."""
+def test_doctor_has_no_npx_row(runner, mock_reg):
+    """nexus-f9bgu: no plugin MCP server needs Node.js any more, so doctor
+    must not tell a user without npx that plugin servers will fail."""
     def which_side(name):
         return None if name == "npx" else f"/usr/bin/{name}"
     result = _invoke(runner, mock_reg, which=which_side)
-    assert result.exit_code == 0, "missing npx must not fail nx doctor (plugin-only)"
-    assert "npx (Node.js, plugin-only)" in result.output
-    assert "not found" in result.output
-    assert "sequential-thinking" in result.output or "context7" in result.output
-    assert "nodejs.org" in result.output
+    assert "npx (Node.js" not in result.output
+    assert "nodejs.org" not in result.output
+    assert "OpenJS.NodeJS" not in result.output
 
 
 # ── Python version ──────────────────────────────────────────────────────────
@@ -659,7 +668,7 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     # code rather than passing for unrelated reasons.
     with (
         patch("nexus.config.is_local_mode", return_value=True),
-        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch_in("nexus.health", "shutil.which", return_value="/usr/bin/rg"),
         # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.
@@ -701,7 +710,7 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
-        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch_in("nexus.health", "shutil.which", return_value="/usr/bin/rg"),
         # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.

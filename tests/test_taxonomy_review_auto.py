@@ -40,6 +40,7 @@ from nexus.db.t2 import T2Database
 
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
+from tests._module_seam import patch_in
 
 #: RDR-194 P3d (nexus-tk070.p3d): the current test's minted tenant, stashed
 #: by the autouse fixture below so module-level ``_seed_topic`` (called from
@@ -1507,8 +1508,7 @@ class TestDispatchFailureRollup:
 
         failures: list[str] = []
         items = [(1, "label-a", ["term"], ["doc"], "coll")]
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=self._failing_proc()),
         ):
             results = await _generate_review_verdicts_batch(
@@ -1524,8 +1524,7 @@ class TestDispatchFailureRollup:
 
         failures: list[str] = []
         items = [(["term-a"], ["doc-a"])]
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=self._failing_proc()),
         ):
             results = await _generate_labels_batch(items, failures=failures)
@@ -1540,8 +1539,7 @@ class TestDispatchFailureRollup:
         from nexus.commands.taxonomy_cmd import _generate_review_verdicts_batch
 
         items = [(1, "label-a", ["term"], ["doc"], "coll")]
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=self._failing_proc()),
         ):
             with patch("nexus.operators.dispatch._log") as mock_log:
@@ -1559,8 +1557,7 @@ class TestDispatchFailureRollup:
         from nexus.commands.taxonomy_cmd import _generate_review_verdicts_batch
 
         items = [(1, "label-a", ["term"], ["doc"], "coll")]
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=self._failing_proc()),
         ):
             with patch("nexus.operators.dispatch._log") as mock_log:

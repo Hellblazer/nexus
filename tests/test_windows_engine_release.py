@@ -28,6 +28,7 @@ import build_pg_bundle_windows as bw
 import check_native_embedded_resources as chk
 import windows_engine_release as wer
 from nexus.daemon import binary_install
+from tests._module_seam import setattr_in
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tests" / "fixtures" / "windows_dumpbin"
@@ -258,7 +259,7 @@ def test_extract_embedded_reads_windows_file_uris_through_the_windows_url_to_pat
         assert win.startswith("C:\\"), win
         return win.replace("C:\\Users\\Sam\\.m2", str(tmp_path / "m2")).replace("\\", "/")
 
-    monkeypatch.setattr(wer.urllib.request, "url2pathname", windows_url2pathname)
+    setattr_in(monkeypatch, wer, "urllib.request.url2pathname", windows_url2pathname)
     members: dict[str, dict[str, bytes]] = {}
     for item in report:
         name = str(item["name"]).lstrip("/")

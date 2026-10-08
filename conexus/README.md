@@ -54,7 +54,7 @@ story.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
+- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -276,16 +276,35 @@ A `hooks/scripts/nx_hook_shim.py <verb>` handler runs
 on a verb it does not know, which blocks the session, so any verb one of those CLIs lacks
 is wired through the shim, which skips it with a notice instead.
 
-Every `hooks/scripts/...` handler is launched as `uv run --no-project --no-config --quiet
-<script>`, never as `python3 <script>` (nexus-efk2h, RDR-224). Stock Windows has no
-`python3` on PATH, so a `python3`-launched hook never fires there; `uv` is already required
-(sn's hooks use it, and it installs as `uv.exe`). `--no-project` and `--no-config` keep uv
-from syncing the session's project or reading a `.python-version`. The four plugin scripts
-carry a PEP 723 `requires-python = ">=3.12"` block, the floor their own guards enforce, so
-uv never runs them under an older interpreter it happens to find first; the shim is
-stdlib-only and has no floor. The first hook run on a machine with no Python 3.12 or newer
-makes uv fetch one, which can outlast a hook's timeout once; later runs find it. Direct
-`nx-hook <verb>` entries are unchanged.
+Every `hooks/scripts/...` handler is launched as `uv tool run --directory
+${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python <script>`, never as
+`python3 <script>` (nexus-efk2h, RDR-224). Stock Windows has no `python3` on PATH, so a
+`python3`-launched hook never fires there; `uv` is already required (sn's hooks use it, and
+it installs as `uv.exe`). It is `uv tool run`, not `uv run` (nexus-f9bgu.36): looking for an
+interpreter, `uv run` executes a `.venv` Python it finds in its starting directory or any
+parent, even with `--no-project`. Started from the hook's cwd that is the project, so a
+cloned repository could supply the interpreter that runs every hook; started from the plugin
+root it still walks up to `~/.venv` and, on Windows, `C:\.venv`, which any local user can
+create (both measured, macOS and Windows 11). A tool environment is built from a uv-managed
+or PATH interpreter and never consults a `.venv`. `--python >=3.12` is the floor the
+scripts' own guards enforce, so uv never runs them under an older interpreter it finds
+first; `--no-config` keeps a `uv.toml` from choosing the interpreter. `--directory` makes a
+script's process cwd the plugin root; it takes the project from the payload's `cwd`, else
+`CLAUDE_PROJECT_DIR`, and the shim starts `nx-hook` in that directory. The first hook run on a machine with no Python 3.12 or newer
+makes uv fetch one, which can outlast a hook's timeout once; later runs find it.
+
+**Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
+(offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
+`No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
+`PermissionRequest` and `UserPromptSubmit`, so five of the seven uv-launched entries (both
+Bash gates, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
+conexus tool call and every prompt until Python exists; the two `SessionStart` entries only
+print the error. The entries are in exec form (`args` is set, so there is no shell), and an
+exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
+command on that machine: `uv python install 3.12` (online once, then it is cached). A
+shell-form wrapper could map the failure to exit 0; it is not used because Claude Code runs
+shell-form hooks through Git Bash or PowerShell depending on the machine, and no one string is
+correct in both (nexus-f9bgu.36). Direct `nx-hook <verb>` entries are unchanged.
 
 | Event | Handler | Purpose |
 |-------|--------|---------|
@@ -413,7 +432,7 @@ The nexus core server exposes 42 MCP tools and the nexus-catalog server exposes 
 
 ### Sequential Thinking
 
-No separate install required — `npx` fetches `@modelcontextprotocol/server-sequential-thinking` on first use.
+No separate install required. The server is `mcp/sequential_thinking.py` in this plugin, a standard-library Python port of `@modelcontextprotocol/server-sequential-thinking` (same tool name and parameters), started with `uv tool run`. Node.js is not needed (nexus-f9bgu).
 
 ## Key Concepts
 

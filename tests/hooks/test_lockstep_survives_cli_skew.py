@@ -30,8 +30,11 @@ from tests._hook_wiring import launcher_script_args
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "conexus" / "hooks" / "scripts"
 _HOOK = "version_lockstep_hook.py"
-_CHAIN = (_HOOK, "version_lockstep_action.py", "_interpreter.py")
-_PLUGIN_LOCAL = {"_interpreter"}
+_CHAIN = (
+    _HOOK, "version_lockstep_action.py", "_interpreter.py", "_exec_path.py",
+    "_endpoint_resolve.py",
+)
+_PLUGIN_LOCAL = {"_interpreter", "_exec_path", "_endpoint_resolve"}
 
 
 def _session_start_entries() -> list[dict]:

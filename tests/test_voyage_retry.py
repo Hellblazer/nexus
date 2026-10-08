@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import voyageai.error as _ve
 
 from nexus.retry import _is_retryable_voyage_error, _voyage_with_retry
+from tests._module_seam import patch_in, patch_time
 
 #: structlog's ConsoleRenderer emits ANSI colour when FORCE_COLOR is set, which
 #: interleaves escape codes inside `key=value` pairs. Log-content assertions
@@ -63,7 +64,7 @@ def test_success_after_transient() -> None:
 
 def test_exhausted_then_raises() -> None:
     fn = MagicMock(side_effect=_ve.APIConnectionError("persistent"))
-    with patch("nexus.retry.time.sleep"), pytest.raises(_ve.APIConnectionError):
+    with patch_time("nexus.retry", "sleep"), pytest.raises(_ve.APIConnectionError):
         _voyage_with_retry(fn, max_attempts=3)
     assert fn.call_count == 3
 
@@ -82,7 +83,7 @@ def test_max_attempts_zero_retryable_error_raises_not_none() -> None:
     """Sibling of the case above for a RETRYABLE error: a single failed
     attempt must raise, never fall through to an implicit None."""
     fn = MagicMock(side_effect=_ve.APIConnectionError("down"))
-    with patch("nexus.retry.time.sleep"), pytest.raises(_ve.APIConnectionError):
+    with patch_time("nexus.retry", "sleep"), pytest.raises(_ve.APIConnectionError):
         _voyage_with_retry(fn, max_attempts=0)
     fn.assert_called_once()
 
@@ -115,7 +116,7 @@ def test_extended_transient_errors_retry(err_cls: type) -> None:
     formerly silent because voyageai.Client's internal tenacity swallowed
     them."""
     fn = MagicMock(side_effect=[err_cls("transient"), "ok"])
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _voyage_with_retry(fn) == "ok"
     assert fn.call_count == 2
 
@@ -136,8 +137,7 @@ def test_retry_accumulator_tracks_voyage_backoff_seconds() -> None:
         "ok",
     ])
     # nexus-8g79.32: pin random.random()=0.5 so jitter factor = 1.0.
-    with patch("nexus.retry.time.sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _voyage_with_retry(fn) == "ok"
     stats = get_retry_stats()
@@ -159,8 +159,7 @@ def test_retry_accumulator_tracks_chroma_backoff_seconds() -> None:
     reset_retry_stats()
     fn = MagicMock(side_effect=[Exception("503"), Exception("503"), "ok"])
     # nexus-8g79.32: pin random.random()=0.5 so jitter factor = 1.0.
-    with patch("nexus.retry.time.sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(fn, max_attempts=3) == "ok"
     stats = get_retry_stats()
@@ -204,7 +203,7 @@ def test_retry_warn_log_fires_on_backoff(capsys) -> None:
         _ve.ServiceUnavailableError("503"),
         "ok",
     ])
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _voyage_with_retry(fn) == "ok"
     captured = capsys.readouterr()
     # Strip ANSI first: structlog's ConsoleRenderer colorizes whenever

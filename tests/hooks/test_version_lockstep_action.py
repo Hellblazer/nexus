@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests._module_seam import setattr_in
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -159,7 +160,7 @@ class TestEditableGate:
         tool_dir = tmp_path / "tools"
         (tool_dir / "conexus").mkdir(parents=True)
         (tool_dir / "conexus" / "uv-receipt.toml").write_text("")
-        monkeypatch.setattr(mod.shutil, "which", lambda c: "/usr/bin/uv")
+        monkeypatch.setattr(mod, "which_off_cwd", lambda c: "/usr/bin/uv")
 
         def fake_run(args, **k):
             class R:
@@ -167,11 +168,11 @@ class TestEditableGate:
                 returncode = 0
             return R()
 
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
         assert mod.uv_receipt_present() is True
 
     def test_uv_missing_means_no_receipt(self, mod, monkeypatch) -> None:
-        monkeypatch.setattr(mod.shutil, "which", lambda c: None)
+        monkeypatch.setattr(mod, "which_off_cwd", lambda c: None)
         assert mod.uv_receipt_present() is False
 
 
@@ -266,6 +267,54 @@ class TestMarkerOnConfirmedSuccess:
         )
         mod.main(["action", "9.9.9"])
         assert marker.parent.is_dir()
+
+
+class TestConfigDirFollowsNexusConfigDir:
+    """nexus-f9bgu: with no per-file override, the marker and the log live in
+    the config dir the CLI uses (``nexus.config.nexus_config_dir``), so a
+    session with ``NEXUS_CONFIG_DIR`` set writes there and never into the
+    real ``~/.config/nexus``. The action ran under ``Path.home()``
+    unconditionally before."""
+
+    @pytest.fixture()
+    def cfg(self, tmp_path: Path, monkeypatch) -> Path:
+        monkeypatch.delenv("NX_LOCKSTEP_MARKER", raising=False)
+        monkeypatch.delenv("NX_LOCKSTEP_LOG", raising=False)
+        monkeypatch.delenv("NX_CONFIG_DIR", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        cfg = tmp_path / "cfg"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        return cfg
+
+    def test_marker_and_log_paths_follow_nexus_config_dir(self, mod, cfg) -> None:
+        assert mod.marker_path() == cfg / "cli_lockstep_marker"
+        assert mod.log_path() == cfg / "lockstep.log"
+
+    def test_write_marker_lands_under_nexus_config_dir_not_home(
+        self, mod, cfg, monkeypatch
+    ) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0", "9.9.9"], run_results={},
+        )
+        mod.main(["action", "9.9.9"])
+        assert (cfg / "cli_lockstep_marker").read_text().strip() == "9.9.9"
+        assert "installed=" in (cfg / "lockstep.log").read_text()
+        assert not (Path.home() / ".config" / "nexus").exists()
+
+    def test_default_is_home_config_nexus_without_env(self, mod, cfg, monkeypatch) -> None:
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        assert mod.marker_path() == Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+        assert mod.log_path() == Path.home() / ".config" / "nexus" / "lockstep.log"
+
+    def test_matches_the_cli_resolution(self, mod, cfg) -> None:
+        from nexus.config import nexus_config_dir
+
+        assert mod.marker_path().parent == nexus_config_dir()
+        assert mod.log_path().parent == nexus_config_dir()
 
 
 class TestFailureLeavesMarkerStale:
@@ -453,19 +502,24 @@ class TestRefDriftRemedyLogging:
             self.stdout = stdout
             self.stderr = stderr
 
+    @pytest.fixture(autouse=True)
+    def _nx_on_path(self, mod, monkeypatch) -> None:
+        # nx is resolved on PATH alone (finding A, nexus-f9bgu.36); these cases
+        # are about what happens after the spawn, so give them one.
+        monkeypatch.setattr(mod, "which_off_cwd", lambda c: f"/usr/bin/{c}")
+
     def test_subprocess_raise_logs_remedy(self, mod, log, monkeypatch) -> None:
         def boom(*a, **k):
             raise OSError("nx not found")
 
-        monkeypatch.setattr(mod.subprocess, "run", boom)
+        setattr_in(monkeypatch, mod, "subprocess.run", boom)
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
         text = log.read_text()
         assert "outcome=nx_upgrade_raised" in text
         assert "remedy=" in text
 
     def test_nonzero_exit_logs_remedy(self, mod, log, monkeypatch) -> None:
-        monkeypatch.setattr(
-            mod.subprocess, "run",
+        setattr_in(monkeypatch, mod, "subprocess.run",
             lambda *a, **k: self._FakeCompleted(returncode=1, stderr="boom"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
@@ -474,8 +528,7 @@ class TestRefDriftRemedyLogging:
         assert "remedy=" in text
 
     def test_reinstall_failed_text_logs_remedy(self, mod, log, monkeypatch) -> None:
-        monkeypatch.setattr(
-            mod.subprocess, "run",
+        setattr_in(monkeypatch, mod, "subprocess.run",
             lambda *a, **k: self._FakeCompleted(returncode=0, stdout="reinstall failed for conexus"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
@@ -484,8 +537,7 @@ class TestRefDriftRemedyLogging:
         assert "remedy=" in text
 
     def test_success_does_not_log_remedy(self, mod, log, monkeypatch) -> None:
-        monkeypatch.setattr(
-            mod.subprocess, "run",
+        setattr_in(monkeypatch, mod, "subprocess.run",
             lambda *a, **k: self._FakeCompleted(
                 returncode=0, stdout="picked up a plugin-only release for conexus",
             ),
@@ -496,8 +548,7 @@ class TestRefDriftRemedyLogging:
         assert "remedy=" not in text
 
     def test_no_drift_confirmed_does_not_log_remedy(self, mod, log, monkeypatch) -> None:
-        monkeypatch.setattr(
-            mod.subprocess, "run",
+        setattr_in(monkeypatch, mod, "subprocess.run",
             lambda *a, **k: self._FakeCompleted(returncode=0, stdout="nothing to do"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
@@ -514,12 +565,12 @@ class TestVersionParsing:
                 returncode = 0
             return R()
 
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(mod.shutil, "which", lambda c: "/usr/bin/nx")
+        setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
+        monkeypatch.setattr(mod, "which_off_cwd", lambda c: "/usr/bin/nx")
         assert mod.installed_nx_version() == "5.7.0"
 
     def test_installed_nx_version_none_when_absent(self, mod, monkeypatch) -> None:
-        monkeypatch.setattr(mod.shutil, "which", lambda c: None)
+        monkeypatch.setattr(mod, "which_off_cwd", lambda c: None)
         assert mod.installed_nx_version() is None
 
 

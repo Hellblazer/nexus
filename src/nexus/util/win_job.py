@@ -76,6 +76,13 @@ CREATE_NEW_PROCESS_GROUP: int = 0x00000200
 #: ``nexus_rdr/224-research-20``).
 CREATE_NO_WINDOW: int = 0x08000000
 
+#: ``CREATE_BREAKAWAY_FROM_JOB`` — the child leaves the job its parent is in.
+#: Honoured only when that job allows breakaway (``JOB_OBJECT_LIMIT_BREAKAWAY_OK``);
+#: otherwise ``CreateProcess`` fails with access denied, so a spawn site adds it
+#: first and falls back to a plain spawn. Used for a daemon that must outlive a
+#: kill-on-close host job (the desktop extension's bootstrap).
+CREATE_BREAKAWAY_FROM_JOB: int = 0x01000000
+
 #: Console control event for a graceful stop of a process spawned with
 #: ``CREATE_NEW_PROCESS_GROUP`` (see :func:`send_ctrl_break`). The storage
 #: supervisor sends it to its engine from the same console; the stopper
@@ -350,6 +357,7 @@ def send_ctrl_break(pid: int) -> bool:
 
 
 __all__ = [
+    "CREATE_BREAKAWAY_FROM_JOB",
     "CREATE_NEW_PROCESS_GROUP",
     "CREATE_NO_WINDOW",
     "CTRL_BREAK_EVENT",

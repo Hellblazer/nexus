@@ -52,6 +52,7 @@ from nexus.mcp_server import (
 from nexus.types import SearchResult
 from tests._catalog_fixture_ops import seed_manifest_chunks
 from tests.conftest import make_vector_test_client
+from tests._module_seam import module_time
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -1683,7 +1684,7 @@ def test_page_cache_expires_on_ttl(monkeypatch):
     _fresh_page_cache(monkeypatch)
     _mock_t3([{"name": "knowledge__test", "count": 5}])
     t = {"now": 1000.0}
-    monkeypatch.setattr(mcp_core.time, "monotonic", lambda: t["now"])
+    module_time(monkeypatch, mcp_core).monotonic = lambda: t["now"]
     calls: list[int] = []
 
     def fake(query, collections, n_results, t3, where=None, **kw):

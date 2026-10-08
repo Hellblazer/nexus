@@ -81,15 +81,17 @@ def _default_plugin_version() -> str | None:
 def _default_lockstep_marker() -> str | None:
     """Last CLI version the RDR-143 lockstep action CONFIRMED, read from the
     SAME marker file the SessionStart hook reads
-    (``~/.config/nexus/cli_lockstep_marker``; ``NX_LOCKSTEP_MARKER``
+    (``<nexus_config_dir()>/cli_lockstep_marker``; ``NX_LOCKSTEP_MARKER``
     overrides for tests, mirroring the hook). ``None`` = never confirmed or
     unreadable — a comparison INPUT, never an authority."""
     import os  # noqa: PLC0415 — stdlib, deferred with the module's on-disk-read convention
 
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle
+
     override = os.environ.get("NX_LOCKSTEP_MARKER")
     marker = (
         Path(override) if override
-        else Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+        else nexus_config_dir() / "cli_lockstep_marker"
     )
     try:
         text = marker.read_text().strip()

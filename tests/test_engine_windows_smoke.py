@@ -27,6 +27,7 @@ import build_pg_bundle_windows as bw
 import engine_windows_smoke as es
 import pg_bundle_windows_smoke as sm
 import windows_engine_release as wer
+from tests._module_seam import setattr_in
 
 REPO = Path(__file__).resolve().parent.parent
 CHANGELOG = REPO / "service" / "src" / "main" / "resources" / "db" / "changelog"
@@ -679,7 +680,7 @@ def test_the_model_download_carries_no_credential(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setenv("GH_TOKEN", "ghp_should_never_be_sent")
     monkeypatch.setenv("GITHUB_TOKEN", "also_never")
-    monkeypatch.setattr(es.urllib.request, "urlopen", fake_urlopen)
+    setattr_in(monkeypatch, es, "urllib.request.urlopen", fake_urlopen)
     dest = tmp_path / "m"
     es.fetch_url("https://github.com/o/r/releases/download/t/model.onnx", dest)
     assert dest.read_bytes() == b"payload" and len(seen) == 1

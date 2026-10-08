@@ -54,12 +54,12 @@ class TestSnPluginStructure:
             for entry in hooks
             for h in entry["hooks"]
         ]
-        if not any(ln.startswith("uv run ") and ln.endswith("/subagent_start.py") for ln in lines):
+        if not any(ln.startswith("uv tool run ") and ln.endswith("/subagent_start.py") for ln in lines):
             offenders.append(f"hooks.json SubagentStart does not run subagent_start.py under uv: {lines}")
         assert not offenders, "\n".join(offenders)
 
     def test_every_hook_script_named_by_hooks_json_exists(self) -> None:
-        """Exec form runs ``uv run ... <path>``, so the +x bit the bash wrappers
+        """Exec form runs ``uv tool run ... python <path>``, so the +x bit the bash wrappers
         needed is no longer part of the contract — asserting it would be a
         check whose domain no longer contains the claim. What still has to
         hold is that every path the manifest names is a file that is there.
@@ -116,13 +116,17 @@ class TestSnHooksLaunchUnderUv:
 
     sn hooks used to run under bare ``python3``, which stock Windows does
     not have. They now run through ``uv``, which sn already requires for
-    Serena. The risk that swap brings is a ``.python-version`` pinning an
-    interpreter that is not installed: without ``--no-config`` it made the
-    launch exit 2. WHERE uv looks for that file depends on its version:
-    0.8 searches above the cwd, 0.12 above the script's directory (both
-    measured; CI runs the newer one). So the pin here sits above BOTH a
-    copy of the plugin and the cwd, and every manifest entry's real argv,
-    not a retyped copy, runs beneath it.
+    Serena. Under ``uv run`` the risk that swap brought was a
+    ``.python-version`` pinning an interpreter that is not installed, which
+    made the launch exit 2 (uv 0.8 searched above the cwd, 0.12 above the
+    script's directory). Since nexus-f9bgu.36 the entries are ``uv tool run
+    --python >=3.12 python``, which no ``.python-version`` or project
+    ``uv.toml`` reaches; the hostile tree keeps both, above a copy of the
+    plugin and the cwd, so a launcher change that lets them back in is seen.
+    What ``--no-config`` still guards is the USER's ``uv.toml`` (measured: a
+    ``required-version`` there exits 2 without the flag), so the tree plants
+    one of those too, and every manifest entry's real argv, not a retyped
+    copy, runs beneath it.
     """
 
     PAYLOAD = json.dumps({
@@ -142,8 +146,11 @@ class TestSnHooksLaunchUnderUv:
 
     @staticmethod
     def _hostile_tree(tmp_path: Path) -> tuple[Path, Path]:
-        """``(plugin_root, cwd)``, both under a pin nothing can satisfy."""
+        """``(plugin_root, cwd)``, both under a pin nothing can satisfy, with a
+        user-level ``uv.toml`` (see :meth:`_run`) that refuses every uv."""
         (tmp_path / ".python-version").write_text("3.8.3\n")
+        (tmp_path / "userconf" / "uv").mkdir(parents=True)
+        (tmp_path / "userconf" / "uv" / "uv.toml").write_text('required-version = "<0.1"\n')
         plugin = tmp_path / "plugin"
         shutil.copytree(SN_DIR, plugin)
         cwd = tmp_path / "project"
@@ -167,7 +174,13 @@ class TestSnHooksLaunchUnderUv:
         return out
 
     def _run(self, argv: list[str], plugin: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(plugin)}
+        # uv reads the user's uv.toml from $XDG_CONFIG_HOME/uv (POSIX) or %APPDATA%\\uv
+        # (Windows); both point at the hostile tree's.
+        userconf = str(plugin.parent / "userconf")
+        env = {
+            **os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(plugin),
+            "XDG_CONFIG_HOME": userconf, "APPDATA": userconf,
+        }
         # --no-config gates config FILES only; uv still honours UV_* env
         # vars, and an ambient UV_PYTHON would choose the interpreter here.
         for var in ("VIRTUAL_ENV", "UV_PYTHON", "UV_NO_CONFIG", "UV_CONFIG_FILE"):
@@ -192,12 +205,12 @@ class TestSnHooksLaunchUnderUv:
     def test_the_pin_is_hostile_without_no_config(self, tmp_path: Path) -> None:
         """Non-vacuity: drop --no-config and the same tree breaks the launch,
         so the test above is exercising the flag, not a harmless directory.
-        This failed on CI's uv 0.12 when the pin sat above the cwd only."""
+        Under ``uv tool run`` the breakage is the user-level ``uv.toml``."""
         plugin, cwd = self._hostile_tree(tmp_path)
         argv = [a for a in self._argvs(plugin)[0] if a != "--no-config"]
         result = self._run(argv, plugin, cwd)
         assert result.returncode != 0, (argv, result.stdout, result.stderr)
-        assert "3.8.3" in result.stderr, result.stderr
+        assert "Required uv version" in result.stderr, result.stderr
 
 
 class TestSnMcpConfig:
@@ -215,17 +228,16 @@ class TestSnMcpConfig:
             offenders.append("serena is not launched with --context claude-code")
         if "--project-from-cwd" not in args:
             offenders.append("serena is not launched with --project-from-cwd")
-        if mcp_config["context7"]["command"] != "npx":
-            offenders.append("context7 command is not npx")
+        # nexus-f9bgu: the hosted endpoint, not npx (no Node.js on a clean
+        # Windows box); tests/test_plugin_mcp_windows_launch.py pins the shape.
+        if mcp_config["context7"].get("url") != "https://mcp.context7.com/mcp":
+            offenders.append("context7 is not the hosted HTTP endpoint")
         # nexus-jbt5x: an unpinned URL gives every fresh spawn a different Serena.
         url, rev = serena_pin()
         if url != "https://github.com/oraios/serena":
             offenders.append(f"serena pin url is {url!r}")
         if len(rev) != 40:
             offenders.append(f"serena pin {rev!r} is not a 40-character revision")
-        pkg = next((a for a in mcp_config["context7"]["args"] if a.startswith("@upstash/context7-mcp")), "")
-        if not re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", pkg):
-            offenders.append(f"context7 is not pinned to an exact version: {pkg!r}")
         # serena-tools.txt was generated from the revision .mcp.json pins.
         snap_rev, available, _ = parse_snapshot()
         if snap_rev != rev:
@@ -1041,7 +1053,7 @@ class TestSnSessionStart:
             for entry in data["hooks"]["SessionStart"]
             for h in entry["hooks"]
         ]
-        assert any(ln.startswith("uv run ") and ln.endswith("/session_start.py") for ln in lines), lines
+        assert any(ln.startswith("uv tool run ") and ln.endswith("/session_start.py") for ln in lines), lines
 
     # ── Serena-root recording (nexus-ebx0s) ──────────────────────────────────
 
@@ -1098,6 +1110,21 @@ class TestSnSessionStart:
         assert result.returncode == 0, result.stderr
         assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_bytes()
         assert b"crashed, event continues" not in result.stderr
+
+    def test_stdout_is_the_section_bytes_whatever_the_stream_encoding(self) -> None:
+        """Claude Code reads the hook's stdout as UTF-8. On Windows a piped
+        stdout is in the locale code page (cp1252) and text mode, so a bare
+        ``sys.stdout.write`` sent the section's em dashes as cp1252 bytes and
+        every newline as CRLF (RDR-224). Forcing a non-UTF-8 stream encoding
+        reproduces that on any host: the output must still be the file's bytes."""
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        env["PYTHONIOENCODING"] = "latin-1"
+        result = subprocess.run(
+            [sys.executable, str(SESSION_START)], input=b"{}",
+            capture_output=True, timeout=10, cwd=str(REPO_ROOT), env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_bytes()
 
 
 class TestSnHookErrorBoundary:

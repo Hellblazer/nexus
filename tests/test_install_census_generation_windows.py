@@ -8,12 +8,12 @@ free: the under-reporting direction. ``platform="win32"`` is injected.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from nexus._install import census_core as cc
+from tests._module_seam import setattr_in
 
 WIN = "win32"
 
@@ -23,8 +23,8 @@ def test_a_junction_pointer_is_matched_by_its_real_target(
 ) -> None:
     pointer = tmp_path / "tools" / "gen-legacy-uv-tool"
     pointer.mkdir(parents=True)  # stands in for the junction
-    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == pointer, raising=False)
-    monkeypatch.setattr(os, "readlink", lambda p, **kw: "\\\\?\\C:\\Users\\Sam\\AppData\\Roaming\\uv\\tools\\conexus")
+    setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.isjunction", lambda p: Path(p) == pointer, raising=False)
+    setattr_in(monkeypatch, "nexus._install.layout_core", "os.readlink", lambda p, **kw: "\\\\?\\C:\\Users\\Sam\\AppData\\Roaming\\uv\\tools\\conexus")
     assert cc._match_prefix(pointer, WIN) == "C:/Users/Sam/AppData/Roaming/uv/tools/conexus/"
 
 
@@ -33,8 +33,8 @@ def test_a_holder_running_from_the_real_legacy_tree_is_found_through_the_pointer
 ) -> None:
     pointer = tmp_path / "tools" / "gen-legacy-uv-tool"
     pointer.mkdir(parents=True)
-    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == pointer, raising=False)
-    monkeypatch.setattr(os, "readlink", lambda p, **kw: "\\\\?\\C:\\uv\\tools\\conexus")
+    setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.isjunction", lambda p: Path(p) == pointer, raising=False)
+    setattr_in(monkeypatch, "nexus._install.layout_core", "os.readlink", lambda p, **kw: "\\\\?\\C:\\uv\\tools\\conexus")
     snapshot = "777 C:/uv/tools/conexus/Scripts/python.exe -m nexus.mcp\n888 C:/other/x.exe\n"
     assert cc.generation_holder_pids(pointer, snapshot, platform=WIN) == [777]
 

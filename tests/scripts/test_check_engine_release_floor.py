@@ -26,6 +26,7 @@ from nexus.db.managed_endpoint import (
     ManagedServiceUnreachable,
 )
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
+from tests._module_seam import patch_in
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEST_URL = "https://example.test"
@@ -454,7 +455,7 @@ _BINARY = gate._REQUIRED_ASSET_NAME
     ],
 )
 def test_paired_tag_published(fake, ok, needles) -> None:
-    with patch.object(gate.subprocess, "run", return_value=fake):
+    with patch_in(gate, "subprocess.run", return_value=fake):
         got, reason = gate._paired_tag_published(_PAIRED_TAG)
     assert got is ok
     for needle in needles:
@@ -464,11 +465,11 @@ def test_paired_tag_published(fake, ok, needles) -> None:
 
 
 def test_paired_tag_published_gh_missing_and_cwd_anchoring(tmp_path) -> None:
-    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("gh not found")):
+    with patch_in(gate, "subprocess.run", side_effect=FileNotFoundError("gh not found")):
         got, reason = gate._paired_tag_published(_PAIRED_TAG)
     assert got is gate._TAGS_UNAVAILABLE and "could not invoke" in reason and "gh auth login" in reason
     ok = _gh({"isDraft": False, "assets": [{"name": _BINARY}]})
-    with patch.object(gate.subprocess, "run", return_value=ok) as run:
+    with patch_in(gate, "subprocess.run", return_value=ok) as run:
         gate._paired_tag_published(_PAIRED_TAG, repo_root=tmp_path)
         assert run.call_args[1]["cwd"] == tmp_path
         gate._paired_tag_published(_PAIRED_TAG)
@@ -484,7 +485,7 @@ def test_tag_existence_and_age_helpers(tmp_path) -> None:
     age = gate._tag_age_hours("engine-service-v0.1.9", repo_root=repo)
     assert isinstance(age, float) and 0.0 <= age < 1.0
     assert gate._tag_age_hours("engine-service-v9.9.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
-    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("no git")):
+    with patch_in(gate, "subprocess.run", side_effect=FileNotFoundError("no git")):
         assert gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
         assert gate._tag_age_hours("engine-service-v0.1.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
 
@@ -803,7 +804,8 @@ class TestCheckDataEffectRelay:
 
 
 class TestRequireWindows:
-    """The opt-in Windows-assets check: 27 assets on a published tag, and nothing else changes."""
+    """The opt-in Windows-assets check: 36 assets on a published tag (27 on one cut before the
+    POSIX engine archives), and nothing else changes."""
 
     TAG = "engine-service-v0.1.140"
     ALL = gate.expected_engine_assets(windows=True)
@@ -812,9 +814,16 @@ class TestRequireWindows:
     def _release(names, *, draft=False):
         return _gh({"isDraft": draft, "assets": [{"name": n} for n in names]})
 
-    def test_the_asset_sets_are_21_and_27(self) -> None:
-        assert len(gate.expected_engine_assets(windows=False)) == 21
-        assert len(self.ALL) == 27 and len(set(self.ALL)) == 27
+    def test_the_asset_sets_are_30_and_36(self) -> None:
+        assert len(gate.expected_engine_assets(windows=False)) == 30
+        assert len(self.ALL) == 36 and len(set(self.ALL)) == 36
+        old = gate.expected_engine_assets(windows=True, posix_archives=False)
+        assert len(old) == 27 and set(old) < set(self.ALL)
+        assert set(self.ALL) - set(old) == {
+            f"nexus-service-{arch}.txz{suffix}"
+            for arch in ("linux-amd64", "linux-arm64", "mac-arm64")
+            for suffix in ("", ".sha256", ".sigstore.json")
+        }
         assert set(gate.expected_engine_assets(windows=False)) < set(self.ALL)
         windows = set(self.ALL) - set(gate.expected_engine_assets(windows=False))
         assert windows == {
@@ -824,25 +833,40 @@ class TestRequireWindows:
         }
 
     def test_a_published_release_with_all_27_passes(self, capsys) -> None:
-        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)):
+        with patch_in(gate, "subprocess.run", return_value=self._release(self.ALL)):
+            assert gate.check_windows_assets(self.TAG) == 0
+        assert "all 36 assets" in capsys.readouterr().out
+
+    def test_a_release_from_before_the_posix_archives_is_held_to_its_27(self, capsys) -> None:
+        """The pinned engine at the time of this change (v0.1.149) has no .txz for Linux or macOS."""
+        old = gate.expected_engine_assets(windows=True, posix_archives=False)
+        with patch_in(gate, "subprocess.run", return_value=self._release(old)):
             assert gate.check_windows_assets(self.TAG) == 0
         assert "all 27 assets" in capsys.readouterr().out
 
-    def test_a_cut_with_the_switch_off_is_named_as_such(self, capsys) -> None:
-        with patch.object(gate.subprocess, "run", return_value=self._release(gate.expected_engine_assets(windows=False))):
+    def test_a_partial_set_of_posix_archives_is_held_to_all_36(self, capsys) -> None:
+        old = gate.expected_engine_assets(windows=True, posix_archives=False)
+        with patch_in(gate, "subprocess.run",
+                          return_value=self._release([*old, "nexus-service-mac-arm64.txz"])):
             assert gate.check_windows_assets(self.TAG) == 1
         err = capsys.readouterr().err
-        assert "missing 6 of 27" in err and "nexus-service-windows-x64.txz" in err
+        assert "missing 8 of 36" in err and "nexus-service-linux-amd64.txz" in err
+
+    def test_a_cut_with_the_switch_off_is_named_as_such(self, capsys) -> None:
+        with patch_in(gate, "subprocess.run", return_value=self._release(gate.expected_engine_assets(windows=False))):
+            assert gate.check_windows_assets(self.TAG) == 1
+        err = capsys.readouterr().err
+        assert "missing 6 of 36" in err and "nexus-service-windows-x64.txz" in err
         assert "NX_WINDOWS_RELEASE_LEGS off" in err and "another cut" in err
 
     def test_any_single_missing_asset_fails_and_is_named(self, capsys) -> None:
         for victim in self.ALL:
-            with patch.object(gate.subprocess, "run", return_value=self._release([n for n in self.ALL if n != victim])):
+            with patch_in(gate, "subprocess.run", return_value=self._release([n for n in self.ALL if n != victim])):
                 assert gate.check_windows_assets(self.TAG) == 1, victim
             assert victim in capsys.readouterr().err
 
     def test_a_draft_fails_even_with_every_asset(self, capsys) -> None:
-        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL, draft=True)):
+        with patch_in(gate, "subprocess.run", return_value=self._release(self.ALL, draft=True)):
             assert gate.check_windows_assets(self.TAG) == 1
         assert "DRAFT" in capsys.readouterr().err
 
@@ -858,21 +882,21 @@ class TestRequireWindows:
         ids=["gh-fails", "not-json", "no-isdraft", "no-assets", "wrong-shape"],
     )
     def test_an_unreadable_answer_is_unverifiable_never_a_pass(self, fake, capsys) -> None:
-        with patch.object(gate.subprocess, "run", return_value=fake):
+        with patch_in(gate, "subprocess.run", return_value=fake):
             assert gate.check_windows_assets(self.TAG) == 2
         assert "CANNOT VERIFY" in capsys.readouterr().err
 
     def test_a_missing_gh_is_unverifiable(self, capsys) -> None:
-        with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("gh")):
+        with patch_in(gate, "subprocess.run", side_effect=FileNotFoundError("gh")):
             assert gate.check_windows_assets(self.TAG) == 2
         assert "CANNOT VERIFY" in capsys.readouterr().err
 
     def test_the_flag_defaults_to_the_pinned_tag_and_names_it_in_the_gh_call(self) -> None:
-        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)) as run:
+        with patch_in(gate, "subprocess.run", return_value=self._release(self.ALL)) as run:
             assert gate.main(["--require-windows"]) == 0
         assert run.call_args[0][0][:3] == ["gh", "release", "view"]
         assert run.call_args[0][0][3] == gate._pinned_engine_tag()
-        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)) as run:
+        with patch_in(gate, "subprocess.run", return_value=self._release(self.ALL)) as run:
             assert gate.main(["--require-windows", self.TAG]) == 0
         assert run.call_args[0][0][3] == self.TAG
 

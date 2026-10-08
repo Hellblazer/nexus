@@ -31,6 +31,7 @@ from click.testing import CliRunner
 
 from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer
+from tests._module_seam import patch_in, setattr_in
 
 
 def _set_platform(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
@@ -175,7 +176,7 @@ class TestUninstallService:
     ) -> None:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -219,7 +220,7 @@ class TestServiceUninstallCli:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
         runner = CliRunner()
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -251,7 +252,7 @@ class TestInstallServiceLibrary:
     ) -> None:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -281,7 +282,7 @@ class TestInstallServiceLibrary:
     ) -> None:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -300,7 +301,7 @@ class TestServiceInstallCli:
     ) -> None:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -320,7 +321,7 @@ class TestServiceInstallCli:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
         runner = CliRunner()
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+        with patch_in(daemon_cmd, "subprocess.run") as mock_run, \
                 patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -581,7 +582,7 @@ class TestActivationFailure:
                 return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Could not find service \"com.nexus.service\" in domain for uid: 501")
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Failed to bootstrap")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         dest = tmp_path / "units" / "com.nexus.service.plist"
@@ -610,7 +611,7 @@ class TestActivationFailure:
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         result = installer.install_autostart(tier="service", force=True)
@@ -633,7 +634,7 @@ class TestActivationFailure:
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         result = installer.install_autostart(tier="service", force=True)
@@ -881,7 +882,7 @@ class TestInstallAutostartConsultsTheManager:
                 return subprocess.CompletedProcess(cmd, 0, stdout=_DISABLED_LISTING, stderr="")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         result = installer.install_autostart(tier="service")
@@ -907,7 +908,7 @@ class TestInstallAutostartConsultsTheManager:
                 return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Could not find service \"com.nexus.service\" in domain for uid: 501")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         result = installer.install_autostart(tier="service")
@@ -929,7 +930,7 @@ class TestInstallAutostartConsultsTheManager:
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="com.nexus.service = { active count = 1 }", stderr="")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         result = installer.install_autostart(tier="service")
@@ -954,7 +955,7 @@ class TestInstallAutostartConsultsTheManager:
                 return subprocess.CompletedProcess(cmd, 0, stdout=_DISABLED_LISTING, stderr="")
             return subprocess.CompletedProcess(cmd, 125, stdout="", stderr="Bootstrap failed: 125: Domain does not support specified action")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         with pytest.raises(installer.ActivationError) as excinfo:
@@ -980,7 +981,7 @@ class TestInstallAutostartConsultsTheManager:
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Could not find domain for gui/501")
 
-        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        setattr_in(monkeypatch, installer, "subprocess.run", _fake_run)
         # nexus-t10nc: the timed activation probes go through run_bounded now.
         monkeypatch.setattr(installer, "run_bounded", _fake_run)
         result = installer.install_autostart(tier="service")

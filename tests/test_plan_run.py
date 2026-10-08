@@ -24,6 +24,7 @@ import json
 import pytest
 
 from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS
+from tests._module_seam import patch_in
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -4712,7 +4713,7 @@ class TestStepRecords:
         claude_dispatch seam, must produce a non-None model/cost on its
         StepRecord -- proving the ambient_usage_sink mechanism actually
         threads through the real call chain, not just a mock."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock
 
         from tests.test_operator_dispatch import _make_proc, _result_ndjson
         from nexus.plans.runner import plan_run
@@ -4730,7 +4731,7 @@ class TestStepRecords:
             returncode=0, stderr=b"",
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             result = await plan_run(_match(plan), dispatcher=None)
 
         assert len(result.step_records) == 1
@@ -4747,7 +4748,6 @@ class TestStepRecords:
         """Two isolated LLM steps, back to back, each dispatching a
         DIFFERENT faked subprocess response -- each StepRecord must
         carry only its OWN step's usage, never the other's."""
-        from unittest.mock import AsyncMock, patch
 
         from tests.test_operator_dispatch import _make_proc, _result_ndjson
         from nexus.plans.runner import plan_run
@@ -4781,7 +4781,7 @@ class TestStepRecords:
         async def fake_create_subprocess_exec(*args, **kwargs):
             return responses.pop(0)
 
-        with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
             result = await plan_run(_match(plan), dispatcher=None, bundle_operators=False)
 
         assert len(result.step_records) == 2

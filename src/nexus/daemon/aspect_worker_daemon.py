@@ -95,24 +95,31 @@ _DEFAULT_RECLAIM_INTERVAL: float = 30.0
 def next_reclaim_wait(
     current: float, *, reclaimed: int | None, base: float, stale_timeout: float,
 ) -> float:
-    """The wait before the next reclaim sweep (nexus-e0ypa, Sam 2026-09-08).
+    """The wait before the next reclaim sweep (nexus-e0ypa, Sam 2026-09-08;
+    failure arm nexus-g5rz5).
 
     A sweep that reclaimed rows resets the wait to *base*; an empty sweep
     doubles it, capped at the stale window (a row cannot become reclaimable
     faster than that, so sweeping an idle queue more often than the window
     only samples what it cannot detect); a failed sweep (``reclaimed is
-    None``) leaves it unchanged, since a service error says nothing about
-    whether the queue is idle. The base is a floor: a window smaller than
-    the base (test sizes) caps growth without shrinking the sweep. On an
-    idle queue this cuts the 30s cadence's 2,880 empty requests a day to
-    about a tenth; on a live queue it keeps the RDR-173 review-M1 promptness
-    the 30s base was chosen for.
+    None``) doubles it on the same ladder to the same cap. A failure is no
+    evidence the queue is idle, but it is evidence the service cannot be
+    asked, and this daemon outlives ``nx daemon service stop`` by design
+    (RDR-224: the worker belongs to the store path, not to the service), so
+    with the stack stopped every sweep fails. Holding the base there made
+    2,880 failed attempts a day, each rebuilding the client, against a
+    service that was not there. The cap bounds the cost of the backoff:
+    once the service returns, the next sweep is at most one stale window
+    away, the same latency an idle queue already accepts. The base is a
+    floor: a window smaller than the base (test sizes) caps growth without
+    shrinking the sweep. On an idle queue this cuts the 30s cadence's 2,880
+    empty requests a day to about a tenth; on a live queue it keeps the
+    RDR-173 review-M1 promptness the 30s base was chosen for.
     """
-    if reclaimed is None:
-        return current
-    if reclaimed > 0:
+    if reclaimed is not None and reclaimed > 0:
         return base
     return max(base, min(current * 2, float(stale_timeout)))
+
 
 #: Grace window (s) to catch a daemon child that crashes immediately after spawn
 #: (RDR-173 P5). On the store path only at actual spawn time (deduped), so the
@@ -392,6 +399,7 @@ class AspectWorkerDaemon:
                     "aspect_worker_daemon.reclaim_queue_rebuild_failed",
                     tenant=self._tenant, error=str(rebuild_exc),
                 )
+                self._back_off_after_failed_sweep()
                 return None
         queue = self._reclaim_queue
         try:
@@ -422,6 +430,7 @@ class AspectWorkerDaemon:
                 tenant=self._tenant, error=str(exc),
             )
             self._reclaim_queue = None
+            self._back_off_after_failed_sweep()
             try:
                 queue.close()
             except Exception as close_exc:  # noqa: BLE001 - best-effort teardown of an already-broken client
@@ -430,6 +439,14 @@ class AspectWorkerDaemon:
                     tenant=self._tenant, error=str(close_exc),
                 )
             return None
+
+    def _back_off_after_failed_sweep(self) -> None:
+        """Grow the wait after a sweep that could not reach the service (the
+        sweep raised, or the client could not be rebuilt). nexus-g5rz5."""
+        self._current_reclaim_wait = next_reclaim_wait(
+            self._current_reclaim_wait, reclaimed=None,
+            base=self._reclaim_interval, stale_timeout=self._stale_timeout,
+        )
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
@@ -629,6 +646,37 @@ _recent_spawn: dict[str, float] = {}  # tenant -> monotonic deadline
 _SPAWN_SUPPRESS_WINDOW: float = 10.0
 
 
+def _popen_outliving_host_job(
+    popen: Callable[..., Any], argv: list[str], **kwargs: Any,
+) -> Any:
+    """``popen(argv, **kwargs)``, asking Windows to take the child out of the
+    spawning process's Job Object first (RDR-224 review finding E).
+
+    The daemon is documented as outliving the storing process. Under the
+    desktop extension that process sits in the bootstrap's kill-on-close job,
+    which every descendant joins unless it breaks away, so without this the
+    daemon dies when the extension closes. The bootstrap's job allows
+    breakaway; a host job that does not refuses the spawn with access denied,
+    and the spawn is retried once without the flag, as
+    ``nexus._session_end_launcher`` does. A no-op off Windows (no
+    ``creationflags``); a failure that is not about breakaway fails the same
+    way on the retry and propagates.
+    """
+    flags = kwargs.pop("creationflags", None)
+    if flags is None:
+        return popen(argv, **kwargs)
+    from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
+
+    try:
+        return popen(argv, creationflags=flags | win_job.CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+    except OSError as exc:
+        _log.info(
+            "aspect_worker_daemon.breakaway_refused",
+            error=str(exc), hint="retrying the spawn inside the host job",
+        )
+        return popen(argv, creationflags=flags, **kwargs)
+
+
 def ensure_aspect_worker_daemon(
     *,
     config_dir: Path | str,
@@ -699,7 +747,8 @@ def ensure_aspect_worker_daemon(
             # the lease and the stale one exits on its own next heartbeat,
             # per this function's own docstring), not by anything signalling
             # this pid. There is no kill call site for containment to serve.
-            proc = _popen(
+            proc = _popen_outliving_host_job(
+                _popen,
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=spawn_log,

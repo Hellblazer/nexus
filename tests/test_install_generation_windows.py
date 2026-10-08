@@ -22,6 +22,7 @@ import pytest
 from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
+from tests._module_seam import setattr_in
 
 WIN = "win32"
 
@@ -184,7 +185,7 @@ class TestBuildGeneration:
                 raise PermissionError(13, "Access is denied")
             return real(path, *a, **kw)
 
-        monkeypatch.setattr(os, "mkdir", mkdir)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.mkdir", mkdir)
         with pytest.raises(gen_core.GenerationError, match="could not create the generation directory") as raised:
             _build(tools, FakeUv())
         assert str(tools) in str(raised.value)
@@ -199,7 +200,7 @@ class TestBuildGeneration:
                 raise OSError(28, "No space left on device")
             return real(src, dst, *a, **kw)
 
-        monkeypatch.setattr(os, "replace", replace)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.replace", replace)
         with pytest.raises(gen_core.GenerationError, match="failed"):
             _build(tools, FakeUv())
         assert list(tools.iterdir()) == []
@@ -339,7 +340,7 @@ class TestFlipAndRollback:
                 raise PermissionError(5, "denied")
             return real(src, dst, *args, **kw)
 
-        monkeypatch.setattr(os, "rename", rename)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.rename", rename)
         with pytest.raises(gen_core.GenerationError, match="could not repoint"):
             self._flip(b, tools)
         assert os.readlink(tools / "current") == str(a)
@@ -399,7 +400,7 @@ class TestFlipAndRollback:
         """os.kill(pid, 0) calls TerminateProcess on Windows. The Windows reading
         asks the process table, so on that reading os.kill must not be reached."""
         calls: list[int] = []
-        monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append(pid))
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.kill", lambda pid, sig: calls.append(pid))
         winproc = gen_core._sibling("winproc_core")
         monkeypatch.setattr(winproc, "ctypes_win_info_api", lambda: object())
         monkeypatch.setattr(winproc, "process_age_seconds", lambda pid, api: 5.0 if pid == 7 else None)
@@ -412,7 +413,7 @@ class TestFlipAndRollback:
     ) -> None:
         """Flipping to the generation current already names, spelt in another
         case, must not rewrite previous to name that same generation."""
-        monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
         a, b = _gen(tools, "gen-A"), _gen(tools, "gen-B")
         gen_core.flip_current(a, tools, ops=SymlinkOps(), platform=WIN)
         gen_core.flip_current(b, tools, ops=SymlinkOps(), platform=WIN)
@@ -593,6 +594,107 @@ class TestEnsureUserPath:
         assert gen_core.uv_bin_dir(run=FakeUv(uv_bin=tmp_path / "ub"), environ={}) == tmp_path / "ub"
         assert gen_core.uv_bin_dir(run=FakeUv(), environ={"UV_TOOL_BIN_DIR": "D:\\ub"}) == Path("D:\\ub")
         assert gen_core.uv_bin_dir(run=FakeUv(), environ={}) == Path.home() / ".local" / "bin"
+
+
+class TestRemoveUserPath:
+    """``nx uninstall`` takes back the entry ``nx self install`` added (RDR-224,
+    nexus-7xzc1). A file or a spy stands in for HKCU\\Environment."""
+
+    ENTRY = "C:\\nx\\tools\\current\\bin"
+
+    def _store(self, tmp_path: Path, value: str) -> gen_core.FileUserPath:
+        store = gen_core.FileUserPath(tmp_path / "userpath.txt")
+        store.write(value, 2)
+        return store
+
+    def test_only_the_entry_goes_and_every_other_entry_stays_byte_for_byte(
+        self, tmp_path: Path,
+    ) -> None:
+        store = self._store(
+            tmp_path, f"{self.ENTRY};C:\\Windows;%USERPROFILE%\\bin;;%LOCALAPPDATA%\\x\\",
+        )
+        result = gen_core.remove_user_path(self.ENTRY, store=store, environ={})
+        assert result.removed == 1
+        assert store.read()[0] == "C:\\Windows;%USERPROFILE%\\bin;;%LOCALAPPDATA%\\x\\"
+
+    def test_every_spelling_of_the_entry_goes(self, tmp_path: Path) -> None:
+        env = {"USERPROFILE": "C:\\nx-home"}
+        store = self._store(
+            tmp_path,
+            f'c:\\NX\\Tools\\Current\\Bin\\;C:\\a;"{self.ENTRY}";%USERPROFILE%\\b',
+        )
+        result = gen_core.remove_user_path(self.ENTRY, store=store, environ=env)
+        assert result.removed == 2
+        assert store.read()[0] == "C:\\a;%USERPROFILE%\\b"
+
+    def test_a_percent_entry_that_expands_to_the_entry_goes(self, tmp_path: Path) -> None:
+        env = {"NXROOT": "C:\\nx"}
+        store = self._store(tmp_path, "%NXROOT%\\tools\\current\\bin;C:\\a")
+        assert gen_core.remove_user_path(self.ENTRY, store=store, environ=env).removed == 1
+        assert store.read()[0] == "C:\\a"
+
+    def test_the_registry_type_is_preserved_and_it_broadcasts_once(self) -> None:
+        class Spy(gen_core.UserPathStore):
+            kind = "spy"
+            written: list = []
+            broadcasts = 0
+
+            def read(self):
+                return f"C:\\Windows;{TestRemoveUserPath.ENTRY}", 1  # REG_SZ
+
+            def write(self, value, reg_type):
+                Spy.written.append((value, reg_type))
+
+            def broadcast(self):
+                Spy.broadcasts += 1
+
+        gen_core.remove_user_path(self.ENTRY, store=Spy(), environ={})
+        assert Spy.written == [("C:\\Windows", 1)]
+        assert Spy.broadcasts == 1
+
+    def test_an_absent_entry_writes_nothing_and_does_not_broadcast(self, tmp_path: Path) -> None:
+        class Spy(gen_core.FileUserPath):
+            broadcasts = 0
+
+            def broadcast(self):
+                Spy.broadcasts += 1
+
+        store = Spy(tmp_path / "p.txt")
+        store.write("C:\\Windows;C:\\nx\\tools\\gen-1\\bin", 2)
+        before = store.path.stat().st_mtime_ns
+        result = gen_core.remove_user_path(self.ENTRY, store=store, environ={})
+        assert result.removed == 0
+        assert store.path.stat().st_mtime_ns == before
+        assert Spy.broadcasts == 0
+
+    def test_a_failing_broadcast_does_not_fail_the_removal(self, tmp_path: Path) -> None:
+        class Hung(gen_core.FileUserPath):
+            def broadcast(self):
+                raise OSError("a window is hung")
+
+        store = Hung(tmp_path / "p.txt")
+        store.write(self.ENTRY, 2)
+        assert gen_core.remove_user_path(self.ENTRY, store=store, environ={}).removed == 1
+        assert store.read()[0] == ""
+
+    def test_an_unreadable_or_unwritable_store_is_a_generation_error(self, tmp_path: Path) -> None:
+        class Locked(gen_core.UserPathStore):
+            kind = "locked"
+
+            def read(self):
+                raise PermissionError(5, "denied")
+
+        with pytest.raises(gen_core.GenerationError, match="could not read the user PATH"):
+            gen_core.remove_user_path(self.ENTRY, store=Locked(), environ={})
+
+        class NoWrite(gen_core.FileUserPath):
+            def write(self, value, reg_type):
+                raise PermissionError(5, "denied")
+
+        store = NoWrite(tmp_path / "x.txt")
+        store.path.write_text(self.ENTRY + "\n")
+        with pytest.raises(gen_core.GenerationError, match="could not write the user PATH"):
+            gen_core.remove_user_path(self.ENTRY, store=store, environ={})
 
 
 class TestInspectUserPath:
@@ -833,7 +935,7 @@ class TestRepairLayout:
 
 class TestReap:
     def test_reaps_through_gc_core_with_rule_d(self, tools: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
         gens = [_gen(tools, f"gen-{n}") for n in "ABCD"]
         for gen in gens:
             (gen / "nexus-install.json").write_text("{}\n")

@@ -36,6 +36,7 @@ import httpx
 import pytest
 
 from nexus.db import minilm_direct
+from tests._module_seam import setattr_in
 
 _N_CALLERS = 6
 _CHUNK = 64 * 1024
@@ -141,7 +142,7 @@ def test_a_peer_starting_a_download_cannot_corrupt_a_caller_about_to_extract(
 
         return _FakeStream(blob, on_first_chunk=_peer_hook)
 
-    monkeypatch.setattr(tarfile, "open", _open)
+    setattr_in(monkeypatch, "nexus.db.minilm_direct", "tarfile.open", _open)
     monkeypatch.setattr("httpx.stream", _stream)
 
     results: list[Path | BaseException] = []
@@ -381,7 +382,7 @@ def test_two_callers_over_an_incomplete_leftover_cannot_delete_each_others_publi
             cleared.set()
             reader_done.wait(timeout=10)
 
-    monkeypatch.setattr(shutil, "rmtree", _rmtree)
+    setattr_in(monkeypatch, "nexus.db.minilm_direct", "shutil.rmtree", _rmtree)
 
     results: dict[str, Path | BaseException] = {}
 
@@ -555,12 +556,11 @@ def test_a_failure_creating_the_stage_dir_leaks_no_archive(
 ) -> None:
     """Review S3: the temp archive was created before the try, so a failing
     mkdtemp left a ~80 MB .part behind."""
-    import tempfile  # noqa: PLC0415 — only this test needs the module object
 
     def _boom(*_a, **_kw):
         raise OSError("no space left on device")
 
-    monkeypatch.setattr(tempfile, "mkdtemp", _boom)
+    setattr_in(monkeypatch, "nexus.db.minilm_direct", "tempfile.mkdtemp", _boom)
     monkeypatch.setattr("httpx.stream", lambda *_a, **_kw: pytest.fail("must not download"))
     with pytest.raises(OSError, match="no space"):
         minilm_direct.ensure_artifact()

@@ -29,6 +29,7 @@ import pytest
 
 import nexus.daemon.service_registry as sr_mod
 from nexus.daemon.service_registry import ServiceRegistry
+from tests._module_seam import setattr_in
 
 
 class _ScriptedMonotonic:
@@ -101,7 +102,7 @@ def test_phases_are_fresh_per_call_not_accumulated(tmp_path: Path, mono) -> None
     assert first["write_replace"] < 1.0
 
     monkey = pytest.MonkeyPatch()
-    monkey.setattr(sr_mod.os, "replace", charge_replace)
+    setattr_in(monkey, sr_mod, "os.replace", charge_replace)
     try:
         reg.heartbeat(record)
     finally:
@@ -125,7 +126,7 @@ def test_a_stalled_replace_is_named_as_the_replace(tmp_path: Path, mono) -> None
         return _real(src, dst)
 
     monkey = pytest.MonkeyPatch()
-    monkey.setattr(sr_mod.os, "replace", charge_replace)
+    setattr_in(monkey, sr_mod, "os.replace", charge_replace)
     try:
         reg.heartbeat(record)
     finally:
@@ -222,7 +223,7 @@ def test_the_two_hypotheses_produce_different_signatures(tmp_path: Path) -> None
             return _real(src, dst)
 
         monkey = pytest.MonkeyPatch()
-        monkey.setattr(sr_mod.os, "replace", charge_replace)
+        setattr_in(monkey, sr_mod, "os.replace", charge_replace)
         try:
             reg.heartbeat(record)
         finally:
@@ -293,7 +294,7 @@ def test_missed_ttl_log_carries_the_stamp_subphases(tmp_path: Path, monkeypatch)
         mono.charge = ttl + 4.0
         return _real(src, dst)
 
-    monkeypatch.setattr(sr_mod.os, "replace", charge_replace)
+    setattr_in(monkeypatch, sr_mod, "os.replace", charge_replace)
     with monkeypatch.context() as m:
         m.setattr(sup, "_probe_service_health", lambda: ssd_mod.HealthProbe.OK)
         m.setattr(sup, "_pg_reachable", lambda: True)

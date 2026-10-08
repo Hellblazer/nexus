@@ -51,10 +51,27 @@ sn left `python3` for the same reason (nexus-j4iy0) by a different route. It
 ships no Python package, so it has no console script to ride; it runs its
 own stdlib scripts through `uv`, which it already requires because Serena
 launches via `uvx`, and which installs as `uv.exe` on Windows. The argv is
-pinned whole: `--no-project` keeps uv from syncing whatever project the
-session's cwd is in, and `--no-config` keeps a `.python-version` from
-choosing, or downloading, the interpreter. uv 0.8 finds that file above the
-cwd and uv 0.12 above the script's directory, so the flag covers both.
+pinned whole, the same for both plugins:
+
+    uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet
+       --python >=3.12 python <script> [verb]
+
+`uv tool run`, never `uv run` (finding C, nexus-f9bgu.36). While `uv run`, even
+`--no-project`, looks for an interpreter it EXECUTES a `.venv/bin/python` (or
+`.venv\\Scripts\\python.exe`) it finds in its starting directory or any parent.
+From the hook's cwd that is the project, which a repository controls (11 of 11
+entries ran a planted one, macOS and Windows). `--directory ${CLAUDE_PLUGIN_ROOT}`
+only moved the start: the plugin root sits under `~/.claude/plugins/cache`, so the
+walk still reached `~/.venv` and, on Windows, `C:\\.venv`, which any local user can
+create (7 of 11 entries in a real Windows 11 session, uv 0.12.23). A tool
+environment is built from a managed or PATH interpreter only and never consults a
+`.venv`. `--directory` stays so a script's process cwd is the plugin root and it
+takes the project from the payload's `cwd` or `CLAUDE_PROJECT_DIR`.
+
+`--python >=3.12` carries the floor. `uv tool run python` ignores a script's PEP 723
+block, which is where the floor lived under `uv run`; exec form passes `>=3.12` to
+uv verbatim, with no shell to read `>` as a redirect. `--no-config` keeps a
+`uv.toml` above the cwd or the plugin from choosing the interpreter or the index.
 """
 from __future__ import annotations
 
@@ -109,18 +126,18 @@ FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "uv"})
 
 #: Everything before the script path, in order: sn's argv (:data:`SN_UV_ARGV`).
-#: The interpreter floor is NOT in the argv. The conexus scripts refuse Python
-#: 3.11 and older, and without a request uv runs them under whatever it finds
-#: first (a ``/usr/bin/python3`` 3.9, or a ``.venv`` above the cwd even under
-#: ``--no-project``, measured). On POSIX a script re-execs into the install
-#: generation's interpreter, which is why that used to be survivable; on
-#: Windows it cannot (no ``bin/python``, and ``os.execv`` there spawns and
-#: exits), so the old interpreter would fail every hook open, silently. Each
-#: script carries a PEP 723 ``requires-python = ">=3.12"`` block, which uv
-#: reads; ``test_every_launched_script_declares_the_interpreter_floor`` pins
-#: it. A ``--python ">=3.12"`` argv would do the same job but puts ``>`` in
-#: argv, which a shell would read as a redirect.
-CONEXUS_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
+#: The interpreter floor IS in the argv (``--python >=3.12``). The conexus scripts
+#: refuse Python 3.11 and older, and without a request uv runs them under whatever
+#: it finds first (a ``/usr/bin/python3`` 3.9, measured). On POSIX a script
+#: re-execs into the install generation's interpreter, which is why that used to
+#: be survivable; on Windows it cannot (no ``bin/python``, and ``os.execv`` there
+#: spawns and exits), so the old interpreter would fail every hook open,
+#: silently. Under ``uv run`` the floor lived in each script's PEP 723 block;
+#: ``uv tool run python`` ignores that block, so the argv carries it. The blocks
+#: stay (``test_every_launched_script_declares_the_interpreter_floor``) for anyone
+#: running a script by hand with ``uv run``. Exec form hands ``>=3.12`` to uv as
+#: one argument; no shell reads the ``>``.
+CONEXUS_UV_ARGV = ("tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python")
 
 #: The stdlib wrapper an entry uses for a verb that some fail-closed CLI
 #: (7.55.0 through 7.57.x) does not register: `uv run ... <shim> <verb>`.
@@ -143,7 +160,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
 SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
 
 #: Everything before the script path, in order. See the module docstring.
-SN_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
+SN_UV_ARGV = ("tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python")
 
 REGISTERED_TOOLS = frozenset(f"hook_{spec.name}" for spec in HOOK_TOOLS)
 
@@ -315,13 +332,12 @@ def reject_sn(event: str, entry: dict) -> str | None:
 
 
 def test_every_launched_script_declares_the_interpreter_floor() -> None:
-    """The floor lives in the script, not the argv (nexus-efk2h).
+    """Every launched script also declares the floor itself (nexus-efk2h).
 
-    Every conexus entry that launches a plugin script through uv must name a
-    script carrying a PEP 723 block with ``requires-python = ">=3.12"``, the
-    floor the script's own guard enforces. Without it uv runs the script under
-    the first interpreter it finds, which on Windows can be one the script
-    refuses, and the hook then fails open.
+    The hooks pass ``--python >=3.12`` to ``uv tool run`` (finding C,
+    nexus-f9bgu.36), which ignores PEP 723 blocks. Each conexus plugin script
+    still carries ``requires-python = ">=3.12"``, the floor its own guard
+    enforces, so a hand-run ``uv run <script>`` gets it too.
     """
     scripts = {
         rest[0]
@@ -399,7 +415,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/old_hook.sh",
             ],
         },
@@ -451,7 +467,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rdr_hook.py",
             ],
         },
@@ -463,7 +479,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
                 "--extra",
             ],
@@ -476,7 +492,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "no-such-verb",
             ],
         },
@@ -488,7 +504,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
                 "mailbox-drain",
                 "mcp-connect-check",
@@ -524,9 +540,39 @@ CONEXUS_REJECTS = [
         {
             "type": "command",
             "command": "uv",
-            "args": ["run", "--no-project", "--no-config", "--quiet"],
+            "args": ["tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python"],
         },
         id="uv-with-no-script",
+    ),
+    # Finding C (nexus-f9bgu.36): `uv run` discovers a .venv from the cwd, the project,
+    # and EXECUTES it.
+    pytest.param(
+        "UserPromptSubmit",
+        {"type": "command", "command": "uv", "args": ["run", "--no-project", "--no-config", "--quiet", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"]},
+        id="uv-run-discovers-from-the-project",
+    ),
+    # The first cure: discovery starts at the plugin root but still walks up through
+    # ~ and the drive root (a ~/.venv ran on 7 of 11 entries, Windows 11, uv 0.12.23).
+    pytest.param(
+        "UserPromptSubmit",
+        {"type": "command", "command": "uv", "args": ["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"]},
+        id="uv-run-discovers-above-the-plugin-root",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {"type": "command", "command": "uv", "args": ["tool", "run", "--directory", "${CLAUDE_PROJECT_DIR}", "--no-config", "--quiet", "--python", ">=3.12", "python", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"]},
+        id="uv-directory-is-the-project",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {"type": "command", "command": "uv", "args": ["tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--quiet", "--python", ">=3.12", "python", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"]},
+        id="uv-tool-run-without-no-config",
+    ),
+    # `uv tool run python` ignores PEP 723 blocks, so the floor has to be in the argv.
+    pytest.param(
+        "UserPromptSubmit",
+        {"type": "command", "command": "uv", "args": ["tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "python", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"]},
+        id="uv-tool-run-without-the-floor",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell
@@ -655,17 +701,40 @@ SN_REJECTS = [
         _sn("x.py", args=[*SN_UV_ARGV, f"{SN_SCRIPT_PREFIX}session_start.py", "--extra"]),
         id="uv-with-an-argument-after-the-script",
     ),
-    # Without --no-config a `.python-version` above the cwd or the plugin picks the
-    # interpreter: measured rc=2 against a pin that is not installed.
+    # Without --no-config a uv.toml above the cwd or the plugin can choose the
+    # interpreter or the index.
     pytest.param(
         "SessionStart",
-        _sn("x.py", args=["run", "--no-project", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        _sn("x.py", args=["tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--quiet", "--python", ">=3.12", "python", f"{SN_SCRIPT_PREFIX}session_start.py"]),
         id="uv-without-no-config",
     ),
     pytest.param(
         "SessionStart",
         _sn("x.py", args=[]),
         id="uv-with-empty-args",
+    ),
+    # `uv run` discovers interpreters from the project (the hook's cwd) and EXECUTES a
+    # .venv/bin/python it finds there (finding C, nexus-f9bgu.36).
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["run", "--no-project", "--no-config", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-run-discovers-from-the-project",
+    ),
+    # The first cure only moved the origin: from the plugin root uv walks up through ~.
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-run-discovers-above-the-plugin-root",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["tool", "run", "--directory", "/tmp", "--no-config", "--quiet", "--python", ">=3.12", "python", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-directory-not-the-plugin-root",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "python", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-tool-run-without-the-floor",
     ),
 ]
 

@@ -38,6 +38,7 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import active_reader, documents_by_title
 from tests.conftest import make_vector_test_client
+from tests._module_seam import module_time
 
 pytestmark = [pytest.mark.integration]
 
@@ -58,7 +59,7 @@ def _chash(text: str) -> str:
 def _no_retry_sleeps(monkeypatch):
     from nexus.rate_brake import reset_brake
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     reset_brake()
     yield
     reset_brake()

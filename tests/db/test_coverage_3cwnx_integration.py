@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -63,6 +62,10 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from nexus.db.pg_provision import bootstrap_superuser
+
+from tests._child_process import java_available, java_executable, pg_data_tempdir, stop_group
 from tests.db._service_fixture import (
     ENGINE_ADMIN_DB_ENV_KEYS,
     SERVICE_ROLES_SQL,
@@ -70,6 +73,7 @@ from tests.db._service_fixture import (
     spawn_service,
     wait_for_service,
 )
+from tests._pg_ctl import pg_ctl_start
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
@@ -77,17 +81,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 _PG_BIN    = pg_bin_dir()
 
-_INITDB   = _PG_BIN / "initdb"
-_PG_CTL   = _PG_BIN / "pg_ctl"
-_PSQL     = _PG_BIN / "psql"
-_CREATEDB = _PG_BIN / "createdb"
+_INITDB   = _PG_BIN / exe_name("initdb")
+_PG_CTL   = _PG_BIN / exe_name("pg_ctl")
+_PSQL     = _PG_BIN / exe_name("psql")
+_CREATEDB = _PG_BIN / exe_name("createdb")
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = (
-    Path(_JAVA_HOME) / "bin" / "java"
-    if _JAVA_HOME
-    else Path(shutil.which("java") or "java")
-)
+_JAVA = java_executable()
 
 _ALL_PREREQS = (
     _JAR.exists()
@@ -95,7 +94,7 @@ _ALL_PREREQS = (
     and _PG_CTL.exists()
     and _PSQL.exists()
     and _CREATEDB.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
 )
 
 pytestmark = [
@@ -158,24 +157,19 @@ def _psql(pg: dict, sql: str) -> None:
 @pytest.fixture(scope="module")
 def pg_instance():
     """Hermetic PostgreSQL 16 instance with catalog schema applied via Liquibase."""
-    pgdata = tempfile.mkdtemp(prefix="nexus_3cwnx_inttest_pg_")
+    pgdata = pg_data_tempdir("nexus_3cwnx_inttest_pg_")
     pg_port = _free_port()
     pglog = os.path.join(pgdata, "pg.log")
-    pg_user = os.environ["USER"]
+    pg_user = bootstrap_superuser()
 
     try:
         subprocess.run(
-            [str(_INITDB), "-D", pgdata, "--no-locale", "-E", "UTF8", "--auth=trust"],
+            [str(_INITDB), "-D", pgdata, "-U", pg_user, "--no-locale", "-E", "UTF8", "--auth=trust"],
             check=True, capture_output=True,
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}",
-             "start", "-w"],
-            check=True, capture_output=True,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "nexuscat3cwnx"],
@@ -229,17 +223,7 @@ def java_service(pg_instance):
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", _TOKEN, proc
     finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_group(proc, grace_s=5)
         shutil.rmtree(chroma_data, ignore_errors=True)
 
 

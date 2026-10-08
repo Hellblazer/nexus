@@ -30,6 +30,7 @@ import pytest
 
 from nexus.daemon.binary_install import BinaryDownloadError, BinaryVerificationError
 from tests.db import _service_fixture as sf
+from nexus._install.layout_core import exe_name
 
 _SUBSTRATE_SRC = Path(__file__).resolve().parents[1] / "_engine_substrate.py"
 
@@ -65,7 +66,7 @@ def test_lazy_resolver_uses_the_import_time_ambient_env(monkeypatch, tmp_path):
     # An explicit NEXUS_PG_BIN must contain the four binaries discovery
     # validates (a SET-but-broken override re-raises by policy).
     for name in ("initdb", "pg_ctl", "psql", "createdb"):
-        (ambient_bin / name).touch()
+        (ambient_bin / exe_name(name)).touch()  # initdb.exe on Windows
     monkeypatch.setitem(es._PG_AMBIENT_ENV, "NEXUS_PG_BIN", str(ambient_bin))
     # A test-time override that must NOT win:
     monkeypatch.setenv("NEXUS_PG_BIN", str(tmp_path / "test-time-override"))
@@ -88,6 +89,8 @@ def _cold_cache(monkeypatch, tmp_path):
     XDG_CACHE_HOME outranks HOME for this cache (nexus-wvyvn), so an ambient
     one is cleared or the test would provision into the developer's cache."""
     monkeypatch.setenv("HOME", str(tmp_path / "virgin-home"))
+    # Path.home() reads USERPROFILE on Windows, not HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "virgin-home"))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
 
 
@@ -248,6 +251,7 @@ def test_the_provision_leg_caches_under_xdg_cache_home_when_it_is_set(monkeypatc
 
 def test_a_blank_xdg_cache_home_falls_back_to_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "h"))  # what Path.home() reads on Windows
     monkeypatch.setenv("XDG_CACHE_HOME", "  ")
     assert sf.substrate_cache_root() == tmp_path / "h" / ".cache" / "nexus-test-substrate"
 

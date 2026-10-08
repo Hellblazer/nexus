@@ -41,6 +41,7 @@ from pathlib import Path
 import pytest
 
 from nexus import upgrade_finish
+from tests._module_seam import module_time, setattr_in
 
 
 def _fake_generation(tools: Path, stamp: str) -> Path:
@@ -401,8 +402,8 @@ def test_restart_stale_actually_signals_a_generation_aspect_worker(
     monkeypatch.setattr(
         "nexus.upgrade_finish.process_command", lambda pid: command
     )
-    monkeypatch.setattr("nexus.upgrade_finish.os.kill", _kill)
-    monkeypatch.setattr("nexus.upgrade_finish.time.sleep", lambda _s: None)
+    setattr_in(monkeypatch, ("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", _kill)
+    module_time(monkeypatch, "nexus.upgrade_finish").sleep = lambda _s: None
 
     actions = upgrade_finish.restart_stale(report)
 
@@ -449,8 +450,7 @@ def test_the_pid_recycle_guard_still_refuses_a_foreign_command(
         "nexus.upgrade_finish.process_command",
         lambda pid: "/usr/bin/vim /notes/aspect-worker.md",
     )
-    monkeypatch.setattr(
-        "nexus.upgrade_finish.os.kill",
+    setattr_in(monkeypatch, ("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill",
         lambda pid, sig: calls.append((pid, sig)),
     )
 

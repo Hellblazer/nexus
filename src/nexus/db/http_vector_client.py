@@ -373,6 +373,14 @@ def _invalidate_endpoint() -> None:
         _lease_cache = None
 
 
+#: A refused connection, or one dropped mid-request. Windows reports a drop as
+#: ``ConnectionAbortedError`` (WinError 10053), a sibling of
+#: ``ConnectionResetError``, not a subclass (RDR-224).
+_RESTART_SIGNATURES: tuple[type[OSError], ...] = (
+    ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError,
+)
+
+
 def _is_retryable_endpoint_error(exc: Exception) -> bool:
     """The three auto-restart signatures (dual-review S2 added RST):
 
@@ -391,8 +399,8 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
         return exc.code == 401
     if isinstance(exc, urllib.error.URLError):
         reason = getattr(exc, "reason", None)
-        return isinstance(reason, (ConnectionRefusedError, ConnectionResetError))
-    return isinstance(exc, (ConnectionRefusedError, ConnectionResetError))
+        return isinstance(reason, _RESTART_SIGNATURES)
+    return isinstance(exc, _RESTART_SIGNATURES)
 
 
 # ── HTTP transport ────────────────────────────────────────────────────────────
@@ -1367,7 +1375,7 @@ def _request(
     # now-mid-respawn scenario the bead's trigger names ("connect-refused
     # against a LEASE-RESOLVED LOCAL endpoint"). The wait belongs only
     # where that evidence exists.
-    except (urllib.error.URLError, ConnectionRefusedError, ConnectionResetError) as exc:
+    except (urllib.error.URLError, *_RESTART_SIGNATURES) as exc:
         # TimeoutError is intentionally NOT in this retry classifier (it is not an
         # auto-restart signature); it propagates straight to the _get/_post handler,
         # which reframes it for managed endpoints (nexus-kf679).

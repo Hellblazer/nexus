@@ -236,6 +236,29 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     return True
 
 
+def _provision_vc_runtime_step(config_dir: Path) -> None:
+    """Windows without Microsoft's VC++ redistributable: put ``msvcp140.dll`` and
+    ``msvcp140_1.dll`` where the client's extension modules find them
+    (nexus-lqjll). A no-op everywhere else and whenever the DLLs are already
+    reachable. Runs on the cloud-mode branches, which never download the engine or
+    PG bundle that otherwise carry them; ``nx upgrade --auto`` does the same for
+    installs that predate this step. Reports a failure with its remedy and never
+    stops init: the install is otherwise complete and the DLLs are retried by
+    the next ``nx init`` or session start."""
+    from nexus.daemon.binary_install import ensure_vc_runtime  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    result = ensure_vc_runtime(config_dir, installed_by="nx init")
+    if result.status == "provisioned":
+        click.echo(f"  VC++ runtime for PDF extraction and local embedding: {result.detail}")
+    elif result.status == "failed":
+        click.echo(
+            f"  Could not place the VC++ runtime DLLs ({result.detail}). PDF extraction "
+            "and local embedding need them: re-run `nx init`, or install Microsoft's "
+            "redistributable from https://aka.ms/vs/17/release/vc_redist.x64.exe",
+            err=True,
+        )
+
+
 def _report_stray_t2_launchagent_cleanup(config_dir: Path) -> None:
     """nexus-c0vby (GH #1405 defect 2): once ``nx init --service`` confirms
     the storage service is genuinely serving, remove any stray
@@ -592,8 +615,7 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
 def _provision_postgres_step() -> None:
     """Provision (or verify) the nx-managed local Postgres cluster.
 
-    Called from init_cmd when ``--service`` is passed or when the service
-    storage backend is already configured (``NX_STORAGE_BACKEND=service``).
+    Called from init_cmd on the service path (the only storage backend).
 
     Structured to be robust: any failure is reported as a clear, actionable
     error rather than a traceback — the user needs an install hint, not a
@@ -670,11 +692,11 @@ def _provision_postgres_step() -> None:
     if result.vector_extension_created:
         lines.append("  Extension 'vector' (pgvector) created.")
     lines.append(f"  Credentials written to {result.credentials_path} (0600).")
-    lines.append(
-        f"  Cluster listening on 127.0.0.1:{result.port}.\n"
-        f"  Set NX_STORAGE_BACKEND=service and source {result.credentials_path} "
-        f"before starting the service."
-    )
+    # No "set NX_STORAGE_BACKEND / source the credentials" advice: the service
+    # backend is the only one and the default (storage_mode), and the supervisor
+    # reads pg_credentials itself, so the line asked for an action nothing needs
+    # (RDR-224 guide walk, nexus-f9bgu).
+    lines.append(f"  Cluster listening on 127.0.0.1:{result.port}.")
     for line in lines:
         click.echo(line)
 
@@ -1082,6 +1104,11 @@ def init_cmd(
         # cloud-mode early return is FOLDED here (not orphaned). P1.2
         # (nexus-r2auz) replaces the MANAGED arm with the RDR-166 credential
         # wizard + ``nx service`` probe.
+        #
+        # nexus-lqjll: neither arm downloads the engine or PG bundle, so on
+        # Windows this is where the VC++ runtime DLLs are placed. BEFORE the
+        # managed probe, which exits non-zero on failure and would skip it.
+        _provision_vc_runtime_step(_config.nexus_config_dir())
         if mode == "managed":
             # MANAGED: ensure RDR-166 creds (reused wizard) + probe the remote
             # service, then STOP. _managed_onboarding exits non-zero on probe

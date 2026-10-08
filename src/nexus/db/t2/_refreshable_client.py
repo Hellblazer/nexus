@@ -307,7 +307,9 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
         ),
     ):
         return True
-    return isinstance(exc, (ConnectionRefusedError, ConnectionResetError))
+    # ConnectionAbortedError: how Windows reports a connection dropped
+    # mid-request (WinError 10053), a sibling of ConnectionResetError (RDR-224).
+    return isinstance(exc, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError))
 
 
 def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
@@ -1243,6 +1245,7 @@ class RefreshableHttpStoreMixin:
             httpx.RemoteProtocolError,
             ConnectionRefusedError,
             ConnectionResetError,
+            ConnectionAbortedError,
         ) as exc:
             if isinstance(exc, httpx.ReadTimeout) and not retry_read_timeout:
                 raise

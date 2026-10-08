@@ -27,6 +27,7 @@ from cut_plugin_release import (
     check_main_readiness,
     perform_cut,
 )
+from tests._module_seam import setattr_in
 
 VERSION = "9.9.0"
 BASE_TAG = f"v{VERSION}"
@@ -1054,7 +1055,7 @@ class TestBatterySubstrateEnv:
             seen.append((command, value))
             return _OK()
 
-        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
         mod._run_real_battery(pathlib.Path("."))
 
         assert len(seen) == len(mod._BATTERY)

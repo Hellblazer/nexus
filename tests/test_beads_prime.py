@@ -34,6 +34,7 @@ from nexus.beads_prime import (
     status,
     user_prime_path,
 )
+from tests._module_seam import setattr_in
 
 #: Dummy config path for ManageStatus fixtures below that don't care
 #: which path was (would have been) read.
@@ -311,7 +312,7 @@ class TestInstall:
         def _boom(*_a, **_kw):  # noqa: ANN002, ANN003, ANN202
             raise OSError("disk full (simulated)")
 
-        monkeypatch.setattr("os.replace", _boom)
+        setattr_in(monkeypatch, "nexus.beads_prime", "os.replace", _boom)
         with pytest.raises(OSError):
             install(target)
         # No half-written target and no leftover temp file.

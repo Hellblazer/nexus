@@ -26,13 +26,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import click
 import pytest
 
 from _generation_harness import SAFE_BASE_PATH, stub_uv
+from tests._module_seam import setattr_in
 
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -96,7 +96,7 @@ def test_self_install_builds_a_new_generation_and_flips(bed, monkeypatch) -> Non
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install()
 
@@ -123,7 +123,7 @@ def test_the_hosting_generation_survives_its_own_installer(bed, monkeypatch) -> 
     host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
     middle = _hosting_generation(tools, "20260601T000000Z", source=str(src))
     (tools / "current").symlink_to(middle)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install(keep=1)
 
@@ -145,7 +145,7 @@ def test_extras_are_carried_forward(bed, monkeypatch) -> None:
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install()
 
@@ -165,7 +165,7 @@ def test_extras_flag_adds_to_an_existing_install(bed, monkeypatch) -> None:
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install(add_extras=("dt",))
 
@@ -182,7 +182,7 @@ def test_extras_flag_dry_run_shows_the_merged_set(bed, monkeypatch, capsys) -> N
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     assert _run_self_install(dry_run=True, add_extras=("dt,local", "dt")) is None
 
@@ -197,7 +197,7 @@ def test_extras_flag_normalizes_case_against_the_receipt(bed, monkeypatch, capsy
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     assert _run_self_install(dry_run=True, add_extras=("Local",)) is None
 
@@ -218,7 +218,7 @@ def test_extras_flag_through_the_real_click_surface(bed, monkeypatch) -> None:
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     result = CliRunner().invoke(
         install_cmd, ["--extras", "dt", "--extras", "local", "--dry-run"],
@@ -233,7 +233,7 @@ def test_extras_flag_refuses_junk_names(bed, monkeypatch) -> None:
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     with pytest.raises(click.ClickException) as exc:
         _run_self_install(add_extras=("loc al",))
@@ -249,7 +249,7 @@ def test_extras_flag_refuses_off_a_generation(bed, monkeypatch, tmp_path) -> Non
 
     checkout_venv = tmp_path / "checkout" / ".venv"
     checkout_venv.mkdir(parents=True)
-    monkeypatch.setattr(sys, "prefix", str(checkout_venv))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(checkout_venv))
 
     with pytest.raises(click.ClickException) as exc:
         perform_self_install(add_extras=("local",))
@@ -275,7 +275,7 @@ def test_both_source_kinds_round_trip(bed, monkeypatch, source_kind, source) -> 
                                source_kind=source_kind,
                                source=source if source else str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install()
 
@@ -298,12 +298,12 @@ def test_it_does_not_run_the_migration_ladder(bed, monkeypatch) -> None:
             calls.append([str(c) for c in cmd])
         return real_run(cmd, *a, **kw)
 
-    monkeypatch.setattr(subprocess, "run", _record)
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _record)
 
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install()
 
@@ -321,7 +321,7 @@ def test_the_builder_claims_its_tree_and_the_receipt_supersedes_it(bed, monkeypa
     tools, _, src = bed
     host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
 
     _run_self_install()
 
@@ -359,7 +359,7 @@ def test_it_refuses_clearly_from_a_dev_checkout(bed, monkeypatch, tmp_path) -> N
 
     checkout_venv = tmp_path / "checkout" / ".venv"
     checkout_venv.mkdir(parents=True)
-    monkeypatch.setattr(sys, "prefix", str(checkout_venv))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(checkout_venv))
     # nexus-gu9zo made "not a generation" a two-way branch: a PACKAGED
     # non-generation now converges instead of refusing. So this test has to say
     # which of the two it is, rather than inheriting the answer from whatever
@@ -392,7 +392,7 @@ def _not_a_generation(tmp_path, monkeypatch) -> Path:
     site = tmp_path / "uv-tools" / "conexus"
     (site / "bin").mkdir(parents=True)
     (site / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
-    monkeypatch.setattr(sys, "prefix", str(site))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(site))
     return site
 
 
@@ -426,7 +426,7 @@ def test_a_packaged_uv_tool_install_converges_instead_of_refusing(
             argv, 0, stdout=f"{tools}/gen-20260827T000000Z\n", stderr="",
         )
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _fake_run)
     result = _run_self_install()
 
     assert result is not None, "converge returned nothing"
@@ -448,7 +448,7 @@ def test_converge_does_not_thread_extras_itself(bed, monkeypatch, tmp_path) -> N
         seen["argv"] = argv
         return subprocess.CompletedProcess(argv, 0, stdout="/t/gen-x\n", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _fake_run)
     _run_self_install()
     assert "--extras" not in seen["argv"], seen["argv"]
 
@@ -464,7 +464,7 @@ def test_converge_never_reaps_in_the_same_pass(bed, monkeypatch, tmp_path) -> No
         calls.append(" ".join(str(a) for a in argv))
         return subprocess.CompletedProcess(argv, 0, stdout="/t/gen-x\n", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _fake_run)
     _run_self_install()
     assert not any("nx_gc_generations" in c for c in calls), calls
 
@@ -489,8 +489,7 @@ def test_a_migration_that_migrated_nothing_is_not_reported_as_success(
     that moved nothing."""
     _not_a_generation(tmp_path, monkeypatch)
     _set_site_kind(monkeypatch, packaged=True)
-    monkeypatch.setattr(
-        subprocess, "run",
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
         lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
     )
 
@@ -502,8 +501,7 @@ def test_a_migration_that_migrated_nothing_is_not_reported_as_success(
 def test_converge_failure_surfaces_stderr(bed, monkeypatch, tmp_path) -> None:
     _not_a_generation(tmp_path, monkeypatch)
     _set_site_kind(monkeypatch, packaged=True)
-    monkeypatch.setattr(
-        subprocess, "run",
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
         lambda argv, **kw: subprocess.CompletedProcess(
             argv, 64, stdout="", stderr="migrate_legacy: uv not resolvable"),
     )
@@ -517,8 +515,7 @@ def test_converge_dry_run_builds_no_generation(bed, monkeypatch, tmp_path) -> No
     _not_a_generation(tmp_path, monkeypatch)
     _set_site_kind(monkeypatch, packaged=True)
     calls = []
-    monkeypatch.setattr(
-        subprocess, "run",
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
         lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
     )
     assert _run_self_install(dry_run=True) is None

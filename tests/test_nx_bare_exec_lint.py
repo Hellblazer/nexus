@@ -381,9 +381,12 @@ def test_installer_resolves_schtasks_through_the_windows_path_and_spawns_in_one_
         and isinstance(n.func, ast.Name)
         and n.func.id in {"run_bounded", "_REAL_RUN_BOUNDED"}
     }
-    # _stop_service_stack_best_effort spawns the `nx` stop verb, whose argv comes
-    # from _resolve_nx_bin (absolute on Windows); it is not a manager command.
-    assert spawners == {"_run_manager", "_stop_service_stack_best_effort"}, (
+    # _stop_service_stack_best_effort and _stop_mineru_if_started spawn `nx`
+    # stop verbs, whose argv comes from _resolve_nx_bin (absolute on Windows);
+    # they are not manager commands.
+    assert spawners == {
+        "_run_manager", "_stop_service_stack_best_effort", "_stop_mineru_if_started",
+    }, (
         "a manager command is spawned outside _run_manager, so it skips "
         f"_manager_executable: {sorted(spawners)}"
     )

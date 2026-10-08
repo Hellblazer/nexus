@@ -51,7 +51,9 @@ def _mineru_output_root() -> Path:
         if runtime and Path(runtime).is_dir():
             base = Path(runtime) / "nexus-mineru"
         else:
-            base = Path.home() / ".cache" / "nexus" / "mineru-output"
+            from nexus.db import onnx_model_root  # noqa: PLC0415 — the one copy of the cache root
+
+            base = onnx_model_root.nexus_cache_root() / "mineru-output"
     make_user_dir(base)
     # Re-chmod in case the directory pre-existed with wider mode.
     try:

@@ -27,6 +27,7 @@ from nexus.daemon import replace_quiesce as rq
 from nexus.daemon.binary_lifecycle import WINDOWS_ENGINE_EXE, WINDOWS_RUNTIME_DLLS
 from nexus.daemon.service_registry import GracefulStopSend
 from nexus.db import pg_bundle
+from tests._module_seam import setattr_in
 
 _WIN = "win32"
 _NAMES = (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE)
@@ -278,7 +279,7 @@ def test_a_keep_directory_that_cannot_be_removed_is_reported_not_raised(tmp_path
             return  # still held: ignore_errors swallowed the error, the dir stays
         real_rmtree(path, ignore_errors=ignore_errors, **kw)
 
-    monkeypatch.setattr(rg.shutil, "rmtree", rmtree)
+    setattr_in(monkeypatch, rg, "shutil.rmtree", rmtree)
     left = rg.sweep_stale_keep_dirs(dest)
     assert left == [stuck]
     rg.place_set_with_rollback(stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None)

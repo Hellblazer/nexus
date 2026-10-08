@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from unittest.mock import patch
 
 import pytest
 
@@ -28,6 +27,7 @@ from nexus.daemon.service_registry import (
     _ctypes_win_process_api,
     pid_alive,
 )
+from tests._module_seam import patch_in
 
 
 class _FakeWinApi:
@@ -68,7 +68,7 @@ def _no_os_kill(*_a, **_k):
 class TestWindowsBranch:
     def test_running_process_is_alive_and_handle_closed(self) -> None:
         api = _FakeWinApi(wait_result=WAIT_TIMEOUT)
-        with patch("os.kill", side_effect=_no_os_kill):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=_no_os_kill):
             assert pid_alive(1234, platform="win32", win_api=api) is True
         assert api.opened == [1234]
         assert api.closed == [42]
@@ -77,7 +77,7 @@ class TestWindowsBranch:
         # A process object outlives its exit while any handle is open; the
         # signalled wait is what says it exited. No zombie state to model.
         api = _FakeWinApi(wait_result=WAIT_OBJECT_0)
-        with patch("os.kill", side_effect=_no_os_kill):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=_no_os_kill):
             assert pid_alive(1234, platform="win32", win_api=api) is False
         assert api.closed == [42]
 
@@ -89,7 +89,7 @@ class TestWindowsBranch:
 
     def test_no_such_pid_is_dead(self) -> None:
         api = _FakeWinApi(handle=None, last_error=ERROR_INVALID_PARAMETER)
-        with patch("os.kill", side_effect=_no_os_kill):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=_no_os_kill):
             assert pid_alive(1234, platform="win32", win_api=api) is False
         assert api.waited == [] and api.closed == []
 
@@ -120,17 +120,17 @@ class TestPosixBranchUnchanged:
 
     def test_posix_uses_signal_zero(self) -> None:
         api = _FakeWinApi()
-        with patch("os.kill") as kill:
+        with patch_in("nexus.daemon.service_registry", "os.kill") as kill:
             assert pid_alive(1234, platform="linux", win_api=api) is True
         kill.assert_called_once_with(1234, 0)
         assert api.opened == []
 
     def test_posix_esrch_is_dead(self) -> None:
-        with patch("os.kill", side_effect=ProcessLookupError()):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=ProcessLookupError()):
             assert pid_alive(1234, platform="darwin") is False
 
     def test_posix_eperm_is_alive(self) -> None:
-        with patch("os.kill", side_effect=PermissionError()):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=PermissionError()):
             assert pid_alive(1234, platform="darwin") is True
 
 

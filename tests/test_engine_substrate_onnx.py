@@ -150,7 +150,9 @@ def test_boot_provisions_before_it_spawns_the_engine_and_hands_it_the_root() -> 
         for n in ast.walk(tree) if isinstance(n, ast.Call)
     }
     assert "_ensure_onnx_models" in calls, "_boot never provisions the ONNX models"
-    assert calls["_ensure_onnx_models"] < calls["Popen"], "models are provisioned after the engine is spawned"
+    # The engine is spawned through tests._child_process.popen_in_group (nexus-f9bgu).
+    assert "popen_in_group" in calls, "_boot no longer spawns the engine through popen_in_group"
+    assert calls["_ensure_onnx_models"] < calls["popen_in_group"], "models are provisioned after the engine is spawned"
     # ...and before PG boots or a port is probed (a probed port is released at once).
     assert calls["_ensure_onnx_models"] < calls["_free_port"]
     assert '"NX_ONNX_MODEL_DIR"' in inspect.getsource(es._boot)

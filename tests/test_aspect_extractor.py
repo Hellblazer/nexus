@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from tests.conftest import make_vector_test_client
+from tests._module_seam import setattr_in
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1219,8 +1220,7 @@ class TestBatchExtraction:
         # is built. (The first row would normally trigger subprocess,
         # but we exercise the read-fail path on the second row only;
         # use a single-input batch.)
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.subprocess.run",
+        setattr_in(monkeypatch, "nexus.aspect_extractor", "subprocess.run",
             lambda *a, **kw: (_ for _ in ()).throw(
                 AssertionError("subprocess must not run when content is empty + read fails"),
             ),

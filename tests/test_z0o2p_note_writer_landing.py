@@ -39,6 +39,7 @@ from nexus.catalog.note_write import (
     fire_note_chains,
     put_note,
 )
+from tests._module_seam import module_time
 
 _COLLECTION = "knowledge__z0o2p-landing__bge-base-en-v15-768__v1"
 _SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nexus"
@@ -89,7 +90,7 @@ def _client_refusals() -> dict[str, Exception]:
 def _no_retry_sleeps(monkeypatch):
     from nexus.rate_brake import reset_brake
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     reset_brake()
     yield
     reset_brake()

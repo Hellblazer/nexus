@@ -56,6 +56,7 @@ from nexus.daemon.storage_service_daemon import (
     stop_storage_service,
     start_storage_service,
 )
+from tests._module_seam import module_time, patch_in, patch_time
 
 
 # ---------------------------------------------------------------------------
@@ -1453,8 +1454,7 @@ class TestRunStorageSupervisorFunction:
                 # False, no escalation needed.
                 side_effect=[True, False, False],
             ),
-            patch(
-                "nexus.daemon.storage_service_daemon.os.kill",
+            patch_in("nexus.daemon.storage_service_daemon", "os.kill",
             ),
             patch(
                 "nexus.daemon.service_registry.all_process_rows",
@@ -2672,8 +2672,8 @@ class TestEnsureStorageSupervisor:
         # deadline on the second read (first read sets the deadline, second is
         # already past it) so the wait loop exits without a real 60s spin.
         ticks = iter([0.0, 10_000.0, 10_000.0])
-        monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(ticks))
-        monkeypatch.setattr(daemon_mod.time, "sleep", lambda _s: None)
+        module_time(monkeypatch, daemon_mod).monotonic = lambda: next(ticks)
+        module_time(monkeypatch, daemon_mod).sleep = lambda _s: None
         with (
             patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
             patch.object(daemon_mod, "_popen", return_value=MagicMock()),
@@ -2915,7 +2915,7 @@ class TestEnsureStorageSupervisor:
         with (
             patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
             patch.object(daemon_mod, "_popen", side_effect=_fake_popen),
-            patch.object(daemon_mod.time, "monotonic", side_effect=[0.0, 100.0]),
+            patch_time(daemon_mod, "monotonic", side_effect=[0.0, 100.0]),
         ):
             with pytest.raises(StorageServiceStartError):
                 # No lease is ever published (the fake Popen does nothing
@@ -3595,7 +3595,10 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
                 age_s=1.0,
                 ttl=15.0,
             )
-            with patch("time.sleep") as mock_sleep:
+            with patch_time(
+                "nexus.daemon.storage_service_daemon", "sleep",
+                also=("nexus.daemon.service_registry",),
+            ) as mock_sleep:
                 outcome = stop_storage_service(config_dir=config_dir)
         finally:
             with contextlib.suppress(
@@ -4304,7 +4307,7 @@ class TestWaitForServiceReadyMigrationAware:
                 sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE
             ),
             patch.object(sup, "_release_stale_changelog_lock") as cleanup,
-            patch("time.sleep"),
+            patch_time("nexus.daemon.storage_service_daemon", "sleep"),
         ):
             sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
 

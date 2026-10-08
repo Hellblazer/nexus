@@ -62,6 +62,7 @@ class PgVectorCardinalityRouterIntegrationTest {
     static final int SMALL_ROWS = 4;
     static final int PAIR_ROWS = 6;
     static final int SCAN_CAP = 16;
+    static final int EF_FLOOR = 200;
     static final int K = 5;
 
     PostgreSQLContainer<?> pg;
@@ -88,6 +89,10 @@ class PgVectorCardinalityRouterIntegrationTest {
             "-c enable_seqscan=off -c enable_bitmapscan=off -c enable_sort=off");
         ds = new HikariDataSource(cfg);
         PgSession.overrideScanBudgetForTests(SCAN_CAP, 1);
+        // The fallback cases need a starved walk: the first ef batch must not reach the small
+        // collections. The fixture was built at the 200 floor; at the 600 default that batch
+        // covers this tenant's whole ~320-row leaf (nexus-3wh8d.31).
+        PgSession.overrideEfSearchFloorForTests(EF_FLOOR);
         var scope = new TenantScope(ds);
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         repo = new PgVectorRepository(scope, embedder, embedder);
@@ -147,6 +152,7 @@ class PgVectorCardinalityRouterIntegrationTest {
     @AfterAll
     void stopAll() {
         PgSession.resetScanBudgetForTests();
+        PgSession.resetEfSearchFloorForTests();
         if (ds != null) {
             ds.close();
         }

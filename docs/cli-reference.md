@@ -3277,6 +3277,16 @@ grants only Administrators and SYSTEM) or cannot be read, so a normal session
 cannot write it. The fix it prints is an `icacls` grant to the current
 user, run from an elevated Command Prompt. The row is absent on POSIX.
 
+**Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
+authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
+password) and fails while any active line still says `trust`, which let any
+local OS account connect to the cluster's port without a password. New clusters
+are `scram-sha-256` from creation; an older one is converted on the next
+`nx daemon service start`, and the row also stays red when that conversion
+failed and rolled back (the reason is the `pg_auth_migration_failed` line in the
+nx log). The row is absent where there is no bundled cluster: a box that has not
+run `nx init --service`, or one using a managed Postgres.
+
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
@@ -3691,7 +3701,7 @@ For a brand-new install the recommended setup is the collapsed flow
 (RDR-174 — one provisioning command, no separate T2-daemon step):
 
 ```
-uv tool install conexus --python 3.12    # the nx CLI (3.14 has no torch wheels)
+uv tool install conexus --python 3.12    # the nx CLI (3.14 has no torch wheels); on Linux add --torch-backend cpu (uv >= 0.9.19)
 nx init                    # acquire the pinned signed engine + PG bundle, provision Postgres+pgvector, fetch bge-768, start the service, offer autostart
 ```
 
@@ -4440,7 +4450,19 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
 
 - **Local service**: stops the engine-service + Postgres stack
   (`nx daemon service stop --with-pg`), stops the T2 daemon, removes the OS
-  autostart unit, and clears the first-run marker.
+  autostart unit, and clears the first-run marker. It then stops the background
+  workers the service stop leaves running, before anything is removed: every
+  aspect worker named by its lease, a detached `nx taxonomy label` run named by
+  `deferred_labeling.pid`, and the MinerU server when `mineru.pid` shows nexus
+  started it (`nx mineru stop`). Each recorded pid is signalled only while its
+  live command line is still that worker; MCP servers belong to Claude sessions
+  and are never stopped.
+- **Windows user PATH**: removes the `<tools>\current\bin` entry that
+  `nx self install` added to `HKCU\Environment` `Path`, keeping every other
+  entry (unexpanded `%VAR%` entries included) and the value's registry type, and
+  broadcasts the change as the install did. Unconditional, like the two steps
+  below. On macOS and Linux `nx self install` edits no PATH and no shell rc file,
+  so there is nothing to revert.
 - **Managed-only client**: clears the managed endpoint config
   (`service_url` + `service_token` + `mint_token` + `mint_tenant`) from `config.yml`. Skips service-stop (no
   local service) and never touches the remote tenant's data.
@@ -4459,13 +4481,13 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
 ```
 nx uninstall                  # DRY RUN (default): preview what would be removed
 nx uninstall --yes            # Perform the teardown
-nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index)
+nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index) and model cache
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--yes` | Perform the teardown. Without it, `nx uninstall` only previews (dry-run default). |
-| `--remove-data` | Also wipe the local nexus data dir (notes + search index). Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
+| `--remove-data` | Also wipe the local nexus data dir (notes + search index) and the model cache `~/.cache/nexus` (`%USERPROFILE%\.cache\nexus` on Windows; the ONNX models and MinerU scratch output). The cache goes only after the service stack is confirmed stopped; a model root you set with `NX_ONNX_MODEL_DIR` outside it is kept and named. Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
 
 **Managed env override:** if `NX_SERVICE_URL` / `NX_SERVICE_TOKEN` are exported in
 your shell (not just `config.yml`), `nx uninstall` clears `config.yml` and warns

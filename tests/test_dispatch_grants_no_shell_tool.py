@@ -18,6 +18,7 @@ import pytest
 
 from nexus import aspect_extractor as ax
 from nexus.mcp.core import _subprocess_tool_grant
+from tests._module_seam import setattr_in
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"
 
@@ -132,7 +133,7 @@ def test_isolated_aspect_call_disables_builtin_tools(monkeypatch: pytest.MonkeyP
         captured.append(argv)
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("x", timeout=1)
     argv = captured[0]
     assert "--tools" in argv and argv[argv.index("--tools") + 1] == "", argv

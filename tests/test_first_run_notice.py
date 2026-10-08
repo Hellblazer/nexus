@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+from nexus.db.pg_provision import CREDENTIALS_FILENAME
 from nexus.mcp._first_run import apply_embedder_notice, embedder_startup_notice
 
 
@@ -57,6 +58,24 @@ class TestEmbedderStartupNotice:
         # directly rather than a disjunction that obscures the behavior.
         assert "nx init" in notice
         assert "384" in notice
+
+    @pytest.mark.parametrize(
+        ("choice", "active"),
+        [(_TIER1_MODEL, _TIER0_MODEL), (None, _TIER0_MODEL)],
+        ids=["chose-bge-no-extra", "no-choice"],
+    )
+    def test_service_install_gets_no_notice(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, choice, active
+    ) -> None:
+        """A local install with the service (pg_credentials present) embeds T3
+        in the engine; the Python embedder serves only T1 and the plan cache.
+        `nx doctor` suppresses this advisory there (health._check_t3_local); the
+        MCP notice told every plugin and Desktop user without the [local] extra
+        that search ran at 384 dimensions, which was false."""
+        (tmp_path / CREDENTIALS_FILENAME).write_text("")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        _pin(monkeypatch, local=True, choice=choice, active=active)
+        assert embedder_startup_notice() is None
 
     def test_notice_is_single_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Server instructions notice must be compact — one line, no newlines.

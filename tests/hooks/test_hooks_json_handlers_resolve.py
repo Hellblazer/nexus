@@ -198,7 +198,7 @@ def _mentions(handler: str, cells: list[str]) -> bool:
         return any(handler in c for c in cells)
     # A command line: the table gives the readable core, not the full
     # shell with its redirections and fallbacks.
-    if handler.startswith("uv run "):
+    if handler.startswith(("uv run ", "uv tool run ")):
         # The launcher (nexus-efk2h) is flags then the script; the table
         # names the script (and a shim verb), so start the comparison there.
         tokens = handler.split()

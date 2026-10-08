@@ -24,6 +24,7 @@ import pytest
 
 from nexus import _winsec
 from nexus._winsec import ensure_owner_only, open_private, owner_only_problem, restrict_to_owner
+from tests._module_seam import setattr_in
 
 REPO = Path(__file__).parent.parent
 PLUGIN_SCRIPT = REPO / "conexus" / "hooks" / "scripts" / "_endpoint_resolve.py"
@@ -86,8 +87,8 @@ class TestOpenPrivateWritesTheBytesItIsGiven:
             seen.append(flags)
             return real_open(path, flags & ~fake_o_binary, mode)
 
-        monkeypatch.setattr(os, "O_BINARY", fake_o_binary, raising=False)
-        monkeypatch.setattr(os, "open", spy)
+        setattr_in(monkeypatch, "nexus._winsec", "os.O_BINARY", fake_o_binary, raising=False)
+        setattr_in(monkeypatch, "nexus._winsec", "os.open", spy)
         fd = open_private(tmp_path / "t", os.O_CREAT | os.O_WRONLY, platform="linux", acl_apply=_boom)
         os.close(fd)
         assert seen and seen[0] & fake_o_binary

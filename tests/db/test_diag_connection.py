@@ -21,6 +21,7 @@ from nexus.db.diag_connection import (
     run_diagnostic_sql,
 )
 from nexus.remediation.sql_lint import DiagnosticSqlViolation
+from tests._platform import IS_WINDOWS
 
 _CREDS = DiagCredentials(port=5599, user="nexus_diag", password="pw")
 
@@ -333,10 +334,14 @@ class TestBundleLibLoaderGuard:
         )
         env = runner.envs[0]
         lib = str(tmp_path / "bundle" / "lib")
-        assert env.get("LD_LIBRARY_PATH", "").split(_os.pathsep)[0] == lib, (
-            "diagnostic psql must get the bundle's sibling lib/ on the "
-            "loader path (same guard as pg_provision's own calls)"
-        )
+        if IS_WINDOWS:
+            # Windows loads the bundle's DLLs from beside the .exe: no loader variable.
+            assert "LD_LIBRARY_PATH" not in env
+        else:
+            assert env.get("LD_LIBRARY_PATH", "").split(_os.pathsep)[0] == lib, (
+                "diagnostic psql must get the bundle's sibling lib/ on the "
+                "loader path (same guard as pg_provision's own calls)"
+            )
         # The read-only + auth env survives the guard:
         assert env["PGPASSWORD"] == "pw"
         assert env["PGOPTIONS"] == "-c default_transaction_read_only=on"

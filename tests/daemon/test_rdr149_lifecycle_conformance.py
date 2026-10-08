@@ -82,6 +82,7 @@ from nexus.daemon.service_registry import (
     process_state,
     request_graceful_stop,
     service_identity,
+    stop_tier_holders,
     sweep_matching_processes,
     terminate_pids,
     ttl_for_tier,
@@ -90,6 +91,8 @@ from nexus.daemon.service_registry import (
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
+from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
+from tests._module_seam import patch_in, patch_time
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
 # places it used to assume POSIX are named once here so each platform branch is
@@ -482,11 +485,30 @@ class StorageServiceRecordHarness(_LeaseHarness):
         sup._service_port = 1
         sup._pg_port = 1
 
-        engine = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+        # The stand-in engine must be UP before the loop runs, and must be the
+        # process that sleeps. On Windows the venv ``python.exe`` is a launcher that
+        # swallows a CTRL_BREAK and spawns the real interpreter as its child, and
+        # a break sent before that child is attached to the console reaches nobody:
+        # the loop's first tick fenced and stopped the engine within milliseconds,
+        # the break missed, and the stop waited the whole 5 s grace before its
+        # Job Object kill ("took 5.02s", measured on qwentescence, reproducible
+        # under ``pytest -q``, which starts the test sooner than ``-v``). The
+        # production engine is only stopped after its readiness probe passed, so
+        # the test waits for the same fact: the child has run its first line.
+        ready = self._cd.parent / "engine-stand-in.ready"  # beside the config dir, not in it
+        engine = subprocess.Popen(  # noqa: S603 — fixed argv, the launcher-free interpreter
+            [
+                CHILD_PYTHON, "-c",
+                "import sys, time; open(sys.argv[1], 'w').close(); time.sleep(60)",
+                str(ready),
+            ],
             start_new_session=True,
             **_OWN_GROUP,  # the supervisor's stop sends a REAL CTRL_BREAK on Windows
         )
+        ready_deadline = time.monotonic() + 30.0
+        while not ready.exists() and time.monotonic() < ready_deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "the stand-in engine never started"
         sup._proc = engine
         owner_registry = ServiceRegistry(dir=self._cd, tier=self._REGISTRY_TIER, clock=self._clock)
         sup._registry = owner_registry
@@ -699,6 +721,15 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         # property existed to check it.
         "storage_service": "pass",  # nexus-cd1k0.2: _supervise_until_stopped checks fenced_exit_code
         "aspect_worker": "pass",  # RDR-173 P1: _heartbeat_loop already stands down on fenced
+    },
+    "teardown_stops_holders": {
+        # RDR-224 nexus-7xzc1: `nx uninstall` stops every recorded holder of a
+        # tier and drops its records through the shared stop_tier_holders;
+        # a recycled pid running something else is never signalled. The
+        # aspect worker was the measured gap (it held a log file open on
+        # Windows and the data dir could not be removed).
+        "storage_service": "pass",
+        "aspect_worker": "pass",
     },
     "dead_owner_lease_reclaimed": {
         # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor_pid
@@ -926,6 +957,78 @@ class TestLifecycleConformance:
 # ---------------------------------------------------------------------------
 # Non-vacuity guard (CA-1).
 # ---------------------------------------------------------------------------
+
+
+#: Where each tier's lease records the pid a teardown stops.
+_TEARDOWN_PID_KEY = {"storage_service": "supervisor_pid", "aspect_worker": "pid"}
+_TEARDOWN_MARKER = "nexus-teardown-conformance-holder"
+
+
+def _spawn_holder() -> subprocess.Popen[bytes]:
+    """A holder in its own process group, up and sleeping, as production holders are.
+
+    On Windows the teardown is a ``CTRL_BREAK`` addressed to the holder's pid;
+    a pid that is not a group id sends the break to every process on the
+    console, pytest included (the run died at 23%, nexus-f9bgu).
+    """
+    return spawn_sleeper([_TEARDOWN_MARKER], seconds=120)
+
+
+class TestTeardownStopsHolders:
+    """The ``teardown_stops_holders`` property, with real processes: the lease
+    names a live pid, the teardown stops it and drops the record, for every
+    tier. A pid whose command is not ours is left running."""
+
+    def _publish(self, config_dir: Path, tier: str, scope: str, pid: int) -> None:
+        key = _TEARDOWN_PID_KEY[tier]
+        endpoint: dict[str, Any] = {"host": "127.0.0.1", "port": 1}
+        payload: dict[str, Any] = {}
+        (payload if key == "supervisor_pid" else endpoint)[key] = pid
+        ServiceRegistry(dir=config_dir, tier=tier).publish(
+            scope, endpoint=endpoint, version="0", owner_token=f"tok-{scope}", payload=payload,
+        )
+
+    def test_every_recorded_holder_is_stopped_and_its_record_dropped(
+        self, tier: str, config_dir: Path,
+    ) -> None:
+        _maybe_xfail("teardown_stops_holders", tier)
+        holders = [_spawn_holder(), _spawn_holder()]
+        try:
+            for i, proc in enumerate(holders):
+                self._publish(config_dir, tier, f"scope{i}", proc.pid)
+            result = stop_tier_holders(
+                dir=config_dir, tier=tier, pid_key=_TEARDOWN_PID_KEY[tier],
+                is_ours=lambda cmd: _TEARDOWN_MARKER in cmd, grace_s=5.0,
+            )
+            for proc in holders:
+                proc.wait(timeout=10)
+            assert sorted(result.stopped) == sorted(p.pid for p in holders)
+            assert result.survivors == ()
+            assert ServiceRegistry(dir=config_dir, tier=tier).records() == []
+        finally:
+            for proc in holders:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+    def test_a_recycled_pid_is_never_signalled(self, tier: str, config_dir: Path) -> None:
+        _maybe_xfail("teardown_stops_holders", tier)
+        stranger = _spawn_holder()
+        try:
+            self._publish(config_dir, tier, "default", stranger.pid)
+            result = stop_tier_holders(
+                dir=config_dir, tier=tier, pid_key=_TEARDOWN_PID_KEY[tier],
+                is_ours=lambda cmd: "aspect-worker" in cmd, grace_s=1.0,
+            )
+            assert stranger.poll() is None, "a pid running something else must not be signalled"
+            assert result.foreign == (stranger.pid,)
+            assert result.stopped == ()
+            assert ServiceRegistry(dir=config_dir, tier=tier).records() == [], (
+                "the dead holder's record goes even though the pid now runs something else"
+            )
+        finally:
+            stranger.kill()
+            stranger.wait()
 
 
 class TestMatrixIsNotVacuous:
@@ -1242,6 +1345,47 @@ def _spawn_unreaped_zombie() -> "subprocess.Popen[bytes]":
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+class TestDeadOwnerReclaimOnTheStopPath:
+    """``reclaim_lease_if_dead_owner(..., budget=)`` (RDR-224 guide walk,
+    nexus-f9bgu): a stop that confirmed its supervisor's exit releases the
+    dead owner's lease, so ``status`` stops saying ``live`` and the next start
+    has no dead lease to reclaim. On the stop path the election wait is
+    bounded the same way ``relinquish(budget=)`` is everywhere else there."""
+
+    @staticmethod
+    def _dead_owner_record(reg: "ServiceRegistry") -> "LeaseRecord":
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 — fixed argv, a genuinely dead pid
+        dead.wait()
+        return reg.publish(
+            "stop-scope",
+            endpoint={"host": "127.0.0.1", "port": 9999},
+            version="1.0",
+            owner_token="tok-dead",
+            payload={"supervisor_pid": dead.pid},
+        )
+
+    def test_a_free_election_releases_the_dead_owners_lease(self, config_dir: Path) -> None:
+        reg = ServiceRegistry(dir=config_dir, tier="storage_service")
+        record = self._dead_owner_record(reg)
+        assert reg.discover("stop-scope") is not None  # non-vacuity: fresh, read as live
+        assert sr.reclaim_lease_if_dead_owner(reg, record, budget=2.0) is True
+        assert reg.discover("stop-scope") is None
+
+    def test_a_busy_election_is_bounded_by_the_budget_and_never_raises(
+        self, config_dir: Path,
+    ) -> None:
+        reg = ServiceRegistry(dir=config_dir, tier="storage_service")
+        record = self._dead_owner_record(reg)
+        with reg.election("stop-scope"):
+            t0 = time.monotonic()
+            reclaimed = sr.reclaim_lease_if_dead_owner(reg, record, budget=0.3)
+            elapsed = time.monotonic() - t0
+        assert reclaimed is True
+        assert 0.3 <= elapsed < 5.0
+        # Nothing was written under a busy flock: the lease is left to its TTL.
+        assert reg.discover("stop-scope") is not None
+
+
 class TestTerminationSurvivorVerdict:
     """``terminate_pids`` is the ONE termination primitive every tier's stop
     path funnels through (``stop_storage_service``'s tree sweep,
@@ -1275,7 +1419,7 @@ class TestTerminationSurvivorVerdict:
             assert pid_running(pid) is False, (
                 f"a zombie is dead, not running: state={process_state(pid)!r}"
             )
-            with patch("time.sleep") as mock_sleep:
+            with patch_time(sr, "sleep") as mock_sleep:
                 stubborn = terminate_pids([pid], grace_s=5.0)
         finally:
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
@@ -1477,7 +1621,7 @@ class TestGracefulStopChannel:
             proc.wait(timeout=5)
 
     def test_posix_gone_pid_is_not_sent_and_not_refused(self) -> None:
-        with patch("os.kill", side_effect=ProcessLookupError):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=ProcessLookupError):
             send = request_graceful_stop(424244, platform="linux")
         assert (send.sent, send.refused, send.gone) == (False, False, True)
 
@@ -1485,13 +1629,13 @@ class TestGracefulStopChannel:
         # POSIX behaviour is unchanged: EPERM was swallowed and the caller's
         # escalation ladder carried on. Only the Windows cross-session case
         # stops the ladder.
-        with patch("os.kill", side_effect=PermissionError):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=PermissionError):
             send = request_graceful_stop(424245, platform="linux")
         assert (send.sent, send.refused) == (False, False)
 
     def test_windows_never_reaches_os_kill_and_sends_ctrl_break(self) -> None:
         api = _ScriptedConsoleApi()
-        with patch("os.kill", side_effect=AssertionError("os.kill is TerminateProcess on Windows")):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=AssertionError("os.kill is TerminateProcess on Windows")):
             send = request_graceful_stop(4242, platform="win32", console_api=api)
         assert send.sent is True
         assert api.attached == [4242] and api.sent == [4242]
@@ -1997,7 +2141,7 @@ class TestHardKillOfAGonePid:
 
     @pytest.mark.parametrize(("exc", "platform"), _GONE_PID_ERRORS)
     def test_a_gone_or_foreign_pid_is_reported_not_raised(self, exc: OSError, platform: str) -> None:
-        with patch("os.kill", side_effect=exc):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=exc):
             assert hard_kill_pid(424246, platform=platform) is False
 
     def test_a_live_child_is_killed(self) -> None:
@@ -2018,7 +2162,7 @@ class TestHardKillOfAGonePid:
         monkeypatch.setattr("nexus.daemon.service_registry.process_state", lambda _pid: "D")
         monkeypatch.setattr("nexus.daemon.service_registry._POST_KILL_SETTLE_S", 0.05)
         # The Windows graceful arm, scripted, so the only os.kill is the hard one.
-        with patch("os.kill", side_effect=exc):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=exc):
             stubborn = terminate_pids(
                 [424242], grace_s=0.05, platform="win32", console_api=_ScriptedConsoleApi(),
             )
@@ -2384,7 +2528,7 @@ class TestLeaseReplaceUnderConcurrentReaders:
                 raise _sharing_violation()
             real_replace(src, dst)
 
-        with patch("os.replace", flaky):
+        with patch_in("nexus.daemon.service_registry", "os.replace", flaky):
             refreshed = reg.heartbeat(record)
 
         assert failures[0] == 0 and len(clock.sleeps) == 3
@@ -2398,7 +2542,7 @@ class TestLeaseReplaceUnderConcurrentReaders:
         clock = _SleepClock()
         reg = self._registry(config_dir, "win32", clock)
         record = self._published(reg)
-        with patch("os.replace", side_effect=_sharing_violation()):
+        with patch_in("nexus.daemon.service_registry", "os.replace", side_effect=_sharing_violation()):
             with pytest.raises(PermissionError):
                 reg.heartbeat(record)
         assert _WINDOWS_SHARING_RETRY_BUDGET_S <= clock.t < _WINDOWS_SHARING_RETRY_BUDGET_S + 0.2, f"gave up after {clock.t:.3f}s, budget {_WINDOWS_SHARING_RETRY_BUDGET_S}"
@@ -2410,7 +2554,7 @@ class TestLeaseReplaceUnderConcurrentReaders:
         clock = _SleepClock()
         reg = self._registry(config_dir, "linux", clock)
         record = self._published(reg)
-        with patch("os.replace", side_effect=_sharing_violation()) as replace:
+        with patch_in("nexus.daemon.service_registry", "os.replace", side_effect=_sharing_violation()) as replace:
             with pytest.raises(PermissionError):
                 reg.heartbeat(record)
         assert replace.call_count == 1 and clock.sleeps == [], (

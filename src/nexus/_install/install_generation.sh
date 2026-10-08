@@ -125,16 +125,26 @@ SPEC="$(nx_build_spec "$SOURCE" "$EXTRAS" "$VERSION")" || exit $?
 # exists, and that failure IS the collision detector. Building into an existing
 # generation would mutate a tree a live process may be running from, which is
 # the one thing this script exists to never do.
+#
+# mkdir(1) is not that detector everywhere, though (nexus-bo01z): uutils
+# coreutils 0.8.0, /usr/bin/mkdir on Ubuntu 26.04, checks for the path and then
+# creates it, and reports the EEXIST of a lost race as success, so two installs
+# in the same second both "claimed" one stamp there. The claim is therefore the
+# EXCLUSIVE creation of the build marker inside the new directory: noclobber
+# makes the shell open it O_EXCL, which no userland mkdir can soften. A racer
+# whose mkdir "succeeded" but whose marker already exists lost, and moves on to
+# the next suffix like any other collision.
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 GEN=""
 for _suffix in "" a b c d e f g h; do
     _candidate="$(nx_generation_dir "${STAMP}${_suffix}" "$TOOLS_DIR")" || exit $?
-    if mkdir "$_candidate" 2>/dev/null; then
+    # The marker also claims the tree for gc.sh (nexus-xn84f): a receipt-less
+    # gen-* with a young marker is a build in progress even while
+    # resolve/download writes nothing under it. The receipt, written last,
+    # supersedes it.
+    if mkdir "$_candidate" 2>/dev/null \
+        && (set -C; : > "$_candidate/$NX_BUILDING_MARKER_NAME") 2>/dev/null; then
         GEN="$_candidate"
-        # Claim the tree for gc.sh (nexus-xn84f): a receipt-less gen-* with a
-        # young marker is a build in progress even while resolve/download
-        # writes nothing under it. The receipt, written last, supersedes it.
-        : > "$GEN/$NX_BUILDING_MARKER_NAME"
         break
     fi
 done

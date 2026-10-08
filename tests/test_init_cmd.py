@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 
 import pytest
+
+from nexus.daemon.service_registry import service_identity
 import yaml
 from click.testing import CliRunner
 
@@ -771,6 +773,34 @@ def test_provision_step_idempotent_on_rerun(tmp_path, monkeypatch, make_pg_bundl
 
     assert extractions["n"] == 1, "bundle re-extracted on rerun (marker not honored)"
     assert provisions["n"] == 2, "provision must run on each invocation"
+
+
+def test_fresh_provision_prints_no_backend_env_advice(tmp_path, monkeypatch, capsys) -> None:
+    """The service backend is the only one and the default, and the supervisor
+    reads ``pg_credentials`` itself, so ``nx init`` must not tell a new user to
+    set ``NX_STORAGE_BACKEND`` or source the credentials file (RDR-224 guide
+    walk, nexus-f9bgu): the advice asks for an action nothing needs."""
+    from types import SimpleNamespace
+
+    import nexus.commands.init as init_mod
+
+    monkeypatch.setenv("NEXUS_PG_BIN", str(tmp_path / "bin"))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    creds = tmp_path / "cfg" / "pg_credentials"
+
+    monkeypatch.setattr(
+        "nexus.db.pg_provision.provision",
+        lambda _cfg: SimpleNamespace(
+            already_provisioned=False, cluster_created=True, db_created=True,
+            admin_role_created=True, svc_role_created=True,
+            vector_extension_created=True, credentials_path=creds, port=15432,
+        ),
+    )
+    init_mod._provision_postgres_step()
+    out = capsys.readouterr().out
+    assert "Cluster listening on 127.0.0.1:15432." in out  # non-vacuity: the summary printed
+    assert "NX_STORAGE_BACKEND" not in out
+    assert "before starting the service" not in out
 
 
 class TestServiceLocalEmbedder:
@@ -1885,7 +1915,7 @@ class TestPollServiceLeaseMarksEvidence:
 
         registry = ServiceRegistry(dir=config_dir, tier="storage_service")
         registry.publish(
-            str(_os.getuid()),
+            service_identity(),
             endpoint={"host": "127.0.0.1", "port": 18101},
             version="7.40.0",
             owner_token=mint_owner_token(),

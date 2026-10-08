@@ -35,7 +35,6 @@ from __future__ import annotations
 import ast
 import re
 import shlex
-import subprocess
 import tempfile
 import warnings
 from pathlib import Path
@@ -43,6 +42,7 @@ from pathlib import Path
 import pytest
 
 from tests.db import _service_fixture as fx
+from tests._module_seam import setattr_in
 
 pytestmark = pytest.mark.lint
 
@@ -380,7 +380,7 @@ def test_spawn_service_hands_popen_the_injected_argv(
         def __init__(self, argv, **kwargs) -> None:
             seen["argv"] = argv
 
-    monkeypatch.setattr(subprocess, "Popen", _Popen)
+    setattr_in(monkeypatch, "tests.db._service_fixture", "subprocess.Popen", _Popen)
     _proc, log = fx.spawn_service(["/usr/bin/java", "-jar", "a.jar"], {}, log_dir=tmp_path / "l")
     assert seen["argv"] == [
         "/usr/bin/java", f"-XX:ErrorFile={tmp_path}/hs_err_%p.log", "-jar", "a.jar",

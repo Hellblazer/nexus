@@ -32,6 +32,7 @@ import nexus.retry as retry_mod
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.rate_brake import RateLimitBrake, reset_brake
 from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker, _etl_with_retry, _is_retryable_etl_error
+from tests._module_seam import patch_in, patch_time
 
 
 class _FakeClock:
@@ -129,8 +130,7 @@ def test_retries_on_transient_503_then_succeeds() -> None:
             raise _make_status_exc(503)
         return "ok"
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(flaky) == "ok"
     assert call_count == 2
@@ -157,7 +157,7 @@ def test_403_is_not_retryable_edge_refusals_are_deterministic() -> None:
             call_count += 1
             raise make()
 
-        with patch("nexus.retry.time.sleep") as mock_sleep:
+        with patch_time("nexus.retry", "sleep") as mock_sleep:
             with pytest.raises((httpx.HTTPStatusError, VectorServiceError)):
                 _etl_with_retry(always_403)
         assert call_count == 1, f"{label}: a 403 must not be retried even once"
@@ -174,8 +174,7 @@ def test_backoff_curve_1_2() -> None:
             raise _make_status_exc(502)
         return "ok"
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(fn_succeeds_on_3rd, max_attempts=3) == "ok"
     # nexus-cy9u7 CRITICAL-2: brake floors both sleeps now (escalating
@@ -186,14 +185,14 @@ def test_backoff_curve_1_2() -> None:
 
 def test_exhausts_attempts_on_persistent_504() -> None:
     fn = MagicMock(side_effect=_make_status_exc(504))
-    with patch("nexus.retry.time.sleep"), pytest.raises(httpx.HTTPStatusError):
+    with patch_time("nexus.retry", "sleep"), pytest.raises(httpx.HTTPStatusError):
         _etl_with_retry(fn, max_attempts=3)
     assert fn.call_count == 3
 
 
 def test_non_retryable_404_raises_immediately() -> None:
     fn = MagicMock(side_effect=_make_status_exc(404))
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(httpx.HTTPStatusError):
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(httpx.HTTPStatusError):
         _etl_with_retry(fn)
     fn.assert_called_once()
     mock_sleep.assert_not_called()
@@ -216,8 +215,7 @@ def test_429_trips_shared_brake_and_floors_sleep_at_retry_after(monkeypatch) -> 
             raise _make_status_exc(429, {"Retry-After": "6"})
         return "ok"
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(flaky) == "ok"
     assert test_brake.trips == 1
@@ -245,8 +243,7 @@ def test_503_without_retry_after_now_trips_brake_with_escalating_default(
         return "ok"
 
     with patch.object(retry_mod, "get_brake", return_value=test_brake):
-        with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-            "nexus.retry.random.random", return_value=0.5,
+        with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
         ):
             assert _etl_with_retry(flaky) == "ok"
     test_brake.trip.assert_called_once_with(None, source="etl")
@@ -258,7 +255,7 @@ def test_success_releases_brake() -> None:
     test_brake.wait.return_value = 0.0
     with patch.object(retry_mod, "get_brake", return_value=test_brake):
         fn = MagicMock(return_value="ok")
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             assert _etl_with_retry(fn) == "ok"
     test_brake.wait.assert_called_once()
     test_brake.release.assert_called_once()
@@ -285,8 +282,7 @@ def test_real_vector_service_error_429_recognised_with_retry_after(monkeypatch) 
     monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
 
     fn = MagicMock(side_effect=[_make_vector_service_error(429, retry_after="4"), "ok"])
-    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(fn) == "ok"
     assert test_brake.trips == 1
@@ -299,7 +295,7 @@ def test_real_vector_service_error_502_retried_via_duck_typed_code() -> None:
     # No Retry-After -> not a narrow rate-limit signal, but still a
     # retryable transient status (502) per _RETRYABLE_ETL_HTTP_STATUSES.
     fn = MagicMock(side_effect=[_make_vector_service_error(502), "ok"])
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _etl_with_retry(fn) == "ok"
     assert fn.call_count == 2
 
@@ -390,8 +386,7 @@ def test_verify_fill_call_site_uses_exactly_one_retry_layer_real_server(
     host, port = httpd.server_address
     monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (f"http://{host}:{port}", "tok"))
 
-    with patch("nexus.retry.time.sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         client = hvc.HttpVectorClient()
         breaker = EtlCircuitBreaker()
@@ -435,7 +430,7 @@ def test_upsert_chunks_retry_false_does_not_self_retry_real_server(
     host, port = httpd.server_address
     monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (f"http://{host}:{port}", "tok"))
 
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(VectorServiceError):
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(VectorServiceError):
         client = hvc.HttpVectorClient()
         client.upsert_chunks(
             "code__test", ["id-1"], ["def hello(): pass"], [{"k": "v"}], retry=False,
@@ -483,6 +478,6 @@ def test_breaker_max_trips_is_counted_per_batch() -> None:
             return "ok"
         return fn
 
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         for _ in range(3):
             assert _etl_batch_with_breaker(_fails_once(), breaker=breaker, max_attempts=1) == "ok"

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
+from tests._module_seam import patch_in
 
 
 @pytest.fixture
@@ -238,8 +239,8 @@ class TestMineruOrchestration:
 class TestMineruRunIsolated:
     """_mineru_run_isolated shells out to a subprocess and reads results."""
 
-    @patch("nexus.pdf_extractor.subprocess.run")
-    @patch("nexus.pdf_extractor.tempfile.mkdtemp")
+    @patch_in("nexus.pdf_extractor", "subprocess.run")
+    @patch_in("nexus.pdf_extractor", "tempfile.mkdtemp")
     def test_subprocess_failure_raises(self, mock_mkdtemp, mock_run, extractor, dummy_pdf, tmp_path):
         """Non-zero exit code raises RuntimeError."""
         mock_mkdtemp.return_value = str(tmp_path / "work")

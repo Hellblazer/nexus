@@ -50,19 +50,25 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     NEXUS_DB_NAME,
     PgBinaries,
     PgVectorNotInstalledError,
     ProvisionResult,
     _port_accepting,
+    bootstrap_superuser,
     check_pgvector_available,
     discover_pg_binaries,
     provision,
 )
 
 _IS_DARWIN = sys.platform == "darwin"
-_VECTOR_LIB = "vector.dylib" if _IS_DARWIN else "vector.so"
+_IS_LINUX = sys.platform.startswith("linux")
+# The Windows bundle ships vector.dll (and pg_trgm.dll) in lib\postgresql. Since
+# nexus-ja4pq this module's skip gate finds initdb.exe, so it runs on Windows.
+_VECTOR_LIB = "vector.dylib" if _IS_DARWIN else ("vector.dll" if sys.platform == "win32" else "vector.so")
 
 # Pinned floors for the PACKAGED artifact (must match the CA-3 gate's floors in
 # tests/db/test_pg_provision_ca3_bundle.py). The relocation smoke re-checks them
@@ -93,7 +99,7 @@ def _relocated_root() -> Path | None:
     if not raw:
         return None
     root = Path(raw)
-    return root if (root / "bin" / "initdb").is_file() else None
+    return root if (root / "bin" / exe_name("initdb")).is_file() else None
 
 
 _ROOT = _relocated_root()
@@ -148,7 +154,10 @@ def provisioned(bins: PgBinaries, tmp_path_factory):
         else:
             os.environ["NEXUS_CONFIG_DIR"] = old_cfg
 
-    yield result, config_dir
+    # nexus-ja4pq: the cluster demands passwords; raw psql below uses the
+    # superuser's recorded one through PGPASSFILE.
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
 
     pgdata = config_dir / "postgres"
     try:
@@ -300,7 +309,7 @@ class TestRelocatedBundleComplete:
 
 # ── Test 3: the PACKAGED artifact's compat floor is preserved ───────────────────
 
-@pytest.mark.skipif(_IS_DARWIN, reason="GLIBC floor is linux-only; macOS uses TestPackagedMacosFloor")
+@pytest.mark.skipif(not _IS_LINUX, reason="GLIBC floor is linux-only; macOS uses TestPackagedMacosFloor, and the Windows bundle has no glibc (its VC++ runtime is checked by the Windows bundle's own verify step)")
 class TestPackagedGlibcFloor:
     """The .txz uploaded by this step is what P3.2/P3.4 consume; re-assert the
     glibc floor on the EXTRACTED libs so an artifact-boundary regression fails
@@ -363,9 +372,9 @@ class TestCreateExtensionFromRelocated:
     location — the failure mode relocation could introduce."""
 
     def _query(self, bins, port, sql) -> subprocess.CompletedProcess:
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()  # the SID-derived role on Windows (nexus-ja4pq)
         return subprocess.run(
-            [str(bins.bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(port),
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
              "-U", os_user, "-d", NEXUS_DB_NAME, "-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30,
         )

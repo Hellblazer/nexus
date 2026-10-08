@@ -57,6 +57,7 @@ from nexus.migration.state import (
     state_path,
     write_state,
 )
+from tests._module_seam import setattr_in
 
 _FIXED_STARTED_AT = "2026-06-13T00:00:00+00:00"
 
@@ -175,7 +176,7 @@ def test_write_uses_os_rename_not_bare_write(monkeypatch: pytest.MonkeyPatch) ->
         calls.append((str(src), str(dst)))
         return real_rename(src, dst, *a, **k)
 
-    monkeypatch.setattr(os, "rename", _spy_rename)
+    setattr_in(monkeypatch, "nexus.migration.state", "os.rename", _spy_rename)
     write_state(
         MigrationState(
             phase=MIGRATING,

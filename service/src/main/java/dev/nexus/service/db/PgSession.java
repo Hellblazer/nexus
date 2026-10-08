@@ -75,11 +75,17 @@ public final class PgSession {
      * crowded the gate tenant's true top-2 out). {@code iterative_scan}
      * cannot recover them: it is starvation-triggered and scans OUTWARD from
      * the frontier; neighbors pruned by the ef-bounded traversal are gone.
-     * Only a larger candidate list finds them — 200 is 5x the default
-     * (the measured failure was marginal: a single insert displaced the
-     * top-2, i.e. the boundary sat right at 40).
+     * Only a larger candidate list finds them. The floor was 200 (5x the
+     * default; the measured failure was marginal: a single insert displaced
+     * the top-2, i.e. the boundary sat right at 40). RDR-225 replaced the one
+     * global graph with one graph per (model, tenant) leaf, and the cloud
+     * gate then missed one true neighbor at ef 200 (code-filtered-001,
+     * recall@10 0.90; tail variance near tied distances, nexus-3wh8d.31,
+     * T2 nexus_rdr/225-recall-per-leaf-analysis). The live sweep (conexus
+     * T2 [29566]) restored 12/12 at ef 400 with latency flat to 1000; 600
+     * keeps headroom over that measured point.
      */
-    static final int DEFAULT_EF_SEARCH_FLOOR = 200;
+    static final int DEFAULT_EF_SEARCH_FLOOR = 600;
 
     /**
      * Default serving value for {@code hnsw.max_scan_tuples} (nexus-wbfpw.47;
@@ -603,9 +609,28 @@ public final class PgSession {
         return Math.min(EF_SEARCH_MAX, Math.max(1, Math.max(floor, nResults)));
     }
 
-    /** Sizing against the env-resolved floor. */
+    /** Sizing against the env-resolved floor, or the test pin when set. */
     static int efSearchFor(int nResults) {
-        return efSearchFor(nResults, EF_SEARCH_FLOOR);
+        Integer o = efSearchFloorOverride;
+        return efSearchFor(nResults, o != null ? o : EF_SEARCH_FLOOR);
+    }
+
+    /** Test pin for the serving floor; null means the env-resolved {@link #EF_SEARCH_FLOOR}. */
+    private static volatile Integer efSearchFloorOverride;
+
+    /**
+     * TEST SEAM (nexus-3wh8d.31): pin the serving {@code hnsw.ef_search} floor, so a
+     * fixture of a few hundred rows can starve an HNSW walk the way a large leaf does in
+     * production; at the 600 default the first ef batch covers such a fixture's whole
+     * graph. Pair with {@link #resetEfSearchFloorForTests()}.
+     */
+    public static void overrideEfSearchFloorForTests(int floor) {
+        efSearchFloorOverride = floor;
+    }
+
+    /** Drop the pinned floor; the env-resolved value applies again. */
+    public static void resetEfSearchFloorForTests() {
+        efSearchFloorOverride = null;
     }
 
     /**

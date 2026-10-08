@@ -103,8 +103,10 @@
 #   sign-out/restart path (measured by nexus-f9bgu.46, fixed by nexus-f9bgu.51,
 #   not re-asserted here), Windows on ARM, Smart App Control in enforcing mode,
 #   the desktop bundle (nexus-ijue9.21), SessionEnd, and the aspect-worker
-#   daemon, which is only observed (process count and command lines after the
-#   --with-pg stop).
+#   daemon, which is only observed (process count, CPU seconds and command
+#   lines after the --with-pg stop). It outlives `service stop` by design:
+#   RDR-224's recorded decision (Revision History, "`service stop` leaves it
+#   running as on POSIX"), nexus-g5rz5.
 #
 # Exit: 0 PASSED, 1 FAILED, 2 refused (wrong host or bad invocation).
 
@@ -563,8 +565,18 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
     Start-Sleep -Seconds $RECHECK_SECONDS
     Assert-Absent @('supervisor', 'engine', 'postgres') "${RECHECK_SECONDS}s after stop --with-pg (launcher respawn?)"
     $k = Get-Stack
-    $aspect = ($k.aspect | ForEach-Object { "$($_.ProcessId):$($_.CommandLine)" }) -join ' | '
-    "stop --with-pg (exit $($r.code)) from [$before]: no supervisor/engine/postgres at stop and ${RECHECK_SECONDS}s later; launcher processes left: $($k.launcher.Count); aspect-worker processes left: $($k.aspect.Count) $aspect"
+    # OBSERVATION, not an assertion, by design (nexus-g5rz5): RDR-224 records
+    # that `nx daemon service stop` leaves the aspect-worker daemon running, on
+    # Windows as on POSIX, because the worker belongs to the store path, not to
+    # the service (Revision History: "its decision that `service stop` leaves it
+    # running as on POSIX"). Two processes are the venv trampoline and its
+    # child. With the stack down it idles on a bounded backoff; the CPU seconds
+    # below are what a spin would show.
+    $aspect = ($k.aspect | ForEach-Object {
+        $cpu = [math]::Round((([double]$_.KernelModeTime) + ([double]$_.UserModeTime)) / 1e7, 1)
+        "$($_.ProcessId):cpu=${cpu}s:$($_.CommandLine)"
+    }) -join ' | '
+    "stop --with-pg (exit $($r.code)) from [$before]: no supervisor/engine/postgres at stop and ${RECHECK_SECONDS}s later; launcher processes left: $($k.launcher.Count); aspect-worker processes left (observed, by design per RDR-224: service stop does not stop the store path's worker): $($k.aspect.Count) $aspect"
     if ($skipIds -notcontains 5) {
         $script:claudeNoEndpoint = Try-ClaudeP 'no-endpoint'
         Assert-Absent @('supervisor', 'engine', 'postgres') 'after the no-endpoint claude -p (it must not start the stack)'

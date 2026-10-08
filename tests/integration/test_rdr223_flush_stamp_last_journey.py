@@ -29,6 +29,7 @@ from tests.integration.test_rdr223_index_repo_oversize_journey import (
     _traffic,
     flush_repo,  # noqa: F401 — the fixture
 )
+from tests._module_seam import module_time
 
 pytestmark = [pytest.mark.integration]
 
@@ -126,7 +127,7 @@ def test_a_stamp_the_flush_cannot_send_leaves_the_documents_indexing_and_is_reco
         return real_append_many(self, docs, *a, complete=complete, **kw)
 
     monkeypatch.setattr(HttpCatalogClient, "append_manifest_many", _append_many)
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     mcp_infra.reset_complete_refusals()
 
     _run_index(repo, reg, force=False)                # does not raise

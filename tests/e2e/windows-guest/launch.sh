@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
         --prompt) [[ $# -ge 2 ]] || { echo "launch.sh: --prompt needs text" >&2; exit 2; }
                   claude_args+=("$2"); shift 2 ;;
         --permission-mode) [[ $# -ge 2 ]] || { echo "launch.sh: --permission-mode needs a mode" >&2; exit 2; }
-                  claude_args=("--permission-mode" "$2" "${claude_args[@]}"); shift 2 ;;
+                  claude_args=("--permission-mode" "$2" ${claude_args[@]+"${claude_args[@]}"}); shift 2 ;;
         --stage) [[ $# -ge 2 ]] || { echo "launch.sh: --stage needs a file" >&2; exit 2; }
                  [[ -f "$2" ]] || { echo "launch.sh: no such file: $2" >&2; exit 2; }
                  stage+=("$2"); shift 2 ;;
@@ -68,7 +68,8 @@ ssh "$HOST" 'cmd /c "(if not exist C:\build\guest\nxgate\stage mkdir C:\build\gu
 scp -q "$here/host-recv.ps1" "$here/token-send.ps1" "$here/token-send.sh" "$HOST:$HOST_DIR/" 2>&1 | quiet
 if [[ ${#claude_args[@]} -gt 0 ]]; then
     argsdir="$(mktemp -d "${TMPDIR:-/tmp}/nxgate-args.XXXXXX")"
-    printf '%s\n' "${claude_args[@]}" > "$argsdir/claude-args.txt"
+    # One argument per line, base64 so a multi-line prompt stays one argument.
+    for a in "${claude_args[@]}"; do printf '%s' "$a" | base64 | tr -d '\n'; echo; done > "$argsdir/claude-args.txt"
     stage+=("$argsdir/claude-args.txt")
 fi
 if [[ ${#stage[@]} -gt 0 ]]; then
@@ -82,7 +83,9 @@ cleanup() {
     # password in its memory) for up to 180 s and makes the next launch fail.
     if [[ -n "$recv" ]] && kill -0 "$recv" 2>/dev/null; then kill "$recv" 2>/dev/null || true; wait "$recv" 2>/dev/null || true; fi
     rm -f "$out"
-    [[ -n "${argsdir:-}" ]] && rm -rf "$argsdir"
+    # `[[ -n ]] && rm` would return 1 when no args were given, and under set -e
+    # the EXIT trap would turn a successful launch into exit 1.
+    [[ -z "${argsdir:-}" ]] || rm -rf "$argsdir"
 }
 trap cleanup EXIT
 security find-generic-password -a "$GUSER" -s "$KEYCHAIN_SERVICE" -w \

@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.daemon.service_registry import service_identity
+
 from nexus.hooks.mailbox_drain import _resolve_base_url, _Skip
 
 
@@ -43,7 +45,7 @@ def _publish_lease(*, host: str = "127.0.0.1", port: int, token: str) -> None:
 
     reg = ServiceRegistry(dir=_config_dir(), tier="storage_service")
     reg.publish(
-        str(os.getuid()),
+        service_identity(),
         endpoint={"host": host, "port": port, "token": token},
         version="test",
         owner_token="aginu-test-owner",
@@ -121,7 +123,7 @@ class TestResolveBaseUrlPrecedence:
             dir=_config_dir(), tier="storage_service", ttl=10.0, clock=lambda: 100.0,
         )
         reg.publish(
-            str(os.getuid()),
+            service_identity(),
             endpoint={"host": "127.0.0.1", "port": 4242, "token": "stale"},
             version="test",
             owner_token="aginu-test-owner",
