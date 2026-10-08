@@ -52,10 +52,15 @@ from typing import Any
 MAX_IDLE_PER_ENDPOINT = 16
 
 #: A pooled connection idle longer than this is discarded at checkout rather
-#: than risked. Well below the idle timeouts of the managed edge (ALB default
-#: 60 s) and the engine; the dead-peer probe and the one-shot retry cover the
-#: remainder.
-MAX_IDLE_SECONDS = 30.0
+#: than risked. It must sit STRICTLY below the tightest idle timeout on the
+#: path: the engine is a JDK ``com.sun.net.httpserver`` whose idle-connection
+#: reaper defaults to ``sun.net.httpserver.idleInterval`` = 30 s (nothing in
+#: ``service/`` overrides it, and the reaper ticks about once a second), and the
+#: managed edge's ALB idles out at 60 s. 20 s leaves 10 s for the reaper tick,
+#: the round trip and clock skew between the two ends; the dead-peer probe and
+#: the one-shot retry cover the remainder. Age is judged on BOTH the monotonic
+#: and the wall clock (see :func:`_idle_expired`).
+MAX_IDLE_SECONDS = 20.0
 
 #: A reused connection that fails this soon after the send was closed by the
 #: server while idle. Later than this the server may have been working on the
@@ -96,8 +101,45 @@ def _looks_dead(sock: Any) -> bool:
         return True
 
 
-def _quick(sent_at: float) -> bool:
-    return time.monotonic() - sent_at < _STALE_FAILURE_WINDOW_S
+#: ``(monotonic, wall)`` reading. Two clocks because ``time.monotonic()`` is
+#: ``mach_absolute_time()`` on macOS and stops while the machine sleeps, so a
+#: connection that idled through a lid-close looks fresh on it; the wall clock
+#: keeps counting. Neither alone is enough: the wall clock can be stepped.
+_Stamp = tuple[float, float]
+
+
+def _stamp() -> _Stamp:
+    return time.monotonic(), time.time()
+
+
+#: Two threads stamp the wall clock a few microseconds apart (and a slew can
+#: nudge it back by about as much); only a backwards move larger than this is a
+#: clock STEP. Without the slack a release and a checkout racing on two threads
+#: read as "the clock went backwards" and a healthy connection was discarded
+#: (measured: 9-10 connections for 8 threads, intermittently).
+_CLOCK_STEP_TOLERANCE_S = 1.0
+
+
+def _idle_expired(since: _Stamp, now: _Stamp) -> bool:
+    """True when a connection stamped ``since`` must not be reused at ``now``:
+    either clock says it idled longer than :data:`MAX_IDLE_SECONDS`, or the
+    wall clock stepped backwards (the stamp cannot be trusted)."""
+    mono = now[0] - since[0]
+    wall = now[1] - since[1]
+    return (
+        mono > MAX_IDLE_SECONDS
+        or wall > MAX_IDLE_SECONDS
+        or wall < -_CLOCK_STEP_TOLERANCE_S
+    )
+
+
+def _quick(sent_at: _Stamp) -> bool:
+    """True when less than :data:`_STALE_FAILURE_WINDOW_S` passed since
+    ``sent_at`` on BOTH clocks (and the wall clock did not step back)."""
+    now = _stamp()
+    mono = now[0] - sent_at[0]
+    wall = now[1] - sent_at[1]
+    return 0 <= mono < _STALE_FAILURE_WINDOW_S and 0 <= wall < _STALE_FAILURE_WINDOW_S
 
 
 def _close_quietly(conn: http.client.HTTPConnection) -> None:
@@ -116,7 +158,7 @@ class _ConnectionPool:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._idle: dict[_Key, list[tuple[http.client.HTTPConnection, float]]] = {}
+        self._idle: dict[_Key, list[tuple[http.client.HTTPConnection, _Stamp]]] = {}
         self._pid = os.getpid()
 
     # -- lifecycle ----------------------------------------------------------
@@ -151,14 +193,14 @@ class _ConnectionPool:
         """The warmest usable idle connection for ``key``, or None."""
         if self._pid != os.getpid():  # a fork the at-fork hook could not see
             self.reset_after_fork()
-        now = time.monotonic()
         stale: list[http.client.HTTPConnection] = []
         found: http.client.HTTPConnection | None = None
         with self._lock:
+            now = _stamp()  # inside the lock: never earlier than a release's stamp
             entries = self._idle.get(key)
             while entries:
                 conn, since = entries.pop()
-                if now - since > MAX_IDLE_SECONDS or _looks_dead(conn.sock):
+                if _idle_expired(since, now) or _looks_dead(conn.sock):
                     stale.append(conn)
                     continue
                 found = conn
@@ -179,7 +221,7 @@ class _ConnectionPool:
             if len(entries) >= MAX_IDLE_PER_ENDPOINT:
                 overflow = conn
             else:
-                entries.append((conn, time.monotonic()))
+                entries.append((conn, _stamp()))
         if overflow is not None:
             _close_quietly(overflow)
 
@@ -193,14 +235,14 @@ class _ConnectionPool:
             _close_quietly(c)
 
     def _sweep_locked(
-        self, now: float, out: list[http.client.HTTPConnection]
+        self, now: _Stamp, out: list[http.client.HTTPConnection]
     ) -> None:
         """Age out every endpoint's over-age idle connections (a rotated lease
         leaves its old key behind). Caller holds the lock."""
         for key in list(self._idle):
-            keep: list[tuple[http.client.HTTPConnection, float]] = []
+            keep: list[tuple[http.client.HTTPConnection, _Stamp]] = []
             for conn, since in self._idle[key]:
-                if now - since > MAX_IDLE_SECONDS:
+                if _idle_expired(since, now):
                     out.append(conn)
                 else:
                     keep.append((conn, since))
@@ -347,7 +389,7 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
                 conn.timeout = timeout
                 if conn.sock is not None:
                     conn.sock.settimeout(timeout)
-            sent_at = time.monotonic()
+            sent_at = _stamp()
             try:
                 try:
                     conn.request(

@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from nexus.db import http_vector_client as hvc
+from nexus.db import pooled_http
 from tests._module_seam import module_time
 
 
@@ -437,6 +438,125 @@ def test_a_connection_is_not_pooled_when_the_server_says_close(
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ── (3b) idle age: both clocks (review H1) ───────────────────────────────────
+#
+# macOS's time.monotonic() is mach_absolute_time(), which stops while the
+# machine sleeps (see the transport comment in http_vector_client). A laptop
+# that sleeps for an hour looks 0 s idle on the monotonic clock, its pooled
+# socket is a zombie, and the request rides it to the full 30/120/600 s
+# timeout. The wall clock does advance across sleep, so a connection is
+# discarded when EITHER clock says it idled too long, or when the wall clock
+# went backwards (a step: the stamp cannot be trusted).
+
+#: The engine is a JDK com.sun.net.httpserver (service/.../NexusService.java);
+#: its idle-connection reaper defaults to sun.net.httpserver.idleInterval =
+#: 30 s and nothing in service/ overrides it. The managed edge is behind an ALB
+#: whose idle timeout is 60 s (docs/rdr/rdr-205 § cloud topology). The client
+#: must give up on an idle connection STRICTLY before the tightest of these.
+_ENGINE_IDLE_INTERVAL_S = 30.0
+_ALB_IDLE_TIMEOUT_S = 60.0
+
+
+class _Clocks:
+    """A hand-driven monotonic + wall clock for ``pooled_http``'s ``time``."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.mono = 1_000.0
+        self.wall = 1_700_000_000.0
+        proxy = module_time(monkeypatch, pooled_http)
+        proxy.monotonic = lambda: self.mono
+        proxy.time = lambda: self.wall
+
+    def sleep(self, *, mono: float, wall: float) -> None:
+        self.mono += mono
+        self.wall += wall
+
+
+def test_max_idle_is_strictly_below_the_engine_and_edge_idle_timeouts() -> None:
+    assert pooled_http.MAX_IDLE_SECONDS < _ENGINE_IDLE_INTERVAL_S
+    assert pooled_http.MAX_IDLE_SECONDS < _ALB_IDLE_TIMEOUT_S
+
+
+def test_a_connection_idle_across_a_system_sleep_is_discarded(
+    make_server, monkeypatch,
+) -> None:
+    """The monotonic clock stood still (sleep), the wall clock did not."""
+    clocks = _Clocks(monkeypatch)
+    srv = make_server()
+    _point_at(monkeypatch, srv)
+    _get("/v1/one")
+    assert hvc.connection_pool_idle_count() == 1
+
+    clocks.sleep(mono=0.5, wall=3600.0)  # laptop lid closed for an hour
+    _get("/v1/two")
+    assert srv.accepted == 2, "a connection idle for an hour (wall) was reused"
+
+
+def test_a_connection_idle_longer_than_max_idle_on_the_monotonic_clock_is_discarded(
+    make_server, monkeypatch,
+) -> None:
+    clocks = _Clocks(monkeypatch)
+    srv = make_server()
+    _point_at(monkeypatch, srv)
+    _get("/v1/one")
+    clocks.sleep(mono=pooled_http.MAX_IDLE_SECONDS + 1, wall=1.0)  # each clock judged alone
+    _get("/v1/two")
+    assert srv.accepted == 2
+
+
+def test_a_connection_whose_wall_clock_stamp_runs_backwards_is_discarded(
+    make_server, monkeypatch,
+) -> None:
+    clocks = _Clocks(monkeypatch)
+    srv = make_server()
+    _point_at(monkeypatch, srv)
+    _get("/v1/one")
+    clocks.sleep(mono=1.0, wall=-120.0)  # the clock was stepped back
+    _get("/v1/two")
+    assert srv.accepted == 2
+
+
+def test_a_recently_idle_connection_is_still_reused(make_server, monkeypatch) -> None:
+    """Non-vacuity for the three discards above: the same harness reuses a
+    connection that idled well inside the limit on both clocks."""
+    clocks = _Clocks(monkeypatch)
+    srv = make_server()
+    _point_at(monkeypatch, srv)
+    _get("/v1/one")
+    clocks.sleep(mono=5.0, wall=5.0)
+    _get("/v1/two")
+    assert srv.accepted == 1
+
+
+def test_a_microsecond_wall_clock_regression_is_not_a_clock_step(
+    make_server, monkeypatch,
+) -> None:
+    """A release on one thread and a checkout on another read the wall clock
+    microseconds apart, in either order; that is not a clock step, and
+    discarding on it opened 9-10 connections for 8 threads."""
+    clocks = _Clocks(monkeypatch)
+    srv = make_server()
+    _point_at(monkeypatch, srv)
+    _get("/v1/one")
+    clocks.sleep(mono=0.0, wall=-0.0005)
+    _get("/v1/two")
+    assert srv.accepted == 1
+
+
+def test_the_sweep_of_other_endpoints_also_uses_both_clocks(make_server, monkeypatch) -> None:
+    """An idle connection on a ROTATED-AWAY endpoint is swept by a checkout on
+    another endpoint; the sweep must age by the wall clock too."""
+    clocks = _Clocks(monkeypatch)
+    a, b = make_server(), make_server()
+    _point_at(monkeypatch, a)
+    _get("/v1/a")
+    assert hvc.connection_pool_idle_count() == 1
+    clocks.sleep(mono=0.5, wall=3600.0)
+    _point_at(monkeypatch, b)
+    _get("/v1/b")  # checkout on B sweeps A's slept-through connection
+    assert hvc.connection_pool_idle_count() == 1  # only B's, just released
 
 
 # ── (5) fork safety ──────────────────────────────────────────────────────────
