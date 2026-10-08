@@ -209,9 +209,10 @@ nexus-wym0l; RDR-225's findings; T2 entries 29657, 29650, 29624, 28937 and
   (`disableIndexScanForExactFallback`, one `selectFrom(fn)`) or the HNSW plan
   wrapped in the empty-result exact re-run (`exactSelectFrom`,
   `exactOnUnderReturn`, `:6587-6603`).
-- **C4. Permits.** `fanoutArmPermits` (`:1872-1876`): default `max(1, pool/2)`,
-  ceiling `max(1, pool - 2)` (`:1857-1862`). The gate is shared by every
-  request.
+- **C4. Permits.** `fanoutArmPermits`: default and ceiling `max(1, pool - 2)`
+  since 538444f0d (it was `max(1, pool/2)` when this RDR was drafted and when
+  M1 was measured); the per-request `fanoutParallelism` default moved to the
+  same value. The gate is shared by every request.
 - **C5. Merge.** `FanoutMerger` (`:1760-1830`). As each arm finishes, its rows
   are cut by that collection's threshold (`distance > threshold` drops), and
   `raw_count`, `dropped`, `min_raw_distance` and `min_dropped_distance` are
@@ -335,9 +336,18 @@ Inference from them:
 - **✅ Verified** (source search). The router decides per statement, and an arm's
   statement selects one collection, so today each collection is routed by its
   own row count (C3, `docs/architecture.md:681`).
-- **⚠️ Assumed** (A1 to A5 below). Inlining of the new function, the window run
-  condition, the production router threshold and collection sizes, the cloud
-  instance size, and the per-arm cost split (I2).
+- **✅ Verified** (source search). A grouped `row_number() OVER (PARTITION BY
+  collection)` with `plain_search_<dim>`'s own order key (distance, then hex
+  chash) returns each collection's exact top-K by construction, and the join
+  back matches the chunks primary key (226-research-5; plan audit round 1).
+- **✅ Verified** (measurement). M1: cost follows arms, not rows returned
+  (226-research-6).
+- **✅ Verified** (measurement). A3: T = 10000; 7 of 116 collections are HNSW,
+  109 are groupable (226-research-7).
+- **⚠️ Documented** (docs only). A2: the run condition does not stop the window
+  sort early (226-research-8).
+- **❓ Assumed** (A1, A4, A5 below; 226-research-9 to -11). Inlining of the new
+  function, the cloud instance size, and the per-arm cost split (I2).
 
 ### Critical Assumptions
 
@@ -346,11 +356,12 @@ Inference from them:
   literal model and tenant prune to one leaf at plan time — **Status**:
   Unverified — **Method**: Spike (EXPLAIN pin, as `ReadPathLeafPruningIntegrationTest`
   does for the existing families).
-- [ ] **A2.** PostgreSQL 17 applies a run condition to `row_number() <= p_k`
-  under `PARTITION BY collection`, so it stops numbering a collection's rows
-  past K. Correctness does not depend on it; only the cost of the WindowAgg
-  does — **Status**: Unverified — **Method**: Spike (EXPLAIN shows "Run
-  Condition").
+- [x] **A2.** Whether PostgreSQL 17 stops numbering a collection's rows past K
+  under `PARTITION BY collection` — **Status**: Documented, answered no
+  (226-research-8). On PostgreSQL 15 and later the run condition puts WindowAgg
+  into pass-through mode, so the window sort still pays the bin's full row
+  count. Correctness does not depend on it. Phase 1 pins that the run
+  condition is present and Phase 0's cost model does not credit an early stop.
 - [x] **A3.** The production router threshold and the collection row counts —
   **Status**: Verified (conexus, read-only, 2026-10-08 ~14:50Z; T2 conexus
   `nexus-tenant-collection-counts-2026-10-08`) — The threshold is the code
