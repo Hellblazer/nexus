@@ -120,6 +120,10 @@ _COLLECTIONS_CACHE_TTL = 60.0
 #: measured on the managed service). ``False`` after a routing fill;
 #: :func:`get_collection_counts` then does the full fetch, once, when a caller asks.
 _collections_counts_loaded: bool = True
+#: Guards the (``_collections_cache``, ``_collections_counts_loaded``) pair: they describe one
+#: listing and are installed together, so a concurrent full fetch and TTL refresh cannot leave a
+#: routing cache beside a ``True`` flag (which would read counts as ``{}`` until the TTL).
+_collections_cache_lock = threading.Lock()
 
 # nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
 # its 8 pooled httpx.Client connections) across calls instead of building one
@@ -868,7 +872,18 @@ def _collections_cache_tuple_from_rows(
     return new_names, new_counts, new_rows, time.monotonic()
 
 
-def _refresh_collections_cache_if_stale() -> None:
+def _install_collections_cache(rows: list[dict]) -> tuple[list[str], dict[str, int], dict[str, dict], float]:
+    """Install *rows* as the cache and set the counts flag in one step under the lock."""
+    global _collections_cache, _collections_counts_loaded
+    cache = _collections_cache_tuple_from_rows(rows)
+    loaded = _rows_carry_counts(rows)
+    with _collections_cache_lock:
+        _collections_cache = cache
+        _collections_counts_loaded = loaded
+    return cache
+
+
+def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
     """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
 
     One ``list_collections()`` round trip populates both the name list and
@@ -877,8 +892,11 @@ def _refresh_collections_cache_if_stale() -> None:
     hitting T3 independently (nexus-rbhci). See
     :func:`_collections_cache_tuple_from_rows` for the row-transformation
     rules (count-sentinel handling, catalog-attribute carry-through).
+
+    *need_counts* (nexus-mz9jv review M3): the caller is about to ask for sizes, so a stale or
+    cold cache is filled from the FULL listing in one request instead of the routing listing
+    followed by a second, full one.
     """
-    global _collections_cache, _collections_counts_loaded
     _names, _counts, _rows, ts = _collections_cache
     now = time.monotonic()
     if now - ts > _COLLECTIONS_CACHE_TTL:
@@ -887,11 +905,13 @@ def _refresh_collections_cache_if_stale() -> None:
         # nexus-mz9jv: names and registry rows are all most readers of this cache use, so the
         # real client is asked for the catalog-only listing; any other handle has no such
         # listing and gives the full one.
-        rows = t3.list_collections(routing=True) if isinstance(t3, HttpVectorClient) else t3.list_collections()
+        if isinstance(t3, HttpVectorClient) and not need_counts:
+            rows = t3.list_collections(routing=True)
+        else:
+            rows = t3.list_collections()
         # A routing row has no count; an engine that ignored the request answered with the
         # full rows, which do.
-        _collections_counts_loaded = _rows_carry_counts(rows)
-        _collections_cache = _collections_cache_tuple_from_rows(rows)
+        _install_collections_cache(rows)
 
 
 def _rows_carry_counts(rows: list[dict]) -> bool:
@@ -926,9 +946,7 @@ def prime_collections_cache(rows: list[dict]) -> None:
     cache entry this could regress against a long-lived process's warm
     cache).
     """
-    global _collections_cache, _collections_counts_loaded
-    _collections_cache = _collections_cache_tuple_from_rows(rows)
-    _collections_counts_loaded = _rows_carry_counts(rows)
+    _install_collections_cache(rows)
 
 
 def get_collection_names() -> list[str]:
@@ -978,14 +996,14 @@ def get_collection_counts() -> dict[str, int]:
     versa, on delete) is visible to the very next call, not up to
     ``_COLLECTIONS_CACHE_TTL`` seconds later.
     """
-    global _collections_cache, _collections_counts_loaded
-    _refresh_collections_cache_if_stale()
-    if not _collections_counts_loaded:
-        # The cache was filled from the routing listing (no counts): the one caller that wants
-        # sizes pays for the full listing, which replaces the cache with a superset.
-        _collections_cache = _collections_cache_tuple_from_rows(get_t3().list_collections())
-        _collections_counts_loaded = True
-    return _collections_cache[1]
+    _refresh_collections_cache_if_stale(need_counts=True)
+    with _collections_cache_lock:
+        cache, loaded = _collections_cache, _collections_counts_loaded
+    if not loaded:
+        # The cache is still warm from a routing fill (no counts): the caller that wants sizes
+        # pays for the full listing, which replaces the cache with a superset.
+        cache = _install_collections_cache(get_t3().list_collections())
+    return cache[1]
 
 
 def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:

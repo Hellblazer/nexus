@@ -3646,6 +3646,14 @@ def _resolve_corpus_target(
     # fan-out or named explicitly (the `__` branch below applies the same
     # rule). The cache behind this stays complete for get_collection_row's
     # identity reads.
+    # nexus-mz9jv review M3: a bare-prefix part (and "all") sizes its fan-out, so on a cold cache ask
+    # for the counts FIRST: that is one full listing, where names first and counts second were a
+    # routing listing plus a full one.
+    counts_up_front: dict[str, int] | None = None
+    if corpus == "all" or any(
+        (p := part.strip()) and split_candidate_collection_name(p)[1] == p for part in corpus.split(",")
+    ):
+        counts_up_front = _get_collection_counts()
     all_names = _get_collection_names()
     if corpus == "all":
         seen: list[str] = []
@@ -3693,7 +3701,7 @@ def _resolve_corpus_target(
             target.append(name)
         else:
             fanned_out = resolve_corpus(part, all_names)
-            counts = _get_collection_counts()
+            counts = counts_up_front if counts_up_front is not None else _get_collection_counts()
             excluded = _fanout_exclusions_for_group(fanned_out, counts)
             for name in fanned_out:
                 if name in excluded:

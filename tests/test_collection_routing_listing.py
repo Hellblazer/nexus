@@ -169,13 +169,52 @@ class TestTheProcessCache:
         assert mcp_infra.get_collection_names() == [_LIVE, _QUAR]
         assert len(seen) == 2
 
-    def test_counts_asked_first_still_cost_one_extra_request_not_two_full_ones(self, monkeypatch):
+    def test_counts_asked_first_on_a_cold_cache_cost_one_full_request(self, monkeypatch):
+        """nexus-mz9jv review M3: a cold cache that is about to be asked for sizes goes straight to the
+        full listing (one request, names and rows included), not routing first and full second."""
         seen = self._client(monkeypatch)
         assert mcp_infra.get_collection_counts() == {_LIVE: 10, _QUAR: 0}
-        assert seen == ["/v1/vectors/stats?fields=routing", "/v1/vectors/stats"]
+        assert seen == ["/v1/vectors/stats"]
+        assert mcp_infra.get_collection_names() == [_LIVE, _QUAR]
+        assert len(seen) == 1, "the full listing filled the names too"
+
+    def test_the_default_bare_prefix_fanout_is_one_stats_request_on_a_cold_cache(self, monkeypatch):
+        """The caller of the above (``_resolve_corpus_target``, a bare-prefix corpus such as the default
+        knowledge,code,docs): it reads names first, then sizes per bare prefix, and used to pay routing + full.
+        (``code`` is the prefix the fake tenant holds; an unmatched prefix takes resolve_corpus's own bounded
+        refresh, which is not what this pins.)"""
+        from nexus.mcp import core
+
+        seen = self._client(monkeypatch)
+        core._resolve_corpus_target("code,code", mcp_infra.get_t3())
+        assert seen == ["/v1/vectors/stats"]
+
+    def test_the_cache_and_its_counts_flag_are_installed_together_under_the_lock(self):
+        """review L4: the (cache, counts-loaded) pair is one atomic assignment. A writer that does not
+        take ``_collections_cache_lock`` completes while another thread holds it."""
+        import threading
+
+        done = threading.Event()
+
+        def writer():
+            mcp_infra.prime_collections_cache(_FULL_ROWS)
+            done.set()
+
+        with mcp_infra._collections_cache_lock:
+            t = threading.Thread(target=writer)
+            t.start()
+            assert not done.wait(0.3), "the cache install did not wait for the lock"
+        t.join(5)
+        assert done.is_set()
 
     def test_an_engine_that_ignores_the_parameter_fills_the_counts_in_the_first_request(self, monkeypatch):
         seen = self._client(monkeypatch, serves_routing=False)
+        assert mcp_infra.get_collection_counts() == {_LIVE: 10, _QUAR: 0}
+        assert seen == ["/v1/vectors/stats"], "counts were asked for, so the first request is the full one"
+
+    def test_an_engine_that_ignores_the_parameter_serves_names_then_counts_in_one_request(self, monkeypatch):
+        seen = self._client(monkeypatch, serves_routing=False)
+        assert mcp_infra.get_collection_names() == [_LIVE, _QUAR]
         assert mcp_infra.get_collection_counts() == {_LIVE: 10, _QUAR: 0}
         assert seen == ["/v1/vectors/stats?fields=routing"], "the full rows already carried the counts"
 
