@@ -13,7 +13,7 @@ from typing import Any
 import structlog
 
 from nexus import call_deadline
-from nexus.config import TuningConfig, get_telemetry_config, load_config
+from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import (
     HttpVectorClient,
@@ -573,8 +573,9 @@ def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) 
     - No server rerank: the page is within noise at fetch sizes 10 and 30
       (the case the MCP ``search`` tool is in by default).
     - Server rerank on: the page is NOT within noise at any lean floor
-      tried. The reranker reads exactly the rows fetched per batch and picks
-      the page from them, so a smaller pool hides rows it would have ranked
+      tried. The reranker read every row fetched per batch (before
+      ``rerank_max_candidates`` existed; see :func:`_rerank_candidate_cap`
+      for what local mode now does) and picked the page from them, so a smaller pool hides rows it would have ranked
       first; mean top-10 overlap with the old page fell to about 0.7 where
       the old page against itself was 1.0, and raising the floor to ``n``
       or ``n * mult // 2`` recovered only part of it. The reranked path
@@ -601,8 +602,8 @@ def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) 
 _PER_COLLECTION_MAX_LIMIT = 1200
 _PER_COLLECTION_RERANK_MAX_LIMIT = 1000
 
-#: The cross-encoder scores a CAPPED candidate set, not every candidate
-#: (Sam's decision, 2026-10-08). Measured in T2
+#: The LOCAL cross-encoder scores a CAPPED candidate set, not every candidate
+#: (Sam, 2026-10-08). Measured in T2
 #: ``nexus/search-latency-local-mode-2026-10-08``: a default ``nx search`` in
 #: local mode took 4.0 to 5.4 s on an M5 Pro, and 3.5 to 4.9 s of that was the
 #: engine's ms-marco-minilm-l6-v2 scoring all 135 candidates at up to 512
@@ -610,19 +611,41 @@ _PER_COLLECTION_RERANK_MAX_LIMIT = 1000
 #: n_results, _RERANK_CANDIDATE_FLOOR)`` rows in vector order; the rest stay in
 #: the result, unscored and in vector order, behind the scored rows. A page
 #: needs ``n_results`` rows, so the cap leaves the reranker three times that
-#: many to choose from. ``search.rerank_max_candidates`` in ``.nexus.yml``
-#: overrides it (``0`` scores every candidate, as before this decision).
+#: many to choose from.
+#:
+#: The DEFAULT applies in local mode only. The latency evidence is the local
+#: cross-encoder; the cloud reranks with Voyage, and the only page-quality
+#: measurement on file (nexus-abdp2, T2 [28984]) was taken in the cloud and
+#: found the reranked page sensitive to the pool it reads, so cloud keeps
+#: scoring every candidate unless ``search.rerank_max_candidates`` says
+#: otherwise. An explicit integer there applies in BOTH modes (``0`` scores
+#: every candidate).
 _RERANK_CANDIDATE_MULTIPLIER = 3
 _RERANK_CANDIDATE_FLOOR = 30
 
 
-def _rerank_candidate_cap(n_results: int, cfg: dict) -> int | None:
+def _rerank_candidate_cap(
+    n_results: int, cfg: dict, *, deep_candidates: bool = False,
+) -> int | None:
     """The ``rerank_max_candidates`` to send with a rerank request, or ``None``
-    for no cap. ``search.rerank_max_candidates``: unset = the default
-    ``max(3 * n_results, 30)``; a positive integer = that many; ``0`` = no cap.
-    Anything else (negative, non-integer, bool) is a config mistake that must not
-    silently disable the cap or break search: logged, and the default applies."""
-    default = max(_RERANK_CANDIDATE_MULTIPLIER * n_results, _RERANK_CANDIDATE_FLOOR)
+    for no cap.
+
+    *deep_candidates* (a caller that filters the pool AFTER retrieval:
+    ``nx search --path`` / ``--max-file-chunks``) is never capped: the filter
+    keeps a minority of the pool, and with a cap most of the survivors would
+    come back unscored behind the scored rows.
+
+    Otherwise ``search.rerank_max_candidates``: a positive integer = that many,
+    in either mode; ``0`` = no cap; unset = the default ``max(3 * n_results, 30)``
+    in local mode and no cap in cloud mode. A negative, non-integer or bool
+    value is a config mistake that must not silently disable the cap or break
+    search: logged, and the mode's default applies."""
+    if deep_candidates:
+        return None
+    default = (
+        max(_RERANK_CANDIDATE_MULTIPLIER * n_results, _RERANK_CANDIDATE_FLOOR)
+        if is_local_mode() else None
+    )
     configured = (cfg.get("search") or {}).get("rerank_max_candidates")
     if configured is None:
         return default
@@ -631,7 +654,10 @@ def _rerank_candidate_cap(n_results: int, cfg: dict) -> int | None:
     _log.warning(
         "search_rerank_max_candidates_invalid",
         value=repr(configured),
-        consequence=f"the default cap of {default} applies",
+        consequence=(
+            f"the default cap of {default} applies" if default is not None
+            else "no cap applies (cloud mode)"
+        ),
     )
     return default
 
@@ -974,9 +1000,11 @@ def search_cross_corpus(
     filters the returned pool AFTER retrieval (``nx search --path`` and
     ``--max-file-chunks`` do) passes it, because a post-filter sees only the
     rows fetched and the lean floor can leave it fewer. Server rerank and
-    *lexical* imply it without being asked: the reranker reads exactly the
-    rows fetched per batch (see :func:`_per_collection_floor` for the
-    measurement).
+    *lexical* imply it without being asked: the reranker reads the rows
+    fetched per batch, all of them in cloud mode and the first
+    ``max(3 * n_results, 30)`` in local mode (:func:`_rerank_candidate_cap`);
+    :func:`_per_collection_floor` has the cloud measurement, taken before the
+    cap existed. A *deep_candidates* caller is never capped.
 
     *rerank* (RDR-188, bead nexus-9o6y2.8): request the SERVER's fused
     rerank stage on each per-collection call. Only honored when *t3*
@@ -1083,7 +1111,10 @@ def search_cross_corpus(
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
     # The vector legs' rerank scores at most this many rows (None: all). The
     # lexical leg is deliberately not capped: see ``_lexical_rows``.
-    rerank_cap = _rerank_candidate_cap(n_results, cfg) if server_rerank else None
+    rerank_cap = (
+        _rerank_candidate_cap(n_results, cfg, deep_candidates=deep_candidates)
+        if server_rerank else None
+    )
     rerank_cap_kw = {"rerank_max_candidates": rerank_cap} if rerank_cap is not None else {}
     # nexus-abdp2: the reranked and lexical paths, and any caller that
     # post-filters the pool, need the deep per-collection floor.

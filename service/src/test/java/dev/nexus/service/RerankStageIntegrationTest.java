@@ -299,6 +299,38 @@ class RerankStageIntegrationTest {
     }
 
     @Test
+    void searchPerCollectionHonoursRerankMaxCandidates() throws Exception {
+        // The per-collection route calls the four-argument RerankStage.apply; dropping the
+        // last argument there falls through to the three-argument overload and scores every
+        // row, which only the document count at the upstream scorer shows.
+        var perCollection = new java.util.LinkedHashMap<String, Object>();
+        perCollection.put("query", Q);
+        perCollection.put("collections", List.of(COL));
+        perCollection.put("per_collection_k", 3);
+        perCollection.put("limit", 10);
+        perCollection.put("rerank", true);
+
+        // Control: no cap, every one of the 3 rows reaches the scorer.
+        scriptVoyage(200, voyageScores(
+                "{\"index\": 2, \"relevance_score\": 0.95}, {\"index\": 1, \"relevance_score\": 0.5}, "
+                + "{\"index\": 0, \"relevance_score\": 0.05}"));
+        postOk(svcVoyage, "/v1/vectors/search-per-collection", perCollection);
+        assertThat(voyageDocumentCount()).isEqualTo(3);
+
+        // Cap 2 of 3: only 2 documents reach the scorer; the third row stays, unscored, last.
+        perCollection.put("rerank_max_candidates", 2);
+        scriptVoyage(200, voyageScores(
+                "{\"index\": 1, \"relevance_score\": 0.9}, {\"index\": 0, \"relevance_score\": 0.2}"));
+        Map<String, Object> env = postOk(svcVoyage, "/v1/vectors/search-per-collection", perCollection);
+
+        assertThat(voyageDocumentCount()).isEqualTo(2);
+        assertThat(env.get("rerank_degraded")).isEqualTo(false);
+        List<Map<String, Object>> rows = results(env);
+        assertThat(rows).extracting(r -> r.get("id")).containsExactly(C2, C1, C3);
+        assertThat(rows.get(2)).doesNotContainKey("rerank_score");
+    }
+
+    @Test
     void rerankMaxCandidatesAboveTheRowCountScoresEveryRow() throws Exception {
         scriptVoyage(200, voyageScores(
                 "{\"index\": 2, \"relevance_score\": 0.95}, {\"index\": 1, \"relevance_score\": 0.5}, "
