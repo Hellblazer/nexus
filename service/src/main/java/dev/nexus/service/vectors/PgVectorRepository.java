@@ -6641,8 +6641,8 @@ FROM scope s
             CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel(), collection);
     }
 
-    private static org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String model,
-                                                 String collection) {
+    static org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String model,
+                                         String collection) {
         return ch.embeddingModel().eq(model).and(ch.tenantId().eq(tenant)).and(ch.collection().eq(collection));
     }
 
