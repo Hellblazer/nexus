@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.74.2] - 2026-10-08
+
+Pairs with engine-service-v0.1.152 (`REQUIRED_ENGINE_VERSION` moves from 0.1.151). The server-side half of the search-latency work: the engine returns vectors with search results, compresses responses, and answers collection stats and routing listings with far less work.
+
+### Changed
+
+- **A search no longer makes one `get-embeddings` request per collection to read the vectors the contradiction check and semantic clustering need** (nexus-92q1p). `POST /v1/vectors/search-per-collection` takes an opt-in `include_embeddings` and fills each surviving row's vector with one by-id statement (`embedding_b64`, little-endian float32); `search_cross_corpus` asks when it will need them and falls back to the by-id fetch against an engine that does not return them. The fan-out was 14 to 22 requests of about 1.2 s each on the managed service.
+- **A search-per-collection arm makes 4 database round trips instead of 13** (nexus-wym0l). The tenant stamp and the serving settings (`statement_timeout`, the HNSW scan settings, `plan_cache_mode`) go to Postgres as one `set_config` statement, and the exact route's four settings as another; the values, order and transaction scope are unchanged. `NX_SEARCH_FANOUT_ARM_PERMITS` is held to the pool size minus 2 (it was the pool size), the default stays half the pool, and the engine logs the effective value at boot. A gzip failure now falls back to an uncompressed response instead of failing it.
+- **The engine compresses responses of 1 KiB or more for a client that sends `Accept-Encoding: gzip`, and the vector client now sends it** (nexus-tjyzn). A search response carrying vectors is hundreds of KB of decimal digits that compress about 2.7 to 1.
+- **Collection stats are cheaper, and routing callers no longer pay for them** (nexus-mz9jv). `nexus.collection_vector_stats` (`vectors-032-1`) counts live chunks with one join instead of a probe per chunk (619 ms to 32.5 ms at a 70,000-chunk tenant, local) and the statement runs without JIT. `GET /v1/vectors/stats?fields=routing` returns names and registry rows from the catalog alone (1.3 ms); the corpus resolver, the sibling lookup, `nx search --corpus` and the collection-row cache use it, and the cache fetches counts only when something asks. The tag that carries it also carries the changeset `vectors-032-1`, so it needs the PITR-fork Liquibase walk rehearsal with `EXPLAIN (ANALYZE, BUFFERS)` of the view, unfiltered and `WHERE collection = X`, at the cloud's `work_mem` before it deploys. The engine logs `event=vector_stats`, `vector_stats_request`, `search_per_collection` and `search_per_collection_request` lines with the SQL and handler milliseconds split.
+- **`listCollections` reads the collection registry with an index probe on `chunks` instead of grouping every chunk row** (nexus-41sfa). 10.2 ms to 1.6 ms at a 70,000-chunk tenant, local; the same set of collections.
+
 ## [7.74.1] - 2026-10-08
 
 Pairs with engine-service-v0.1.151, unchanged from 7.74.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.151); a client-only patch. Search and query against the managed service were slow because the vector client opened a new TCP and TLS connection for every request; this release reuses connections and removes work `query` never used. The larger server-side fixes (search returning vectors, gzip, a faster `stats` view) ship with the next engine tag and the client release that pins it.

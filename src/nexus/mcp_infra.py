@@ -113,6 +113,17 @@ _t3_lock = threading.Lock()
 #: :func:`get_collection_row`.
 _collections_cache: tuple[list[str], dict[str, int], dict[str, dict], float] = ([], {}, {}, 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
+#: Whether ``_collections_cache``'s counts map holds real counts (nexus-mz9jv). The cache is
+#: filled from the catalog-only routing listing when the engine serves it, which has no
+#: counts: names and registry rows are all most callers read, and the full listing makes the
+#: engine count every collection's live chunks (100 to 560 ms at a 75,000-chunk tenant, 3.5 s
+#: measured on the managed service). ``False`` after a routing fill;
+#: :func:`get_collection_counts` then does the full fetch, once, when a caller asks.
+_collections_counts_loaded: bool = True
+#: Guards the (``_collections_cache``, ``_collections_counts_loaded``) pair: they describe one
+#: listing and are installed together, so a concurrent full fetch and TTL refresh cannot leave a
+#: routing cache beside a ``True`` flag (which would read counts as ``{}`` until the TTL).
+_collections_cache_lock = threading.Lock()
 
 # nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
 # its 8 pooled httpx.Client connections) across calls instead of building one
@@ -861,7 +872,18 @@ def _collections_cache_tuple_from_rows(
     return new_names, new_counts, new_rows, time.monotonic()
 
 
-def _refresh_collections_cache_if_stale() -> None:
+def _install_collections_cache(rows: list[dict]) -> tuple[list[str], dict[str, int], dict[str, dict], float]:
+    """Install *rows* as the cache and set the counts flag in one step under the lock."""
+    global _collections_cache, _collections_counts_loaded
+    cache = _collections_cache_tuple_from_rows(rows)
+    loaded = _rows_carry_counts(rows)
+    with _collections_cache_lock:
+        _collections_cache = cache
+        _collections_counts_loaded = loaded
+    return cache
+
+
+def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
     """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
 
     One ``list_collections()`` round trip populates both the name list and
@@ -870,13 +892,32 @@ def _refresh_collections_cache_if_stale() -> None:
     hitting T3 independently (nexus-rbhci). See
     :func:`_collections_cache_tuple_from_rows` for the row-transformation
     rules (count-sentinel handling, catalog-attribute carry-through).
+
+    *need_counts* (nexus-mz9jv review M3): the caller is about to ask for sizes, so a stale or
+    cold cache is filled from the FULL listing in one request instead of the routing listing
+    followed by a second, full one.
     """
-    global _collections_cache
     _names, _counts, _rows, ts = _collections_cache
     now = time.monotonic()
     if now - ts > _COLLECTIONS_CACHE_TTL:
-        rows = get_t3().list_collections()
-        _collections_cache = _collections_cache_tuple_from_rows(rows)
+        t3 = get_t3()
+        from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+        # nexus-mz9jv: names and registry rows are all most readers of this cache use, so the
+        # real client is asked for the catalog-only listing; any other handle has no such
+        # listing and gives the full one.
+        if isinstance(t3, HttpVectorClient) and not need_counts:
+            rows = t3.list_collections(routing=True)
+        else:
+            rows = t3.list_collections()
+        # A routing row has no count; an engine that ignored the request answered with the
+        # full rows, which do.
+        _install_collections_cache(rows)
+
+
+def _rows_carry_counts(rows: list[dict]) -> bool:
+    """Whether a ``list_collections()`` answer holds counts: an empty listing has nothing to
+    count, and a routing listing (nexus-mz9jv) has rows without a ``count``."""
+    return not rows or any("count" in row for row in rows)
 
 
 def prime_collections_cache(rows: list[dict]) -> None:
@@ -905,8 +946,7 @@ def prime_collections_cache(rows: list[dict]) -> None:
     cache entry this could regress against a long-lived process's warm
     cache).
     """
-    global _collections_cache
-    _collections_cache = _collections_cache_tuple_from_rows(rows)
+    _install_collections_cache(rows)
 
 
 def get_collection_names() -> list[str]:
@@ -956,8 +996,14 @@ def get_collection_counts() -> dict[str, int]:
     versa, on delete) is visible to the very next call, not up to
     ``_COLLECTIONS_CACHE_TTL`` seconds later.
     """
-    _refresh_collections_cache_if_stale()
-    return _collections_cache[1]
+    _refresh_collections_cache_if_stale(need_counts=True)
+    with _collections_cache_lock:
+        cache, loaded = _collections_cache, _collections_counts_loaded
+    if not loaded:
+        # The cache is still warm from a routing fill (no counts): the caller that wants sizes
+        # pays for the full listing, which replaces the cache with a superset.
+        cache = _install_collections_cache(get_t3().list_collections())
+    return cache[1]
 
 
 def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
@@ -1014,8 +1060,9 @@ def invalidate_collections_cache() -> None:
     Mirrors the existing ``_page_cache_invalidate()`` call at the same
     write sites in ``nexus.mcp.core``.
     """
-    global _collections_cache
+    global _collections_cache, _collections_counts_loaded
     _collections_cache = ([], {}, {}, 0.0)
+    _collections_counts_loaded = True
 
 
 #: nexus-m20mf P3 fold-in (critic finding 1/1b, hardened per round-2
@@ -3821,11 +3868,12 @@ def reset_singletons():
     instances (see ``nexus.hook_registry``); they are no longer
     module-globals on ``mcp_infra`` and therefore not cleared here.
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _collections_counts_loaded
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], {}, {}, 0.0)
+    _collections_counts_loaded = True
     # nexus-w1ip: the T2 singleton's reset (close + clear refcounts /
     # pending-close, same nexus-0dpli guard) is now the slot's own
     # responsibility.

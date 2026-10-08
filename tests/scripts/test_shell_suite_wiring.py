@@ -187,7 +187,7 @@ SUITES = [
     # audit negatives over mutated copies of the gate, 75 in all. nexus-tu8wp.3: leg L (the per-collection
     # search route through the edge): 20 verdict cases over _route_probe_verdict, 7 wiring checks, the
     # widened audit and 11 negatives over mutated copies of the gate, 115 in all.
-    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 115),
+    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 150),
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),

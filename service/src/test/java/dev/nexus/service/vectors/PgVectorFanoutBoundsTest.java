@@ -51,8 +51,26 @@ class PgVectorFanoutBoundsTest {
         assertThat(PgVectorRepository.fanoutArmPermits(null, 1)).isEqualTo(1);
         assertThat(PgVectorRepository.fanoutArmPermits("3", 10)).isEqualTo(3);
         assertThat(PgVectorRepository.fanoutArmPermits("99", 10))
-            .as("the cross-request cap cannot exceed the pool: it exists to leave connections free")
-            .isEqualTo(10);
+            .as("the cross-request cap leaves 2 connections of the pool to /health, writes and plain search")
+            .isEqualTo(8);
+        assertThat(PgVectorRepository.fanoutArmPermits("8", 10)).isEqualTo(8);
+        assertThat(PgVectorRepository.fanoutArmPermits("9", 10)).isEqualTo(8);
+    }
+
+    @Test
+    void armPermitsFollowThePool_withTheHeadroomClamp() {
+        // nexus-wym0l: the ceiling is max(1, pool - 2); the default stays half the pool, below the ceiling
+        // for every pool of 4 or more, and the ceiling never goes under 1.
+        assertThat(PgVectorRepository.fanoutArmPermitCeiling(10)).isEqualTo(8);
+        assertThat(PgVectorRepository.fanoutArmPermitCeiling(3)).isEqualTo(1);
+        assertThat(PgVectorRepository.fanoutArmPermitCeiling(2)).isEqualTo(1);
+        assertThat(PgVectorRepository.fanoutArmPermitCeiling(1)).isEqualTo(1);
+        assertThat(PgVectorRepository.fanoutArmPermits(null, 20)).isEqualTo(10);
+        assertThat(PgVectorRepository.fanoutArmPermits("50", 20)).isEqualTo(18);
+        assertThat(PgVectorRepository.fanoutArmPermits(null, 4)).isEqualTo(2);
+        assertThat(PgVectorRepository.fanoutArmPermits("4", 4)).isEqualTo(2);
+        assertThat(PgVectorRepository.fanoutArmPermits("5", 3)).isEqualTo(1);
+        assertThat(PgVectorRepository.fanoutArmPermits("5", 2)).isEqualTo(1);
     }
 
     @Test

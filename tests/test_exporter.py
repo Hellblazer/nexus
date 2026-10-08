@@ -448,7 +448,9 @@ class TestServiceModeExport:
         routing on the endpoint paths export_collection actually calls."""
 
         def fake_get(path: str, **_kwargs):
-            if path == "/v1/vectors/stats":
+            # ``?fields=routing`` (nexus-mz9jv) is answered with full rows, as an engine
+            # that predates it does; the client accepts either form.
+            if path.split("?", 1)[0] == "/v1/vectors/stats":
                 return [{"name": collection_name, "count": len(ids)}]
             if path.startswith("/v1/vectors/count"):
                 return {"count": len(ids)}

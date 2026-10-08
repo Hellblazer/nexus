@@ -1424,25 +1424,30 @@ public final class PgVectorRepository {
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours. First, so the
-            // GUC round trips below run under its network bound too (nexus-u9zkn).
-            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
+        // nexus-wym0l: the tenant stamp and every serving setting below travel in ONE statement, applied by
+        // withTenant before the work runs (and so before the router probe and the search, which depend on
+        // them). They were seven round trips per arm. The pairing and the order of the settings are the ones
+        // HnswServingGucParityTest pins; this block only changes how they reach Postgres.
+        return tenantScope.withTenant(tenant, gucs -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological scan cancels (57014) instead
+            // of pinning xmin for hours. First, so the network bound set with it covers what follows
+            // (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(gucs, statementTimeoutMs.getAsInt());
             // Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS +
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            gucs.set("hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: widen the traversal's candidate list too — iterative scan
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
-            PgSession.setHnswEfSearch(ctx, nResults);
+            PgSession.setHnswEfSearch(gucs, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
-            PgSession.setHnswScanBudget(ctx);
+            PgSession.setHnswScanBudget(gucs);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
-            PgSession.setSearchPlanCacheMode(ctx);
+            PgSession.setSearchPlanCacheMode(gucs);
+        }, ctx -> {
             // nexus-tu8wp.6: the cardinality router. The threshold 0 disables it, and no probe runs.
             long startNanos = System.nanoTime();
             int exactMaxRows = PgSession.searchExactMaxRows();
@@ -1710,9 +1715,18 @@ public final class PgVectorRepository {
      * one stat per surviving collection in request order, the query-embedding token count, the
      * names dropped as unregistered, and the most rows the merge held at once
      * ({@code peakRetainedRows}, never more than {@code limit}; a diagnostic, not on the wire).
+     * {@code embeddingDim} is the width of the {@code embedding_b64} vectors on the rows when the request
+     * asked for embeddings ({@code include_embeddings}), else {@code 0}.
      */
     public record PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
-                                      long tokens, List<String> skippedCollections, int peakRetainedRows) {}
+                                      long tokens, List<String> skippedCollections, int peakRetainedRows,
+                                      int embeddingDim) {
+        /** A result of a request that did not ask for embeddings ({@code embeddingDim} 0). */
+        public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
+                                   long tokens, List<String> skippedCollections, int peakRetainedRows) {
+            this(rows, perCollection, tokens, skippedCollections, peakRetainedRows, 0);
+        }
+    }
 
     /** What bounded one arm's statement: the search bound, the fan-out budget, or the request budget. */
     enum Limiter { SEARCH, FANOUT, REQUEST }
@@ -1835,14 +1849,58 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Connections the fan-out arm gate leaves to everything that is not a fan-out arm: {@code /health}, writes,
+     * plain search, the request thread's own lookups (nexus-wym0l). The arm cap is never above
+     * {@code poolSize - FANOUT_ARM_POOL_HEADROOM}, so a deployment that raises the pool, or sets
+     * {@code NX_SEARCH_FANOUT_ARM_PERMITS} high, cannot hand every connection to the arms.
+     */
+    static final int FANOUT_ARM_POOL_HEADROOM = 2;
+
+    /** The most arm permits a pool of {@code poolSize} allows: {@code max(1, poolSize - headroom)}. */
+    static int fanoutArmPermitCeiling(int poolSize) {
+        return Math.max(1, poolSize - FANOUT_ARM_POOL_HEADROOM);
+    }
+
+    /**
      * Resolve the cross-request cap on fan-out arms in flight: {@code NX_SEARCH_FANOUT_ARM_PERMITS}
-     * when it is a positive integer, else {@code max(1, poolSize / 2)}, never above the pool size.
-     * Half the pool by default leaves at least the other half for {@code /health}, writes and plain
-     * search however many fan-out requests are running.
+     * when it is a positive integer, else {@code max(1, poolSize / 2)}, in both cases never above
+     * {@link #fanoutArmPermitCeiling} ({@code max(1, poolSize - 2)}). The default is half the pool, which
+     * leaves at least the other half for {@code /health}, writes and plain search however many fan-out
+     * requests are running; the ceiling is what an override or a different default is held to, so the cap
+     * follows the pool instead of a number that was right for one pool size.
      */
     static int fanoutArmPermits(String raw, int poolSize) {
         int dflt = Math.max(1, poolSize / 2);
-        return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt), poolSize));
+        return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt),
+                                    fanoutArmPermitCeiling(poolSize)));
+    }
+
+    /**
+     * Resolve the arm permit count once at boot, create the cross-request gate with it, and log it (nexus-wym0l).
+     * The gate is built by the first request that reaches it with whatever the environment says then; creating
+     * it here makes the logged value the one the process runs with. A configured value above the pool's ceiling
+     * is clamped and logged at WARN, naming both, so a clamp is never silent.
+     *
+     * @return the effective number of arm permits
+     */
+    public int startupFanoutArmPermits() {
+        int pool = tenantScope.poolSize();
+        String raw = System.getenv(FANOUT_ARM_PERMITS_ENV);
+        int dflt = Math.max(1, pool / 2);
+        int ceiling = fanoutArmPermitCeiling(pool);
+        int configured = positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt);
+        int effective = fanoutArmPermits(raw, pool);
+        tenantScope.fanoutArmGate(effective);
+        log.info("event=search_fanout_arm_permits effective={} pool_size={} default={} ceiling={} "
+                 + "configured={} source={}",
+                 effective, pool, dflt, ceiling, configured,
+                 raw == null || raw.isBlank() ? "default" : FANOUT_ARM_PERMITS_ENV);
+        if (configured > ceiling) {
+            log.warn("event=search_fanout_arm_permits_clamped configured={} effective={} pool_size={} "
+                     + "headroom={} name={}",
+                     configured, effective, pool, FANOUT_ARM_POOL_HEADROOM, FANOUT_ARM_PERMITS_ENV);
+        }
+        return effective;
     }
 
     /**
@@ -2056,6 +2114,23 @@ public final class PgVectorRepository {
             new FanoutSettings(parallelism, defaultFanoutBudgetMs(), PgSession.startupSearchStatementTimeoutMs()));
     }
 
+    /**
+     * As above, asking for each surviving row's stored vector as {@code embedding_b64}
+     * ({@link #attachEmbeddings}); {@code includeEmbeddings == false} is the plain search.
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings,
+            new FanoutSettings(defaultFanoutParallelism(), defaultFanoutBudgetMs(),
+                               PgSession.startupSearchStatementTimeoutMs()));
+    }
+
     /** As above with every fan-out knob explicit; a test seam. */
     public PerCollectionResult searchPerCollection(String tenant, String queryText,
                                                    List<String> collectionNames,
@@ -2063,6 +2138,19 @@ public final class PgVectorRepository {
                                                    Map<String, Double> thresholds,
                                                    Map<String, Object> where,
                                                    boolean includeSourceUri,
+                                                   FanoutSettings settings) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, false, settings);
+    }
+
+    /** As above with every fan-out knob explicit and the embeddings opt-in; a test seam. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
                                                    FanoutSettings settings) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
@@ -2097,7 +2185,9 @@ public final class PgVectorRepository {
 
         // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
         // is the reference each collection's dispatch dimension is checked against.
+        long embedStartNanos = System.nanoTime();
         EmbedResult embed = embedQueryRaw(tenant, cols.get(0), queryText);
+        final long queryEmbedMs = (System.nanoTime() - embedStartNanos) / 1_000_000L;
         float[] qv = embed.embeddings().get(0);
         Vector queryVec = Vector.of(qv);
         int queryDim = qv.length;
@@ -2179,7 +2269,25 @@ public final class PgVectorRepository {
         }
 
         List<Map<String, Object>> rows = merger.drainBestFirst();
+        long enrichStartNanos = System.nanoTime();
         enrichSearchRows(tenant, rows, includeSourceUri);
+        final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
+        long fillStartNanos = System.nanoTime();
+        if (includeEmbeddings) {
+            // The fill enriches results that are already finished: a failure in it (a DB error, a
+            // statement timeout) costs the vectors, never the rows. The client fetches by id any row
+            // that arrives without embedding_b64 (nexus-92q1p review M2).
+            try {
+                attachEmbeddings(tenant, model, queryDim, rows);
+            } catch (RuntimeException e) {
+                for (Map<String, Object> row : rows) {
+                    row.remove(EMBEDDING_ROW_KEY);
+                }
+                log.warn("event=search_per_collection_embedding_fill_failed rows={} error_class={} error={}",
+                         rows.size(), e.getClass().getSimpleName(), e.getMessage());
+            }
+        }
+        final long embeddingFillMs = includeEmbeddings ? (System.nanoTime() - fillStartNanos) / 1_000_000L : 0L;
         List<PerCollectionStat> stats = merger.stats();
         long fanoutMs = (System.nanoTime() - startNanos) / 1_000_000L;
         long slowestArmMs = 0L;
@@ -2196,13 +2304,84 @@ public final class PgVectorRepository {
         }
         log.info("event=search_per_collection collections={} arms={} workers={} per_collection_k={} limit={} "
                  + "rows={} peak_retained_rows={} isolated_errors={} budget_exhausted={} statement_timeouts={} "
-                 + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={}",
+                 + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={} query_embed_ms={} "
+                 + "enrich_ms={} include_embeddings={} embedding_fill_ms={}",
                  n, runnable.size(), workers, perCollectionK, limit, rows.size(), merger.peakRetained(),
                  stats.stream().filter(s -> s.error() != null).count(),
                  stats.stream().filter(s -> s.errorKind() == ArmErrorKind.FANOUT_BUDGET_EXHAUSTED).count(),
                  stats.stream().filter(s -> s.errorKind() == ArmErrorKind.STATEMENT_TIMEOUT).count(),
-                 skipped.size(), fanoutMs, slowestArmMs, sumArmMs, fanoutBudgetMs);
-        return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained());
+                 skipped.size(), fanoutMs, slowestArmMs, sumArmMs, fanoutBudgetMs, queryEmbedMs, enrichMs,
+                 includeEmbeddings, embeddingFillMs);
+        return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
+                                       includeEmbeddings ? queryDim : 0);
+    }
+
+    /** Row key of a survivor's stored vector: base64 of its little-endian float32 components. */
+    public static final String EMBEDDING_ROW_KEY = "embedding_b64";
+
+    /** Wire name of the {@link #EMBEDDING_ROW_KEY} encoding, echoed beside the vector width. */
+    public static final String EMBEDDING_ENCODING = "f32-le-b64";
+
+    /**
+     * Fill each surviving row of a fan-out with its stored vector ({@code include_embeddings}, nexus-92q1p).
+     *
+     * <p>Why here and not in the arms: the vector-ranked arm statements stay exactly as they were (no extra
+     * column to detoast for the rows the merge then discards, no change to their serving settings), and the
+     * vectors are read once for the at most {@code limit} rows that survived. ONE statement for the whole
+     * request: {@code embedding_model} and {@code tenant_id} are named, so it plans to the one
+     * (model, tenant) leaf ({@link #getEmbeddingsQuery}'s shape, RDR-225), and {@code collection IN (...)}
+     * with {@code chash IN (...)} brings back each survivor plus, at most, a row of the same chash in another
+     * collection of the request, which is dropped by the (collection, chash) key below. Every collection of
+     * the request has one model (enforced above), so one leaf and one width.
+     *
+     * <p>A survivor with no vector here (deleted or tombstoned since the search statement, or a
+     * foreign-width row) keeps no {@code embedding_b64}: the field is absent, never an empty string, and the
+     * caller fetches that row by id.
+     */
+    private void attachEmbeddings(String tenant, String model, int dim, List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return;
+        Set<String> colls = new LinkedHashSet<>();
+        Set<String> chashes = new LinkedHashSet<>();
+        Set<String> wanted = new HashSet<>();
+        for (Map<String, Object> row : rows) {
+            String c = (String) row.get("collection");
+            String h = (String) row.get("chash");
+            colls.add(c);
+            chashes.add(h);
+            wanted.add(c + "\u0000" + h);
+        }
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var found = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.collection(), ch.chash(), ch.embedding())
+               .from(ch.table())
+               .where(ch.embeddingModel().eq(model))
+               .and(ch.tenantId().eq(tenant))
+               .and(ch.collection().in(colls))
+               .and(ch.chash().in(chashes))
+               .and(ch.embedding().isNotNull())
+               .and(liveChunksCondition(ctx, ch))
+               .fetch());
+        Map<String, String> encoded = new HashMap<>(found.size() * 2);
+        for (var rec : found) {
+            String key = rec.value1() + "\u0000" + rec.value2();
+            if (wanted.contains(key) && rec.value3() != null) {
+                encoded.put(key, encodeEmbedding(rec.value3().floats()));
+            }
+        }
+        for (Map<String, Object> row : rows) {
+            String b64 = encoded.get(row.get("collection") + "\u0000" + row.get("chash"));
+            if (b64 != null) {
+                row.put(EMBEDDING_ROW_KEY, b64);
+            }
+        }
+    }
+
+    /** Base64 of {@code floats} as little-endian IEEE 754 binary32, four bytes per component. */
+    static String encodeEmbedding(float[] floats) {
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(floats.length * Float.BYTES)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        buf.asFloatBuffer().put(floats);
+        return java.util.Base64.getEncoder().encodeToString(buf.array());
     }
 
     /**
@@ -2723,8 +2902,9 @@ public final class PgVectorRepository {
         // so any row's count is the answer, or 0 when the page is empty.
         var countField = DSL.count().over();
         long[] emptyPageCountHolder = {-1L};
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var result = tenantScope.withTenant(tenant, ctx -> {
-            org.jooq.Condition cond = ch.collection().eq(collection).and(ch.chash().in(ids))
+            org.jooq.Condition cond = scope.and(ch.chash().in(ids))
                                           .and(liveChunksCondition(ctx, ch));
             var rows = ctx.select(ch.chash(), ch.chunkText(), ch.metadata(), countField)
                .from(ch.table())
@@ -2791,10 +2971,11 @@ public final class PgVectorRepository {
         }
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var rows = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .where(scope.and(ch.chash().in(ids)))
                .orderBy(ch.chash().asc())
                .fetch());
         List<String> outIds = new ArrayList<>(rows.size());
@@ -2834,24 +3015,10 @@ public final class PgVectorRepository {
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "embeddings", List.of());
         }
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        // The collection's model (registry row, cached in-process; dimForCollection just resolved it).
+        final String model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
         var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.embedding())
-               .from(ch.table())
-               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
-               // nexus-oizh7 D1 hazard (see dimForCollection's DECISION for the general
-               // dim-scoping contract this guard instantiates — embedding-column reads
-               // ARE dim-guarded): without ch.embedding().isNotNull(), a foreign-dim row
-               // matches this predicate, rec.value2() (the un-dispatched embedding
-               // column) is null, and the hydration loop below stored an EMPTY list for
-               // that chash rather than omitting it -- violating this method's own
-               // Chroma-parity "ids not present are OMITTED" contract. Pre-unification
-               // the row simply did not exist in this dim's table, so it was never a
-               // candidate at all.
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids))
-                      .and(ch.embedding().isNotNull())
-                      .and(liveChunksCondition(ctx, ch)))
-               .fetch());
+            getEmbeddingsQuery(ctx, dim, tenant, model, collection, ids).fetch());
 
         Map<String, List<Float>> byChash = new HashMap<>();
         for (var rec : result) {
@@ -2870,6 +3037,40 @@ public final class PgVectorRepository {
             }
         }
         return Map.of("ids", outIds, "embeddings", outEmbeddings);
+    }
+
+    /**
+     * The statement {@link #getEmbeddings} runs, apart from running it, so
+     * {@code GetEmbeddingsPruningIntegrationTest} reads the plan of the engine's own statement and not of a copy.
+     *
+     * <p>RDR-225: {@code nexus.chunks} is LIST-partitioned by {@code embedding_model}, then by
+     * {@code tenant_id}. The row-level-security policy is {@code current_setting}-based, so it cannot prune
+     * leaves at plan time; without the explicit {@code embedding_model} and {@code tenant_id} predicates the
+     * planner appends every (model, tenant) leaf and runs the live-owner function against each (measured on the
+     * managed cloud: about 1.2 s per call, 14 to 22 calls per search). With them it plans to the one leaf, as
+     * {@link #probeSelectedRowsQuery} does. {@code model} is the collection's registry row
+     * ({@link CollectionRegistry#lookup}, cached in-process); {@code tenant} is the tenant the statement runs as.
+     *
+     * <p>{@code TombstoneFilterGateTest} requires every named get-family method to call
+     * {@link #liveChunksCondition} by name; this builder is that call site for {@code getEmbeddings}.
+     */
+    static org.jooq.Select<? extends org.jooq.Record2<String, Vector>> getEmbeddingsQuery(
+            DSLContext ctx, int dim, String tenant, String model, String collection, List<String> ids) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return ctx.select(ch.chash(), ch.embedding())
+               .from(ch.table())
+               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
+               // nexus-oizh7 D1 hazard (see dimForCollection's DECISION for the general
+               // dim-scoping contract this guard instantiates — embedding-column reads
+               // ARE dim-guarded): without ch.embedding().isNotNull(), a foreign-dim row
+               // matches this predicate, the un-dispatched embedding column is null, and
+               // the hydration loop stores an EMPTY list for that chash rather than
+               // omitting it -- violating getEmbeddings' own Chroma-parity "ids not
+               // present are OMITTED" contract.
+               .where(chunkScope(ch, tenant, model, collection))
+               .and(ch.chash().in(ids))
+               .and(ch.embedding().isNotNull())
+               .and(liveChunksCondition(ctx, ch));
     }
 
     /**
@@ -2959,7 +3160,7 @@ public final class PgVectorRepository {
                                         boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        org.jooq.Condition cond = ch.collection().eq(collection);
+        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
                 cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
@@ -3082,7 +3283,7 @@ public final class PgVectorRepository {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
-        org.jooq.Condition cond = ch.collection().eq(collection);
+        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
                 cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
@@ -3147,14 +3348,40 @@ public final class PgVectorRepository {
      */
     public List<Map<String, Object>> listCollections(String tenant) {
         var names = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
-               .orderBy(1)
-               .fetch());
+            listCollectionsQuery(ctx, tenant).fetch());
         List<Map<String, Object>> out = new ArrayList<>(names.size());
         for (var rec : names) {
             out.add(Map.of("name", rec.value1()));
         }
         return out;
+    }
+
+    /**
+     * The statement {@link #listCollections} runs, apart from running it, so a test can read its plan.
+     *
+     * <p>RDR-225 (nexus-41sfa): {@code SELECT DISTINCT collection FROM nexus.chunks} scans every row of every
+     * leaf the tenant owns (a sequential scan plus a hash aggregate on each: 20 to 27 ms at 21.8k rows against
+     * 0.18 ms for this shape, T2 {@code nexus/rdr225-partition-pruning-census-2026-10-08}). This reads the
+     * registry instead, one row per collection, and asks {@code chunks} only whether the collection holds at
+     * least one row, keyed on the full composite key {@code (tenant_id, collection, embedding_model)} so the
+     * probe is an index lookup in the one leaf of the collection's model and tenant.
+     *
+     * <p>Same result set as the scan: every chunk row carries a registry row under the validated composite
+     * foreign key {@code chunks_collection_fk (tenant_id, collection, embedding_model) ->
+     * catalog_collections (tenant_id, name, embedding_model)} (vectors-030 step 7.5), so a collection that holds
+     * chunks always has a registry row, and the probe finds its chunks through the same three columns. A
+     * registered collection with no chunk row is still absent, as before. The tenant predicate is explicit
+     * (it is also the RLS scope) so the registry read is bounded to the tenant's rows by its key.
+     */
+    static org.jooq.Select<? extends org.jooq.Record1<String>> listCollectionsQuery(DSLContext ctx, String tenant) {
+        return ctx.selectDistinct(CATALOG_COLLECTIONS.NAME)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(DSL.exists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID))
+                .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))))
+            .orderBy(CATALOG_COLLECTIONS.NAME);
     }
 
     /**
@@ -3802,20 +4029,13 @@ public final class PgVectorRepository {
      * accept the prefix. Routing consumers now ask for {@code live}.
      */
     public List<Map<String, Object>> collectionStats(String tenant, String lifecycleFilter) {
-        org.jooq.Condition byState = (lifecycleFilter == null || lifecycleFilter.isBlank())
-            ? org.jooq.impl.DSL.noCondition()
-            : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
-        // nexus-4w07i: a rename keeps the old name's row as a tombstone
-        // (superseded_by = the new name) with lifecycle_state still 'live', so the
-        // routing view excluded nothing for it. A tombstone that holds chunks (a
-        // stale writer, say) was then a search target under a retired name. 'live'
-        // here is the ROUTING view, so it also requires the row not be superseded;
-        // an empty string is the column's "not superseded" value, as NULL is.
-        org.jooq.Condition lifecycleCond = "live".equals(lifecycleFilter)
-            ? byState.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
-            : byState;
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
+        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter);
+        long statsStartNanos = System.nanoTime();
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-mz9jv: the view's inflated cost estimate trips JIT, 190 to 270 ms of compilation for a
+            // statement whose executor time is milliseconds.
+            PgSession.disableJit(ctx);
+            return ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
@@ -3826,7 +4046,10 @@ public final class PgVectorRepository {
                    .and(CATALOG_COLLECTIONS.NAME.eq(COLLECTION_VECTOR_STATS.COLLECTION)))
                .where(lifecycleCond)
                .orderBy(COLLECTION_VECTOR_STATS.COLLECTION.asc(), COLLECTION_VECTOR_STATS.DIM.asc())
-               .fetch());
+               .fetch();
+        });
+        log.info("event=vector_stats variant=full rows={} lifecycle={} query_ms={}", result.size(),
+                 lifecycleFilter, (System.nanoTime() - statsStartNanos) / 1_000_000L);
         List<Map<String, Object>> out = new ArrayList<>(result.size());
         for (var rec : result) {
             Map<String, Object> row = new java.util.LinkedHashMap<>();
@@ -3873,6 +4096,77 @@ public final class PgVectorRepository {
     }
 
     /**
+     * The lifecycle predicate of the stats and routing listings (nexus-bc7ps, nexus-4w07i). {@code null} or
+     * blank is no filter. nexus-4w07i: a rename keeps the old name's row as a tombstone
+     * (superseded_by = the new name) with lifecycle_state still 'live', so the routing view excluded nothing
+     * for it. A tombstone that holds chunks (a stale writer, say) was then a search target under a retired
+     * name. 'live' here is the ROUTING view, so it also requires the row not be superseded; an empty string is
+     * the column's "not superseded" value, as NULL is.
+     */
+    private static org.jooq.Condition lifecycleCondition(String lifecycleFilter) {
+        org.jooq.Condition byState = (lifecycleFilter == null || lifecycleFilter.isBlank())
+            ? org.jooq.impl.DSL.noCondition()
+            : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
+        return "live".equals(lifecycleFilter)
+            ? byState.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            : byState;
+    }
+
+    /**
+     * The routing listing, {@code GET /v1/vectors/stats?fields=routing} (nexus-mz9jv): the collections a
+     * routing consumer (a corpus resolver, a sibling lookup, a name parser) may search, read from
+     * {@code catalog_collections} alone. Every field a router reads is a catalog column, so this never
+     * touches the chunk rows' liveness, which is what makes {@link #collectionStats} cost 100 to 560 ms at
+     * a 75,000-chunk tenant; 0.8 ms measured (T2 {@code nexus/search-latency-root-cause-2026-10-08}).
+     *
+     * <p>Same collection population as {@link #collectionStats}: a collection appears iff it physically
+     * holds at least one chunk row (the stats view is one row per collection and dim that holds chunks),
+     * tested by an {@code EXISTS} on {@code (tenant_id, collection, embedding_model)}, the key of the chunks
+     * table's partition leaf and of its foreign key to the registry ({@link #listCollectionsQuery}). The
+     * {@code lifecycleFilter} is the stats route's, with the same rename-tombstone rule. A registered
+     * collection with no chunk is absent, as it is from the stats route.
+     *
+     * <p>Row shape, a subset of a stats row: {@code name}, and from the registry {@code content_type},
+     * {@code owner_id}, {@code embedding_model}, {@code lifecycle_state}, plus {@code superseded_by} on a
+     * rename tombstone. A column that is null is omitted, as in a stats row. There is no {@code dim},
+     * {@code count}, {@code stored_count} or {@code last_write}: those need the liveness scan, and a caller
+     * that needs them asks for the full route. The absence of {@code count} is also how a client tells this
+     * answer from an old engine's full rows.
+     */
+    public List<Map<String, Object>> collectionRouting(String tenant, String lifecycleFilter) {
+        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter);
+        long routingStartNanos = System.nanoTime();
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                       CATALOG_COLLECTIONS.SUPERSEDED_BY)
+               .from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+               .and(DSL.exists(ctx.selectOne().from(CHUNKS)
+                   .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID))
+                   .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                   .and(CHUNKS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))))
+               .and(lifecycleCond)
+               .orderBy(CATALOG_COLLECTIONS.NAME.asc())
+               .fetch());
+        log.info("event=vector_stats variant=routing rows={} lifecycle={} query_ms={}", result.size(),
+                 lifecycleFilter, (System.nanoTime() - routingStartNanos) / 1_000_000L);
+        List<Map<String, Object>> out = new ArrayList<>(result.size());
+        for (var rec : result) {
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("name", rec.value1());
+            if (rec.value2() != null) row.put("content_type", rec.value2());
+            if (rec.value3() != null) row.put("owner_id", rec.value3());
+            if (rec.value4() != null) row.put("embedding_model", rec.value4());
+            if (rec.value5() != null) row.put("lifecycle_state", rec.value5());
+            String supersededBy = rec.value6();
+            if (supersededBy != null && !supersededBy.isEmpty()) row.put("superseded_by", supersededBy);
+            out.add(row);
+        }
+        return out;
+    }
+
+    /**
      * List entries in a collection (metadata only), paginated by chash ordering.
      *
      * @return Chroma-style envelope {@code {ids: List<String>, metadatas: List<Map>}}
@@ -3881,6 +4175,7 @@ public final class PgVectorRepository {
                                     int limit, int offset) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
@@ -3889,7 +4184,7 @@ public final class PgVectorRepository {
                // get-family this needs no out-of-band chash: a plain listing
                // surfaced tombstoned content by default via
                // POST /v1/vectors/store-list (VectorHandler#handleStoreList).
-               .where(ch.collection().eq(collection).and(liveChunksCondition(ctx, ch)))
+               .where(scope.and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch());
@@ -4669,8 +4964,9 @@ FROM scope s
     public int count(String tenant, String collection) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         long c = tenantScope.withTenant(tenant, ctx ->
-            (long) ctx.fetchCount(ch.table(), ch.collection().eq(collection)));
+            (long) ctx.fetchCount(ch.table(), scope));
         // PG count(*) is bigint; refuse to wrap rather than silently narrow.
         if (c > Integer.MAX_VALUE) {
             throw new IllegalStateException("count overflow for collection '" + collection
@@ -5845,7 +6141,8 @@ FROM scope s
         }
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        return tenantScope.withTenant(tenant, ctx -> selectExistingChashesCtx(ctx, ch, collection, chashes));
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
+        return tenantScope.withTenant(tenant, ctx -> selectExistingChashesCtx(ctx, ch, scope, chashes));
     }
 
     /**
@@ -5855,10 +6152,10 @@ FROM scope s
      * UPDATE loop, RDR-181 bead nexus-f0r8p.2).
      */
     private static Set<String> selectExistingChashesCtx(DSLContext ctx, DimTables.ChunkTable ch,
-                                                         String collection, List<String> chashes) {
+                                                         org.jooq.Condition scope, List<String> chashes) {
         return new HashSet<>(ctx.select(ch.chash())
                                  .from(ch.table())
-                                 .where(ch.collection().eq(collection).and(ch.chash().in(chashes)))
+                                 .where(scope.and(ch.chash().in(chashes)))
                                  .fetch(ch.chash()));
     }
 
@@ -6008,6 +6305,8 @@ FROM scope s
         existenceSelectCalls.incrementAndGet();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
+            // RDR-225: the (model, tenant, collection) scope, resolved before the transaction opens.
+            final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
             return tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: the have-vector metadata-only UPDATE below touches
                 // rows the superseded-chunk sweep DELETEs and gc_quarantine_orphans moves,
@@ -6019,7 +6318,7 @@ FROM scope s
                 // see acquireSweepGateShared's javadoc for the formula and why the writer
                 // side deliberately has no lock_timeout.
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
-                Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, collection, dedupIds);
+                Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, scope, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see
                 // afterExistencePartitionHookForTests javadoc. Fires AFTER the existence
@@ -6089,7 +6388,7 @@ FROM scope s
      * different text) without a second round trip.
      */
     private static Map<String, String> selectExistingChashTextCtx(DSLContext ctx, DimTables.ChunkTable ch,
-                                                                    String collection, List<String> chashes) {
+                                                                    org.jooq.Condition scope, List<String> chashes) {
         Map<String, String> out = new HashMap<>();
         // nexus-6yps0: bound the IN-clause bind-param budget at SOURCE_URI_JOIN_BATCH,
         // the same constant sourceUrisByChash already chunks its own chash IN-clause
@@ -6100,7 +6399,7 @@ FROM scope s
             List<String> batch = chashes.subList(start, Math.min(start + SOURCE_URI_JOIN_BATCH, chashes.size()));
             ctx.select(ch.chash(), ch.chunkText())
                .from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(batch)))
+               .where(scope.and(ch.chash().in(batch)))
                .fetch()
                .forEach(r -> out.put(r.value1(), r.value2()));
         }
@@ -6182,7 +6481,7 @@ FROM scope s
                 int dim = dimForCollection(tenant, col);
                 DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
                 var chunks = ctx.select(ch.chash(), ch.chunkText()).from(ch.table())
-                                .where(ch.collection().eq(col).and(ch.chash().in(e.getValue())))
+                                .where(chunkScope(ch, tenant, col).and(ch.chash().in(e.getValue())))
                                 .fetch();
                 Map<String, String> byChash =
                     textByColThenChash.computeIfAbsent(col, k -> new HashMap<>());
@@ -6251,9 +6550,10 @@ FROM scope s
     public String fetchChunkText(String tenant, String collection, String chash) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chunkText()).from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
+               .where(scope.and(ch.chash().eq(chash)))
                .fetchOne(ch.chunkText()));
     }
 
@@ -6376,6 +6676,25 @@ FROM scope s
      * <p>{@code TombstoneFilterGateTest.scanTypedChunksSites} requires every named
      * get-family method to call this helper by name; keep the name.
      */
+    /**
+     * The RDR-225 partition-pruning scope of a collection's chunk rows: its embedding model, its tenant and
+     * its name. {@code nexus.chunks} is LIST-partitioned by {@code embedding_model}, then by {@code tenant_id},
+     * and the row-level-security policy is {@code current_setting}-based, so a statement that names only
+     * {@code collection} plans against EVERY (model, tenant) leaf. A collection carries exactly one model (the
+     * composite foreign key to {@code catalog_collections}), so this selects the same rows the bare
+     * {@code collection = ?} did. The model comes from {@link CollectionRegistry#lookup} (cached in-process;
+     * the first call on a miss opens its own transaction), so call it BEFORE {@code withTenant}, not inside it.
+     */
+    private org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String collection) {
+        return chunkScope(ch, tenant,
+            CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel(), collection);
+    }
+
+    static org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String model,
+                                         String collection) {
+        return ch.embeddingModel().eq(model).and(ch.tenantId().eq(tenant)).and(ch.collection().eq(collection));
+    }
+
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
         Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
         return DSL.exists(ctx.selectOne().from(

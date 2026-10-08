@@ -256,6 +256,83 @@ run_l "L: curl failure (000) -> violation (1)" 1 "was not answered like one" 000
 run_l "L: a probe that names no fragment -> violation (1), never a pass on any 400" 1 "must name the engine message fragment" \
   400 "$BAD_K" ""
 
+# Leg M's judges (nexus-tjyzn, nexus-mz9jv, nexus-92q1p), extracted from the real script: the mode decides whether
+# "not served" is a violation, so these pin the non-vacuity rule: from the engine release that carries the surfaces,
+# a leg that observed nothing cannot pass.
+: > "$TMP/mfn.sh"
+for fn in _surfaces_mode _surface_verdict _embeddings_verdict; do
+  sed -n "/^${fn}() {/,/^}/p" "$GATE" > "$TMP/one.sh"
+  if [ "$(head -n 1 "$TMP/one.sh")" != "${fn}() {" ] || [ "$(tail -n 1 "$TMP/one.sh")" != '}' ]; then
+    echo "[FAIL] $fn not found or not closed in $GATE (extracted $(wc -l < "$TMP/one.sh") lines)"
+    echo "$NAME: $PASS passed, $((FAIL + 1)) failed"
+    exit 1
+  fi
+  cat "$TMP/one.sh" >> "$TMP/mfn.sh"
+done
+run_m() {  # <label> <want-rc> <want-text> <command...>
+  local label="$1" want_rc="$2" want_text="$3" out rc
+  shift 3
+  # shellcheck disable=SC1091
+  out="$(source "$TMP/mfn.sh"; "$@")"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && [[ "$out" == *"$want_text"* ]]; then
+    PASS=$((PASS + 1)); echo "[ok]   $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] $label: want rc=$want_rc text='$want_text', got rc=$rc"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+run_m "M mode: engine below the minimum, nothing asserted -> auto-old" 0 "auto-old" _surfaces_mode '{"release_version":"0.1.151"}' "" 0.1.152
+run_m "M mode: engine at the minimum -> strict" 0 "strict" _surfaces_mode '{"release_version":"0.1.152"}' "" 0.1.152
+run_m "M mode: engine above the minimum -> strict" 0 "strict" _surfaces_mode '{"release_version":"0.1.160"}' "" 0.1.152
+run_m "M mode: 0.1.99 sorts below 0.1.152 numerically, not as text" 0 "auto-old" _surfaces_mode '{"release_version":"0.1.99"}' "" 0.1.152
+run_m "M mode: an unparseable release_version is strict, never given the old-engine allowance" 0 "strict" _surfaces_mode '{"release_version":"dev"}' "" 0.1.152
+run_m "M mode: a body that is not JSON is strict" 0 "strict" _surfaces_mode '<html>' "" 0.1.152
+run_m "M mode: served asserted on an old engine -> strict" 0 "strict" _surfaces_mode '{"release_version":"0.1.151"}' served 0.1.152
+run_m "M mode: absent asserted on a new engine -> absent" 0 "absent" _surfaces_mode '{"release_version":"0.1.160"}' absent 0.1.152
+
+# Fixtures for M1/M2: a routing listing of 40 rows (well over 1 KiB), gzipped; an old engine's full rows.
+"$E2E_PYTHON" - "$TMP" <<'PY'
+import gzip, json, sys
+d = sys.argv[1]
+routing = [{"name": "code__own%02d__bge-base-en-v15-768__v1" % i, "content_type": "code", "owner_id": "own%02d" % i,
+            "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live"} for i in range(40)]
+full = [dict(r, dim=768, count=10 + i, stored_count=12 + i) for i, r in enumerate(routing)]
+small = routing[:2]
+for name, doc in (("routing", routing), ("full", full), ("small", small)):
+    raw = json.dumps(doc).encode()
+    open("%s/%s.json" % (d, name), "wb").write(raw)
+    open("%s/%s.gz" % (d, name), "wb").write(gzip.compress(raw))
+open(d + "/hdr.gzip", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\ncontent-encoding: gzip\r\n\r\n")
+open(d + "/hdr.plain", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\n\r\n")
+open(d + "/other.gz", "wb").write(gzip.compress(json.dumps(routing[:5]).encode()))
+open(d + "/bad.gz", "wb").write(b"not gzip at all")
+open(d + "/page.html", "w").write("<html>403</html>")
+PY
+R="$TMP/routing.json"; G="$TMP/routing.gz"
+run_m "M1: gzip served, decodes to the identity listing -> ok (0)" 0 "ok [M1]" _surface_verdict gzip "$R" "$G" "$TMP/hdr.gzip" strict
+run_m "M1: ... also in auto-old mode (a new engine on an old floor)" 0 "ok [M1]" _surface_verdict gzip "$R" "$G" "$TMP/hdr.gzip" auto-old
+run_m "M1: strict, the response has no Content-Encoding -> violation (1): the engine must compress" 1 "must serve this" _surface_verdict gzip "$R" "$R" "$TMP/hdr.plain" strict
+run_m "M1: auto-old, no Content-Encoding -> NOT SERVED (3)" 3 "NOT SERVED [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.plain" auto-old
+run_m "M1: strict, a body below 1 KiB cannot exercise gzip -> violation (1), never a skip" 1 "no read-only route" _surface_verdict gzip "$TMP/small.json" "$TMP/small.gz" "$TMP/hdr.gzip" strict
+run_m "M1: strict, Content-Encoding gzip over a body that does not gunzip -> violation (1)" 1 "does not gunzip" _surface_verdict gzip "$R" "$TMP/bad.gz" "$TMP/hdr.gzip" strict
+run_m "M1: strict, the gzip response decodes to a different listing -> violation (1)" 1 "different listing" _surface_verdict gzip "$R" "$TMP/other.gz" "$TMP/hdr.gzip" strict
+run_m "M1: absent asserted but gzip served -> violation (1)" 1 "NX_EXPECTED_ENGINE_SURFACES=absent" _surface_verdict gzip "$R" "$G" "$TMP/hdr.gzip" absent
+run_m "M1: absent asserted, not served -> NOT SERVED (3)" 3 "NOT SERVED [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.plain" absent
+run_m "M1: an edge HTML page as the identity body -> violation (1)" 1 "did not answer a non-empty JSON list" _surface_verdict gzip "$TMP/page.html" "$G" "$TMP/hdr.gzip" strict
+run_m "M2: routing rows, no counts -> ok (0)" 0 "ok [M2]" _surface_verdict routing "$R" "$G" "$TMP/hdr.gzip" strict
+run_m "M2: strict, an engine that ignored fields=routing (full rows) -> violation (1)" 1 "ignored fields=routing" _surface_verdict routing "$TMP/full.json" "$TMP/full.gz" "$TMP/hdr.plain" strict
+run_m "M2: auto-old, full rows -> NOT SERVED (3)" 3 "NOT SERVED [M2]" _surface_verdict routing "$TMP/full.json" "$TMP/full.gz" "$TMP/hdr.plain" auto-old
+run_m "M2: an empty listing -> violation (1), never a pass on nothing" 1 "non-empty JSON list" _surface_verdict routing <(printf '[]') "$G" "$TMP/hdr.gzip" strict
+EMB_OK='{"collection":"c","rows":2,"embedding_dim":768,"vector_lens":[3072,3072]}'
+run_m "M3: every row carries a dim*4 vector -> ok (0)" 0 "ok [M3]" _embeddings_verdict "$EMB_OK" strict
+run_m "M3: strict, rows without vectors or echo -> violation (1)" 1 "must serve include_embeddings" _embeddings_verdict '{"collection":"c","rows":2,"embedding_dim":null,"vector_lens":[null,null]}' strict
+run_m "M3: auto-old, rows without vectors or echo -> NOT SERVED (3)" 3 "NOT SERVED [M3]" _embeddings_verdict '{"collection":"c","rows":2,"embedding_dim":null,"vector_lens":[null,null]}' auto-old
+run_m "M3: strict, one row missing its vector -> violation (1)" 1 "1 of 2 rows carry a vector" _embeddings_verdict '{"collection":"c","rows":2,"embedding_dim":768,"vector_lens":[3072,null]}' strict
+run_m "M3: strict, a vector of the wrong width -> violation (1)" 1 "expected embedding_dim * 4" _embeddings_verdict '{"collection":"c","rows":1,"embedding_dim":768,"vector_lens":[1024]}' strict
+run_m "M3: no rows at all -> violation (1), a live collection must return rows" 1 "nothing to carry a vector" _embeddings_verdict '{"collection":"c","rows":0,"embedding_dim":768,"vector_lens":[]}' strict
+run_m "M3: absent asserted but served -> violation (1)" 1 "NX_EXPECTED_ENGINE_SURFACES=absent" _embeddings_verdict "$EMB_OK" absent
+
 # Wiring: the not-run state reaches the final sentinel, a violation is a leg
 # failure, and the function is called with the bearer-resolved status body.
 check_wiring() {
@@ -270,7 +347,7 @@ check_wiring "B3 return 3 sets B3_NOT_RUN" '3\) echo "  \$B3_LINE"; B3_NOT_RUN=1
 check_wiring "B3 violation is a leg failure" '\*\) _leg_fail "\$B3_LINE"'
 check_wiring "J is judged on the status body leg B fetched" 'J_LINE="\$\(_reaper_status_verdict "\$STATUS_BODY"\)"'
 check_wiring "J violation is a leg failure" '_leg_fail "\$J_LINE"'
-check_wiring "the leg battery expects 10 legs (A B C+D E F H I J K L)" '^EXPECTED_LEGS=10$'
+check_wiring "the leg battery expects 11 legs (A B C+D E F H I J K L M)" '^EXPECTED_LEGS=11$'
 check_wiring "L runs each probe through _route_probe, which judges with the real _route_probe_verdict and the expectation env" \
   'line="\$\(_route_probe_verdict "\$label" "\$EDGE_CODE" "\$EDGE_BODY" "\$fragment" "\$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE"\)" \|\| rc=\$\?'
 check_wiring "L: an unasserted old-engine 404 (exit 3) sets the not-served flag" '3\) echo "  \$line"; L_ABSENT=\$\(\(L_ABSENT \+ 1\)\); L_ROUTE_NOT_SERVED=1 ;;'
@@ -628,6 +705,25 @@ neg_case "_edge_post called from leg I" "_edge_post used outside legs K and L (i
 addr = f"ccpg-desc-' 'store = HttpTupleStore()
 _edge_post "/v1/vectors/search-per-collection" "{}"
 addr = f"ccpg-desc-'
+
+check_wiring "M judges its probes through _surface_judge, and a violation is a leg failure" '_leg_fail "M: the engine surfaces through the edge did not answer as the engine does'
+check_wiring "the not-served note reaches the PASSED line (leg M)" 'new engine surfaces NOT served: M saw an engine without'
+check_wiring "the leg M expectation env accepts only unset, served, absent" 'NX_EXPECTED_ENGINE_SURFACES" in'
+neg_case "_edge_post called from leg M" "_edge_post used outside legs K and L (in M)" \
+  '    M_BAD=0
+' '    M_BAD=0
+    _edge_post "/v1/vectors/search-per-collection" "{}"
+'
+neg_case "a raw curl -X POST inside leg M" "a curl with a write flag in leg M" \
+  '    M_BAD=0
+' '    M_BAD=0
+    curl -sS -X POST -H @"$BEARER_FILE" --data '"'{}'"' "$SERVICE_URL/v1/vectors/search-per-collection" >/dev/null
+'
+neg_case "a client write call added to leg M" "a client write call in leg M" \
+  'M_NOT_SERVED=0
+' 'M_NOT_SERVED=0
+uv run python -c '"'store.put(1)'"'
+'
 
 echo "$NAME: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

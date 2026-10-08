@@ -624,7 +624,15 @@ from __future__ import annotations
 #: 600 so recall holds on the RDR-225 per-leaf HNSW graphs (nexus-3wh8d.31).
 #: No changesets, no wire entries; deployed and gated in the cloud
 #: (2026-10-07 21:59Z) BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 151)
+#:
+#: 7.74.2 pairs with engine-service-v0.1.152 (tagged 2026-10-08 on
+#: fab8c8337), the search-latency engine: search-per-collection returns
+#: vectors on request (nexus-92q1p), gzip responses (nexus-tjyzn), a
+#: set-based collection_vector_stats and a catalog-only routing listing
+#: (vectors-032-1, nexus-mz9jv), an index-probe listCollections
+#: (nexus-41sfa) and batched arm settings (nexus-wym0l). All four wire
+#: entries are [additive]; the engine deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 152)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

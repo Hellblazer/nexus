@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.http.RequestContext;
@@ -842,6 +843,72 @@ class PgVectorSearchPerCollectionIntegrationTest {
                 .isEqualTo(ids(all.rows()).subList(0, 5));
             // per-collection stats still describe each arm's FULL row set, before the cut
             assertThat(cut.perCollection()).allSatisfy(s -> assertThat(s.rawCount()).isEqualTo(3));
+        }
+    }
+
+    // ── round trips per arm (nexus-wym0l) ────────────────────────────────────
+
+    private static int countOf(String haystack, String needle) {
+        int n = 0;
+        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length())) {
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * Every statement an arm sends is a client-to-server round trip, and in the cloud each one costs the
+     * engine-to-Postgres RTT. Measured before the fix (T2 nexus/search-latency-root-cause-2026-10-08): the
+     * tenant stamp and six serving settings were seven statements, plus four more on the exact path. The
+     * tenant stamp and the serving settings now travel in ONE statement, so an HNSW-routed arm is
+     * settings, probe, search (then COMMIT), and an exact-routed arm adds the one statement that
+     * re-enables the exact plan's access paths.
+     */
+    @Test
+    void armRoundTrips_hnswRoutedArmIsSettingsProbeSearch() throws Exception {
+        String tenant = "tu8wp-rt-hnsw";
+        List<String> cols = tinyCollections(tenant, 1);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);  // warm caches
+        PgSession.overrideSearchExactMaxRowsForTests(1);   // 3 rows > 1: the router walks the HNSW index
+        try {
+            probe.reset();
+            PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);
+            assertThat(r.rows()).hasSize(3);
+            List<String> stmts = probe.armStatements;
+            assertThat(stmts).as("one arm: settings, probe, search; got %s", stmts).hasSize(3);
+            assertThat(probe.armCommits.get()).as("one COMMIT for the arm").isEqualTo(1);
+            assertThat(countOf(stmts.get(0), "set_config"))
+                .as("tenant stamp + statement_timeout, iterative_scan, ef_search, max_scan_tuples, "
+                    + "scan_mem_multiplier, plan_cache_mode in one statement")
+                .isEqualTo(7);
+            assertThat(stmts.subList(1, 3)).noneMatch(x -> x.contains("set_config"));
+            assertThat(probe.statementTimeouts).as("the statement bound still reaches the arm").hasSize(1);
+        } finally {
+            PgSession.resetSearchExactMaxRowsForTests();
+        }
+    }
+
+    @Test
+    void armRoundTrips_exactRoutedArmAddsOneStatementForTheExactSettings() throws Exception {
+        String tenant = "tu8wp-rt-exact";
+        List<String> cols = tinyCollections(tenant, 1);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);  // warm caches
+        PgSession.overrideSearchExactMaxRowsForTests(100);  // 3 rows <= 100: the router goes exact
+        try {
+            probe.reset();
+            PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);
+            assertThat(r.rows()).hasSize(3);
+            List<String> stmts = probe.armStatements;
+            assertThat(stmts).as("one arm: settings, probe, exact settings, search; got %s", stmts).hasSize(4);
+            assertThat(probe.armCommits.get()).isEqualTo(1);
+            assertThat(countOf(stmts.get(0), "set_config")).isEqualTo(7);
+            assertThat(countOf(stmts.get(2), "set_config"))
+                .as("enable_indexscan, enable_bitmapscan, enable_seqscan, enable_sort in one statement")
+                .isEqualTo(4);
+            assertThat(stmts.get(1)).doesNotContain("set_config");
+            assertThat(stmts.get(3)).doesNotContain("set_config");
+        } finally {
+            PgSession.resetSearchExactMaxRowsForTests();
         }
     }
 

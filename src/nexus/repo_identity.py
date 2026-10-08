@@ -463,7 +463,7 @@ def list_sibling_collections(
     try:
         # nexus-bc7ps: sibling projection is routing; a quarantine sibling
         # shares the owner segment and must not be a search target.
-        all_colls = live_collection_rows(t3_client)
+        all_colls = live_collection_rows(t3_client, routing=True)
     except Exception:  # noqa: BLE001 — boundary catch of T3 client errors; degrade to empty sibling list
         return []
 

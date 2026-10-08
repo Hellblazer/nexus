@@ -1,6 +1,6 @@
 [project]
 name = "conexus-mcpb"
-version = "7.74.1"
+version = "7.74.2"
 description = "Conexus packaged as Claude Desktop .mcpb (Desktop Extension)"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -12,7 +12,7 @@ dependencies = [
     # the extension's plan cache picked a different embedder than the plugin's
     # and downloaded its own bge copy. Pinned by
     # tests/test_plugin_structure.py::test_mcpb_pins_bare_conexus.
-    "conexus>=7.74.1",
+    "conexus>=7.74.2",
 ]
 
 [tool.uv]
