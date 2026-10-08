@@ -800,10 +800,19 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred with its sibling
 
                         new_pid = ensure_aspect_worker_daemon(config_dir=nexus_config_dir())
-                        actions.append(
-                            f"cycled {proc.kind} (pid {proc.pid} drained; "
-                            f"started pid {new_pid})"
-                        )
+                        if new_pid is False:
+                            # The spawner declined: `claude` is not on PATH, so a
+                            # child would only refuse. Say it, not "started pid False".
+                            actions.append(
+                                f"NEEDS HUMAN: {proc.kind} pid {proc.pid} drained but not "
+                                "restarted: the `claude` binary is not on PATH, so a "
+                                "worker would only refuse"
+                            )
+                        else:
+                            actions.append(
+                                f"cycled {proc.kind} (pid {proc.pid} drained; "
+                                f"started pid {new_pid})"
+                            )
                     except Exception as exc:  # noqa: BLE001 — never fail the finish pass on a respawn
                         # Say so loudly rather than reporting a restart:
                         # a silent stop is what produced the 35-minute

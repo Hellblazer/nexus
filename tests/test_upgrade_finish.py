@@ -4024,7 +4024,7 @@ class TestAspectWorkerIsRestartedNotJustStopped:
     deliver.
     """
 
-    def _run_with_dead_pid(self, monkeypatch, ensure_calls: list):
+    def _run_with_dead_pid(self, monkeypatch, ensure_calls: list, *, ensure_returns=12345):
         import nexus.upgrade_finish as uf
 
         monkeypatch.setattr(uf, "process_command", lambda pid: "nx daemon aspect-worker start")
@@ -4049,7 +4049,7 @@ class TestAspectWorkerIsRestartedNotJustStopped:
 
         monkeypatch.setattr(
             awd, "ensure_aspect_worker_daemon",
-            lambda **kw: ensure_calls.append(kw) or 12345,
+            lambda **kw: ensure_calls.append(kw) or ensure_returns,
         )
 
         report = uf.SkewReport(
@@ -4057,6 +4057,14 @@ class TestAspectWorkerIsRestartedNotJustStopped:
             stale=[uf.StaleProcess(pid=200, kind="aspect-worker", command="w", age_s=99)],
         )
         return uf.restart_stale(report)
+
+    def test_a_declined_respawn_is_reported_not_as_a_started_pid(self, monkeypatch) -> None:
+        """ensure_aspect_worker_daemon returns False when `claude` is absent and
+        nothing was started; the line must not read 'started pid False'."""
+        actions = self._run_with_dead_pid(monkeypatch, [], ensure_returns=False)
+        line = next(a for a in actions if "aspect-worker" in a)
+        assert "started pid" not in line, line
+        assert "NEEDS HUMAN" in line and "claude" in line, line
 
     def test_a_drained_worker_is_started_again(self, monkeypatch) -> None:
         ensure_calls: list = []
