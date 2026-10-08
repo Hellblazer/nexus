@@ -21,29 +21,41 @@ public final class HttpUtil {
      */
     static final int GZIP_MIN_BYTES = 1024;
 
-    /** True when the request's {@code Accept-Encoding} lists {@code gzip} (or {@code *}) with a non-zero quality. */
+    /**
+     * True when the request's {@code Accept-Encoding} accepts {@code gzip}: an explicit {@code gzip} entry
+     * decides (so {@code gzip;q=0, *} refuses, RFC 9110 12.5.3), else a {@code *} entry with a non-zero quality.
+     */
     static boolean acceptsGzip(HttpExchange exchange) {
         var values = exchange.getRequestHeaders().get("Accept-Encoding");
         if (values == null) return false;
+        Boolean explicit = null;
+        boolean wildcard = false;
         for (String line : values) {
             for (String part : line.split(",")) {
                 String[] token = part.trim().split(";", 2);
                 String coding = token[0].trim();
-                if (!coding.equalsIgnoreCase("gzip") && !coding.equals("*")) continue;
-                if (token.length > 1) {
-                    String q = token[1].trim().toLowerCase(java.util.Locale.ROOT);
-                    if (q.startsWith("q=")) {
-                        try {
-                            if (Double.parseDouble(q.substring(2).trim()) <= 0.0) continue;
-                        } catch (NumberFormatException e) {
-                            continue;
-                        }
-                    }
+                boolean isGzip = coding.equalsIgnoreCase("gzip");
+                if (!isGzip && !coding.equals("*")) continue;
+                boolean accepted = qualityIsPositive(token.length > 1 ? token[1] : "");
+                if (isGzip) {
+                    explicit = accepted;
+                } else {
+                    wildcard = accepted;
                 }
-                return true;
             }
         }
-        return false;
+        return explicit != null ? explicit : wildcard;
+    }
+
+    /** A coding's parameter list is acceptable unless it carries a {@code q} that is zero or unparseable. */
+    private static boolean qualityIsPositive(String params) {
+        String q = params.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!q.startsWith("q=")) return true;
+        try {
+            return Double.parseDouble(q.substring(2).trim()) > 0.0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     private static byte[] gzip(byte[] bytes) throws IOException {

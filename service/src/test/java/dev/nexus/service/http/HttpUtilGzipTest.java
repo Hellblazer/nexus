@@ -81,7 +81,7 @@ class HttpUtilGzipTest {
     @Test
     void qualityZeroAndOtherCodingsDoNotAcceptGzip() throws Exception {
         String body = json(5_000);
-        for (String header : new String[] {"gzip;q=0", "gzip; q=0.0", "br", "identity", "deflate", ""}) {
+        for (String header : new String[] {"gzip;q=0", "gzip; q=0.0", "gzip;q=0, *", "*, gzip;q=0", "*;q=0", "br", "identity", "deflate", ""}) {
             var ex = exchange(header);
             HttpUtil.send(ex, 200, body);
             assertThat(ex.responseHeaders.containsKey("Content-Encoding")).as("Accept-Encoding: '%s'", header)
@@ -93,7 +93,7 @@ class HttpUtilGzipTest {
     @Test
     void gzipWithAQualityAndTheWildcardAreAccepted() throws Exception {
         String body = json(5_000);
-        for (String header : new String[] {"gzip;q=0.5", "br, gzip;q=1.0", "*", "GZIP"}) {
+        for (String header : new String[] {"gzip;q=0.5", "br, gzip;q=1.0", "*", "GZIP", "gzip, *;q=0", "*;q=0, gzip"}) {
             var ex = exchange(header);
             HttpUtil.send(ex, 200, body);
             assertThat(ex.responseHeaders.getFirst("Content-Encoding")).as("Accept-Encoding: '%s'", header)
