@@ -21,7 +21,7 @@ from nexus import embed_window
 from nexus.chunker import chunk_file, split_line_chunks_to_window, split_text_to_token_window
 from nexus.corpus import CANONICAL_EMBEDDING_MODELS
 from nexus.db.local_ef import LOCAL_EMBEDDING_TOKENS
-from nexus.embed_window import MODEL_MAX_TOKENS, TokenWindow, window_for_model
+from nexus.embed_window import MODEL_MAX_TOKENS, TokenWindow, window_for_collection, window_for_model
 from nexus.md_chunker import SemanticMarkdownChunker
 from nexus.pdf_chunker import PDFChunker
 
@@ -85,6 +85,41 @@ def test_the_fastembed_name_resolves_to_the_same_window(tmp_path, monkeypatch) -
     monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(tmp_path))
     w = window_for_model("BAAI/bge-base-en-v1.5")
     assert w is not None and w.max_tokens == 512
+
+
+# ── RDR-224 guest walk: the window follows the collection, not the Python EF ─
+
+def test_the_window_follows_the_collection_name_token_not_the_python_ef(
+    tmp_path, monkeypatch
+) -> None:
+    """On a service-backed local install `nx init` provisions bge-768 for the
+    engine, while the Python EF (no fastembed extra) reports MiniLM. Indexing
+    passed that MiniLM name to the window lookup, so every index run warned
+    about a missing MiniLM tokenizer at a Chroma-era path and checked chunks
+    against a window the engine does not embed with. The collection name
+    carries the model the engine really uses."""
+    _synthetic_tokenizer(tmp_path / "tokenizer.json")
+    monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(tmp_path))
+    monkeypatch.setenv("NX_MINILM_CACHE_DIR", str(tmp_path / "no-chroma-cache"))
+    with capture_logs() as logs:
+        w = window_for_collection("code__repo-1-1__bge-base-en-v15-768__v1", "all-MiniLM-L6-v2")
+    assert w is not None and w.max_tokens == 512
+    assert not [e for e in logs if e.get("event") == "embed_window_tokenizer_missing"], logs
+
+
+def test_a_voyage_collection_name_needs_no_window_whatever_the_ef_says() -> None:
+    assert window_for_collection(
+        "docs__repo-1-1__voyage-context-3__v1", "all-MiniLM-L6-v2"
+    ) is None
+
+
+def test_a_non_conformant_collection_falls_back_to_the_given_model(tmp_path, monkeypatch) -> None:
+    """A legacy two-segment name carries no token to read."""
+    _synthetic_tokenizer(tmp_path / "tokenizer.json")
+    monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(tmp_path))
+    w = window_for_collection("code__legacy-abcd1234", "BAAI/bge-base-en-v1.5")
+    assert w is not None and w.max_tokens == 512
+    assert window_for_collection("", "voyage-code-3") is None
 
 
 def test_a_missing_tokenizer_warns_naming_the_path_and_gets_no_window(tmp_path, monkeypatch) -> None:
@@ -159,10 +194,10 @@ def test_line_chunks_fit_the_window(window) -> None:
 # ── wiring ───────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(("path", "needle"), [
-    ("src/nexus/code_indexer.py", "token_window=window_for_model(ctx.embedding_model)"),
-    ("src/nexus/prose_indexer.py", "window_for_model(ctx.embedding_model)"),
+    ("src/nexus/code_indexer.py", "token_window=window_for_collection(ctx.corpus, ctx.embedding_model)"),
+    ("src/nexus/prose_indexer.py", "window_for_collection(ctx.corpus, ctx.embedding_model)"),
     ("src/nexus/doc_indexer.py", "window_for_model(target_model)"),
-    ("src/nexus/pipeline_stages.py", "token_window=window_for_model(target_model)"),
+    ("src/nexus/pipeline_stages.py", "token_window=window_for_collection(corpus, target_model)"),
 ])
 def test_every_indexer_chunks_to_its_models_window(path, needle) -> None:
     """Wiring pin: a chunk site that stops passing the window goes back to
