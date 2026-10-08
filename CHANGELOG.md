@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.74.1] - 2026-10-08
+
+Pairs with engine-service-v0.1.151, unchanged from 7.74.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.151); a client-only patch. Search and query against the managed service were slow because the vector client opened a new TCP and TLS connection for every request; this release reuses connections and removes work `query` never used. The larger server-side fixes (search returning vectors, gzip, a faster `stats` view) ship with the next engine tag and the client release that pins it.
+
 ### Fixed
 
 - **`nx uninstall --yes --remove-data` leaves less behind** (nexus-25wlq, RDR-224). The engine's DJL tokenizer cache now lives under `~/.cache/nexus/djl` (the engine is started with `DJL_CACHE_DIR` there unless you set one), so the model-cache removal takes it; a `~/.djl.ai` from an earlier release is named in the report and kept, because other Java programs share it. On Windows the last engine run's `onnxruntime-java<digits>` folders under `TMP` (else `TEMP`) are removed after a confirmed stop, by the engine's own sweep rules and a narrower name match. A clean Windows 11 walk found 24 MB left over from these two.
