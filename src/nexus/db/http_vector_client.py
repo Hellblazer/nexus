@@ -467,39 +467,43 @@ def _enable_tcp_keepalive(sock: Any) -> None:
             continue
 
 
+def _on_connect_enable_keepalive(sock: Any) -> None:
+    """Connect hook for the pooled transport. A module-level function that looks
+    :func:`_enable_tcp_keepalive` up at call time, so the pooled handler classes
+    are built once and a patched ``_enable_tcp_keepalive`` is still honoured."""
+    _enable_tcp_keepalive(sock)
+
+
 def _keepalive_opener() -> Any:
-    """A urllib opener whose connections carry :func:`_enable_tcp_keepalive`.
+    """A urllib opener over the process-wide persistent-connection pool, whose
+    NEW connections carry :func:`_enable_tcp_keepalive` (nexus-qjjlz).
 
-    urllib offers no socket-options hook, so the connection classes are
-    subclassed to set the options immediately after ``connect()``. Built
-    fresh per call: openers are cheap, and caching one would pin the
-    endpoint/proxy resolution that ``_resolve_endpoint`` may change between
-    requests (RDR-149 lease rotation).
+    urllib offers neither a socket-options hook nor connection reuse (its
+    ``do_open`` forces ``Connection: close``), so :mod:`nexus.db.pooled_http`
+    replaces that one step. The OPENER is still built per call: it carries the
+    ``ProxyHandler``, which reads the proxy environment fresh each time, and
+    the pool is keyed by the endpoint ``_resolve_endpoint`` resolved for THIS
+    request, so lease rotation (RDR-149) changes the key instead of pinning
+    anything. ``Connection: close`` was never what the name meant: the
+    "keepalive" here is the TCP socket option, not HTTP keep-alive.
     """
-    import http.client  # noqa: PLC0415 — deferred import — branch-local
-    import urllib.request  # noqa: PLC0415 — deferred import — branch-local
+    from nexus.db.pooled_http import build_opener  # noqa: PLC0415 — deferred import — keeps module load light
 
-    class _KeepAliveHTTPConnection(http.client.HTTPConnection):
-        def connect(self) -> None:
-            super().connect()
-            _enable_tcp_keepalive(self.sock)
+    return build_opener(_on_connect_enable_keepalive)
 
-    class _KeepAliveHTTPSConnection(http.client.HTTPSConnection):
-        def connect(self) -> None:
-            super().connect()
-            _enable_tcp_keepalive(self.sock)
 
-    class _KeepAliveHTTPHandler(urllib.request.HTTPHandler):
-        def http_open(self, req: Any) -> Any:
-            return self.do_open(_KeepAliveHTTPConnection, req)
+def reset_connection_pool_for_tests() -> None:
+    """Test helper: close every pooled connection."""
+    from nexus.db.pooled_http import reset_pool  # noqa: PLC0415 — deferred import
 
-    class _KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
-        def https_open(self, req: Any) -> Any:
-            return self.do_open(_KeepAliveHTTPSConnection, req)
+    reset_pool()
 
-    return urllib.request.build_opener(
-        _KeepAliveHTTPHandler, _KeepAliveHTTPSHandler,
-    )
+
+def connection_pool_idle_count() -> int:
+    """Idle pooled connections across all endpoints (tests, diagnostics)."""
+    from nexus.db.pooled_http import idle_connection_count  # noqa: PLC0415 — deferred import
+
+    return idle_connection_count()
 
 
 #: RDR-204 Phase 3 item 5 (nexus-ft04v.26): last successful response's
@@ -624,6 +628,9 @@ def _request_once(
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
+        # nexus-qjjlz: the pooled transport decodes gzip; an engine that does
+        # not compress yet ignores this.
+        "Accept-Encoding": "gzip",
         # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's
         # ownerless-write log; absent on a client older than this release.
         **client_identity_headers(),
