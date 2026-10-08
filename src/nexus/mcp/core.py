@@ -53,6 +53,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
+    _COLLECTIONS_CACHE_TTL,
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
     get_collection_counts as _get_collection_counts,
@@ -5561,7 +5562,7 @@ def store_put(
         # nexus-rbhci review finding: a collection whose count just crossed
         # _FANOUT_MIN_COLLECTION_CHUNK_COUNT (or a brand-new collection)
         # must be visible to the default fan-out immediately, not up to
-        # _COLLECTIONS_CACHE_TTL seconds later.
+        # _COLLECTION_COUNTS_TTL seconds later.
         _invalidate_collections_cache()
         # Auto-link from T1 scratch link-context.
         # nexus-a414: replace prior bare-except with named-exception capture
@@ -6333,7 +6334,9 @@ def store_list(
         # lists the subjects rather than paging one collection's entries.
         scope = _read_scope(t3, collection)
         if len(scope) > 1:
-            counts = _get_collection_counts()
+            # The sizes are printed, so keep the 60 s freshness they always had; only the
+            # fan-out floor tolerates the 15 minute counts window.
+            counts = _get_collection_counts(max_age=_COLLECTIONS_CACHE_TTL)
             lines = [
                 f"{len(scope)} knowledge collections "
                 "(pass one as collection= to list its entries):"
