@@ -1424,25 +1424,30 @@ public final class PgVectorRepository {
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours. First, so the
-            // GUC round trips below run under its network bound too (nexus-u9zkn).
-            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
+        // nexus-wym0l: the tenant stamp and every serving setting below travel in ONE statement, applied by
+        // withTenant before the work runs (and so before the router probe and the search, which depend on
+        // them). They were seven round trips per arm. The pairing and the order of the settings are the ones
+        // HnswServingGucParityTest pins; this block only changes how they reach Postgres.
+        return tenantScope.withTenant(tenant, gucs -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological scan cancels (57014) instead
+            // of pinning xmin for hours. First, so the network bound set with it covers what follows
+            // (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(gucs, statementTimeoutMs.getAsInt());
             // Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS +
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            gucs.set("hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: widen the traversal's candidate list too — iterative scan
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
-            PgSession.setHnswEfSearch(ctx, nResults);
+            PgSession.setHnswEfSearch(gucs, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
-            PgSession.setHnswScanBudget(ctx);
+            PgSession.setHnswScanBudget(gucs);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
-            PgSession.setSearchPlanCacheMode(ctx);
+            PgSession.setSearchPlanCacheMode(gucs);
+        }, ctx -> {
             // nexus-tu8wp.6: the cardinality router. The threshold 0 disables it, and no probe runs.
             long startNanos = System.nanoTime();
             int exactMaxRows = PgSession.searchExactMaxRows();
@@ -1844,14 +1849,58 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Connections the fan-out arm gate leaves to everything that is not a fan-out arm: {@code /health}, writes,
+     * plain search, the request thread's own lookups (nexus-wym0l). The arm cap is never above
+     * {@code poolSize - FANOUT_ARM_POOL_HEADROOM}, so a deployment that raises the pool, or sets
+     * {@code NX_SEARCH_FANOUT_ARM_PERMITS} high, cannot hand every connection to the arms.
+     */
+    static final int FANOUT_ARM_POOL_HEADROOM = 2;
+
+    /** The most arm permits a pool of {@code poolSize} allows: {@code max(1, poolSize - headroom)}. */
+    static int fanoutArmPermitCeiling(int poolSize) {
+        return Math.max(1, poolSize - FANOUT_ARM_POOL_HEADROOM);
+    }
+
+    /**
      * Resolve the cross-request cap on fan-out arms in flight: {@code NX_SEARCH_FANOUT_ARM_PERMITS}
-     * when it is a positive integer, else {@code max(1, poolSize / 2)}, never above the pool size.
-     * Half the pool by default leaves at least the other half for {@code /health}, writes and plain
-     * search however many fan-out requests are running.
+     * when it is a positive integer, else {@code max(1, poolSize / 2)}, in both cases never above
+     * {@link #fanoutArmPermitCeiling} ({@code max(1, poolSize - 2)}). The default is half the pool, which
+     * leaves at least the other half for {@code /health}, writes and plain search however many fan-out
+     * requests are running; the ceiling is what an override or a different default is held to, so the cap
+     * follows the pool instead of a number that was right for one pool size.
      */
     static int fanoutArmPermits(String raw, int poolSize) {
         int dflt = Math.max(1, poolSize / 2);
-        return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt), poolSize));
+        return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt),
+                                    fanoutArmPermitCeiling(poolSize)));
+    }
+
+    /**
+     * Resolve the arm permit count once at boot, create the cross-request gate with it, and log it (nexus-wym0l).
+     * The gate is built by the first request that reaches it with whatever the environment says then; creating
+     * it here makes the logged value the one the process runs with. A configured value above the pool's ceiling
+     * is clamped and logged at WARN, naming both, so a clamp is never silent.
+     *
+     * @return the effective number of arm permits
+     */
+    public int startupFanoutArmPermits() {
+        int pool = tenantScope.poolSize();
+        String raw = System.getenv(FANOUT_ARM_PERMITS_ENV);
+        int dflt = Math.max(1, pool / 2);
+        int ceiling = fanoutArmPermitCeiling(pool);
+        int configured = positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt);
+        int effective = fanoutArmPermits(raw, pool);
+        tenantScope.fanoutArmGate(effective);
+        log.info("event=search_fanout_arm_permits effective={} pool_size={} default={} ceiling={} "
+                 + "configured={} source={}",
+                 effective, pool, dflt, ceiling, configured,
+                 raw == null || raw.isBlank() ? "default" : FANOUT_ARM_PERMITS_ENV);
+        if (configured > ceiling) {
+            log.warn("event=search_fanout_arm_permits_clamped configured={} effective={} pool_size={} "
+                     + "headroom={} name={}",
+                     configured, effective, pool, FANOUT_ARM_POOL_HEADROOM, FANOUT_ARM_PERMITS_ENV);
+        }
+        return effective;
     }
 
     /**

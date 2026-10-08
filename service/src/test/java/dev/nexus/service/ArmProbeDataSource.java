@@ -52,6 +52,14 @@ final class ArmProbeDataSource {
     volatile long borrowDelayMs = 0L;
     /** Every statement_timeout value an arm connection was given, in the order it was set. */
     final List<Integer> statementTimeouts = new CopyOnWriteArrayList<>();
+    /**
+     * The SQL text of every statement an arm connection executed, in execution order across all arms
+     * (nexus-wym0l). Each entry is one client-to-server round trip; the implicit BEGIN of
+     * {@code autoCommit=false} travels with the first statement and is not a separate entry.
+     */
+    final List<String> armStatements = new CopyOnWriteArrayList<>();
+    /** Commits issued on arm connections: one more round trip each. */
+    final AtomicInteger armCommits = new AtomicInteger();
 
     private final DataSource delegate;
     private final DataSource proxy;
@@ -76,6 +84,8 @@ final class ArmProbeDataSource {
         borrowDelayMs = 0L;
         failure = () -> new SQLException("probe failure");
         statementTimeouts.clear();
+        armStatements.clear();
+        armCommits.set(0);
     }
 
     private static boolean inArm() {
@@ -114,17 +124,24 @@ final class ArmProbeDataSource {
                 }
             }
             Object out = invoke(real, cm, cargs);
+            if (cm.getName().equals("commit")) {
+                armCommits.incrementAndGet();
+            }
             if (cm.getName().equals("prepareStatement") && cargs != null && cargs.length > 0
-                    && cargs[0] instanceof String sql && sql.contains("set_config")) {
-                return spy((PreparedStatement) out);
+                    && cargs[0] instanceof String sql) {
+                return spy((PreparedStatement) out, sql);
             }
             return out;
         };
         return Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[] {Connection.class}, h);
     }
 
-    /** Watches one {@code set_config(?, ?, true)} statement: records the value bound for statement_timeout. */
-    private PreparedStatement spy(PreparedStatement real) {
+    /**
+     * Watches one prepared statement: records its SQL on execute, and for a {@code set_config(?, ?, true)}
+     * statement (one call or several in one SELECT) records the value bound for every
+     * {@code statement_timeout} name/value pair, in parameter order.
+     */
+    private PreparedStatement spy(PreparedStatement real, String sql) {
         Map<Integer, Object> bound = new HashMap<>();
         InvocationHandler h = (p, m, a) -> {
             String name = m.getName();
@@ -132,9 +149,16 @@ final class ArmProbeDataSource {
                     && a[0] instanceof Integer idx) {
                 bound.put(idx, a[1]);
             }
-            if (name.startsWith("execute") && "statement_timeout".equals(String.valueOf(bound.get(1)))
-                    && bound.get(2) != null) {
-                statementTimeouts.add(Integer.parseInt(String.valueOf(bound.get(2))));
+            if (name.startsWith("execute")) {
+                armStatements.add(sql);
+                if (sql.contains("set_config")) {
+                    for (var e : bound.entrySet()) {
+                        if ("statement_timeout".equals(String.valueOf(e.getValue()))
+                                && bound.get(e.getKey() + 1) != null) {
+                            statementTimeouts.add(Integer.parseInt(String.valueOf(bound.get(e.getKey() + 1))));
+                        }
+                    }
+                }
             }
             return invoke(real, m, a);
         };

@@ -76,7 +76,7 @@ class TenantScopeGucAllowlistTest {
     @Test
     void nullAndBlankGucNamesStillRejected() {
         assertThrows(IllegalArgumentException.class,
-                () -> scope.withTenant("tenant-a", null, dsl -> null));
+                () -> scope.withTenant("tenant-a", (String) null, dsl -> null));
         assertThrows(IllegalArgumentException.class,
                 () -> scope.withTenant("tenant-a", "  ", dsl -> null));
         assertEquals(0, ds.borrows.get());

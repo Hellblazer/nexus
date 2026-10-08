@@ -588,10 +588,13 @@ public final class PgSession {
      * cannot leave the fallback with no exact plan.
      */
     public static void disableIndexScanForExactFallback(DSLContext ctx) {
-        setLocal(ctx, "enable_indexscan", "off");
-        setLocal(ctx, "enable_bitmapscan", "on");
-        setLocal(ctx, "enable_seqscan", "on");
-        setLocal(ctx, "enable_sort", "on");
+        // One statement, not four (nexus-wym0l): the four settings are independent and run in this order.
+        new GucBatch(ctx)
+            .set("enable_indexscan", "off")
+            .set("enable_bitmapscan", "on")
+            .set("enable_seqscan", "on")
+            .set("enable_sort", "on")
+            .applyInTransaction();
     }
 
     /**
@@ -913,11 +916,7 @@ public final class PgSession {
      * @throws IllegalArgumentException on a non-whitelisted GUC
      */
     public static void setLocal(DSLContext ctx, String guc, String value) {
-        if (!ALLOWED_GUCS.contains(guc)) {
-            throw new IllegalArgumentException(
-                "GUC '" + guc + "' is not whitelisted for SET LOCAL (allowed: "
-                + ALLOWED_GUCS + ")");
-        }
+        requireAllowed(guc);
         // nexus-u9zkn: a statement bound and its network bound are set together here, before the
         // set_config round trip so that round trip is covered too.
         if ("statement_timeout".equals(guc)) {
@@ -926,5 +925,136 @@ public final class PgSession {
         ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
                 DSL.val(guc), DSL.val(value), DSL.inline(true)))
            .fetch();
+    }
+
+    private static void requireAllowed(String guc) {
+        if (!ALLOWED_GUCS.contains(guc)) {
+            throw new IllegalArgumentException(
+                "GUC '" + guc + "' is not whitelisted for SET LOCAL (allowed: "
+                + ALLOWED_GUCS + ")");
+        }
+    }
+
+    // ── batched settings (nexus-wym0l) ───────────────────────────────────────
+
+    /**
+     * A set of transaction-local GUC assignments that travel to Postgres as ONE statement,
+     * {@code SELECT set_config(a, ..., true), set_config(b, ..., true), ...} (nexus-wym0l).
+     *
+     * <p>Why: every {@link #setLocal} is a client-to-server round trip, and a search-per-collection arm
+     * used to send the tenant stamp and six serving settings as seven of them before its first real
+     * statement (T2 {@code nexus/search-latency-root-cause-2026-10-08}: 131 of 183 statements in a
+     * 13-collection request). Against a database one network hop away each costs that hop's RTT.
+     *
+     * <p>Semantics are exactly the unbatched ones. The assignments are the same {@code set_config(name,
+     * value, true)} calls with the same names and values, transaction-local, applied in the order added
+     * (the target list of a SELECT is evaluated left to right, and the settings are independent of each
+     * other), and the statement runs BEFORE the first statement that depends on them, because
+     * {@link TenantScope#withTenant(String, java.util.function.Consumer, java.util.function.Function)}
+     * applies the batch before it hands the caller its context. A setting that is rejected (a value Postgres
+     * refuses) fails the statement and so the transaction, as an unbatched one would.
+     *
+     * <p>The {@link #setSearchStatementTimeout}, {@link #setHnswEfSearch}, {@link #setHnswScanBudget} and
+     * {@link #setSearchPlanCacheMode} overloads that take a batch add what the {@code DSLContext} forms
+     * set; {@code HnswServingGucParityTest} counts those calls by name, so the pairing is checked at every
+     * site whichever form it uses.
+     */
+    public static final class GucBatch {
+        private final DSLContext ctx;
+        private final java.util.List<org.jooq.Field<String>> calls = new java.util.ArrayList<>();
+        private Long statementTimeoutMs;
+
+        GucBatch(DSLContext ctx) {
+            this.ctx = ctx;
+        }
+
+        /** Add {@code set_config(guc, value, true)}; the name must be whitelisted. */
+        public GucBatch set(String guc, String value) {
+            requireAllowed(guc);
+            if ("statement_timeout".equals(guc)) {
+                statementTimeoutMs = Long.parseLong(value);
+            }
+            add(guc, value);
+            return this;
+        }
+
+        /** The tenant stamp: names outside {@link #ALLOWED_GUCS}, validated by {@code TenantScope}. */
+        GucBatch stamp(String gucName, String tenant) {
+            add(gucName, tenant);
+            return this;
+        }
+
+        private void add(String guc, String value) {
+            calls.add(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(guc), DSL.val(value), DSL.inline(true)));
+        }
+
+        /** The context the batch will run on; the scan budget is resolved through it when not yet known. */
+        DSLContext ctx() {
+            return ctx;
+        }
+
+        /**
+         * Send the batch as one statement, with the network bounds of the unbatched sequence: the statement
+         * runs under the tenant stamp's bound (it is the first read of the borrow, before any path has a
+         * statement bound), and afterwards the connection is bound to {@code statement_timeout} plus the
+         * margin when the batch set one, else put back to no bound. A batch with no calls sends nothing.
+         */
+        void apply(java.sql.Connection conn) {
+            if (calls.isEmpty()) {
+                return;
+            }
+            bindStampNetworkTimeout(conn, true);
+            ctx.select(calls).fetch();
+            if (statementTimeoutMs != null) {
+                bindNetworkTimeout(ctx, statementTimeoutMs);
+            } else {
+                bindStampNetworkTimeout(conn, false);
+            }
+        }
+
+        /**
+         * Send the batch as one statement mid-transaction, when the borrow's stamp and bounds are already
+         * in place (the exact route's settings, which follow the router probe).
+         */
+        void applyInTransaction() {
+            if (calls.isEmpty()) {
+                return;
+            }
+            if (statementTimeoutMs != null) {
+                bindNetworkTimeout(ctx, statementTimeoutMs);
+            }
+            ctx.select(calls).fetch();
+        }
+    }
+
+    /** A new, empty batch on {@code ctx}'s transaction. */
+    public static GucBatch gucBatch(DSLContext ctx) {
+        return new GucBatch(ctx);
+    }
+
+    /** {@link #setSearchStatementTimeout(DSLContext, int)} for a batch. */
+    public static void setSearchStatementTimeout(GucBatch batch, int timeoutMs) {
+        batch.set("statement_timeout", Integer.toString(timeoutMs));
+    }
+
+    /** {@link #setHnswEfSearch(DSLContext, int)} for a batch. */
+    public static void setHnswEfSearch(GucBatch batch, int nResults) {
+        batch.set("hnsw.ef_search", Integer.toString(efSearchFor(nResults)));
+    }
+
+    /** {@link #setHnswScanBudget(DSLContext)} for a batch. */
+    public static void setHnswScanBudget(GucBatch batch) {
+        ScanBudget b = scanBudget;
+        if (b == null) {
+            b = startupScanBudget(batch.ctx());
+        }
+        batch.set("hnsw.max_scan_tuples", Integer.toString(b.maxScanTuples()));
+        batch.set("hnsw.scan_mem_multiplier", Integer.toString(b.memMultiplier()));
+    }
+
+    /** {@link #setSearchPlanCacheMode(DSLContext)} for a batch. */
+    public static void setSearchPlanCacheMode(GucBatch batch) {
+        batch.set("plan_cache_mode", "force_custom_plan");
     }
 }
