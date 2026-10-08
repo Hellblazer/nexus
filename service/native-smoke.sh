@@ -220,7 +220,7 @@ else
   echo "  FAIL gzip: no Content-Encoding: gzip, or the body does not decode to the stored note"; head -12 "$SMOKE_TMP/gz.hdr"; fail=1
 fi
 if grep -q 'gzip_response_unavailable' "$SMOKE_TMP/svc.log"; then
-  echo "  FAIL gzip fell back to identity in the native image:"; grep gzip_response_unavailable "$SMOKE_TMP/svc.log" | head -3; fail=1
+  echo "  FAIL gzip fell back to identity in the native image:"; grep -m 3 gzip_response_unavailable "$SMOKE_TMP/svc.log"; fail=1
 fi
 
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
