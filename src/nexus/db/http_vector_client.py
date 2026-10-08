@@ -27,6 +27,9 @@ CHUNKING STAYS PYTHON per the bead relay).
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import gzip
 import hashlib
 import json
 import math
@@ -612,6 +615,14 @@ def _is_non_replayable_path(path: str) -> bool:
     )
 
 
+def _response_body(resp: Any) -> bytes:
+    """The body bytes of *resp* (a 2xx response or an ``HTTPError``), gunzipped when the engine
+    compressed it (``Content-Encoding: gzip``, nexus-tjyzn). Identity bodies pass through."""
+    raw = resp.read()
+    encoding = (resp.headers.get("Content-Encoding") or "").strip().lower() if resp.headers else ""
+    return gzip.decompress(raw) if encoding == "gzip" else raw
+
+
 def _request_once(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -639,8 +650,9 @@ def _request_once(
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
-        # nexus-qjjlz: the pooled transport decodes gzip; an engine that does
-        # not compress yet ignores this.
+        # nexus-qjjlz / nexus-tjyzn: the pooled transport decodes gzip, and the engine gzips a
+        # response of 1 KiB or more for a client that asks. Additive: an engine that predates it
+        # ignores the header.
         "Accept-Encoding": "gzip",
         # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's
         # ownerless-write log; absent on a client older than this release.
@@ -682,7 +694,7 @@ def _request_once(
             # this is a thread-local capture rather than a new parameter.
             _stash_response_headers(resp.headers)
             _note_data_token_response(base_url, tenant, resp.status)
-            return json.loads(resp.read())
+            return json.loads(_response_body(resp))
     except urllib.error.HTTPError as exc:
         # nexus-umue1: clear the futility flag on any non-401 HTTPError too
         # (e.g. a 404) -- this is the ONLY point that sees status codes
@@ -1702,7 +1714,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     try:
         return _request("POST", path, tenant=tenant, timeout=timeout, body=body)
     except urllib.error.HTTPError as e:
-        body_bytes = e.read()
+        body_bytes = _response_body(e)
         try:
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
@@ -1825,7 +1837,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
     try:
         return _request("GET", path, tenant=tenant, timeout=30, body=None)
     except urllib.error.HTTPError as e:
-        body_bytes = e.read()
+        body_bytes = _response_body(e)
         try:
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
@@ -1987,6 +1999,48 @@ def _unpack_rerank_envelope(results: Any, rerank_meta_out: dict | None) -> Any:
     if rerank_meta_out is not None:
         rerank_meta_out.update(meta)
     return results
+
+
+#: The engine's ``embedding_encoding`` for the ``embedding_b64`` row field of ``include_embeddings``
+#: (nexus-92q1p): base64 of the vector's components as little-endian IEEE 754 binary32.
+_EMBEDDING_ENCODING = "f32-le-b64"
+
+
+def _take_embeddings(envelope: dict, payload: Any) -> None:
+    """Move the ``embedding_b64`` field of the envelope's result rows into
+    ``envelope["result_embeddings"]`` (nexus-92q1p, see
+    :meth:`HttpVectorClient.search_per_collection`).
+
+    The field is removed from EVERY row whether or not it is used: a row's
+    keys other than ``id``/``content``/``distance`` become result metadata
+    downstream, and a 1024-dim vector must not be one of them. The decoded
+    list is built only when the engine echoed ``embedding_encoding`` as
+    :data:`_EMBEDDING_ENCODING` and a positive integer ``embedding_dim``;
+    without that echo the field (which an engine that predates it never
+    sends) is dropped and the envelope is left as it was. A row whose
+    ``embedding_b64`` is not valid base64 or is not ``dim * 4`` bytes gets
+    ``None``: that row, not the whole answer, is fetched by id.
+    """
+    rows = envelope["results"]
+    encoded = [row.pop("embedding_b64", None) if isinstance(row, dict) else None for row in rows]
+    if not isinstance(payload, dict) or payload.get("embedding_encoding") != _EMBEDDING_ENCODING:
+        return
+    dim = payload.get("embedding_dim")
+    if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+        return
+    decoded: list[bytes | None] = []
+    for b64 in encoded:
+        raw: bytes | None = None
+        if isinstance(b64, str):
+            try:
+                candidate = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError):
+                candidate = b""
+            if len(candidate) == dim * 4:
+                raw = candidate
+        decoded.append(raw)
+    envelope["embedding_dim"] = dim
+    envelope["result_embeddings"] = decoded
 
 
 class VectorServiceError(RuntimeError):
@@ -2488,7 +2542,7 @@ def is_live_collection_row(row: Any) -> bool:
     return row.get("lifecycle_state", "live") == "live"
 
 
-def live_collection_rows(t3: Any) -> list[dict]:
+def live_collection_rows(t3: Any, *, routing: bool = False) -> list[dict]:
     """Routing-side listing over any T3 handle (nexus-bc7ps).
 
     A real :class:`HttpVectorClient` asks the engine for ``lifecycle_state=live``
@@ -2498,9 +2552,15 @@ def live_collection_rows(t3: Any) -> list[dict]:
     Routing modules call this, never the bare ``list_collections()``, so a
     ``quarantine-<name>`` row cannot reach a name parser through them; the lint in
     ``tests/test_bc7ps_routing_uses_live_listing.py`` pins that.
+
+    ``routing=True`` (nexus-mz9jv) is for a caller that reads names and registry
+    attributes and never a size: a real client then returns rows without
+    ``count``/``stored_count``/``dim``/``last_write`` from the catalog-only
+    listing (see :meth:`HttpVectorClient.list_collections`). A caller with a size
+    floor, taxonomy discovery, leaves it off and keeps the counts.
     """
     if isinstance(t3, HttpVectorClient):
-        return t3.list_live_collections()
+        return t3.list_live_collections(routing=True) if routing else t3.list_live_collections()
     return [row for row in t3.list_collections() if is_live_collection_row(row)]
 
 
@@ -3541,6 +3601,7 @@ class HttpVectorClient:
         thresholds: dict[str, float | None] | None = None,
         where: dict | None = None,
         include_source_uri: bool = False,
+        include_embeddings: bool = False,
         rerank: bool = False,
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
@@ -3586,6 +3647,20 @@ class HttpVectorClient:
 
         ``rerank`` follows :meth:`search`: the degrade state lands in
         *rerank_meta_out*, once for the whole request.
+
+        *include_embeddings* (nexus-92q1p) asks the engine for each surviving
+        row's stored vector, read once after the merge, so a caller that needs
+        the vectors (the contradiction check, semantic clustering) makes no
+        ``get-embeddings`` round trip per collection afterward. The rows come
+        back with ``embedding_b64`` (base64 of little-endian float32), which
+        this method DECODES and REMOVES from the rows, so a vector never lands
+        in a result's metadata: the envelope then carries ``"embedding_dim"``
+        and ``"result_embeddings"``, a list aligned with ``"results"`` whose
+        entries are the raw little-endian float32 bytes of that row's vector
+        (``dim * 4`` bytes) or ``None`` for a row the engine returned none for.
+        Both keys are ABSENT when the engine did not answer with the
+        ``embedding_encoding`` / ``embedding_dim`` echo (an engine that predates
+        the field ignores it); the caller then fetches by id as before.
         """
         if self._per_collection_written_off():
             return None
@@ -3606,6 +3681,8 @@ class HttpVectorClient:
             body["where"] = where
         if include_source_uri:
             body["include_source_uri"] = True
+        if include_embeddings:
+            body["include_embeddings"] = True
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -3694,6 +3771,7 @@ class HttpVectorClient:
         self._per_collection_confirmed = True
         if rerank:
             envelope["results"] = _unpack_rerank_envelope(payload, rerank_meta_out)
+        _take_embeddings(envelope, payload)
         return envelope
 
     @staticmethod
@@ -4121,7 +4199,9 @@ class HttpVectorClient:
             )
         return _post("/v1/vectors/resolve", body, tenant=self._tenant)
 
-    def collection_stats(self, lifecycle_state: str | None = None) -> list[dict]:
+    def collection_stats(
+        self, lifecycle_state: str | None = None, *, routing: bool = False,
+    ) -> list[dict]:
         """Per-collection live statistics via ``GET /v1/vectors/stats``.
 
         ``lifecycle_state`` (nexus-bc7ps) is passed through as the route's
@@ -4156,9 +4236,15 @@ class HttpVectorClient:
         back automatically.
         """
         path = "/v1/vectors/stats"
+        query: dict[str, str] = {}
+        if routing:
+            # nexus-mz9jv: the catalog-only listing; see :meth:`list_collections`.
+            query["fields"] = "routing"
         if lifecycle_state:
+            query["lifecycle_state"] = lifecycle_state
+        if query:
             from urllib.parse import urlencode  # noqa: PLC0415 — one call site
-            path = f"{path}?{urlencode({'lifecycle_state': lifecycle_state})}"
+            path = f"{path}?{urlencode(query)}"
         result = _get(path, tenant=self._tenant)
         return result if isinstance(result, list) else []
 
@@ -4514,9 +4600,24 @@ class HttpVectorClient:
     )
 
     def list_collections(
-        self, lifecycle_state: str | None = None, *, strict: bool = False,
+        self, lifecycle_state: str | None = None, *, strict: bool = False, routing: bool = False,
     ) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
+
+        ``routing`` (nexus-mz9jv) asks for the ROUTING listing instead: the same
+        collections (those that physically hold a chunk), the same
+        ``lifecycle_state`` filter, with only the name and the catalog attributes
+        a router reads (``content_type``, ``owner_id``, ``embedding_model``,
+        ``lifecycle_state``, ``superseded_by``), via
+        ``GET /v1/vectors/stats?fields=routing``. A router (corpus resolution, sibling
+        lookup, the collection-row cache) never reads a size, and the full listing
+        makes the engine count every collection's live chunks (100 to 560 ms at a
+        75,000-chunk tenant, 3.5 s measured on the managed service) where the routing
+        one reads the catalog alone (under a millisecond measured). The rows then
+        carry NO ``count``, ``stored_count``, ``dim`` or ``last_write``; a caller that
+        needs one does not pass ``routing``. An engine that predates the parameter
+        ignores it and answers with the full rows, which come back complete (counts
+        included), so the result is right either way and no second request is made.
 
         ``lifecycle_state`` (nexus-bc7ps): ``None`` is the full inventory, the
         right view for doctor, gc, backfill and export; a state name is an
@@ -4569,7 +4670,7 @@ class HttpVectorClient:
         failure.
         """
         try:
-            stats = self.collection_stats(lifecycle_state)
+            stats = self.collection_stats(lifecycle_state, routing=routing)
         except VectorServiceError as e:
             if e.code != 404:
                 if strict:
@@ -4581,21 +4682,7 @@ class HttpVectorClient:
             # row it can name is treated as live (absent state = live, the
             # same reading is_live_collection_row applies to the joined route).
             return self._list_collections_via_count()
-        merged: dict[str, dict] = {}
-        for row in stats:
-            name = row.get("name", "")
-            if not name:
-                continue
-            entry = merged.setdefault(name, {"name": name, "count": 0, "stored_count": 0})
-            # `or 0` guards an explicit null count, not just an absent key
-            entry["count"] += int(row.get("count") or 0)
-            # A row from an engine older than the RDR-192 Step 5 amendment has
-            # no stored_count; its single count then stands for both.
-            entry["stored_count"] += int(row.get("stored_count", row.get("count")) or 0)
-            for key in self._STATS_CATALOG_ATTR_KEYS:
-                if key in row and key not in entry:
-                    entry[key] = row[key]
-        rows = [merged[n] for n in sorted(merged)]
+        rows = self._merge_stats_rows(stats)
         # nexus-7l3zo: this IS the listing seam every CLI verb goes through,
         # so prime the process's collection-row cache here, once, with the
         # response just fetched. Before this only search_cmd primed it, and
@@ -4616,7 +4703,41 @@ class HttpVectorClient:
             prime_collections_cache(rows)
         return rows
 
-    def list_live_collections(self) -> list[dict]:
+    def _merge_stats_rows(self, stats: list[dict]) -> list[dict]:
+        """One entry per collection name from ``/v1/vectors/stats`` rows (the
+        full form: one row per ``(collection, dim)``), counts summed, the first
+        row's catalog attributes kept, name ascending. The tail of
+        :meth:`list_collections`.
+
+        A ROUTING row (``fields=routing``, nexus-mz9jv: a name and catalog
+        attributes, no ``count`` or ``dim``) is one per collection already and
+        stays without counts: a count of 0 invented here would read as "empty".
+        A listing is the routing form when none of its rows has a ``count`` or
+        a ``dim``; an engine that ignored the request answered the full form.
+        """
+        routing_form = bool(stats) and not any(
+            isinstance(r, dict) and ("count" in r or "dim" in r) for r in stats
+        )
+        merged: dict[str, dict] = {}
+        for row in stats:
+            name = row.get("name", "")
+            if not name:
+                continue
+            if routing_form:
+                entry = merged.setdefault(name, {"name": name})
+            else:
+                entry = merged.setdefault(name, {"name": name, "count": 0, "stored_count": 0})
+                # `or 0` guards an explicit null count, not just an absent key
+                entry["count"] += int(row.get("count") or 0)
+                # A row from an engine older than the RDR-192 Step 5 amendment has
+                # no stored_count; its single count then stands for both.
+                entry["stored_count"] += int(row.get("stored_count", row.get("count")) or 0)
+            for key in self._STATS_CATALOG_ATTR_KEYS:
+                if key in row and key not in entry:
+                    entry[key] = row[key]
+        return [merged[n] for n in sorted(merged)]
+
+    def list_live_collections(self, *, routing: bool = False) -> list[dict]:
         """The ROUTING view of :meth:`list_collections` (nexus-bc7ps): rows
         whose ``lifecycle_state`` is live, so a ``quarantine-<name>`` sibling
         (or a dormant / disputed row) is never handed to a name parser, corpus
@@ -4630,7 +4751,11 @@ class HttpVectorClient:
         makes the pairing additive in the new-client / old-engine direction
         rather than a silent regression to pre-fix behaviour.
         """
-        rows = self.list_collections(lifecycle_state="live")
+        # ``routing`` (nexus-mz9jv) is for a caller that reads names and registry
+        # attributes only: it gets the catalog-only listing, without the live-chunk
+        # counts it would throw away. A caller that applies a size floor (taxonomy
+        # discovery) keeps the default and the counts.
+        rows = self.list_collections(lifecycle_state="live", routing=routing)
         return [row for row in rows if is_live_collection_row(row)]
 
     def _list_collections_via_count(self) -> list[dict]:

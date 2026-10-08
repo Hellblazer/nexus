@@ -212,7 +212,10 @@ class TombstoneFilterGateTest {
      * upsert flow, not a content-serving read.
      */
     private static final Map<String, List<String>> TYPED_CHUNKS_READ_METHODS = Map.of(
-        "PgVectorRepository.java", List.of("get", "getWhere", "getEmbeddings", "getAllMetadata", "list"));
+        // getEmbeddingsQuery (nexus-68bsx) is the statement getEmbeddings runs; getEmbeddings itself no longer
+        // touches DimTables.CHUNKS.get(dim), so the scan skips it as a thin delegate.
+        "PgVectorRepository.java",
+        List.of("get", "getWhere", "getEmbeddings", "getEmbeddingsQuery", "getAllMetadata", "list"));
 
     /** Marker for a typed {@code DimTables.ChunkTable} accessor assignment in the blanked source. */
     private static final String TYPED_CHUNK_TABLE_ACCESS = "DimTables.CHUNKS.get(dim)";
@@ -786,7 +789,7 @@ class TombstoneFilterGateTest {
 
     @Test
     void floor_typedChunksReadSites() throws IOException {
-        // 5 on the final tree: get, getWhere, getEmbeddings, getAllMetadata (nexus-8j1zx)
+        // 5 on the final tree: get, getWhere, getEmbeddingsQuery (getEmbeddings' statement, nexus-68bsx), getAllMetadata (nexus-8j1zx)
         // + list (nexus-txcbo) — the five typed DimTables.ChunkTable reads found reading
         // nexus.chunks_<dim> with zero tombstone filtering (structurally invisible to
         // both scanDocAndChunkSites and scanRawChunksSites). Their 5-arg delegating

@@ -216,6 +216,29 @@ public final class TenantScope {
      * @param work    function receiving a stamped {@link DSLContext}
      */
     public <T> T withTenant(String tenant, String gucName, Function<DSLContext, T> work) {
+        return withTenant(tenant, gucName, null, work);
+    }
+
+    /**
+     * {@link #withTenant(String, Function)} with transaction-local settings sent in the SAME statement as
+     * the tenant stamp (nexus-wym0l): {@code settings} adds the GUCs this borrow needs to a
+     * {@link PgSession.GucBatch}, and the stamp and the batch go to Postgres as one
+     * {@code SELECT set_config(...), set_config(...), ...} before {@code work} runs. That is one round trip
+     * where the stamp plus N {@code PgSession.setLocal} calls were N+1.
+     *
+     * <p>{@code settings} runs after admission and after the connection is borrowed, inside the
+     * transaction's scope, so a value computed there (a remaining time budget) is charged for queueing the
+     * way it was when it was computed after the stamp; if it throws, the transaction is rolled back and the
+     * connection returned like any {@code work} failure. The tenant is stamped first in the statement and
+     * the batch's settings follow in the order they were added.
+     */
+    public <T> T withTenant(String tenant, java.util.function.Consumer<PgSession.GucBatch> settings,
+                            Function<DSLContext, T> work) {
+        return withTenant(tenant, DEFAULT_TENANT_GUC, settings, work);
+    }
+
+    private <T> T withTenant(String tenant, String gucName, java.util.function.Consumer<PgSession.GucBatch> settings,
+                             Function<DSLContext, T> work) {
         if (tenant == null || tenant.isBlank()) {
             throw new IllegalArgumentException("tenant must not be null or blank");
         }
@@ -251,13 +274,15 @@ public final class TenantScope {
                     "admission queue full after " + admissionTimeoutMs + "ms (retryable)"));
         }
         try {
-            return stampAndRun(tenant, gucName, work);
+            return stampAndRun(tenant, gucName, settings, work);
         } finally {
             admission.release();
         }
     }
 
-    private <T> T stampAndRun(String tenant, String gucName, Function<DSLContext, T> work) {
+    private <T> T stampAndRun(String tenant, String gucName,
+                              java.util.function.Consumer<PgSession.GucBatch> settings,
+                              Function<DSLContext, T> work) {
         Connection conn = null;
         try {
             conn = dataSource.getConnection();
@@ -278,11 +303,14 @@ public final class TenantScope {
             // name is bound rather than concatenated).
             // nexus-u9zkn: the stamp is the first read of the borrow and runs before any path sets its
             // statement bound, so it gets its own network bound, removed again before the work runs.
-            PgSession.bindStampNetworkTimeout(conn, true);
-            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
-                    DSL.val(gucName), DSL.val(tenant), DSL.inline(true)))
-               .fetch();
-            PgSession.bindStampNetworkTimeout(conn, false);
+            // nexus-wym0l: the caller's own settings ride in the same statement as the stamp. The batch binds
+            // the stamp's network bound around that one statement, then the caller's statement bound when it
+            // set one, else none (see GucBatch#apply).
+            PgSession.GucBatch batch = PgSession.gucBatch(ctx).stamp(gucName, tenant);
+            if (settings != null) {
+                settings.accept(batch);
+            }
+            batch.apply(conn);
 
             T result = work.apply(ctx);
 

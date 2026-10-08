@@ -15,9 +15,95 @@ public final class HttpUtil {
 
     private HttpUtil() {}
 
+    /**
+     * Smallest response body, in bytes, the engine compresses (nexus-tjyzn). Below it gzip's 18-byte framing
+     * and the CPU cost buy nothing; a search response with a few rows is already past it.
+     */
+    static final int GZIP_MIN_BYTES = 1024;
+
+    /** True when the request's {@code Accept-Encoding} lists {@code gzip} (or {@code *}) with a non-zero quality. */
+    static boolean acceptsGzip(HttpExchange exchange) {
+        var values = exchange.getRequestHeaders().get("Accept-Encoding");
+        if (values == null) return false;
+        for (String line : values) {
+            for (String part : line.split(",")) {
+                String[] token = part.trim().split(";", 2);
+                String coding = token[0].trim();
+                if (!coding.equalsIgnoreCase("gzip") && !coding.equals("*")) continue;
+                if (token.length > 1) {
+                    String q = token[1].trim().toLowerCase(java.util.Locale.ROOT);
+                    if (q.startsWith("q=")) {
+                        try {
+                            if (Double.parseDouble(q.substring(2).trim()) <= 0.0) continue;
+                        } catch (NumberFormatException e) {
+                            continue;
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(HttpUtil.class);
+
+    /** The compression step, behind a seam so a test can make it fail. */
+    @FunctionalInterface
+    interface Gzipper {
+        byte[] gzip(byte[] bytes) throws IOException;
+    }
+
+    private static volatile Gzipper gzipper = HttpUtil::gzip;
+    private static final java.util.concurrent.atomic.AtomicBoolean GZIP_FAILURE_LOGGED =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Test seam: replace the compression step; {@code null} restores the real one. */
+    static void setGzipperForTests(Gzipper g) {
+        gzipper = g == null ? HttpUtil::gzip : g;
+        GZIP_FAILURE_LOGGED.set(false);
+    }
+
+    private static byte[] gzip(byte[] bytes) throws IOException {
+        var out = new java.io.ByteArrayOutputStream(bytes.length / 3 + 64);
+        try (var gz = new java.util.zip.GZIPOutputStream(out)) {
+            gz.write(bytes);
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * Send a JSON response. When the client sent {@code Accept-Encoding: gzip} and the body is at least
+     * {@link #GZIP_MIN_BYTES}, the body is gzip-compressed with {@code Content-Encoding: gzip} and
+     * {@code Vary: Accept-Encoding} (nexus-tjyzn: a search response carrying vectors is hundreds of KB of
+     * decimal digits that compress about 2.7 to 1, and over a long-RTT path that is whole round trips of
+     * transfer). A client that does not ask gets the identity body, byte for byte as before. The compressed
+     * length is known before the headers go, so {@code Content-Length} is exact and nothing is chunked.
+     */
     public static void send(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+        if (bytes.length >= GZIP_MIN_BYTES) {
+            // The body of an eligible response depends on the request's Accept-Encoding, so a cache must key on it.
+            exchange.getResponseHeaders().add("Vary", "Accept-Encoding");
+            if (acceptsGzip(exchange)) {
+                byte[] packed = null;
+                try {
+                    packed = gzipper.gzip(bytes);
+                } catch (IOException | LinkageError e) {
+                    // Compression is an optimisation. If it cannot run (an I/O failure in the stream, or in a
+                    // native image a java.util.zip class or native method that did not link), the client gets
+                    // the identity body, which every client accepts, instead of a failed request.
+                    if (GZIP_FAILURE_LOGGED.compareAndSet(false, true)) {
+                        log.warn("event=gzip_response_unavailable error=\"{}\" falling_back=identity", String.valueOf(e));
+                    }
+                }
+                if (packed != null && packed.length < bytes.length) {
+                    bytes = packed;
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                }
+            }
+        }
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);

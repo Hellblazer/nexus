@@ -1302,7 +1302,7 @@ def t3_collection_name(
             # nexus-bc7ps: --corpus resolution is routing; live rows only.
             matches = [
                 c["name"]
-                for c in live_collection_rows(t3)
+                for c in live_collection_rows(t3, routing=True)
                 if c["name"].startswith(f"{user_arg}__")
             ]
         except Exception:  # noqa: BLE001 — best-effort collection-listing probe; empty match list on any backend failure

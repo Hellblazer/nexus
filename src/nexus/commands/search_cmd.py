@@ -384,11 +384,24 @@ def search_cmd(
                 continue
             target_collections.append(c)
     else:
-        from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred import (http_vector_client)
+        from nexus.db.http_vector_client import (  # noqa: PLC0415 — deferred import (http_vector_client)
+            HttpVectorClient,
+            is_live_collection_row,
+        )
 
-        # The FULL listing primes the row cache below (identity reads need every
-        # row); the ROUTING candidates are the live rows only (nexus-bc7ps).
-        collection_rows = db.list_collections()
+        # The listing primes the row cache below (identity reads need every
+        # row, live or not); the ROUTING candidates are the live rows only
+        # (nexus-bc7ps). nexus-mz9jv: this verb routes by name and registry
+        # row and reads no count, so against the real client it asks for the
+        # catalog-only listing instead of the full live-chunk inventory, which
+        # a cold CLI process paid for on every invocation (100 to 560 ms
+        # engine-side at 75,000 chunks, 3.5 s measured on the managed
+        # service). An engine without the routing listing answers with the
+        # full rows, so the result is complete either way.
+        collection_rows = (
+            db.list_collections(routing=True) if isinstance(db, HttpVectorClient)
+            else db.list_collections()
+        )
         all_collections = [c["name"] for c in collection_rows if is_live_collection_row(c)]
         # RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): resolve_corpus's
         # Stage 2 (bare content-type fan-out) reads nexus.mcp_infra's

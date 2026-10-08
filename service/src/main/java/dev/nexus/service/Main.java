@@ -274,6 +274,8 @@ public final class Main {
         var tenantScope = new TenantScope(ds);
         var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter,
                                                   qryEmbedRouter);
+        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
+        pgVectorRepo.startupFanoutArmPermits();
 
         // Embedding profile (RDR-204 Phase 1, bead nexus-ft04v.6): the engine is
         // the only writer of nexus.embedding_profile, and this mode decision

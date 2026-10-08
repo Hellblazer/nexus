@@ -320,6 +320,164 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(body.get("per_collection").get(0).get("error").isNull()).isTrue();
     }
 
+    // ── include_embeddings (nexus-92q1p) ──────────────────────────────────────
+
+    private static float[] decodeEmbedding(String b64) {
+        byte[] raw = java.util.Base64.getDecoder().decode(b64);
+        float[] out = new float[raw.length / 4];
+        java.nio.ByteBuffer.wrap(raw).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(out);
+        return out;
+    }
+
+    @Test
+    void includeEmbeddings_putsEachSurvivorsStoredVectorOnItsRow_andStatesTheEncoding() throws Exception {
+        Map<String, Object> req = ok();
+        req.put("include_embeddings", true);
+        req.put("limit", 6);   // cut after the merge: only the six survivors are read
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.get("embedding_encoding").asText()).isEqualTo("f32-le-b64");
+        assertThat(body.get("embedding_dim").asInt()).isEqualTo(384);
+        assertThat(body.get("results")).hasSize(6);
+        for (JsonNode row : body.get("results")) {
+            assertThat(row.has("embedding_b64")).as("row %s", row.get("id")).isTrue();
+            float[] got = decodeEmbedding(row.get("embedding_b64").asText());
+            assertThat(got).as("384 components, 4 bytes each").hasSize(384);
+            float[] stored = embedder.embed(List.of(row.get("content").asText())).get(0);
+            assertThat(got).as("the stored vector of %s, not another row's", row.get("content").asText())
+                .containsExactly(stored);
+        }
+    }
+
+    @Test
+    void includeEmbeddings_isOptIn_theDefaultResponseIsUnchanged() throws Exception {
+        for (Object flag : new Object[] {null, false}) {
+            Map<String, Object> req = ok();
+            if (flag != null) req.put("include_embeddings", flag);
+            var r = post(req);
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.fieldNames()).toIterable()
+                .containsExactly("results", "per_collection", "per_collection_k", "limit");
+            for (JsonNode row : body.get("results")) {
+                assertThat(row.has("embedding_b64")).isFalse();
+            }
+        }
+    }
+
+    @Test
+    void includeEmbeddings_survivesRerank_andStatesTheEncodingForAnEmptyResult() throws Exception {
+        Map<String, Object> req = ok();
+        req.put("include_embeddings", true);
+        req.put("rerank", true);
+        JsonNode body = json(post(req));
+        assertThat(body.get("rerank_degraded").asBoolean()).isTrue();
+        for (JsonNode row : body.get("results")) {
+            assertThat(row.has("embedding_b64")).isTrue();
+        }
+
+        Map<String, Object> none = ok();
+        none.put("include_embeddings", true);
+        none.put("thresholds", Map.of(DENSE, -0.001, SMALL, -0.001));   // every row dropped by its threshold
+        JsonNode empty = json(post(none));
+        assertThat(empty.get("results")).isEmpty();
+        assertThat(empty.get("embedding_encoding").asText()).isEqualTo("f32-le-b64");
+        assertThat(empty.get("embedding_dim").asInt()).isEqualTo(384);
+    }
+
+    /**
+     * The request pattern before and after, over loopback against this engine, printed (bounds nothing).
+     * Before: the search, then one {@code get-embeddings} request per collection in the pool (the client's
+     * {@code _fetch_embeddings_for_results}, 8 in flight). After: the search with {@code include_embeddings}.
+     * Loopback has no round-trip time, so this shows the engine's work and the bytes, and the request count
+     * is what the round-trip time multiplies on the managed service (about 1.2 s per call there, 14 to 22 calls).
+     */
+    @Test
+    void includeEmbeddings_versusTheGetEmbeddingsFanout_printed() throws Exception {
+        int collections = Integer.getInteger("spc.bench.collections", 14);
+        int rows = Integer.getInteger("spc.bench.rows", 40);
+        var scope = new TenantScope(svcDs);
+        var repo = new PgVectorRepository(scope, embedder, embedder);
+        List<String> names = new ArrayList<>();
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            for (int c = 0; c < collections; c++) {
+                String name = "knowledge__tu8wp-bench-" + c + "__minilm-l6-v2-384__v1";
+                names.add(name);
+                PgContainerHelper.insertCollection(dsl, TENANT, name);
+            }
+        }
+        for (String name : names) {
+            seed(scope, repo, name, "bench", rows, 0.1, 0.002);
+        }
+        Map<String, Object> req = request(names, rows, collections * rows);
+        // Warm both paths once.
+        post(req);
+        long t0 = System.nanoTime();
+        var search = post(req);
+        JsonNode body = json(search);
+        Map<String, List<String>> idsByCollection = new LinkedHashMap<>();
+        for (JsonNode row : body.get("results")) {
+            idsByCollection.computeIfAbsent(row.get("collection").asText(), k -> new ArrayList<>())
+                .add(row.get("id").asText());
+        }
+        long fetchedBytes = 0;
+        try (var pool = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            List<java.util.concurrent.Future<Integer>> futures = new ArrayList<>();
+            for (var e : idsByCollection.entrySet()) {
+                futures.add(pool.submit(() -> {
+                    var r = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/get-embeddings")
+                        .header("Authorization", "Bearer " + TOKEN)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(
+                            Map.of("collection", e.getKey(), "ids", e.getValue()))))
+                        .build();
+                    return http.send(r, HttpResponse.BodyHandlers.ofString()).body().length();
+                }));
+            }
+            for (var f : futures) fetchedBytes += f.get();
+        }
+        long beforeMs = (System.nanoTime() - t0) / 1_000_000L;
+        long beforeBytes = fetchedBytes + search.body().length();
+
+        Map<String, Object> withVectors = new LinkedHashMap<>(req);
+        withVectors.put("include_embeddings", true);
+        post(withVectors);
+        long t1 = System.nanoTime();
+        var one = post(withVectors);
+        long afterMs = (System.nanoTime() - t1) / 1_000_000L;
+        System.out.println("search+embeddings collections=" + collections + " rows=" + body.get("results").size()
+            + " BEFORE requests=" + (1 + idsByCollection.size()) + " wall_ms=" + beforeMs + " bytes=" + beforeBytes
+            + " | AFTER requests=1 wall_ms=" + afterMs + " bytes=" + one.body().length());
+        assertThat(json(one).get("results")).hasSize(body.get("results").size());
+    }
+
+    // ── gzip (nexus-tjyzn) ────────────────────────────────────────────────────
+
+    @Test
+    void aGzipAcceptingClientGetsACompressedBodyThatDecodesToTheSameJson() throws Exception {
+        String payload = MAPPER.writeValueAsString(ok());
+        HttpRequest.Builder b = TestHttp.request("http://127.0.0.1:" + service.getPort()
+                + "/v1/vectors/search-per-collection")
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(payload));
+        var identity = http.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(identity.headers().firstValue("Content-Encoding")).as("no Accept-Encoding, no encoding").isEmpty();
+
+        var gz = http.send(b.header("Accept-Encoding", "gzip").build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(gz.statusCode()).isEqualTo(200);
+        assertThat(gz.headers().firstValue("Content-Encoding")).hasValue("gzip");
+        assertThat(gz.headers().firstValue("Vary").orElse("")).contains("Accept-Encoding");
+        assertThat(gz.body().length).as("compressed is smaller").isLessThan(identity.body().length);
+        byte[] plain;
+        try (var in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gz.body()))) {
+            plain = in.readAllBytes();
+        }
+        assertThat(MAPPER.readTree(plain)).isEqualTo(MAPPER.readTree(identity.body()));
+    }
+
     // ── a transient failure is a whole-request 503 ────────────────────────────
 
     @Test
