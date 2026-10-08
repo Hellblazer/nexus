@@ -39,9 +39,7 @@ import java.util.List;
  * {@code TempFileHelper} reads the property once at class initialisation. The
  * directory has to be removed, and the first moment its DLLs are unlocked is the
  * next process. DJL's tokenizer library is not affected: it extracts once into a
- * stable cache directory ({@code <DJL_CACHE_DIR>/tokenizers/<version>-...}, which the
- * supervisor points at {@code ~/.cache/nexus/djl}; an older engine used DJL's shared
- * default {@code ~/.djl.ai}) and reuses it.
+ * stable cache directory ({@code ~/.djl.ai/tokenizers/<version>-...}) and reuses it.
  *
  * <p><b>Safety.</b> The sweep runs on Windows only; elsewhere {@code deleteOnExit}
  * works and there is nothing to sweep. A directory is removed only when
