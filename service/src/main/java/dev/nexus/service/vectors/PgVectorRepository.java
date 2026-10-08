@@ -3169,14 +3169,40 @@ public final class PgVectorRepository {
      */
     public List<Map<String, Object>> listCollections(String tenant) {
         var names = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
-               .orderBy(1)
-               .fetch());
+            listCollectionsQuery(ctx, tenant).fetch());
         List<Map<String, Object>> out = new ArrayList<>(names.size());
         for (var rec : names) {
             out.add(Map.of("name", rec.value1()));
         }
         return out;
+    }
+
+    /**
+     * The statement {@link #listCollections} runs, apart from running it, so a test can read its plan.
+     *
+     * <p>RDR-225 (nexus-41sfa): {@code SELECT DISTINCT collection FROM nexus.chunks} scans every row of every
+     * leaf the tenant owns (a sequential scan plus a hash aggregate on each: 20 to 27 ms at 21.8k rows against
+     * 0.18 ms for this shape, T2 {@code nexus/rdr225-partition-pruning-census-2026-10-08}). This reads the
+     * registry instead, one row per collection, and asks {@code chunks} only whether the collection holds at
+     * least one row, keyed on the full composite key {@code (tenant_id, collection, embedding_model)} so the
+     * probe is an index lookup in the one leaf of the collection's model and tenant.
+     *
+     * <p>Same result set as the scan: every chunk row carries a registry row under the validated composite
+     * foreign key {@code chunks_collection_fk (tenant_id, collection, embedding_model) ->
+     * catalog_collections (tenant_id, name, embedding_model)} (vectors-030 step 7.5), so a collection that holds
+     * chunks always has a registry row, and the probe finds its chunks through the same three columns. A
+     * registered collection with no chunk row is still absent, as before. The tenant predicate is explicit
+     * (it is also the RLS scope) so the registry read is bounded to the tenant's rows by its key.
+     */
+    static org.jooq.Select<? extends org.jooq.Record1<String>> listCollectionsQuery(DSLContext ctx, String tenant) {
+        return ctx.selectDistinct(CATALOG_COLLECTIONS.NAME)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(DSL.exists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID))
+                .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))))
+            .orderBy(CATALOG_COLLECTIONS.NAME);
     }
 
     /**
