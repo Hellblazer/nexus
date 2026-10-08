@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from nexus.config import default_db_path
 from nexus.service_handles import SharedClientSlot, cached_endpoint_key
@@ -544,9 +544,21 @@ def record_taxonomy_discover_attempt(
 _taxonomy_deferral = ""
 _taxonomy_breaker_armed = False
 _taxonomy_deferral_lock = threading.Lock()
+#: Monotonic deadline after which a time-bounded deferral (engine warm-up,
+#: failure backoff) lifts by itself; ``None`` = no deadline (the in-run
+#: breaker's deferral, which lasts the whole run). Set with the reason.
+_taxonomy_deferral_until: float | None = None
+#: Monotonic stamps of when the current deferral was set and, if it lifted by
+#: its deadline, when: the closing message states the real elapsed time.
+_taxonomy_deferral_set_at: float | None = None
+_taxonomy_deferral_lifted_at: float | None = None
+#: The clock the deadline reads; tests replace it to move time.
+_taxonomy_clock = time.monotonic
 
 
-def set_taxonomy_deferral(reason: str, *, arm_breaker: bool = False) -> None:
+def set_taxonomy_deferral(
+    reason: str, *, arm_breaker: bool = False, expires_in_s: float | None = None,
+) -> None:
     """Defer taxonomy assignment for this process (``""`` clears it).
 
     *arm_breaker* lets a lost batch defer the rest of the run (see
@@ -554,25 +566,65 @@ def set_taxonomy_deferral(reason: str, *, arm_breaker: bool = False) -> None:
     the duration of the command: a long-lived process such as the MCP
     server must never have one failure switch its assigns off for good.
     Clearing (``""``) disarms it.
+
+    *expires_in_s* bounds the deferral: it lifts that many seconds from now
+    without anyone clearing it. The conditions that defer a run at its start
+    (a freshly restarted engine, a recent loss) are time windows, and a run
+    can outlast them by hours; a flag fixed at start deferred a whole 2.9 h
+    first index because the engine had restarted 102 s before it began.
     """
     global _taxonomy_deferral, _taxonomy_breaker_armed
+    global _taxonomy_deferral_until, _taxonomy_deferral_set_at, _taxonomy_deferral_lifted_at
     with _taxonomy_deferral_lock:
+        now = _taxonomy_clock()
         _taxonomy_deferral = reason
         _taxonomy_breaker_armed = arm_breaker
+        _taxonomy_deferral_until = (
+            now + max(0.0, expires_in_s) if reason and expires_in_s is not None else None
+        )
+        _taxonomy_deferral_set_at = now if reason else None
+        _taxonomy_deferral_lifted_at = None
+
+
+def _taxonomy_deferral_unlocked() -> str:
+    """The current reason, lifting a deadline that has passed. Lock held."""
+    global _taxonomy_deferral, _taxonomy_deferral_until, _taxonomy_deferral_lifted_at
+    if _taxonomy_deferral and _taxonomy_deferral_until is not None:
+        now = _taxonomy_clock()
+        if now >= _taxonomy_deferral_until:
+            # Lifted AT the deadline, not when someone noticed: the closing
+            # message reports how long the window held, and noticing at the
+            # end of a 3 h run would say 3 h.
+            _taxonomy_deferral_lifted_at = _taxonomy_deferral_until
+            _taxonomy_deferral = ""
+            _taxonomy_deferral_until = None
+    return _taxonomy_deferral
 
 
 def _trip_taxonomy_breaker() -> None:
     """Defer the rest of an armed run after a lost batch; no-op unarmed."""
-    global _taxonomy_deferral
+    global _taxonomy_deferral, _taxonomy_deferral_set_at, _taxonomy_deferral_lifted_at
     with _taxonomy_deferral_lock:
-        if _taxonomy_breaker_armed and not _taxonomy_deferral:
+        if _taxonomy_breaker_armed and not _taxonomy_deferral_unlocked():
             _taxonomy_deferral = "taxonomy assign failed earlier in this run"
+            _taxonomy_deferral_set_at = _taxonomy_clock()
+            _taxonomy_deferral_lifted_at = None
 
 
 def taxonomy_deferral() -> str:
     """The current deferral reason, or ``""`` when assignment runs."""
     with _taxonomy_deferral_lock:
-        return _taxonomy_deferral
+        return _taxonomy_deferral_unlocked()
+
+
+def taxonomy_deferral_lifted_after_s() -> int | None:
+    """Seconds the last deferral held before its deadline lifted it, or
+    ``None`` when it never lifted (still in force, or never set)."""
+    with _taxonomy_deferral_lock:
+        _taxonomy_deferral_unlocked()
+        if _taxonomy_deferral_set_at is None or _taxonomy_deferral_lifted_at is None:
+            return None
+        return round(_taxonomy_deferral_lifted_at - _taxonomy_deferral_set_at)
 
 
 def _record_taxonomy_deferred(chunk_count: int) -> None:
@@ -614,13 +666,28 @@ def record_taxonomy_failure(marker: Any, *, now: float) -> None:
     os.replace(tmp, path)
 
 
-def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
-    """Why this run should defer taxonomy assignment, or ``""``.
+class TaxonomyDeferral(NamedTuple):
+    """Why a run defers taxonomy assignment and for how much longer.
+
+    ``reason`` is ``""`` when the run does not defer. ``expires_in_s`` is the
+    time left in the window that caused it, measured at the decision.
+    """
+
+    reason: str
+    expires_in_s: int = 0
+
+
+def decide_taxonomy_deferral_window(
+    *, uptime_fn: Any, marker: Any, now_fn: Any,
+) -> TaxonomyDeferral:
+    """Whether this run should defer taxonomy assignment, and until when.
 
     Two exclusions, checked in order: the engine restarted less than
     :func:`taxonomy_defer_uptime_s` ago; or a run lost an assignment less
     than :func:`taxonomy_failure_backoff_s` ago (the *marker* file). Unknown
-    uptime and an unreadable marker both defer nothing.
+    uptime and an unreadable marker both defer nothing. Both are time
+    windows, so the decision carries the seconds left in the window: the
+    caller bounds the deferral by it instead of holding it for the run.
 
     Known limits, accepted: "under load" is caught only after a batch has
     failed (the client has no engine load signal); a deploy that does not
@@ -631,16 +698,34 @@ def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str
     from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
 
     uptime = uptime_fn()
-    if uptime is not None and uptime < taxonomy_defer_uptime_s():
-        return f"engine restarted {uptime} s ago"
+    window = taxonomy_defer_uptime_s()
+    if uptime is not None and uptime < window:
+        return TaxonomyDeferral(
+            f"engine restarted {uptime} s before this run began "
+            f"(warm-up window {window} s)",
+            window - uptime,
+        )
     try:
         failed_at = float(Path(marker).read_text().strip())
     except (OSError, ValueError):
-        return ""
+        return TaxonomyDeferral("")
     age = now_fn() - failed_at
-    if 0 <= age < taxonomy_failure_backoff_s():
-        return f"taxonomy assign failed {age:.0f} s ago"
-    return ""
+    backoff = taxonomy_failure_backoff_s()
+    if 0 <= age < backoff:
+        return TaxonomyDeferral(
+            f"taxonomy assign failed {age:.0f} s before this run began "
+            f"(backoff {backoff} s)",
+            int(backoff - age) + 1,
+        )
+    return TaxonomyDeferral("")
+
+
+def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
+    """The reason from :func:`decide_taxonomy_deferral_window`, or ``""``."""
+    return decide_taxonomy_deferral_window(
+        uptime_fn=uptime_fn, marker=marker, now_fn=now_fn,
+    ).reason
+
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
