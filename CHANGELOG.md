@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A search no longer makes one `get-embeddings` request per collection to read the vectors the contradiction check and semantic clustering need** (nexus-92q1p). `POST /v1/vectors/search-per-collection` takes an opt-in `include_embeddings` and fills each surviving row's vector with one by-id statement (`embedding_b64`, little-endian float32); `search_cross_corpus` asks when it will need them and falls back to the by-id fetch against an engine that does not return them. The fan-out was 14 to 22 requests of about 1.2 s each on the managed service.
+- **The engine compresses responses of 1 KiB or more for a client that sends `Accept-Encoding: gzip`, and the vector client now sends it** (nexus-tjyzn). A search response carrying vectors is hundreds of KB of decimal digits that compress about 2.7 to 1.
+- **Collection stats are cheaper, and routing callers no longer pay for them** (nexus-mz9jv). `nexus.collection_vector_stats` (`vectors-032-1`) counts live chunks with one join instead of a probe per chunk (619 ms to 32.5 ms at a 70,000-chunk tenant, local) and the statement runs without JIT. `GET /v1/vectors/stats?fields=routing` returns names and registry rows from the catalog alone (1.3 ms); the corpus resolver, the sibling lookup, `nx search --corpus` and the collection-row cache use it, and the cache fetches counts only when something asks. The engine logs `event=vector_stats`, `vector_stats_request`, `search_per_collection` and `search_per_collection_request` lines with the SQL and handler milliseconds split.
+- **`listCollections` reads the collection registry with an index probe on `chunks` instead of grouping every chunk row** (nexus-41sfa). 10.2 ms to 1.6 ms at a 70,000-chunk tenant, local; the same set of collections.
+
 ## [7.74.0] - 2026-10-07
 
 Pairs with engine-service-v0.1.151 (tagged 2026-10-07 on da58bf11a; `REQUIRED_ENGINE_VERSION` moves from 0.1.150 to 0.1.151): the HNSW search floor below, no changesets and no wire-ledger entries. The engine deployed to the cloud and passed its gates (recall 12/12 at ef 600, cloud client-path gate 10/10) before this client tag. This release also carries the RDR-224 native Windows batch: the uninstall that removes what it installed, the smaller downloads, hooks and MCP servers that run without Node or a project `.venv`, and the Windows test fixes; the native-Windows CI test set passed under a non-elevated account (1481 passed, 0 failed).
