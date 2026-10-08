@@ -90,6 +90,10 @@ _CODE_NAV_TASK_RE = re.compile(
 _CODE_REVIEW_TYPE_RE = re.compile(r"code-review", re.IGNORECASE)
 #: subagent-start.sh:130
 _CODE_REVIEW_TASK_RE = re.compile(r"code.review|review.code|lint|style.check", re.IGNORECASE)
+#: nexus-yjg4v: agent types that change code get the brief check. Keyed on
+#: agent_type because a real dispatch carries no task text. Read-only types
+#: (explore, reviewers, critics, validators, planners, researchers) do not match.
+_IMPLEMENTER_TYPE_RE = re.compile(r"developer|general-purpose|^claude$|debugger", re.IGNORECASE)
 #: subagent-start.sh:297
 _PHASE_GATE_TASK_RE = re.compile(
     r"close.*phase|phase.*clos|phase.*review|review.*gate|approach.*cross.walk|"
@@ -210,6 +214,31 @@ _PHASE_GATE = (
     "enforces this; skipping it is the silent-scope-reduction failure mode: "
     "RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
     "three phases later.\n"
+)
+
+#: nexus-yjg4v: the five questions behind the review fix rounds of
+#: 2026-10-08 (T2 nexus/critique-4d362d901-contradiction-scope-2026-10-08,
+#: rerank-cap-review-fixes, review-a86acb113-index-workers-length-grouping,
+#: debug-p2c-bench-empty-collections-cache). Each brief stated WHAT to change
+#: and left one of these open; a reviewer then asked it. The development
+#: skill's Pre-Dispatch section carries the same list for the brief's author.
+_BRIEF_CHECK = (
+    "\n## Brief check (if you change code)\n\n"
+    "Before your first edit, find your brief's answer to each question. Where "
+    "it has none or says UNKNOWN, resolve it first (read the code, measure, or "
+    "ask the dispatcher) and put the answers at the top of your hand-back. If "
+    "you cannot resolve one, stop and report it; do not guess.\n"
+    "1. Consumers: every caller and consumer of what you change, by name, and "
+    "which of them filter, re-rank or page AFTER it.\n"
+    "2. Final point: where the output's real final order or display is decided "
+    "(after boosts, caps, paging), and that your change acts there.\n"
+    "3. Modes: behaviour in local AND cloud mode; a mode nobody measured is "
+    "measured first or left unchanged.\n"
+    "4. Bounds: which pool, permit, memory or thread limit the change draws on, "
+    "and its size against that limit on small and large boxes.\n"
+    "5. State: every cache or shared state you touch, who invalidates it, the "
+    "invalidate-vs-in-flight-fill race, the first-write and empty cases, and "
+    "the test reset hooks.\n"
 )
 
 _SEQTHINK = (
@@ -468,6 +497,9 @@ def run(payload: dict | None) -> HookResult:
         if _PHASE_GATE_TASK_RE.search(task_text):
             parts.append(_PHASE_GATE)
         parts.append(_knowledge_map_section(repo_root))
+
+    if _IMPLEMENTER_TYPE_RE.search(agent_type):
+        parts.append(_BRIEF_CHECK)
 
     parts.append(_SEQTHINK)
 

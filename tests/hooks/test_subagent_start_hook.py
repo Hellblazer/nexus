@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
+
 import nexus.hooks.subagent_start as _subagent_start_mod
 from tests._platform import posix_only
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
@@ -447,6 +449,50 @@ class TestWorktreeProjectResolution:
         )
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "T2-SCAN-MARKER" in ctx
+
+
+class TestBriefCheckInjection:
+    """nexus-yjg4v: an agent that changes code gets the brief check, so the
+    questions behind 2026-10-08's four review fix rounds (consumers, the real
+    display point, local vs cloud, resource bounds, cache state) are answered
+    before its first edit. Keyed on agent_type alone, the only routing field a
+    real dispatch carries (see TestAgentTypeClassification)."""
+
+    _REAL_SHAPE = {
+        "session_id": "test-session",
+        "hook_event_name": "SubagentStart",
+        "prompt_id": "abc123",
+    }
+
+    def _ctx(self, agent_type: str) -> str:
+        result = _run_hook(stdin=json.dumps({**self._REAL_SHAPE, "agent_type": agent_type}))
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    @pytest.mark.parametrize(
+        "agent_type",
+        ["developer", "conexus:developer", "worktree-developer", "general-purpose", "claude", "conexus:debugger"],
+    )
+    def test_implementer_types_get_the_brief_check(self, agent_type: str) -> None:
+        ctx = self._ctx(agent_type)
+        assert "## Brief check" in ctx
+        for question in ("Consumers:", "Final point:", "Modes:", "Bounds:", "State:"):
+            assert question in ctx, question
+
+    @pytest.mark.parametrize(
+        "agent_type",
+        [
+            "Explore",
+            "conexus:code-review-expert",
+            "conexus:substantive-critic",
+            "conexus:test-validator",
+            "conexus:strategic-planner",
+            "conexus:deep-research-synthesizer",
+            "Plan",
+        ],
+    )
+    def test_read_only_types_do_not(self, agent_type: str) -> None:
+        assert "## Brief check" not in self._ctx(agent_type)
 
 
 class TestAgentTypeClassification:
