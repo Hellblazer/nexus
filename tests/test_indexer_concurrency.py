@@ -43,6 +43,7 @@ class TestResolveIndexConcurrency:
         monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND_CATALOG", raising=False)
+        monkeypatch.setenv("NX_LOCAL", "0")  # cloud: the named constant; local scales with cores
         assert resolve_index_concurrency() == DEFAULT_SERVICE_INDEX_CONCURRENCY
 
     def test_override_onto_non_service_backend_warns_but_wins(self, monkeypatch):
@@ -66,13 +67,14 @@ class TestResolveIndexConcurrency:
             for l in logs
         )
 
-    def test_service_backends_default_is_the_named_constant(self, monkeypatch):
+    def test_service_backends_cloud_default_is_the_named_constant(self, monkeypatch):
         from nexus.indexer_utils import resolve_index_concurrency
 
         from nexus.indexer_utils import DEFAULT_SERVICE_INDEX_CONCURRENCY
 
         monkeypatch.delenv("NX_INDEX_CONCURRENCY", raising=False)
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_LOCAL", "0")
         assert resolve_index_concurrency() == DEFAULT_SERVICE_INDEX_CONCURRENCY
 
     # test_non_service_catalog_defaults_one RETIRED (nexus-i711w terminal

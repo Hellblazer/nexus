@@ -113,6 +113,7 @@ class Bge768GroupPlannerTest {
             planned += paddedTokens(Bge768Embedder.planGroups(lens, AREA, WASTE));
         }
         assertThat((double) singleGroup / real).as("the old shape pads heavily").isGreaterThan(1.4);
+        assertThat(planned).as("padding can never be below the real tokens").isGreaterThanOrEqualTo(real);
         assertThat((double) planned / real).as("planned padding").isLessThan(1.2);
         assertThat(planned).isLessThan((long) (singleGroup * 0.8));
     }

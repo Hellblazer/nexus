@@ -380,6 +380,10 @@ public final class Bge768Embedder implements Embedder {
      *
      * <p>Degrades to the pre-existing single-call behavior when the whole input is already one
      * length: the planner then produces one group (or the area-bounded groups, as before).
+     *
+     * <p>A deadline abort between groups discards every group already finished: the request
+     * returns nothing and the client retries the WHOLE request. A request now has about four
+     * groups, so there are more check points per request than before grouping.
      */
     private List<float[]> embedSubBatched(List<String> texts) throws Exception {
         int n = texts.size();
@@ -412,8 +416,10 @@ public final class Bge768Embedder implements Embedder {
             int end = group[1];
             int groupMaxLen = group[2];
             if (groups.length > 1) {
-                // Only log when sub-batching actually engaged -- the common case (whole
-                // request one group) stays silent at the old single-call volume.
+                // Only a request that planned more than one group logs here. Length grouping
+                // makes that the usual case for a mixed-length request (about four groups at 16
+                // chunks), so this is a debug line per group, not a rare event; a request whose
+                // rows all fit one group stays silent.
                 log.debug("event=bge768_subbatch start={} size={} maxLen={} totalBatch={}",
                         start, end - start, groupMaxLen, n);
             }
@@ -453,6 +459,10 @@ public final class Bge768Embedder implements Embedder {
             }
             subBatchIndex++;
 
+            // A deadline abort discards the groups already finished: nothing is returned
+            // for the request, and the client retries the WHOLE request after
+            // retry_after_s. With about four groups per request there are more such check
+            // points than before length grouping, so more finished work can be thrown away.
             // nexus-8hdg9 phase 3: cooperative deadline check BETWEEN sub-batches, before
             // the next runOnnxSubBatch. Reuses this iteration's nowNanos (design record §4:
             // no second clock read; the added cost is one long comparison). Only when more
