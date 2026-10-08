@@ -110,4 +110,29 @@ class HttpUtilGzipTest {
         assertThat(ex.status).isEqualTo(422);
         assertThat(gunzip(ex.bodyBytes())).isEqualTo(body);
     }
+
+    @Test
+    void whenTheGzipStepFails_theResponseIsTheIdentityBody() throws Exception {
+        String body = json(50_000);
+        try {
+            for (HttpUtil.Gzipper broken : new HttpUtil.Gzipper[] {
+                    b -> { throw new java.io.IOException("simulated stream failure"); },
+                    b -> { throw new UnsatisfiedLinkError("simulated: native zip method not linked"); },
+                    b -> { throw new NoClassDefFoundError("simulated: java/util/zip class absent"); }}) {
+                HttpUtil.setGzipperForTests(broken);
+                var ex = exchange("gzip");
+                HttpUtil.send(ex, 200, body);
+                assertThat(ex.status).isEqualTo(200);
+                assertThat(ex.responseHeaders.containsKey("Content-Encoding"))
+                    .as("an identity body must not claim an encoding").isFalse();
+                assertThat(ex.bodyString()).isEqualTo(body);
+            }
+        } finally {
+            HttpUtil.setGzipperForTests(null);
+        }
+        // Non-vacuity: with the real step restored, the same request is compressed.
+        var ok = exchange("gzip");
+        HttpUtil.send(ok, 200, body);
+        assertThat(ok.responseHeaders.getFirst("Content-Encoding")).isEqualTo("gzip");
+    }
 }

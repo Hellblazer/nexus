@@ -46,6 +46,24 @@ public final class HttpUtil {
         return false;
     }
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(HttpUtil.class);
+
+    /** The compression step, behind a seam so a test can make it fail. */
+    @FunctionalInterface
+    interface Gzipper {
+        byte[] gzip(byte[] bytes) throws IOException;
+    }
+
+    private static volatile Gzipper gzipper = HttpUtil::gzip;
+    private static final java.util.concurrent.atomic.AtomicBoolean GZIP_FAILURE_LOGGED =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Test seam: replace the compression step; {@code null} restores the real one. */
+    static void setGzipperForTests(Gzipper g) {
+        gzipper = g == null ? HttpUtil::gzip : g;
+        GZIP_FAILURE_LOGGED.set(false);
+    }
+
     private static byte[] gzip(byte[] bytes) throws IOException {
         var out = new java.io.ByteArrayOutputStream(bytes.length / 3 + 64);
         try (var gz = new java.util.zip.GZIPOutputStream(out)) {
@@ -69,8 +87,18 @@ public final class HttpUtil {
             // The body of an eligible response depends on the request's Accept-Encoding, so a cache must key on it.
             exchange.getResponseHeaders().add("Vary", "Accept-Encoding");
             if (acceptsGzip(exchange)) {
-                byte[] packed = gzip(bytes);
-                if (packed.length < bytes.length) {
+                byte[] packed = null;
+                try {
+                    packed = gzipper.gzip(bytes);
+                } catch (IOException | LinkageError e) {
+                    // Compression is an optimisation. If it cannot run (an I/O failure in the stream, or in a
+                    // native image a java.util.zip class or native method that did not link), the client gets
+                    // the identity body, which every client accepts, instead of a failed request.
+                    if (GZIP_FAILURE_LOGGED.compareAndSet(false, true)) {
+                        log.warn("event=gzip_response_unavailable error=\"{}\" falling_back=identity", String.valueOf(e));
+                    }
+                }
+                if (packed != null && packed.length < bytes.length) {
                     bytes = packed;
                     exchange.getResponseHeaders().set("Content-Encoding", "gzip");
                 }
