@@ -908,7 +908,7 @@ def _set_cap_config(monkeypatch, value) -> None:
 
 
 class TestRerankCandidateCap:
-    """In LOCAL mode the default cap is ``max(3 * n_results, 30)``; in cloud mode
+    """In LOCAL mode the default cap is ``max(3 * n_results, 60)``; in cloud mode
     there is none. ``search.rerank_max_candidates`` overrides either (0 turns the
     cap off). It rides the request as ``rerank_max_candidates`` so the ENGINE
     scores that many rows, not all."""
@@ -918,9 +918,9 @@ class TestRerankCandidateCap:
         _set_mode(monkeypatch, local=True)
 
     @pytest.mark.parametrize("n, expected", [
-        (1, 30), (5, 30), (10, 30), (11, 33), (20, 60), (100, 300),
+        (1, 60), (5, 60), (10, 60), (20, 60), (21, 63), (100, 300),
     ])
-    def test_default_cap_is_three_times_n_with_a_floor_of_thirty(
+    def test_default_cap_is_three_times_n_with_a_floor_of_sixty(
         self, monkeypatch, n, expected,
     ):
         cols = _cols("code", _BGE, 2)
@@ -945,7 +945,7 @@ class TestRerankCandidateCap:
         }
         _search(engine, cols, n=10, rerank=True)
         sent = [b for p, b in engine.calls if p == _SEARCH]
-        assert sent and all(b["rerank_max_candidates"] == 30 for b in sent)
+        assert sent and all(b["rerank_max_candidates"] == 60 for b in sent)
 
     def test_the_lexical_leg_is_not_capped(self, monkeypatch):
         # A lexical-only hit sits deep in vector order; capping its rerank would
@@ -961,9 +961,9 @@ class TestRerankCandidateCap:
     @pytest.mark.parametrize("local, configured, expected", [
         (True, 50, 50),         # a fixed cap
         (True, 0, None),        # off: score every candidate, as before
-        (True, -3, 30),         # nonsense falls back to the mode's default, loudly in the log
-        (True, "many", 30),
-        (True, True, 30),       # a bool is not a count
+        (True, -3, 60),         # nonsense falls back to the mode's default, loudly in the log
+        (True, "many", 60),
+        (True, True, 60),       # a bool is not a count
         (False, 50, 50),        # an explicit cap applies in cloud mode too
         (False, 0, None),
         (False, -3, None),      # nonsense in cloud mode: the cloud default, which is no cap
@@ -1037,21 +1037,21 @@ class TestRerankCandidateCap:
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
         engine.mutate = _rerank_flags
         _search(engine, cols, n=10, rerank=True)
-        assert engine.route_calls()[0]["rerank_max_candidates"] == 30
+        assert engine.route_calls()[0]["rerank_max_candidates"] == 60
 
     def test_rows_past_the_cap_keep_vector_order_behind_the_scored_rows(self, monkeypatch):
         # Emulate the engine: score the first `cap` rows, leave the rest unscored.
-        # docs (x4 over-fetch): n=10 asks for 40 rows per collection, the cap is 30.
+        # docs (x4 over-fetch): n=20 asks for 80 rows per collection, the cap is 60.
         cols = _cols("docs", _BGE, 1)
-        engine = _FakeEngine(monkeypatch, {cols[0]: _rows("r", 60, 0.2)})
+        engine = _FakeEngine(monkeypatch, {cols[0]: _rows("r", 100, 0.2)})
         self._engine_that_honours_the_cap(engine)
 
-        results = _search(engine, cols, n=10, rerank=True)
+        results = _search(engine, cols, n=20, rerank=True)
         scored = [r for r in results if "rerank_score" in r.metadata]
         unscored = [r for r in results if "rerank_score" not in r.metadata]
-        assert len(scored) == 30 and len(unscored) == 10
-        # unscored rows stay in vector (distance) order, r30..r39
-        assert [r.id for r in unscored] == [f"r{i}" for i in range(30, 40)]
+        assert len(scored) == 60 and len(unscored) == 20
+        # unscored rows stay in vector (distance) order, r60..r79
+        assert [r.id for r in unscored] == [f"r{i}" for i in range(60, 80)]
         assert max(r.distance for r in scored) <= min(r.distance for r in unscored)
 
         # The result count is what an uncapped search returns.
@@ -1059,8 +1059,8 @@ class TestRerankCandidateCap:
             "nexus.search_engine.load_config",
             lambda: {"search": {"contradiction_check": False, "rerank_max_candidates": 0}},
         )
-        uncapped = _search(engine, cols, n=10, rerank=True)
-        assert len(uncapped) == len(results) == 40
+        uncapped = _search(engine, cols, n=20, rerank=True)
+        assert len(uncapped) == len(results) == 80
         assert all("rerank_score" in r.metadata for r in uncapped)
 
     def test_the_default_cap_never_starves_a_page(self):

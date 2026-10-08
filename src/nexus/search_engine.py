@@ -611,7 +611,15 @@ _PER_COLLECTION_RERANK_MAX_LIMIT = 1000
 #: n_results, _RERANK_CANDIDATE_FLOOR)`` rows in vector order; the rest stay in
 #: the result, unscored and in vector order, behind the scored rows. A page
 #: needs ``n_results`` rows, so the cap leaves the reranker three times that
-#: many to choose from.
+#: many to choose from, with a floor of 60.
+#:
+#: The floor was 30 until a page-quality measurement (T2
+#: ``nexus/rerank-cap-page-quality-2026-10-08`` [29696], 40 queries, n=10): 30
+#: kept 6.5 of the uncapped top 10 and lost canonical answers in a hand check
+#: (uncapped better on 5 of 10, capped on 2), and it dropped prose rows twice as
+#: often as code, because prose sits deeper in vector order. 60 keeps 9.0 of 10
+#: and still scores 1.45 s instead of 3.4 s on an M5 Pro; 90 matched uncapped.
+#: Sam chose 60, 2026-10-08.
 #:
 #: The DEFAULT applies in local mode only. The latency evidence is the local
 #: cross-encoder; the cloud reranks with Voyage, and the only page-quality
@@ -621,7 +629,7 @@ _PER_COLLECTION_RERANK_MAX_LIMIT = 1000
 #: otherwise. An explicit integer there applies in BOTH modes (``0`` scores
 #: every candidate).
 _RERANK_CANDIDATE_MULTIPLIER = 3
-_RERANK_CANDIDATE_FLOOR = 30
+_RERANK_CANDIDATE_FLOOR = 60
 
 
 def _rerank_candidate_cap(
@@ -636,7 +644,7 @@ def _rerank_candidate_cap(
     come back unscored behind the scored rows.
 
     Otherwise ``search.rerank_max_candidates``: a positive integer = that many,
-    in either mode; ``0`` = no cap; unset = the default ``max(3 * n_results, 30)``
+    in either mode; ``0`` = no cap; unset = the default ``max(3 * n_results, 60)``
     in local mode and no cap in cloud mode. A negative, non-integer or bool
     value is a config mistake that must not silently disable the cap or break
     search: logged, and the mode's default applies."""
