@@ -416,8 +416,11 @@ correct answer. HNSW-routed collections run today's statement. Fields that can
 change, and how:
 
 - `per_collection[].error` and `error_kind` for a collection in a bin whose
-  statement failed. The values stay in the existing set, but one bin's timeout
-  now marks every member of the bin (see Failure Modes).
+  statement timed out. The values stay in the existing set. The bin's members
+  are re-run one by one as single-collection exact arms while the fan-out
+  budget remains, so a member is marked only when its own re-run also fails or
+  the budget runs out (see Failure Modes). A timed-out bin costs its members
+  extra latency, not results, unless the budget is gone.
 - The engine's log lines. `event=search_per_collection` keeps `arms` as the
   number of collections searched and gains `statements`, `bins`,
   `grouped_collections`, `hnsw_arms` and `probe_ms`.
@@ -525,7 +528,7 @@ statements.
 | Bin execution | `runArm`, `runPlainSearchStatement` | Extend: the same transaction and settings with a different statement |
 | Grouped statement | `plain_search_<dim>` (`vectors-031-1`) | New sibling function family, same predicates |
 | Merge, thresholds, stats | `FanoutMerger` | Reuse unchanged |
-| Permits, budgets, failure mapping | `fanoutArmPermits`, `armBound`, `settleArmFailure` | Reuse; bin failures map to each member |
+| Permits, budgets, failure mapping | `fanoutArmPermits`, `armBound`, `settleArmFailure`, `acquireArmSlot` | Reuse; a timed-out bin re-runs its members as ordinary arms, each settled by `settleArmFailure` |
 | Kill switch | none | New engine setting `NX_SEARCH_GROUPED_EXACT` |
 
 ### Decision Rationale
@@ -615,7 +618,9 @@ ships; adopted as the interim lever (Sam, 2026-10-08, § Decisions).
   collections to `1 + B + L` (L large collections), and the fixed per-arm cost
   with them.
 - Positive: exact-routed results are unchanged, and checkable exactly.
-- Negative: one failed or timed-out bin marks every collection in it.
+- Negative: a timed-out bin costs its members a second, per-collection pass,
+  so a bad bin can be slower than today's arms for that request; members are
+  marked failed only when the re-run also fails or the budget runs out.
 - Negative: a new function family, so a changeset and a PITR-fork walk
   rehearsal before deploy (§ Release).
 - Negative: two places now encode "which rows a search selects" for the
@@ -647,10 +652,11 @@ ships; adopted as the interim lever (Sam, 2026-10-08, § Decisions).
   is bounded: about T rows when the permit cap does not bind. M5 puts a
   5.6k-row exact scan at about 70 ms; M4 puts the whole tenant at 4.3 s warm and
   17.7 s cold serially, so even the capped case (S / P rows per bin) is well
-  under 30 s on the measured data. **Mitigation**: on a timeout every member is
-  reported with the limiter's `error_kind`, the slow-statement line names the
-  bin's collections, and its members are re-run one by one while the
-  request's fan-out budget remains (Sam, 2026-10-08).
+  under 30 s on the measured data. **Mitigation**: the slow-statement line
+  names the bin's collections, and its members are re-run one by one while the
+  request's fan-out budget remains (Sam, 2026-10-08). Only a member whose own
+  re-run fails, or that the budget never reaches, is reported with an
+  `error_kind`.
 - **Risk: `work_mem` for the window sort.** The sort is per bin over narrow
   rows: about 100 bytes times the bin's rows, so about 1 MB at T = 10000. Local
   installs run 4 MB `work_mem`, the cloud 384 MB (C11). Concurrent bins each
@@ -762,9 +768,17 @@ same change (a `RETURNS TABLE` function adds a jOOQ record).
   collection runs.
 - Bins: the assignment for fixed counts and permits is deterministic, and B
   follows `clamp(ceil(S / T), 1, P)`.
-- Failure: a bin forced past its bound reports every member with the
-  limiter's `error_kind`; a transient failure in a bin fails the request with
-  503; the request-budget case fails with the deadline shape.
+- Failure, bin timeout (Sam's decision 2), three cases:
+  (a) a SEARCH-limited bin timeout with budget left re-runs every member as a
+  single-collection exact arm and returns their rows;
+  (b) a member whose own re-run also times out gets `statement_timeout`;
+  (c) a budget that runs out before or during the re-run gives the members not
+  yet run `fanout_budget_exhausted`.
+  The re-run's permit discipline is pinned: the bin releases its permit before
+  its members take their own, each through `acquireArmSlot`, so bin and member
+  holders never exceed P together.
+- Failure, other: a transient failure in a bin fails the request with 503; the
+  request-budget case fails with the deadline shape.
 - Concurrency: simultaneous bin and arm holders never exceed P (counted, not
   inferred from exit codes).
 - Switches: `NX_SEARCH_EXACT_MAX_ROWS=0` and `NX_SEARCH_GROUPED_EXACT=0` each
@@ -777,7 +791,9 @@ same change (a `RETURNS TABLE` function adds a jOOQ record).
 #### Step 2: Code
 
 The request probe, routing, binning, bin execution with the lazy cursor, the
-merger hand-off, the setting, the log fields and the counter. Then
+member re-run on a bin timeout (release the bin's permit, then re-run each
+member through `acquireArmSlot` as today's exact arm while the fan-out budget
+remains), the merger hand-off, the setting, the log fields and the counter. Then
 `scripts/mvnw-leased.sh test` with every `*GateTest` and the `integration`
 group. `docs/architecture.md` (cardinality router paragraph) and
 `docs/configuration.md` (the new setting) are updated in the same change.
@@ -947,10 +963,13 @@ Decided by Sam, 2026-10-08:
 3. **`NX_SEARCH_GROUPED_EXACT` is removed** after one release in production.
 4. **Interim lever: raise the arm permits to their ceiling of 8 now.** Sam is
    the only tenant, so the shared-pool concern does not bind. The cloud has no
-   deploy knob for `NX_SEARCH_FANOUT_ARM_PERMITS`, so conexus proposes moving
-   the engine's built-in default from half the pool to the ceiling (pool minus
-   2, 8 at pool 10) in the next engine tag, a plain image flip. Pending Sam's
-   go in conexus's session.
+   deploy knob for it, so the engine's built-in defaults move from half the
+   pool to the ceiling, `max(1, pool - 2)` (8 at pool 10), for BOTH
+   `NX_SEARCH_FANOUT_ARM_PERMITS` and the per-request
+   `NX_SEARCH_FANOUT_CONCURRENCY`; raising only the permits would not speed up a
+   lone search, which the per-request limit holds to 5. It ships in the next
+   engine tag, ahead of this RDR (Sam's go in conexus's session, T2 conexus
+   [29662]). This moves P in the bin formula too.
 5. **The grouped query is a new stored SQL function family**
    (`plain_search_grouped_<dim>`), installed by a Liquibase changeset beside
    the ten families RDR-225 redefined. The engine calls it; the client sends
