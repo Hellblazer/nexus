@@ -162,6 +162,18 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      into a failure (run it so after the deploy of the route's engine) and =absent
 #      turns a served route into one. Read-only by construction, pinned by the same
 #      structural audit as leg K (tests/e2e/cloud_client_path_gate_b3_test.sh).
+#   M  the engine surfaces cut after engine-service-v0.1.151 (nexus-tjyzn, nexus-mz9jv, nexus-92q1p), through
+#      the edge, with the real client for the last: (M1) a response of 1 KiB or more asked for with
+#      `Accept-Encoding: gzip` comes back `Content-Encoding: gzip` and decodes to the identity body (an edge
+#      may strip or normalise the header, or buffer and recompress); (M2) `GET /v1/vectors/stats?fields=routing`
+#      returns catalog rows (name, lifecycle_state, ...) with no count/dim/stored_count/last_write; (M3)
+#      `HttpVectorClient.search_per_collection(include_embeddings=True)` over one live collection returns
+#      rows with a vector, `embedding_dim` > 0 and each vector `dim * 4` bytes. Read-only: two GETs, and one
+#      search (which embeds one short query). NON-VACUITY: from engine release_version >= ENGINE_SURFACES_MIN
+#      (default 0.1.152, `NX_ENGINE_SURFACES_MIN` overrides) the three MUST be observed served, and a body too
+#      small to exercise gzip is a failure, not a skip; below it an engine that does not serve a surface
+#      passes with the sentinel line saying "new engine surfaces NOT served".
+#      NX_EXPECTED_ENGINE_SURFACES=served forces the strict reading, =absent asserts the old engine.
 #
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
@@ -184,6 +196,10 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #       set it for the run after engine-service-v0.1.147's deploy, where an old
 #       engine's 404 would otherwise pass with a NOT SERVED note on the sentinel
 #       line. `absent` asserts the opposite (the route not yet deployed).
+#   NX_EXPECTED_ENGINE_SURFACES=served tests/e2e/cloud-client-path-gate.sh
+#       asserts leg M sees gzip, the routing listing and include_embeddings SERVED regardless of the engine's
+#       release_version (nexus-tjyzn / nexus-mz9jv / nexus-92q1p); `absent` asserts the opposite. Unset, the
+#       engine's release_version decides (see leg M above).
 # Exit 0 == CLOUD CLIENT-PATH GATE PASSED (literal sentinel on last line).
 # Exit 2 == not applicable (not a cloud-mode box). Any other == FAILED.
 set -euo pipefail
@@ -209,6 +225,15 @@ case "$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE" in
     *) echo "FATAL: NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE is not one of: (unset), served, absent." >&2; exit 2 ;;
 esac
 
+# nexus-tjyzn / nexus-mz9jv / nexus-92q1p: leg M's expectation and the first engine release that carries the
+# three surfaces (the first cut after engine-service-v0.1.151; update it if the cut is numbered differently).
+NX_EXPECTED_ENGINE_SURFACES="${NX_EXPECTED_ENGINE_SURFACES:-}"
+case "$NX_EXPECTED_ENGINE_SURFACES" in
+    ""|served|absent) ;;
+    *) echo "FATAL: NX_EXPECTED_ENGINE_SURFACES=$NX_EXPECTED_ENGINE_SURFACES is not one of: (unset), served, absent." >&2; exit 2 ;;
+esac
+ENGINE_SURFACES_MIN="${NX_ENGINE_SURFACES_MIN:-0.1.152}"
+
 # Legs accumulate violations instead of fail-fast: a red run is relay
 # evidence, and "which legs are broken" is the payload.
 VIOLATIONS=0
@@ -224,7 +249,7 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=10 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
+# EXPECTED_LEGS=11 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
 # [J] and [K] added 2026-10-04, nexus-wbfpw.50; [L] added 2026-10-05, nexus-tu8wp.3;
 # [G] deleted at cleanup step A1, nexus-0r1uz): [A] /version,
 # [B] edge auth contract (unauthenticated /health refused, data token
@@ -236,10 +261,11 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # the edge (nexus-kp5q3, 2026-09-29), [J] engine reaper liveness on /v1/status
 # through the edge, [K] the vector sweep routes through the edge (both
 # nexus-wbfpw.50, 2026-10-04), [L] the per-collection search route through the
-# edge (nexus-tu8wp.3, 2026-10-05). Editing the battery means updating this
+# edge (nexus-tu8wp.3, 2026-10-05), [M] gzip, the routing listing and include_embeddings through the
+# edge (nexus-tjyzn, nexus-mz9jv, nexus-92q1p, 2026-10-08). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=10
+EXPECTED_LEGS=11
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 # Leg B3's compare logic (nexus-20onx; nexus-i1oh4 doctrine applied to it in the
@@ -488,6 +514,161 @@ violation("HTTP %s (body: %r), expected the engine's 400 (route served) or its J
 PY
 }
 
+# Leg M's mode (nexus-tjyzn / nexus-mz9jv / nexus-92q1p). Arguments: the /version body, the expectation
+# (NX_EXPECTED_ENGINE_SURFACES: empty, `served` or `absent`), the first engine release that carries the
+# surfaces. Prints one word: `strict` (the surfaces MUST be served: asserted, or the engine's release_version is at
+# or above the minimum), `absent` (asserted not served) or `auto-old` (an engine below the minimum, nothing asserted:
+# a surface not served passes with a note). A /version body whose release_version cannot be parsed is `strict`
+# when nothing is asserted: an engine that cannot say what it is does not get the old-engine allowance.
+_surfaces_mode() {
+    "$E2E_PYTHON" - "$1" "${2:-}" "$3" <<'PY'
+import json
+import re
+import sys
+
+body, expected, minimum = sys.argv[1:4]
+
+
+def parse(raw):
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", (raw or "").strip())
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+if expected in ("served", "absent"):
+    print("strict" if expected == "served" else "absent")
+    sys.exit(0)
+try:
+    version = parse(json.loads(body).get("release_version"))
+except (ValueError, AttributeError):
+    version = None
+floor = parse(minimum)
+print("auto-old" if (version is not None and floor is not None and version < floor) else "strict")
+PY
+}
+
+# Leg M1 and M2's judge (nexus-tjyzn, nexus-mz9jv): the routing listing read twice through the edge, once with
+# `Accept-Encoding: identity` and once with `gzip`. Arguments: which check (`gzip` or `routing`), the identity
+# body file, the gzip-request body file, the gzip-request response-headers file (curl -D), the mode
+# (_surfaces_mode). Prints one line; exit status: 0 served and correct, 3 NOT served (allowed only in `auto-old` and
+# `absent`), 1 a violation. `strict` turns every "not served" into a violation, so once the engine is new enough
+# the leg cannot pass by observing nothing.
+_surface_verdict() {
+    "$E2E_PYTHON" - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import gzip
+import json
+import sys
+
+which, ident_path, gz_path, hdr_path, mode = sys.argv[1:6]
+label = {"gzip": "M1", "routing": "M2"}[which]
+GZIP_MIN_BYTES = 1024   # HttpUtil.GZIP_MIN_BYTES
+
+
+def violation(msg):
+    print("%s: %s" % (label, msg))
+    sys.exit(1)
+
+
+def not_served(msg):
+    if mode == "strict":
+        violation(msg + " -- the engine must serve this (release_version at or above the minimum, or NX_EXPECTED_ENGINE_SURFACES=served)")
+    print("NOT SERVED [%s]: %s" % (label, msg))
+    sys.exit(3)
+
+
+def served(msg):
+    if mode == "absent":
+        violation("served, but NX_EXPECTED_ENGINE_SURFACES=absent: " + msg)
+    print("ok [%s]: %s" % (label, msg))
+    sys.exit(0)
+
+
+ident = open(ident_path, "rb").read()
+try:
+    rows = json.loads(ident)
+except ValueError:
+    rows = None
+if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) and isinstance(r.get("name"), str) for r in rows):
+    violation("GET /v1/vectors/stats?fields=routing did not answer a non-empty JSON list of rows with names through the edge "
+              "(body: %r): an edge page, a stripped body, or a tenant with no collections" % (ident[:160],))
+
+if which == "routing":
+    counted = [r["name"] for r in rows if any(k in r for k in ("count", "dim", "stored_count", "last_write"))]
+    if counted:
+        not_served("the listing still carries counts or a dimension (e.g. %s): the engine ignored fields=routing and answered "
+                   "the full stats" % counted[0])
+    if not any(isinstance(r.get("lifecycle_state"), str) for r in rows):
+        violation("no row carries lifecycle_state: the routing rows must carry the registry state the router filters on")
+    served("%d catalog rows, name and registry attributes, no counts" % len(rows))
+
+# which == "gzip"
+raw_headers = open(hdr_path, "rb").read().decode("latin-1")
+blocks = [b for b in raw_headers.replace("\r\n", "\n").split("\n\n") if b.strip()]
+last = blocks[-1] if blocks else ""
+encodings = [ln.split(":", 1)[1].strip().lower() for ln in last.split("\n")
+             if ln.lower().startswith("content-encoding:")]
+if len(ident) < GZIP_MIN_BYTES:
+    not_served("the routing listing is %d bytes, below the engine's %d-byte compression threshold, so no read-only route "
+               "exercises gzip for this tenant" % (len(ident), GZIP_MIN_BYTES))
+if "gzip" not in encodings:
+    not_served("a %d-byte response asked for with Accept-Encoding: gzip came back without Content-Encoding: gzip "
+               "(Content-Encoding: %s): the engine does not compress, or the edge strips the header" % (len(ident), encodings or "absent"))
+packed = open(gz_path, "rb").read()
+try:
+    decoded = json.loads(gzip.decompress(packed))
+except (OSError, EOFError, ValueError) as exc:
+    violation("Content-Encoding: gzip but the body does not gunzip to JSON (%s): the edge re-encoded or truncated it" % exc)
+if decoded != rows:
+    violation("the gzip response decodes to a different listing than the identity response (%d vs %d rows): re-run, and "
+              "if it persists the edge is altering the body" % (len(decoded) if isinstance(decoded, list) else -1, len(rows)))
+served("%d bytes identity, %d bytes gzip (%.1f to 1), decodes to the same %d rows" % (len(ident), len(packed), len(ident) / max(1, len(packed)), len(rows)))
+PY
+}
+
+# Leg M3's judge (nexus-92q1p): the summary the real client's search_per_collection(include_embeddings=True) produced,
+# as JSON {"collection", "rows", "embedding_dim", "vector_lens"}. Arguments: the summary, the mode. Exit status as
+# _surface_verdict.
+_embeddings_verdict() {
+    "$E2E_PYTHON" - "$1" "$2" <<'PY'
+import json
+import sys
+
+raw, mode = sys.argv[1:3]
+label = "M3"
+
+
+def violation(msg):
+    print("%s: %s" % (label, msg))
+    sys.exit(1)
+
+
+try:
+    s = json.loads(raw)
+except ValueError:
+    violation("the client probe printed no JSON summary (%r)" % (raw[:160],))
+rows, dim, lens = s.get("rows"), s.get("embedding_dim"), s.get("vector_lens")
+carried = [n for n in (lens or []) if n is not None]
+if not isinstance(rows, int) or rows < 1:
+    violation("the search over %r returned %r rows: nothing to carry a vector (a live collection must return rows)" % (s.get("collection"), rows))
+if not carried and not dim:
+    if mode == "strict":
+        violation("rows came back with no vector and no embedding_dim echo: the engine must serve include_embeddings "
+                  "(release_version at or above the minimum, or NX_EXPECTED_ENGINE_SURFACES=served)")
+    print("NOT SERVED [M3]: %d rows, no vector and no embedding_dim echo: the engine predates include_embeddings, and the "
+          "client fetches the vectors by id" % rows)
+    sys.exit(3)
+if mode == "absent":
+    violation("include_embeddings is served, but NX_EXPECTED_ENGINE_SURFACES=absent")
+if not isinstance(dim, int) or dim <= 0:
+    violation("vectors came back but embedding_dim is %r" % (dim,))
+if len(carried) != rows:
+    violation("%d of %d rows carry a vector (the engine omits a row only when its vector is unreadable)" % (len(carried), rows))
+bad = [n for n in carried if n != dim * 4]
+if bad:
+    violation("a vector is %d bytes, expected embedding_dim * 4 = %d" % (bad[0], dim * 4))
+print("ok [M3]: %d rows, each with a %d-byte vector (embedding_dim=%d), read through the edge by the real client" % (rows, dim * 4, dim))
+PY
+}
+
 # Every python whose STDOUT is captured below configures cli logging first:
 # structlog's unconfigured default writes to stdout, and a log line there
 # becomes part of the captured value (leg B's first data-token run carried
@@ -590,7 +771,7 @@ esac
 # reads it with -H @file. Which kind was used goes to stderr.
 # Leg K reuses the bearer, so it outlives leg B; the trap removes it on every exit, a
 # _fail included, and is installed BEFORE mktemp so a kill between the two cannot leak it.
-trap 'rm -f "${BEARER_FILE:-}"' EXIT
+trap 'rm -f "${BEARER_FILE:-}"; rm -rf "${M_DIR:-}"' EXIT
 BEARER_FILE="$(mktemp)"
 chmod 600 "$BEARER_FILE"
 STATUS_BODY=""
@@ -1181,6 +1362,80 @@ else
     [ "$L_BAD" -eq 0 ] || _leg_fail "L: the per-collection route through the edge did not answer as the engine does (see above)"
 fi
 
+# ── Leg M: gzip, the routing listing and include_embeddings through the edge ─────────────────────────────
+# nexus-tjyzn, nexus-mz9jv, nexus-92q1p. The review of the branch that added them found no gate leg through the
+# public edge for any of the three. M1 and M2 read GET /v1/vectors/stats?fields=routing twice (identity, then
+# gzip), so both checks ride on the same read-only route; M3 is the real client's search over one live collection
+# with include_embeddings. The mode (_surfaces_mode) is what makes the leg non-vacuous: from the first engine
+# release that carries the surfaces they must be observed served.
+_leg_enter M "gzip, the routing listing and include_embeddings through the edge (served from the engine release that carries them; read-only)"
+M_DIR="$(mktemp -d)"
+M_NOT_SERVED=0
+M_MODE="$(_surfaces_mode "$VERSION_BODY" "$NX_EXPECTED_ENGINE_SURFACES" "$ENGINE_SURFACES_MIN")"
+echo "  mode: $M_MODE (engine release_version floor for the surfaces: $ENGINE_SURFACES_MIN)"
+_surface_judge() {
+    local rc=0 line
+    line="$("$@")" || rc=$?
+    case "$rc" in
+        0) echo "  $line" ;;
+        3) echo "  $line"; M_NOT_SERVED=1 ;;
+        *) echo "  VIOLATION [${line%%:*}]:${line#*:}" >&2; return 1 ;;
+    esac
+}
+if [ ! -s "$BEARER_FILE" ]; then
+    _leg_fail "M: no bearer (leg B could not resolve one), so the engine surfaces could not be reached"
+else
+    M_BAD=0
+    M_IDENT_CODE="$(curl -sS -m 30 -H @"$BEARER_FILE" -H 'Accept-Encoding: identity' -o "$M_DIR/ident.body" -w '%{http_code}' "$SERVICE_URL/v1/vectors/stats?fields=routing")" || M_IDENT_CODE=000
+    M_GZ_CODE="$(curl -sS -m 30 -H @"$BEARER_FILE" -H 'Accept-Encoding: gzip' -D "$M_DIR/gz.headers" -o "$M_DIR/gz.body" -w '%{http_code}' "$SERVICE_URL/v1/vectors/stats?fields=routing")" || M_GZ_CODE=000
+    if [ "$M_IDENT_CODE" != 200 ] || [ "$M_GZ_CODE" != 200 ]; then
+        echo "  VIOLATION [M1]: GET /v1/vectors/stats?fields=routing answered HTTP $M_IDENT_CODE (identity) and $M_GZ_CODE (gzip), expected 200 for both" >&2
+        M_BAD=1
+    else
+        _surface_judge _surface_verdict gzip "$M_DIR/ident.body" "$M_DIR/gz.body" "$M_DIR/gz.headers" "$M_MODE" || M_BAD=1
+        _surface_judge _surface_verdict routing "$M_DIR/ident.body" "$M_DIR/gz.body" "$M_DIR/gz.headers" "$M_MODE" || M_BAD=1
+        M_COLLECTION="$("$E2E_PYTHON" - "$M_DIR/ident.body" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))
+live = [r["name"] for r in rows if r.get("lifecycle_state", "live") == "live" and "__" in r["name"]]
+print(live[0] if live else "")
+PY
+)"
+        if [ -z "$M_COLLECTION" ]; then
+            echo "  VIOLATION [M3]: the routing listing names no live collection to search" >&2
+            M_BAD=1
+        else
+            M_SUMMARY="$(M_COLLECTION="$M_COLLECTION" uv run python - <<'PY'
+import json
+import os
+from nexus.logging_setup import configure_logging
+configure_logging("cli")
+from nexus.db import make_t3
+
+name = os.environ["M_COLLECTION"]
+t3 = make_t3()
+env = t3.search_per_collection("ccpg include_embeddings probe", [name], per_collection_k=2, limit=2, include_embeddings=True)
+if not env:
+    print(json.dumps({"collection": name, "rows": 0, "embedding_dim": None, "vector_lens": []}))
+else:
+    vecs = env.get("result_embeddings") or [None] * len(env.get("results") or [])
+    print(json.dumps({
+        "collection": name,
+        "rows": len(env.get("results") or []),
+        "embedding_dim": env.get("embedding_dim"),
+        "vector_lens": [len(v) if v is not None else None for v in vecs],
+    }))
+PY
+)" || { echo "  VIOLATION [M3]: the client probe crashed (see above)" >&2; M_BAD=1; M_SUMMARY=""; }
+            if [ -n "$M_SUMMARY" ]; then
+                _surface_judge _embeddings_verdict "$M_SUMMARY" "$M_MODE" || M_BAD=1
+            fi
+        fi
+    fi
+    [ "$M_BAD" -eq 0 ] || _leg_fail "M: the engine surfaces through the edge did not answer as the engine does (see above)"
+fi
+rm -rf "$M_DIR"
+
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
     # Distinct from a violation: "the gate did not run its full battery" is
     # a different fact from "the edge is broken", and the relay must be able
@@ -1197,6 +1452,9 @@ if [ "$B3_NOT_RUN" = 1 ]; then
 fi
 if [ "$L_ROUTE_NOT_SERVED" = 1 ]; then
     PASS_NOTE="${PASS_NOTE:+$PASS_NOTE; }per-collection route NOT served: L saw the old engine's JSON 404"
+fi
+if [ "$M_NOT_SERVED" = 1 ]; then
+    PASS_NOTE="${PASS_NOTE:+$PASS_NOTE; }new engine surfaces NOT served: M saw an engine without gzip, the routing listing or include_embeddings"
 fi
 if [ -n "$PASS_NOTE" ]; then
     echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0 ($PASS_NOTE)"
