@@ -1087,7 +1087,8 @@ def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run
     Holders keep their own tree and converge at their next spawn.
 
     This upgrades the BINARY only. Run `nx upgrade` separately for the
-    migration ladder — they are two commands on purpose (RDR-143 CA-2).
+    migration ladder — they are two commands on purpose (RDR-143 CA-2). A
+    fresh install needs no `nx upgrade`: `nx init` converges the ladder.
     """
     generation = perform_self_install(
         keep=keep, version=version, dry_run=dry_run, add_extras=extras,
@@ -1096,7 +1097,11 @@ def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run
         return
     click.echo(f"installed {generation.name}")
     click.echo(prune_uv_cache())
-    click.echo("run `nx upgrade` for migrations; live sessions converge at their next spawn")
+    click.echo(
+        "if this upgraded an existing install, run `nx upgrade` for migrations "
+        "(a fresh install is set up by `nx init` instead); "
+        "live sessions converge at their next spawn"
+    )
 
 
 @self_group.command("gc")
