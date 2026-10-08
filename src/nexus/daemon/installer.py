@@ -37,6 +37,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1189,6 +1191,9 @@ class DaemonUninstallReport:
     #: RDR-224 (nexus-7xzc1): pids of the background workers uninstall stopped
     #: (aspect workers, a topic labeling run), sorted.
     workers_stopped: tuple[int, ...] = ()
+    #: RDR-224 (nexus-25wlq): the ``onnxruntime-java<n>`` temp directories
+    #: ``--remove-data`` removed on Windows (see :func:`sweep_ort_temp_dirs`).
+    ort_temp_dirs_removed: tuple[Path, ...] = ()
 
 
 # NO _stop_daemon_best_effort: it shelled out to ``nx daemon t2 stop``, a verb
@@ -1306,6 +1311,124 @@ def _user_model_root_outside(cache: Path) -> Path | None:
     except ValueError:
         return root
     return None
+
+
+#: The extraction directory onnxruntime-java makes on every start. The engine's
+#: own boot sweep (``OrtTempSweep.java``, nexus-f9bgu.8/.11) removes the old
+#: ones, so the LAST run's directory is the one a Windows uninstall finds. The
+#: constants and the predicate below are that class's, rule for rule;
+#: ``tests/daemon/test_uninstall_walk_followups.py`` ties them to its source.
+ORT_TEMP_DIR_PREFIX = "onnxruntime-java"
+#: The libraries ORT loads: a live engine's copies are mapped and refuse deletion.
+ORT_LOADED_LIBS: tuple[str, ...] = ("onnxruntime.dll", "onnxruntime4j_jni.dll")
+#: A directory holding both, touched more recently than this, may be an engine's
+#: between writing its JNI DLL and loading it.
+ORT_COMPLETE_MIN_AGE_S = 0.25
+#: A directory missing one, touched more recently than this, may be mid-extraction.
+ORT_INCOMPLETE_MIN_AGE_S = 30.0
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _ort_temp_root() -> Path:
+    """The directory the engine's JVM calls ``java.io.tmpdir``.
+
+    On Windows that is ``GetTempPath``: ``TMP``, then ``TEMP``, then
+    ``USERPROFILE`` (Python's own ``gettempdir`` reads ``TEMP`` before ``TMP``).
+    Elsewhere the sweep never runs, so the ordinary answer will do.
+    """
+    if _is_windows():
+        for name in ("TMP", "TEMP", "USERPROFILE"):
+            value = os.environ.get(name, "").strip()
+            if value:
+                return Path(value)
+    return Path(tempfile.gettempdir())
+
+
+def _is_link_like(st: object) -> bool:
+    """A symbolic link or any other Windows reparse point (a junction, a cloud
+    placeholder): following one would delete somewhere else, so it is not ORT's."""
+    if stat.S_ISLNK(st.st_mode):  # type: ignore[attr-defined]
+        return True
+    if getattr(st, "st_reparse_tag", 0):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def sweep_ort_temp_dirs(
+    tmp_root: Path,
+    *,
+    now: float | None = None,
+    lstat=os.lstat,  # type: ignore[no-untyped-def]  # injectable so a test can present a junction on any host
+    unlink=os.unlink,  # type: ignore[no-untyped-def]  # injectable so a test can stand in for a Windows file lock
+    rmdir=os.rmdir,  # type: ignore[no-untyped-def]
+) -> tuple[list[Path], list[str]]:
+    """Remove the dead ``onnxruntime-java<n>`` directories in *tmp_root* the way
+    the engine's ``OrtTempSweep`` would, and no others. Returns (removed, notes);
+    each note names a matching directory that was left and why. Never raises.
+
+    A directory goes only when it is a real directory holding only regular files
+    (a link, a reparse point or anything nested is not ORT's), is not one an
+    engine may be filling (age: the newest modification time of it or any file in
+    it, past 250 ms when both loaded libraries are present, past 30 s when not),
+    and its loaded libraries delete. Those are tried first: a live engine's are
+    mapped, so the first refusal leaves the whole directory alone. The name test
+    is case-sensitive and anchored at the start; the engine's glob on Windows is
+    case-insensitive, and a narrower match here only ever deletes less.
+    """
+    removed: list[Path] = []
+    notes: list[str] = []
+    try:
+        names = sorted(n for n in os.listdir(tmp_root) if n.startswith(ORT_TEMP_DIR_PREFIX))
+    except OSError:
+        return removed, notes
+    clock = time.time() if now is None else now
+    for name in names:
+        d = Path(tmp_root) / name
+        try:
+            dst = lstat(d)
+            if not stat.S_ISDIR(dst.st_mode) or _is_link_like(dst):
+                notes.append(f"left {d}: not a plain directory of the engine's")
+                continue
+            newest = dst.st_mtime
+            files: list[Path] = []
+            foreign = False
+            for child in sorted(os.listdir(d)):
+                cst = lstat(d / child)
+                if not stat.S_ISREG(cst.st_mode) or _is_link_like(cst):
+                    foreign = True
+                    break
+                files.append(d / child)
+                newest = max(newest, cst.st_mtime)
+            if foreign:
+                notes.append(f"left {d}: holds something other than regular files")
+                continue
+            complete = {f.name for f in files} >= set(ORT_LOADED_LIBS)
+            bound = ORT_COMPLETE_MIN_AGE_S if complete else ORT_INCOMPLETE_MIN_AGE_S
+            if not newest + bound < clock:
+                notes.append(f"left {d}: too recent to be a finished run's")
+                continue
+            files.sort(key=lambda f: (f.name not in ORT_LOADED_LIBS, f.name))
+            deleted_any = False
+            for f in files:
+                try:
+                    unlink(f)
+                    deleted_any = True
+                except OSError as exc:
+                    if not deleted_any:
+                        notes.append(f"left {d}: in use (a library is mapped: {exc})")
+                    else:
+                        notes.append(f"left {d}: could not finish removing it ({f.name}: {exc})")
+                    break
+            else:
+                try:
+                    rmdir(d)
+                    removed.append(d)
+                except OSError as exc:
+                    notes.append(f"left {d}: could not remove the emptied directory ({exc})")
+        except OSError as exc:
+            notes.append(f"left {d}: could not inspect it ({exc})")
+    return removed, notes
 
 
 def _force_remove(func, path, _exc) -> None:  # type: ignore[no-untyped-def]
@@ -1482,8 +1605,14 @@ def _service_stack_confirmed_stopped(stop_exit_ok: bool) -> tuple[bool, tuple[st
     return not survivors, survivors
 
 
-def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> DaemonUninstallReport:
+def uninstall_daemon(
+    *, confirm: bool = False, remove_data: bool = False, cli: bool = False,
+) -> DaemonUninstallReport:
     """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
+
+    ``cli=True`` words the dry-run text for ``nx uninstall`` (which proceeds
+    with ``--yes`` and ``--remove-data``); the default keeps the MCP tool's
+    ``confirm=true`` / ``remove_data=true`` wording.
 
     With ``confirm=False`` this is a dry run: it reports what WOULD be
     removed and touches nothing. With ``confirm=True`` it removes BOTH OS
@@ -1499,17 +1628,30 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     install_dir = _daemon._autostart_install_dir()
     unit_dest = install_dir / _daemon._autostart_filename_t2()
     service_unit_dest = install_dir / _daemon._autostart_filename_service()
-    from nexus.db.onnx_model_root import nexus_cache_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.db.onnx_model_root import legacy_djl_tokenizer_cache, nexus_cache_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     data_dir = nexus_config_dir()
     marker = _first_run_marker_path()
     cache_dir = nexus_cache_root()
     user_model_root = _user_model_root_outside(cache_dir)
+    legacy_djl = legacy_djl_tokenizer_cache()
 
+    on_windows = _is_windows()
     if not confirm:
-        parts = [
-            f"the service autostart unit at {service_unit_dest}",
-            f"the T2 autostart unit at {unit_dest}",
+        if on_windows:
+            from nexus.daemon.windows_autostart import TASK_NAME  # noqa: PLC0415 — deferred import — Windows-only path
+
+            # The Windows install registers a Task Scheduler task and keeps its
+            # definition under the autostart dir. There is no T2 unit there.
+            parts = [
+                f"the {TASK_NAME} Task Scheduler logon task (and its kept definition at {service_unit_dest})",
+            ]
+        else:
+            parts = [
+                f"the service autostart unit at {service_unit_dest}",
+                f"the T2 autostart unit at {unit_dest}",
+            ]
+        parts += [
             "stop the engine-service + Postgres stack (service stop --with-pg)",
             "stop the nexus background workers (aspect workers, a topic labeling "
             "run, MinerU if nexus started it)",
@@ -1523,7 +1665,27 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
                 parts.append(
                     f"(the NX_ONNX_MODEL_DIR model root at {user_model_root} is kept)"
                 )
+            if on_windows:
+                parts.append(
+                    f"the {ORT_TEMP_DIR_PREFIX}<n> directories the engine's last run "
+                    f"left in {_ort_temp_root()}"
+                )
+            if legacy_djl.exists():
+                parts.append(
+                    f"(the shared DJL tokenizer cache at {legacy_djl} is kept: other "
+                    "programs may use it)"
+                )
         plan = "; ".join(parts)
+        if cli:
+            tail = (
+                " (--remove-data is set: this DELETES your notes and search index)."
+                if remove_data else "."
+            )
+        else:
+            tail = (
+                " Re-run with confirm=true to proceed"
+                + (" (remove_data=true is set: this DELETES your notes and search index)." if remove_data else ".")
+            )
         return DaemonUninstallReport(
             confirmed=False,
             unit_status=(
@@ -1539,10 +1701,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             data_dir=data_dir,
             daemon_stopped=False,
             warnings=(),
-            message=(
-                f"This would remove: {plan}. Re-run with confirm=true to proceed"
-                + (" (remove_data=true is set: this DELETES your notes and search index)." if remove_data else ".")
-            ),
+            message=f"This would remove: {plan}.{tail}",
         )
 
     warnings: list[str] = []
@@ -1654,6 +1813,33 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             else:
                 cache_removed = True
 
+    # 4c. With remove_data, the shared DJL default cache is reported, never
+    #     removed: ~/.djl.ai is every DJL program's, and nothing in it shows it
+    #     is nexus's. (Engines from this change on extract under the nexus
+    #     cache, removed above; this is the directory older engines used.)
+    if remove_data and legacy_djl.exists():
+        warnings.append(
+            f"left {legacy_djl}: DJL's default tokenizer cache, which other DJL "
+            "programs share. Engines before this release extracted there; remove "
+            "it yourself if nothing else on this machine uses DJL"
+        )
+
+    # 4d. Windows: the last engine run's onnxruntime-java temp directory. The
+    #     engine sweeps older ones at boot, so the final run's always survives
+    #     it. Only with remove_data, only after a confirmed stop (a live
+    #     engine's DLLs are mapped), only what the engine's own sweep removes.
+    ort_removed: list[Path] = []
+    if remove_data and on_windows:
+        if not service_stopped:
+            warnings.append(
+                f"kept the {ORT_TEMP_DIR_PREFIX}<n> temp directories in "
+                f"{_ort_temp_root()}: the service stack may still be running with "
+                "their libraries loaded; re-run once it has stopped"
+            )
+        else:
+            ort_removed, ort_notes = sweep_ort_temp_dirs(_ort_temp_root())
+            warnings.extend(ort_notes)
+
     # 5. Remove what the autostart install created outside the data dir: the
     #    unit's log file (with remove_data) and the nexus-owned autostart/log
     #    directories once empty (RDR-224). Anything else in them is named, kept.
@@ -1661,13 +1847,15 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         warnings.append(log_warning)
     warnings.extend(_prune_autostart_dirs())
 
-    summary = [
-        f"service autostart unit: {service_unit_result.status.value}",
-        f"T2 autostart unit: {unit_result.status.value}",
-    ]
+    summary = [f"service autostart unit: {service_unit_result.status.value}"]
+    # Windows never had a T2 unit: naming one there only invents a POSIX file.
+    t2_nameable = not (on_windows and t2_absent)
+    if t2_nameable:
+        summary.append(f"T2 autostart unit: {unit_result.status.value}")
     summary.append("service stack stopped" if service_stopped else "service stop not confirmed")
     if t2_absent:
-        summary.append("no T2 daemon (nothing to stop)")
+        if t2_nameable:
+            summary.append("no T2 daemon (nothing to stop)")
     else:
         summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
     if workers_stopped:
@@ -1682,6 +1870,8 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         summary.append(f"data dir {data_dir} wiped")
     if cache_removed:
         summary.append(f"model cache {cache_dir} removed")
+    if ort_removed:
+        summary.append(f"{len(ort_removed)} {ORT_TEMP_DIR_PREFIX} temp dir(s) removed")
     return DaemonUninstallReport(
         confirmed=True,
         unit_status=unit_result.status,
@@ -1696,6 +1886,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         cache_removed=cache_removed,
         cache_dir=cache_dir,
         workers_stopped=workers_stopped,
+        ort_temp_dirs_removed=tuple(sorted(ort_removed)),
         warnings=tuple(warnings),
         message="Daemon uninstall complete: " + "; ".join(summary) + ".",
     )
