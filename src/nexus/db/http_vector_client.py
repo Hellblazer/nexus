@@ -601,6 +601,17 @@ def _pop_response_headers() -> dict[str, str]:
     return {"X-Nexus-Skipped-Collections": value} if value else {}
 
 
+#: Routes the pooled transport must never replay by itself, beyond the GC
+#: sweeps in :func:`gateway_backoff.is_non_idempotent_sweep_path`.
+_NON_REPLAYABLE_PATH_SUFFIXES: tuple[str, ...] = ("/v1/vectors/store-delete",)
+
+
+def _is_non_replayable_path(path: str) -> bool:
+    return is_non_idempotent_sweep_path(path) or any(
+        path.endswith(suffix) for suffix in _NON_REPLAYABLE_PATH_SUFFIXES
+    )
+
+
 def _request_once(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -652,6 +663,12 @@ def _request_once(
     req = urllib.request.Request(
         base_url + path, data=data, headers=headers, method=method
     )
+    if _is_non_replayable_path(path):
+        # A sweep or a delete the server may already have run when the
+        # connection drops: the transport must not replay it on its own.
+        from nexus.db.pooled_http import mark_non_replayable  # noqa: PLC0415 — deferred import — keeps module load light
+
+        mark_non_replayable(req)
     # nexus-gbt5u: NOT urlopen — the module-level opener has no socket-options
     # hook, so a sleep-orphaned connection could never be detected. See the
     # transport-section comment above.

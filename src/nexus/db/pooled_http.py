@@ -27,7 +27,13 @@ process-wide pool keyed by the RESOLVED endpoint, so:
 * a connection the server closed while it sat idle is replaced transparently:
   one retry on a fresh connection, only when the failure is the "peer closed
   before answering" family, the connection was reused, and the failure came
-  within seconds of the send;
+  within seconds of the send. Every such retry is logged
+  (``pooled_http_stale_retry``). A request marked with
+  :func:`mark_non_replayable` (GC sweeps, store-delete: the server may already
+  have run it) never takes a pooled connection and is never replayed here;
+* a pooled connection is discarded when it idled longer than
+  :data:`MAX_IDLE_SECONDS` on EITHER the monotonic or the wall clock (the
+  monotonic clock stops during macOS sleep);
 * responses are read eagerly and decoded (``Content-Encoding: gzip``), then
   the connection goes back to the pool in the same call. Every caller read the
   whole body anyway.
@@ -46,6 +52,10 @@ import time
 import zlib
 from collections.abc import Callable
 from typing import Any
+
+import structlog
+
+_log = structlog.get_logger(__name__)
 
 #: Idle connections kept per endpoint. Search fans out on 8 threads; the cap
 #: only bounds what is retained, never what is opened.
@@ -76,6 +86,23 @@ _STALE_ERRORS: tuple[type[BaseException], ...] = (
     ConnectionAbortedError,
     BrokenPipeError,
 )
+
+#: Ceiling on a gzip response body AFTER decoding (a decompression bomb from a
+#: hostile or broken peer must not exhaust memory). The largest legitimate
+#: response is a 300-row page of chunk text and embeddings, a few MiB.
+MAX_DECODED_BYTES = 256 * 1024 * 1024
+
+#: Attribute set on a ``urllib.request.Request`` by :func:`mark_non_replayable`.
+_NON_REPLAYABLE_ATTR = "nexus_non_replayable"
+
+
+def mark_non_replayable(req: Any) -> None:
+    """Mark ``req`` as one the transport must never send twice (a sweep or a
+    delete: the server may have run it before the connection dropped). Such a
+    request never takes a pooled connection, so the stale-peer retry cannot
+    apply to it: a fresh connection is not stale, and any failure surfaces."""
+    setattr(req, _NON_REPLAYABLE_ATTR, True)
+
 
 #: ``(is_https, host[:port], tunnel_host, ssl-context identity)``. ``host`` is
 #: the PROXY when a proxy is in play, so a proxy change is a different key.
@@ -254,8 +281,18 @@ class _ConnectionPool:
 
 _POOL = _ConnectionPool()
 
+def _after_fork_in_child() -> None:
+    """Make the child safe to use the transport: an empty pool, and fresh
+    module locks (a thread that does not exist in the child may have held any
+    of them at fork time, and it will never release it)."""
+    global _ssl_context_lock, _handler_classes_lock
+    _POOL.reset_after_fork()
+    _ssl_context_lock = threading.Lock()
+    _handler_classes_lock = threading.Lock()
+
+
 if hasattr(os, "register_at_fork"):  # POSIX; Windows has no fork to guard
-    os.register_at_fork(after_in_child=lambda: _POOL.reset_after_fork())
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 def reset_pool() -> None:
@@ -269,8 +306,34 @@ def idle_connection_count() -> int:
 
 # ── response ──────────────────────────────────────────────────────────────────
 
+def _is_success(status: int) -> bool:
+    return 200 <= status < 300
+
+
 def _is_gzip(headers: Any) -> bool:
     return (headers.get("Content-Encoding") or "").strip().lower() in ("gzip", "x-gzip")
+
+
+class _GzipBodyError(Exception):
+    """A gzip body that cannot be decoded: ``truncated`` (stream ended early),
+    ``corrupt``, or ``too_large`` (decoded size over :data:`MAX_DECODED_BYTES`)."""
+
+    def __init__(self, kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.kind = kind
+
+
+def _gunzip(raw: bytes) -> bytes:
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        out = decoder.decompress(raw, MAX_DECODED_BYTES + 1)
+    except zlib.error as exc:
+        raise _GzipBodyError("corrupt", str(exc)) from exc
+    if len(out) > MAX_DECODED_BYTES:
+        raise _GzipBodyError("too_large", f"decoded size exceeds {MAX_DECODED_BYTES} bytes")
+    if not decoder.eof:
+        raise _GzipBodyError("truncated", "incomplete or truncated gzip stream")
+    return out
 
 
 def _buffered_response(
@@ -280,18 +343,38 @@ def _buffered_response(
     ``code``/``status``, ``headers``, ``msg`` (the reason, as urllib sets it),
     context manager. ``HTTPErrorProcessor`` and ``HTTPError`` take it as-is.
     A gzip body is decoded and its encoding/length headers dropped, so a
-    reader sees the same thing it would from an identity response."""
+    reader sees the same thing it would from an identity response.
+
+    A body that cannot be decoded never surfaces as a bare ``OSError`` (outside
+    every caller's taxonomy). On a non-2xx status the raw bytes are kept and
+    the real status survives (``HTTPError``, so a 502's gateway retry still
+    sees a 502). On a 2xx it is a transport failure: ``ConnectionResetError``
+    for a truncated or corrupt stream (the restart classifier retries it),
+    ``URLError`` for an over-size one (a retry would not help)."""
+    import urllib.error  # noqa: PLC0415 — deferred import — keeps module load light
     import urllib.response  # noqa: PLC0415 — deferred import — keeps module load light
 
     headers = resp.msg  # http.client puts the parsed header Message here
     body = raw
     if _is_gzip(headers):
-        try:
-            body = zlib.decompress(raw, 16 + zlib.MAX_WBITS)
-        except zlib.error as exc:
-            raise OSError(f"undecodable gzip response body: {exc}") from exc
-        del headers["Content-Encoding"]
-        del headers["Content-Length"]
+        decoded: bytes | None = raw  # an empty body is empty, not corrupt
+        if raw:
+            try:
+                decoded = _gunzip(raw)
+            except _GzipBodyError as exc:
+                if _is_success(resp.status):
+                    if exc.kind == "too_large":
+                        raise urllib.error.URLError(
+                            f"decompressed response body exceeds {MAX_DECODED_BYTES} bytes"
+                        ) from exc
+                    raise ConnectionResetError(
+                        f"truncated or undecodable gzip response body ({exc.kind}): {exc}"
+                    ) from exc
+                decoded = None  # non-2xx: keep the raw bytes AND the encoding header
+        if decoded is not None:
+            body = decoded
+            del headers["Content-Encoding"]
+            del headers["Content-Length"]
     out = urllib.response.addinfourl(io.BytesIO(body), headers, url, resp.status)
     out.reason = resp.reason  # type: ignore[attr-defined]
     out.msg = resp.reason  # type: ignore[attr-defined]
@@ -302,15 +385,23 @@ def _buffered_response(
 # ── the handlers ──────────────────────────────────────────────────────────────
 
 _ssl_context_lock = threading.Lock()
-_ssl_context_slot: tuple[tuple[str | None, str | None], Any] | None = None
+_ssl_context_slot: tuple[tuple[Any, ...], Any] | None = None
 
 
 def _shared_ssl_context() -> Any:
     """The process-wide client SSL context, rebuilt when the trust environment
-    (``SSL_CERT_FILE`` / ``SSL_CERT_DIR``) changes. Same construction as
+    (``SSL_CERT_FILE`` / ``SSL_CERT_DIR``) or the default-context factory
+    (``ssl._create_default_https_context``, which a caller may replace to
+    install its own trust policy) changes. Same construction as
     ``http.client``'s own default, which is what ``HTTPSHandler`` would build."""
+    import ssl  # noqa: PLC0415 — deferred import — keeps module load light
+
     global _ssl_context_slot
-    env = (os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
+    env = (
+        os.environ.get("SSL_CERT_FILE"),
+        os.environ.get("SSL_CERT_DIR"),
+        ssl._create_default_https_context,  # noqa: SLF001 — the documented override point
+    )
     with _ssl_context_lock:
         if _ssl_context_slot is None or _ssl_context_slot[0] != env:
             create = getattr(http.client, "_create_https_context", None)
@@ -379,7 +470,22 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
                 conn.set_tunnel(tunnel_host, headers=tunnel_headers)
             return conn
 
-        allow_reuse = True  # one transparent retry: afterwards, fresh connections only
+        # A non-replayable request (sweep, delete) never takes a pooled
+        # connection, so no stale-peer retry can apply to it. Everything else
+        # gets ONE transparent retry on a fresh connection, and afterwards
+        # fresh connections only.
+        allow_reuse = not getattr(req, _NON_REPLAYABLE_ATTR, False)
+        method = req.get_method()
+
+        def _log_retry(stage: str, err: BaseException) -> None:
+            _log.warning(
+                "pooled_http_stale_retry",
+                method=method,
+                path=req.selector,
+                host=host,
+                stage=stage,
+                error=type(err).__name__,
+            )
         while True:
             conn = _POOL.take(key) if allow_reuse else None
             reused = conn is not None
@@ -393,11 +499,12 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
             try:
                 try:
                     conn.request(
-                        req.get_method(), req.selector, req.data, headers,
+                        method, req.selector, req.data, headers,
                         encode_chunked=encode_chunked,
                     )
                 except OSError as err:
                     if reused and isinstance(err, _STALE_ERRORS) and _quick(sent_at):
+                        _log_retry("send", err)
                         _close_quietly(conn)
                         _POOL.drop_endpoint(key)
                         allow_reuse = False
@@ -405,24 +512,46 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
                     raise urllib.error.URLError(err) from err
                 try:
                     resp = conn.getresponse()
-                except _STALE_ERRORS:
+                except _STALE_ERRORS as err:
                     if reused and _quick(sent_at):
+                        _log_retry("response", err)
                         _close_quietly(conn)
                         _POOL.drop_endpoint(key)
                         allow_reuse = False
                         continue
                     raise
-                raw = resp.read()
+                truncated: http.client.IncompleteRead | None = None
+                try:
+                    raw = resp.read()
+                except http.client.IncompleteRead as exc:
+                    raw, truncated = exc.partial, exc
             except BaseException:
                 _close_quietly(conn)
                 raise
             break
 
+        # Decode BEFORE deciding the connection's fate: a body that fails to
+        # decode, or one cut short, means the peer is not behaving and the
+        # connection must not go back to the pool.
+        try:
+            if truncated is not None:
+                if _is_success(resp.status):
+                    raise ConnectionResetError(
+                        f"truncated response body: {truncated}"
+                    ) from truncated
+                # Non-2xx: the status is the information; keep it, with the
+                # partial body, so the gateway retry still sees the 502.
+                _close_quietly(conn)
+                return _buffered_response(resp, raw, req.get_full_url())
+            out = _buffered_response(resp, raw, req.get_full_url())
+        except BaseException:
+            _close_quietly(conn)
+            raise
         if resp.will_close or conn.sock is None:
             _close_quietly(conn)
         else:
             _POOL.release(key, conn)
-        return _buffered_response(resp, raw, req.get_full_url())
+        return out
 
     class _PooledHTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req: Any) -> Any:

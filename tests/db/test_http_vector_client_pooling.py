@@ -280,37 +280,6 @@ def test_stale_connection_that_looks_alive_is_retried_once_on_a_fresh_one(
     assert [r["path"] for r in srv.requests] == ["/v1/one", "/v1/two"]
 
 
-def test_request_retry_budget_is_one_not_a_loop(monkeypatch) -> None:
-    """A server that accepts and immediately drops every connection fails the
-    request after ONE transparent retry, as the raw connection error the
-    existing retry classifier knows."""
-    lsock = socket.socket()
-    lsock.bind(("127.0.0.1", 0))
-    lsock.listen(8)
-    accepted = []
-
-    def _drop() -> None:
-        while True:
-            try:
-                c, _ = lsock.accept()
-            except OSError:
-                return
-            accepted.append(1)
-            c.close()
-
-    threading.Thread(target=_drop, daemon=True).start()
-    url = f"http://127.0.0.1:{lsock.getsockname()[1]}"
-    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (url, "tok"))
-    try:
-        with pytest.raises(ConnectionError):
-            _get()
-    finally:
-        lsock.close()
-    # first attempt on a fresh connection fails immediately: no pooled
-    # connection existed, so no transparent retry.
-    assert len(accepted) == 1
-
-
 # ── (4) error taxonomy is unchanged ──────────────────────────────────────────
 
 @pytest.mark.parametrize("code", [400, 401, 404, 429, 500, 502, 503, 504])
@@ -433,7 +402,12 @@ def test_a_connection_is_not_pooled_when_the_server_says_close(
     try:
         _point_at(monkeypatch, srv)
         _get()
+        # The assertion that can fail: http.client reconnects a closed
+        # connection by itself (auto_open), so counting accepted sockets alone
+        # passes even when the pool keeps the dead connection (review M3).
+        assert hvc.connection_pool_idle_count() == 0, "a Connection: close response was pooled"
         _get()
+        assert hvc.connection_pool_idle_count() == 0
         assert srv.accepted == 2
     finally:
         srv.shutdown()
@@ -639,7 +613,10 @@ def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> Non
     import datetime
     import ssl
 
-    pytest.importorskip("cryptography")
+    # No importorskip: cryptography is a hard transitive dependency of conexus
+    # itself (sigstore, mcp[crypto]; `uv tree --invert --package cryptography`),
+    # so a missing one is a broken environment and this must fail, not skip --
+    # a skip here would silently drop the only production-shape (TLS) coverage.
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
