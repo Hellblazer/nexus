@@ -154,6 +154,8 @@ def window_for_collection(collection: str, model: str) -> TokenWindow | None:
     for MiniLM's window made every index run warn about a tokenizer the
     install has no use for (RDR-224 guest walk).
     """
-    from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — deferred; corpus pulls the catalog stack
+    from nexus.corpus import index_model_for_collection, is_conformant_collection_name  # noqa: PLC0415 — deferred; corpus pulls the catalog stack
 
-    return window_for_model(embedding_model_for_collection_name(collection) or model)
+    if collection and is_conformant_collection_name(collection):
+        return window_for_model(index_model_for_collection(collection))
+    return window_for_model(model)
