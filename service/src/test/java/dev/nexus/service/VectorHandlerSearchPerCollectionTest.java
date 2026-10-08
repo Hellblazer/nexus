@@ -320,6 +320,31 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(body.get("per_collection").get(0).get("error").isNull()).isTrue();
     }
 
+    // ── gzip (nexus-tjyzn) ────────────────────────────────────────────────────
+
+    @Test
+    void aGzipAcceptingClientGetsACompressedBodyThatDecodesToTheSameJson() throws Exception {
+        String payload = MAPPER.writeValueAsString(ok());
+        HttpRequest.Builder b = TestHttp.request("http://127.0.0.1:" + service.getPort()
+                + "/v1/vectors/search-per-collection")
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(payload));
+        var identity = http.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(identity.headers().firstValue("Content-Encoding")).as("no Accept-Encoding, no encoding").isEmpty();
+
+        var gz = http.send(b.header("Accept-Encoding", "gzip").build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(gz.statusCode()).isEqualTo(200);
+        assertThat(gz.headers().firstValue("Content-Encoding")).hasValue("gzip");
+        assertThat(gz.headers().firstValue("Vary").orElse("")).contains("Accept-Encoding");
+        assertThat(gz.body().length).as("compressed is smaller").isLessThan(identity.body().length);
+        byte[] plain;
+        try (var in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gz.body()))) {
+            plain = in.readAllBytes();
+        }
+        assertThat(MAPPER.readTree(plain)).isEqualTo(MAPPER.readTree(identity.body()));
+    }
+
     // ── a transient failure is a whole-request 503 ────────────────────────────
 
     @Test

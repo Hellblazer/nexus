@@ -24,6 +24,7 @@ final class CapturingExchange extends HttpExchange {
     private final String method;
     private final URI uri;
     private final InputStream requestBody;
+    final Headers requestHeaders = new Headers();
     final Headers responseHeaders = new Headers();
     private final ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
     int status = -1;
@@ -34,9 +35,11 @@ final class CapturingExchange extends HttpExchange {
         this.requestBody = new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8));
     }
 
+    byte[] bodyBytes() { return responseBody.toByteArray(); }
+
     String bodyString() { return responseBody.toString(StandardCharsets.UTF_8); }
 
-    @Override public Headers getRequestHeaders() { return new Headers(); }
+    @Override public Headers getRequestHeaders() { return requestHeaders; }
     @Override public Headers getResponseHeaders() { return responseHeaders; }
     @Override public URI getRequestURI() { return uri; }
     @Override public String getRequestMethod() { return method; }

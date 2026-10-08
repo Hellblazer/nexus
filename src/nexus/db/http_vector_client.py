@@ -27,6 +27,7 @@ CHUNKING STAYS PYTHON per the bead relay).
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -597,6 +598,14 @@ def _pop_response_headers() -> dict[str, str]:
     return {"X-Nexus-Skipped-Collections": value} if value else {}
 
 
+def _response_body(resp: Any) -> bytes:
+    """The body bytes of *resp* (a 2xx response or an ``HTTPError``), gunzipped when the engine
+    compressed it (``Content-Encoding: gzip``, nexus-tjyzn). Identity bodies pass through."""
+    raw = resp.read()
+    encoding = (resp.headers.get("Content-Encoding") or "").strip().lower() if resp.headers else ""
+    return gzip.decompress(raw) if encoding == "gzip" else raw
+
+
 def _request_once(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -624,6 +633,10 @@ def _request_once(
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
+        # nexus-tjyzn: the engine gzips a response of 1 KiB or more for a client that asks
+        # (a search response carrying vectors is hundreds of KB of decimal digits that compress
+        # about 2.7 to 1). Additive: an engine that predates it ignores the header.
+        "Accept-Encoding": "gzip",
         # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's
         # ownerless-write log; absent on a client older than this release.
         **client_identity_headers(),
@@ -658,7 +671,7 @@ def _request_once(
             # this is a thread-local capture rather than a new parameter.
             _stash_response_headers(resp.headers)
             _note_data_token_response(base_url, tenant, resp.status)
-            return json.loads(resp.read())
+            return json.loads(_response_body(resp))
     except urllib.error.HTTPError as exc:
         # nexus-umue1: clear the futility flag on any non-401 HTTPError too
         # (e.g. a 404) -- this is the ONLY point that sees status codes
@@ -1678,7 +1691,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     try:
         return _request("POST", path, tenant=tenant, timeout=timeout, body=body)
     except urllib.error.HTTPError as e:
-        body_bytes = e.read()
+        body_bytes = _response_body(e)
         try:
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
@@ -1801,7 +1814,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
     try:
         return _request("GET", path, tenant=tenant, timeout=30, body=None)
     except urllib.error.HTTPError as e:
-        body_bytes = e.read()
+        body_bytes = _response_body(e)
         try:
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
