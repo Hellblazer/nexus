@@ -278,3 +278,52 @@ def test_the_daemons_own_refusal_remains_the_backstop(monkeypatch) -> None:
     monkeypatch.setattr(awd, "_claude_available", lambda: False)
     with pytest.raises(RuntimeError, match="claude"):
         awd._require_extraction_credentials()
+
+
+@pytest.mark.parametrize("claude_on_path", [False, True])
+def test_the_spawner_and_the_daemon_guard_share_one_predicate(
+    tmp_path: Path, monkeypatch, claude_on_path: bool,
+) -> None:
+    """The spawner and the daemon's own guard must ask the SAME question.
+
+    The autouse stub is lifted and the real predicate restored, then the only
+    input is ``shutil.which``: flipping it must flip BOTH the spawner (spawns
+    or not) and the guard (raises or not). Two predicates that happened to
+    agree on a stub would diverge here; a stub-only test could not see it.
+    """
+    monkeypatch.setattr(awd, "_claude_available", _REAL_CLAUDE_AVAILABLE)
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/local/bin/claude" if claude_on_path else None,
+    )
+    _FakePopen.reset()
+
+    up = ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+    if claude_on_path:
+        awd._require_extraction_credentials()  # does not raise
+    else:
+        with pytest.raises(RuntimeError, match="claude"):
+            awd._require_extraction_credentials()
+
+    assert up is claude_on_path
+    assert len(_FakePopen.calls) == (1 if claude_on_path else 0)
+
+
+def test_both_entry_points_call_through_the_module_level_predicate(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Replacing ``_claude_available`` moves both entry points together, in both
+    directions, and each is observed refusing then allowing."""
+    state = {"available": False}
+    monkeypatch.setattr(awd, "_claude_available", lambda: state["available"])
+
+    for available in (False, True):
+        state["available"] = available
+        awd._recent_spawn.clear()
+        _FakePopen.reset()
+        up = ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+        guard_raised = False
+        try:
+            awd._require_extraction_credentials()
+        except RuntimeError:
+            guard_raised = True
+        assert (up, guard_raised) == (available, not available)

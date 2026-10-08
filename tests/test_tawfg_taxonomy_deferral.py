@@ -28,7 +28,7 @@ from nexus.mcp_infra import (
     TAXONOMY_DEFER_UPTIME_S,
     TAXONOMY_FAILURE_BACKOFF_S,
     DrainResult,
-    decide_taxonomy_deferral,
+    decide_taxonomy_deferral_window,
     drain_unassigned_chunks,
     record_taxonomy_failure,
 )
@@ -46,9 +46,9 @@ def _clear_deferral(monkeypatch):
 
 
 def _decide(tmp_path, uptime):
-    return decide_taxonomy_deferral(
+    return decide_taxonomy_deferral_window(
         uptime_fn=lambda: uptime, marker=tmp_path / "taxonomy_assign_failed_at", now_fn=lambda: _NOW,
-    )
+    ).reason
 
 
 # ── the decision ──────────────────────────────────────────────────────────────
@@ -218,8 +218,8 @@ def test_the_marker_is_per_engine_and_survives_token_rotation(tmp_path, monkeypa
     assert "tok-a" not in a.name and "engine-a" not in a.name, "no raw endpoint or token on disk"
 
     record_taxonomy_failure(a, now=_NOW)
-    assert "failed" in decide_taxonomy_deferral(uptime_fn=lambda: None, marker=a, now_fn=lambda: _NOW)
-    assert decide_taxonomy_deferral(uptime_fn=lambda: None, marker=b, now_fn=lambda: _NOW) == ""
+    assert "failed" in decide_taxonomy_deferral_window(uptime_fn=lambda: None, marker=a, now_fn=lambda: _NOW).reason
+    assert decide_taxonomy_deferral_window(uptime_fn=lambda: None, marker=b, now_fn=lambda: _NOW).reason == ""
 
 
 def test_thresholds_are_env_tunable(tmp_path, monkeypatch) -> None:
@@ -232,7 +232,7 @@ def test_thresholds_are_env_tunable(tmp_path, monkeypatch) -> None:
     marker = tmp_path / "m"
     record_taxonomy_failure(marker, now=_NOW - 100)
     monkeypatch.setenv("NX_TAXONOMY_FAILURE_BACKOFF_S", "50")
-    assert decide_taxonomy_deferral(uptime_fn=lambda: None, marker=marker, now_fn=lambda: _NOW) == ""
+    assert decide_taxonomy_deferral_window(uptime_fn=lambda: None, marker=marker, now_fn=lambda: _NOW).reason == ""
 
 
 @pytest.mark.parametrize("payload,expected", [
@@ -267,9 +267,9 @@ def test_uptime_probe_failure_is_no_evidence(monkeypatch) -> None:
 def test_a_future_dated_marker_defers_nothing(tmp_path) -> None:
     """Clock skew or a corrupted marker must not defer indefinitely."""
     record_taxonomy_failure(tmp_path / "m", now=_NOW + 3600)
-    assert decide_taxonomy_deferral(
+    assert decide_taxonomy_deferral_window(
         uptime_fn=lambda: None, marker=tmp_path / "m", now_fn=lambda: _NOW,
-    ) == ""
+    ).reason == ""
 
 
 def test_no_taxonomy_still_defers_and_records(tmp_path, monkeypatch, t2_service_env) -> None:
@@ -394,6 +394,27 @@ def test_the_decision_carries_the_time_left_in_the_window(tmp_path) -> None:
         uptime_fn=lambda: None, marker=tmp_path / "absent", now_fn=lambda: _NOW,
     )
     assert none.reason == "" and none.expires_in_s == 0
+
+
+def test_both_windows_applying_takes_the_longer_and_names_both(tmp_path) -> None:
+    """Engine restarted 100 s ago (500 s of warm-up left) and a failure marker
+    10 s old (890 s of backoff left): the deferral lifts at 890 s, not 500 s."""
+    marker = tmp_path / "m"
+    record_taxonomy_failure(marker, now=_NOW - 10)
+    d = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: 100, marker=marker, now_fn=lambda: _NOW,
+    )
+    assert TAXONOMY_FAILURE_BACKOFF_S - 10 <= d.expires_in_s <= TAXONOMY_FAILURE_BACKOFF_S - 9
+    assert d.expires_in_s > TAXONOMY_DEFER_UPTIME_S - 100
+    assert "restarted" in d.reason and "failed" in d.reason
+
+    # and the other way round: the warm-up is the longer one
+    record_taxonomy_failure(marker, now=_NOW - (TAXONOMY_FAILURE_BACKOFF_S - 5))
+    d = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: 1, marker=marker, now_fn=lambda: _NOW,
+    )
+    assert d.expires_in_s == TAXONOMY_DEFER_UPTIME_S - 1
+    assert "restarted" in d.reason and "failed" in d.reason
 
 
 def test_a_bounded_deferral_lifts_at_its_deadline(clock) -> None:

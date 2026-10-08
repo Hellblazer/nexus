@@ -4065,6 +4065,8 @@ class TestAspectWorkerIsRestartedNotJustStopped:
         line = next(a for a in actions if "aspect-worker" in a)
         assert "started pid" not in line, line
         assert "NEEDS HUMAN" in line and "claude" in line, line
+        # The line names its remedy, like the respawn-failure sibling beside it.
+        assert "put `claude` on PATH" in line and "nx daemon aspect-worker start" in line, line
 
     def test_a_drained_worker_is_started_again(self, monkeypatch) -> None:
         ensure_calls: list = []

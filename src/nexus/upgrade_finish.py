@@ -806,7 +806,8 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                             actions.append(
                                 f"NEEDS HUMAN: {proc.kind} pid {proc.pid} drained but not "
                                 "restarted: the `claude` binary is not on PATH, so a "
-                                "worker would only refuse"
+                                "worker would only refuse — install Claude Code or put "
+                                "`claude` on PATH, then run `nx daemon aspect-worker start`"
                             )
                         else:
                             actions.append(

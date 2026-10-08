@@ -1037,8 +1037,6 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     the stack down. ``nx daemon restart-stale`` cycles it; ``nx uninstall`` stops it.
     """
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        _port_accepting,
-        _read_pg_credentials,
         stop_storage_service,
     )
 
@@ -1169,10 +1167,24 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         )
         sys.exit(1)
 
-    if with_pg:
-        # Before the Postgres branches: they return early when PG is absent,
-        # and a full-stack stop still owes the MinerU server its stop.
-        _stop_mineru_with_stack(config_dir)
+    # MinerU is stopped AFTER Postgres, on every path out of the Postgres
+    # branches (early returns when PG is absent, and the exit(2) failure):
+    # uninstall runs this under a 30 s bound, and a slow MinerU drain (up to
+    # 10 s) ahead of ``pg_ctl -m fast stop`` could get nx killed before
+    # Postgres is stopped, which makes uninstall refuse remove_data.
+    try:
+        _service_stop_postgres(config_dir, with_pg=with_pg, pid=pid)
+    finally:
+        if with_pg:
+            _stop_mineru_with_stack(config_dir)
+
+
+def _service_stop_postgres(config_dir: Path, *, with_pg: bool, pid: int | None) -> None:
+    """The Postgres half of ``nx daemon service stop`` (reports; stops it only with --with-pg)."""
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        _port_accepting,
+        _read_pg_credentials,
+    )
 
     creds_path = config_dir / "pg_credentials"
     if not creds_path.exists():

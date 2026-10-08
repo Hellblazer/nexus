@@ -682,12 +682,16 @@ def decide_taxonomy_deferral_window(
 ) -> TaxonomyDeferral:
     """Whether this run should defer taxonomy assignment, and until when.
 
-    Two exclusions, checked in order: the engine restarted less than
+    Two exclusions: the engine restarted less than
     :func:`taxonomy_defer_uptime_s` ago; or a run lost an assignment less
     than :func:`taxonomy_failure_backoff_s` ago (the *marker* file). Unknown
     uptime and an unreadable marker both defer nothing. Both are time
     windows, so the decision carries the seconds left in the window: the
     caller bounds the deferral by it instead of holding it for the run.
+
+    When both windows apply, the deferral lasts until the later one ends
+    (the larger ``expires_in_s``) and the reason names both. Lifting at the
+    earlier one would resume assignment while the other cause still holds.
 
     Known limits, accepted: "under load" is caught only after a batch has
     failed (the client has no engine load signal); a deploy that does not
@@ -697,34 +701,34 @@ def decide_taxonomy_deferral_window(
     """
     from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
 
+    windows: list[TaxonomyDeferral] = []
     uptime = uptime_fn()
     window = taxonomy_defer_uptime_s()
     if uptime is not None and uptime < window:
-        return TaxonomyDeferral(
+        windows.append(TaxonomyDeferral(
             f"engine restarted {uptime} s before this run began "
             f"(warm-up window {window} s)",
             window - uptime,
-        )
+        ))
     try:
         failed_at = float(Path(marker).read_text().strip())
     except (OSError, ValueError):
+        failed_at = None
+    if failed_at is not None:
+        age = now_fn() - failed_at
+        backoff = taxonomy_failure_backoff_s()
+        if 0 <= age < backoff:
+            windows.append(TaxonomyDeferral(
+                f"taxonomy assign failed {age:.0f} s before this run began "
+                f"(backoff {backoff} s)",
+                int(backoff - age) + 1,
+            ))
+    if not windows:
         return TaxonomyDeferral("")
-    age = now_fn() - failed_at
-    backoff = taxonomy_failure_backoff_s()
-    if 0 <= age < backoff:
-        return TaxonomyDeferral(
-            f"taxonomy assign failed {age:.0f} s before this run began "
-            f"(backoff {backoff} s)",
-            int(backoff - age) + 1,
-        )
-    return TaxonomyDeferral("")
-
-
-def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
-    """The reason from :func:`decide_taxonomy_deferral_window`, or ``""``."""
-    return decide_taxonomy_deferral_window(
-        uptime_fn=uptime_fn, marker=marker, now_fn=now_fn,
-    ).reason
+    return TaxonomyDeferral(
+        "; ".join(w.reason for w in windows),
+        max(w.expires_in_s for w in windows),
+    )
 
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────

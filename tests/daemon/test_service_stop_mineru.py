@@ -139,3 +139,71 @@ def test_a_different_config_dir_does_not_reach_the_users_mineru(
         assert result.exit_code == 0, result.output
         assert server.poll() is None
         assert "not the default config dir" in result.output, result.output
+
+
+# ── ordering: Postgres first, MinerU after (uninstall bounds the whole stop at 30 s) ──
+
+
+def _with_postgres(config_dir: Path, monkeypatch, events: list[str], *, pg_fails: bool = False) -> None:
+    """A provisioned, listening Postgres whose stop and MinerU's stop log to *events*."""
+    (config_dir / "pg_credentials").write_text(f"PG_PORT=54329\nPG_DATA={config_dir / 'pgdata'}\n")
+    monkeypatch.setattr("nexus.daemon.storage_service_daemon._port_accepting", lambda host, port: True)
+
+    class _Bins:
+        pg_ctl = Path("/fake/pg_ctl")
+
+    monkeypatch.setattr("nexus.db.pg_provision.discover_pg_binaries", lambda: _Bins())
+
+    def _pg_stop(argv, **kw):
+        events.append("postgres")
+        if pg_fails:
+            raise RuntimeError("pg_ctl failed")
+
+    monkeypatch.setattr("nexus.commands.daemon.run_bounded", _pg_stop)
+    monkeypatch.setattr(
+        "nexus.commands.daemon._stop_mineru_with_stack", lambda cd: events.append("mineru"),
+    )
+
+
+def test_postgres_is_stopped_before_mineru(config_dir: Path, monkeypatch) -> None:
+    events: list[str] = []
+    _with_postgres(config_dir, monkeypatch, events)
+
+    result = _stop(config_dir, "--with-pg")
+
+    assert result.exit_code == 0, result.output
+    assert events == ["postgres", "mineru"], "a slow MinerU drain must not sit ahead of pg_ctl"
+
+
+def test_mineru_is_still_stopped_when_postgres_fails_to_stop(config_dir: Path, monkeypatch) -> None:
+    events: list[str] = []
+    _with_postgres(config_dir, monkeypatch, events, pg_fails=True)
+
+    result = _stop(config_dir, "--with-pg")
+
+    assert result.exit_code == 2, result.output
+    assert events == ["postgres", "mineru"]
+
+
+def test_mineru_is_stopped_when_there_is_no_postgres(config_dir: Path, monkeypatch) -> None:
+    """The early-return path (no pg_credentials) still owes MinerU its stop."""
+    events: list[str] = []
+    monkeypatch.setattr(
+        "nexus.commands.daemon._stop_mineru_with_stack", lambda cd: events.append("mineru"),
+    )
+    assert not (config_dir / "pg_credentials").exists()
+
+    result = _stop(config_dir, "--with-pg")
+
+    assert result.exit_code == 0, result.output
+    assert events == ["mineru"]
+
+
+def test_without_with_pg_neither_postgres_nor_mineru_is_stopped(config_dir: Path, monkeypatch) -> None:
+    events: list[str] = []
+    _with_postgres(config_dir, monkeypatch, events)
+
+    result = _stop(config_dir)
+
+    assert result.exit_code == 0, result.output
+    assert events == []

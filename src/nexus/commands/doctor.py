@@ -1121,6 +1121,21 @@ def _report_aspect_queue_service() -> None:
         return
 
     click.echo(f"aspect_extraction_queue: {pending} pending, {len(failed)} failed (service backend)")
+    # The spawner declines to start the aspect worker when `claude` is not on
+    # PATH and says so once per process in a log line; this is the durable
+    # signal. A WARNING, not a failure: rows wait in the queue until a worker
+    # can run. Not applicable (silent) with nothing pending, so a virgin box
+    # stays clean. The predicate is the daemon's own, imported at call time.
+    if pending > 0:
+        from nexus.daemon.aspect_worker_daemon import _claude_available  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+        if not _claude_available():
+            click.echo(
+                f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH. "
+                "Install Claude Code or put `claude` on PATH; pending rows are "
+                "extracted once a worker can run.",
+                err=True,
+            )
     if failed:
         click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
         for row in failed[:20]:
