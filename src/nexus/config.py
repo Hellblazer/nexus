@@ -1173,6 +1173,9 @@ _DEFAULTS: dict[str, Any] = {
             "default": 0.55,
         },
         "cluster_by": None,
+        # None: the engine's rerank scores max(3 * n, 30) candidates; an int
+        # fixes the count; 0 scores every candidate (nexus.search_engine).
+        "rerank_max_candidates": None,
         "contradiction_check": False,
         "query_sanitizer": True,
     },

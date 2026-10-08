@@ -226,6 +226,10 @@ This is a per-chunk classification, based only on the chunk's own AST content, n
 
 Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code), compensating for higher noise in prose collections.
 
+### Rerank scores a capped candidate set
+
+`nx search` over more than one collection asks the engine to rerank. The engine scores the first `max(3 x n, 30)` candidates in vector order, where `n` is the number of results you asked for, not every candidate the over-fetch returned. The other candidates stay in the result, unscored and in vector order, behind the scored ones, so the result count and the page do not change shape. Local mode, where the cross-encoder (ms-marco-minilm-l6-v2) runs on the CPU, measured 3.5 to 4.9 s of a 4.0 to 5.4 s search scoring all 135 candidates; the cap scores 30 for a default `-n 10`. A search that returns fewer candidates than the cap is scored in full, as before. The lexical leg of `--lexical` is not capped. Set `search.rerank_max_candidates` in `.nexus.yml` to change the cap (`0` scores every candidate); see [Configuration](configuration.md). An engine older than the field ignores it and scores every candidate.
+
 ### Catalog pre-filtering
 
 When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog (Postgres, served by `nexus-service`) and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.

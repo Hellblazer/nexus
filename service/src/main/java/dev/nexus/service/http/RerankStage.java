@@ -71,6 +71,32 @@ final class RerankStage {
      *              and the degraded path (the caller sized its consumer for topK)
      */
     Map<String, Object> apply(String query, List<Map<String, Object>> rows, Integer topK) {
+        return apply(query, rows, topK, null);
+    }
+
+    /**
+     * {@link #apply(String, List, Integer)} with a cap on the rows SCORED.
+     *
+     * <p>{@code maxCandidates} (request field {@code rerank_max_candidates}) bounds the
+     * scoring cost, which is per document and the dominant cost of the local cross-encoder
+     * (Sam, 2026-10-08, T2 nexus/search-latency-local-mode-2026-10-08: about 3.5 to 4.9 s of
+     * a 4 to 5 s CLI search scored all 135 candidates). Only the first {@code maxCandidates}
+     * rows with text, in the order the caller handed them (distance order), reach the
+     * scorer. Every other row stays in the result, after the scored rows and in its
+     * original relative order, with no {@code rerank_score}, so the result count and the
+     * response shape are unchanged. {@code null} scores every row (today's behaviour); a
+     * value at or above the number of scorable rows is the same thing. Textless rows do
+     * not use up a slot. Distinct from {@code topK}, which bounds what comes BACK, not
+     * what is scored.
+     *
+     * @throws IllegalArgumentException {@code maxCandidates} is not positive
+     */
+    Map<String, Object> apply(String query, List<Map<String, Object>> rows, Integer topK,
+                              Integer maxCandidates) {
+        if (maxCandidates != null && maxCandidates < 1) {
+            throw new IllegalArgumentException(
+                    "rerank_max_candidates must be at least 1, got " + maxCandidates);
+        }
         if (rows.isEmpty()) {
             return envelope(rows, false, null, null);
         }
@@ -84,6 +110,7 @@ final class RerankStage {
         List<String> documents = new ArrayList<>(rows.size());
         List<Integer> docIndexToRowIndex = new ArrayList<>(rows.size());
         for (int i = 0; i < rows.size(); i++) {
+            if (maxCandidates != null && documents.size() >= maxCandidates) break;
             Object content = rows.get(i).get("content");
             if (content instanceof String s && !s.isBlank()) {
                 documents.add(s);
@@ -133,7 +160,7 @@ final class RerankStage {
             row.put("rerank_score", s.relevanceScore());
             ordered.add(row);
         }
-        // Unscored rows (textless, or beyond the scorer's topK) rank below every
+        // Unscored rows (textless, beyond maxCandidates, or beyond the scorer's topK) rank below every
         // scored row, keeping their original relative order.
         for (int i = 0; i < rows.size(); i++) {
             if (!taken[i]) ordered.add(rows.get(i));

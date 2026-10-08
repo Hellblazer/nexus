@@ -601,6 +601,41 @@ def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) 
 _PER_COLLECTION_MAX_LIMIT = 1200
 _PER_COLLECTION_RERANK_MAX_LIMIT = 1000
 
+#: The cross-encoder scores a CAPPED candidate set, not every candidate
+#: (Sam's decision, 2026-10-08). Measured in T2
+#: ``nexus/search-latency-local-mode-2026-10-08``: a default ``nx search`` in
+#: local mode took 4.0 to 5.4 s on an M5 Pro, and 3.5 to 4.9 s of that was the
+#: engine's ms-marco-minilm-l6-v2 scoring all 135 candidates at up to 512
+#: tokens each. The engine scores the first ``max(_RERANK_CANDIDATE_MULTIPLIER *
+#: n_results, _RERANK_CANDIDATE_FLOOR)`` rows in vector order; the rest stay in
+#: the result, unscored and in vector order, behind the scored rows. A page
+#: needs ``n_results`` rows, so the cap leaves the reranker three times that
+#: many to choose from. ``search.rerank_max_candidates`` in ``.nexus.yml``
+#: overrides it (``0`` scores every candidate, as before this decision).
+_RERANK_CANDIDATE_MULTIPLIER = 3
+_RERANK_CANDIDATE_FLOOR = 30
+
+
+def _rerank_candidate_cap(n_results: int, cfg: dict) -> int | None:
+    """The ``rerank_max_candidates`` to send with a rerank request, or ``None``
+    for no cap. ``search.rerank_max_candidates``: unset = the default
+    ``max(3 * n_results, 30)``; a positive integer = that many; ``0`` = no cap.
+    Anything else (negative, non-integer, bool) is a config mistake that must not
+    silently disable the cap or break search: logged, and the default applies."""
+    default = max(_RERANK_CANDIDATE_MULTIPLIER * n_results, _RERANK_CANDIDATE_FLOOR)
+    configured = (cfg.get("search") or {}).get("rerank_max_candidates")
+    if configured is None:
+        return default
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured or None
+    _log.warning(
+        "search_rerank_max_candidates_invalid",
+        value=repr(configured),
+        consequence=f"the default cap of {default} applies",
+    )
+    return default
+
+
 #: Collections one per-collection request may name; a larger model group is
 #: sent as several requests and merged client-side.
 _PER_COLLECTION_MAX_COLLECTIONS = 256
@@ -1046,6 +1081,10 @@ def search_cross_corpus(
 
     # RDR-188: only a capability-marked backend is asked to rerank.
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
+    # The vector legs' rerank scores at most this many rows (None: all). The
+    # lexical leg is deliberately not capped: see ``_lexical_rows``.
+    rerank_cap = _rerank_candidate_cap(n_results, cfg) if server_rerank else None
+    rerank_cap_kw = {"rerank_max_candidates": rerank_cap} if rerank_cap is not None else {}
     # nexus-abdp2: the reranked and lexical paths, and any caller that
     # post-filters the pool, need the deep per-collection floor.
     deep_pool = bool(server_rerank) or lexical or deep_candidates
@@ -1120,6 +1159,10 @@ def search_cross_corpus(
             # tail server-side (VectorHandler#sendSearchResult), so the
             # two legs' scores are on the same scale by construction and
             # the rows can be ordered against each other honestly.
+            #
+            # NOT capped by rerank_max_candidates (the vector legs are): a
+            # lexical-only hit can sit deep in the fused order, and capping
+            # would leave it unscored, in the tail the CLI drops.
             if server_rerank:
                 lex_meta: dict = {}
                 lex_raw = t3.hybrid_search(
@@ -1184,7 +1227,7 @@ def search_cross_corpus(
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
-                                rerank=True, rerank_meta_out=rerank_meta)
+                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw)
             else:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where)
             if lexical:
@@ -1428,6 +1471,7 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
+                **rerank_cap_kw,
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(

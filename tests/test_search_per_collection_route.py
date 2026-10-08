@@ -888,6 +888,130 @@ class TestMixedModelFallsBackToSingletons:
         assert len(engine.route_calls()) == 1
 
 
+# ── the rerank scores a capped candidate set (Sam, 2026-10-08) ───────────────
+
+
+def _rerank_flags(env):
+    return {**env, "rerank_degraded": False, "rerank_model": "fake"}
+
+
+class TestRerankCandidateCap:
+    """The default cap is ``max(3 * n_results, 30)``; ``search.rerank_max_candidates``
+    overrides it (0 turns the cap off). It rides the request as
+    ``rerank_max_candidates`` so the ENGINE scores that many rows, not all."""
+
+    @pytest.mark.parametrize("n, expected", [
+        (1, 30), (5, 30), (10, 30), (11, 33), (20, 60), (100, 300),
+    ])
+    def test_default_cap_is_three_times_n_with_a_floor_of_thirty(
+        self, monkeypatch, n, expected,
+    ):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        engine.mutate = _rerank_flags
+        _search(engine, cols, n=n, rerank=True)
+        assert engine.route_calls()[0]["rerank_max_candidates"] == expected
+
+    def test_no_cap_field_without_rerank(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        _search(engine, cols, n=5)
+        assert "rerank_max_candidates" not in engine.route_calls()[0]
+
+    def test_the_batched_fallback_carries_the_same_cap(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols}, route=False)
+        # The flat /search must answer with a rerank envelope when rerank is on.
+        flat = engine._serve_flat
+        engine._serve_flat = lambda body: {
+            "results": flat(body), "rerank_degraded": False, "rerank_model": "fake",
+        }
+        _search(engine, cols, n=10, rerank=True)
+        sent = [b for p, b in engine.calls if p == _SEARCH]
+        assert sent and all(b["rerank_max_candidates"] == 30 for b in sent)
+
+    def test_the_lexical_leg_is_not_capped(self, monkeypatch):
+        # A lexical-only hit sits deep in vector order; capping its rerank would
+        # leave it unscored and drop it from the page, which is what the leg is for.
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        engine.mutate = _rerank_flags
+        engine.lexical_rows = []
+        _search(engine, cols, n=5, rerank=True, lexical=True)
+        hybrid = [b for p, b in engine.calls if p == _HYBRID]
+        assert hybrid and all("rerank_max_candidates" not in b for b in hybrid)
+
+    @pytest.mark.parametrize("configured, expected", [
+        (50, 50),       # a fixed cap
+        (0, None),      # off: score every candidate, as before
+        (-3, 30),       # nonsense falls back to the default, loudly in the log
+        ("many", 30),
+        (True, 30),     # a bool is not a count
+    ])
+    def test_config_overrides_the_cap(self, monkeypatch, configured, expected):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        engine.mutate = _rerank_flags
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": False,
+                                "rerank_max_candidates": configured}},
+        )
+        _search(engine, cols, n=5, rerank=True)
+        body = engine.route_calls()[0]
+        if expected is None:
+            assert "rerank_max_candidates" not in body
+        else:
+            assert body["rerank_max_candidates"] == expected
+
+    def test_rows_past_the_cap_keep_vector_order_behind_the_scored_rows(self, monkeypatch):
+        # Emulate the engine: score the first `cap` rows, leave the rest unscored.
+        # docs (x4 over-fetch): n=10 asks for 40 rows per collection, the cap is 30.
+        cols = _cols("docs", _BGE, 1)
+        engine = _FakeEngine(monkeypatch, {cols[0]: _rows("r", 60, 0.2)})
+        self._engine_that_honours_the_cap(engine)
+
+        results = _search(engine, cols, n=10, rerank=True)
+        scored = [r for r in results if "rerank_score" in r.metadata]
+        unscored = [r for r in results if "rerank_score" not in r.metadata]
+        assert len(scored) == 30 and len(unscored) == 10
+        # unscored rows stay in vector (distance) order, r30..r39
+        assert [r.id for r in unscored] == [f"r{i}" for i in range(30, 40)]
+        assert max(r.distance for r in scored) <= min(r.distance for r in unscored)
+
+        # The result count is what an uncapped search returns.
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": False, "rerank_max_candidates": 0}},
+        )
+        uncapped = _search(engine, cols, n=10, rerank=True)
+        assert len(uncapped) == len(results) == 40
+        assert all("rerank_score" in r.metadata for r in uncapped)
+
+    def test_a_request_below_the_cap_is_scored_in_full(self, monkeypatch):
+        cols = _cols("docs", _BGE, 1)
+        engine = _FakeEngine(monkeypatch, {cols[0]: _rows("r", 12, 0.2)})
+        self._engine_that_honours_the_cap(engine)
+
+        results = _search(engine, cols, n=10, rerank=True)
+        assert len(results) == 12
+        assert all("rerank_score" in r.metadata for r in results)
+
+    @staticmethod
+    def _engine_that_honours_the_cap(engine):
+        """Emulate the engine's stage: score the first ``rerank_max_candidates``
+        merged rows (every row when the field is absent), leave the rest unscored."""
+
+        def stage(env):
+            body = engine.route_calls()[-1]
+            cap = body.get("rerank_max_candidates", len(env["results"]))
+            for i, row in enumerate(env["results"][:cap]):
+                row["rerank_score"] = 1.0 - i / 1000
+            return _rerank_flags(env)
+
+        engine.mutate = stage
+
+
 # ── lexical stays on its route ───────────────────────────────────────────────
 
 

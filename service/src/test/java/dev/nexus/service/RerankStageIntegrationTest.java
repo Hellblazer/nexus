@@ -90,6 +90,7 @@ class RerankStageIntegrationTest {
 
     HttpServer fakeVoyage;
     final ConcurrentLinkedQueue<Object[]> voyageResponses = new ConcurrentLinkedQueue<>();
+    volatile String lastVoyageRequest;   // body of the newest request the fake upstream saw
 
     NexusService svcVoyage;   // fused stage → real VoyageReranker → fake upstream
     NexusService svcNone;     // no reranker wired
@@ -126,7 +127,7 @@ class RerankStageIntegrationTest {
         // Scripted fake Voyage /v1/rerank upstream (same idiom as VoyageRerankerTest).
         fakeVoyage = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         fakeVoyage.createContext("/v1/rerank", exchange -> {
-            exchange.getRequestBody().readAllBytes();
+            lastVoyageRequest = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             Object[] scripted = voyageResponses.poll();
             int status = scripted == null ? 200 : (Integer) scripted[0];
             byte[] body = (scripted == null ? "{\"data\": []}" : (String) scripted[1])
@@ -273,6 +274,53 @@ class RerankStageIntegrationTest {
                 searchBody("rerank", true, "rerank_top_k", 1));
 
         assertThat(results(env)).extracting(r -> r.get("id")).containsExactly(C3);
+    }
+
+    @SuppressWarnings("unchecked")
+    private int voyageDocumentCount() throws Exception {
+        return ((List<Object>) MAPPER.readValue(lastVoyageRequest, MAP_TYPE).get("documents")).size();
+    }
+
+    @Test
+    void rerankMaxCandidatesLimitsTheDocumentsScoredAndKeepsEveryRow() throws Exception {
+        // Cap 2 of 3 rows: only the 2 nearest reach the upstream scorer; the third
+        // (C3, the farthest) stays in the response, unscored, behind the scored rows.
+        scriptVoyage(200, voyageScores(
+                "{\"index\": 1, \"relevance_score\": 0.9}, {\"index\": 0, \"relevance_score\": 0.2}"));
+
+        Map<String, Object> env = postOk(svcVoyage, "/v1/vectors/search",
+                searchBody("rerank", true, "rerank_max_candidates", 2));
+
+        assertThat(voyageDocumentCount()).isEqualTo(2);
+        assertThat(env.get("rerank_degraded")).isEqualTo(false);
+        List<Map<String, Object>> rows = results(env);
+        assertThat(rows).extracting(r -> r.get("id")).containsExactly(C2, C1, C3);
+        assertThat(rows.get(2)).doesNotContainKey("rerank_score");
+    }
+
+    @Test
+    void rerankMaxCandidatesAboveTheRowCountScoresEveryRow() throws Exception {
+        scriptVoyage(200, voyageScores(
+                "{\"index\": 2, \"relevance_score\": 0.95}, {\"index\": 1, \"relevance_score\": 0.5}, "
+                + "{\"index\": 0, \"relevance_score\": 0.05}"));
+
+        Map<String, Object> env = postOk(svcVoyage, "/v1/vectors/search",
+                searchBody("rerank", true, "rerank_max_candidates", 30));
+
+        assertThat(voyageDocumentCount()).isEqualTo(3);
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly(C3, C2, C1);
+    }
+
+    @Test
+    void rerankMaxCandidatesWithoutRerankOrBelowOneIsA400() throws Exception {
+        var noRerank = post(svcVoyage, "/v1/vectors/search", searchBody("rerank_max_candidates", 2));
+        assertThat(noRerank.statusCode()).isEqualTo(400);
+        assertThat(noRerank.body()).contains("rerank_max_candidates");
+
+        var zero = post(svcVoyage, "/v1/vectors/search",
+                searchBody("rerank", true, "rerank_max_candidates", 0));
+        assertThat(zero.statusCode()).isEqualTo(400);
+        assertThat(zero.body()).contains("rerank_max_candidates");
     }
 
     @Test

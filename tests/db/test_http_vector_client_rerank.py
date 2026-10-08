@@ -296,3 +296,44 @@ def test_embedding_mode_probe_settles_unknown_after_cap(client, monkeypatch):
     for _ in range(10):
         assert client.embedding_mode() is None
     assert len(attempts) == client._EMBEDDING_MODE_MAX_PROBES
+
+
+# ── rerank_max_candidates: score at most N rows (Sam, 2026-10-08) ───────────
+
+
+def test_search_sends_rerank_max_candidates_only_with_rerank(client, monkeypatch):
+    captured: list[dict] = []
+    _patch_post(monkeypatch, {"results": [], "rerank_degraded": False}, captured)
+
+    client.search("q", ["knowledge__t"], rerank=True, rerank_max_candidates=30)
+    assert captured[-1]["body"]["rerank_max_candidates"] == 30
+
+    client.search("q", ["knowledge__t"], rerank=True)
+    assert "rerank_max_candidates" not in captured[-1]["body"]
+
+    # Without rerank the engine would 400 on the field; the client never sends it.
+    _patch_post(monkeypatch, [], captured)
+    client.search("q", ["knowledge__t"], rerank_max_candidates=30)
+    assert "rerank_max_candidates" not in captured[-1]["body"]
+
+
+def test_search_per_collection_sends_rerank_max_candidates_only_with_rerank(client, monkeypatch):
+    captured: list[dict] = []
+    envelope = {"results": [],
+                "per_collection": [{"collection": "knowledge__t", "raw_count": 0, "dropped": 0,
+                                    "min_raw_distance": None, "min_dropped_distance": None,
+                                    "error": None, "error_kind": None}],
+                "per_collection_k": 5, "limit": 10, "rerank_degraded": False}
+    _patch_post(monkeypatch, envelope, captured)
+
+    client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10,
+                                 rerank=True, rerank_max_candidates=30)
+    assert captured[-1]["body"]["rerank_max_candidates"] == 30
+
+    client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10, rerank=True)
+    assert "rerank_max_candidates" not in captured[-1]["body"]
+
+    _patch_post(monkeypatch, {k: v for k, v in envelope.items() if k != "rerank_degraded"}, captured)
+    client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10,
+                                 rerank_max_candidates=30)
+    assert "rerank_max_candidates" not in captured[-1]["body"]
