@@ -3649,9 +3649,18 @@ def _resolve_corpus_target(
     # nexus-mz9jv review M3: a bare-prefix part (and "all") sizes its fan-out, so on a cold cache ask
     # for the counts FIRST: that is one full listing, where names first and counts second were a
     # routing listing plus a full one.
+    def _names_a_collection(token: str) -> bool:
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): *token* is a user-typed --corpus TOKEN, not
+        # necessarily an existing collection -- the row-based collection_owner would raise
+        # CollectionNotRegisteredError on a bare "code" or a legacy "docs__foo" that has no row under
+        # that exact string. split_candidate_collection_name(token)[1] != token is the STRING-SHAPE
+        # substitute for a raw "__" in token test (see its docstring) -- this is the same class of
+        # candidate-string site as nexus.corpus.t3_collection_name's own ct/rest split.
+        return split_candidate_collection_name(token)[1] != token
+
     counts_up_front: dict[str, int] | None = None
     if corpus == "all" or any(
-        (p := part.strip()) and split_candidate_collection_name(p)[1] == p for part in corpus.split(",")
+        part.strip() and not _names_a_collection(part.strip()) for part in corpus.split(",")
     ):
         counts_up_front = _get_collection_counts()
     all_names = _get_collection_names()
@@ -3667,17 +3676,8 @@ def _resolve_corpus_target(
         part = part.strip()
         if not part:
             continue
-        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): *part* is a
-        # user-typed --corpus TOKEN, not necessarily an existing
-        # collection -- the row-based collection_owner would raise
-        # CollectionNotRegisteredError on a bare "code" or a legacy
-        # "docs__foo" that has no row under that exact string.
-        # split_candidate_collection_name(part)[1] != part is the
-        # STRING-SHAPE substitute for a raw "__" in part test (see its
-        # docstring) -- this is the same class of candidate-string site
-        # as nexus.corpus.t3_collection_name's own ct/rest split, which
-        # this delegates to on the next line.
-        if split_candidate_collection_name(part)[1] != part:
+        # *part* is a user-typed --corpus TOKEN: see _names_a_collection above.
+        if _names_a_collection(part):
             name = t3_collection_name(part, t3=t3)
             # nexus-bc7ps (Sam, 2026-09-16: an explicit corpus name is LLM
             # navigation, never a human choice): a registered non-live
