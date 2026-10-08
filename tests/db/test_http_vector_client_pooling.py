@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from nexus.db import http_vector_client as hvc
+from tests._module_seam import module_time
 
 
 class _CountingServer(ThreadingHTTPServer):
@@ -363,7 +364,7 @@ def test_gateway_retry_wrapper_still_retries_503_over_a_pooled_connection(
     srv = make_server()
     _point_at(monkeypatch, srv)
     monkeypatch.setattr(hvc, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0))
-    monkeypatch.setattr(hvc.time, "sleep", lambda _s: None)
+    module_time(monkeypatch, hvc).sleep = lambda _s: None
 
     with pytest.raises(urllib.error.HTTPError) as ei:
         hvc._request("GET", "/v1/status/503", tenant="default", timeout=10, body=None)
