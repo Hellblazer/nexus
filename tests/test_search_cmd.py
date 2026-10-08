@@ -151,6 +151,62 @@ def test_corpus_csv_form_matches_repeat_form(
     assert "rdr__nexus" in target_names
 
 
+# ── RDR-224 guest walk: a missing leg of the DEFAULT corpus is not a warning ──
+
+
+def _search_with(runner: CliRunner, collections: list[str], *args: str):
+    mock_t3 = _mock_t3(collections)
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(main, ["search", "query", *args])
+    return result, ms
+
+
+def test_default_corpus_with_no_knowledge_collection_does_not_warn(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """The default --corpus spans knowledge, code and docs. An install that has
+    only indexed a repo has no knowledge collection, and a warning about the
+    leg the user never asked for was printed on every such search."""
+    result, ms = _search_with(runner, ["code__myrepo", "docs__myrepo"])
+    assert result.exit_code == 0, result.output
+    assert "no collections match" not in result.output.lower()
+    targets = ms.call_args.kwargs.get("collections") or ms.call_args.args[1]
+    assert sorted(targets) == ["code__myrepo", "docs__myrepo"]
+
+
+def test_default_corpus_with_nothing_at_all_still_says_so(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """Silencing the per-leg warning must not silence the empty result: the
+    closing 'no matching collections' line is how the user learns nothing ran."""
+    mock_t3 = _mock_t3([])
+    mock_t3.list_collections.return_value = []
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus") as ms:
+        result = runner.invoke(main, ["search", "query"])
+    assert result.exit_code == 0, result.output
+    assert "no matching collections found" in result.output
+    ms.assert_not_called()
+
+
+def test_explicit_knowledge_corpus_still_warns_when_absent(
+    runner: CliRunner, cloud_env,
+) -> None:
+    result, _ = _search_with(runner, ["code__myrepo"], "--corpus", "knowledge")
+    assert "no collections match --corpus 'knowledge'" in result.output
+
+
+def test_a_corpus_that_merely_lists_the_default_legs_in_another_order_warns(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """Only the untouched default is silent: anything the user typed is theirs."""
+    result, _ = _search_with(
+        runner, ["code__myrepo"], "--corpus", "code", "--corpus", "knowledge",
+    )
+    assert "no collections match --corpus 'knowledge'" in result.output
+
+
 # ── nexus-d9xt2: skip GET /v1/vectors/stats for explicit collection names ──
 
 
