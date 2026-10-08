@@ -209,10 +209,11 @@ nexus-wym0l; RDR-225's findings; T2 entries 29657, 29650, 29624, 28937 and
   (`disableIndexScanForExactFallback`, one `selectFrom(fn)`) or the HNSW plan
   wrapped in the empty-result exact re-run (`exactSelectFrom`,
   `exactOnUnderReturn`, `:6587-6603`).
-- **C4. Permits.** `fanoutArmPermits`: default and ceiling `max(1, pool - 2)`
-  since 538444f0d (it was `max(1, pool/2)` when this RDR was drafted and when
-  M1 was measured); the per-request `fanoutParallelism` default moved to the
-  same value. The gate is shared by every request.
+- **C4. Permits.** `fanoutArmPermits`: default `max(1, pool/2)`, ceiling
+  `max(1, pool - 2)`; the per-request `fanoutParallelism` default is the same
+  half. The default was `pool - 2` in engine-service-v0.1.153 only, and was
+  reverted after measurement (§ Decisions, item 4). The gate is shared by every
+  request.
 - **C5. Merge.** `FanoutMerger` (`:1760-1830`). As each arm finishes, its rows
   are cut by that collection's threshold (`distance > threshold` drops), and
   `raw_count`, `dropped`, `min_raw_distance` and `min_dropped_distance` are
@@ -981,6 +982,17 @@ Decided by Sam, 2026-10-08:
    lone search, which the per-request limit holds to 5. It ships in the next
    engine tag, ahead of this RDR (Sam's go in conexus's session, T2 conexus
    [29662]). This moves P in the bin formula too.
+
+   **Outcome, measured and reverted (2026-10-08).** engine-service-v0.1.153
+   shipped the change. In the cloud the arms then became DB-throughput-bound.
+   Effective parallelism rose from 3-4.5 to 4.5-6.3, but mean arm time rose by
+   the same factor and sum_arm_ms by 40-90%. The 61-collection call was
+   unchanged, the 28-collection call got worse, and only the 30-collection query
+   gained about 15% (T2 `nexus/search-fanout-permits-8-result-2026-10-08`
+   [29699]). Sam reverted the defaults to half the pool for the next engine tag.
+   This bears on the design: under contention, per-row DB work, not per-arm
+   overhead, may dominate, which is the question A5 and Phase 0's stop gate
+   exist to answer.
 5. **The grouped query is a new stored SQL function family**
    (`plain_search_grouped_<dim>`), installed by a Liquibase changeset beside
    the ten families RDR-225 redefined. The engine calls it; the client sends
