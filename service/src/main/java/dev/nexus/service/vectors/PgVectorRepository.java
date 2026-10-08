@@ -2723,8 +2723,9 @@ public final class PgVectorRepository {
         // so any row's count is the answer, or 0 when the page is empty.
         var countField = DSL.count().over();
         long[] emptyPageCountHolder = {-1L};
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var result = tenantScope.withTenant(tenant, ctx -> {
-            org.jooq.Condition cond = ch.collection().eq(collection).and(ch.chash().in(ids))
+            org.jooq.Condition cond = scope.and(ch.chash().in(ids))
                                           .and(liveChunksCondition(ctx, ch));
             var rows = ctx.select(ch.chash(), ch.chunkText(), ch.metadata(), countField)
                .from(ch.table())
@@ -2791,10 +2792,11 @@ public final class PgVectorRepository {
         }
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var rows = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .where(scope.and(ch.chash().in(ids)))
                .orderBy(ch.chash().asc())
                .fetch());
         List<String> outIds = new ArrayList<>(rows.size());
@@ -2834,24 +2836,10 @@ public final class PgVectorRepository {
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "embeddings", List.of());
         }
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        // The collection's model (registry row, cached in-process; dimForCollection just resolved it).
+        final String model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
         var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.embedding())
-               .from(ch.table())
-               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
-               // nexus-oizh7 D1 hazard (see dimForCollection's DECISION for the general
-               // dim-scoping contract this guard instantiates — embedding-column reads
-               // ARE dim-guarded): without ch.embedding().isNotNull(), a foreign-dim row
-               // matches this predicate, rec.value2() (the un-dispatched embedding
-               // column) is null, and the hydration loop below stored an EMPTY list for
-               // that chash rather than omitting it -- violating this method's own
-               // Chroma-parity "ids not present are OMITTED" contract. Pre-unification
-               // the row simply did not exist in this dim's table, so it was never a
-               // candidate at all.
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids))
-                      .and(ch.embedding().isNotNull())
-                      .and(liveChunksCondition(ctx, ch)))
-               .fetch());
+            getEmbeddingsQuery(ctx, dim, tenant, model, collection, ids).fetch());
 
         Map<String, List<Float>> byChash = new HashMap<>();
         for (var rec : result) {
@@ -2870,6 +2858,40 @@ public final class PgVectorRepository {
             }
         }
         return Map.of("ids", outIds, "embeddings", outEmbeddings);
+    }
+
+    /**
+     * The statement {@link #getEmbeddings} runs, apart from running it, so
+     * {@code GetEmbeddingsPruningIntegrationTest} reads the plan of the engine's own statement and not of a copy.
+     *
+     * <p>RDR-225: {@code nexus.chunks} is LIST-partitioned by {@code embedding_model}, then by
+     * {@code tenant_id}. The row-level-security policy is {@code current_setting}-based, so it cannot prune
+     * leaves at plan time; without the explicit {@code embedding_model} and {@code tenant_id} predicates the
+     * planner appends every (model, tenant) leaf and runs the live-owner function against each (measured on the
+     * managed cloud: about 1.2 s per call, 14 to 22 calls per search). With them it plans to the one leaf, as
+     * {@link #probeSelectedRowsQuery} does. {@code model} is the collection's registry row
+     * ({@link CollectionRegistry#lookup}, cached in-process); {@code tenant} is the tenant the statement runs as.
+     *
+     * <p>{@code TombstoneFilterGateTest} requires every named get-family method to call
+     * {@link #liveChunksCondition} by name; this builder is that call site for {@code getEmbeddings}.
+     */
+    static org.jooq.Select<? extends org.jooq.Record2<String, Vector>> getEmbeddingsQuery(
+            DSLContext ctx, int dim, String tenant, String model, String collection, List<String> ids) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return ctx.select(ch.chash(), ch.embedding())
+               .from(ch.table())
+               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
+               // nexus-oizh7 D1 hazard (see dimForCollection's DECISION for the general
+               // dim-scoping contract this guard instantiates — embedding-column reads
+               // ARE dim-guarded): without ch.embedding().isNotNull(), a foreign-dim row
+               // matches this predicate, the un-dispatched embedding column is null, and
+               // the hydration loop stores an EMPTY list for that chash rather than
+               // omitting it -- violating getEmbeddings' own Chroma-parity "ids not
+               // present are OMITTED" contract.
+               .where(chunkScope(ch, tenant, model, collection))
+               .and(ch.chash().in(ids))
+               .and(ch.embedding().isNotNull())
+               .and(liveChunksCondition(ctx, ch));
     }
 
     /**
@@ -2959,7 +2981,7 @@ public final class PgVectorRepository {
                                         boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        org.jooq.Condition cond = ch.collection().eq(collection);
+        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
                 cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
@@ -3082,7 +3104,7 @@ public final class PgVectorRepository {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
-        org.jooq.Condition cond = ch.collection().eq(collection);
+        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
                 cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
@@ -3881,6 +3903,7 @@ public final class PgVectorRepository {
                                     int limit, int offset) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
@@ -3889,7 +3912,7 @@ public final class PgVectorRepository {
                // get-family this needs no out-of-band chash: a plain listing
                // surfaced tombstoned content by default via
                // POST /v1/vectors/store-list (VectorHandler#handleStoreList).
-               .where(ch.collection().eq(collection).and(liveChunksCondition(ctx, ch)))
+               .where(scope.and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch());
@@ -4669,8 +4692,9 @@ FROM scope s
     public int count(String tenant, String collection) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         long c = tenantScope.withTenant(tenant, ctx ->
-            (long) ctx.fetchCount(ch.table(), ch.collection().eq(collection)));
+            (long) ctx.fetchCount(ch.table(), scope));
         // PG count(*) is bigint; refuse to wrap rather than silently narrow.
         if (c > Integer.MAX_VALUE) {
             throw new IllegalStateException("count overflow for collection '" + collection
@@ -5845,7 +5869,8 @@ FROM scope s
         }
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        return tenantScope.withTenant(tenant, ctx -> selectExistingChashesCtx(ctx, ch, collection, chashes));
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
+        return tenantScope.withTenant(tenant, ctx -> selectExistingChashesCtx(ctx, ch, scope, chashes));
     }
 
     /**
@@ -5855,10 +5880,10 @@ FROM scope s
      * UPDATE loop, RDR-181 bead nexus-f0r8p.2).
      */
     private static Set<String> selectExistingChashesCtx(DSLContext ctx, DimTables.ChunkTable ch,
-                                                         String collection, List<String> chashes) {
+                                                         org.jooq.Condition scope, List<String> chashes) {
         return new HashSet<>(ctx.select(ch.chash())
                                  .from(ch.table())
-                                 .where(ch.collection().eq(collection).and(ch.chash().in(chashes)))
+                                 .where(scope.and(ch.chash().in(chashes)))
                                  .fetch(ch.chash()));
     }
 
@@ -6008,6 +6033,8 @@ FROM scope s
         existenceSelectCalls.incrementAndGet();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
+            // RDR-225: the (model, tenant, collection) scope, resolved before the transaction opens.
+            final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
             return tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: the have-vector metadata-only UPDATE below touches
                 // rows the superseded-chunk sweep DELETEs and gc_quarantine_orphans moves,
@@ -6019,7 +6046,7 @@ FROM scope s
                 // see acquireSweepGateShared's javadoc for the formula and why the writer
                 // side deliberately has no lock_timeout.
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
-                Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, collection, dedupIds);
+                Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, scope, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see
                 // afterExistencePartitionHookForTests javadoc. Fires AFTER the existence
@@ -6089,7 +6116,7 @@ FROM scope s
      * different text) without a second round trip.
      */
     private static Map<String, String> selectExistingChashTextCtx(DSLContext ctx, DimTables.ChunkTable ch,
-                                                                    String collection, List<String> chashes) {
+                                                                    org.jooq.Condition scope, List<String> chashes) {
         Map<String, String> out = new HashMap<>();
         // nexus-6yps0: bound the IN-clause bind-param budget at SOURCE_URI_JOIN_BATCH,
         // the same constant sourceUrisByChash already chunks its own chash IN-clause
@@ -6100,7 +6127,7 @@ FROM scope s
             List<String> batch = chashes.subList(start, Math.min(start + SOURCE_URI_JOIN_BATCH, chashes.size()));
             ctx.select(ch.chash(), ch.chunkText())
                .from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(batch)))
+               .where(scope.and(ch.chash().in(batch)))
                .fetch()
                .forEach(r -> out.put(r.value1(), r.value2()));
         }
@@ -6182,7 +6209,7 @@ FROM scope s
                 int dim = dimForCollection(tenant, col);
                 DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
                 var chunks = ctx.select(ch.chash(), ch.chunkText()).from(ch.table())
-                                .where(ch.collection().eq(col).and(ch.chash().in(e.getValue())))
+                                .where(chunkScope(ch, tenant, col).and(ch.chash().in(e.getValue())))
                                 .fetch();
                 Map<String, String> byChash =
                     textByColThenChash.computeIfAbsent(col, k -> new HashMap<>());
@@ -6251,9 +6278,10 @@ FROM scope s
     public String fetchChunkText(String tenant, String collection, String chash) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chunkText()).from(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
+               .where(scope.and(ch.chash().eq(chash)))
                .fetchOne(ch.chunkText()));
     }
 
@@ -6376,6 +6404,25 @@ FROM scope s
      * <p>{@code TombstoneFilterGateTest.scanTypedChunksSites} requires every named
      * get-family method to call this helper by name; keep the name.
      */
+    /**
+     * The RDR-225 partition-pruning scope of a collection's chunk rows: its embedding model, its tenant and
+     * its name. {@code nexus.chunks} is LIST-partitioned by {@code embedding_model}, then by {@code tenant_id},
+     * and the row-level-security policy is {@code current_setting}-based, so a statement that names only
+     * {@code collection} plans against EVERY (model, tenant) leaf. A collection carries exactly one model (the
+     * composite foreign key to {@code catalog_collections}), so this selects the same rows the bare
+     * {@code collection = ?} did. The model comes from {@link CollectionRegistry#lookup} (cached in-process;
+     * the first call on a miss opens its own transaction), so call it BEFORE {@code withTenant}, not inside it.
+     */
+    private org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String collection) {
+        return chunkScope(ch, tenant,
+            CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel(), collection);
+    }
+
+    private static org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String model,
+                                                 String collection) {
+        return ch.embeddingModel().eq(model).and(ch.tenantId().eq(tenant)).and(ch.collection().eq(collection));
+    }
+
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
         Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
         return DSL.exists(ctx.selectOne().from(
