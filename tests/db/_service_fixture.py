@@ -576,7 +576,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     if not jar.exists():
         return (
             f"service jar not built: {_rel(jar)} "
-            "(run: mvn -f service/pom.xml package -DskipTests)"
+            "(run: scripts/build-gate-jar.sh)"
         )
     jar_mtime = jar.stat().st_mtime
     newest_src = 0.0
@@ -604,7 +604,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
         return (
             f"service jar is STALE: {_rel(jar)} predates "
             f"{rel} — rebuild before integration run "
-            "(run: mvn -f service/pom.xml package -DskipTests)"
+            "(run: scripts/build-gate-jar.sh)"
         )
     # COMPLETENESS, checked AFTER staleness (nexus-06fu4). Being-written is a
     # third state the mtime comparison above cannot represent: a jar mid-write
@@ -637,7 +637,7 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
             "this is most likely a concurrent `mvn package` rewriting it right "
             "now rather than a stale build — wait for that build to finish and "
             "rerun. If no build is running, rebuild: "
-            "mvn -f service/pom.xml package -DskipTests"
+            "scripts/build-gate-jar.sh"
         )
     return None
 

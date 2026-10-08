@@ -20,6 +20,23 @@ of 32 and passes, so the cap does nothing on a quiet machine and binds only
 when something else has already taken the budget. `NX_XDIST_NO_CAP=1` opts
 out. Diagnose with `ipcs -m` before suspecting the code.
 
+**The session start refuses when the engine substrate cannot boot** (`tests/conftest.py`
+`_preflight_engine_substrate`, verdict from `tests/_substrate_preflight.refusal`).
+A missing or stale service jar, or a PG bundle for the pinned engine tag that is
+not downloadable (the tag is not published yet, as on a release branch whose
+engine is still building), used to error every substrate-backed test at setup:
+25,636 errors on one full `-n auto` run, one fact. Now the xdist controller checks
+once, after the lease gates and before any worker spawns, and exits 75 with one
+line naming the cause and the remedy (`scripts/build-gate-jar.sh`, or wait for
+the engine release). It asks the substrate's own functions
+(`jar_freshness_skip_reason`, `_engine_substrate._pg_bin`), so there is no second
+copy of the freshness rule, and it provisions the PG bundle itself when it is not
+cached, so workers find it. `NX_TEST_T2_SUBSTRATE=none` skips it; a nested pytest
+inside a lease holder skips it; a bug in the preflight is logged and the run goes
+on. A test that spawns a child pytest and wants the preflight to run must clear
+`NX_SUITE_LEASE_HELD_BY` and give the child its own `NX_BUILD_LEASE_ROOT`
+(`tests/test_substrate_preflight.py` does).
+
 `-m lint` selects the O(repo) meta-tests (AST/regex scans of `src/nexus`, `conexus/` agent-skill-command markdown, RDR frontmatter, marker-selection coverage itself) that the default `addopts` (`-m 'not integration and not slow and not lint'`) excludes from the hot loop — they only change when repo *structure* changes, not application behavior, and run once in CI's dedicated `pytest (lint markers)` job rather than once per shard. Run them explicitly with `uv run pytest -m lint` when touching `conexus/`, RDR frontmatter, or a storage-boundary/hook-registration invariant those files pin.
 
 `-m integration` is also deselected by default. CI's `pytest (integration, affected)` job runs, on every push and PR, the integration files the change touched or that directly import a `src/nexus` module it changed (`scripts/select_affected_integration_tests.py`), with a per-file non-vacuity check (`scripts/assert_integration_affected_ran.py`). Transitive imports and `service/` changes select nothing by themselves; the nightly local-service gate runs the whole family, the release battery runs it per release, and the CA-3 and write-seam jobs run their own files. A new integration test FILE therefore runs in CI on the push that adds it; a new test inside an existing file runs too, but a skip in it is visible only in the job's `-rs` output, not as a failure. If the job reports that a file skipped every test, give the job the missing prerequisite, or list the file in `ALL_SKIP_ALLOWED` with its reason (a runner limit, or a bead for a test no gate arms).
@@ -224,8 +241,9 @@ on first use, each once per box under a cross-process lock: the PG bundle
 under `$XDG_CACHE_HOME/nexus-test-substrate/<tag>/` (`~/.cache/...` when
 `XDG_CACHE_HOME` is unset), the models under the engine's onnx_models root
 (`$NX_ONNX_MODEL_DIR`, else `~/.cache/nexus/onnx_models`). A box that is
-offline on its first run gets a message naming the fix, not a wall of setup
-errors. Port shards scale with the xdist worker count, so `-n auto` fits any
+offline on its first run gets one exit-75 line at session start naming the
+pinned engine tag, not a wall of setup errors (see the substrate preflight
+below). Port shards scale with the xdist worker count, so `-n auto` fits any
 core count (nexus-wvyvn).
 
 What the host itself must supply:

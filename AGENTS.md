@@ -32,7 +32,7 @@ uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
 
-Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/_engine_substrate.py`) or skip. **After any pull/rebase or edit touching `service/` (a comment in a Java file or a changelog XML counts: the gate is mtime-keyed), run `scripts/build-gate-jar.sh`** — the substrate's freshness gate rejects a stale/unstamped jar and every substrate-backed test errors at setup, lint-marked ones included, so a suite run beside a jar rebuild reports a wall of setup errors that is not a test failure. Never backdate mtimes to get past it; rebuild. Test-authoring directives (scenario journeys, lint bucket, contract-suite patterns, parametrize rules) live in [`tests/AGENTS.md`](tests/AGENTS.md).
+Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/_engine_substrate.py`) or skip. **After any pull/rebase or edit touching `service/` (a comment in a Java file or a changelog XML counts: the gate is mtime-keyed), run `scripts/build-gate-jar.sh`** — the substrate's freshness gate rejects a stale/unstamped jar, lint-marked tests included, and a session start now refuses on it (exit 75, one line naming `scripts/build-gate-jar.sh`; the same preflight refuses when the pinned engine tag's PG bundle is not downloadable, and `NX_TEST_T2_SUBSTRATE=none` skips it). A jar rebuilt DURING a run is a different case: the preflight has already passed, so that run still reports a wall of setup errors that is not a test failure. Never backdate mtimes to get past it; rebuild. Test-authoring directives (scenario journeys, lint bucket, contract-suite patterns, parametrize rules) live in [`tests/AGENTS.md`](tests/AGENTS.md).
 
 ## Architecture at a glance
 
@@ -430,16 +430,20 @@ things to avoid carefully; they are impossible.
 
 6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST
    SUBSTRATE-BACKED TEST.** `service/target/` is untracked build output, so
-   a fresh worktree has no service jar and every substrate-backed test
-   errors at setup. The fix is seconds rather than a nine-minute rebuild
-   because the cache key is on `service/` CONTENT and lives in the git
-   common dir, so every worktree on the box shares one build.
+   a fresh worktree has no service jar. The fix is seconds rather than a
+   nine-minute rebuild because the cache key is on `service/` CONTENT and
+   lives in the git common dir, so every worktree on the box shares one
+   build.
 
-   **This produces the SAME SYMPTOM as rule 5's exhaustion** — thousands of
-   setup errors that read as catastrophic breakage. Two causes, one
-   symptom. Check `ipcs -m` first because it is one command; if segments
-   are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
-   fresh worktree, zero shared-memory segments, missing jar.
+   A missing or stale jar used to produce the SAME SYMPTOM as rule 5's
+   exhaustion: thousands of setup errors (20673 on 2026-09-19, in a fresh
+   worktree with zero shared-memory segments). It no longer does. The
+   session-start substrate preflight (`tests/conftest.py`
+   `_preflight_engine_substrate`, `tests/_substrate_preflight.py`) exits 75
+   with one line naming `scripts/build-gate-jar.sh`, and does the same when
+   the pinned engine tag's PG bundle is not downloadable. The setup-error
+   wall now means shared-memory exhaustion (rule 5) or a jar rewritten
+   after the session started; check `ipcs -m` first.
 
 7. **Before pushing, ask whether a run someone is waiting on is in flight.**
    Worktrees split the tree; CI remains one shared resource with one queue,
@@ -545,7 +549,7 @@ anything moves); work that is already committed is cherry-picked, because a
 commit is recoverable where an applied-but-unverified diff is not.
 
 **A note on reading long runs.** Preconditions are warned at the TOP of a
-run (the stale-jar banner above is one). Whether such a warning reaches you
+run (the shared-memory cap note above is one). Whether such a warning reaches you
 depends on how much output follows it, which inverts against its value: the
 longer and more expensive the run, the further the warning sits from the
 tail. `head` as well as `tail`, or grep the warning shape.
