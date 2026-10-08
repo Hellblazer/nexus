@@ -3207,7 +3207,7 @@ def _search_render(
         # dropped is not. Not on the cached list (every page turn renders its own slice)
         # and not for structured output, which carries no flag. One get-embeddings call
         # per collection that holds a mixed-agent pair on this page, none otherwise.
-        if cfg.get("search", {}).get("contradiction_check", True):
+        if cfg.get("search", {}).get("contradiction_check", False):
             page = flag_displayed_contradictions(page, t3)
 
         lines: list[str] = [READER_INSTRUCTION]

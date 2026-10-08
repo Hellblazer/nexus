@@ -480,6 +480,18 @@ class TestTheRenderedPage:
         assert spy.calls == []
         assert _FLAG not in out
 
+    def test_the_check_is_off_by_default_and_a_flaggable_page_fetches_nothing(self):
+        # Sam 2026-10-08: opt-in. The shipped default and a config with no
+        # search.contradiction_check key both leave the page unflagged.
+        from nexus.config import _DEFAULTS
+
+        assert _DEFAULTS["search"]["contradiction_check"] is False
+        spy, _ = _spy_t3(_VEC, [_NOTES])
+        rows = [_n("n0", _NOTES, "agent-x", 0.10), _n("n1", _NOTES, "agent-y", 0.11)]
+        out = _render(rows, names=[_NOTES], cfg={})
+        assert spy.calls == []
+        assert _FLAG not in out
+
     def test_structured_output_carries_no_flag_and_fetches_nothing(self):
         spy, _ = _spy_t3(_VEC, [_NOTES])
         rows = [_n("n0", _NOTES, "agent-x", 0.10), _n("n1", _NOTES, "agent-y", 0.11)]

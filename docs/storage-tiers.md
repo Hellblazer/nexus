@@ -76,8 +76,8 @@ over time:
 - **Contradiction flagging** during T3 search: the MCP `search` tool
   adds `[CONTRADICTS ANOTHER RESULT]` to any pair on the page it renders where two
   high-similarity chunks come from different `source_agent` provenance,
-  surfacing inconsistencies for human review. Default-on; opt out via
-  `search.contradiction_check: false`. See
+  surfacing inconsistencies for human review. Off by default; enable with
+  `search.contradiction_check: true`. See
   [Querying Guide § Contradiction detection](querying-guide.md#contradiction-detection-rdr-057-phase-3a).
 - **`formalizes` catalog link type**: when a higher-abstraction
   representation (extracted entities, RDF triples, structured notes) is

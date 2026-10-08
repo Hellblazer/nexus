@@ -1173,7 +1173,7 @@ _DEFAULTS: dict[str, Any] = {
             "default": 0.55,
         },
         "cluster_by": None,
-        "contradiction_check": True,
+        "contradiction_check": False,
         "query_sanitizer": True,
     },
     "voyageai": {
