@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.74.2] - 2026-10-08
+
 Pairs with engine-service-v0.1.152 (`REQUIRED_ENGINE_VERSION` moves from 0.1.151). The server-side half of the search-latency work: the engine returns vectors with search results, compresses responses, and answers collection stats and routing listings with far less work.
 
 ### Changed
