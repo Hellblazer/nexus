@@ -26,7 +26,7 @@ _TEXT = "a chunk of a paper that was first indexed under a degraded extraction"
 def _fake_pdf_chunks(overridden: bool):
     import hashlib
 
-    def _chunks(file, content_hash, target_model, now_iso, collection_name, chunk_chars=None):
+    def _chunks(file, content_hash, target_model, now_iso, corpus, chunk_chars=None, collection_name=""):
         chash = hashlib.sha256(_TEXT.encode()).hexdigest()
         meta = make_chunk_metadata(
             content_type="pdf",

@@ -94,7 +94,7 @@ from nexus import _locking
 from nexus import pdeathsig as _pdeathsig
 from nexus.daemon import readiness
 from nexus.daemon import session_end as _session_end
-from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
+from nexus.db.onnx_model_root import ENV_MODEL_DIR, apply_djl_cache_env, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util import win_job as _win_job
@@ -1337,6 +1337,10 @@ class StorageServiceSupervisor:
         # the caller already set it: service_onnx_models_root() returns that
         # same value.
         env[ENV_MODEL_DIR] = str(service_onnx_models_root())
+        # RDR-224 guest walk: DJL extracts its tokenizer library under
+        # ~/.djl.ai by default, a directory nothing of ours removes. Point it
+        # under ~/.cache/nexus so `nx uninstall --remove-data` covers it.
+        apply_djl_cache_env(env)
         # A Python-only per-model override (NX_SERVICE_BGE_DIR /
         # NX_SERVICE_CROSSENCODER_DIR) pointed off the root re-creates the
         # same green-provision-then-crash shape on a second axis — the

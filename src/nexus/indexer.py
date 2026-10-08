@@ -3163,7 +3163,10 @@ def _index_pdf_file(
             return nullcontext()
 
     with _stage("chunking"):
-        prepared = _pdf_chunks(file, content_hash_hex, target_model, now_iso, collection_name, chunk_chars=chunk_chars)
+        prepared = _pdf_chunks(
+            file, content_hash_hex, target_model, now_iso, collection_name,
+            chunk_chars=chunk_chars, collection_name=collection_name,
+        )
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
         return 0

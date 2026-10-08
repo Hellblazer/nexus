@@ -140,3 +140,22 @@ def window_for_model(model: str) -> TokenWindow | None:
         )
         return None
     return TokenWindow(max_tokens, path)
+
+
+def window_for_collection(collection: str, model: str) -> TokenWindow | None:
+    """The window for chunks bound for *collection*.
+
+    A conformant collection name carries the model token the engine embeds
+    its chunks with, so that token decides the window. *model* is the
+    caller's own idea of the model, used only when the name carries none (a
+    legacy two-segment name, an empty name). The two disagree on a
+    service-backed local install: the engine embeds bge-768 while the Python
+    embedding function, with no fastembed extra, reports MiniLM, and asking
+    for MiniLM's window made every index run warn about a tokenizer the
+    install has no use for (RDR-224 guest walk).
+    """
+    from nexus.corpus import index_model_for_collection, is_conformant_collection_name  # noqa: PLC0415 — deferred; corpus pulls the catalog stack
+
+    if collection and is_conformant_collection_name(collection):
+        return window_for_model(index_model_for_collection(collection))
+    return window_for_model(model)

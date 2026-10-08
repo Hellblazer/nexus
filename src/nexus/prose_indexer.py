@@ -20,7 +20,7 @@ from pathlib import Path
 
 import structlog
 
-from nexus.embed_window import window_for_model
+from nexus.embed_window import window_for_collection
 from nexus.index_context import IndexContext
 from nexus.indexer_utils import check_staleness
 
@@ -52,7 +52,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     from nexus.chunker import _line_chunk, split_line_chunks_to_window  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
 
     # nexus-spujb: chunks must fit the embedding model's token window.
-    token_window = window_for_model(ctx.embedding_model)
+    token_window = window_for_collection(ctx.corpus, ctx.embedding_model)
     from nexus.errors import UnextractableContentError  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred

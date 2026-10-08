@@ -12796,6 +12796,9 @@ def daemon_uninstall(
     - `remove_data=True` removes `~/.cache/nexus/` (the ONNX model cache)
       only after the stack is confirmed stopped, and never a model root set
       with `NX_ONNX_MODEL_DIR` outside it.
+    - On Windows, `remove_data=True` also removes the `onnxruntime-java<n>`
+      directories the engine's last run left in the temp directory (`TMP`,
+      else `TEMP`), after the same confirmed stop.
     - `remove_data=True` does NOT touch `~/.local/share/nexus/` (the
       fastembed cache, and any relic Chroma directory from a pre-PG
       install) — remove that separately for a full wipe.

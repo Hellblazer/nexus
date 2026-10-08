@@ -2032,6 +2032,38 @@ class TestSpawnServiceOnnxModelRoot:
             self._spawn_env(config_dir, clock, monkeypatch)
         assert not [e for e in logs if e["event"] == "onnx_per_model_override_diverges"]
 
+    def test_djl_cache_is_pointed_under_the_nexus_cache(
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-25wlq: DJL's default (~/.djl.ai) is shared and outlived an
+        uninstall; the engine is spawned with DJL_CACHE_DIR inside the
+        directory --remove-data already removes."""
+        monkeypatch.delenv("DJL_CACHE_DIR", raising=False)
+        monkeypatch.delenv("ENGINE_CACHE_DIR", raising=False)
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        home = Path(os.environ.get("HOME") or Path.home())
+        assert env["DJL_CACHE_DIR"] == str(home / ".cache" / "nexus" / "djl")
+
+    @pytest.mark.parametrize("name", ["DJL_CACHE_DIR", "ENGINE_CACHE_DIR"])
+    def test_an_operators_own_djl_directory_is_left_alone(
+        self,
+        name: str,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("DJL_CACHE_DIR", raising=False)
+        monkeypatch.delenv("ENGINE_CACHE_DIR", raising=False)
+        monkeypatch.setenv(name, "/their/djl")
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert env[name] == "/their/djl"
+        if name == "ENGINE_CACHE_DIR":
+            assert "DJL_CACHE_DIR" not in env, "ENGINE_CACHE_DIR already decides; none is added"
+
 
 class TestCredsReloadAfterBackfill:
     """nexus-hzhgl round 3 review Significant-1: ``_backfill_provision_grants()``

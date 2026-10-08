@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx uninstall --yes --remove-data` leaves less behind** (nexus-25wlq, RDR-224). The engine's DJL tokenizer cache now lives under `~/.cache/nexus/djl` (the engine is started with `DJL_CACHE_DIR` there unless you set one), so the model-cache removal takes it; a `~/.djl.ai` from an earlier release is named in the report and kept, because other Java programs share it. On Windows the last engine run's `onnxruntime-java<digits>` folders under `TMP` (else `TEMP`) are removed after a confirmed stop, by the engine's own sweep rules and a narrower name match. A clean Windows 11 walk found 24 MB left over from these two.
+- **On Windows the `nx uninstall` preview names the Task Scheduler task it would remove, not a Linux unit, and tells a CLI user to re-run with `--yes`** (nexus-25wlq). The MCP tool keeps its `confirm=true` wording.
+- **A default `nx search` no longer warns that no knowledge (or code, or docs) collection matched** (nexus-25wlq). The default corpus spans all three, so a missing leg there is not news; an explicit `--corpus` still warns.
+- **`nx index md`, `nx index pdf` and `nx collection reindex` chunk a bge collection to its 512-token window, and stop warning `embed_window_tokenizer_missing` about a MiniLM tokenizer** (nexus-25wlq, RDR-224). They took the window from the Python embedding function's model, which on a service-backed local install is MiniLM while the engine embeds bge-768, so chunks were checked against the wrong window (or none) and every run looked for a tokenizer at a Chroma-era path. The window now follows the collection name's model token, as `nx index repo` already did.
+
 ## [7.74.0] - 2026-10-07
 
 Pairs with engine-service-v0.1.151 (tagged 2026-10-07 on da58bf11a; `REQUIRED_ENGINE_VERSION` moves from 0.1.150 to 0.1.151): the HNSW search floor below, no changesets and no wire-ledger entries. The engine deployed to the cloud and passed its gates (recall 12/12 at ef 600, cloud client-path gate 10/10) before this client tag. This release also carries the RDR-224 native Windows batch: the uninstall that removes what it installed, the smaller downloads, hooks and MCP servers that run without Node or a project `.venv`, and the Windows test fixes; the native-Windows CI test set passed under a non-elevated account (1481 passed, 0 failed).
