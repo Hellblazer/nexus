@@ -1319,6 +1319,12 @@ def _user_model_root_outside(cache: Path) -> Path | None:
 #: constants and the predicate below are that class's, rule for rule;
 #: ``tests/daemon/test_uninstall_walk_followups.py`` ties them to its source.
 ORT_TEMP_DIR_PREFIX = "onnxruntime-java"
+#: What ``Files.createTempDirectory("onnxruntime-java")`` really names it: the
+#: prefix plus ``Long.toUnsignedString(random.nextLong())``, 1 to 20 decimal
+#: digits. The ENGINE's sweep matches any name starting with the prefix; this
+#: uninstall is deliberately narrower, so a user's own ``onnxruntime-java-backup``
+#: in the temp directory is never deleted by a command that has no business there.
+_ORT_TEMP_DIR_NAME = re.compile(re.escape(ORT_TEMP_DIR_PREFIX) + r"[0-9]{1,20}")
 #: The libraries ORT loads: a live engine's copies are mapped and refuse deletion.
 ORT_LOADED_LIBS: tuple[str, ...] = ("onnxruntime.dll", "onnxruntime4j_jni.dll")
 #: A directory holding both, touched more recently than this, may be an engine's
@@ -1373,13 +1379,15 @@ def sweep_ort_temp_dirs(
     it, past 250 ms when both loaded libraries are present, past 30 s when not),
     and its loaded libraries delete. Those are tried first: a live engine's are
     mapped, so the first refusal leaves the whole directory alone. The name test
-    is case-sensitive and anchored at the start; the engine's glob on Windows is
-    case-insensitive, and a narrower match here only ever deletes less.
+    is case-sensitive and must be the prefix plus decimal digits (what Java's
+    ``createTempDirectory`` appends); the engine's predicate matches any name
+    starting with the prefix, case-insensitively on Windows, and a narrower match
+    here only ever deletes less.
     """
     removed: list[Path] = []
     notes: list[str] = []
     try:
-        names = sorted(n for n in os.listdir(tmp_root) if n.startswith(ORT_TEMP_DIR_PREFIX))
+        names = sorted(n for n in os.listdir(tmp_root) if _ORT_TEMP_DIR_NAME.fullmatch(n))
     except OSError:
         return removed, notes
     clock = time.time() if now is None else now

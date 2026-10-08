@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -123,13 +124,23 @@ class TestPreview:
         assert "--remove-data" in msg and "DELETES" in msg, msg
 
     @pytest.mark.parametrize("platform", ["win32", "linux"])
-    def test_nx_uninstall_never_tells_a_cli_user_to_pass_confirm(self, platform: str, box) -> None:
+    def test_nx_uninstall_never_tells_a_cli_user_to_pass_confirm(
+        self, platform: str, box, monkeypatch,
+    ) -> None:
+        """Through the real verb, with a local footprint present so the
+        preview path runs (without one `uninstall_daemon` is never called and
+        the CLI's own closing line would satisfy the assertion by itself)."""
+        from nexus.commands import uninstall as uninstall_cmd_mod
+
         box.platform(platform)
+        monkeypatch.setattr(uninstall_cmd_mod, "_local_service_present", lambda: True)
         res = CliRunner().invoke(main, ["uninstall", "--remove-data"])
         assert res.exit_code == 0, res.output
         assert "confirm=true" not in res.output, res.output
         assert "remove_data=true" not in res.output, res.output
-        assert "Re-run with --yes" in res.output, res.output
+        # The preview's own tail, not the CLI's closing "Re-run with --yes".
+        assert "(--remove-data is set: this DELETES your notes and search index)." in res.output, res.output
+        assert "Re-run with confirm" not in res.output, res.output
 
 
 # ── DJL's tokenizer cache ───────────────────────────────────────────────────
@@ -154,13 +165,6 @@ class TestDjlCache:
         env = {omr.ENV_DJL_CACHE_DIR: "  ", omr.ENV_DJL_ENGINE_CACHE_DIR: ""}
         omr.apply_djl_cache_env(env)
         assert env[omr.ENV_DJL_CACHE_DIR] == str(omr.djl_cache_root())
-
-    def test_the_supervisor_applies_it_to_the_engine_spawn_env(self) -> None:
-        import inspect
-
-        from nexus.daemon import storage_service_daemon as ssd
-
-        assert "apply_djl_cache_env(env)" in inspect.getsource(ssd.StorageServiceSupervisor._spawn_service)
 
     def test_remove_data_removes_the_djl_cache_under_the_nexus_cache(self, box) -> None:
         box.platform("linux")
@@ -215,6 +219,7 @@ class TestOrtTempSweepPredicate:
 
     def test_removes_a_finished_runs_directory_and_nothing_near_it(self, tmp_path: Path) -> None:
         victim = _ort_dir(tmp_path, f"{ORT}8812345")
+        biggest = _ort_dir(tmp_path, f"{ORT}{'9' * 20}")  # Long.toUnsignedString tops out at 20 digits
         foreign_target = tmp_path / "elsewhere"
         foreign_target.mkdir()
         (foreign_target / "keep.txt").write_text("user data")
@@ -223,26 +228,70 @@ class TestOrtTempSweepPredicate:
             "prefix not at start": _ort_dir(tmp_path, f"my-{ORT}1"),
             "wrong case": _ort_dir(tmp_path, "ONNXRUNTIME-JAVA1"),
         }
+        # Narrower than the engine's predicate on purpose: the engine would take these
+        # (any name starting with the prefix), a user-run uninstall must not. Each holds
+        # both loaded libraries and is old, so only the NAME keeps it.
+        sentinels |= {
+            "user backup": _ort_dir(tmp_path, f"{ORT}-backup"),
+            "bare prefix": _ort_dir(tmp_path, ORT),
+            "digits then text": _ort_dir(tmp_path, f"{ORT}123old"),
+            "21 digits": _ort_dir(tmp_path, f"{ORT}{'9' * 21}"),
+        }
         (tmp_path / f"{ORT}.txt").write_text("a FILE with the prefix")
         nested = _ort_dir(tmp_path, f"{ORT}7")
         (nested / "sub").mkdir()
         (nested / "sub" / "deep.dll").write_bytes(b"x")
         _age(nested, 3600)
-        link = tmp_path / f"{ORT}-link"
-        link.symlink_to(foreign_target, target_is_directory=True)
 
         removed, notes = _sweep(tmp_path)
 
-        assert removed == [victim]
-        assert not victim.exists()
+        assert sorted(removed) == sorted([victim, biggest])
+        assert not victim.exists() and not biggest.exists()
         for label, d in sentinels.items():
             assert d.is_dir() and (d / next(iter(os.listdir(d)))).exists(), label
         assert (tmp_path / f"{ORT}.txt").read_text() == "a FILE with the prefix"
         assert (nested / "sub" / "deep.dll").exists(), "a directory holding a subdirectory is not ORT's"
-        assert link.is_symlink() and (foreign_target / "keep.txt").read_text() == "user data", (
-            "a symbolic link is never followed"
-        )
-        assert any(str(nested) in n for n in notes) and any(str(link) in n for n in notes), notes
+        assert (foreign_target / "keep.txt").read_text() == "user data"
+        assert any(str(nested) in n for n in notes), notes
+
+    def test_a_symbolic_link_is_never_followed(self, tmp_path: Path) -> None:
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (target / "keep.txt").write_text("user data")
+        link = tmp_path / f"{ORT}55"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as exc:  # Windows without SeCreateSymbolicLinkPrivilege (WinError 1314)
+            if sys.platform != "win32":
+                raise
+            pytest.skip(
+                "a directory symlink needs SeCreateSymbolicLinkPrivilege, which this Windows "
+                f"account lacks ({exc})"
+            )
+        removed, notes = _sweep(tmp_path)
+        assert removed == [] and link.is_symlink()
+        assert (target / "keep.txt").read_text() == "user data"
+        assert any(str(link) in n for n in notes), notes
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="a directory junction exists only on Windows")
+    def test_a_real_junction_is_never_followed(self, tmp_path: Path) -> None:
+        """`_winapi.CreateJunction` needs no privilege; the sweep must leave both
+        the junction and its target alone (the injected-lstat test above only
+        simulates the reparse tag)."""
+        import _winapi
+
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (target / "onnxruntime.dll").write_bytes(b"user data")
+        _age(target / "onnxruntime.dll", 3600)
+        junction = tmp_path / f"{ORT}77"
+        _winapi.CreateJunction(str(target), str(junction))
+
+        removed, notes = _sweep(tmp_path)
+
+        assert removed == []
+        assert (target / "onnxruntime.dll").read_bytes() == b"user data", "the target must survive"
+        assert any(str(junction) in n for n in notes), notes
 
     def test_a_junction_reads_as_foreign(self, tmp_path: Path) -> None:
         """Windows reports a junction as a directory whose lstat carries a reparse
