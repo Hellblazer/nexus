@@ -5025,6 +5025,14 @@ def query(
                 taxonomy=_t2_db.taxonomy,
                 telemetry=_t2_db.telemetry,
                 diagnostics_out=qdiag,
+                # nexus-tnwm2: query groups by document and orders by
+                # hybrid_score; it never reads _topic_label or _cluster_label.
+                # The inherited default ("semantic") made topic grouping look
+                # up every topic's label, one GET /topics/by_id each (the
+                # engine has no batched route): 7 serial round trips, ~1.6 s
+                # on the managed cloud. The topic BOOST does not depend on
+                # cluster_by and still runs.
+                cluster_by=None,
             )
         # hybrid scoring + RDR-055 E2 quality boost — parity
         # with the CLI (search_cmd.py). Chunk-level ranking (and, below,
@@ -5144,13 +5152,26 @@ def query(
                 for chash, doc_ids in by_chash.items():
                     if doc_ids:
                         chash_to_doc[chash] = sorted(doc_ids)[0]
-            # Fetch manifest length for each unique doc_id seen.
-            # One get_manifest call per doc; bounded by the result set.
-            for doc_id in set(chash_to_doc.values()):
+            # Fetch manifest length for each unique doc_id seen. nexus-tnwm2:
+            # ONE get_manifests round trip for the whole set (it was one
+            # get_manifest per document, serial); the per-doc loop remains
+            # only for a catalog without the batch method.
+            seen_doc_ids = sorted(set(chash_to_doc.values()))
+            batch_manifests: dict | None = None
+            get_many = getattr(cat, "get_manifests", None)
+            if seen_doc_ids and get_many is not None:
                 try:
-                    doc_to_chunk_count[doc_id] = len(cat.get_manifest(doc_id))
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    continue
+                    batch_manifests = get_many(seen_doc_ids)
+                except Exception:  # noqa: BLE001 — graceful degradation; per-doc loop below
+                    batch_manifests = None
+            if batch_manifests is not None:
+                doc_to_chunk_count = {d: len(m) for d, m in batch_manifests.items()}
+            else:
+                for doc_id in seen_doc_ids:
+                    try:
+                        doc_to_chunk_count[doc_id] = len(cat.get_manifest(doc_id))
+                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                        continue
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
