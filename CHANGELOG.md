@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Pairs with engine-service-v0.1.152 (`REQUIRED_ENGINE_VERSION` moves from 0.1.151). The server-side half of the search-latency work: the engine returns vectors with search results, compresses responses, and answers collection stats and routing listings with far less work.
+
 ### Changed
 
 - **A search no longer makes one `get-embeddings` request per collection to read the vectors the contradiction check and semantic clustering need** (nexus-92q1p). `POST /v1/vectors/search-per-collection` takes an opt-in `include_embeddings` and fills each surviving row's vector with one by-id statement (`embedding_b64`, little-endian float32); `search_cross_corpus` asks when it will need them and falls back to the by-id fetch against an engine that does not return them. The fan-out was 14 to 22 requests of about 1.2 s each on the managed service.
