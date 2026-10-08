@@ -914,7 +914,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .from(COLLECTION_VECTOR_STATS)
             .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL)));
         assertInlinedLiveC(plan, "collection_vector_stats");
-        assertOneSharedLiveProbe(plan, "collection_vector_stats");
+        assertSetBasedLiveJoin(plan, "collection_vector_stats");
     }
 
     @Test
@@ -924,7 +924,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                     COLLECTION_VECTOR_STATS.STORED_COUNT)
             .from(COLLECTION_VECTOR_STATS));
         assertInlinedLiveC(plan, "collection_vector_stats");
-        assertOneSharedLiveProbe(plan, "collection_vector_stats");
+        assertSetBasedLiveJoin(plan, "collection_vector_stats");
     }
 
     /** The view must also report what the fixture constructed, so the plans above were taken
@@ -962,16 +962,18 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     }
 
     /**
-     * The view reads {@code chunk_count} and {@code last_write} through the same live(c) test, and the
-     * planner evaluates it ONCE per chunk and feeds both aggregates (one SubPlan). The view is O(chunks)
-     * by construction, so a second probe per chunk would double a cost that every {@code list_collections}
-     * pays; this fails if a change makes the two aggregates probe separately.
+     * nexus-mz9jv (vectors-032-1): the view reads {@code chunk_count} and {@code last_write} through ONE
+     * set-based join of the chunks to the live (tenant, collection, chash) set, not through a
+     * {@code chunk_live_owners} probe per chunk and per aggregate (vectors-019-5, a correlated SubPlan, which
+     * made the view cost 2N probes and tripped JIT at a 75,000-chunk tenant). This fails if a change brings a
+     * correlated SubPlan back.
      */
-    private static void assertOneSharedLiveProbe(String plan, String what) {
+    private static void assertSetBasedLiveJoin(String plan, String what) {
         assertThat(plan)
-            .as("%s: live(c) must be one per-chunk probe shared by both aggregates. Plan was:%n%s", what, plan)
-            .contains("SubPlan 1")
-            .doesNotContain("SubPlan 2");
+            .as("%s: live(c) must be one join of the chunks to the live set, not a per-chunk SubPlan. Plan was:%n%s",
+                what, plan)
+            .contains("Join")
+            .doesNotContain("SubPlan");
     }
 
     /** RDR-225: the model every chunk of this fixture carries (the collections are minilm-l6-v2-384). */

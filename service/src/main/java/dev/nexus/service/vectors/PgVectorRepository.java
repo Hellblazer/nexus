@@ -3850,20 +3850,13 @@ public final class PgVectorRepository {
      * accept the prefix. Routing consumers now ask for {@code live}.
      */
     public List<Map<String, Object>> collectionStats(String tenant, String lifecycleFilter) {
-        org.jooq.Condition byState = (lifecycleFilter == null || lifecycleFilter.isBlank())
-            ? org.jooq.impl.DSL.noCondition()
-            : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
-        // nexus-4w07i: a rename keeps the old name's row as a tombstone
-        // (superseded_by = the new name) with lifecycle_state still 'live', so the
-        // routing view excluded nothing for it. A tombstone that holds chunks (a
-        // stale writer, say) was then a search target under a retired name. 'live'
-        // here is the ROUTING view, so it also requires the row not be superseded;
-        // an empty string is the column's "not superseded" value, as NULL is.
-        org.jooq.Condition lifecycleCond = "live".equals(lifecycleFilter)
-            ? byState.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
-            : byState;
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
+        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter);
+        long statsStartNanos = System.nanoTime();
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-mz9jv: the view's inflated cost estimate trips JIT, 190 to 270 ms of compilation for a
+            // statement whose executor time is milliseconds.
+            PgSession.disableJit(ctx);
+            return ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
@@ -3874,7 +3867,10 @@ public final class PgVectorRepository {
                    .and(CATALOG_COLLECTIONS.NAME.eq(COLLECTION_VECTOR_STATS.COLLECTION)))
                .where(lifecycleCond)
                .orderBy(COLLECTION_VECTOR_STATS.COLLECTION.asc(), COLLECTION_VECTOR_STATS.DIM.asc())
-               .fetch());
+               .fetch();
+        });
+        log.info("event=vector_stats variant=full rows={} lifecycle={} query_ms={}", result.size(),
+                 lifecycleFilter, (System.nanoTime() - statsStartNanos) / 1_000_000L);
         List<Map<String, Object>> out = new ArrayList<>(result.size());
         for (var rec : result) {
             Map<String, Object> row = new java.util.LinkedHashMap<>();
@@ -3915,6 +3911,77 @@ public final class PgVectorRepository {
             if (supersededBy != null && !supersededBy.isEmpty()) {
                 row.put("superseded_by", supersededBy);
             }
+            out.add(row);
+        }
+        return out;
+    }
+
+    /**
+     * The lifecycle predicate of the stats and routing listings (nexus-bc7ps, nexus-4w07i). {@code null} or
+     * blank is no filter. nexus-4w07i: a rename keeps the old name's row as a tombstone
+     * (superseded_by = the new name) with lifecycle_state still 'live', so the routing view excluded nothing
+     * for it. A tombstone that holds chunks (a stale writer, say) was then a search target under a retired
+     * name. 'live' here is the ROUTING view, so it also requires the row not be superseded; an empty string is
+     * the column's "not superseded" value, as NULL is.
+     */
+    private static org.jooq.Condition lifecycleCondition(String lifecycleFilter) {
+        org.jooq.Condition byState = (lifecycleFilter == null || lifecycleFilter.isBlank())
+            ? org.jooq.impl.DSL.noCondition()
+            : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
+        return "live".equals(lifecycleFilter)
+            ? byState.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            : byState;
+    }
+
+    /**
+     * The routing listing, {@code GET /v1/vectors/stats?fields=routing} (nexus-mz9jv): the collections a
+     * routing consumer (a corpus resolver, a sibling lookup, a name parser) may search, read from
+     * {@code catalog_collections} alone. Every field a router reads is a catalog column, so this never
+     * touches the chunk rows' liveness, which is what makes {@link #collectionStats} cost 100 to 560 ms at
+     * a 75,000-chunk tenant; 0.8 ms measured (T2 {@code nexus/search-latency-root-cause-2026-10-08}).
+     *
+     * <p>Same collection population as {@link #collectionStats}: a collection appears iff it physically
+     * holds at least one chunk row (the stats view is one row per collection and dim that holds chunks),
+     * tested by an {@code EXISTS} on {@code (tenant_id, collection, embedding_model)}, the key of the chunks
+     * table's partition leaf and of its foreign key to the registry ({@link #listCollectionsQuery}). The
+     * {@code lifecycleFilter} is the stats route's, with the same rename-tombstone rule. A registered
+     * collection with no chunk is absent, as it is from the stats route.
+     *
+     * <p>Row shape, a subset of a stats row: {@code name}, and from the registry {@code content_type},
+     * {@code owner_id}, {@code embedding_model}, {@code lifecycle_state}, plus {@code superseded_by} on a
+     * rename tombstone. A column that is null is omitted, as in a stats row. There is no {@code dim},
+     * {@code count}, {@code stored_count} or {@code last_write}: those need the liveness scan, and a caller
+     * that needs them asks for the full route. The absence of {@code count} is also how a client tells this
+     * answer from an old engine's full rows.
+     */
+    public List<Map<String, Object>> collectionRouting(String tenant, String lifecycleFilter) {
+        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter);
+        long routingStartNanos = System.nanoTime();
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                       CATALOG_COLLECTIONS.SUPERSEDED_BY)
+               .from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+               .and(DSL.exists(ctx.selectOne().from(CHUNKS)
+                   .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID))
+                   .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                   .and(CHUNKS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))))
+               .and(lifecycleCond)
+               .orderBy(CATALOG_COLLECTIONS.NAME.asc())
+               .fetch());
+        log.info("event=vector_stats variant=routing rows={} lifecycle={} query_ms={}", result.size(),
+                 lifecycleFilter, (System.nanoTime() - routingStartNanos) / 1_000_000L);
+        List<Map<String, Object>> out = new ArrayList<>(result.size());
+        for (var rec : result) {
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("name", rec.value1());
+            if (rec.value2() != null) row.put("content_type", rec.value2());
+            if (rec.value3() != null) row.put("owner_id", rec.value3());
+            if (rec.value4() != null) row.put("embedding_model", rec.value4());
+            if (rec.value5() != null) row.put("lifecycle_state", rec.value5());
+            String supersededBy = rec.value6();
+            if (supersededBy != null && !supersededBy.isEmpty()) row.put("superseded_by", supersededBy);
             out.add(row);
         }
         return out;

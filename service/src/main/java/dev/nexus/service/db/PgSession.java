@@ -56,7 +56,10 @@ public final class PgSession {
         // non-index access path penalized, hash joins included -- this GUC is set only
         // from test code (PlainSearchTextGatedSearchExplainTest et al.), never from
         // production PgVectorRepository dispatch paths.
-        "enable_hashjoin"
+        "enable_hashjoin",
+        // nexus-mz9jv: the collection-stats statement is a few ms of executor work whose inflated cost
+        // estimate tripped JIT compilation (190 to 270 ms per call); see disableJit.
+        "jit"
     );
 
     /**
@@ -554,6 +557,18 @@ public final class PgSession {
      */
     public static void setSearchPlanCacheMode(DSLContext ctx) {
         setLocal(ctx, "plan_cache_mode", "force_custom_plan");
+    }
+
+    /**
+     * Turn JIT compilation off for the rest of this transaction ({@code SET LOCAL jit = off}, nexus-mz9jv).
+     * PostgreSQL JIT-compiles a statement whose estimated cost passes {@code jit_above_cost}; an aggregate over
+     * a large partitioned table does, however cheap its real execution, and compiling cost 190 to 270 ms per call
+     * on the collection-stats statement (T2 {@code nexus/search-latency-root-cause-2026-10-08}). For a statement
+     * whose executor time is milliseconds that compile time is pure latency. Not applied to the vector-ranked
+     * statements: it does not touch the serving GUC pairing {@code HnswServingGucParityTest} counts.
+     */
+    public static void disableJit(DSLContext ctx) {
+        setLocal(ctx, "jit", "off");
     }
 
     /**

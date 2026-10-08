@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-mz9jv: nexus.collection_vector_stats computes liveness with one set-based join instead of one
+    function probe per stored chunk.
+
+    WHY. vectors-019-5 defined the view with
+        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash)))
+    and the same expression again under max(created_at). Each EXISTS is a correlated probe of
+    catalog_document_chunks joined to catalog_documents, run for every stored chunk of the tenant and evaluated
+    once per FILTER, so a tenant of N chunks costs 2N nested-loop probes. The inflated plan cost (1.7M for 74,900
+    chunks) also trips JIT compilation, which adds 190 to 270 ms to every call on its own. Measured with the engine
+    on loopback against 136,900 chunks (target tenant 74,900; T2 nexus/search-latency-root-cause-2026-10-08,
+    "ROOT CAUSE B"): the vectors-019-5 view 561 ms (399 ms with jit off); this definition 98 ms (90 ms with jit
+    off). The cost is linear in the tenant's chunk count, so a larger tenant pays proportionally more.
+
+    WHAT CHANGES. The definition only. live(c) is "the chunk has an owner in its own collection whose document
+    is not tombstoned", which is exactly the existence of a row in
+        SELECT DISTINCT m.tenant_id, m.collection, m.chash
+          FROM nexus.catalog_document_chunks m
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE d.deleted_at IS NULL
+    (the body of nexus.chunk_live_owners, vectors-018-1, read once for the whole tenant). The view LEFT JOINs the
+    chunks to that set on (tenant_id, collection, chash); the DISTINCT keeps the join at most one row per chunk,
+    so a chunk with several live owners is still counted once. chunk_count and last_write FILTER on a match,
+    stored_count counts every stored chunk, as before.
+
+    EQUIVALENCE. Same six columns in the same order with the same names and types (tenant_id, collection, dim
+    integer, chunk_count bigint, last_write timestamptz, stored_count bigint), the same grain (tenant_id,
+    collection, dim), the same rows for a collection that holds only unowned chunks (chunk_count 0, last_write
+    NULL). chunk_live_owners is not edited and keeps its other callers (every search family, vectors-031). The
+    view stays SECURITY INVOKER, so row-level security on all three tables still applies as the caller; a join
+    over the manifest and document tables reads exactly the rows the per-chunk probes read. CollectionVectorStatsSetBasedTest
+    runs the vectors-019-5 definition beside this one over a fixture with live, tombstoned, shared, unowned and
+    mixed-width chunks in two tenants and asserts the two outputs are identical, row for row.
+
+    CREATE OR REPLACE VIEW keeps the view's owner, its GRANT SELECT TO PUBLIC and every object that depends on it,
+    so no grant is touched here and the runAlways grants blocks (grants-nexus-svc, grants-nexus-diag) apply as
+    they did. Not an edit of vectors-019-5, vectors-030 or vectors-031, whose checksums are live: this is a new
+    changeset after them.
+
+    The matching Java change is SET LOCAL jit = off for the stats statement (PgVectorRepository.collectionStats):
+    the remaining plan is cheap enough that JIT compilation costs more than it saves.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-032-1" author="nexus-mz9jv">
+        <comment>nexus.collection_vector_stats: liveness from one set-based join of nexus.chunks to the live (tenant, collection, chash) set of the manifest and document tables, instead of a chunk_live_owners probe per stored chunk and per FILTER. Same columns, types, grain and results (vectors-019-5 semantics); the plan no longer scales as 2N probes and no longer trips JIT. The view's grants, options and dependents are kept by CREATE OR REPLACE VIEW.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_vector_stats
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       c.collection,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim,
+       count(*) FILTER (WHERE lv.chash IS NOT NULL)                AS chunk_count,
+       max(c.created_at) FILTER (WHERE lv.chash IS NOT NULL)       AS last_write,
+       count(*)                                                    AS stored_count
+  FROM nexus.chunks c
+  LEFT JOIN (SELECT DISTINCT m.tenant_id, m.collection, m.chash
+               FROM nexus.catalog_document_chunks m
+               JOIN nexus.catalog_documents d
+                 ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+              WHERE d.deleted_at IS NULL) lv
+         ON lv.tenant_id = c.tenant_id AND lv.collection = c.collection AND lv.chash = c.chash
+ GROUP BY c.tenant_id, c.collection, 3;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_vector_stats
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       c.collection,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash)))          AS chunk_count,
+       max(c.created_at) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))) AS last_write,
+       count(*)                                                AS stored_count
+  FROM nexus.chunks c
+ GROUP BY c.tenant_id, c.collection, 3;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

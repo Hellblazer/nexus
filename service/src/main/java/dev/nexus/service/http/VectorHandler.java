@@ -1934,6 +1934,12 @@ public final class VectorHandler implements HttpHandler {
      * <p>Per-collection vector statistics from {@code nexus.collection_vector_stats}
      * (RDR-156 P3, Decision 4) — tombstone-filtered live counts, one round-trip for
      * all of the tenant's collections. Replaces doctor/status N+1 count() loops.
+     *
+     * <p>{@code ?fields=routing} (nexus-mz9jv, additive) answers with the catalog-only routing listing
+     * instead: {@code [{"name", "content_type", "owner_id", "embedding_model", "lifecycle_state",
+     * "superseded_by"?}, ...]}, the same collections the full route lists (those that hold chunks), with the
+     * same {@code lifecycle_state} filter, and no {@code dim}, {@code count}, {@code stored_count} or
+     * {@code last_write}. A router reads only catalog columns, so it skips the liveness scan.
      */
     private void handleStats(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "GET");
@@ -1950,8 +1956,26 @@ public final class VectorHandler implements HttpHandler {
             HttpUtil.send(ex, 400, json(Map.of("error", e.getMessage())));
             return;
         }
-        var stats = repo.collectionStats(tenant, lifecycleFilter);
-        HttpUtil.send(ex, 200, json(stats));
+        // nexus-mz9jv: ?fields=routing is the catalog-only listing for routing callers (see
+        // PgVectorRepository.collectionRouting); absent is the full stats. An engine older than this ignores the
+        // parameter and answers with the full rows, which a client tells apart by their count/dim keys.
+        String fields = optionalQueryParam(ex, "fields");
+        if (fields != null && !fields.isBlank() && !"routing".equals(fields)) {
+            HttpUtil.send(ex, 400, json(Map.of("error", "fields must be 'routing' or absent, got '" + fields + "'")));
+            return;
+        }
+        long handlerStartNanos = System.nanoTime();
+        var stats = "routing".equals(fields)
+            ? repo.collectionRouting(tenant, lifecycleFilter)
+            : repo.collectionStats(tenant, lifecycleFilter);
+        long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
+        String statsBody = json(stats);
+        HttpUtil.send(ex, 200, statsBody);
+        // nexus-mz9jv: where the seconds go. repo_ms is the engine's SQL (the vector_stats line has the statement
+        // alone); the rest of handler_ms is serialisation, compression and the write.
+        log.info("event=vector_stats_request variant={} rows={} bytes={} repo_ms={} handler_ms={}",
+                 "routing".equals(fields) ? "routing" : "full", stats.size(), statsBody.length(), repoMs,
+                 (System.nanoTime() - handlerStartNanos) / 1_000_000L);
     }
 
     /**

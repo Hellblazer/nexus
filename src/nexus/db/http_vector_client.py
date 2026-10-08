@@ -2477,7 +2477,7 @@ def is_live_collection_row(row: Any) -> bool:
     return row.get("lifecycle_state", "live") == "live"
 
 
-def live_collection_rows(t3: Any) -> list[dict]:
+def live_collection_rows(t3: Any, *, routing: bool = False) -> list[dict]:
     """Routing-side listing over any T3 handle (nexus-bc7ps).
 
     A real :class:`HttpVectorClient` asks the engine for ``lifecycle_state=live``
@@ -2487,9 +2487,15 @@ def live_collection_rows(t3: Any) -> list[dict]:
     Routing modules call this, never the bare ``list_collections()``, so a
     ``quarantine-<name>`` row cannot reach a name parser through them; the lint in
     ``tests/test_bc7ps_routing_uses_live_listing.py`` pins that.
+
+    ``routing=True`` (nexus-mz9jv) is for a caller that reads names and registry
+    attributes and never a size: a real client then returns rows without
+    ``count``/``stored_count``/``dim``/``last_write`` from the catalog-only
+    listing (see :meth:`HttpVectorClient.list_collections`). A caller with a size
+    floor, taxonomy discovery, leaves it off and keeps the counts.
     """
     if isinstance(t3, HttpVectorClient):
-        return t3.list_live_collections()
+        return t3.list_live_collections(routing=True) if routing else t3.list_live_collections()
     return [row for row in t3.list_collections() if is_live_collection_row(row)]
 
 
@@ -4110,7 +4116,9 @@ class HttpVectorClient:
             )
         return _post("/v1/vectors/resolve", body, tenant=self._tenant)
 
-    def collection_stats(self, lifecycle_state: str | None = None) -> list[dict]:
+    def collection_stats(
+        self, lifecycle_state: str | None = None, *, routing: bool = False,
+    ) -> list[dict]:
         """Per-collection live statistics via ``GET /v1/vectors/stats``.
 
         ``lifecycle_state`` (nexus-bc7ps) is passed through as the route's
@@ -4145,9 +4153,15 @@ class HttpVectorClient:
         back automatically.
         """
         path = "/v1/vectors/stats"
+        query: dict[str, str] = {}
+        if routing:
+            # nexus-mz9jv: the catalog-only listing; see :meth:`list_collections`.
+            query["fields"] = "routing"
         if lifecycle_state:
+            query["lifecycle_state"] = lifecycle_state
+        if query:
             from urllib.parse import urlencode  # noqa: PLC0415 — one call site
-            path = f"{path}?{urlencode({'lifecycle_state': lifecycle_state})}"
+            path = f"{path}?{urlencode(query)}"
         result = _get(path, tenant=self._tenant)
         return result if isinstance(result, list) else []
 
@@ -4503,9 +4517,24 @@ class HttpVectorClient:
     )
 
     def list_collections(
-        self, lifecycle_state: str | None = None, *, strict: bool = False,
+        self, lifecycle_state: str | None = None, *, strict: bool = False, routing: bool = False,
     ) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
+
+        ``routing`` (nexus-mz9jv) asks for the ROUTING listing instead: the same
+        collections (those that physically hold a chunk), the same
+        ``lifecycle_state`` filter, with only the name and the catalog attributes
+        a router reads (``content_type``, ``owner_id``, ``embedding_model``,
+        ``lifecycle_state``, ``superseded_by``), via
+        ``GET /v1/vectors/stats?fields=routing``. A router (corpus resolution, sibling
+        lookup, the collection-row cache) never reads a size, and the full listing
+        makes the engine count every collection's live chunks (100 to 560 ms at a
+        75,000-chunk tenant, 3.5 s measured on the managed service) where the routing
+        one reads the catalog alone (under a millisecond measured). The rows then
+        carry NO ``count``, ``stored_count``, ``dim`` or ``last_write``; a caller that
+        needs one does not pass ``routing``. An engine that predates the parameter
+        ignores it and answers with the full rows, which come back complete (counts
+        included), so the result is right either way and no second request is made.
 
         ``lifecycle_state`` (nexus-bc7ps): ``None`` is the full inventory, the
         right view for doctor, gc, backfill and export; a state name is an
@@ -4558,7 +4587,7 @@ class HttpVectorClient:
         failure.
         """
         try:
-            stats = self.collection_stats(lifecycle_state)
+            stats = self.collection_stats(lifecycle_state, routing=routing)
         except VectorServiceError as e:
             if e.code != 404:
                 if strict:
@@ -4570,21 +4599,7 @@ class HttpVectorClient:
             # row it can name is treated as live (absent state = live, the
             # same reading is_live_collection_row applies to the joined route).
             return self._list_collections_via_count()
-        merged: dict[str, dict] = {}
-        for row in stats:
-            name = row.get("name", "")
-            if not name:
-                continue
-            entry = merged.setdefault(name, {"name": name, "count": 0, "stored_count": 0})
-            # `or 0` guards an explicit null count, not just an absent key
-            entry["count"] += int(row.get("count") or 0)
-            # A row from an engine older than the RDR-192 Step 5 amendment has
-            # no stored_count; its single count then stands for both.
-            entry["stored_count"] += int(row.get("stored_count", row.get("count")) or 0)
-            for key in self._STATS_CATALOG_ATTR_KEYS:
-                if key in row and key not in entry:
-                    entry[key] = row[key]
-        rows = [merged[n] for n in sorted(merged)]
+        rows = self._merge_stats_rows(stats)
         # nexus-7l3zo: this IS the listing seam every CLI verb goes through,
         # so prime the process's collection-row cache here, once, with the
         # response just fetched. Before this only search_cmd primed it, and
@@ -4605,7 +4620,41 @@ class HttpVectorClient:
             prime_collections_cache(rows)
         return rows
 
-    def list_live_collections(self) -> list[dict]:
+    def _merge_stats_rows(self, stats: list[dict]) -> list[dict]:
+        """One entry per collection name from ``/v1/vectors/stats`` rows (the
+        full form: one row per ``(collection, dim)``), counts summed, the first
+        row's catalog attributes kept, name ascending. The tail of
+        :meth:`list_collections`.
+
+        A ROUTING row (``fields=routing``, nexus-mz9jv: a name and catalog
+        attributes, no ``count`` or ``dim``) is one per collection already and
+        stays without counts: a count of 0 invented here would read as "empty".
+        A listing is the routing form when none of its rows has a ``count`` or
+        a ``dim``; an engine that ignored the request answered the full form.
+        """
+        routing_form = bool(stats) and not any(
+            isinstance(r, dict) and ("count" in r or "dim" in r) for r in stats
+        )
+        merged: dict[str, dict] = {}
+        for row in stats:
+            name = row.get("name", "")
+            if not name:
+                continue
+            if routing_form:
+                entry = merged.setdefault(name, {"name": name})
+            else:
+                entry = merged.setdefault(name, {"name": name, "count": 0, "stored_count": 0})
+                # `or 0` guards an explicit null count, not just an absent key
+                entry["count"] += int(row.get("count") or 0)
+                # A row from an engine older than the RDR-192 Step 5 amendment has
+                # no stored_count; its single count then stands for both.
+                entry["stored_count"] += int(row.get("stored_count", row.get("count")) or 0)
+            for key in self._STATS_CATALOG_ATTR_KEYS:
+                if key in row and key not in entry:
+                    entry[key] = row[key]
+        return [merged[n] for n in sorted(merged)]
+
+    def list_live_collections(self, *, routing: bool = False) -> list[dict]:
         """The ROUTING view of :meth:`list_collections` (nexus-bc7ps): rows
         whose ``lifecycle_state`` is live, so a ``quarantine-<name>`` sibling
         (or a dormant / disputed row) is never handed to a name parser, corpus
@@ -4619,7 +4668,11 @@ class HttpVectorClient:
         makes the pairing additive in the new-client / old-engine direction
         rather than a silent regression to pre-fix behaviour.
         """
-        rows = self.list_collections(lifecycle_state="live")
+        # ``routing`` (nexus-mz9jv) is for a caller that reads names and registry
+        # attributes only: it gets the catalog-only listing, without the live-chunk
+        # counts it would throw away. A caller that applies a size floor (taxonomy
+        # discovery) keeps the default and the counts.
+        rows = self.list_collections(lifecycle_state="live", routing=routing)
         return [row for row in rows if is_live_collection_row(row)]
 
     def _list_collections_via_count(self) -> list[dict]:

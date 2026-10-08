@@ -266,7 +266,12 @@ _ROUTING_MODULES = [
 #: ``_client`` branch is the retired in-process Chroma substrate, which has
 #: no lifecycle column and is not on either engine route.
 _ALLOWED = {
-    ("commands/search_cmd.py", "collection_rows = db.list_collections()"),
+    # nexus-mz9jv: the CLI verb lists once, and the real client is asked for the catalog-only
+    # routing listing (its rows are then filtered with is_live_collection_row, below the call);
+    # the full listing stays for the T3Database facade, which has no routing form. The
+    # unfiltered rows are what primes the identity cache, so this is not a lifecycle_state=live call.
+    ("commands/search_cmd.py", "db.list_collections(routing=True) if isinstance(db, HttpVectorClient)"),
+    ("commands/search_cmd.py", "else db.list_collections()"),
     ("commands/taxonomy_cmd.py", "for c in t3._client.list_collections():"),
     # the MCP collection_list TOOL is the inventory surface (twin of
     # `nx collection list`), not a routing read; the fan-out in the same
