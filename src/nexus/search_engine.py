@@ -1012,6 +1012,15 @@ def search_cross_corpus(
     #: Result ids the lexical leg returned, across every batch. Read by
     #: :func:`_cap_enrichment_pool`, which never drops one.
     pool_lexical_ids: set[str] = set()
+    # nexus-92q1p: the contradiction check and semantic clustering need each result's
+    # stored vector. The per-collection route returns them with the rows
+    # (``include_embeddings``), so the 14 to 22 per-collection ``get-embeddings`` round
+    # trips of ``_fetch_embeddings_for_results`` are only the fallback for the rows the
+    # route did not carry. Keyed by (collection, id): the raw little-endian float32 bytes.
+    want_embeddings = bool(
+        cfg.get("search", {}).get("contradiction_check", True) or cluster_by == "semantic"
+    )
+    prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
     total_dropped = 0
@@ -1416,6 +1425,9 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
+                # Only when needed: a request without the field is byte-identical to
+                # what an engine that predates it expects.
+                **({"include_embeddings": True} if want_embeddings else {}),
             )
         except PerCollectionEnvelopeError as exc:
             _log.warning(
@@ -1441,10 +1453,14 @@ def search_cross_corpus(
             return None
 
         rows_by_col: dict[str, list[dict]] = {c: [] for c in group}
-        for r in envelope["results"]:
+        emb_by_col: dict[str, dict[str, bytes]] = {c: {} for c in group}
+        row_embeddings = envelope.get("result_embeddings")
+        for i, r in enumerate(envelope["results"]):
             name = r.get("collection") or (group[0] if len(group) == 1 else "")
             if name in rows_by_col:
                 rows_by_col[name].append(r)
+                if row_embeddings is not None and row_embeddings[i] is not None:
+                    emb_by_col[name][r["id"]] = row_embeddings[i]
         stats = {e["collection"]: e for e in envelope["per_collection"]}
 
         parts = []
@@ -1479,6 +1495,7 @@ def search_cross_corpus(
                 "min_raw_distance": min_raw,
                 "rerank_meta": rerank_meta,
                 "lexical_ids": set(),
+                "embeddings": emb_by_col[col],
             })
 
         if lexical:
@@ -1666,6 +1683,8 @@ def search_cross_corpus(
             continue
         all_results.extend(part["results"])
         pool_lexical_ids.update(part.get("lexical_ids", ()))
+        for rid, raw in part.get("embeddings", {}).items():
+            prefetched_embeddings[(col, rid)] = raw
         diag_per_collection[col] = (
             part["raw_count"], part["dropped"], part["threshold"],
             part["min_dropped_distance"],
@@ -1819,7 +1838,9 @@ def search_cross_corpus(
     failed_indices: set[int] = set()
     if needs_embeddings:
         call_deadline.check("search_cross_corpus:before_embeddings")
-        fetched_embeddings, failed_indices = _fetch_embeddings_for_results(all_results, t3)
+        fetched_embeddings, failed_indices = _embeddings_for_results(
+            all_results, t3, prefetched_embeddings,
+        )
         call_deadline.check("search_cross_corpus:after_embeddings")
 
     # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
@@ -2102,6 +2123,64 @@ def _cap_enrichment_pool(
         lexical=len(results) - len(ranked),
     )
     return [r for i, r in enumerate(results) if i in keep or r.id in lexical_ids]
+
+
+def _embeddings_for_results(
+    results: list[SearchResult],
+    t3: Any,
+    prefetched: "dict[tuple[str, str], bytes]",
+) -> "tuple[np.ndarray | None, set[int]]":
+    """The embedding matrix for *results*: vectors the search response already carried
+    (*prefetched*, ``(collection, id)`` to little-endian float32 bytes, nexus-92q1p),
+    and :func:`_fetch_embeddings_for_results` for the rows it did not.
+
+    Same contract as :func:`_fetch_embeddings_for_results`: ``(matrix, failed_indices)``
+    with zero rows at the failed indices, ``(None, failed)`` when nothing could be
+    assembled, and one matrix dimension (a row of another width is marked failed, as a
+    collection of another width is there). With nothing prefetched this IS that
+    function, so an engine that does not return vectors behaves exactly as before. With
+    every row prefetched it makes no ``get_embeddings`` call at all.
+    """
+    if not prefetched:
+        return _fetch_embeddings_for_results(results, t3)
+    import numpy as np  # noqa: PLC0415 — deferred heavy dep; only when embeddings are assembled
+
+    rows: dict[int, "np.ndarray"] = {}
+    missing: list[int] = []
+    for i, r in enumerate(results):
+        raw = prefetched.get((r.collection, r.id))
+        if raw is None:
+            missing.append(i)
+        else:
+            rows[i] = np.frombuffer(raw, dtype="<f4")
+    failed_indices: set[int] = set()
+    if missing:
+        sub_matrix, sub_failed = _fetch_embeddings_for_results([results[i] for i in missing], t3)
+        for local, i in enumerate(missing):
+            if sub_matrix is None or local in sub_failed:
+                failed_indices.add(i)
+            else:
+                rows[i] = sub_matrix[local]
+    if not rows:
+        return None, failed_indices
+    # One matrix, one width: the first row (in result order) fixes it, as the first
+    # successful collection does in the fetch path.
+    emb_dim = len(rows[min(rows)])
+    embeddings = np.zeros((len(results), emb_dim), dtype=np.float32)
+    mismatched: set[str] = set()
+    for i, vec in rows.items():
+        if len(vec) != emb_dim:
+            failed_indices.add(i)
+            mismatched.add(results[i].collection)
+            continue
+        embeddings[i] = vec
+    for col in sorted(mismatched):
+        _log.warning(
+            "embedding_dim_mismatch_across_collections",
+            collection=col,
+            matrix_dim=emb_dim,
+        )
+    return embeddings, failed_indices
 
 
 def _fetch_embeddings_for_results(

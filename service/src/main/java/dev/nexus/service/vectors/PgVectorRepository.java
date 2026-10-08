@@ -1710,9 +1710,18 @@ public final class PgVectorRepository {
      * one stat per surviving collection in request order, the query-embedding token count, the
      * names dropped as unregistered, and the most rows the merge held at once
      * ({@code peakRetainedRows}, never more than {@code limit}; a diagnostic, not on the wire).
+     * {@code embeddingDim} is the width of the {@code embedding_b64} vectors on the rows when the request
+     * asked for embeddings ({@code include_embeddings}), else {@code 0}.
      */
     public record PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
-                                      long tokens, List<String> skippedCollections, int peakRetainedRows) {}
+                                      long tokens, List<String> skippedCollections, int peakRetainedRows,
+                                      int embeddingDim) {
+        /** A result of a request that did not ask for embeddings ({@code embeddingDim} 0). */
+        public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
+                                   long tokens, List<String> skippedCollections, int peakRetainedRows) {
+            this(rows, perCollection, tokens, skippedCollections, peakRetainedRows, 0);
+        }
+    }
 
     /** What bounded one arm's statement: the search bound, the fan-out budget, or the request budget. */
     enum Limiter { SEARCH, FANOUT, REQUEST }
@@ -2056,6 +2065,23 @@ public final class PgVectorRepository {
             new FanoutSettings(parallelism, defaultFanoutBudgetMs(), PgSession.startupSearchStatementTimeoutMs()));
     }
 
+    /**
+     * As above, asking for each surviving row's stored vector as {@code embedding_b64}
+     * ({@link #attachEmbeddings}); {@code includeEmbeddings == false} is the plain search.
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings,
+            new FanoutSettings(defaultFanoutParallelism(), defaultFanoutBudgetMs(),
+                               PgSession.startupSearchStatementTimeoutMs()));
+    }
+
     /** As above with every fan-out knob explicit; a test seam. */
     public PerCollectionResult searchPerCollection(String tenant, String queryText,
                                                    List<String> collectionNames,
@@ -2063,6 +2089,19 @@ public final class PgVectorRepository {
                                                    Map<String, Double> thresholds,
                                                    Map<String, Object> where,
                                                    boolean includeSourceUri,
+                                                   FanoutSettings settings) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, false, settings);
+    }
+
+    /** As above with every fan-out knob explicit and the embeddings opt-in; a test seam. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
                                                    FanoutSettings settings) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
@@ -2097,7 +2136,9 @@ public final class PgVectorRepository {
 
         // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
         // is the reference each collection's dispatch dimension is checked against.
+        long embedStartNanos = System.nanoTime();
         EmbedResult embed = embedQueryRaw(tenant, cols.get(0), queryText);
+        final long queryEmbedMs = (System.nanoTime() - embedStartNanos) / 1_000_000L;
         float[] qv = embed.embeddings().get(0);
         Vector queryVec = Vector.of(qv);
         int queryDim = qv.length;
@@ -2179,7 +2220,14 @@ public final class PgVectorRepository {
         }
 
         List<Map<String, Object>> rows = merger.drainBestFirst();
+        long enrichStartNanos = System.nanoTime();
         enrichSearchRows(tenant, rows, includeSourceUri);
+        final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
+        long fillStartNanos = System.nanoTime();
+        if (includeEmbeddings) {
+            attachEmbeddings(tenant, model, queryDim, rows);
+        }
+        final long embeddingFillMs = includeEmbeddings ? (System.nanoTime() - fillStartNanos) / 1_000_000L : 0L;
         List<PerCollectionStat> stats = merger.stats();
         long fanoutMs = (System.nanoTime() - startNanos) / 1_000_000L;
         long slowestArmMs = 0L;
@@ -2196,13 +2244,84 @@ public final class PgVectorRepository {
         }
         log.info("event=search_per_collection collections={} arms={} workers={} per_collection_k={} limit={} "
                  + "rows={} peak_retained_rows={} isolated_errors={} budget_exhausted={} statement_timeouts={} "
-                 + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={}",
+                 + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={} query_embed_ms={} "
+                 + "enrich_ms={} include_embeddings={} embedding_fill_ms={}",
                  n, runnable.size(), workers, perCollectionK, limit, rows.size(), merger.peakRetained(),
                  stats.stream().filter(s -> s.error() != null).count(),
                  stats.stream().filter(s -> s.errorKind() == ArmErrorKind.FANOUT_BUDGET_EXHAUSTED).count(),
                  stats.stream().filter(s -> s.errorKind() == ArmErrorKind.STATEMENT_TIMEOUT).count(),
-                 skipped.size(), fanoutMs, slowestArmMs, sumArmMs, fanoutBudgetMs);
-        return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained());
+                 skipped.size(), fanoutMs, slowestArmMs, sumArmMs, fanoutBudgetMs, queryEmbedMs, enrichMs,
+                 includeEmbeddings, embeddingFillMs);
+        return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
+                                       includeEmbeddings ? queryDim : 0);
+    }
+
+    /** Row key of a survivor's stored vector: base64 of its little-endian float32 components. */
+    public static final String EMBEDDING_ROW_KEY = "embedding_b64";
+
+    /** Wire name of the {@link #EMBEDDING_ROW_KEY} encoding, echoed beside the vector width. */
+    public static final String EMBEDDING_ENCODING = "f32-le-b64";
+
+    /**
+     * Fill each surviving row of a fan-out with its stored vector ({@code include_embeddings}, nexus-92q1p).
+     *
+     * <p>Why here and not in the arms: the vector-ranked arm statements stay exactly as they were (no extra
+     * column to detoast for the rows the merge then discards, no change to their serving settings), and the
+     * vectors are read once for the at most {@code limit} rows that survived. ONE statement for the whole
+     * request: {@code embedding_model} and {@code tenant_id} are named, so it plans to the one
+     * (model, tenant) leaf ({@link #getEmbeddingsQuery}'s shape, RDR-225), and {@code collection IN (...)}
+     * with {@code chash IN (...)} brings back each survivor plus, at most, a row of the same chash in another
+     * collection of the request, which is dropped by the (collection, chash) key below. Every collection of
+     * the request has one model (enforced above), so one leaf and one width.
+     *
+     * <p>A survivor with no vector here (deleted or tombstoned since the search statement, or a
+     * foreign-width row) keeps no {@code embedding_b64}: the field is absent, never an empty string, and the
+     * caller fetches that row by id.
+     */
+    private void attachEmbeddings(String tenant, String model, int dim, List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return;
+        Set<String> colls = new LinkedHashSet<>();
+        Set<String> chashes = new LinkedHashSet<>();
+        Set<String> wanted = new HashSet<>();
+        for (Map<String, Object> row : rows) {
+            String c = (String) row.get("collection");
+            String h = (String) row.get("chash");
+            colls.add(c);
+            chashes.add(h);
+            wanted.add(c + "\u0000" + h);
+        }
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var found = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.collection(), ch.chash(), ch.embedding())
+               .from(ch.table())
+               .where(ch.embeddingModel().eq(model))
+               .and(ch.tenantId().eq(tenant))
+               .and(ch.collection().in(colls))
+               .and(ch.chash().in(chashes))
+               .and(ch.embedding().isNotNull())
+               .and(liveChunksCondition(ctx, ch))
+               .fetch());
+        Map<String, String> encoded = new HashMap<>(found.size() * 2);
+        for (var rec : found) {
+            String key = rec.value1() + "\u0000" + rec.value2();
+            if (wanted.contains(key) && rec.value3() != null) {
+                encoded.put(key, encodeEmbedding(rec.value3().floats()));
+            }
+        }
+        for (Map<String, Object> row : rows) {
+            String b64 = encoded.get(row.get("collection") + "\u0000" + row.get("chash"));
+            if (b64 != null) {
+                row.put(EMBEDDING_ROW_KEY, b64);
+            }
+        }
+    }
+
+    /** Base64 of {@code floats} as little-endian IEEE 754 binary32, four bytes per component. */
+    static String encodeEmbedding(float[] floats) {
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(floats.length * Float.BYTES)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        buf.asFloatBuffer().put(floats);
+        return java.util.Base64.getEncoder().encodeToString(buf.array());
     }
 
     /**

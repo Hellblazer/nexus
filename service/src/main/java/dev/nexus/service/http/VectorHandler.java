@@ -603,6 +603,7 @@ public final class VectorHandler implements HttpHandler {
      *   "thresholds":         {"name1": 0.45, "name2": null},  // optional; keys must be in collections
      *   "where":              {"key": "val"},   // optional, applied in every collection's arm
      *   "include_source_uri": false,
+     *   "include_embeddings": false,            // optional; each row then carries its stored vector, see below
      *   "rerank":             false,            // optional; then limit must be &lt;= 1000
      *   "rerank_top_k":       null              // optional; requires rerank
      * }
@@ -617,9 +618,18 @@ public final class VectorHandler implements HttpHandler {
      *   "per_collection_k": 40,   // echo
      *   "limit": 300,             // echo
      *   // when rerank: rerank_degraded / rerank_model / rerank_error, as on /search
+     *   // when include_embeddings: "embedding_encoding": "f32-le-b64", "embedding_dim": 1024
      * }
      * </pre>
-     * {@code X-Nexus-Usage-Tokens} and {@code X-Nexus-Skipped-Collections} are emitted as on
+     * <p><strong>{@code include_embeddings} (nexus-92q1p).</strong> Opt-in, default {@code false}: the response is
+     * then byte-identical to before. When {@code true}, after the merge and the {@code limit} cut each result
+     * row gains {@code "embedding_b64"}: its stored vector as base64 of {@code embedding_dim} little-endian
+     * IEEE 754 binary32 components (4 x {@code embedding_dim} bytes), read by one by-id statement over the
+     * survivors. The envelope states {@code embedding_encoding} and {@code embedding_dim} (both present when
+     * the request asked, even for zero rows), so a client detects an engine that ignored the field by their
+     * absence. A row whose vector could not be read (deleted since the search) has no {@code embedding_b64}.
+     *
+     * <p>{@code X-Nexus-Usage-Tokens} and {@code X-Nexus-Skipped-Collections} are emitted as on
      * {@code /search}. A row is dropped by its collection's threshold when
      * {@code distance > threshold}. A collection that returned no rows for a reason of its own is
      * reported in its {@code per_collection} entry, {@code error} (human text) beside
@@ -655,6 +665,7 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Double> thresholds = optThresholds(body, "thresholds");
         Map<String, Object> where = optMap(body, "where");
         boolean includeSourceUri  = optBool(body, "include_source_uri", false);
+        boolean includeEmbeddings = optBool(body, "include_embeddings", false);
         boolean rerank            = optBool(body, "rerank", false);
         Integer rerankTopK        = optInteger(body, "rerank_top_k");
         if (!rerank && rerankTopK != null) {
@@ -667,8 +678,10 @@ public final class VectorHandler implements HttpHandler {
                     + " rows, but limit is " + limit + " — lower limit or drop rerank");
         }
 
+        long handlerStartNanos = System.nanoTime();
         var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
-                                              thresholds, where, includeSourceUri);
+                                              thresholds, where, includeSourceUri, includeEmbeddings);
+        long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
         emitTokenUsage(ex, result.tokens());
         emitSkippedCollections(ex, result.skippedCollections());
 
@@ -693,7 +706,19 @@ public final class VectorHandler implements HttpHandler {
         envelope.put("per_collection", perCollection);
         envelope.put("per_collection_k", perK);
         envelope.put("limit", limit);
-        HttpUtil.send(ex, 200, json(envelope));
+        if (includeEmbeddings) {
+            envelope.put("embedding_encoding", PgVectorRepository.EMBEDDING_ENCODING);
+            envelope.put("embedding_dim", result.embeddingDim());
+        }
+        long serializeStartNanos = System.nanoTime();
+        String envelopeBody = json(envelope);
+        long serializeMs = (System.nanoTime() - serializeStartNanos) / 1_000_000L;
+        HttpUtil.send(ex, 200, envelopeBody);
+        // nexus-mz9jv: the request's total beside the search_per_collection line's split (query embed, fan-out,
+        // enrich, embedding fill): repo_ms covers those, the rest of handler_ms is rerank, serialisation, the write.
+        log.info("event=search_per_collection_request collections={} rows={} bytes={} repo_ms={} serialize_ms={} "
+                 + "handler_ms={}", collections.size(), result.rows().size(), envelopeBody.length(), repoMs,
+                 serializeMs, (System.nanoTime() - handlerStartNanos) / 1_000_000L);
     }
 
     /**

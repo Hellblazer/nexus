@@ -27,6 +27,8 @@ CHUNKING STAYS PYTHON per the bead relay).
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import gzip
 import hashlib
 import json
@@ -1978,6 +1980,48 @@ def _unpack_rerank_envelope(results: Any, rerank_meta_out: dict | None) -> Any:
     return results
 
 
+#: The engine's ``embedding_encoding`` for the ``embedding_b64`` row field of ``include_embeddings``
+#: (nexus-92q1p): base64 of the vector's components as little-endian IEEE 754 binary32.
+_EMBEDDING_ENCODING = "f32-le-b64"
+
+
+def _take_embeddings(envelope: dict, payload: Any) -> None:
+    """Move the ``embedding_b64`` field of the envelope's result rows into
+    ``envelope["result_embeddings"]`` (nexus-92q1p, see
+    :meth:`HttpVectorClient.search_per_collection`).
+
+    The field is removed from EVERY row whether or not it is used: a row's
+    keys other than ``id``/``content``/``distance`` become result metadata
+    downstream, and a 1024-dim vector must not be one of them. The decoded
+    list is built only when the engine echoed ``embedding_encoding`` as
+    :data:`_EMBEDDING_ENCODING` and a positive integer ``embedding_dim``;
+    without that echo the field (which an engine that predates it never
+    sends) is dropped and the envelope is left as it was. A row whose
+    ``embedding_b64`` is not valid base64 or is not ``dim * 4`` bytes gets
+    ``None``: that row, not the whole answer, is fetched by id.
+    """
+    rows = envelope["results"]
+    encoded = [row.pop("embedding_b64", None) if isinstance(row, dict) else None for row in rows]
+    if not isinstance(payload, dict) or payload.get("embedding_encoding") != _EMBEDDING_ENCODING:
+        return
+    dim = payload.get("embedding_dim")
+    if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+        return
+    decoded: list[bytes | None] = []
+    for b64 in encoded:
+        raw: bytes | None = None
+        if isinstance(b64, str):
+            try:
+                candidate = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError):
+                candidate = b""
+            if len(candidate) == dim * 4:
+                raw = candidate
+        decoded.append(raw)
+    envelope["embedding_dim"] = dim
+    envelope["result_embeddings"] = decoded
+
+
 class VectorServiceError(RuntimeError):
     """Raised when the vector service returns an error.
 
@@ -3536,6 +3580,7 @@ class HttpVectorClient:
         thresholds: dict[str, float | None] | None = None,
         where: dict | None = None,
         include_source_uri: bool = False,
+        include_embeddings: bool = False,
         rerank: bool = False,
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
@@ -3581,6 +3626,20 @@ class HttpVectorClient:
 
         ``rerank`` follows :meth:`search`: the degrade state lands in
         *rerank_meta_out*, once for the whole request.
+
+        *include_embeddings* (nexus-92q1p) asks the engine for each surviving
+        row's stored vector, read once after the merge, so a caller that needs
+        the vectors (the contradiction check, semantic clustering) makes no
+        ``get-embeddings`` round trip per collection afterward. The rows come
+        back with ``embedding_b64`` (base64 of little-endian float32), which
+        this method DECODES and REMOVES from the rows, so a vector never lands
+        in a result's metadata: the envelope then carries ``"embedding_dim"``
+        and ``"result_embeddings"``, a list aligned with ``"results"`` whose
+        entries are the raw little-endian float32 bytes of that row's vector
+        (``dim * 4`` bytes) or ``None`` for a row the engine returned none for.
+        Both keys are ABSENT when the engine did not answer with the
+        ``embedding_encoding`` / ``embedding_dim`` echo (an engine that predates
+        the field ignores it); the caller then fetches by id as before.
         """
         if self._per_collection_written_off():
             return None
@@ -3601,6 +3660,8 @@ class HttpVectorClient:
             body["where"] = where
         if include_source_uri:
             body["include_source_uri"] = True
+        if include_embeddings:
+            body["include_embeddings"] = True
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -3689,6 +3750,7 @@ class HttpVectorClient:
         self._per_collection_confirmed = True
         if rerank:
             envelope["results"] = _unpack_rerank_envelope(payload, rerank_meta_out)
+        _take_embeddings(envelope, payload)
         return envelope
 
     @staticmethod
