@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.75.0] - 2026-10-08
+
+Pairs with engine-service-v0.1.154 (`REQUIRED_ENGINE_VERSION` moves from 0.1.152; v0.1.153 was deployed to the managed service but never pinned). Search and indexing latency, in both modes. A default search no longer carries vectors, and the contradiction check is opt-in. Chunk counts are cached for 15 minutes. In local mode the cross-encoder rerank scores a capped set of 60 candidates, and indexing runs about 1.8 times faster. Three local-mode first-run defects are fixed.
+
 ### Changed
 
 - **The per-collection chunk counts a default MCP search sizes its fan-out from are cached for 15 minutes instead of 60 seconds** (search latency, Sam's decision 2026-10-08). The counts come from the full `GET /v1/vectors/stats`, about 380 ms on a local engine and 0.73 s on the managed service, and interactive searches are spaced more than a minute apart, so nearly every one paid it (measured: 724 ms cold, 209 ms warm, 588 ms after a 65 s wait). The names and registry rows keep their 60 s clock and refresh from the cheap catalog-only routing listing, which now carries the counts forward instead of discarding them. This process's own `store_put`, `store_delete` and new-collection registration still drop the counts at once. The one thing the longer window can get wrong: a collection that another process grew past the 3-chunk fan-out floor is skipped by the default fan-out for at most 15 minutes (a collection named explicitly is never affected). `store_list` prints the sizes, so it keeps the 60 s freshness (`get_collection_counts(max_age=...)`). Constant: `mcp_infra._COLLECTION_COUNTS_TTL`.

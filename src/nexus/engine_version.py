@@ -632,7 +632,14 @@ from __future__ import annotations
 #: (vectors-032-1, nexus-mz9jv), an index-probe listCollections
 #: (nexus-41sfa) and batched arm settings (nexus-wym0l). All four wire
 #: entries are [additive]; the engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 152)
+#:
+#: 7.75.0 pairs with engine-service-v0.1.154 (tagged 2026-10-08), which skips the
+#: never-pinned v0.1.153 (fan-out at max(1, pool-2), measured no faster in the cloud
+#: and reverted in v0.1.154). v0.1.154 carries the optional `rerank_max_candidates`
+#: field (nexus-92q1p), length-grouped local bge embedding (nexus-qlveu) and the
+#: fan-out defaults back at max(1, pool/2). All wire entries are [additive]; the
+#: engine deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 154)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
