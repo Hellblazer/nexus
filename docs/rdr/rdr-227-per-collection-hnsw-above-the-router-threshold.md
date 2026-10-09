@@ -67,8 +67,10 @@ client). The interim is the router default T = 30000 in engine-service-v0.1.156
 Under T = 30000 the floor moves to the mid-size exact arms, `code__1-20` (29,355
 rows) and `code__1-72` (27,893 rows), at about 0.8 s each under concurrency
 (statement maxima 710 to 989 ms, live on v0.1.156, `nexus_rdr/227-research-1`),
-and a warm default search stays 0.5 to 0.7 s slower than on v0.1.154. No value of
-T removes that without bringing back Gap 1's miss on `code__1-72`.
+and a warm default search stays 0.5 to 0.7 s slower than on v0.1.154. Lowering T below
+27,893 brings back Gap 1's miss on `code__1-72`. A T between 27,893 and 29,355
+would move only `code__1-20` off the exact path, whose recall at
+`ef_search = 1000` was not measured; Phase 1 Step 3 measures it.
 
 #### Gap 3: A cold HNSW index is slow on first touch
 
@@ -100,8 +102,8 @@ should be of the same order as the leaf index's 2 to 7 s.
   generic plan would instead walk every tenant's leaf (A1). A1 verified the
   proof holds on the engine's bound, custom-planned call, and a sampled runtime
   check (Technical Design, Plan mode) watches it. RDR-225 Alternative 4 rejected a
-  partition per collection for partition count; this RDR's Alternative 3 is the
-  same layout and is not pursued.
+  partition per collection for partition count; this RDR's Alternative 3 is a
+  narrower version of that layout (large collections only) and is not pursued.
 
 ## Context
 
@@ -250,11 +252,14 @@ walk at `ef_search = 1000`.
   the pooler: a concurrent build needs a session) with the `NX_DB_ADMIN_*` values
   `Main` read at boot, in autocommit (a concurrent build cannot run in a
   transaction block, so not through jOOQ's transaction wrapper), and closes it
-  after each pass. It sets `application_name = nexus-pci-builder`. A concurrent
+  after each pass. It sets `application_name` to `nexus-pci-builder-` plus the
+  engine's per-boot id, the form `BackendReaper` uses (`nexus_rdr/227-research-7`),
+  so the engine's shutdown terminates its own builder backend. A concurrent
   build waits for older transactions, and those waits are lock waits, so the
   `CREATE INDEX CONCURRENTLY` statement runs with no `lock_timeout` and a
   30-minute `statement_timeout`; `DROP INDEX CONCURRENTLY` runs with a 5 s
-  `lock_timeout`. Both values are design choices, measured in Phase 1 Step 3.
+  `lock_timeout`; a drop that times out is retried on the next pass. Both values
+  are design choices; Phase 1 Step 3 measures build time under them.
   The socket timeout sits above the statement timeout.
 - **Credentials are restart-bound.** The engine reads `NX_DB_ADMIN_*` once at
   boot (`nexus_rdr/227-research-4`), so after an in-place `nexus_admin` rotation
@@ -262,8 +267,9 @@ walk at `ef_search = 1000`.
   This RDR therefore requires an engine restart after a `nexus_admin` rotation.
   T2 `nexus/engine-credential-model-admin-startup-only` already makes the
   engine's env rewrite a precondition of the next boot, since every boot re-runs
-  migration as admin; this RDR amends its "rotating without a restart is safe" to
-  "rotating without a restart stops index maintenance until the restart".
+  migration as admin. This RDR amends that entry's conclusion that rotating the
+  admin password without an engine restart is safe: rotating without a restart
+  now stops index maintenance until the restart.
   conexus owns the rotation procedure and offered to add the restart
   (2026-10-09); their confirmation is a prerequisite. An authentication failure sets
   `builder_state = auth_failed` in the status object (Day 2 Operations) and logs
@@ -272,66 +278,82 @@ walk at `ef_search = 1000`.
 - **No admin credentials.** `Main` falls back to the app credentials for
   migration when `NX_DB_ADMIN_*` are absent; the builder does the same. If that
   role cannot create an index on the leaf (`insufficient_privilege`), the builder
-  sets `builder_state = no_privilege`, logs once, and builds nothing. Arms above T
-  then take the no-index route in the routing table.
+  sets `builder_state = no_privilege`, logs once, and builds nothing.
 - **Lifecycle.** One reconciler per engine, at most one builder per database.
-  - *Build trigger.* The router's probe already counts each arm's collection up
-    to T+1 rows (`nexus_rdr/227-research-5`). A single-collection arm whose probe
-    exceeds T on a collection not in the router's valid-index set enqueues
-    (tenant, model, collection) on an in-memory, de-duplicated queue. The
-    reconciler drains it. With `NX_SEARCH_EXACT_MAX_ROWS=0` the probe does not run,
-    so nothing is enqueued and no index is built or dropped by size.
+  - *Build threshold.* Builds are driven by the reconciler's own row counts, not
+    by searches, so a collection gets its index before the router ever sends it
+    to one. `NX_SEARCH_PCI_BUILD_MIN_ROWS` (B, an integer >= 1, default 20000) is
+    the build threshold; it is independent of the routing threshold T, and B <= T
+    is what lets T be lowered to B later (Phase 2b). The routing probe cannot do
+    this job, because it counts at most T+1 rows and never reports a collection
+    below T (`nexus_rdr/227-research-7`).
   - *Sweep, read half.* Every engine, with no lock, once after boot and every
     10 minutes (`NX_SEARCH_PCI_SWEEP_SECONDS`, an integer >= 60): enumerate the
     per-collection indexes on every leaf by name prefix `pci_` in
-    `pg_class`/`pg_index` (catalogs are not row-secured), read each index's
-    collection from its predicate (`pg_get_expr(indpred, indrelid)`, the
-    `collection = '<name>'` literal the builder wrote), and replace the router's
+    `pg_class`/`pg_index` (catalogs are not row-secured), parse each index's
+    collection from its deparsed predicate (`pg_get_expr(indpred, indrelid)`,
+    which reads `(collection = '<name>'::text)`), and replace the router's
     valid-index set with the `indisvalid` ones. Until the first read the set is
-    empty and arms above T take the no-index route. The read half runs on its own
-    pooled connection as `nexus_svc`, which can read the catalogs.
-  - *Sweep, DDL half.* Only the lock holder (One builder, below): count each
-    indexed collection, drop by the rules below, prewarm, and build from the
-    queue. `nexus.chunks` is FORCE ROW LEVEL SECURITY, so the owner role is
-    tenant-scoped too (`nexus_rdr/227-research-5`). For each indexed collection
-    the holder sets `nexus.tenant` to the leaf's tenant, read from the leaf's
-    partition bound, and counts that collection's rows on the leaf.
-  - *Hysteresis and retirement.* Build above T. Drop when the count falls below
-    T/2, or when the collection is no longer live in the collection registry
-    (deleted or superseded). The canonical rename re-homes the chunk rows to the
-    new name (`nexus_rdr/227-research-5`), so the old index counts zero and is
-    dropped, and the new name is built on its next probe above T. A COPY rename
-    and a supersede keep the old collection's rows (`nexus_rdr/227-research-6`), so
-    those are dropped by the registry check, not the count. Quarantine moves rows
-    to a separate `quarantine-<name>` collection, so the source count falls.
+    empty. The read half runs on its own pooled connection as `nexus_svc`, which
+    can read the catalogs, and it runs whatever `NX_SEARCH_PCI` says.
+  - *Sweep, DDL half.* Only the lock holder (One builder, below). For each leaf
+    it resolves the leaf's tenant from the partition bound, then, in one explicit
+    transaction on the admin session (`SET LOCAL` has no effect outside one,
+    `nexus_rdr/227-research-7`), sets `SET LOCAL nexus.tenant` to that tenant and
+    counts rows per collection on the leaf. `nexus.chunks` is FORCE ROW LEVEL
+    SECURITY, so the owner role sees only that tenant's rows
+    (`nexus_rdr/227-research-5`). It reads the collection registry under the same
+    tenant. It then drops by the rules below, builds the missing indexes, and
+    prewarms. Building and dropping run outside that transaction, in autocommit.
+  - *Build and retirement rules.* Build when a collection that is live in the
+    registry (`superseded_by` empty) counts at least B rows on its leaf and has no
+    `pci_` index. Drop when its count falls below B/2, when the registry no longer
+    lists it, or when its `superseded_by` is set. A count of zero for a
+    collection the registry lists as live and populated is treated as a counting
+    failure: logged, never acted on. The canonical rename re-homes the chunk rows
+    and supersedes the old name (`nexus_rdr/227-research-5`), so the old index is
+    dropped and the new name is built on the next pass. A supersede keeps the old
+    rows (`nexus_rdr/227-research-6`) and is dropped by `superseded_by`. A COPY
+    rename leaves the old collection live with its rows
+    (`nexus_rdr/227-research-7`), so its index correctly stays. Quarantine moves
+    rows to a separate quarantine collection, so the source count falls.
   - *One builder.* The DDL half takes `pg_try_advisory_lock` on its admin
     session (the migrator's precedent, `nexus_rdr/227-research-5`) on its own key,
     never `SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY` (`nexus_rdr/227-research-6`),
-    and holds it for the pass. A second engine fails the try and skips the DDL
-    half; its read half still refreshes its router set. Builds run one at a time,
-    with `CREATE INDEX CONCURRENTLY IF NOT EXISTS`.
+    and, like that key, outside the int4 range that the repositories'
+    `hashtext` transaction locks occupy; it holds the lock for the pass. A second engine fails the try and skips the DDL
+    half; its read half still refreshes its router set. Because the work comes
+    from the counts, not from a per-engine queue, whichever engine holds the lock
+    sees all of it. Builds run one at a time, with
+    `CREATE INDEX CONCURRENTLY IF NOT EXISTS`.
   - *Failed versus in flight.* Only the lock holder builds, and it holds the lock
     for the whole build. So an INVALID `pci_` index that the lock holder finds
     outside its own build is a failed build (its builder's session ended); the
-    holder drops it with `DROP INDEX CONCURRENTLY IF EXISTS` on that exact name
-    and re-enqueues the collection. Routing counts only `indisvalid` indexes.
-    A collection whose build fails is retried after 10 minutes, doubling to a
-    24-hour cap; after three consecutive failures the status object counts it as
-    failing (Day 2 Operations).
+    holder drops it with `DROP INDEX CONCURRENTLY IF EXISTS` on that exact name.
+    Routing counts only `indisvalid` indexes. A collection whose build fails is
+    retried no sooner than 10 minutes later (the next pass at or after that),
+    doubling to a 24-hour cap; after three consecutive failures the holder's
+    status counts it as failing (Day 2 Operations).
   - *Migrations.* A boot migration that alters a leaf would queue behind an
     in-flight build, and every later read and write of that leaf would queue
-    behind the migration. So the migrator, before it walks, cancels any backend
-    named `nexus-pci-builder` (`pg_cancel_backend`); the cancelled build leaves an
-    invalid index that the next pass drops and rebuilds. The builder never runs
-    during its own engine's migration, which completes before the reconciler
-    starts.
-  - *Caps.* At most `NX_SEARCH_PCI_MAX_PER_LEAF` indexes per leaf (an integer
-    >= 0, default 16; 0 builds none). `NX_SEARCH_PCI=0` turns the builder off: no
-    builds and no drops. Existing indexes stay, and the planner may still choose
-    them for a single-collection arm; arms above T take the no-index route.
-    The settings are validated at boot like `NX_SEARCH_EXACT_MAX_ROWS`.
+    behind the migration. So the migrator, before it walks, terminates any
+    backend whose `application_name` starts with `nexus-pci-builder-`
+    (`pg_terminate_backend`, which works on the same role without superuser,
+    `nexus_rdr/227-research-7`). Terminating the session, not cancelling the
+    statement, ends the whole pass and releases its advisory lock, so no further
+    build starts; the interrupted build leaves an invalid index that a later pass
+    drops and rebuilds. The builder never runs during its own engine's migration,
+    which completes before the reconciler starts.
+  - *Caps and switches.* At most `NX_SEARCH_PCI_MAX_PER_LEAF` indexes per leaf
+    (an integer >= 0, default 16; 0 builds none). `NX_SEARCH_PCI=0` (`1`, the
+    default, enables it; any other value refuses boot) turns the DDL half off: no
+    builds and no drops. The read half still runs, so existing valid indexes stay
+    in the router set and keep serving. All four settings are validated at boot
+    like `NX_SEARCH_EXACT_MAX_ROWS`.
 - **Routing.** The router decides exact versus HNSW as today, by the probe
-  against T. The partial index needs no separate route: on a single-collection
+  against T. With `NX_SEARCH_EXACT_MAX_ROWS=0` there is no probe and every
+  single-collection arm takes HNSW: an indexed collection at the serving
+  `ef_search`, any other at `ef_search = 1000`. The partial index needs no separate route: on a single-collection
   HNSW statement the planner chooses it under `force_custom_plan` (A1). The
   router keeps an in-memory set of valid (leaf, collection) indexes, refreshed
   by every engine's read half and after each local build, and uses it only to
@@ -343,7 +365,7 @@ walk at `ef_search = 1000`.
   | --- | --- | --- |
   | <= T | any | exact (today) |
   | > T | yes | HNSW, serving `ef_search`; the planner walks the partial index |
-  | > T | no (none yet, building, failed, capped, builder off, or no privilege) | HNSW leaf walk at `ef_search = 1000` (Alternative 4 as the fallback; single-collection arms only) |
+  | > T | no (below B, none yet, building, failed, capped, or no privilege) | HNSW leaf walk at `ef_search = 1000` (Alternative 4 as the fallback; single-collection arms only) |
 
   A statement over several collections cannot use a partial index (its
   predicate does not imply one collection) and keeps today's leaf walk.
@@ -361,7 +383,8 @@ walk at `ef_search = 1000`.
 - **Cold start.** A per-collection index's first touch after a restart was 86 to
   189 ms with the OS cache intact (a lower bound); from disk it should be of the
   order of the leaf index's 2 to 7 s (not measured for a partial index). The
-  lock holder runs `pg_prewarm` on its admin session, which owns the index, on
+  lock holder runs `pg_prewarm` on its admin session (the leaf owner, which
+  Phase 1 Step 2 confirms) on
   each valid per-collection index after boot and after each build, if the
   extension is installed (A6). One search would warm
   only its own walk, not the graph. A database failover without an engine
@@ -370,9 +393,10 @@ walk at `ef_search = 1000`.
   objects keyed on data. The reconciler needs no registry table: the `pci_`
   prefix and each index's predicate let `pg_class` and `pg_index` answer which
   exist, for which collection, and which are valid. Only the builder creates
-  `pci_` names; an operator-made index with that prefix would be dropped.
-- **Index name.** `pci_` plus the first 24 hex digits of
-  `sha256(model, tenant, collection)`.
+  `pci_` names; an operator-made index with that prefix is treated like the
+  builder's own and falls under the build and retirement rules.
+- **Index name.** `pci_` plus the first 24 hex digits of the SHA-256 of model,
+  tenant and collection joined by a NUL byte.
 
 ### Existing Infrastructure Audit
 
@@ -408,8 +432,9 @@ grows with collection size. Rejected as the end state; it was the nqsa7 stopgap.
 
 Removes the two slowest arms, keeps `code__1-72` exact. Leaves `code__1-1` and
 `code__1-2` on the filtered leaf walk at the serving `ef_search`, the walk that
-missed the nearest row on `code__1-72`; Phase 0 recorded no serving miss on the
-two of them separately. Combined with Alternative 4 it meets the target on every
+missed the nearest row on `code__1-72`; Phase 0 reported serving recall only in
+aggregate, and its one top-1 miss is the `code__1-72` repro (inferred from the
+matching 0.925). Combined with Alternative 4 it meets the target on every
 tested query; see Alternative 4.
 
 ### Alternative 3: Sub-partition the leaf by collection for large collections
@@ -456,21 +481,24 @@ without a valid index (Routing) and ships it first (Phase 2a).
   measured; Phase 1 measures it on the substrate, bulk load included.
 - The long-lived engine process now keeps the admin credentials it read at boot
   and opens an admin session, where before it closed the admin pool after
-  migration. That session runs a fixed statement set and nothing else: the
-  advisory lock, catalog reads, per-tenant row counts under `SET LOCAL
-  nexus.tenant` for the leaf it is reconciling, `CREATE INDEX CONCURRENTLY IF
-  NOT EXISTS` and `DROP INDEX CONCURRENTLY IF EXISTS` on `pci_` names it derived
-  or read, and `pg_prewarm`. The collection is `%L`-quoted. This is a deliberate
+  migration. That session runs a fixed statement set and nothing else: its own
+  session settings (`application_name`, `statement_timeout`, `lock_timeout`),
+  the advisory lock, catalog reads and leaf resolution, per-tenant row counts and
+  registry reads inside a transaction under `SET LOCAL nexus.tenant` for the leaf
+  it is reconciling, `CREATE INDEX CONCURRENTLY IF NOT EXISTS` and
+  `DROP INDEX CONCURRENTLY IF EXISTS` on `pci_` names it derived or read, and
+  `pg_prewarm`. The collection is `%L`-quoted. This is a deliberate
   widening of the admin path, recorded here.
-- A nexus_admin rotation requires an engine restart (Builder).
+- A nexus_admin rotation requires an engine restart (Credentials are
+  restart-bound).
 
 ### Risks and Mitigations
 
 - **The planner stops using a partial index** (stats drift, a path without
   `force_custom_plan`). A1 holds today. Mitigation: the sampled plan check, and
   the fallback is the leaf walk, not a scan.
-- **Index build load on the managed instance.** Builds start at the first probe
-  above T after Phase 2b deploys. Mitigation: concurrent builds, one at a time
+- **Index build load on the managed instance.** Builds start at the first DDL
+  pass after Phase 2b deploys, for every live collection at or above B. Mitigation: concurrent builds, one at a time
   (A3: 10 to 21 s each, no write blocking). To defer them, deploy with
   `NX_SEARCH_PCI=0` and restart without it at a chosen time.
 - **Cold first touch** (Gap 3). Mitigation: `pg_prewarm` after boot and after
@@ -480,7 +508,7 @@ without a valid index (Routing) and ships it first (Phase 2a).
 
 A missing, invalid or unused per-collection index degrades to the leaf walk,
 never to an error. A failed build leaves an invalid index that the builder holding
-the lock drops by name and re-enqueues. A stale admin password stops builds and
+the lock drops by name; the next pass rebuilds it. A stale admin password stops builds and
 drops, visibly (`builder_state`), until the engine restarts.
 
 ## Implementation Plan
@@ -491,7 +519,7 @@ drops, visibly (`builder_state`), until the engine restarts.
 - [x] A5: the cloud engine's admin credentials confirmed present after boot
   (conexus-1c, 2026-10-09).
 - [ ] conexus's `nexus_admin` rotation procedure restarts the engine
-  (conexus-1c agreed, 2026-10-09).
+  (offered by conexus-1c, 2026-10-09; confirmation pending).
 - [x] Sam's decision on the stop rule: continue to per-collection indexes
   (2026-10-09).
 
@@ -548,22 +576,27 @@ and the degraded paths (no index, invalid index).
 - **Phase 2a.** One engine cut with Step 1 only (`ef_search = 1000` above T, T
   stays 30000). Measure a warm default search live on it, the same way the
   v0.1.154 to v0.1.156 numbers were taken.
-- **Phase 2b.** Only if Phase 2a's measurement leaves the mid-size exact arms
-  setting the floor: one engine cut with Step 2, gated on Step 3. Builds start at
-  the first probe above T after deploy (Risks). T stays 30000 in the cut and is
-  lowered afterwards by the `NX_SEARCH_EXACT_MAX_ROWS` setting, once
-  `code__1-72` and `code__1-20` hold valid indexes and Step 3's recall runs
-  (`code__1-20` own-topic, prose, second tenant) pass the Gap 1 target; the code
-  default follows in a later cut. Until a lowered T's collections hold valid
-  indexes they take the `ef_search = 1000` walk, which misses on `code__1-72`
-  (A4), so T is lowered only after their indexes are valid.
+- **Phase 2b.** Only if Phase 2a's measured default search shows the mid-size
+  exact arms still setting the floor (that is, still the largest arm statements
+  under concurrency): one engine cut with Step 2, gated on Step 3. T stays 30000
+  in the cut and B is 20000, so the first DDL pass builds indexes for every live
+  collection at or above 20000 rows, `code__1-72` and `code__1-20` included,
+  while those two keep routing exact (Risks). Once both hold valid indexes and
+  Step 3's recall runs (`code__1-20` own-topic, prose, second tenant) pass the
+  Gap 1 target, T is lowered to B by the `NX_SEARCH_EXACT_MAX_ROWS` setting, and
+  the code default follows in a later cut. Lowering T only after their indexes
+  are valid keeps them off the `ef_search = 1000` walk, which misses on
+  `code__1-72` (A4).
 
 ### Day 2 Operations
 
 The engine's status response gains a `per_collection_indexes` object: valid,
-invalid, building and failing counts, `builder_state` (`ok`, `auth_failed`,
-`no_privilege`, `off`), and the last pass time. The counts are global, not per
-tenant, like the existing `reaper` object on the same unauthenticated route. It
+invalid and building counts, read from `pg_index` and
+`pg_stat_progress_create_index` so every engine reports the same numbers, and the
+answering engine's own `builder_state` (`ok`, `auth_failed`, `no_privilege`,
+`off`), failing count and last DDL pass time, which are per engine and labelled
+so. The counts are global, not per tenant, like the existing `reaper` object on
+the same unauthenticated route. It
 is additive and goes in the wire ledger. Each sweep also logs `event=pci_sweep`
 with the same counts. `nx doctor` reads the object over HTTP, so it works on a
 managed install as well as a local one.
@@ -578,8 +611,11 @@ None.
 - Recall: seeded leaf where one large collection sits beside larger siblings;
   the arm's recall against exact meets the Gap 1 target.
 - Degraded: no index, invalid index, index being built.
-- Lifecycle: crossing T builds; dropping below T/2, deleting or superseding
-  drops.
+- Lifecycle: reaching B builds; dropping below B/2, deleting or superseding
+  drops; a COPY rename keeps the index; a collection between B and T has an index
+  and still routes exact.
+- Counting: a count taken without the tenant set (zero rows for a live,
+  populated collection) is logged and never drops an index.
 - Invalid index: a failed concurrent build is dropped by name and rebuilt;
   routing ignores it meanwhile (the EXPLAIN pin also asserts `indisvalid`).
 - Tenant targeting: two tenants with the same collection name each get an index
@@ -587,18 +623,25 @@ None.
 - Two reconcilers: two engines against one database build each index once.
 - A pass during a build: the second engine skips; the build's index is not
   dropped.
-- Rename: a renamed collection's old index is dropped by the sweep and the new
-  name is built on its next probe above T.
+- Rename: after a canonical rename the old index is dropped and the new name is
+  built on the next DDL pass.
 - Hysteresis: a collection between T/2 and T keeps its index.
 - Credentials: a wrong admin password sets `builder_state = auth_failed` and
   builds nothing.
 - Router refresh: the engine that loses the lock has the same valid-index set
   as the winner after its next read half.
-- Off and privilege: `NX_SEARCH_PCI=0` and a role without privilege build
-  nothing and route arms above T at `ef_search = 1000`.
+- Off and privilege: `NX_SEARCH_PCI=0` and a role without privilege build and
+  drop nothing; existing valid indexes keep serving; unindexed arms above T take
+  `ef_search = 1000`.
+- Router off: with `NX_SEARCH_EXACT_MAX_ROWS=0`, indexed arms take the serving
+  `ef_search` and the rest `ef_search = 1000`.
+- Settings: invalid `NX_SEARCH_PCI`, `NX_SEARCH_PCI_BUILD_MIN_ROWS`,
+  `NX_SEARCH_PCI_SWEEP_SECONDS` or `NX_SEARCH_PCI_MAX_PER_LEAF` refuse boot.
+- Shutdown: stopping the engine terminates its builder backend.
 - Cap: a leaf at `NX_SEARCH_PCI_MAX_PER_LEAF` builds no more.
 - Retry: a failing build backs off and is counted as failing after three tries.
-- Migration: a migrator cancels an in-flight `nexus-pci-builder` backend.
+- Migration: a migrator terminates an in-flight builder session, and no later
+  build in that pass starts.
 - Status: the `per_collection_indexes` object reports the counts above.
 - Plan check: the sampled EXPLAIN logs `used=false` when the index is skipped.
 
@@ -615,7 +658,7 @@ Warm large arm under 50 ms, against 1.1 to 2.0 s exact under load (Phase 0 at
 10 workers: indexed arms 10 to 22 ms against exact 0.4 to 1.2 s; code-group
 statement total 2.5 to 3.2 s against 4.8 to 5.9 s). The default-search figure
 is not derived yet: Phase 0 measured statement time, not a client search, and
-measures it after Phase 2b lowers T.
+measures it after T is lowered in Phase 2b.
 
 ## Finalization Gate
 
@@ -680,7 +723,7 @@ Phase 2a's measured default search shows those exact arms still set the floor
 - T2 `conexus/rdr226-step02-fork-grouped-exact-2026-10-09`
 - T2 `nexus_rdr/226-research-13`, `nexus_rdr/226-research-14`
 - T2 `nexus/search-telemetry-and-perk-measurements-2026-10-09` [29728]
-- T2 `nexus_rdr/227-research-1` to `-6`,
+- T2 `nexus_rdr/227-research-1` to `-7`,
   `nexus/engine-credential-model-admin-startup-only` [23506],
   `conexus/rdr227-phase0-fork-2026-10-09`
 - Beads nexus-43ulx, nexus-nqsa7
@@ -704,3 +747,8 @@ Phase 2a's measured default search shows those exact arms still set the floor
   on every engine, own lock key, timeouts and backoff, predicate-based mapping,
   registry-based retirement, migrator cancels builds, like-for-like comparison
   (research `-6`).
+- 2026-10-09: Post-accept fix-check fix: builds driven by the reconciler's row
+  counts against a build threshold B independent of T (the probe-driven trigger
+  could not build collections below T), COPY rename keeps its index, counts in an
+  explicit transaction, migrator terminates builder sessions, per-boot builder
+  name, status semantics (research `-7`).
