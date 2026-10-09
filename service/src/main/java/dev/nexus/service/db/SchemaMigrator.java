@@ -8,6 +8,9 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
+import liquibase.lockservice.DatabaseChangeLogLock;
+import liquibase.lockservice.LockService;
+import liquibase.lockservice.LockServiceFactory;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -25,6 +28,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.TimeZone;
@@ -380,6 +384,31 @@ public final class SchemaMigrator {
     }
 
     /**
+     * Key of the session-level advisory lock a migrator holds for its whole walk (nexus-8sph2).
+     *
+     * <p>The bytes of {@code "nexus"} as a bigint. It sits above the int4 range on purpose:
+     * {@code TaxonomyRepository} keys its transaction locks on {@code hashtext(...)}, an int4 widened to
+     * bigint, so no key it can produce equals this one.
+     */
+    public static final long MIGRATION_ADVISORY_LOCK_KEY = 0x6e65787573L;
+
+    /**
+     * How long a migrator waits for another live migrator's advisory lock before it refuses to boot.
+     * Liquibase's own default wait for its changelog lock, so a contended boot fails on the same clock
+     * it always has.
+     */
+    static final Duration DEFAULT_MIGRATION_LOCK_WAIT = Duration.ofMinutes(5);
+
+    /**
+     * Test seam (nexus-8sph2): as {@link #migrate(DataSource)} with the wait for another live migrator's
+     * advisory lock set by the caller, so a test of the contended case does not wait five minutes. Public
+     * for the cross-package reason {@link #migrate(DataSource, Runnable)} gives.
+     */
+    public static MigrationOutcome migrate(DataSource ds, Duration migrationLockWait) {
+        return migrate(ds, () -> { }, LocalDiskPreflight::dataDirFreeBytesFromEnv, migrationLockWait);
+    }
+
+    /**
      * Test seam (nexus-jl08t round 3, T2 [25617]/critic round-2 finding).
      * {@code afterUpdateHook} runs immediately after {@code
      * liquibase.update()} returns — the migration is already committed at
@@ -420,6 +449,12 @@ public final class SchemaMigrator {
      */
     public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook,
                                            java.util.function.Supplier<java.util.OptionalLong> dataDirFreeBytes) {
+        return migrate(ds, afterUpdateHook, dataDirFreeBytes, DEFAULT_MIGRATION_LOCK_WAIT);
+    }
+
+    private static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook,
+                                            java.util.function.Supplier<java.util.OptionalLong> dataDirFreeBytes,
+                                            Duration migrationLockWait) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         try {
             pinJvmTimeZoneToUtc();
@@ -494,10 +529,14 @@ public final class SchemaMigrator {
             database.setLiquibaseSchemaName("public");
             database.setDefaultSchemaName("public");
 
+            // nexus-8sph2: the migration lock is declared AFTER Liquibase so it closes FIRST. Liquibase's
+            // close() closes the connection, which on a pool returns it with the session, and so the
+            // session-level advisory lock, still alive; the lock must be released before that happens.
             try (Liquibase liquibase = new Liquibase(
                     MASTER_CHANGELOG,
                     new ClassLoaderResourceAccessor(),
-                    database)) {
+                    database);
+                 MigrationLock migrationLock = MigrationLock.acquire(conn, database, migrationLockWait)) {
 
                 // Count pending changesets for the structured log entry.
                 int pending = liquibase.listUnrunChangeSets(
@@ -1246,6 +1285,119 @@ public final class SchemaMigrator {
      * Unchecked exception thrown when {@link #migrate(DataSource)} cannot
      * complete. {@code Main.java} catches this and calls {@code System.exit(1)}.
      */
+    /**
+     * The migrator's session-level advisory lock, held from before Liquibase takes its changelog lock until
+     * after the walk (nexus-8sph2).
+     *
+     * <p>Liquibase's lock is a committed row in {@code databasechangeloglock}. A walker stopped mid-walk
+     * (SIGTERM, CTRL_BREAK, a crash) leaves the row {@code locked=true}, and the next boot waited five
+     * minutes for it and failed (measured 2026-10-05, T2 nexus_rdr/224-research-19). The row cannot tell a
+     * dead walker from a live one. A session-level advisory lock can: PostgreSQL drops it when the holding
+     * session ends, however the process stopped. Every migrator takes it first, so a migrator that holds it
+     * knows no other migrator is walking, and a locked row it finds is stale. It releases that row through
+     * Liquibase's own {@link LockService#forceReleaseLock()} and lets Liquibase take its lock as before.
+     * Liquibase's lock stays in place, so an engine that predates this lock still waits on the row.
+     *
+     * <p>Accepted gap: an engine that predates this lock, walking at the same moment as one that has it,
+     * holds the row but not the advisory lock, and would have its row released. That needs two engine
+     * versions booting against one database at once; the cloud runs one engine and a local install one.
+     */
+    private static final class MigrationLock implements AutoCloseable {
+        private static final Duration POLL = Duration.ofSeconds(1);
+        private final Connection conn;
+
+        private MigrationLock(Connection conn) {
+            this.conn = conn;
+        }
+
+        static MigrationLock acquire(Connection conn, Database database, Duration wait) throws LiquibaseException {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            long deadline = System.nanoTime() + wait.toNanos();
+            boolean logged = false;
+            while (!tryLock(ctx)) {
+                if (!logged) {
+                    log.info("event=schema_migration_lock_wait key={} holder_pid={} wait_s={}",
+                             MIGRATION_ADVISORY_LOCK_KEY, holderPid(ctx), wait.toSeconds());
+                    logged = true;
+                }
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    throw new MigrationException("another migrator holds the migration lock (advisory key "
+                        + MIGRATION_ADVISORY_LOCK_KEY + ", holder pid " + holderPid(ctx) + ") after waiting "
+                        + wait.toSeconds() + " s");
+                }
+                try {
+                    Thread.sleep(Math.min(POLL.toMillis(), Math.max(1, remaining / 1_000_000)));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new MigrationException("interrupted waiting for the migration lock", e);
+                }
+            }
+            MigrationLock lock = new MigrationLock(conn);
+            try {
+                releaseStaleChangelogLock(database);
+            } catch (LiquibaseException | RuntimeException e) {
+                lock.close();
+                throw e;
+            }
+            return lock;
+        }
+
+        private static boolean tryLock(DSLContext ctx) {
+            return Boolean.TRUE.equals(ctx.select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN,
+                    DSL.val(MIGRATION_ADVISORY_LOCK_KEY)))
+                .fetchOne(0, Boolean.class));
+        }
+
+        /** The pid holding the migration lock, or -1 when none is visible; for the log line only. */
+        private static int holderPid(DSLContext ctx) {
+            try {
+                Integer pid = ctx.select(DSL.field(DSL.name("pid"), Integer.class))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
+                    .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+                    .and(DSL.field(DSL.name("granted"), Boolean.class).isTrue())
+                    .and(DSL.field(DSL.name("classid"), Long.class).cast(SQLDataType.BIGINT)
+                        .eq(MIGRATION_ADVISORY_LOCK_KEY >>> 32))
+                    .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT)
+                        .eq(MIGRATION_ADVISORY_LOCK_KEY & 0xffffffffL))
+                    .and(DSL.field(DSL.name("objsubid"), Integer.class).eq(1))
+                    .limit(1)
+                    .fetchOne(0, Integer.class);
+                return pid == null ? -1 : pid;
+            } catch (DataAccessException e) {
+                return -1;
+            }
+        }
+
+        /** Under the migration lock any locked changelog row is stale: release it, naming who left it. */
+        private static void releaseStaleChangelogLock(Database database) throws LiquibaseException {
+            LockService lockService = LockServiceFactory.getInstance().getLockService(database);
+            DatabaseChangeLogLock[] locks = lockService.listLocks();
+            if (locks.length == 0) {
+                return;
+            }
+            for (DatabaseChangeLogLock stale : locks) {
+                log.warn("event=schema_changelog_lock_stale_released lockedby=\"{}\" lockgranted={}",
+                         stale.getLockedBy(), stale.getLockGranted() == null ? null
+                             : stale.getLockGranted().toInstant());
+            }
+            lockService.forceReleaseLock();
+        }
+
+        @Override
+        public void close() {
+            try {
+                DSL.using(conn, SQLDialect.POSTGRES)
+                    .select(DSL.function("pg_advisory_unlock", SQLDataType.BOOLEAN,
+                        DSL.val(MIGRATION_ADVISORY_LOCK_KEY)))
+                    .fetchOne();
+            } catch (DataAccessException e) {
+                // The session ending releases it anyway; a failed unlock on a broken connection is not fatal.
+                log.warn("event=schema_migration_lock_release_failed cause=\"{}\"", e.toString());
+            }
+        }
+    }
+
     public static final class MigrationException extends RuntimeException {
         public MigrationException(String message, Throwable cause) {
             super(message, cause);
