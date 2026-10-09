@@ -4257,6 +4257,101 @@ def _check_engine_reaper(
     )]
 
 
+_PCI_LABEL = "Per-collection indexes"
+
+#: ``per_collection_indexes.this_engine.builder_state`` values the row knows. Anything else is an engine newer than
+#: this client and reads not applicable rather than a guess.
+_PCI_BUILDER_STATES = frozenset({"ok", "auth_failed", "no_privilege", "off", "standby"})
+
+
+def _check_per_collection_indexes(
+    engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
+) -> list[HealthResult]:
+    """nexus-43ulx.24 (RDR-227 Day 2): are the per-collection partial HNSW indexes being built and usable?
+
+    Reads the ``per_collection_indexes`` object of ``GET /v1/status`` (nexus-43ulx.23): the read half's global
+    ``valid`` / ``invalid`` / ``unparsed`` counts, and in ``this_engine`` what this engine's builder is doing
+    (``builder_state``, ``failing``, ``last_ddl_pass_at``). The same status body serves the Engine reaper row, so a
+    local and a managed engine are judged the same way (HTTP only).
+
+    * fail (hard ✗): ``builder_state`` ``auth_failed`` (the engine's admin credential was rejected, typically after a
+      ``nexus_admin`` rotation) or ``no_privilege`` (the admin role cannot create indexes on the leaves). Checked
+      before the counts, so a dead builder cannot read green on ``invalid=0``.
+    * warn: ``invalid`` > 0 or ``failing`` > 0.
+    * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with neither; ``off`` passes with a note that
+      builds are disabled by ``NX_SEARCH_PCI=0``.
+
+    Not applicable (ok, no warning) when the engine cannot be reached, when it predates the object, and when the
+    object cannot be read, which includes a ``builder_state`` this client does not know. A count that is not a
+    non-negative int is read as 0, as the reaper row reads its counters.
+    """
+    label = _PCI_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_per_collection_indexes_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    def _na(why: str) -> list[HealthResult]:
+        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
+
+    if status is None:
+        return _na("the engine's status endpoint could not be read")
+    pci = status.get("per_collection_indexes")
+    if pci is None:
+        return _na("this engine predates the per-collection index status field")
+    this_engine = pci.get("this_engine") if isinstance(pci, dict) else None
+    state = this_engine.get("builder_state") if isinstance(this_engine, dict) else None
+    if not isinstance(state, str) or state not in _PCI_BUILDER_STATES:
+        return _na("the engine's per-collection index status could not be read")
+
+    now = now or datetime.now(UTC)
+    valid, invalid = _status_int(pci.get("valid")), _status_int(pci.get("invalid"))
+    unparsed, failing = _status_int(pci.get("unparsed")), _status_int(this_engine.get("failing"))
+    last_ddl = _instant(this_engine.get("last_ddl_pass_at"))
+    ddl_note = ("no DDL pass yet" if last_ddl is None
+                else f"last DDL pass {_span(max(0.0, (now - last_ddl).total_seconds()))} ago")
+    counts = f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+
+    if state in ("auth_failed", "no_privilege"):
+        why = ("the engine's admin credential was rejected" if state == "auth_failed"
+               else "the engine's admin role has no privilege to create indexes on the leaves")
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"builder_state {state}: {why}, so no per-collection index is being built ({counts})",
+            fix_suggestions=[
+                *(["After a nexus_admin credential rotation, restart the engine so it reads the new credential "
+                   "(`nx daemon service stop && nx daemon service start` for a local engine); the engine logs "
+                   "event=pci_builder_auth_failed"] if state == "auth_failed" else
+                  ["The engine's admin role cannot create indexes on the leaves of nexus.chunks: grant it the "
+                   "privilege (it must own or be able to CREATE INDEX on the partitions), then restart the engine"]),
+                "NX_SEARCH_PCI=0 switches the builder off on purpose, and then this row passes with a note",
+                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+            ],
+        )]
+    off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
+    if invalid or failing:
+        parts = [f"{n} {what}" for n, what in ((invalid, "invalid"), (failing, "failing")) if n]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"{', '.join(parts)} ({counts}); builder_state {state}, {ddl_note}{off_note}"),
+            fix_suggestions=[
+                "Read the engine log for event=pci_sweep (the read half's counts, one line per sweep) and the "
+                "builder's own lines for the collection that fails",
+                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+            ],
+        )]
+    if state == "standby":
+        return [HealthResult(label=label, ok=True,
+                             detail=f"{counts}; a peer engine holds the builder lock (standby)")]
+    return [HealthResult(label=label, ok=True, detail=f"{counts}; builder_state {state}, {ddl_note}{off_note}")]
+
+
 def _check_t2_launchagent_stray() -> list[HealthResult]:
     """nexus-c0vby (GH #1405 defect 2): backstop for the automatic
     ``unload_stale_t2_launchagent`` finish-pass leg
@@ -10227,6 +10322,7 @@ def run_health_checks(
     results.extend(_check_engine_convergence())
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
+    results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
