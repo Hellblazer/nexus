@@ -153,10 +153,12 @@ mini, macOS user `ghrunner`) is a self-hosted runner for release legs only: the
 engine-service release legs, the PG-bundle cache seed and the signing rehearsal
 (Sam, 2026-09-28, nexus-yd9po). `qwentescence` (WSL) is a test host reachable by
 ssh, not a runner; its native Windows side is the separate `win-release` runner
-described below. Both hosts take hand-run suites and gates through ssh;
-agents' full suites go to hellmini (Sam, 2026-10-02). The T2 how-tos
-`nexus/hellmini-second-test-host-howto` and `nexus/qwentescence-test-host-howto`
-carry the recipes.
+described below. `chas` (a native Ubuntu 26.04 box, 32 cores, 123 GB, ssh
+alias `chas-test`) is a test host only, never a runner. Agents' full Python
+suites and engine suites go to chas first (2026-10-08, nexus-y10bw). hellmini takes
+macOS-specific runs, and the overflow when chas is busy. The T2 how-tos
+`nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto` and
+`nexus/qwentescence-test-host-howto` carry the recipes.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two self-hosted registrations, `hellmini` and
@@ -525,7 +527,20 @@ things to avoid carefully; they are impossible.
     write tool, whenever you are not certain your session started inside
     the worktree it is editing.
 
-12. **A second test host, `hellmini`, takes full suites and gates.** A Mac
+12. **The default test host is `chas`; `hellmini` is the second.** chas
+    (`ssh chas-test`, user `nxtest`, no sudo) holds its own clone at
+    `~/src/nexus` (primary on `develop`, never edited) with worktrees in
+    `~/src/nexus-wt/`. Its leases live in that clone's git common dir. Push
+    with `git push chas HEAD:refs/heads/<unique-ref>` (laptop remote `chas`)
+    and add a worktree at that ref. `-n auto` there means 32 workers
+    (`PYTEST_XDIST_AUTO_NUM_WORKERS`); 32 workers peak at about 95 of 123 GB,
+    so do not raise it. Measured 2026-10-08 on develop 14fb28184: the Python
+    suite in about 11 min, `scripts/mvnw-leased.sh test` in 9 min. Detach a long
+    run with `setsid -f`, not `nohup ... &`: a backgrounded process inherits
+    SIGINT ignored, and one test reads that (nexus-jo8za). Details: T2
+    `nexus/chas-test-host-howto`.
+
+    hellmini, the second host, takes macOS runs and overflow. A Mac
     mini on the tailnet (`ssh hellmini`) holds its own clone at
     `/Volumes/Bulk/src/nexus` (primary on `develop`, never edited) with
     worktrees in `/Volumes/Bulk/src/nexus-wt/`. Its suite and build leases
@@ -555,7 +570,7 @@ longer and more expensive the run, the further the warning sits from the
 tail. `head` as well as `tail`, or grep the warning shape.
 
 **A remote pytest hand run goes through `scripts/watched_pytest.py`** (nexus-hlvg1),
-on qwentescence, qwent-test and hellmini alike:
+on chas, qwentescence, qwent-test and hellmini alike:
 `python scripts/watched_pytest.py --stall 180 --status <file> -- uv run pytest ...`.
 It adds `-v` and `faulthandler_timeout`, kills the process tree after
 `--stall` seconds of silence and names the hung test (exit 124), names a run
