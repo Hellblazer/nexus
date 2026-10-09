@@ -639,7 +639,15 @@ from __future__ import annotations
 #: field (nexus-92q1p), length-grouped local bge embedding (nexus-qlveu) and the
 #: fan-out defaults back at max(1, pool/2). All wire entries are [additive]; the
 #: engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 154)
+#:
+#: 7.76.0 pairs with engine-service-v0.1.156 (tagged 2026-10-09 on f391a1a6c,
+#: deployed and gated 11:05Z), which skips v0.1.155 (router default T=60000,
+#: measured ~1 s slower live and superseded). v0.1.156 carries the optional
+#: `content_chars` field (nexus-tao37), the cardinality router default 30000
+#: (nexus-nqsa7), stale changelog-lock recovery (nexus-8sph2) and the per-arm
+#: phase log (RDR-226 Phase 0). The one wire entry is [additive]; the engine
+#: deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 156)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

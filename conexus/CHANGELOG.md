@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.76.0] - 2026-10-09
+
+Plugin version aligned with conexus 7.76.0. This plugin change becomes live at this pin (the deferred `PENDING_RELEASE.md` entry, now emptied):
+
+- **Brief checklist for implementer dispatches** (nexus-yjg4v). `conexus/skills/development/SKILL.md` gains a Pre-Dispatch: Brief Checklist section and a Brief Checklist block in the developer relay: five questions (consumers, final display point, local and cloud modes, resource bounds, cache and shared state) a brief answers or marks `UNKNOWN: resolve first`. The SubagentStart hook injects the same questions into every implementer dispatch; both halves ship together in this release.
+
 ## [7.75.0] - 2026-10-08
 
 Plugin version aligned with conexus 7.75.0. No plugin-side changes: `PENDING_RELEASE.md` held no entries.
