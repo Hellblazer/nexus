@@ -1225,6 +1225,85 @@ def note_collection_written(name: str) -> None:
         invalidate_collections_cache()
 
 
+#: A document id no catalog holds: the warm-up's catalog read resolves it to nothing.
+_WARMUP_ABSENT_DOC_ID = "0.0.0"
+
+#: ``0``/``false``/``off``/``no`` turns the MCP startup search warm-up off (nexus-vpa9q).
+SEARCH_WARMUP_ENV = "NX_MCP_SEARCH_WARMUP"
+
+
+def search_warmup_enabled() -> bool:
+    return os.environ.get(SEARCH_WARMUP_ENV, "").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def warm_search_path() -> None:
+    """Do the cheap cold-process steps of a first search ahead of it (nexus-vpa9q).
+
+    A cold MCP process paid these on its first search, all network round trips and TCP/TLS
+    setup (engine plus ALB 0.01-0.02 s of each, conexus ALB 2026-10-09): the cloud version
+    probe (~0.25 s), the routing listing (0.25-0.43 s), and a new connection for the second
+    model group's search request (0.2-0.3 s). This runs them at server start: the probe and the
+    vector client, the routing listing (names cache plus a pooled connection), a second routing
+    read concurrently so the pool holds two warm connections, the shared T2 slot and the
+    catalog handle. It never asks for the full stats listing (0.7 s of engine DB time per
+    call): a session that never searches should not pay it. Best-effort; each step's failure is
+    logged at debug and the rest still run.
+    """
+    import structlog  # noqa: PLC0415 — matches this module's branch-local logger imports
+
+    log = structlog.get_logger(__name__)
+    started = time.monotonic()
+
+    def step(name: str, fn: Any) -> None:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 — warm-up is best-effort; the first search does the work itself
+            log.debug("search_warmup_step_failed", step=name, exc_info=True)
+
+    t3_box: list[Any] = []
+    step("t3", lambda: t3_box.append(get_t3()))
+    t3 = t3_box[0] if t3_box else None
+    if t3 is not None and callable(getattr(t3, "embedding_mode", None)):
+        step("embedding_mode", t3.embedding_mode)
+
+    def second_connection() -> None:
+        from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+
+        if isinstance(t3, HttpVectorClient):
+            t3.list_collections(routing=True)
+
+    threads = [
+        threading.Thread(target=step, args=("names", get_live_collection_names), daemon=True),
+        threading.Thread(target=step, args=("second_connection", second_connection), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    # One real, near-free request on each so the first search's taxonomy and catalog calls ride
+    # an open connection (a cold one cost them 0.3-0.5 s): an empty link-pairs read on the shared
+    # T2, an absent document on the catalog. Neither read leaves client-side state, unlike the
+    # chash-positions route, whose failure backoff a warm-up must not trip.
+    step("t2", lambda: t2_index_write(
+        lambda db: db.taxonomy.get_topic_link_pairs([]), op="search_warmup",
+    ))
+    step("catalog", lambda: get_catalog().resolve_many([_WARMUP_ABSENT_DOC_ID]))
+    for t in threads:
+        t.join()
+    log.debug("search_warmup_done", elapsed_s=round(time.monotonic() - started, 3))
+
+
+def warm_search_path_in_background(
+    target: Any = None,
+) -> threading.Thread | None:
+    """Run :func:`warm_search_path` on a daemon thread; None when opted out."""
+    if not search_warmup_enabled():
+        return None
+    thread = threading.Thread(
+        target=target or warm_search_path, name="nexus-search-warmup", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 _fanout_counts_refresh_lock = threading.Lock()
 _fanout_counts_refresh: threading.Thread | None = None
 

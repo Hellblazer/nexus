@@ -448,3 +448,30 @@ class TestCloudProbeConfirmsThePerCollectionRoute:
         """The cloud gate refuses an engine below REQUIRED_ENGINE_VERSION, so
         a client that passed it can always skip the probe."""
         assert tuple(_FLOOR_TUPLE) >= hvc.PER_COLLECTION_ROUTE_MIN_ENGINE
+
+
+class TestCloudProbeSeedsTheEmbeddingMode:
+    """nexus-vpa9q: the cloud probe already read /version, so the client's
+    embedding_mode() memo is seeded from it instead of a second GET on the
+    first search."""
+
+    @pytest.mark.parametrize("mode", ["voyage", "onnx-local"])
+    def test_a_known_mode_is_seeded(self, monkeypatch, mode):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        caps = dataclasses.replace(_caps(), embedding_mode=mode)
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service", MagicMock(return_value=caps),
+        )
+        assert get_http_vector_client()._embedding_mode_memo == mode
+
+    def test_an_unknown_mode_is_not_seeded(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        caps = dataclasses.replace(_caps(), embedding_mode="unknown")
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service", MagicMock(return_value=caps),
+        )
+        assert get_http_vector_client()._embedding_mode_memo is None
+
+    def test_local_mode_is_not_seeded(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        assert get_http_vector_client()._embedding_mode_memo is None

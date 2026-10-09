@@ -73,6 +73,7 @@ from nexus.mcp_infra import (
     flush_search_telemetry_at_exit as _flush_search_telemetry_at_exit,
     search_taxonomy as _search_taxonomy,
     search_telemetry_sink as _search_telemetry_sink,
+    warm_search_path_in_background as _warm_search_path_in_background,
     t2_ctx as _t2_ctx,
     t2_index_write as _t2_index_write,
 )
@@ -1740,6 +1741,10 @@ async def _t1_lifespan(_app: Any):
     # opt-out via NX_NO_TELEMETRY=1 / `nx telemetry off`.
     from nexus.install_ping import ping_in_background  # noqa: PLC0415 — startup cost
     ping_in_background()
+
+    # nexus-vpa9q: do a first search's cheap cold steps (version probe, routing listing, warm
+    # connections) now, on a daemon thread; opt-out via NX_MCP_SEARCH_WARMUP=0.
+    _warm_search_path_in_background()
 
     # nexus-d76vc: start the T1 handoff-marker watcher UNCONDITIONALLY,
     # before the routing decision below picks a branch. A handoff can

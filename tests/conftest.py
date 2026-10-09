@@ -2476,6 +2476,13 @@ def _reset_search_telemetry_sink_if_loaded() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_mcp_search_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MCP lifespan starts a search warm-up thread (nexus-vpa9q) that reaches the engine.
+    Off in the unit suite; tests/test_search_warmup.py turns it back on where it is the subject."""
+    monkeypatch.setenv("NX_MCP_SEARCH_WARMUP", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_search_telemetry_sink():
     """Give every test its own MCP search telemetry worker (nexus-vpa9q).
 
