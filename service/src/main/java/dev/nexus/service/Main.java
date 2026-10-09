@@ -272,10 +272,6 @@ public final class Main {
                     reranker.modelToken());
         }
         var tenantScope = new TenantScope(ds);
-        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter,
-                                                  qryEmbedRouter);
-        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
-        pgVectorRepo.startupFanoutArmPermits();
 
         // Embedding profile (RDR-204 Phase 1, bead nexus-ft04v.6): the engine is
         // the only writer of nexus.embedding_profile, and this mode decision
@@ -376,9 +372,23 @@ public final class Main {
             return;
         }
 
+        // nexus-43ulx.12 (RDR-227): the router's valid-index set. Built here, after the boot catch above has
+        // validated the NX_SEARCH_PCI* settings (PgSession resolves them in a static initializer, so touching
+        // them any earlier would let a malformed value escape main as ExceptionInInitializerError), and handed
+        // to the repository as its only index set (the empty default belongs to tests, never to production).
+        var pciSweep = dev.nexus.service.vectors.PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings());
+        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter, qryEmbedRouter, pciSweep);
+        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
+        pgVectorRepo.startupFanoutArmPermits();
+
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
                 localEmbedActivitySupplier, tupleTemplateRegistry);
         service.start();
+        // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
+        // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
+        // shutdown hook before ds.close(). Until the first read lands the set is empty and every single-collection
+        // statement above the router threshold walks at hnsw.ef_search 1000, the safe direction.
+        pciSweep.start();
 
         log.info("event=service_ready port={}", service.getPort());
 
@@ -420,6 +430,8 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
+            // nexus-43ulx.12: end the catalog reads before the pool they borrow from closes.
+            pciSweep.stop();
             // nexus-g17tf: FIRST after the listener stops, ahead of the embedder
             // closes (each can wait up to 5s) so the reaper always runs inside a
             // 10s container stop grace. Hikari's close aborts the sockets, and a

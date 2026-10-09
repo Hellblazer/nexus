@@ -8,7 +8,10 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.PgSession.PciSettings;
+import dev.nexus.service.vectors.PciCatalog;
 import dev.nexus.service.vectors.PciIndexSet;
+import dev.nexus.service.vectors.PciIndexSweep;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.PgVectorRepository.FanoutSettings;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionResult;
@@ -764,6 +767,174 @@ class PgVectorCardinalityRouterIntegrationTest {
             assertThat(arms).allSatisfy(l -> assertThat(l).contains("ef_search=" + WIDEST + " "));
         } finally {
             logger.setLevel(was);
+        }
+    }
+
+    // ── RDR-227 Step 2 (nexus-43ulx.12): the read half supplies the real valid-index set ──────────
+
+    private static final PciSettings SWEEP_SETTINGS = new PciSettings(true, 20_000, 600, 16);
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+
+    private static String sha256Hex(String s) {
+        try {
+            return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** {@code nexus.partition_name('chunks', model, tenant)}: the tenant leaf an index is made on. */
+    private static String leafName(String model, String tenant) {
+        return "chunks_m" + sha256Hex(model).substring(0, 8) + "_t_" + sha256Hex(tenant).substring(0, 16);
+    }
+
+    /** Build the per-collection index the way the builder will, as the superuser who owns the leaf. */
+    private void createPciIndex(String tenant, String collection) throws Exception {
+        String model = registeredModel(tenant, collection);
+        assertThat(model).isEqualTo(MODEL_384);
+        String ddl = "CREATE INDEX " + PciCatalog.indexName(model, tenant, collection) + " ON nexus."
+            + leafName(model, tenant) + " USING hnsw (embedding_384 nexus.vector_cosine_ops) WHERE collection = '"
+            + collection + "'";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, ddl);
+        }
+    }
+
+    private void dropPciIndex(String tenant, String collection) throws Exception {
+        String model = registeredModel(tenant, collection);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su,
+                "DROP INDEX IF EXISTS nexus." + PciCatalog.indexName(model, tenant, collection));
+        }
+    }
+
+    private java.util.function.Supplier<PciCatalog.Snapshot> catalogReader() {
+        var catalog = new PciCatalog(ds);
+        return () -> catalog.read();
+    }
+
+    /** A sweep that reads the real catalog through the engine's pool, counting its reads. */
+    private PciIndexSweep catalogSweep(java.util.concurrent.atomic.AtomicInteger reads) {
+        var read = catalogReader();
+        return new PciIndexSweep(() -> {
+            reads.incrementAndGet();
+            return read.get();
+        }, SWEEP_SETTINGS);
+    }
+
+    private static void awaitTrue(java.util.function.BooleanSupplier condition, String what) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("timed out waiting for " + what);
+            }
+            Thread.sleep(20);
+        }
+    }
+
+    /** A swept valid index serves its collection at the serving value; any other walks the leaf at 1000. */
+    @Test
+    void sweptValidIndex_servesItsCollection_anUnindexedOneWalksWidest() throws Exception {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var sweep = catalogSweep(new java.util.concurrent.atomic.AtomicInteger());
+        var probe = new EfSearchProbe();
+        var r = probedRepo(probe, sweep);
+        createPciIndex(TENANT_X, X_HNSW1);
+        try {
+            List<String> beforeRead = efFor(probe, r,
+                x -> x.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW1), K, null, false));
+            assertThat(beforeRead).as("the set is empty until the first read, whatever the catalog holds")
+                .isNotEmpty().containsOnly(Integer.toString(WIDEST));
+
+            assertThat(sweep.refresh()).isTrue();
+            assertThat(sweep.status().valid()).as("exactly the one index built here").isEqualTo(1);
+
+            assertThat(efFor(probe, r, x -> x.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW1), K, null, false)))
+                .as("X_HNSW1 has a valid index: serving").isNotEmpty().containsOnly(Integer.toString(EF_FLOOR));
+            assertThat(efFor(probe, r, x -> x.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW2), K, null, false)))
+                .as("X_HNSW2 has none: leaf at 1000").isNotEmpty().containsOnly(Integer.toString(WIDEST));
+        } finally {
+            dropPciIndex(TENANT_X, X_HNSW1);
+        }
+    }
+
+    /** Router off (NX_SEARCH_EXACT_MAX_ROWS=0): the indexed collection still serves, the rest walk at 1000. */
+    @Test
+    void routerOff_sweptIndexedCollectionServes_theRestWalkWidest() throws Exception {
+        PgSession.overrideSearchExactMaxRowsForTests(0);
+        var sweep = catalogSweep(new java.util.concurrent.atomic.AtomicInteger());
+        var probe = new EfSearchProbe();
+        var r = probedRepo(probe, sweep);
+        createPciIndex(TENANT_X, X_HNSW1);
+        try {
+            sweep.refresh();
+            Counters before = Counters.now();
+            assertThat(efFor(probe, r, x -> x.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW1), K, null, false)))
+                .isNotEmpty().containsOnly(Integer.toString(EF_FLOOR));
+            assertThat(efFor(probe, r, x -> x.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW2), K, null, false)))
+                .isNotEmpty().containsOnly(Integer.toString(WIDEST));
+            assertThat(Counters.now().since(before).exact()).as("no probe at T = 0").isZero();
+        } finally {
+            dropPciIndex(TENANT_X, X_HNSW1);
+        }
+    }
+
+    /**
+     * Router refresh: two engines (two sweeps over one database) hold the same set after their next scheduled
+     * read, for a build and again for a drop.
+     */
+    @Test
+    void twoEnginesAgainstOneDatabase_holdTheSameSetAfterTheirNextRead() throws Exception {
+        var a = PciIndexSweep.withPeriod(catalogReader(), SWEEP_SETTINGS, java.time.Duration.ofMillis(100));
+        var b = PciIndexSweep.withPeriod(catalogReader(), SWEEP_SETTINGS, java.time.Duration.ofMillis(100));
+        String model = registeredModel(TENANT_X, X_HNSW1);
+        a.start();
+        b.start();
+        try {
+            awaitTrue(() -> a.status().everRead() && b.status().everRead(), "both engines' first read");
+            assertThat(a.hasValidIndex(model, TENANT_X, X_HNSW1)).isFalse();
+            assertThat(b.hasValidIndex(model, TENANT_X, X_HNSW1)).isFalse();
+
+            createPciIndex(TENANT_X, X_HNSW1);
+            try {
+                awaitTrue(() -> a.hasValidIndex(model, TENANT_X, X_HNSW1) && b.hasValidIndex(model, TENANT_X, X_HNSW1),
+                    "both engines to see the new index");
+            } finally {
+                dropPciIndex(TENANT_X, X_HNSW1);
+            }
+            awaitTrue(() -> !a.hasValidIndex(model, TENANT_X, X_HNSW1) && !b.hasValidIndex(model, TENANT_X, X_HNSW1),
+                "both engines to see the drop");
+        } finally {
+            a.stop();
+            b.stop();
+        }
+    }
+
+    /** No catalog round trip per statement or per arm: the reader runs only when refresh() does. */
+    @Test
+    void theSearchPathNeverCallsTheCatalog() throws Exception {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var sweep = catalogSweep(reads);
+        var probe = new EfSearchProbe();
+        var r = probedRepo(probe, sweep);
+        createPciIndex(TENANT_X, X_HNSW1);
+        try {
+            sweep.refresh();
+            assertThat(reads).hasValue(1);
+
+            probe.clear();
+            r.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW1), K, null, false);
+            r.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW2), K, null, false);
+            r.searchWithTokens(TENANT_X, QUERY, List.of(X_HNSW1, X_HNSW2), K, null, false);
+            r.searchPerCollection(TENANT_X, QUERY, List.of(X_EXACT, X_HNSW1, X_HNSW2), K, 100, null, null, false);
+
+            assertThat(probe.efSearchPerStatement()).as("the statements ran, and consulted the set")
+                .contains(Integer.toString(EF_FLOOR), Integer.toString(WIDEST));
+            assertThat(reads).as("and none of them read the catalog").hasValue(1);
+        } finally {
+            dropPciIndex(TENANT_X, X_HNSW1);
         }
     }
 
