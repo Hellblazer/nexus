@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.PciIndexSet;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionResult;
 import org.jooq.SQLDialect;
@@ -57,6 +58,11 @@ class PgVectorCardinalityRouterIntegrationTest {
     static final String C1 = "knowledge__tu8wp6-c1__minilm-l6-v2-384__v1";
     static final String C2 = "knowledge__tu8wp6-c2__minilm-l6-v2-384__v1";
     static final String ISO = "knowledge__tu8wp6-iso__minilm-l6-v2-384__v1";
+    // RDR-227 Step 1: a tenant of its own for the fan-out telemetry test (one exact arm, two HNSW arms).
+    static final String TENANT_X = "43ulx1-ef";
+    static final String X_EXACT = "knowledge__43ulx1-exact__minilm-l6-v2-384__v1";
+    static final String X_HNSW1 = "knowledge__43ulx1-h1__minilm-l6-v2-384__v1";
+    static final String X_HNSW2 = "knowledge__43ulx1-h2__minilm-l6-v2-384__v1";
     static final String QUERY = "tu8wp6 router query";
     static final int BIG_ROWS = 300;
     static final int SMALL_ROWS = 4;
@@ -68,6 +74,7 @@ class PgVectorCardinalityRouterIntegrationTest {
     PostgreSQLContainer<?> pg;
     HikariDataSource ds;
     PgVectorRepository repo;
+    PgVectorRepositoryContractTest.FakeEmbedder embedder;
     /** chash to the angle it was seeded at, for the brute-force expectation. */
     final Map<String, Double> angleOf = new LinkedHashMap<>();
     /** chash to "tenant|collection", so a test can name the rows of a collection set. */
@@ -94,7 +101,7 @@ class PgVectorCardinalityRouterIntegrationTest {
         // covers this tenant's whole ~320-row leaf (nexus-3wh8d.31).
         PgSession.overrideEfSearchFloorForTests(EF_FLOOR);
         var scope = new TenantScope(ds);
-        var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
+        embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         repo = new PgVectorRepository(scope, embedder, embedder);
         embedder.register(QUERY, 1f, 0f);
 
@@ -102,6 +109,9 @@ class PgVectorCardinalityRouterIntegrationTest {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             for (String c : List.of(BIG, S1, S2, C1, C2, ISO)) {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
+            }
+            for (String c : List.of(X_EXACT, X_HNSW1, X_HNSW2)) {
+                PgContainerHelper.insertCollection(dsl, TENANT_X, c);
             }
             PgContainerHelper.insertCollection(dsl, ISO_A, ISO);
             PgContainerHelper.insertCollection(dsl, ISO_B, ISO);
@@ -111,6 +121,9 @@ class PgVectorCardinalityRouterIntegrationTest {
         seed(scope, embedder, TENANT, S2, "s2", SMALL_ROWS, 3.1, 0.01);
         seed(scope, embedder, TENANT, C1, "c1", PAIR_ROWS, 2.0, 0.02);
         seed(scope, embedder, TENANT, C2, "c2", PAIR_ROWS, 2.5, 0.02);
+        seed(scope, embedder, TENANT_X, X_EXACT, "xe", 4, 2.0, 0.02);
+        seed(scope, embedder, TENANT_X, X_HNSW1, "x1", 30, 0.5, 0.02);
+        seed(scope, embedder, TENANT_X, X_HNSW2, "x2", 40, 1.0, 0.02);
         // Same collection name in two tenants: 3 rows for A, 30 for B.
         seed(scope, embedder, ISO_A, ISO, "isoa", 3, 2.0, 0.05);
         seed(scope, embedder, ISO_B, ISO, "isob", 30, 2.0, 0.05);
@@ -251,11 +264,22 @@ class PgVectorCardinalityRouterIntegrationTest {
         assertThat(d.fallback()).as("the index satisfied it: no re-run").isZero();
     }
 
+    /**
+     * A repository whose index set claims a valid per-collection index for every collection, so a single
+     * collection walks at the SERVING ef_search (RDR-227 Step 1). A single collection with no index now walks
+     * at 1000, which covers this fixture's whole ~320-row leaf, so the walk no longer starves; the starved
+     * walk these fallback cases need is the serving one.
+     */
+    private PgVectorRepository servingRepo() {
+        return new PgVectorRepository(new TenantScope(ds), embedder, embedder, (model, tenant, collection) -> true);
+    }
+
     @Test
     void aSmallCollectionAboveTStillGetsTodaysEmptyResultFallback() {
         PgSession.overrideSearchExactMaxRowsForTests(SMALL_ROWS - 1);
         Counters before = Counters.now();
-        assertThat(flat(TENANT, List.of(S1), K)).as("repaired by the re-run").hasSize(SMALL_ROWS);
+        assertThat(servingRepo().searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false).value())
+            .as("repaired by the re-run").hasSize(SMALL_ROWS);
         assertThat(Counters.now().since(before).fallback()).as("today's path is unchanged above T").isEqualTo(1);
     }
 
@@ -265,7 +289,8 @@ class PgVectorCardinalityRouterIntegrationTest {
     void zeroNeverRoutesExact() {
         PgSession.overrideSearchExactMaxRowsForTests(0);
         Counters before = Counters.now();
-        List<Map<String, Object>> rows = flat(TENANT, List.of(S1), K);
+        List<Map<String, Object>> rows =
+            servingRepo().searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false).value();
         Counters d = Counters.now().since(before);
 
         assertThat(rows).as("still repaired, by today's re-run").hasSize(SMALL_ROWS);
@@ -414,10 +439,12 @@ class PgVectorCardinalityRouterIntegrationTest {
 
     @Test
     void theSlowLineNamesARouteNeverDecidedAsUnrouted() {
-        assertThat(PgVectorRepository.slowRouteLabel(10, true, 4)).isEqualTo("exact");
-        assertThat(PgVectorRepository.slowRouteLabel(10, false, 11)).isEqualTo("hnsw");
-        assertThat(PgVectorRepository.slowRouteLabel(0, false, -1)).as("router off").isEqualTo("hnsw");
-        assertThat(PgVectorRepository.slowRouteLabel(10, false, -1))
+        assertThat(PgVectorRepository.slowRouteLabel(10, true, 4, 1000))
+            .as("exact ignores ef_search, so the label does not name it").isEqualTo("exact");
+        assertThat(PgVectorRepository.slowRouteLabel(10, false, 11, 600)).isEqualTo("hnsw@600");
+        assertThat(PgVectorRepository.slowRouteLabel(10, false, 11, 1000)).isEqualTo("hnsw@1000");
+        assertThat(PgVectorRepository.slowRouteLabel(0, false, -1, 1000)).as("router off").isEqualTo("hnsw@1000");
+        assertThat(PgVectorRepository.slowRouteLabel(10, false, -1, 1000))
             .as("router on, the probe threw before counting").isEqualTo("unrouted");
     }
 
@@ -463,6 +490,239 @@ class PgVectorCardinalityRouterIntegrationTest {
             assertThat(after).as("indexscan, bitmapscan, seqscan, sort on the connection after the search")
                 .containsExactly("on", "off", "off", "off");
         }
+    }
+
+    // ── RDR-227 Step 1: hnsw.ef_search 1000 for a single collection with no per-collection index ──────────
+
+    private static final int WIDEST = 1000;
+
+    /** A repository over a probed copy of the pool, so a test reads the ef_search each statement ran with. */
+    private PgVectorRepository probedRepo(EfSearchProbe probe, PciIndexSet indexes) {
+        return new PgVectorRepository(new TenantScope(probe.wrap(ds)), embedder, embedder, indexes);
+    }
+
+    /** Records every question the router asked, and answers from a fixed set of collection names. */
+    private static final class StubIndexes implements PciIndexSet {
+        final List<String> asked = new ArrayList<>();
+        final java.util.Set<String> valid;
+
+        StubIndexes(String... valid) {
+            this.valid = java.util.Set.of(valid);
+        }
+
+        @Override
+        public boolean hasValidIndex(String model, String tenant, String collection) {
+            asked.add(model + "|" + tenant + "|" + collection);
+            return valid.contains(collection);
+        }
+    }
+
+    /** The ef_search each plain-search statement of {@code search} ran with, read in its own transaction. */
+    private static List<String> efFor(EfSearchProbe probe, PgVectorRepository r,
+                                      java.util.function.Consumer<PgVectorRepository> search) {
+        probe.clear();
+        search.accept(r);
+        return List.copyOf(probe.efSearchPerStatement());
+    }
+
+    /** Routing row 1: the probe counts at or below T. The route is exact; the batch had already set 1000. */
+    @Test
+    void rowProbeAtOrBelowT_routesExact_andTheBatchHadAlreadySetTheWideValue() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var probe = new EfSearchProbe();
+        var r = probedRepo(probe, PciIndexSet.NONE);
+        Counters before = Counters.now();
+        List<String> ef = efFor(probe, r, x -> x.searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false));
+        Counters d = Counters.now().since(before);
+        assertThat(d.exact()).as("S1 holds 4 rows, T is 10: exact").isEqualTo(1);
+        assertThat(d.hnsw()).isZero();
+        assertThat(ef).as("the choice is made in the settings batch, before the probe; exact ignores it")
+            .isNotEmpty().containsOnly(Integer.toString(WIDEST));
+    }
+
+    /** Routing row 2, searchWithTokens: above T, one collection, no index: HNSW at 1000. */
+    @Test
+    void rowAboveT_oneCollection_noIndex_searchWithTokensWalksAtWidest() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var probe = new EfSearchProbe();
+        var stub = new StubIndexes();
+        var r = probedRepo(probe, stub);
+        Counters before = Counters.now();
+        List<String> ef = efFor(probe, r, x -> x.searchWithTokens(TENANT, QUERY, List.of(BIG), K, null, false));
+        Counters d = Counters.now().since(before);
+        assertThat(d.hnsw()).as("BIG holds 300 rows, T is 10: HNSW").isEqualTo(1);
+        assertThat(ef).as("hnsw.ef_search the statement ran with, read in its transaction")
+            .isNotEmpty().containsOnly(Integer.toString(WIDEST));
+        assertThat(stub.asked).as("asked once, with the statement's tenant and collection").hasSize(1);
+        String[] q = stub.asked.get(0).split("\\|");
+        assertThat(q).hasSize(3);
+        assertThat(q[0]).as("the model of the leaf").isNotBlank();
+        assertThat(q[1]).isEqualTo(TENANT);
+        assertThat(q[2]).isEqualTo(BIG);
+    }
+
+    /** Routing row 3: a statement over several collections keeps the serving value. */
+    @Test
+    void rowSeveralCollections_keepTheServingValue() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var probe = new EfSearchProbe();
+        var stub = new StubIndexes();
+        var r = probedRepo(probe, stub);
+        Counters before = Counters.now();
+        List<String> ef = efFor(probe, r, x -> x.searchWithTokens(TENANT, QUERY, List.of(C1, C2), 20, null, false));
+        assertThat(Counters.now().since(before).hnsw()).as("6 + 6 rows > T").isEqualTo(1);
+        assertThat(ef).as("serving: max(floor %d, k 20)", EF_FLOOR).isNotEmpty().containsOnly(Integer.toString(EF_FLOOR));
+        assertThat(stub.asked).as("a multi-collection statement cannot use a partial index: not asked").isEmpty();
+    }
+
+    /** Routing row 4: the router off (T = 0), one collection: 1000. */
+    @Test
+    void rowRouterOff_oneCollection_walksAtWidest() {
+        PgSession.overrideSearchExactMaxRowsForTests(0);
+        var probe = new EfSearchProbe();
+        var r = probedRepo(probe, PciIndexSet.NONE);
+        Counters before = Counters.now();
+        List<String> ef = efFor(probe, r, x -> x.searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false));
+        Counters d = Counters.now().since(before);
+        assertThat(d.exact()).as("no probe at T = 0").isZero();
+        assertThat(d.hnsw()).isEqualTo(1);
+        assertThat(ef.get(0)).isEqualTo(Integer.toString(WIDEST));
+    }
+
+    /** Routing row 5: an index set that has a valid index for the collection: the serving value. */
+    @Test
+    void rowValidIndex_keepsTheServingValue_andOnlyForThatCollection() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var probe = new EfSearchProbe();
+        var r = probedRepo(probe, new StubIndexes(BIG));
+        Counters before = Counters.now();
+        List<String> ef = efFor(probe, r, x -> x.searchWithTokens(TENANT, QUERY, List.of(BIG), K, null, false));
+        assertThat(Counters.now().since(before).hnsw()).isEqualTo(1);
+        assertThat(ef).as("BIG has a valid index: serving").isNotEmpty().containsOnly(Integer.toString(EF_FLOOR));
+
+        // The set is keyed on the collection: an index for another collection does not help BIG.
+        ef = efFor(probe, probedRepo(probe, new StubIndexes(S1)),
+                   x -> x.searchWithTokens(TENANT, QUERY, List.of(BIG), K, null, false));
+        assertThat(ef).as("only S1 has an index, BIG walks the leaf").isNotEmpty().containsOnly(Integer.toString(WIDEST));
+    }
+
+    /** The fan-out arm, rows 2 and 5: the same rule, read from the arm-phases line. */
+    @Test
+    void fanOutArm_noIndex_walksAtWidest_andAValidIndexKeepsServing() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var probe = new EfSearchProbe();
+
+        List<String> lines = phaseLines(() -> probedRepo(probe, PciIndexSet.NONE)
+            .searchPerCollection(TENANT, QUERY, List.of(BIG), K, 100, null, null, false));
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0)).contains("ef1000_arms=1 ", "top_statements=" + BIG + ":hnsw:1000:");
+
+        lines = phaseLines(() -> probedRepo(probe, new StubIndexes(BIG))
+            .searchPerCollection(TENANT, QUERY, List.of(BIG), K, 100, null, null, false));
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0)).contains("ef1000_arms=0 ", "top_statements=" + BIG + ":hnsw:" + EF_FLOOR + ":");
+    }
+
+    /**
+     * The field the Phase 2a measurement reads. One exact arm and two single-collection HNSW arms: the line
+     * counts the arms at 1000, and names the three arms with route, ef_search and statement time, largest
+     * first. The exact arm's batch also set 1000 (the choice precedes the probe), but it is not an arm that
+     * ran HNSW at 1000, so it is listed with its route and left out of the count.
+     */
+    @Test
+    void theArmPhasesLineNamesTheArmsByStatementTimeAndCountsTheEf1000Arms() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        List<String> lines = phaseLines(() -> repo.searchPerCollection(
+            TENANT_X, QUERY, List.of(X_EXACT, X_HNSW1, X_HNSW2), K, 100, null, null, false));
+        assertThat(lines).as("one arm-phases line per request").hasSize(1);
+        String line = lines.get(0);
+        assertThat(line).contains("arms=3 ", "exact_arms=1 hnsw_arms=2", "ef1000_arms=2 ");
+
+        var m = java.util.regex.Pattern.compile(" top_statements=(\\S*)").matcher(line);
+        assertThat(m.find()).as(line).isTrue();
+        String[] entries = m.group(1).split(",");
+        assertThat(entries).as("the three largest statement times").hasSize(3);
+        java.util.Map<String, String[]> byCollection = new java.util.HashMap<>();
+        long previous = Long.MAX_VALUE;
+        for (String e : entries) {
+            String[] f = e.split(":");
+            assertThat(f).as(e).hasSize(4);
+            byCollection.put(f[0], f);
+            long ms = Long.parseLong(f[3]);
+            assertThat(ms).as("largest first: " + m.group(1)).isLessThanOrEqualTo(previous);
+            previous = ms;
+        }
+        assertThat(byCollection.keySet()).containsExactlyInAnyOrder(X_EXACT, X_HNSW1, X_HNSW2);
+        assertThat(byCollection.get(X_EXACT)).as("route and ef_search of the exact arm")
+            .containsSubsequence(X_EXACT, "exact", Integer.toString(WIDEST));
+        assertThat(byCollection.get(X_HNSW1)).containsSubsequence(X_HNSW1, "hnsw", Integer.toString(WIDEST));
+        assertThat(byCollection.get(X_HNSW2)).containsSubsequence(X_HNSW2, "hnsw", Integer.toString(WIDEST));
+    }
+
+    /** The field's ordering, limit and format, with the times fixed. */
+    @Test
+    void topStatementsIsLargestFirst_limitedAndSkipsStatementsThatNeverFinished() {
+        var arms = List.of(
+            new PgVectorRepository.ArmStatement("a", false, 1000, 5_000_000L),
+            new PgVectorRepository.ArmStatement("b", true, 1000, 90_000_000L),
+            new PgVectorRepository.ArmStatement("c", false, 600, 40_000_000L),
+            new PgVectorRepository.ArmStatement("d", false, 1000, 70_000_000L),
+            new PgVectorRepository.ArmStatement("e", false, 1000, 0L));
+        assertThat(PgVectorRepository.topStatements(arms, 3))
+            .isEqualTo("b:exact:1000:90,d:hnsw:1000:70,c:hnsw:600:40");
+        assertThat(PgVectorRepository.topStatements(arms, 10))
+            .as("an arm that never finished a statement has no statement time to list")
+            .isEqualTo("b:exact:1000:90,d:hnsw:1000:70,c:hnsw:600:40,a:hnsw:1000:5");
+        assertThat(PgVectorRepository.topStatements(List.of(), 3)).isEmpty();
+    }
+
+    /** The slow-statement line carries the route with its ef_search. */
+    @Test
+    void theSlowLineCarriesTheEfSearchOfAnHnswStatement() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        PgVectorRepository.overrideSlowStatementMsForTests(0);
+        List<String> slow = slowLines(() -> flat(TENANT, List.of(BIG), K));
+        assertThat(slow).hasSize(1);
+        assertThat(slow.get(0)).contains("route=hnsw@" + WIDEST + " ");
+        slow = slowLines(() -> flat(TENANT, List.of(C1, C2), 20));
+        assertThat(slow).hasSize(1);
+        assertThat(slow.get(0)).contains("route=hnsw@" + EF_FLOOR + " ");
+    }
+
+    /** The DEBUG per-arm line (not emitted in the cloud, but the local read of an arm) names ef_search. */
+    @Test
+    void theDebugPerArmLineCarriesEfSearch() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(PgVectorRepository.class);
+        var was = logger.getLevel();
+        logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        try {
+            List<String> arms = capture(() -> repo.searchPerCollection(
+                TENANT, QUERY, List.of(BIG, S1), K, 100, null, null, false), "event=search_per_collection_arm ");
+            assertThat(arms).hasSize(2);
+            assertThat(arms).allSatisfy(l -> assertThat(l).contains("ef_search=" + WIDEST + " "));
+        } finally {
+            logger.setLevel(was);
+        }
+    }
+
+    private static List<String> phaseLines(Runnable body) {
+        return capture(body, "event=search_per_collection_arm_phases ");
+    }
+
+    /** Formatted messages beginning with {@code prefix} that were logged while {@code body} ran. */
+    private static List<String> capture(Runnable body, String prefix) {
+        var root = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+        return logs.list.stream().map(ILoggingEvent::getFormattedMessage).filter(m -> m.startsWith(prefix)).toList();
     }
 
     private static String chash(String text) {

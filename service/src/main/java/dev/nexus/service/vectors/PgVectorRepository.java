@@ -310,6 +310,8 @@ public final class PgVectorRepository {
     private final Embedder       queryEmbedder;
     private final EmbedderRouter docRouter;      // nullable; preferred over docEmbedder
     private final EmbedderRouter queryRouter;    // nullable; preferred over queryEmbedder
+    /** RDR-227: valid per-collection indexes, consulted to choose {@code hnsw.ef_search}; never null. */
+    private final PciIndexSet    pciIndexes;
 
     /**
      * The RLS-stamping gateway this repository was constructed with (RDR-204 Phase 2,
@@ -351,7 +353,13 @@ public final class PgVectorRepository {
      */
     public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                               Embedder queryEmbedder) {
-        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS);
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE);
+    }
+
+    /** {@link #PgVectorRepository(TenantScope, Embedder, Embedder)} with the per-collection index set (RDR-227). */
+    public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
+                              Embedder queryEmbedder, PciIndexSet pciIndexes) {
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes);
     }
 
     /**
@@ -367,12 +375,18 @@ public final class PgVectorRepository {
      */
     PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                        Embedder queryEmbedder, int getAllMetadataMaxRows) {
+        this(tenantScope, docEmbedder, queryEmbedder, getAllMetadataMaxRows, PciIndexSet.NONE);
+    }
+
+    private PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
+                               Embedder queryEmbedder, int getAllMetadataMaxRows, PciIndexSet pciIndexes) {
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docEmbedder;
         this.queryEmbedder = queryEmbedder;
         this.docRouter     = null;
         this.queryRouter   = null;
         this.getAllMetadataMaxRows = getAllMetadataMaxRows;
+        this.pciIndexes    = java.util.Objects.requireNonNull(pciIndexes, "pciIndexes");
     }
 
     /**
@@ -386,7 +400,13 @@ public final class PgVectorRepository {
      */
     public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                               EmbedderRouter queryRouter) {
-        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS);
+        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE);
+    }
+
+    /** {@link #PgVectorRepository(TenantScope, EmbedderRouter, EmbedderRouter)} with the per-collection index set (RDR-227). */
+    public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
+                              EmbedderRouter queryRouter, PciIndexSet pciIndexes) {
+        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, pciIndexes);
     }
 
     /**
@@ -397,12 +417,18 @@ public final class PgVectorRepository {
      */
     PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                        EmbedderRouter queryRouter, int getAllMetadataMaxRows) {
+        this(tenantScope, docRouter, queryRouter, getAllMetadataMaxRows, PciIndexSet.NONE);
+    }
+
+    private PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
+                               EmbedderRouter queryRouter, int getAllMetadataMaxRows, PciIndexSet pciIndexes) {
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (ONNX fallback)
         this.queryEmbedder = queryRouter;
         this.docRouter     = docRouter;
         this.queryRouter   = queryRouter;
         this.getAllMetadataMaxRows = getAllMetadataMaxRows;
+        this.pciIndexes    = java.util.Objects.requireNonNull(pciIndexes, "pciIndexes");
     }
 
     /**
@@ -1436,6 +1462,15 @@ public final class PgVectorRepository {
                                                              boolean rebindBeforeExactRerun,
                                                              ArmPhases phases) {
         final long setupStartNanos = System.nanoTime();
+        // RDR-227 Step 1: a statement over exactly one collection that has no valid per-collection index walks
+        // the shared leaf index, filtered down to that collection, and stops at the first rows the filter
+        // admits. The widest ef_search is the cheap remedy that closes most of the gap, so such a statement
+        // gets it. Decided here, before the transaction and so before the router probe; a statement the probe
+        // then sends exact ignores ef_search. A statement over several collections cannot use a per-collection
+        // index and keeps the serving value. The other HNSW sites (the dense gate, the by-id sites) do not
+        // change.
+        final boolean walkWide = colls.length == 1 && !pciIndexes.hasValidIndex(model, tenant, colls[0]);
+        final int efSearch = walkWide ? PgSession.EF_SEARCH_WIDEST : PgSession.servingEfSearch(nResults);
         // nexus-wym0l: the tenant stamp and every serving setting below travel in ONE statement, applied by
         // withTenant before the work runs (and so before the router probe and the search, which depend on
         // them). They were seven round trips per arm. The pairing and the order of the settings are the ones
@@ -1452,7 +1487,11 @@ public final class PgVectorRepository {
             // nexus-4ktfm: widen the traversal's candidate list too — iterative scan
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
-            PgSession.setHnswEfSearch(gucs, nResults);
+            if (walkWide) {
+                PgSession.setHnswEfSearchWidest(gucs);
+            } else {
+                PgSession.setHnswEfSearch(gucs, nResults);
+            }
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(gucs);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
@@ -1464,6 +1503,7 @@ public final class PgVectorRepository {
             long startNanos = System.nanoTime();
             if (phases != null) {
                 phases.setupNanos = startNanos - setupStartNanos;
+                phases.efSearch = efSearch;
             }
             int exactMaxRows = PgSession.searchExactMaxRows();
             int probedRows = -1;
@@ -1501,7 +1541,7 @@ public final class PgVectorRepository {
                 }
                 return result;
             } finally {
-                logIfSlow(colls, slowRouteLabel(exactMaxRows, exact, probedRows),
+                logIfSlow(colls, slowRouteLabel(exactMaxRows, exact, probedRows, efSearch),
                           probedRows, System.nanoTime() - startNanos, completed);
             }
         });
@@ -1594,14 +1634,40 @@ public final class PgVectorRepository {
 
     /**
      * The route named on the slow-statement line: {@code exact}; {@code hnsw} when the router is off
-     * or the probe counted above the threshold; {@code unrouted} when the router is on but the probe
-     * never produced a count (it threw, so no route was decided and the statement did not run).
+     * or the probe counted above the threshold, with the {@code hnsw.ef_search} the statement set after an
+     * {@code @} (RDR-227: {@code hnsw@1000} is a single collection walking the leaf at the widest value);
+     * {@code unrouted} when the router is on but the probe never produced a count (it threw, so no route was
+     * decided and the statement did not run). {@code exact} does not name ef_search, which it ignores.
      */
-    public static String slowRouteLabel(int exactMaxRows, boolean exact, int probedRows) {
+    public static String slowRouteLabel(int exactMaxRows, boolean exact, int probedRows, int efSearch) {
         if (exact) {
             return "exact";
         }
-        return exactMaxRows > 0 && probedRows < 0 ? "unrouted" : "hnsw";
+        return exactMaxRows > 0 && probedRows < 0 ? "unrouted" : "hnsw@" + efSearch;
+    }
+
+    /** How many statements the arm-phases line names (RDR-227 Step 1). */
+    private static final int TOP_STATEMENTS = 3;
+
+    /** One fan-out arm's statement, for the request's {@code top_statements} field (RDR-227 Step 1). */
+    public record ArmStatement(String collection, boolean exact, int efSearch, long statementNanos) {}
+
+    /**
+     * The {@code top_statements} value of the arm-phases line: the {@code limit} largest statement times of
+     * the request, largest first, each as {@code collection:route:ef_search:statement_ms} (route {@code exact}
+     * or {@code hnsw}), comma-separated with no spaces. An arm whose statement never finished (a timeout, an
+     * error) has no statement time and is not listed. Empty when no arm finished a statement. The per-arm
+     * collection, route and time otherwise exist only in the DEBUG per-arm line, which the cloud engine does
+     * not emit (RDR-227, the Phase 2 gate reads this field).
+     */
+    public static String topStatements(List<ArmStatement> arms, int limit) {
+        return arms.stream()
+            .filter(a -> a.statementNanos() > 0L)
+            .sorted(java.util.Comparator.comparingLong(ArmStatement::statementNanos).reversed())
+            .limit(limit)
+            .map(a -> a.collection() + ":" + (a.exact() ? "exact" : "hnsw") + ":" + a.efSearch() + ":"
+                      + a.statementNanos() / 1_000_000L)
+            .collect(java.util.stream.Collectors.joining(","));
     }
 
     private static void logIfSlow(String[] colls, String route, int probedRows, long elapsedNanos,
@@ -1875,12 +1941,16 @@ public final class PgVectorRepository {
         volatile long statementNanos;
         volatile boolean exact;
         volatile int probedRows = -1;
+        /** The {@code hnsw.ef_search} the arm's settings batch set (an arm the probe sends exact ignores it). */
+        volatile int efSearch = -1;
     }
 
     /** Per-request sums and maxima of {@link ArmPhases}; {@code other} is the arm total minus the four phases. */
     static final class ArmPhaseTotals {
         int arms;
         int exactArms;
+        /** Arms that ran the HNSW route with {@code hnsw.ef_search} at pgvector's maximum (RDR-227 Step 1). */
+        int ef1000Arms;
         long permitWaitNanos;
         long setupNanos;
         long probeNanos;
@@ -1895,6 +1965,8 @@ public final class PgVectorRepository {
             arms++;
             if (p.exact) {
                 exactArms++;
+            } else if (p.efSearch == PgSession.EF_SEARCH_WIDEST) {
+                ef1000Arms++;
             }
             permitWaitNanos += p.permitWaitNanos;
             setupNanos += p.setupNanos;
@@ -2368,6 +2440,7 @@ public final class PgVectorRepository {
         long slowestArmMs = 0L;
         long sumArmMs = 0L;
         ArmPhaseTotals phaseTotals = new ArmPhaseTotals();
+        List<ArmStatement> armStatements = new ArrayList<>(runnable.size());
         for (int slot : runnable) {
             long ms = armNanos[slot] / 1_000_000L;
             slowestArmMs = Math.max(slowestArmMs, ms);
@@ -2375,27 +2448,32 @@ public final class PgVectorRepository {
             ArmPhases p = armPhases[slot];
             if (p != null) {
                 phaseTotals.add(p, armNanos[slot]);
+                armStatements.add(new ArmStatement(cols.get(slot), p.exact, p.efSearch, p.statementNanos));
             }
             if (log.isDebugEnabled()) {
                 PerCollectionStat s = stats.get(slot);
                 log.debug("event=search_per_collection_arm collection={} arm_ms={} raw_count={} error_kind={} "
-                          + "permit_wait_ms={} setup_ms={} probe_ms={} statement_ms={} route={} probed_rows={}",
+                          + "permit_wait_ms={} setup_ms={} probe_ms={} statement_ms={} route={} ef_search={} "
+                          + "probed_rows={}",
                           cols.get(slot), ms, s.rawCount(), s.errorKind() == null ? null : s.errorKind().wire(),
                           p == null ? -1 : p.permitWaitNanos / 1_000_000L, p == null ? -1 : p.setupNanos / 1_000_000L,
                           p == null ? -1 : p.probeNanos / 1_000_000L, p == null ? -1 : p.statementNanos / 1_000_000L,
-                          p == null ? null : (p.exact ? "exact" : "hnsw"), p == null ? -1 : p.probedRows);
+                          p == null ? null : (p.exact ? "exact" : "hnsw"), p == null ? -1 : p.efSearch,
+                          p == null ? -1 : p.probedRows);
             }
         }
         // RDR-226 Phase 0 (2026-10-09): where the arm time goes, summed over the request's arms.
         log.info("event=search_per_collection_arm_phases arms={} sum_arm_ms={} sum_permit_wait_ms={} "
                  + "sum_setup_ms={} sum_probe_ms={} sum_statement_ms={} sum_other_ms={} max_permit_wait_ms={} "
-                 + "max_setup_ms={} max_probe_ms={} max_statement_ms={} exact_arms={} hnsw_arms={}",
+                 + "max_setup_ms={} max_probe_ms={} max_statement_ms={} exact_arms={} hnsw_arms={} "
+                 + "ef1000_arms={} top_statements={}",
                  phaseTotals.arms, sumArmMs, phaseTotals.permitWaitNanos / 1_000_000L,
                  phaseTotals.setupNanos / 1_000_000L, phaseTotals.probeNanos / 1_000_000L,
                  phaseTotals.statementNanos / 1_000_000L, phaseTotals.otherNanos / 1_000_000L,
                  phaseTotals.maxPermitWaitNanos / 1_000_000L, phaseTotals.maxSetupNanos / 1_000_000L,
                  phaseTotals.maxProbeNanos / 1_000_000L, phaseTotals.maxStatementNanos / 1_000_000L,
-                 phaseTotals.exactArms, phaseTotals.arms - phaseTotals.exactArms);
+                 phaseTotals.exactArms, phaseTotals.arms - phaseTotals.exactArms, phaseTotals.ef1000Arms,
+                 topStatements(armStatements, TOP_STATEMENTS));
         log.info("event=search_per_collection collections={} arms={} workers={} per_collection_k={} limit={} "
                  + "rows={} peak_retained_rows={} isolated_errors={} budget_exhausted={} statement_timeouts={} "
                  + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={} query_embed_ms={} "
