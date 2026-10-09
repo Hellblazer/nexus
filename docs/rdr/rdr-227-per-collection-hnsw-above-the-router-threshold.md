@@ -130,10 +130,15 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
 - [ ] **A1.** The planner uses a partial index `WHERE collection = 'X'` for an
   inlined `plain_search_<dim>` arm whose `p_collections` is the one-element
   array `{X}` (predicate implication through `= ANY` of a one-element constant
-  array). **Status**: Unverified. **Method**: Spike (Phase 0).
+  array), with `p_collections` BOUND as jOOQ binds it, under
+  `plan_cache_mode = force_custom_plan`. A literal `'{X}'` in the SQL text can
+  prove the implication while a bound array cannot, so only the bound form
+  counts. **Status**: Unverified. **Method**: Spike (Phase 0).
 - [ ] **A2.** An unfiltered walk over one collection's own graph returns that
   collection's exact top-k at the serving settings (recall >= 0.99 at k 40 to
-  120 on the nqsa7 repro and on seeded queries). **Status**: Unverified.
+  120 on real query vectors, the nqsa7 repro plus 18 natural-language queries
+  over the three collections; queries seeded from the collection's own rows never
+  missed on nqsa7 and over-state recall). **Status**: Unverified.
   **Method**: Spike (Phase 0).
 - [ ] **A3.** Building one partial HNSW index over 30k to 60k rows takes minutes,
   not hours, and `CREATE INDEX CONCURRENTLY` on a leaf does not block writes.
@@ -141,6 +146,14 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
 - [ ] **A4.** A cheaper alternative does not already close Gap 1: a larger
   `ef_search` (1000) or `strict_order` for single-collection arms on large
   collections. **Status**: Unverified. **Method**: Spike (Phase 0).
+- [ ] **A5.** The engine can build and drop these indexes. `nexus_svc` does not
+  own the leaves, and DDL is not governed by RLS, so `nexus_svc` cannot
+  `CREATE INDEX` on a leaf at all. The builder needs either a `nexus_admin`
+  connection in the engine or a `SECURITY DEFINER` function owned by the leaf
+  owner that builds only the index this RDR names. `CREATE INDEX CONCURRENTLY`
+  cannot run inside a transaction or a function, which rules out the second form
+  as written. **Status**: Unverified (conexus-1c review, 2026-10-09).
+  **Method**: Source read plus spike before Phase 1.
 
 ## Proposed Solution
 
@@ -159,7 +172,8 @@ behaviour (exact, or the leaf walk).
   (embedding_<dim> vector_cosine_ops) WHERE collection = '<collection>'`, with the
   name derived from (model, tenant, collection) the way RDR-225 names leaf
   objects. Build parameters match the leaf index's.
-- **Lifecycle.** The engine reconciles indexes against collection sizes: a
+- **Lifecycle.** The engine reconciles indexes against collection sizes, under
+  the role A5 settles: a
   collection that crosses above T gets an index built in the background; one that
   falls below T, is deleted, quarantined or renamed loses it. A collection keeps
   the exact path until its index is valid (`pg_index.indisvalid`).
@@ -252,25 +266,39 @@ retries.
 
 ### Prerequisites
 
-- [ ] A1 to A4 measured (Phase 0).
+- [ ] A1 to A4 measured (Phase 0); A5 settled before Phase 1.
 - [ ] Sam's decision on the stop rule: if Alternative 4 reaches the recall target
   at acceptable cost, stop there.
 
 ### Minimum Viable Validation
 
 On a PITR fork: build a partial HNSW index for `code__1-72`, `code__1-1` and
-`code__1-2`. Run the nqsa7 repro query and the 30 seeded queries through the
-inlined function at the serving settings. Recall >= 0.99 at k 40 to 120, warm
+`code__1-2`. Run the nqsa7 repro query and the 18 natural-language query vectors
+(`/tmp/rdr227-query-vectors-voyage-code-3.json`, voyage-code-3, `input_type`
+null) through the inlined function with bound parameters at the serving
+settings. Recall >= 0.99 at k 40 to 120, warm
 arm time under 50 ms, and a stated cold first-touch time.
 
 ### Phase 0: Measure (decides the approach, may stop the work)
 
-- **Step 0.1, fork.** A4 first: recall and cost of `ef_search = 1000` and of
-  `strict_order` for the three large collections, nqsa7 repro plus seeded queries.
+- **Positive control, fork, first.** One fan-out emulated as production runs it:
+  the 28 code arms and the 61 knowledge arms through a 5-worker pool sharing
+  permits. It must reproduce v0.1.155/156 handler times before any alternative's
+  number is trusted; solo numbers are recorded beside it so the concurrency
+  factor shows.
+- **Step 0.1, fork.** A4 first, under that concurrency: `ef_search = 1000` under
+  `relaxed_order`, `strict_order` at the serving `ef_search`, and both, each with
+  and without the router probe, at the engine's live `max_scan_tuples` and
+  derived `scan_mem_multiplier` (`event=hnsw_scan_budget`).
 - **Step 0.2, fork.** A1 and A2: build the three partial indexes, `EXPLAIN` the
-  inlined arm to confirm the planner uses them, measure recall and warm and cold
-  time.
-- **Step 0.3, fork.** A3: build time and write blocking for each index.
+  inlined arm with bound parameters to confirm the planner uses them, measure
+  recall and warm time, and cold time after an instance restart (a lower bound,
+  since the OS page cache may survive), beside cold time on the existing leaf
+  index measured the same way.
+- **Step 0.3, fork.** A3: build time and size for each index at the instance's
+  `maintenance_work_mem` and `max_parallel_maintenance_workers` and at raised
+  values; write blocking proven by a concurrent insert into the same leaf
+  partition plus `pg_locks` sampling during each `CONCURRENTLY` build.
 - **Exit.** Numbers to T2. If Step 0.1 reaches recall >= 0.99 at acceptable cost,
   implement Alternative 4 and stop. If A1 fails, revise toward Alternative 3.
 
@@ -324,7 +352,7 @@ design resolves them by measuring cold first touch before choosing (Phase 0).
 
 ### Assumption Verification
 
-A1 to A4 are unverified; all are Phase 0 spikes on a fork.
+A1 to A5 are unverified. A1 to A4 are Phase 0 spikes on a fork; A5 is a source read and spike before Phase 1.
 
 #### API Verification
 
@@ -340,8 +368,9 @@ The Minimum Viable Validation is in scope and runs in Phase 0.
 
 ### Cross-Cutting Concerns
 
-- **Tenancy**: indexes are per tenant leaf; the reconciler runs under RLS as
-  every engine write does.
+- **Tenancy**: indexes are per tenant leaf. Index DDL is not governed by RLS,
+  so tenant scoping comes from the leaf the reconciler names, and the role that
+  builds the index is not the serving role (A5).
 - **Local mode**: a local install has few large collections; the same code path
   applies.
 

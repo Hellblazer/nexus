@@ -842,6 +842,7 @@ nexus-43qgm.6
 nexus-43qgm.7
 nexus-43qgm.8
 nexus-43qgm.9
+nexus-43ulx
 nexus-441p5
 nexus-441p5.1
 nexus-446yl
@@ -7754,6 +7755,7 @@ nexus-znwc2
 nexus-znwc2.1
 nexus-zo0zt
 nexus-zp2s
+nexus-zpd9o
 nexus-zpnq
 nexus-zptvf
 nexus-zptvf.1
