@@ -115,9 +115,45 @@ class PgSessionPciSettingsTest {
     // ---- the record and the boot touch -----------------------------------------------------
 
     @Test
-    void startupPciSettings_matchesTheEnvResolvedAccessor() {
+    void resolvePciSettings_readsEachOfTheFourVariablesIntoItsOwnField() {
+        // Four distinct non-default values: swapping any two getenv names or constructor arguments
+        // changes at least one field.
+        java.util.Map<String, String> env = java.util.Map.of(
+            "NX_SEARCH_PCI", "0",
+            "NX_SEARCH_PCI_BUILD_MIN_ROWS", "12345",
+            "NX_SEARCH_PCI_SWEEP_SECONDS", "321",
+            "NX_SEARCH_PCI_MAX_PER_LEAF", "7");
+
+        PgSession.PciSettings s = PgSession.resolvePciSettings(env::get);
+
+        assertThat(s.enabled()).isFalse();
+        assertThat(s.buildMinRows()).isEqualTo(12_345);
+        assertThat(s.sweepSeconds()).isEqualTo(321);
+        assertThat(s.maxPerLeaf()).isEqualTo(7);
+    }
+
+    @Test
+    void resolvePciSettings_emptyEnvironmentGivesTheDefaults() {
+        PgSession.PciSettings s = PgSession.resolvePciSettings(java.util.Map.<String, String>of()::get);
+
+        assertThat(s).isEqualTo(new PgSession.PciSettings(true,
+            PgSession.DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS,
+            PgSession.DEFAULT_SEARCH_PCI_SWEEP_SECONDS,
+            PgSession.DEFAULT_SEARCH_PCI_MAX_PER_LEAF));
+    }
+
+    @Test
+    void resolvePciSettings_aBadValueNamesItsVariable() {
+        assertThatThrownBy(() -> PgSession.resolvePciSettings(
+            java.util.Map.of("NX_SEARCH_PCI_SWEEP_SECONDS", "soon")::get))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("NX_SEARCH_PCI_SWEEP_SECONDS");
+    }
+
+    @Test
+    void startupPciSettings_isTheClassInitResolvedValue() {
+        // The static initializer ran against the real environment; whatever it resolved is in range.
         PgSession.PciSettings s = PgSession.startupPciSettings();
-        assertThat(s).isEqualTo(PgSession.pciSettings());
         assertThat(s.buildMinRows()).isBetween(1, 1_000_000);
         assertThat(s.sweepSeconds()).isBetween(60, 86_400);
         assertThat(s.maxPerLeaf()).isBetween(0, 1_000);
@@ -159,6 +195,24 @@ class PgSessionPciSettingsTest {
             PgSession.logPciBootSettings(new PgSession.PciSettings(true, 1_000_000, 600, 16), 0));
         assertThat(events).noneMatch(e -> e.getFormattedMessage().contains("pci_build_threshold_above_router"));
         single(events, Level.INFO, "event=pci_settings");
+    }
+
+    @Test
+    void doesNotWarn_whenNothingBuilds_switchOffOrMaxPerLeafZero() {
+        // B (1,000,000) is far above T (30,000), the warning's condition, but with NX_SEARCH_PCI=0 or
+        // NX_SEARCH_PCI_MAX_PER_LEAF=0 no index is built, so there is nothing to strand a collection from.
+        for (PgSession.PciSettings s : new PgSession.PciSettings[] {
+            new PgSession.PciSettings(false, 1_000_000, 600, 16),
+            new PgSession.PciSettings(true, 1_000_000, 600, 0)}) {
+            List<ILoggingEvent> events = capture(() -> PgSession.logPciBootSettings(s, 30_000));
+            assertThat(events).as("%s", s)
+                .noneMatch(e -> e.getFormattedMessage().contains("pci_build_threshold_above_router"));
+            single(events, Level.INFO, "event=pci_settings");
+        }
+        // Control: the same B and T with both on and a cap above 0 does warn.
+        List<ILoggingEvent> events = capture(() ->
+            PgSession.logPciBootSettings(new PgSession.PciSettings(true, 1_000_000, 600, 1), 30_000));
+        single(events, Level.WARN, "event=pci_build_threshold_above_router");
     }
 
     @Test

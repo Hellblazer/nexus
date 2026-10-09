@@ -806,11 +806,19 @@ public final class PgSession {
      */
     public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) { }
 
-    private static final PciSettings PCI_SETTINGS = new PciSettings(
-        searchPci(System.getenv("NX_SEARCH_PCI")),
-        searchPciBuildMinRows(System.getenv("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
-        searchPciSweepSeconds(System.getenv("NX_SEARCH_PCI_SWEEP_SECONDS")),
-        searchPciMaxPerLeaf(System.getenv("NX_SEARCH_PCI_MAX_PER_LEAF")));
+    private static final PciSettings PCI_SETTINGS = resolvePciSettings(System::getenv);
+
+    /**
+     * Resolve the four {@code NX_SEARCH_PCI*} settings from {@code env} (a variable name to its value, or
+     * null). The static initializer passes {@code System::getenv}; a test passes a map.
+     */
+    static PciSettings resolvePciSettings(java.util.function.Function<String, String> env) {
+        return new PciSettings(
+            searchPci(env.apply("NX_SEARCH_PCI")),
+            searchPciBuildMinRows(env.apply("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
+            searchPciSweepSeconds(env.apply("NX_SEARCH_PCI_SWEEP_SECONDS")),
+            searchPciMaxPerLeaf(env.apply("NX_SEARCH_PCI_MAX_PER_LEAF")));
+    }
 
     /**
      * Parse {@code NX_SEARCH_PCI}. Null/blank means on; the only other accepted values are exactly
@@ -871,11 +879,6 @@ public final class PgSession {
         return PCI_SETTINGS;
     }
 
-    /** The resolved {@code NX_SEARCH_PCI*} settings. */
-    public static PciSettings pciSettings() {
-        return PCI_SETTINGS;
-    }
-
     /**
      * True when a collection could sit between the router threshold T and the build threshold B: the
      * router is on ({@code T > 0}) and {@code B > T}. Such a collection is routed to HNSW (so it walks
@@ -887,14 +890,17 @@ public final class PgSession {
     }
 
     /**
-     * Log the resolved settings ({@code event=pci_settings}) and, when
-     * {@link #pciBuildThresholdAboveRouter} holds, the WARN {@code event=pci_build_threshold_above_router}.
+     * Log the resolved settings ({@code event=pci_settings}) and, when something builds
+     * ({@code enabled} and {@code maxPerLeaf > 0}) and {@link #pciBuildThresholdAboveRouter} holds, the
+     * WARN {@code event=pci_build_threshold_above_router}.
      * Called from {@code Main} inside the boot try block that refuses on a bad value.
      */
     public static void logPciBootSettings(PciSettings s, int routerMaxRows) {
         log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={}",
             s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf());
-        if (pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {
+        // Nothing builds when the switch is off or the per-leaf cap is 0, so B above T strands nothing new.
+        boolean builds = s.enabled() && s.maxPerLeaf() > 0;
+        if (builds && pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {
             log.warn("event=pci_build_threshold_above_router build_min_rows={} router_max_rows={} "
                 + "detail=\"collections with more than router_max_rows and fewer than build_min_rows rows "
                 + "walk at hnsw.ef_search 1000 and never get an index\"",

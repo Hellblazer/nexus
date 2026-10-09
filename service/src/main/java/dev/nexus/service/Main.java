@@ -352,7 +352,9 @@ public final class Main {
             // the search statement timeout, the scan budget, the taxonomy assign bounds, the network
             // bound margin); the
             // parse's own message names the variable that failed.
-            log.error("event=pg_session_env_invalid error=\"{}\"", t.getMessage(), t);
+            // A static-init failure arrives wrapped; its message is null and the cause names the variable.
+            Throwable cause = (t instanceof ExceptionInInitializerError && t.getCause() != null) ? t.getCause() : t;
+            log.error("event=pg_session_env_invalid error=\"{}\"", cause.getMessage(), t);
             System.exit(1);
         }
 
