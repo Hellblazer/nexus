@@ -15,6 +15,7 @@ untouched.
 """
 from __future__ import annotations
 
+import dataclasses
 import traceback
 from unittest.mock import MagicMock
 
@@ -398,3 +399,52 @@ class TestProbeCacheStateHygiene:
 
         with pytest.raises(ManagedServiceUnreachable, match="validated snapshot"):
             get_http_vector_client()
+
+
+class TestCloudProbeConfirmsThePerCollectionRoute:
+    """nexus-vpa9q: a first search ran its model groups one after another,
+    because the first ``search-per-collection`` request in a process is a
+    single-flight probe (nexus-tu8wp.2) and every other group waits on it
+    (measured 2026-10-09 against engine v0.1.154: first default search 5.8 s,
+    4.8-5.0 s with the probe skipped). In cloud mode the version probe has
+    already read the engine's release, so a release that carries the route
+    confirms it up front and the groups run in parallel from the first search.
+    """
+
+    @staticmethod
+    def _with_release(release: str) -> ManagedCapabilities:
+        return dataclasses.replace(_caps(), release_version=release)
+
+    def test_a_release_with_the_route_confirms_it(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        minimum = ".".join(str(p) for p in hvc.PER_COLLECTION_ROUTE_MIN_ENGINE)
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            MagicMock(return_value=self._with_release(minimum)),
+        )
+        assert get_http_vector_client()._per_collection_confirmed is True
+
+    def test_a_release_before_the_route_keeps_the_probe(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        major, minor, patch = hvc.PER_COLLECTION_ROUTE_MIN_ENGINE
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            MagicMock(return_value=self._with_release(f"{major}.{minor}.{patch - 1}")),
+        )
+        assert get_http_vector_client()._per_collection_confirmed is False
+
+    def test_an_unparseable_release_keeps_the_probe(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service", MagicMock(return_value=None),
+        )
+        assert get_http_vector_client()._per_collection_confirmed is False
+
+    def test_local_mode_keeps_the_probe(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        assert get_http_vector_client()._per_collection_confirmed is False
+
+    def test_the_pinned_engine_carries_the_route(self):
+        """The cloud gate refuses an engine below REQUIRED_ENGINE_VERSION, so
+        a client that passed it can always skip the probe."""
+        assert tuple(_FLOOR_TUPLE) >= hvc.PER_COLLECTION_ROUTE_MIN_ENGINE
