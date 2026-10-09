@@ -3063,6 +3063,7 @@ def _search_render(
                 diagnostics_out=diag,
                 rerank=lexical_rerank,
                 rerank_meta_out=rerank_meta if lexical_rerank else None,
+                content_chars=_MCP_CONTENT_CHARS,
             )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -3519,6 +3520,10 @@ def search(
 #: them without holding stale results past content changes. Thread-safe via
 #: the lock (MCP tools can run concurrently).
 _PAGE_LOOKAHEAD_PAGES = 2
+
+#: nexus-tao37: the MCP search and query tools show at most 300 characters of a row
+#: (search's snippet is 200, query's is 300), so they ask the engine for no more.
+_MCP_CONTENT_CHARS: int = 300
 _PAGE_CACHE_TTL_S = 120.0
 _page_cache_lock = threading.Lock()
 _page_cache: dict[str, Any] = {}
@@ -5079,6 +5084,7 @@ def query(
             taxonomy=_search_taxonomy(),
             telemetry=_search_telemetry_sink(),
             diagnostics_out=qdiag,
+            content_chars=_MCP_CONTENT_CHARS,
             # nexus-tnwm2: query groups by document and orders by
             # hybrid_score; it never reads _topic_label or _cluster_label.
             # The inherited default ("semantic") made topic grouping look

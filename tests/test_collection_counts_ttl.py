@@ -335,3 +335,36 @@ def test_one_search_request_resolves_its_target_once(monkeypatch):
         core._page_cache_invalidate()
     assert resolved == [["knowledge__a", "knowledge__thin"]]
     assert searched == [["knowledge__a", "knowledge__thin"]]
+
+
+def test_mcp_search_and_query_ask_for_capped_row_text(monkeypatch):
+    """nexus-tao37: the MCP tools show at most 300 characters of a row, so both ask the engine for
+    no more; the CLI never passes content_chars and keeps the full text."""
+    from nexus.mcp import core
+
+    seen: list = []
+
+    def fake_search(query, target, **kw):
+        seen.append(kw.get("content_chars"))
+        return []
+
+    monkeypatch.setattr(core, "_get_t3", lambda: object())
+    monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, t3, **kw: ["knowledge__a"])
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake_search)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
+    core._page_cache_invalidate()
+    try:
+        core.search(query="anything", corpus="knowledge")
+        core.query(question="anything", corpus="knowledge")
+    finally:
+        core._page_cache_invalidate()
+    assert seen == [core._MCP_CONTENT_CHARS, core._MCP_CONTENT_CHARS]
+    assert core._MCP_CONTENT_CHARS >= 300, "query shows 300-character snippets"
+
+
+def test_the_cli_never_caps_row_text():
+    import inspect
+
+    from nexus.commands import search_cmd
+
+    assert "content_chars" not in inspect.getsource(search_cmd)

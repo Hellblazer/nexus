@@ -403,6 +403,64 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(post(bad).statusCode()).as("embeddings_limit must be positive").isEqualTo(400);
     }
 
+    /**
+     * nexus-tao37: {@code content_chars} caps each row's text. A default MCP search shows 200-300 characters of
+     * a 10-row page from a 300-row pool, and the full text was about half of every 100-160 KB gzipped
+     * response (measured 2026-10-09). The rows, their order and every other field are unchanged, and the
+     * envelope echoes the cap so a client can tell an engine that applied it from one that predates it.
+     */
+    @Test
+    void contentChars_capsEachRowsText_echoesTheCap_andKeepsTheRows() throws Exception {
+        JsonNode full = json(post(ok())).get("results");
+        Map<String, Object> req = ok();
+        req.put("content_chars", 5);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.get("content_chars").asInt()).isEqualTo(5);
+        JsonNode capped = body.get("results");
+        assertThat(capped).hasSize(full.size());
+        for (int i = 0; i < full.size(); i++) {
+            assertThat(capped.get(i).get("id").asText()).isEqualTo(full.get(i).get("id").asText());
+            String whole = full.get(i).get("content").asText();
+            assertThat(capped.get(i).get("content").asText())
+                .isEqualTo(whole.substring(0, Math.min(5, whole.length())));
+            assertThat(capped.get(i).get("chash").asText()).isEqualTo(full.get(i).get("chash").asText());
+        }
+    }
+
+    @Test
+    void contentChars_mustBePositive() throws Exception {
+        for (Object bad : new Object[] {0, -3}) {
+            Map<String, Object> req = ok();
+            req.put("content_chars", bad);
+            assertThat(post(req).statusCode()).as("content_chars %s", bad).isEqualTo(400);
+        }
+    }
+
+    @Test
+    void contentChars_appliesAfterRerank() throws Exception {
+        Map<String, Object> req = ok();
+        req.put("rerank", true);
+        req.put("content_chars", 4);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.get("content_chars").asInt()).isEqualTo(4);
+        for (JsonNode row : body.get("results")) {
+            assertThat(row.get("content").asText().length()).isLessThanOrEqualTo(4);
+        }
+    }
+
+    @Test
+    void capCodePoints_neverSplitsASurrogatePair() {
+        String s = "a\uD83D\uDE00bc"; // a, grinning face (two UTF-16 units), b, c
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(s, 2)).isEqualTo("a\uD83D\uDE00");
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(s, 1)).isEqualTo("a");
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(s, 10)).isSameAs(s);
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(null, 3)).isNull();
+    }
+
     @Test
     void includeEmbeddings_isOptIn_theDefaultResponseIsUnchanged() throws Exception {
         for (Object flag : new Object[] {null, false}) {

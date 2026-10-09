@@ -609,7 +609,8 @@ public final class VectorHandler implements HttpHandler {
      *   "embeddings_limit": 300,                // optional, with include_embeddings: only the first N rows keep the vector
      *   "rerank":             false,            // optional; then limit must be &lt;= 1000
      *   "rerank_top_k":       null,             // optional; requires rerank
-     *   "rerank_max_candidates": null           // optional; requires rerank; score at most this many rows
+     *   "rerank_max_candidates": null,          // optional; requires rerank; score at most this many rows
+     *   "content_chars": 300                    // optional (nexus-tao37); cap each row's text at N code points
      * }
      * </pre>
      *
@@ -681,6 +682,10 @@ public final class VectorHandler implements HttpHandler {
                     "rerank_top_k requires \"rerank\": true — set both or neither");
         }
         Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
+        Integer contentChars        = optInteger(body, "content_chars");
+        if (contentChars != null && contentChars < 1) {
+            throw new IllegalArgumentException("field 'content_chars' must be at least 1, got " + contentChars);
+        }
         if (rerank && limit > dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST) {
             throw new IllegalArgumentException("rerank scores at most "
                     + dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST
@@ -721,9 +726,23 @@ public final class VectorHandler implements HttpHandler {
                 }
             }
         }
+        if (contentChars != null && envelope.get("results") instanceof List<?> finalRows) {
+            // nexus-tao37: after the rerank, which scores the full text. A default MCP search shows 200-300
+            // characters of a 10-row page from this pool; the full text was about half of every response.
+            for (Object o : finalRows) {
+                if (o instanceof Map<?, ?> row && row.get("content") instanceof String text) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> mutable = (Map<String, Object>) row;
+                    mutable.put("content", capCodePoints(text, contentChars));
+                }
+            }
+        }
         envelope.put("per_collection", perCollection);
         envelope.put("per_collection_k", perK);
         envelope.put("limit", limit);
+        if (contentChars != null) {
+            envelope.put("content_chars", contentChars);
+        }
         if (includeEmbeddings) {
             envelope.put("embedding_encoding", PgVectorRepository.EMBEDDING_ENCODING);
             envelope.put("embedding_dim", result.embeddingDim());
@@ -2341,6 +2360,20 @@ public final class VectorHandler implements HttpHandler {
     }
 
     /** Optional boolean field; absent or null → {@code defaultValue}. */
+    /**
+     * The first {@code max} code points of {@code text} (nexus-tao37): a cut never splits a surrogate pair.
+     * Returns {@code text} itself when it is already short enough.
+     */
+    public static String capCodePoints(String text, int max) {
+        if (text == null || text.length() <= max) {
+            return text;
+        }
+        if (text.codePointCount(0, text.length()) <= max) {
+            return text;
+        }
+        return text.substring(0, text.offsetByCodePoints(0, max));
+    }
+
     private boolean optBool(Map<String, Object> body, String key, boolean defaultValue) {
         Object val = body.get(key);
         if (val == null) return defaultValue;

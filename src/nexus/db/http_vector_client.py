@@ -3628,6 +3628,7 @@ class HttpVectorClient:
         rerank_top_k: int | None = None,
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
+        content_chars: int | None = None,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -3673,6 +3674,10 @@ class HttpVectorClient:
         *rerank_max_candidates*: the engine scores at most that many of the merged
         rows, in distance order, and returns the rest unscored behind them.
 
+        *content_chars* (nexus-tao37) caps each returned row's text at that many
+        code points, applied after the rerank. A caller that shows only snippets
+        sends it; an engine that predates the field answers the full text.
+
         *include_embeddings* (nexus-92q1p) asks the engine for each surviving
         row's stored vector, read once after the merge, so a caller that needs
         the vectors (semantic clustering) makes no
@@ -3716,6 +3721,10 @@ class HttpVectorClient:
             body["include_embeddings"] = True
             if embeddings_limit is not None:
                 body["embeddings_limit"] = int(embeddings_limit)
+        if content_chars is not None:
+            # nexus-tao37: the engine caps each row's text after its rerank; an engine that
+            # predates the field ignores it and answers the full text.
+            body["content_chars"] = int(content_chars)
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:

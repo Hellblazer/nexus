@@ -987,6 +987,7 @@ def search_cross_corpus(
     rerank_meta_out: dict[str, dict] | None = None,
     lexical: bool = False,
     deep_candidates: bool = False,
+    content_chars: int | None = None,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -1084,6 +1085,11 @@ def search_cross_corpus(
     candidates for that collection (kept or dropped), not just the
     dropped subset — see ``SearchDiagnostics`` for the dropped-only
     variant.
+
+    *content_chars* (nexus-tao37) asks the per-collection route to cap each
+    row's text at that many code points. Pass it only when every reader of
+    the returned text shows a snippet (the MCP tools); the batched fallback
+    path and an engine that predates the field return the full text.
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -1560,6 +1566,8 @@ def search_cross_corpus(
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
                 **rerank_cap_kw,
+                # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
+                **({"content_chars": content_chars} if content_chars is not None else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(
