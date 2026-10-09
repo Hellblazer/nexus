@@ -1148,7 +1148,14 @@ def search_cross_corpus(
     # latency, nexus-92q1p follow-up, Sam 2026-10-08): it runs on the rows a search DISPLAYS,
     # after the caller's boosts, caps and paging, in :func:`flag_displayed_contradictions`.
     # Only the opt-in semantic clustering still wants a vector per pooled row.
-    want_embeddings = cluster_by == "semantic"
+    #
+    # nexus-w032x: and only its Ward fallback reads them. With a taxonomy, topic grouping is
+    # tried first and fires whenever it covers over half the pool, which it did in every
+    # profiled default CLI search (2026-10-09); asking the route for the vectors anyway made
+    # the code-group response 1.05-1.46 MB and the search ~1.4 s slower. So the route is asked
+    # only when there is no taxonomy to group by; otherwise the Ward branch below fetches
+    # them by id, and only when grouping did not fire.
+    want_embeddings = cluster_by == "semantic" and taxonomy is None
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
@@ -1984,18 +1991,6 @@ def search_cross_corpus(
     if topic_reads is not None:
         _topic_assignments = topic_reads.assignments()
 
-    # Semantic clustering needs a vector per pooled row (Ward fallback), fetched once here.
-    # Per-collection failures are isolated: failed indices are excluded from clustering but
-    # do not suppress it for successfully-fetched collections (R3-1).
-    fetched_embeddings = None
-    failed_indices: set[int] = set()
-    if cluster_by == "semantic" and all_results:
-        call_deadline.check("search_cross_corpus:before_embeddings")
-        fetched_embeddings, failed_indices = _embeddings_for_results(
-            all_results, t3, prefetched_embeddings,
-        )
-        call_deadline.check("search_cross_corpus:after_embeddings")
-
     if cluster_by == "semantic" and all_results:
         topic_grouped = False
         # Try topic-based grouping first (RDR-070, nexus-y8f)
@@ -2016,7 +2011,19 @@ def search_cross_corpus(
             except Exception:  # noqa: BLE001 — best-effort topic grouping; failure logged at debug, falls back to Ward clustering
                 _log.debug("topic_grouping_failed", exc_info=True)
 
-        # Fall back to Ward clustering if topic grouping didn't fire
+        # Fall back to Ward clustering if topic grouping didn't fire. It needs a vector per
+        # pooled row, assembled only now (nexus-w032x): from the route's rows when it was
+        # asked for them, by id otherwise. Per-collection failures are isolated: failed
+        # indices are excluded from clustering but do not suppress it for
+        # successfully-fetched collections (R3-1).
+        fetched_embeddings = None
+        failed_indices: set[int] = set()
+        if not topic_grouped:
+            call_deadline.check("search_cross_corpus:before_embeddings")
+            fetched_embeddings, failed_indices = _embeddings_for_results(
+                all_results, t3, prefetched_embeddings,
+            )
+            call_deadline.check("search_cross_corpus:after_embeddings")
         if not topic_grouped and fetched_embeddings is not None:
             if not failed_indices:
                 all_results = _apply_clustering(all_results, fetched_embeddings)
