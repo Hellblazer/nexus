@@ -25,6 +25,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -242,14 +243,121 @@ class PciCatalogIntegrationTest {
     }
 
     @Test
+    void aPciIndexWhoseNameIsNotTheBuildersShape_isUnparsedEvenWithAParseablePredicate() throws Exception {
+        PciCatalog.Snapshot before = catalog.read();
+        String collection = "code__pcicat-badname__voyage-code-3__v1";
+        String operatorMade = "pci_foo";
+        String reindexLeftover = PciCatalog.indexName(M1024, T1, collection) + "_ccnew";
+        ddl(createIndexDdl("", operatorMade, M1024, T1, "collection = " + lit(collection)));
+        ddl(createIndexDdl("", reindexLeftover, M1024, T1, "collection = " + lit(collection)));
+
+        PciCatalog.Snapshot snap = catalog.read();
+
+        for (String name : List.of(operatorMade, reindexLeftover)) {
+            assertThat(index(leaf(snap, M1024, T1), name)).as(name).hasValueSatisfying(i -> {
+                assertThat(i.valid()).isTrue();
+                assertThat(i.parsed()).isFalse();
+                assertThat(i.collection()).isNull();
+            });
+        }
+        assertThat(snap.unparsedCount()).isEqualTo(before.unparsedCount() + 2);
+        assertThat(snap.validCount()).isEqualTo(before.validCount());
+        assertThat(snap.hasValidIndex(M1024, T1, collection)).as("never routed to").isFalse();
+    }
+
+    @Test
+    void aCorrectlyNamedIndexThatIsNotHnsw_isUnparsedEvenWithAParseablePredicate() throws Exception {
+        PciCatalog.Snapshot before = catalog.read();
+        String collection = "code__pcicat-btree__voyage-code-3__v1";
+        String name = PciCatalog.indexName(M1024, T1, collection);
+        ddl("CREATE INDEX " + name + " ON nexus." + leafName(M1024, T1) + " (collection) WHERE collection = "
+            + lit(collection));
+
+        PciCatalog.Snapshot snap = catalog.read();
+
+        assertThat(index(leaf(snap, M1024, T1), name)).hasValueSatisfying(i -> {
+            assertThat(i.valid()).isTrue();
+            assertThat(i.parsed()).isFalse();
+        });
+        assertThat(snap.unparsedCount()).isEqualTo(before.unparsedCount() + 1);
+        assertThat(snap.hasValidIndex(M1024, T1, collection)).as("never routed to").isFalse();
+    }
+
+    @Test
+    void aCollectionNameWithABackslash_roundTripsWithStandardConformingStringsOn() throws Exception {
+        String backslashed = "knowledge__back\\slash__minilm-l6-v2-384__v1";
+        buildIndex(M384, T1, backslashed);
+
+        PciCatalog.Snapshot snap = catalog.read();
+
+        assertThat(index(leaf(snap, M384, T1), PciCatalog.indexName(M384, T1, backslashed)))
+            .hasValueSatisfying(i -> assertThat(i.collection()).isEqualTo(backslashed));
+        assertThat(snap.hasValidIndex(M384, T1, backslashed)).isTrue();
+    }
+
+    @Test
+    void whenStandardConformingStringsIsOff_everyIndexIsUnparsed() throws Exception {
+        buildIndex(M384, T2, "knowledge__scs-off__minilm-l6-v2-384__v1");
+        PciCatalog.Snapshot on = catalog.read();
+        assertThat(on.validCount()).as("non-vacuity: parsed indexes exist with the setting on").isGreaterThan(0);
+
+        try (Connection c = svcDs.getConnection()) {
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            setStandardConformingStrings(ctx, "off");
+            PciCatalog.Snapshot off;
+            try {
+                off = catalog.read(ctx);
+            } finally {
+                setStandardConformingStrings(ctx, "on");
+            }
+
+            assertThat(off.validCount()).isZero();
+            assertThat(off.invalidCount()).isZero();
+            assertThat(off.unparsedCount()).as("the same indexes, all unparsed")
+                .isEqualTo(on.validCount() + on.invalidCount() + on.unparsedCount());
+            assertThat(off.hasValidIndex(M384, T2, "knowledge__scs-off__minilm-l6-v2-384__v1")).isFalse();
+        }
+    }
+
+    private static void setStandardConformingStrings(DSLContext ctx, String value) {
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.inline("standard_conforming_strings"),
+            DSL.inline(value), DSL.inline(false))).fetch();
+    }
+
+    @Test
+    void aTenantNameWithAQuote_roundTripsThroughTheBoundParse() throws Exception {
+        String quotedTenant = "pcicat-o'brien-tenant";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES),
+                "tok-pcicat-q-0123456789abcdef0000000", quotedTenant, "pcicatq");
+        }
+        String collection = "code__pcicat-quoted-tenant__voyage-code-3__v1";
+        buildIndex(M1024, quotedTenant, collection);
+
+        PciCatalog.Snapshot snap = catalog.read();
+
+        PciCatalog.Leaf leaf = leaf(snap, M1024, quotedTenant);
+        assertThat(leaf.tenant()).isEqualTo(quotedTenant);
+        assertThat(index(leaf, PciCatalog.indexName(M1024, quotedTenant, collection)))
+            .hasValueSatisfying(i -> assertThat(i.parsed()).isTrue());
+        assertThat(snap.hasValidIndex(M1024, quotedTenant, collection)).isTrue();
+        assertThat(snap.hasValidIndex(M1024, "pcicat-o''brien-tenant", collection)).isFalse();
+    }
+
+    @Test
     void indexesWithoutThePrefix_orOutsideTheChunksLeaves_areNotReported() throws Exception {
         ddl("CREATE INDEX not_a_pci_index ON nexus." + leafName(M1024, T1) + " (collection) WHERE collection = 'zzz'");
         ddl("CREATE INDEX pci_on_the_wrong_table ON nexus.catalog_collections (name) WHERE name = 'zzz'");
+        // 'pci_' as a LIKE pattern reads the underscore as any one character, so a LIKE filter would admit this
+        // leaf index; the reader's filter is a literal prefix.
+        String lookalike = "pcix_" + "0".repeat(23);
+        ddl("CREATE INDEX " + lookalike + " ON nexus." + leafName(M1024, T1) + " (collection) WHERE collection = 'zzz'");
 
         PciCatalog.Snapshot snap = catalog.read();
 
         assertThat(snap.leaves().stream().flatMap(l -> l.indexes().stream()).map(PciCatalog.Index::name))
-            .doesNotContain("not_a_pci_index", "pci_on_the_wrong_table");
+            .doesNotContain("not_a_pci_index", "pci_on_the_wrong_table", lookalike);
         assertThat(snap.leaves().stream().flatMap(l -> l.indexes().stream()).map(PciCatalog.Index::name))
             .allMatch(n -> n.startsWith("pci_"));
     }
@@ -306,6 +414,10 @@ class PciCatalogIntegrationTest {
                 assertThat(terminated).isTrue();
                 await("the build statement to end", build::isDone);
                 assertThat(build).isCompletedExceptionally();
+                // The terminated run left the helper's Liquibase lock held; clear it so a later run is not blocked.
+                try (Connection su = pg.createConnection("")) {
+                    PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
+                }
             } finally {
                 blocker.rollback();
             }
@@ -320,7 +432,16 @@ class PciCatalogIntegrationTest {
         assertThat(snap.hasValidIndex(M1024, T1, collection)).as("invalid is never routed to").isFalse();
         assertThat(snap.invalidCount()).isGreaterThanOrEqualTo(1);
         // The valid one built by another test is unaffected by the invalid sibling.
-        buildIndex(M1024, T2, collection);
+        // ... and the no-transaction helper runs again once its lock row is clear (bounded: a held lock blocks it).
+        CompletableFuture.runAsync(() -> {
+            try (Connection c = pg.createConnection("")) {
+                PgContainerHelper.runSuperuserDdlOutsideTransaction(c,
+                    createIndexDdl("CONCURRENTLY ", PciCatalog.indexName(M1024, T2, collection), M1024, T2,
+                        "collection = " + lit(collection)));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }).get(BOUND.toSeconds(), TimeUnit.SECONDS);
         assertThat(catalog.read().hasValidIndex(M1024, T2, collection)).isTrue();
     }
 }

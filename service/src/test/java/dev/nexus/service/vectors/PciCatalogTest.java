@@ -74,4 +74,43 @@ class PciCatalogTest {
         assertThat(PciCatalog.parseBoundValue("FOR VALUES FROM (1) TO (2)")).isEmpty();
         assertThat(PciCatalog.parseBoundValue(null)).isEmpty();
     }
+
+    private static final String GOOD_NAME = "pci_0123456789abcdef01234567";
+    private static final String GOOD_PREDICATE = "(collection = 'c'::text)";
+
+    @Test
+    void attributedCollection_parsesOnlyWhenEveryConditionHolds() {
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, "on")).contains("c");
+        // Each condition alone breaks it.
+        assertThat(PciCatalog.attributedCollection("pci_foo", "hnsw", GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME + "_ccnew", "hnsw", GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection("pci_0123456789ABCDEF01234567", "hnsw", GOOD_PREDICATE, true, "on"))
+            .as("upper case hex is not the builder's name").isEmpty();
+        assertThat(PciCatalog.attributedCollection("pci_0123456789abcdef0123456", "hnsw", GOOD_PREDICATE, true, "on"))
+            .as("23 digits").isEmpty();
+        assertThat(PciCatalog.attributedCollection(null, "hnsw", GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "btree", GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "ivfflat", GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, null, GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", "(tenant_id = 'c'::text)", true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", null, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, false, "on")).isEmpty();
+    }
+
+    @Test
+    void attributedCollection_standardConformingStringsNotOn_isUnparsed() {
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, "off")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, "")).isEmpty();
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, null)).isEmpty();
+    }
+
+    @Test
+    void snapshot_ofNoLeaves_isEmptyAndCountsNothing() {
+        PciCatalog.Snapshot snap = new PciCatalog.Snapshot(java.util.List.of());
+
+        assertThat(snap.leaves()).isEmpty();
+        assertThat(snap.validCount()).isZero();
+        assertThat(snap.unparsedCount()).isZero();
+        assertThat(snap.hasValidIndex("m", "t", "c")).isFalse();
+    }
 }

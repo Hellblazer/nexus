@@ -457,10 +457,27 @@ public final class PgContainerHelper {
      * ({@code CREATE INDEX CONCURRENTLY}, {@code DROP INDEX CONCURRENTLY}; nexus-43ulx.11). The
      * statement blocks until it ends, so a caller that wants to observe it mid-flight runs this on a
      * thread of its own with its own connection.
+     *
+     * <p><b>A run whose backend is terminated leaves the Liquibase lock held.</b> Liquibase cannot release its
+     * lock row over the dead connection, so the next call blocks on it (for minutes) instead of running. A test
+     * that terminates the backend of a statement started here must call
+     * {@link #clearSuperuserDdlOutsideTransactionLock} before it calls this method again.
      */
     public static void runSuperuserDdlOutsideTransaction(Connection su, String ddl) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-superuser-ddl-no-tx.xml",
             "databasechangelog_test_superuser_ddl_no_tx", Map.of("ddl", ddl));
+    }
+
+    /**
+     * Release the Liquibase lock {@link #runSuperuserDdlOutsideTransaction} may have left held when its backend was
+     * terminated mid-statement: {@code locked = false} on its lock row, as the superuser that owns the table.
+     */
+    public static void clearSuperuserDdlOutsideTransactionLock(Connection su) {
+        Table<?> lock = DSL.table(DSL.name("databasechangelog_test_superuser_ddl_no_tx_lock"));
+        DSL.using(su, SQLDialect.POSTGRES)
+            .update(lock)
+            .set(DSL.field(DSL.name("locked"), Boolean.class), false)
+            .execute();
     }
 
     /**

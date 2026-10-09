@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.jooq.nexus.Tables;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
-import org.jooq.Record7;
+import org.jooq.Record;
+import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -45,14 +45,22 @@ import java.util.regex.Pattern;
  * nexus.partition_bound_value} does the same job server-side but is granted to no role. One statement means one
  * snapshot, so a leaf is never listed with indexes from two different instants.
  *
- * <p><b>Unparsed rule</b> (the RDR leaves it open; Sam's decision 4, T2 {@code nexus_rdr/227-planner-decisions-confirmed}).
- * An index whose name starts with {@code pci_} and whose predicate is not exactly {@code (collection = '<name>'::text)}
- * is <i>unparsed</i>: an operator-made index, a hand-edited predicate, or a PostgreSQL that deparses differently. An
- * unparsed index is listed with a {@code null} collection and counted by {@link Snapshot#unparsedCount()} (the status
- * object reports it), whatever its validity. It is never routed to ({@link Snapshot#hasValidIndex} cannot return true
- * for it), never built, and never dropped: no DDL consumer may act on an index that is not {@link Index#parsed()}.
- * The same holds for every index on a leaf whose own bounds are not a single-value LIST bound, since such an index
- * cannot be attributed to a (model, tenant) pair.
+ * <p><b>Unparsed rule</b> (the RDR leaves it open; Sam's decision 4, T2 {@code nexus_rdr/227-planner-decisions-confirmed},
+ * extended by the session in nexus-43ulx.11's fix round). An index is <i>parsed</i> only when ALL of these hold: its
+ * name matches {@code ^pci_[0-9a-f]{24}$} (the shape {@link #indexName} makes), its access method is {@code hnsw}
+ * ({@code pg_am} through {@code pg_class.relam}), its predicate is exactly {@code (collection = '<name>'::text)}, and
+ * its leaf's own and parent bounds are single-value LIST bounds. Every other index whose name starts with
+ * {@code pci_} is <i>unparsed</i>: an operator-made index ({@code pci_foo}), a REINDEX CONCURRENTLY leftover
+ * ({@code pci_<hash>_ccnew}), a non-hnsw index, a hand-edited predicate, or a PostgreSQL that deparses differently.
+ * An unparsed index is listed with a {@code null} collection and counted by {@link Snapshot#unparsedCount()} (the
+ * status object reports it), whatever its validity. It is never routed to ({@link Snapshot#hasValidIndex} cannot
+ * return true for it), never built, and never dropped: no DDL consumer may act on an index that is not
+ * {@link Index#parsed()}. This NARROWS the RDR Schema sentence saying operator-made {@code pci_} indexes follow the
+ * build and retire rules; the amendment is pending in nexus-43ulx.23.
+ *
+ * <p><b>Deparse depends on a setting.</b> {@code pg_get_expr} writes string literals according to
+ * {@code standard_conforming_strings} (backslashes are doubled when it is off). The read takes the setting in the same
+ * statement, and when it is not {@code on} every index is unparsed, the safe direction.
  */
 public final class PciCatalog {
 
@@ -64,6 +72,12 @@ public final class PciCatalog {
     /** {@code (collection = '<name>'::text)}, with {@code ''} standing for a quote inside the name. */
     private static final Pattern COLLECTION_PREDICATE =
         Pattern.compile("^\\(collection = '((?:[^']++|'')*+)'::text\\)$", Pattern.DOTALL);
+
+    /** The shape of every name {@link #indexName} makes; any other {@code pci_} name is not the builder's. */
+    private static final Pattern BUILDER_NAME = Pattern.compile("^pci_[0-9a-f]{24}$");
+
+    /** The only access method the router and the builder deal in. */
+    private static final String ACCESS_METHOD = "hnsw";
 
     /** {@code FOR VALUES IN ('<value>')}, a single-value LIST bound. */
     private static final Pattern LIST_BOUND =
@@ -96,31 +110,49 @@ public final class PciCatalog {
 
     private record Key(String model, String tenant, String collection) { }
 
-    /** What one catalog read saw, immutable. It answers the router's question as a {@link PciIndexSet}. */
+    /**
+     * What one catalog read saw, immutable. It answers the router's question as a {@link PciIndexSet}.
+     *
+     * <p><b>Contract for callers:</b> an empty {@link #leaves()} means the read found no partition leaves of
+     * {@code nexus.chunks}, which no installed schema produces. Treat it as a read failure, never as "there are no
+     * indexes": acting on it (a builder deciding everything is missing, a drop pass deciding nothing is wanted)
+     * would be acting on a read that saw nothing.
+     */
     public static final class Snapshot implements PciIndexSet {
         private final List<Leaf> leaves;
-        private final Set<Key> valid = new LinkedHashSet<>();
-        private int validCount;
-        private int invalidCount;
-        private int unparsedCount;
+        private final Set<Key> valid;
+        private final int validCount;
+        private final int invalidCount;
+        private final int unparsedCount;
 
         Snapshot(List<Leaf> leaves) {
             this.leaves = List.copyOf(leaves);
+            Set<Key> validKeys = new LinkedHashSet<>();
+            int validIndexes = 0;
+            int invalidIndexes = 0;
+            int unparsedIndexes = 0;
             for (Leaf leaf : this.leaves) {
                 for (Index index : leaf.indexes()) {
                     if (!index.parsed()) {
-                        unparsedCount++;
+                        unparsedIndexes++;
                     } else if (index.valid()) {
-                        validCount++;
-                        valid.add(new Key(leaf.model(), leaf.tenant(), index.collection()));
+                        validIndexes++;
+                        validKeys.add(new Key(leaf.model(), leaf.tenant(), index.collection()));
                     } else {
-                        invalidCount++;
+                        invalidIndexes++;
                     }
                 }
             }
+            this.valid = Set.copyOf(validKeys);
+            this.validCount = validIndexes;
+            this.invalidCount = invalidIndexes;
+            this.unparsedCount = unparsedIndexes;
         }
 
-        /** Every tenant leaf of {@code nexus.chunks}, with or without indexes. */
+        /**
+         * Every tenant leaf of {@code nexus.chunks}, with or without indexes. Empty means a failed read; see the
+         * class comment.
+         */
         public List<Leaf> leaves() {
             return leaves;
         }
@@ -141,7 +173,7 @@ public final class PciCatalog {
             return invalidCount;
         }
 
-        /** {@code pci_} indexes whose predicate or leaf did not parse, whatever their validity. */
+        /** {@code pci_} indexes that failed any part of the parsed rule, whatever their validity. */
         public int unparsedCount() {
             return unparsedCount;
         }
@@ -196,6 +228,21 @@ public final class PciCatalog {
         return unquote(LIST_BOUND, deparsedBound);
     }
 
+    /**
+     * The one decision of the unparsed rule: the collection an index serves, or empty when the index is unparsed.
+     * An index is parsed only when its name has the builder's shape, its access method is hnsw, its predicate parses,
+     * both of its leaf's bounds parsed, and {@code standard_conforming_strings} was {@code on} for the read (otherwise
+     * the deparsed text of a backslash is ambiguous).
+     */
+    static Optional<String> attributedCollection(String indexName, String accessMethod, String deparsedPredicate,
+                                                 boolean leafBoundsParsed, String standardConformingStrings) {
+        if (!"on".equals(standardConformingStrings) || !leafBoundsParsed || !ACCESS_METHOD.equals(accessMethod)
+            || indexName == null || !BUILDER_NAME.matcher(indexName).matches()) {
+            return Optional.empty();
+        }
+        return parseCollection(deparsedPredicate);
+    }
+
     private static Optional<String> unquote(Pattern shape, String text) {
         if (text == null) {
             return Optional.empty();
@@ -230,26 +277,33 @@ public final class PciCatalog {
         Field<Object> indexTable = col("i", "indrelid");
         Field<String> indexName = col("ix", "relname", String.class);
         Field<Boolean> indexValid = col("i", "indisvalid", Boolean.class);
+        Field<String> indexMethod = col("am", "amname", String.class);
         Field<String> indexPredicate = DSL.function(DSL.name("pg_catalog", "pg_get_expr"), SQLDataType.CLOB,
             col("i", "indpred"), indexTable);
         Table<?> pci = ctx.select(
                 indexTable.as("indrelid"),
                 indexName.as("index_name"),
                 indexValid.as("index_valid"),
-                indexPredicate.as("index_predicate"))
+                indexPredicate.as("index_predicate"),
+                indexMethod.as("index_method"))
             .from(catalog("pg_index", "i"))
             .join(catalog("pg_class", "ix")).on(col("ix", "oid").eq(col("i", "indexrelid")))
+            .join(catalog("pg_am", "am")).on(col("am", "oid").eq(col("ix", "relam")))
             .where(DSL.left(indexName, PREFIX.length()).eq(PREFIX))
             .asTable("x");
         Field<Object> pciTable = pci.field("indrelid", Object.class);
         Field<String> pciName = pci.field("index_name", String.class);
         Field<Boolean> pciValid = pci.field("index_valid", Boolean.class);
         Field<String> pciPredicate = pci.field("index_predicate", String.class);
+        Field<String> pciMethod = pci.field("index_method", String.class);
+        // Read in the statement that deparses the predicates, so the two are of one instant.
+        Field<String> stringsSetting = DSL.function("current_setting", SQLDataType.VARCHAR,
+            DSL.inline("standard_conforming_strings")).as("scs");
 
         // Every chunks parent the typed accessors name (all three dimensions share one table today).
         Set<List<String>> parents = new LinkedHashSet<>();
         for (DimTables.ChunkTable chunks : DimTables.CHUNKS.values()) {
-            parents.add(List.of(Tables.CHUNKS.getSchema().getName(), chunks.table().getName()));
+            parents.add(List.of(chunks.table().getSchema().getName(), chunks.table().getName()));
         }
         List<Condition> any = new ArrayList<>();
         for (List<String> qualified : parents) {
@@ -258,8 +312,9 @@ public final class PciCatalog {
         }
         Condition onParents = DSL.or(any);
 
-        List<Record7<String, String, String, String, String, Boolean, String>> rows = ctx
-            .select(leafSchemaName, leafName, leafBound, modelBound, pciName, pciValid, pciPredicate)
+        Result<? extends Record> rows = ctx
+            .select(leafSchemaName, leafName, leafBound, modelBound, pciName, pciValid, pciPredicate, pciMethod,
+                stringsSetting)
             .from(leaf)
             .join(leafSchema).on(col("ln", "oid").eq(col("l", "relnamespace")))
             .join(toModel).on(col("i1", "inhrelid").eq(leafOid))
@@ -274,11 +329,13 @@ public final class PciCatalog {
 
         Map<List<String>, LeafBuilder> leaves = new LinkedHashMap<>();
         for (var row : rows) {
-            LeafBuilder b = leaves.computeIfAbsent(List.of(row.value1(), row.value2()),
-                k -> new LeafBuilder(row.value1(), row.value2(),
-                    parseBoundValue(row.value4()).orElse(null), parseBoundValue(row.value3()).orElse(null)));
-            if (row.value5() != null) {
-                b.add(row.value5(), row.value6(), row.value7());
+            LeafBuilder b = leaves.computeIfAbsent(List.of(row.get(leafSchemaName), row.get(leafName)),
+                k -> new LeafBuilder(row.get(leafSchemaName), row.get(leafName),
+                    parseBoundValue(row.get(modelBound)).orElse(null),
+                    parseBoundValue(row.get(leafBound)).orElse(null)));
+            if (row.get(pciName) != null) {
+                b.add(row.get(pciName), row.get(pciValid), row.get(pciPredicate), row.get(pciMethod),
+                    row.get(stringsSetting));
             }
         }
         List<Leaf> out = new ArrayList<>(leaves.size());
@@ -302,9 +359,10 @@ public final class PciCatalog {
             this.tenant = tenant;
         }
 
-        void add(String indexName, Boolean valid, String predicate) {
+        void add(String indexName, Boolean valid, String predicate, String method, String stringsSetting) {
             // An index cannot be attributed to a (model, tenant) when either bound did not parse.
-            String collection = model == null || tenant == null ? null : parseCollection(predicate).orElse(null);
+            String collection = attributedCollection(indexName, method, predicate,
+                model != null && tenant != null, stringsSetting).orElse(null);
             indexes.add(new Index(indexName, Boolean.TRUE.equals(valid), collection));
         }
 
