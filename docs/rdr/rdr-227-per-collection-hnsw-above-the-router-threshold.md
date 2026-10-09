@@ -2,12 +2,12 @@
 title: "Per-Collection HNSW Indexes Above the Router Threshold"
 id: RDR-227
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-09
-accepted_date:
+accepted_date: 2026-10-09
 related_issues: [nexus-43ulx, nexus-nqsa7, nexus-vpa9q, nexus-tao37]
 related_rdrs: [RDR-225, RDR-226]
 ---
