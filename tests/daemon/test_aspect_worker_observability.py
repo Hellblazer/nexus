@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from structlog.testing import capture_logs
 
 import nexus.aspect_worker as aw
@@ -26,6 +27,13 @@ from nexus.daemon.aspect_worker_daemon import (
     ensure_aspect_worker_daemon,
 )
 from nexus.db import storage_mode
+
+
+@pytest.fixture(autouse=True)
+def _claude_on_path(monkeypatch) -> None:
+    """The spawner will not fork without `claude`; the spawn tests here are about
+    what happens after a fork, so they must not depend on the box having it."""
+    monkeypatch.setattr(awd, "_claude_available", lambda: True)
 
 
 class _FakeWorker:

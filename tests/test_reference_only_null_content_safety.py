@@ -95,8 +95,7 @@ class TestSearchCrossCorpusNoneContentBoundary:
                 }]
 
             def get_embeddings(self, collection, ids):
-                # Only reached if a future default flips contradiction_check
-                # or clustering back on for this call; the per-collection
+                # Only reached if this call turns on semantic clustering; the per-collection
                 # try/except in _fetch_embeddings_for_results treats any
                 # exception here as an isolated per-collection failure
                 # (logged, indices marked failed, search still returns).

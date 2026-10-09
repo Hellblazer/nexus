@@ -65,7 +65,9 @@ import java.util.Map;
  * <p><strong>Fused rerank stage (RDR-188, bead nexus-9o6y2.2).</strong> The five
  * search routes (search/query, hybrid-search, search-metadata-scoped,
  * search-topic-scoped, search-graph-hop) accept optional {@code "rerank": true}
- * + {@code "rerank_top_k": N} request fields. With {@code rerank=true} the
+ * + {@code "rerank_top_k": N} (cap on rows returned) and {@code "rerank_max_candidates": N}
+ * (cap on rows SCORED: the first N in input order, the rest returned unscored behind
+ * them) request fields. With {@code rerank=true} the
  * response becomes the {@link RerankStage} object envelope
  * ({@code {"results": [...], "rerank_degraded": ...}}) — rows are reranked
  * server-side on content already fetched under RLS, and any scoring failure
@@ -606,7 +608,8 @@ public final class VectorHandler implements HttpHandler {
      *   "include_embeddings": false,            // optional; each row then carries its stored vector, see below
      *   "embeddings_limit": 300,                // optional, with include_embeddings: only the first N rows keep the vector
      *   "rerank":             false,            // optional; then limit must be &lt;= 1000
-     *   "rerank_top_k":       null              // optional; requires rerank
+     *   "rerank_top_k":       null,             // optional; requires rerank
+     *   "rerank_max_candidates": null           // optional; requires rerank; score at most this many rows
      * }
      * </pre>
      *
@@ -677,6 +680,7 @@ public final class VectorHandler implements HttpHandler {
             throw new IllegalArgumentException(
                     "rerank_top_k requires \"rerank\": true — set both or neither");
         }
+        Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
         if (rerank && limit > dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST) {
             throw new IllegalArgumentException("rerank scores at most "
                     + dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST
@@ -692,7 +696,7 @@ public final class VectorHandler implements HttpHandler {
 
         Map<String, Object> envelope = new LinkedHashMap<>();
         if (rerank) {
-            envelope.putAll(rerankStage.apply(queryText, result.rows(), rerankTopK));
+            envelope.putAll(rerankStage.apply(queryText, result.rows(), rerankTopK, rerankMaxCandidates));
         } else {
             envelope.put("results", result.rows());
         }
@@ -767,7 +771,8 @@ public final class VectorHandler implements HttpHandler {
             throw new IllegalArgumentException(
                     "rerank_top_k requires \"rerank\": true — set both or neither");
         }
-        Object payload = rerank ? rerankStage.apply(queryText, result.value(), rerankTopK)
+        Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
+        Object payload = rerank ? rerankStage.apply(queryText, result.value(), rerankTopK, rerankMaxCandidates)
                                 : result.value();
         HttpUtil.send(ex, 200, json(payload));
     }
@@ -2349,6 +2354,26 @@ public final class VectorHandler implements HttpHandler {
         if (val == null) return null;
         String s = val.toString();
         return s.isBlank() ? null : s;
+    }
+
+    /**
+     * The optional {@code rerank_max_candidates} request field: score at most this many
+     * rows, see {@link RerankStage#apply(String, List, Integer, Integer)}. Absent means
+     * score every row. Like {@code rerank_top_k} it is a caller error (400) without
+     * {@code "rerank": true}, and below 1.
+     */
+    private Integer optRerankMaxCandidates(Map<String, Object> body, boolean rerank) {
+        Integer v = optInteger(body, "rerank_max_candidates");
+        if (v == null) return null;
+        if (!rerank) {
+            throw new IllegalArgumentException(
+                    "rerank_max_candidates requires \"rerank\": true — set both or neither");
+        }
+        if (v < 1) {
+            throw new IllegalArgumentException(
+                    "field 'rerank_max_candidates' must be at least 1, got " + v);
+        }
+        return v;
     }
 
     /** Optional integer field; null → null (no-filter on that dimension). */

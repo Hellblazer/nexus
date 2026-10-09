@@ -328,6 +328,29 @@ def test_diversity_cap_applies_after_server_rerank_resort(runner, cloud_env):
     assert len(distinct) >= 9, f"expected >=9 distinct files, got {len(distinct)}: {items}"
 
 
+def test_a_scored_row_always_outranks_an_unscored_one_through_the_diversity_cap(runner, cloud_env):
+    """The engine scores only a capped candidate set (rerank_max_candidates), so
+    unscored rows now trail EVERY search, not just a degraded collection's. The
+    diversity cap runs within the scored group and within the unscored group:
+    capping the concatenation would let a first-seen file's unscored row sit in
+    the cap's kept head ahead of a scored row that overflowed its file's quota.
+    4 scored chunks of one file (2 overflow the per-file quota) and 1 unscored
+    chunk of another file: on a 4-slot page every slot is a scored row."""
+    results = [
+        _file_result(f"dom{i}", source_path="dominant.py", rerank_score=0.9 - i * 0.01)
+        for i in range(4)
+    ]
+    results.append(_file_result("unscored", source_path="other.py", distance=0.05))
+    mock_t3 = _t3_mock(["knowledge__test", "rdr__nexus"])
+
+    res = _invoke(runner, mock_t3, _fake_retrieval(results),
+                  ["search", "query", "--corpus", "knowledge,rdr", "--json", "--n", "4"])
+
+    assert res.exit_code == 0, res.output
+    items = json.loads(res.stdout)
+    assert [it["id"] for it in items] == ["dom0", "dom1", "dom2", "dom3"]
+
+
 def test_diversity_cap_applies_on_fallback_round_robin_path(runner, cloud_env):
     """Same shape, on the NO-server-rerank fallback path (a single target
     collection skips server rerank — see

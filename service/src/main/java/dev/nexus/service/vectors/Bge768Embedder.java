@@ -114,6 +114,16 @@ public final class Bge768Embedder implements Embedder {
     private static final long MAX_ATTENTION_TENSOR_BYTES =
             attentionTensorBytes(16, MAX_SEQ_LEN);
 
+    /**
+     * Largest fraction of a group's tokens that may be padding before the planner starts a new
+     * group: a group closes when {@code size * maxLen > (1 + MAX_PAD_WASTE) * realTokens}.
+     * 0.25 from a simulation over 12,999 real chunks at 16 per request: padded tokens 1.62x ->
+     * 1.12x of real, at about 4 ONNX calls per request instead of one. 0.1 reaches 1.04x but
+     * needs about 6 calls per request, and a call that small starts to lose the arithmetic
+     * efficiency the saved padding was meant to buy; 0.5 stays at 1.24x.
+     */
+    static final double MAX_PAD_WASTE = 0.25;
+
     private static long attentionTensorBytes(long batchSize, long seqLen) {
         return batchSize * ATTENTION_HEADS * seqLen * seqLen * Float.BYTES;
     }
@@ -350,22 +360,30 @@ public final class Bge768Embedder implements Embedder {
     }
 
     /**
-     * Tokenizes the whole input once (cheap relative to an ONNX forward pass), then
-     * greedily partitions it into sub-batches bounded by {@link #MAX_PADDED_TOKEN_AREA}
-     * — never re-ordering, so results concatenate directly in input order. Each
-     * sub-batch is a separate {@link #runOnnxSubBatch} call, so an oversize request
-     * degrades in throughput (more ONNX invocations) rather than in memory (one
-     * unbounded rectangular tensor).
+     * Tokenizes the whole input once (cheap relative to an ONNX forward pass), orders the rows by
+     * token length, partitions that order into groups of similar length, and runs one ONNX call
+     * per group. Results are scattered back to the caller's input order.
      *
-     * <p>Sequential (not sorted-by-length) partitioning: extending the current group
-     * with the next text in order is enough to bound padded-token area — a long text
-     * simply forces its group to close sooner — without the added complexity and
-     * result-reordering bookkeeping a sort-then-bucket scheme would need to restore
-     * input order afterward.
+     * <p>Why length-ordered: every group is padded to its longest row, and the cost of a call
+     * grows with the padded token count (and, for attention, with its square). Measured on this
+     * repo's own chunks (12,999 chunks, mean 278 tokens, 11% at the 512 cap), a request of 16
+     * chunks in arrival order padded to 1.62x its real tokens (attention 2.03x); the same chunks
+     * grouped by length at {@link #MAX_PAD_WASTE} = 0.25 pad to about 1.12x (attention about
+     * 1.22x), in about 4 calls per request instead of one (T2 nexus/index-embedding-throughput-2026-10-08).
+     * The local engine is CPU-bound, so those padded tokens are wall time.
      *
-     * <p>Degrades to the pre-existing single-shot behavior when the whole input
-     * already fits under budget: the loop below produces exactly one group and one
-     * ONNX call, identical to what the old unconditional {@code embedBatch} did.
+     * <p>Two bounds close a group: the padded-token-area ceiling {@link #MAX_PADDED_TOKEN_AREA}
+     * (memory, nexus-zu4ma, unchanged) and the padding-waste ceiling. A row is always allowed to
+     * start a group, so a single row never fails either bound. The output for a text does not
+     * depend on its group beyond float rounding (cosine to the same text alone is above
+     * {@code 1 - 1e-6}, pinned by {@link Bge768BatchCompositionTest}).
+     *
+     * <p>Degrades to the pre-existing single-call behavior when the whole input is already one
+     * length: the planner then produces one group (or the area-bounded groups, as before).
+     *
+     * <p>A deadline abort between groups discards every group already finished: the request
+     * returns nothing and the client retries the WHOLE request. A request now has about four
+     * groups, so there are more check points per request than before grouping.
      */
     private List<float[]> embedSubBatched(List<String> texts) throws Exception {
         int n = texts.size();
@@ -377,6 +395,11 @@ public final class Bge768Embedder implements Embedder {
             lens[i] = Math.min((int) encodings[i].getIds().length, MAX_SEQ_LEN);
         }
 
+        GroupPlan plan = planGroups(lens, MAX_PADDED_TOKEN_AREA, MAX_PAD_WASTE);
+        Encoding[] ordered = new Encoding[n];
+        for (int k = 0; k < n; k++) ordered[k] = encodings[plan.order()[k]];
+        float[][] scattered = new float[n][];
+
         // Bead nexus-s71lr: this call's own clock, for the "elapsed"/"chunks_per_sec"
         // fields on the progress line below. Independent of progressGate's clock, which
         // is shared instance-wide across every concurrent embed() call.
@@ -387,25 +410,21 @@ public final class Bge768Embedder implements Embedder {
         // (RequestDeadlineProbe.NONE outside a filtered request -> never aborts).
         long deadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
 
-        List<float[]> results = new ArrayList<>(n);
-        int start = 0;
-        while (start < n) {
-            int end = start + 1;
-            int groupMaxLen = Math.max(lens[start], 1);
-            while (end < n) {
-                int candidateMaxLen = Math.max(groupMaxLen, Math.max(lens[end], 1));
-                long candidateArea = (long) (end - start + 1) * candidateMaxLen * candidateMaxLen;
-                if (candidateArea > MAX_PADDED_TOKEN_AREA) break;
-                groupMaxLen = candidateMaxLen;
-                end++;
-            }
-            if (end - start < n) {
-                // Only log when sub-batching actually engaged — the common case (whole
-                // request under budget) stays silent at the old single-call volume.
+        int[][] groups = plan.groups();
+        for (int[] group : groups) {
+            int start = group[0];
+            int end = group[1];
+            int groupMaxLen = group[2];
+            if (groups.length > 1) {
+                // Only a request that planned more than one group logs here. Length grouping
+                // makes that the usual case for a mixed-length request (about four groups at 16
+                // chunks), so this is a debug line per group, not a rare event; a request whose
+                // rows all fit one group stays silent.
                 log.debug("event=bge768_subbatch start={} size={} maxLen={} totalBatch={}",
                         start, end - start, groupMaxLen, n);
             }
-            results.addAll(runOnnxSubBatch(encodings, start, end, groupMaxLen));
+            List<float[]> part = runOnnxSubBatch(ordered, start, end, groupMaxLen);
+            for (int k = 0; k < part.size(); k++) scattered[plan.order()[start + k]] = part.get(k);
             chunksDone += end - start;
 
             long nowNanos = System.nanoTime();
@@ -439,8 +458,11 @@ public final class Bge768Embedder implements Embedder {
                         admissionFields);
             }
             subBatchIndex++;
-            start = end;
 
+            // A deadline abort discards the groups already finished: nothing is returned
+            // for the request, and the client retries the WHOLE request after
+            // retry_after_s. With about four groups per request there are more such check
+            // points than before length grouping, so more finished work can be thrown away.
             // nexus-8hdg9 phase 3: cooperative deadline check BETWEEN sub-batches, before
             // the next runOnnxSubBatch. Reuses this iteration's nowNanos (design record §4:
             // no second clock read; the added cost is one long comparison). Only when more
@@ -449,7 +471,7 @@ public final class Bge768Embedder implements Embedder {
             // AdmissionControlledEmbedder's finally; the session.run() that just returned
             // is the granularity floor (the deadline never interrupts a run; only
             // shutdown does, through GatedRun's terminate flag, nexus-o5xyx.3).
-            if (start < n && RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
+            if (chunksDone < n && RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
                 long elapsedMs = (nowNanos - callStartNanos) / 1_000_000L;
                 long pastDeadlineMs = (nowNanos - deadlineNanos) / 1_000_000L;
                 activityTracker.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
@@ -464,7 +486,51 @@ public final class Bge768Embedder implements Embedder {
                         RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
             }
         }
-        return results;
+        return new ArrayList<>(java.util.Arrays.asList(scattered));
+    }
+
+    /**
+     * One partition of a request: {@code order[k]} is the input index of the k-th row in length
+     * order, and each {@code groups[g]} is {@code {start, end, maxLen}} over that order
+     * ({@code end} exclusive, {@code maxLen >= 1} the group's padded width).
+     */
+    record GroupPlan(int[] order, int[][] groups) {}
+
+    /**
+     * Partition {@code lens} (token counts, already capped at {@link #MAX_SEQ_LEN}) into ONNX
+     * groups: stable ascending sort by length, then greedy extension of the current group while
+     * BOTH bounds hold: the padded-token area {@code size * maxLen^2 <= maxArea}, and the padding
+     * waste {@code size * maxLen <= (1 + maxWaste) * (real tokens in the group)}. The first row of
+     * a group is always accepted. Package-private and pure so the planner is testable without the
+     * 416 MB model.
+     */
+    static GroupPlan planGroups(int[] lens, long maxArea, double maxWaste) {
+        int n = lens.length;
+        Integer[] boxed = new Integer[n];
+        for (int i = 0; i < n; i++) boxed[i] = i;
+        java.util.Arrays.sort(boxed, java.util.Comparator.comparingInt(i -> lens[i]));  // stable
+        int[] order = new int[n];
+        for (int k = 0; k < n; k++) order[k] = boxed[k];
+
+        List<int[]> groups = new ArrayList<>();
+        int start = 0;
+        while (start < n) {
+            int end = start + 1;
+            long realTokens = Math.max(lens[order[start]], 1);
+            int groupMaxLen = (int) realTokens;
+            while (end < n) {
+                int len = Math.max(lens[order[end]], 1);  // ascending: the new row is the new max
+                long size = end - start + 1;
+                if (size * len * len > maxArea) break;
+                if (size * len > (1.0 + maxWaste) * (realTokens + len)) break;
+                realTokens += len;
+                groupMaxLen = len;
+                end++;
+            }
+            groups.add(new int[]{start, end, groupMaxLen});
+            start = end;
+        }
+        return new GroupPlan(order, groups.toArray(new int[0][]));
     }
 
     /**

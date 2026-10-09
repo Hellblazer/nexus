@@ -3069,6 +3069,11 @@ class HttpVectorClient:
                     "path may be intercepted or stubbed; refusing to treat "
                     "the write as durable"
                 )
+        if n:
+            # Same rule as the combined write (HttpCatalogClient._post_embedding_write): a
+            # collection's first stored chunk adds it to the engine's listing.
+            from nexus.mcp_infra import note_collection_written  # noqa: PLC0415 — circular-dep avoidance (mcp_infra imports this module)
+            note_collection_written(collection)
         _log.debug(
             "http_vector_upsert_chunks",
             collection=collection,
@@ -3359,9 +3364,16 @@ class HttpVectorClient:
         include_source_uri: bool = False,
         rerank: bool = False,
         rerank_top_k: int | None = None,
+        rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
+
+        ``rerank_max_candidates`` (with ``rerank``) asks the engine to SCORE at
+        most that many rows, the first N in distance order; the others stay in
+        the result, unscored, behind the scored rows. Sent only with ``rerank``
+        (the engine 400s on it otherwise); ``None`` scores every row. An engine
+        that predates the field ignores it and scores every row.
 
         Param name ``collection_names`` (not ``collections``) matches
         ``T3Database.search`` (nexus-7zuzz). The HTTP body key stays
@@ -3423,6 +3435,8 @@ class HttpVectorClient:
             body["rerank"] = True
             if rerank_top_k is not None:
                 body["rerank_top_k"] = rerank_top_k
+            if rerank_max_candidates is not None:
+                body["rerank_max_candidates"] = rerank_max_candidates
             # Pace rerank requests on the shared brake (n75jg critique):
             # the reranker is the same upstream the brake trips on, and a
             # per-collection fan-out (search_cross_corpus) would otherwise
@@ -3605,6 +3619,7 @@ class HttpVectorClient:
         embeddings_limit: int | None = None,
         rerank: bool = False,
         rerank_top_k: int | None = None,
+        rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
@@ -3647,11 +3662,13 @@ class HttpVectorClient:
         engine 400s on one.
 
         ``rerank`` follows :meth:`search`: the degrade state lands in
-        *rerank_meta_out*, once for the whole request.
+        *rerank_meta_out*, once for the whole request. So does
+        *rerank_max_candidates*: the engine scores at most that many of the merged
+        rows, in distance order, and returns the rest unscored behind them.
 
         *include_embeddings* (nexus-92q1p) asks the engine for each surviving
         row's stored vector, read once after the merge, so a caller that needs
-        the vectors (the contradiction check, semantic clustering) makes no
+        the vectors (semantic clustering) makes no
         ``get-embeddings`` round trip per collection afterward. The rows come
         back with ``embedding_b64`` (base64 of little-endian float32), which
         this method DECODES and REMOVES from the rows, so a vector never lands
@@ -3696,6 +3713,8 @@ class HttpVectorClient:
             body["rerank"] = True
             if rerank_top_k is not None:
                 body["rerank_top_k"] = rerank_top_k
+            if rerank_max_candidates is not None:
+                body["rerank_max_candidates"] = rerank_max_candidates
             from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
             get_brake().wait()
 

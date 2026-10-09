@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from structlog.testing import capture_logs
 
 import nexus.aspect_worker as aw
 import nexus.daemon.aspect_worker_daemon as awd
@@ -38,13 +39,24 @@ from nexus.daemon.service_registry import (
     ttl_for_tier,
 )
 from nexus.db import storage_mode
+from tests._module_seam import setattr_in
+
+
+#: The real predicate, captured before the autouse fixture stubs it.
+_REAL_CLAUDE_AVAILABLE = awd._claude_available
 
 
 @pytest.fixture(autouse=True)
-def _clear_spawn_dedup():
+def _clear_spawn_dedup(monkeypatch):
     """The intra-process spawn-suppression dict is a module global; clear it so
-    one test's spawn does not suppress the next test's expected spawn."""
+    one test's spawn does not suppress the next test's expected spawn.
+
+    ``claude`` is present unless a test says otherwise: the spawner refuses to
+    fork without it, so these tests would otherwise depend on the box running
+    them having the binary installed."""
     awd._recent_spawn.clear()
+    monkeypatch.setattr(awd, "_claude_absent_logged", False)
+    monkeypatch.setattr(awd, "_claude_available", lambda: True)
     yield
     awd._recent_spawn.clear()
 
@@ -189,3 +201,127 @@ def test_enqueue_hook_service_mode_reaches_daemon_spawn(tmp_path, monkeypatch) -
         "/p/doc.pdf", "knowledge__o__m__v1", "content", doc_id="1.2.3",
     )
     assert len(_FakePopen.calls) == 1   # the hook chain reached the daemon-spawn path
+
+
+# ── no spawn without `claude` ────────────────────────────────────────────────
+#
+# Measured 2026-10-08 on a local-mode box without the `claude` binary: every
+# indexing step and every `nx store put` reached the spawner, which forked a
+# daemon that refused at once (`aspect_worker_daemon.missing_claude_credentials`)
+# 119 times and left a 400 KB crash log. The child's refusal stays as the
+# backstop; the spawner now checks the same precondition first.
+
+
+def test_no_spawn_without_claude(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(awd, "_claude_available", lambda: False)
+    _FakePopen.reset()
+
+    up = ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+
+    assert up is False, "no daemon is up and none was started"
+    assert _FakePopen.calls == []
+
+
+def test_the_absence_is_logged_once_per_process(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(awd, "_claude_available", lambda: False)
+    _FakePopen.reset()
+
+    with capture_logs() as logs:
+        for _ in range(5):
+            ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+
+    skipped = [e for e in logs if e["event"] == "aspect_worker_daemon.spawn_skipped_claude_absent"]
+    assert len(skipped) == 1, logs
+    assert skipped[0]["log_level"] == "warning"
+    assert "claude" in skipped[0]["hint"]
+    assert _FakePopen.calls == []
+
+
+def test_a_spawn_happens_when_claude_exists(tmp_path: Path, monkeypatch) -> None:
+    """The same call, claude present: it spawns and logs no absence."""
+    monkeypatch.setattr(awd, "_claude_available", lambda: True)
+    _FakePopen.reset()
+
+    with capture_logs() as logs:
+        up = ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+
+    assert up is True
+    assert len(_FakePopen.calls) == 1
+    assert not [e for e in logs if e["event"] == "aspect_worker_daemon.spawn_skipped_claude_absent"]
+
+
+def test_a_running_daemon_is_reported_up_even_when_claude_is_not_on_this_path(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A daemon some other process spawned is up; this process's PATH does not
+    change that, and the spawner has nothing to refuse."""
+    monkeypatch.setattr(awd, "_claude_available", lambda: False)
+    _publish_live_lease(tmp_path, "default")
+    _FakePopen.reset()
+
+    assert ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen) is True
+    assert _FakePopen.calls == []
+
+
+def test_the_availability_check_reads_path(monkeypatch) -> None:
+    """The real predicate, not the stub: it is what both the spawner and the
+    daemon's own guard ask."""
+    setattr_in(monkeypatch, awd, "shutil.which", lambda name: None)
+    assert _REAL_CLAUDE_AVAILABLE() is False
+    setattr_in(monkeypatch, awd, "shutil.which", lambda name: "/usr/local/bin/claude" if name == "claude" else None)
+    assert _REAL_CLAUDE_AVAILABLE() is True
+
+
+def test_the_daemons_own_refusal_remains_the_backstop(monkeypatch) -> None:
+    monkeypatch.setattr(awd, "_claude_available", lambda: False)
+    with pytest.raises(RuntimeError, match="claude"):
+        awd._require_extraction_credentials()
+
+
+@pytest.mark.parametrize("claude_on_path", [False, True])
+def test_the_spawner_and_the_daemon_guard_share_one_predicate(
+    tmp_path: Path, monkeypatch, claude_on_path: bool,
+) -> None:
+    """The spawner and the daemon's own guard must ask the SAME question.
+
+    The autouse stub is lifted and the real predicate restored, then the only
+    input is ``shutil.which``: flipping it must flip BOTH the spawner (spawns
+    or not) and the guard (raises or not). Two predicates that happened to
+    agree on a stub would diverge here; a stub-only test could not see it.
+    """
+    monkeypatch.setattr(awd, "_claude_available", _REAL_CLAUDE_AVAILABLE)
+    setattr_in(
+        monkeypatch, awd, "shutil.which", lambda name: "/usr/local/bin/claude" if claude_on_path else None,
+    )
+    _FakePopen.reset()
+
+    up = ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+    if claude_on_path:
+        awd._require_extraction_credentials()  # does not raise
+    else:
+        with pytest.raises(RuntimeError, match="claude"):
+            awd._require_extraction_credentials()
+
+    assert up is claude_on_path
+    assert len(_FakePopen.calls) == (1 if claude_on_path else 0)
+
+
+def test_both_entry_points_call_through_the_module_level_predicate(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Replacing ``_claude_available`` moves both entry points together, in both
+    directions, and each is observed refusing then allowing."""
+    state = {"available": False}
+    monkeypatch.setattr(awd, "_claude_available", lambda: state["available"])
+
+    for available in (False, True):
+        state["available"] = available
+        awd._recent_spawn.clear()
+        _FakePopen.reset()
+        up = ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+        guard_raised = False
+        try:
+            awd._require_extraction_credentials()
+        except RuntimeError:
+            guard_raised = True
+        assert (up, guard_raised) == (available, not available)

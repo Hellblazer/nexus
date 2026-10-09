@@ -50,9 +50,12 @@ class _FakePopen:
 
 
 @pytest.fixture(autouse=True)
-def _reset() -> Any:
+def _reset(monkeypatch) -> Any:
     _FakePopen.calls = []
     awd._recent_spawn.clear()
+    # The spawner will not fork without `claude`; these tests are about HOW it
+    # forks, so they must not depend on the box having the binary.
+    monkeypatch.setattr(awd, "_claude_available", lambda: True)
     yield
     awd._recent_spawn.clear()
 

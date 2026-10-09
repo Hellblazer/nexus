@@ -28,7 +28,7 @@ from nexus.mcp_infra import (
     TAXONOMY_DEFER_UPTIME_S,
     TAXONOMY_FAILURE_BACKOFF_S,
     DrainResult,
-    decide_taxonomy_deferral,
+    decide_taxonomy_deferral_window,
     drain_unassigned_chunks,
     record_taxonomy_failure,
 )
@@ -46,9 +46,9 @@ def _clear_deferral(monkeypatch):
 
 
 def _decide(tmp_path, uptime):
-    return decide_taxonomy_deferral(
+    return decide_taxonomy_deferral_window(
         uptime_fn=lambda: uptime, marker=tmp_path / "taxonomy_assign_failed_at", now_fn=lambda: _NOW,
-    )
+    ).reason
 
 
 # ── the decision ──────────────────────────────────────────────────────────────
@@ -169,7 +169,7 @@ def test_index_repo_defers_after_a_restart_and_says_so(tmp_path, monkeypatch, t2
     out = _index_repo(tmp_path, monkeypatch, uptime=30)
 
     assert out.exit_code == 0, out.output
-    assert "Taxonomy deferred: engine restarted 30 s ago" in out.output, out.output
+    assert "Taxonomy deferred: engine restarted 30 s before this run began" in out.output, out.output
     assert drained == [], "the drain is deferred too"
     assert mcp_infra.taxonomy_deferral() == "", "the flag does not outlive the command"
 
@@ -218,8 +218,8 @@ def test_the_marker_is_per_engine_and_survives_token_rotation(tmp_path, monkeypa
     assert "tok-a" not in a.name and "engine-a" not in a.name, "no raw endpoint or token on disk"
 
     record_taxonomy_failure(a, now=_NOW)
-    assert "failed" in decide_taxonomy_deferral(uptime_fn=lambda: None, marker=a, now_fn=lambda: _NOW)
-    assert decide_taxonomy_deferral(uptime_fn=lambda: None, marker=b, now_fn=lambda: _NOW) == ""
+    assert "failed" in decide_taxonomy_deferral_window(uptime_fn=lambda: None, marker=a, now_fn=lambda: _NOW).reason
+    assert decide_taxonomy_deferral_window(uptime_fn=lambda: None, marker=b, now_fn=lambda: _NOW).reason == ""
 
 
 def test_thresholds_are_env_tunable(tmp_path, monkeypatch) -> None:
@@ -232,7 +232,7 @@ def test_thresholds_are_env_tunable(tmp_path, monkeypatch) -> None:
     marker = tmp_path / "m"
     record_taxonomy_failure(marker, now=_NOW - 100)
     monkeypatch.setenv("NX_TAXONOMY_FAILURE_BACKOFF_S", "50")
-    assert decide_taxonomy_deferral(uptime_fn=lambda: None, marker=marker, now_fn=lambda: _NOW) == ""
+    assert decide_taxonomy_deferral_window(uptime_fn=lambda: None, marker=marker, now_fn=lambda: _NOW).reason == ""
 
 
 @pytest.mark.parametrize("payload,expected", [
@@ -267,9 +267,9 @@ def test_uptime_probe_failure_is_no_evidence(monkeypatch) -> None:
 def test_a_future_dated_marker_defers_nothing(tmp_path) -> None:
     """Clock skew or a corrupted marker must not defer indefinitely."""
     record_taxonomy_failure(tmp_path / "m", now=_NOW + 3600)
-    assert decide_taxonomy_deferral(
+    assert decide_taxonomy_deferral_window(
         uptime_fn=lambda: None, marker=tmp_path / "m", now_fn=lambda: _NOW,
-    ) == ""
+    ).reason == ""
 
 
 def test_no_taxonomy_still_defers_and_records(tmp_path, monkeypatch, t2_service_env) -> None:
@@ -291,7 +291,7 @@ def test_no_taxonomy_still_defers_and_records(tmp_path, monkeypatch, t2_service_
             patch("nexus.indexer.index_repository", side_effect=_lossy_index):
         out = CliRunner().invoke(main, ["index", "repo", str(repo), "--no-taxonomy"])
 
-    assert "Taxonomy deferred: engine restarted 30 s ago" in out.output, out.output
+    assert "Taxonomy deferred: engine restarted 30 s before this run began" in out.output, out.output
     assert out.exit_code != 0, out.output
     assert mcp_infra.taxonomy_failure_marker_path(nexus_config_dir()).exists()
 
@@ -350,3 +350,182 @@ def test_discovery_waits_out_the_window_too(tmp_path, monkeypatch, t2_service_en
     out = _run(None)
     assert out.exit_code == 0, out.output
     assert calls == [None] or (calls and calls[0] != []), calls
+
+
+# ── the deferral is a time window, not a verdict on the whole run ─────────────
+#
+# Measured 2026-10-08 (nexus/search-latency-local-mode-2026-10-08): an index
+# started 102 s after `nx init` started the engine deferred taxonomy for the
+# whole 2.9 h, 22,848-chunk run, because the decision was made once at start.
+
+
+class _Clock:
+    """A controllable monotonic clock for the deferral deadline."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _Clock:
+    c = _Clock()
+    monkeypatch.setattr(mcp_infra, "_taxonomy_clock", c)
+    return c
+
+
+def test_the_decision_carries_the_time_left_in_the_window(tmp_path) -> None:
+    d = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: 102, marker=tmp_path / "m", now_fn=lambda: _NOW,
+    )
+    assert d.expires_in_s == TAXONOMY_DEFER_UPTIME_S - 102
+    assert "102 s before this run began" in d.reason, "the reason names the START of the run, not the end"
+
+    marker = tmp_path / "m"
+    record_taxonomy_failure(marker, now=_NOW - 100)
+    d = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: None, marker=marker, now_fn=lambda: _NOW,
+    )
+    assert TAXONOMY_FAILURE_BACKOFF_S - 100 <= d.expires_in_s <= TAXONOMY_FAILURE_BACKOFF_S - 99
+
+    none = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: None, marker=tmp_path / "absent", now_fn=lambda: _NOW,
+    )
+    assert none.reason == "" and none.expires_in_s == 0
+
+
+def test_both_windows_applying_takes_the_longer_and_names_both(tmp_path) -> None:
+    """Engine restarted 100 s ago (500 s of warm-up left) and a failure marker
+    10 s old (890 s of backoff left): the deferral lifts at 890 s, not 500 s."""
+    marker = tmp_path / "m"
+    record_taxonomy_failure(marker, now=_NOW - 10)
+    d = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: 100, marker=marker, now_fn=lambda: _NOW,
+    )
+    assert TAXONOMY_FAILURE_BACKOFF_S - 10 <= d.expires_in_s <= TAXONOMY_FAILURE_BACKOFF_S - 9
+    assert d.expires_in_s > TAXONOMY_DEFER_UPTIME_S - 100
+    assert "restarted" in d.reason and "failed" in d.reason
+
+    # and the other way round: the warm-up is the longer one
+    record_taxonomy_failure(marker, now=_NOW - (TAXONOMY_FAILURE_BACKOFF_S - 5))
+    d = mcp_infra.decide_taxonomy_deferral_window(
+        uptime_fn=lambda: 1, marker=marker, now_fn=lambda: _NOW,
+    )
+    assert d.expires_in_s == TAXONOMY_DEFER_UPTIME_S - 1
+    assert "restarted" in d.reason and "failed" in d.reason
+
+
+def test_a_bounded_deferral_lifts_at_its_deadline(clock) -> None:
+    mcp_infra.set_taxonomy_deferral("engine restarted 102 s before", expires_in_s=498)
+    clock.now += 497
+    assert mcp_infra.taxonomy_deferral() != ""
+    assert mcp_infra.taxonomy_deferral_lifted_after_s() is None
+    clock.now += 3000
+    assert mcp_infra.taxonomy_deferral() == ""
+    assert mcp_infra.taxonomy_deferral_lifted_after_s() == 498, (
+        "reports the deadline, not the moment someone looked"
+    )
+
+
+def test_an_unbounded_deferral_never_lifts_by_itself(clock) -> None:
+    mcp_infra.set_taxonomy_deferral("manual")
+    clock.now += 10**6
+    assert mcp_infra.taxonomy_deferral() == "manual"
+
+
+def test_the_flush_hook_assigns_once_the_window_has_passed(monkeypatch, clock) -> None:
+    calls: list[int] = []
+
+    def _ok(collection, doc_ids, **kw):
+        calls.append(len(doc_ids))
+        return {"assigned": len(doc_ids)}, [], []
+
+    monkeypatch.setattr(mcp_infra, "_assign_from_chashes_with_retry", _ok)
+    monkeypatch.setattr("nexus.db.http_vector_client.is_service_backed", lambda _t3: True)
+    monkeypatch.setattr(mcp_infra, "get_t3", lambda: object())
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    mcp_infra.set_taxonomy_deferral("engine restarted 102 s before", arm_breaker=True, expires_in_s=498)
+
+    mcp_infra.taxonomy_assign_batch_hook(["a" * 64], "docs__c", [], None, None)
+    clock.now += 499
+    mcp_infra.taxonomy_assign_batch_hook(["b" * 64, "c" * 64], "docs__c", [], None, None)
+
+    assert calls == [2], "the batch inside the window is deferred, the one after it is assigned"
+    assert mcp_infra.taxonomy_assign_run_stats()["deferred_chunks"] == 1
+
+
+def test_a_lost_batch_after_the_window_still_trips_the_breaker(monkeypatch, clock) -> None:
+    monkeypatch.setattr(
+        mcp_infra, "_assign_from_chashes_with_retry",
+        lambda collection, doc_ids, **kw: ({"assigned": 0}, list(doc_ids), ["HTTP 500"]),
+    )
+    monkeypatch.setattr("nexus.db.http_vector_client.is_service_backed", lambda _t3: True)
+    monkeypatch.setattr(mcp_infra, "get_t3", lambda: object())
+    monkeypatch.setattr(mcp_infra, "_record_taxonomy_tripwire", lambda *a, **kw: None)
+    mcp_infra.set_taxonomy_deferral("engine restarted 102 s before", arm_breaker=True, expires_in_s=10)
+    clock.now += 11
+
+    mcp_infra.taxonomy_assign_batch_hook(["a" * 64], "docs__c", [], None, None)
+
+    assert "failed earlier in this run" in mcp_infra.taxonomy_deferral()
+    clock.now += 10**6
+    assert mcp_infra.taxonomy_deferral() != "", "the breaker's deferral lasts the run"
+
+
+def _index_run_longer_than_the_window(tmp_path, monkeypatch, clock, *, argv=()):
+    """An engine that restarted 30 s before the run; the run lasts 3 h."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    reg = MagicMock()
+    reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
+    monkeypatch.setattr(mcp_infra, "engine_process_uptime_seconds", lambda: 30)
+    mcp_infra.reset_taxonomy_assign_run_stats()
+
+    def _long_index(*a, **kw):
+        mcp_infra._record_taxonomy_deferred(5)  # a batch inside the window
+        clock.now += 3 * 3600
+        return {"files_changed": 3}
+
+    with patch("nexus.commands.index._registry", return_value=reg), \
+            patch("nexus.indexer.index_repository", side_effect=_long_index):
+        return CliRunner().invoke(main, ["index", "repo", str(repo), *argv])
+
+
+def test_a_run_longer_than_the_window_drains_and_discovers_at_the_end(
+    tmp_path, monkeypatch, clock, t2_service_env,
+) -> None:
+    drained: list[str] = []
+    discovered: list = []
+    monkeypatch.setattr(
+        mcp_infra, "drain_unassigned_chunks",
+        lambda name, **kw: drained.append(name) or DrainResult(name, True),
+    )
+    monkeypatch.setattr(
+        "nexus.commands.index.run_collection_postprocessing",
+        lambda collections, **kw: discovered.append(kw.get("discover_collections")),
+    )
+
+    out = _index_run_longer_than_the_window(tmp_path, monkeypatch, clock)
+
+    assert out.exit_code == 0, out.output
+    assert drained == ["docs__myrepo"], "the window lifted mid-run, so the end-of-run drain runs"
+    assert discovered and discovered[0] != [], "and so does discovery"
+    window = TAXONOMY_DEFER_UPTIME_S - 30
+    assert f"assignment resumes {window} s into this run" in out.output, out.output
+    # The closing line states the real duration and cause, not "restarted N s ago".
+    assert f"5 chunk(s) deferred during the first {window} s of the run" in out.output, out.output
+    assert "engine restarted 30 s before this run began" in out.output
+    assert "engine restarted 30 s ago" not in out.output
+
+
+def test_no_taxonomy_run_does_not_claim_a_drain_it_skipped(
+    tmp_path, monkeypatch, clock, t2_service_env,
+) -> None:
+    out = _index_run_longer_than_the_window(tmp_path, monkeypatch, clock, argv=("--no-taxonomy",))
+    assert out.exit_code == 0, out.output
+    assert "end-of-run drain" not in out.output, out.output
+    assert "a later run's drain assigns them" in out.output, out.output

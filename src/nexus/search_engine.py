@@ -13,7 +13,7 @@ from typing import Any
 import structlog
 
 from nexus import call_deadline
-from nexus.config import TuningConfig, get_telemetry_config, load_config
+from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import (
     HttpVectorClient,
@@ -573,8 +573,9 @@ def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) 
     - No server rerank: the page is within noise at fetch sizes 10 and 30
       (the case the MCP ``search`` tool is in by default).
     - Server rerank on: the page is NOT within noise at any lean floor
-      tried. The reranker reads exactly the rows fetched per batch and picks
-      the page from them, so a smaller pool hides rows it would have ranked
+      tried. The reranker read every row fetched per batch (before
+      ``rerank_max_candidates`` existed; see :func:`_rerank_candidate_cap`
+      for what local mode now does) and picked the page from them, so a smaller pool hides rows it would have ranked
       first; mean top-10 overlap with the old page fell to about 0.7 where
       the old page against itself was 1.0, and raising the floor to ``n``
       or ``n * mult // 2`` recovered only part of it. The reranked path
@@ -600,6 +601,74 @@ def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) 
 #: than learns it from the refusal (nexus-tu8wp.2, critique-tu8wp1 trap 3).
 _PER_COLLECTION_MAX_LIMIT = 1200
 _PER_COLLECTION_RERANK_MAX_LIMIT = 1000
+
+#: The LOCAL cross-encoder scores a CAPPED candidate set, not every candidate
+#: (Sam, 2026-10-08). Measured in T2
+#: ``nexus/search-latency-local-mode-2026-10-08``: a default ``nx search`` in
+#: local mode took 4.0 to 5.4 s on an M5 Pro, and 3.5 to 4.9 s of that was the
+#: engine's ms-marco-minilm-l6-v2 scoring all 135 candidates at up to 512
+#: tokens each. The engine scores the first ``max(_RERANK_CANDIDATE_MULTIPLIER *
+#: n_results, _RERANK_CANDIDATE_FLOOR)`` rows in vector order; the rest stay in
+#: the result, unscored and in vector order, behind the scored rows. A page
+#: needs ``n_results`` rows, so the cap leaves the reranker three times that
+#: many to choose from, with a floor of 60.
+#:
+#: The floor was 30 until a page-quality measurement (T2
+#: ``nexus/rerank-cap-page-quality-2026-10-08`` [29696], 40 queries, n=10): 30
+#: kept 6.5 of the uncapped top 10 and lost canonical answers in a hand check
+#: (uncapped better on 5 of 10, capped on 2), and it dropped prose rows twice as
+#: often as code, because prose sits deeper in vector order. 60 keeps 9.0 of 10
+#: and still scores 1.45 s instead of 3.4 s on an M5 Pro; 90 matched uncapped.
+#: Sam chose 60, 2026-10-08.
+#:
+#: The DEFAULT applies in local mode only. The latency evidence is the local
+#: cross-encoder; the cloud reranks with Voyage, and the only page-quality
+#: measurement on file (nexus-abdp2, T2 [28984]) was taken in the cloud and
+#: found the reranked page sensitive to the pool it reads, so cloud keeps
+#: scoring every candidate unless ``search.rerank_max_candidates`` says
+#: otherwise. An explicit integer there applies in BOTH modes (``0`` scores
+#: every candidate).
+_RERANK_CANDIDATE_MULTIPLIER = 3
+_RERANK_CANDIDATE_FLOOR = 60
+
+
+def _rerank_candidate_cap(
+    n_results: int, cfg: dict, *, deep_candidates: bool = False,
+) -> int | None:
+    """The ``rerank_max_candidates`` to send with a rerank request, or ``None``
+    for no cap.
+
+    *deep_candidates* (a caller that filters the pool AFTER retrieval:
+    ``nx search --path`` / ``--max-file-chunks``) is never capped: the filter
+    keeps a minority of the pool, and with a cap most of the survivors would
+    come back unscored behind the scored rows.
+
+    Otherwise ``search.rerank_max_candidates``: a positive integer = that many,
+    in either mode; ``0`` = no cap; unset = the default ``max(3 * n_results, 60)``
+    in local mode and no cap in cloud mode. A negative, non-integer or bool
+    value is a config mistake that must not silently disable the cap or break
+    search: logged, and the mode's default applies."""
+    if deep_candidates:
+        return None
+    default = (
+        max(_RERANK_CANDIDATE_MULTIPLIER * n_results, _RERANK_CANDIDATE_FLOOR)
+        if is_local_mode() else None
+    )
+    configured = (cfg.get("search") or {}).get("rerank_max_candidates")
+    if configured is None:
+        return default
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured or None
+    _log.warning(
+        "search_rerank_max_candidates_invalid",
+        value=repr(configured),
+        consequence=(
+            f"the default cap of {default} applies" if default is not None
+            else "no cap applies (cloud mode)"
+        ),
+    )
+    return default
+
 
 #: Collections one per-collection request may name; a larger model group is
 #: sent as several requests and merged client-side.
@@ -939,9 +1008,11 @@ def search_cross_corpus(
     filters the returned pool AFTER retrieval (``nx search --path`` and
     ``--max-file-chunks`` do) passes it, because a post-filter sees only the
     rows fetched and the lean floor can leave it fewer. Server rerank and
-    *lexical* imply it without being asked: the reranker reads exactly the
-    rows fetched per batch (see :func:`_per_collection_floor` for the
-    measurement).
+    *lexical* imply it without being asked: the reranker reads the rows
+    fetched per batch, all of them in cloud mode and the first
+    ``max(3 * n_results, 30)`` in local mode (:func:`_rerank_candidate_cap`);
+    :func:`_per_collection_floor` has the cloud measurement, taken before the
+    cap existed. A *deep_candidates* caller is never capped.
 
     *rerank* (RDR-188, bead nexus-9o6y2.8): request the SERVER's fused
     rerank stage on each per-collection call. Only honored when *t3*
@@ -1012,14 +1083,17 @@ def search_cross_corpus(
     #: Result ids the lexical leg returned, across every batch. Read by
     #: :func:`_cap_enrichment_pool`, which never drops one.
     pool_lexical_ids: set[str] = set()
-    # nexus-92q1p: the contradiction check and semantic clustering need each result's
-    # stored vector. The per-collection route returns them with the rows
-    # (``include_embeddings``), so the 14 to 22 per-collection ``get-embeddings`` round
-    # trips of ``_fetch_embeddings_for_results`` are only the fallback for the rows the
-    # route did not carry. Keyed by (collection, id): the raw little-endian float32 bytes.
-    want_embeddings = bool(
-        cfg.get("search", {}).get("contradiction_check", True) or cluster_by == "semantic"
-    )
+    # nexus-92q1p: semantic clustering needs each pooled result's stored vector. The
+    # per-collection route returns them with the rows (``include_embeddings``), so the 14 to
+    # 22 per-collection ``get-embeddings`` round trips of ``_fetch_embeddings_for_results``
+    # are only the fallback for the rows the route did not carry. Keyed by (collection, id):
+    # the raw little-endian float32 bytes.
+    #
+    # The contradiction check does not ask for them and does not run in this function (search
+    # latency, nexus-92q1p follow-up, Sam 2026-10-08): it runs on the rows a search DISPLAYS,
+    # after the caller's boosts, caps and paging, in :func:`flag_displayed_contradictions`.
+    # Only the opt-in semantic clustering still wants a vector per pooled row.
+    want_embeddings = cluster_by == "semantic"
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
@@ -1043,6 +1117,13 @@ def search_cross_corpus(
 
     # RDR-188: only a capability-marked backend is asked to rerank.
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
+    # The vector legs' rerank scores at most this many rows (None: all). The
+    # lexical leg is deliberately not capped: see ``_lexical_rows``.
+    rerank_cap = (
+        _rerank_candidate_cap(n_results, cfg, deep_candidates=deep_candidates)
+        if server_rerank else None
+    )
+    rerank_cap_kw = {"rerank_max_candidates": rerank_cap} if rerank_cap is not None else {}
     # nexus-abdp2: the reranked and lexical paths, and any caller that
     # post-filters the pool, need the deep per-collection floor.
     deep_pool = bool(server_rerank) or lexical or deep_candidates
@@ -1117,6 +1198,10 @@ def search_cross_corpus(
             # tail server-side (VectorHandler#sendSearchResult), so the
             # two legs' scores are on the same scale by construction and
             # the rows can be ordered against each other honestly.
+            #
+            # NOT capped by rerank_max_candidates (the vector legs are): a
+            # lexical-only hit can sit deep in the fused order, and capping
+            # would leave it unscored, in the tail the CLI drops.
             if server_rerank:
                 lex_meta: dict = {}
                 lex_raw = t3.hybrid_search(
@@ -1181,7 +1266,7 @@ def search_cross_corpus(
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
-                                rerank=True, rerank_meta_out=rerank_meta)
+                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw)
             else:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where)
             if lexical:
@@ -1425,6 +1510,7 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
+                **rerank_cap_kw,
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(
@@ -1835,25 +1921,17 @@ def search_cross_corpus(
         except Exception:  # noqa: BLE001 — best-effort topic assignment; failure logged at debug, boost/grouping skipped
             _log.debug("topic_assignments_failed", exc_info=True)
 
-    # Fetch embeddings once if either contradiction detection OR clustering
-    # needs them — avoids double fetching (F1 fix). Per-collection failures
-    # are isolated: failed indices are excluded from feature processing but
-    # do not suppress the features for successfully-fetched collections (R3-1).
-    contradiction_enabled = cfg.get("search", {}).get("contradiction_check", True)
-    needs_embeddings = (contradiction_enabled or cluster_by == "semantic") and all_results
+    # Semantic clustering needs a vector per pooled row (Ward fallback), fetched once here.
+    # Per-collection failures are isolated: failed indices are excluded from clustering but
+    # do not suppress it for successfully-fetched collections (R3-1).
     fetched_embeddings = None
     failed_indices: set[int] = set()
-    if needs_embeddings:
+    if cluster_by == "semantic" and all_results:
         call_deadline.check("search_cross_corpus:before_embeddings")
         fetched_embeddings, failed_indices = _embeddings_for_results(
             all_results, t3, prefetched_embeddings,
         )
         call_deadline.check("search_cross_corpus:after_embeddings")
-
-    # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
-    # search.contradiction_check=false in .nexus.yml.
-    if contradiction_enabled and all_results and fetched_embeddings is not None:
-        all_results = _flag_contradictions(all_results, fetched_embeddings, failed_indices)
 
     if cluster_by == "semantic" and all_results:
         topic_grouped = False
@@ -2307,6 +2385,78 @@ def _fetch_embeddings_for_results(
     return embeddings, failed_indices
 
 
+#: Search review I-8: cap the O(n²) pairwise contradiction check per collection. At 30
+#: rows the pair count is 435; above that the pairwise signal is rarely informative and the
+#: cost grows quadratically. The check now runs on one rendered page, so this bounds a
+#: collection's share of THAT page: a collection with more than 30 candidate rows on the
+#: page is neither fetched for nor checked (a page is at most 300 rows).
+_CONTRADICTION_MAX_PER_COLLECTION: int = 30
+
+
+def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
+    """Indices (ascending) of the rows of one rendered *page* that could be flagged.
+
+    Search latency (nexus-92q1p follow-up, Sam 2026-10-08, measured at 7.9 s for a
+    limit-10 default-corpus search with up to 300 pooled vectors per call): RDR-057
+    Phase 3a designed the contradiction check over the RETURNED results ("~2 ms for
+    N=10"), and the flag renders only on displayed rows.
+
+    :func:`_flag_contradictions` flags a pair only when both rows share a collection and
+    both carry a non-empty, different ``source_agent``. A row is therefore a candidate
+    only if it has a ``source_agent`` and its collection also holds, on the page, a row
+    with a different one. The indexer stamps every code/docs/rdr chunk with one agent
+    (``nexus-indexer``; ``recovery_bundle`` stamps ``recovery-import``), so those
+    collections yield none unless an import put a second agent in the same collection;
+    a knowledge collection holding notes from two or more agents does. A collection with
+    more candidates than :data:`_CONTRADICTION_MAX_PER_COLLECTION` is skipped by the check
+    and so is not fetched for.
+    """
+    by_col: dict[str, list[int]] = {}
+    for i, r in enumerate(page):
+        if r.metadata.get("source_agent"):
+            by_col.setdefault(r.collection, []).append(i)
+    out: list[int] = []
+    for idxs in by_col.values():
+        if len({page[i].metadata["source_agent"] for i in idxs}) < 2:
+            continue
+        if len(idxs) > _CONTRADICTION_MAX_PER_COLLECTION:
+            continue
+        out.extend(idxs)
+    return sorted(out)
+
+
+def flag_displayed_contradictions(page: list[SearchResult], t3: Any) -> list[SearchResult]:
+    """:func:`_flag_contradictions` over the rows of one rendered *page*, candidates only.
+
+    *page* is the rows a search is about to display, in display order, after the
+    caller's ranking boosts, file-diversity cap and offset/limit slice (the MCP
+    ``search`` text render is the one reader of the flag). Returns a list of the same
+    length and order; a flagged row is a copy, so a cached row is never mutated. Vectors
+    come from :func:`_fetch_embeddings_for_results`, one ``get-embeddings`` call per
+    collection that holds a candidate (in parallel), and none when there is no candidate.
+
+    A collection whose fetch fails (or comes back the wrong shape) leaves its rows
+    unflagged and the other collections' flags intact; any other failure leaves the page
+    unflagged. Neither fails the search, so the check stays an annotation, never a gate.
+    """
+    cands = _contradiction_candidates(page)
+    if not cands:
+        return list(page)
+    sub = [page[i] for i in cands]
+    try:
+        sub_emb, sub_failed = _fetch_embeddings_for_results(sub, t3)
+        if sub_emb is None:
+            return list(page)
+        flagged = _flag_contradictions(sub, sub_emb, sub_failed)
+    except Exception:  # noqa: BLE001 — the flag is an annotation; any failure leaves the page unflagged, logged at debug
+        _log.debug("contradiction_check_failed", exc_info=True)
+        return list(page)
+    out = list(page)
+    for k, i in enumerate(cands):
+        out[i] = flagged[k]
+    return out
+
+
 def _flag_contradictions(
     results: list[SearchResult],
     embeddings: "np.ndarray",
@@ -2339,12 +2489,9 @@ def _flag_contradictions(
 
     flagged: set[int] = set()
     pairs_checked = 0
-    # Search review I-8: cap the O(n²) pairwise check to keep a single
-    # noisy collection (near-duplicate chunks, e.g. a knowledge__* corpus
-    # with repeated boilerplate) from dominating search-engine latency.
-    # At 30 indices, the pair count is 435 — above that the pairwise
-    # signal is rarely informative and the cost grows quadratically.
-    _CONTRADICTION_MAX_PER_COLLECTION = 30
+    # Search review I-8: the per-collection cap (_CONTRADICTION_MAX_PER_COLLECTION)
+    # keeps a single noisy collection (near-duplicate chunks, e.g. a knowledge__*
+    # corpus with repeated boilerplate) from dominating search-engine latency.
     for col, indices in col_groups.items():
         if len(indices) < 2:
             continue
@@ -2397,7 +2544,7 @@ def _apply_clustering(
     """Cluster results using pre-fetched embeddings, returning flat list with labels.
 
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
-    duplicate ChromaDB round-trips when contradiction detection also runs.
+    a second embedding fetch.
     """
     from nexus.search_clusterer import cluster_results  # noqa: PLC0415 — branch-local; only when clustering applied
 

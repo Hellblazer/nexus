@@ -28,6 +28,11 @@ import pytest
 from structlog.testing import capture_logs
 
 import nexus.catalog.note_write as nw
+
+# Imported before any test patches nexus.corpus.ensure_collection_registered: doc_indexer binds that
+# name at import time, so a first import while the patch is live keeps the refusing double for the
+# rest of the worker, and later index tests in the worker fail on it.
+import nexus.doc_indexer  # noqa: F401
 from nexus.catalog.note_write import (
     NO_CATALOG,
     NOT_LANDED,

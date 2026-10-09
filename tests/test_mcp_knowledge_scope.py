@@ -43,7 +43,7 @@ def scope(monkeypatch):
         "nexus.mcp_infra.get_collection_row",
         lambda name: {"content_type": name.split("__", 1)[0], "lifecycle_state": "live"},
     )
-    monkeypatch.setattr(core, "_get_collection_counts", lambda: {ALPHA: 2, BETA: 2, CODE: 5})
+    monkeypatch.setattr(core, "_get_collection_counts", lambda **_kw: {ALPHA: 2, BETA: 2, CODE: 5})
     with patch("nexus.mcp.core._get_t3", return_value=t3):
         yield t3, ids
 

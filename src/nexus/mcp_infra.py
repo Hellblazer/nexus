@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from nexus.config import default_db_path
 from nexus.service_handles import SharedClientSlot, cached_endpoint_key
@@ -112,18 +112,42 @@ _t3_lock = threading.Lock()
 #: SAME ``/v1/vectors/stats`` round trip this cache already makes -- see
 #: :func:`get_collection_row`.
 _collections_cache: tuple[list[str], dict[str, int], dict[str, dict], float] = ([], {}, {}, 0.0)
+#: How long NAMES and registry ROWS are served from the cache. They refresh from the catalog-only
+#: routing listing, which is cheap, and another process can create or retire a collection at any
+#: time, so this stays at a minute.
 _COLLECTIONS_CACHE_TTL = 60.0
+#: How long the per-collection chunk COUNTS are served from the cache (Sam, 2026-10-08). The counts
+#: size the default search fan-out (a collection below
+#: ``nexus.mcp.core._FANOUT_MIN_COLLECTION_CHUNK_COUNT`` chunks is excluded), and they come from the
+#: full ``GET /v1/vectors/stats``: about 380 ms on a local engine and 0.73 s on the managed service
+#: (T2 nexus/search-latency-local-mode-2026-10-08 and the cloud record). At the old 60 s every
+#: interactive search spaced more than a minute from the last paid it (measured 724 ms cold, 209 ms
+#: warm, 588 ms after a 65 s wait). Staleness has one effect: a collection that another process grew
+#: past the floor is skipped by the default fan-out for at most this long (a collection named
+#: explicitly is never affected). This process's own writes drop the counts at once, see
+#: :func:`invalidate_collections_cache`. A caller that PRINTS sizes passes ``max_age`` to
+#: :func:`get_collection_counts` for a tighter bound.
+_COLLECTION_COUNTS_TTL = 15 * 60.0
+#: When the counts in ``_collections_cache`` were last read from the engine (``_now()`` clock).
+#: A routing refresh of the names carries the counts forward WITHOUT moving this, so the counts
+#: age on their own clock. 0.0 is "never", and what an invalidation resets it to.
+_collections_counts_ts: float = 0.0
 #: Whether ``_collections_cache``'s counts map holds real counts (nexus-mz9jv). The cache is
 #: filled from the catalog-only routing listing when the engine serves it, which has no
 #: counts: names and registry rows are all most callers read, and the full listing makes the
 #: engine count every collection's live chunks (100 to 560 ms at a 75,000-chunk tenant, 3.5 s
 #: measured on the managed service). ``False`` after a routing fill;
 #: :func:`get_collection_counts` then does the full fetch, once, when a caller asks.
-_collections_counts_loaded: bool = True
+_collections_counts_loaded: bool = False
 #: Guards the (``_collections_cache``, ``_collections_counts_loaded``) pair: they describe one
 #: listing and are installed together, so a concurrent full fetch and TTL refresh cannot leave a
 #: routing cache beside a ``True`` flag (which would read counts as ``{}`` until the TTL).
 _collections_cache_lock = threading.Lock()
+#: Bumped by every :func:`invalidate_collections_cache` (review of 1d57bb6cd, minor 1). A fetch
+#: reads it before its round trip and installs only if it has not moved: a full listing that
+#: started before an in-process write would otherwise install its pre-write counts after the
+#: write's invalidation and keep them for the whole 15 minute counts window.
+_collections_cache_generation: int = 0
 
 # nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
 # its 8 pooled httpx.Client connections) across calls instead of building one
@@ -520,9 +544,21 @@ def record_taxonomy_discover_attempt(
 _taxonomy_deferral = ""
 _taxonomy_breaker_armed = False
 _taxonomy_deferral_lock = threading.Lock()
+#: Monotonic deadline after which a time-bounded deferral (engine warm-up,
+#: failure backoff) lifts by itself; ``None`` = no deadline (the in-run
+#: breaker's deferral, which lasts the whole run). Set with the reason.
+_taxonomy_deferral_until: float | None = None
+#: Monotonic stamps of when the current deferral was set and, if it lifted by
+#: its deadline, when: the closing message states the real elapsed time.
+_taxonomy_deferral_set_at: float | None = None
+_taxonomy_deferral_lifted_at: float | None = None
+#: The clock the deadline reads; tests replace it to move time.
+_taxonomy_clock = time.monotonic
 
 
-def set_taxonomy_deferral(reason: str, *, arm_breaker: bool = False) -> None:
+def set_taxonomy_deferral(
+    reason: str, *, arm_breaker: bool = False, expires_in_s: float | None = None,
+) -> None:
     """Defer taxonomy assignment for this process (``""`` clears it).
 
     *arm_breaker* lets a lost batch defer the rest of the run (see
@@ -530,25 +566,65 @@ def set_taxonomy_deferral(reason: str, *, arm_breaker: bool = False) -> None:
     the duration of the command: a long-lived process such as the MCP
     server must never have one failure switch its assigns off for good.
     Clearing (``""``) disarms it.
+
+    *expires_in_s* bounds the deferral: it lifts that many seconds from now
+    without anyone clearing it. The conditions that defer a run at its start
+    (a freshly restarted engine, a recent loss) are time windows, and a run
+    can outlast them by hours; a flag fixed at start deferred a whole 2.9 h
+    first index because the engine had restarted 102 s before it began.
     """
     global _taxonomy_deferral, _taxonomy_breaker_armed
+    global _taxonomy_deferral_until, _taxonomy_deferral_set_at, _taxonomy_deferral_lifted_at
     with _taxonomy_deferral_lock:
+        now = _taxonomy_clock()
         _taxonomy_deferral = reason
         _taxonomy_breaker_armed = arm_breaker
+        _taxonomy_deferral_until = (
+            now + max(0.0, expires_in_s) if reason and expires_in_s is not None else None
+        )
+        _taxonomy_deferral_set_at = now if reason else None
+        _taxonomy_deferral_lifted_at = None
+
+
+def _taxonomy_deferral_unlocked() -> str:
+    """The current reason, lifting a deadline that has passed. Lock held."""
+    global _taxonomy_deferral, _taxonomy_deferral_until, _taxonomy_deferral_lifted_at
+    if _taxonomy_deferral and _taxonomy_deferral_until is not None:
+        now = _taxonomy_clock()
+        if now >= _taxonomy_deferral_until:
+            # Lifted AT the deadline, not when someone noticed: the closing
+            # message reports how long the window held, and noticing at the
+            # end of a 3 h run would say 3 h.
+            _taxonomy_deferral_lifted_at = _taxonomy_deferral_until
+            _taxonomy_deferral = ""
+            _taxonomy_deferral_until = None
+    return _taxonomy_deferral
 
 
 def _trip_taxonomy_breaker() -> None:
     """Defer the rest of an armed run after a lost batch; no-op unarmed."""
-    global _taxonomy_deferral
+    global _taxonomy_deferral, _taxonomy_deferral_set_at, _taxonomy_deferral_lifted_at
     with _taxonomy_deferral_lock:
-        if _taxonomy_breaker_armed and not _taxonomy_deferral:
+        if _taxonomy_breaker_armed and not _taxonomy_deferral_unlocked():
             _taxonomy_deferral = "taxonomy assign failed earlier in this run"
+            _taxonomy_deferral_set_at = _taxonomy_clock()
+            _taxonomy_deferral_lifted_at = None
 
 
 def taxonomy_deferral() -> str:
     """The current deferral reason, or ``""`` when assignment runs."""
     with _taxonomy_deferral_lock:
-        return _taxonomy_deferral
+        return _taxonomy_deferral_unlocked()
+
+
+def taxonomy_deferral_lifted_after_s() -> int | None:
+    """Seconds the last deferral held before its deadline lifted it, or
+    ``None`` when it never lifted (still in force, or never set)."""
+    with _taxonomy_deferral_lock:
+        _taxonomy_deferral_unlocked()
+        if _taxonomy_deferral_set_at is None or _taxonomy_deferral_lifted_at is None:
+            return None
+        return round(_taxonomy_deferral_lifted_at - _taxonomy_deferral_set_at)
 
 
 def _record_taxonomy_deferred(chunk_count: int) -> None:
@@ -590,13 +666,32 @@ def record_taxonomy_failure(marker: Any, *, now: float) -> None:
     os.replace(tmp, path)
 
 
-def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
-    """Why this run should defer taxonomy assignment, or ``""``.
+class TaxonomyDeferral(NamedTuple):
+    """Why a run defers taxonomy assignment and for how much longer.
 
-    Two exclusions, checked in order: the engine restarted less than
+    ``reason`` is ``""`` when the run does not defer. ``expires_in_s`` is the
+    time left in the window that caused it, measured at the decision.
+    """
+
+    reason: str
+    expires_in_s: int = 0
+
+
+def decide_taxonomy_deferral_window(
+    *, uptime_fn: Any, marker: Any, now_fn: Any,
+) -> TaxonomyDeferral:
+    """Whether this run should defer taxonomy assignment, and until when.
+
+    Two exclusions: the engine restarted less than
     :func:`taxonomy_defer_uptime_s` ago; or a run lost an assignment less
     than :func:`taxonomy_failure_backoff_s` ago (the *marker* file). Unknown
-    uptime and an unreadable marker both defer nothing.
+    uptime and an unreadable marker both defer nothing. Both are time
+    windows, so the decision carries the seconds left in the window: the
+    caller bounds the deferral by it instead of holding it for the run.
+
+    When both windows apply, the deferral lasts until the later one ends
+    (the larger ``expires_in_s``) and the reason names both. Lifting at the
+    earlier one would resume assignment while the other cause still holds.
 
     Known limits, accepted: "under load" is caught only after a batch has
     failed (the client has no engine load signal); a deploy that does not
@@ -606,17 +701,35 @@ def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str
     """
     from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
 
+    windows: list[TaxonomyDeferral] = []
     uptime = uptime_fn()
-    if uptime is not None and uptime < taxonomy_defer_uptime_s():
-        return f"engine restarted {uptime} s ago"
+    window = taxonomy_defer_uptime_s()
+    if uptime is not None and uptime < window:
+        windows.append(TaxonomyDeferral(
+            f"engine restarted {uptime} s before this run began "
+            f"(warm-up window {window} s)",
+            window - uptime,
+        ))
     try:
         failed_at = float(Path(marker).read_text().strip())
     except (OSError, ValueError):
-        return ""
-    age = now_fn() - failed_at
-    if 0 <= age < taxonomy_failure_backoff_s():
-        return f"taxonomy assign failed {age:.0f} s ago"
-    return ""
+        failed_at = None
+    if failed_at is not None:
+        age = now_fn() - failed_at
+        backoff = taxonomy_failure_backoff_s()
+        if 0 <= age < backoff:
+            windows.append(TaxonomyDeferral(
+                f"taxonomy assign failed {age:.0f} s before this run began "
+                f"(backoff {backoff} s)",
+                int(backoff - age) + 1,
+            ))
+    if not windows:
+        return TaxonomyDeferral("")
+    return TaxonomyDeferral(
+        "; ".join(w.reason for w in windows),
+        max(w.expires_in_s for w in windows),
+    )
+
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
@@ -818,6 +931,11 @@ def get_t3():
     return _t3_instance
 
 
+def _now() -> float:
+    """Monotonic seconds; a module attribute so tests can inject a clock."""
+    return time.monotonic()
+
+
 def _collections_cache_tuple_from_rows(
     rows: list[dict],
 ) -> tuple[list[str], dict[str, int], dict[str, dict], float]:
@@ -869,18 +987,44 @@ def _collections_cache_tuple_from_rows(
             for key in ("content_type", "owner_id", "embedding_model", "lifecycle_state")
             if key in row
         }
-    return new_names, new_counts, new_rows, time.monotonic()
+    return new_names, new_counts, new_rows, _now()
 
 
-def _install_collections_cache(rows: list[dict]) -> tuple[list[str], dict[str, int], dict[str, dict], float]:
-    """Install *rows* as the cache and set the counts flag in one step under the lock."""
-    global _collections_cache, _collections_counts_loaded
-    cache = _collections_cache_tuple_from_rows(rows)
-    loaded = _rows_carry_counts(rows)
+def _cache_generation() -> int:
     with _collections_cache_lock:
+        return _collections_cache_generation
+
+
+def _install_collections_cache(
+    rows: list[dict], *, generation: int | None = None,
+) -> tuple[list[str], dict[str, int], dict[str, dict], float]:
+    """Install *rows* as the cache and set the counts flag in one step under the lock.
+
+    *generation*, when given, is :func:`_cache_generation` read before the fetch that produced
+    *rows*. If an invalidation happened since, the rows may predate that write, so nothing is
+    installed and the next reader fetches again.
+
+    A listing that carries counts replaces the counts and restarts their clock. A routing listing
+    has none: it refreshes names and rows and carries the counts (and their clock) forward, so a
+    60 s names refresh never discards counts that are good for 15 minutes.
+    """
+    global _collections_cache, _collections_counts_loaded, _collections_counts_ts
+    cache = _collections_cache_tuple_from_rows(rows)
+    with _collections_cache_lock:
+        if generation is not None and generation != _collections_cache_generation:
+            return _collections_cache
+        if _rows_carry_counts(rows):
+            _collections_counts_loaded = True
+            _collections_counts_ts = cache[3]
+        else:
+            cache = (cache[0], _collections_cache[1], cache[2], cache[3])
         _collections_cache = cache
-        _collections_counts_loaded = loaded
     return cache
+
+
+def _counts_are_fresh(max_age: float) -> bool:
+    with _collections_cache_lock:
+        return _collections_counts_loaded and _now() - _collections_counts_ts <= max_age
 
 
 def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
@@ -898,8 +1042,9 @@ def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
     followed by a second, full one.
     """
     _names, _counts, _rows, ts = _collections_cache
-    now = time.monotonic()
+    now = _now()
     if now - ts > _COLLECTIONS_CACHE_TTL:
+        generation = _cache_generation()
         t3 = get_t3()
         from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
         # nexus-mz9jv: names and registry rows are all most readers of this cache use, so the
@@ -911,7 +1056,7 @@ def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
             rows = t3.list_collections()
         # A routing row has no count; an engine that ignored the request answered with the
         # full rows, which do.
-        _install_collections_cache(rows)
+        _install_collections_cache(rows, generation=generation)
 
 
 def _rows_carry_counts(rows: list[dict]) -> bool:
@@ -970,13 +1115,15 @@ def get_live_collection_names() -> list[str]:
     return [n for n in names if is_live_collection_row(rows.get(n, {}))]
 
 
-def get_collection_counts() -> dict[str, int]:
+def get_collection_counts(max_age: float | None = None) -> dict[str, int]:
     """Return cached per-collection row counts, keyed by collection name.
 
-    Shares the ``_COLLECTIONS_CACHE_TTL``-windowed cache with
-    :func:`get_collection_names`: whichever of the two is called first in a
-    given window pays for the ``list_collections()`` round trip, and the
-    other reads its half of the same cached tuple for free. This is what
+    Shares the cached tuple with :func:`get_collection_names`, but not its
+    clock: names and rows refresh every ``_COLLECTIONS_CACHE_TTL`` seconds
+    from the cheap routing listing (which carries the counts forward), while
+    the counts are re-read from the full listing only after
+    ``_COLLECTION_COUNTS_TTL`` (15 minutes, Sam 2026-10-08), or *max_age*
+    seconds when a caller that prints sizes asks for a tighter bound. This is what
     ``list_collections()`` itself reports as ``count`` -- the vector
     store's live row count for the collection (chunks, tombstone-filtered;
     see ``HttpVectorClient.list_collections``'s docstring), with any
@@ -994,16 +1141,23 @@ def get_collection_counts() -> dict[str, int]:
     ``store_put``/``store_delete`` via :func:`invalidate_collections_cache`
     -- a collection crossing the floor from below to at-or-above (or vice
     versa, on delete) is visible to the very next call, not up to
-    ``_COLLECTIONS_CACHE_TTL`` seconds later.
+    ``_COLLECTION_COUNTS_TTL`` seconds later. A write by ANOTHER process is
+    seen within ``_COLLECTION_COUNTS_TTL``: a collection that grew past the
+    floor there stays out of the default fan-out until then. An explicitly
+    named collection is never affected.
     """
-    _refresh_collections_cache_if_stale(need_counts=True)
+    ttl = _COLLECTION_COUNTS_TTL if max_age is None else max_age
+    # Counts still good: only the names/rows may need their cheap routing refresh. Otherwise a
+    # stale or cold cache is filled from the FULL listing in one request.
+    _refresh_collections_cache_if_stale(need_counts=not _counts_are_fresh(ttl))
+    if not _counts_are_fresh(ttl):
+        # The names were fresh (so nothing refreshed them) or were refreshed from the routing
+        # listing, which has no counts: the caller that wants sizes pays for the full listing,
+        # which replaces the cache with a superset.
+        generation = _cache_generation()
+        _install_collections_cache(get_t3().list_collections(), generation=generation)
     with _collections_cache_lock:
-        cache, loaded = _collections_cache, _collections_counts_loaded
-    if not loaded:
-        # The cache is still warm from a routing fill (no counts): the caller that wants sizes
-        # pays for the full listing, which replaces the cache with a superset.
-        cache = _install_collections_cache(get_t3().list_collections())
-    return cache[1]
+        return _collections_cache[1]
 
 
 def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
@@ -1046,10 +1200,37 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     return row
 
 
+def note_collection_written(name: str) -> None:
+    """A chunk write to *name* has committed: drop the cache if it does not name *name*.
+
+    The engine's listing names only collections that physically hold a chunk. Registering a new
+    collection drops this cache, but the combined writer reads it again (for its per-request chunk
+    cap) before the first chunk lands, which refills it with a listing that cannot name the new
+    collection. Without this call that listing served every in-process reader for up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds after a successful write (found through
+    ``tests/integration/test_rdr_196_p2c_retrieval_bench.py``: an empty collection list after 15
+    in-process ``nx index rdr`` runs that finished inside the window).
+
+    A write to a collection the cache already names changes no membership, so the hot write path
+    costs a set lookup and no refetch. Dropping also bumps the generation, so a fetch that began
+    before this write cannot install its older listing afterwards.
+    """
+    if not name:
+        return
+    with _collections_cache_lock:
+        listed = name in _collections_cache[2] or name in _collections_cache[0]
+    if not listed:
+        invalidate_collections_cache()
+
+
 def invalidate_collections_cache() -> None:
     """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
     call to refetch from T3 rather than serving up to
-    ``_COLLECTIONS_CACHE_TTL`` seconds of stale collection existence/counts.
+    ``_COLLECTIONS_CACHE_TTL`` seconds of stale collection existence or
+    ``_COLLECTION_COUNTS_TTL`` seconds of stale counts. This is the one
+    invalidation seam for the counts: every write this process makes that can
+    change a collection's count or membership (``store_put``, ``store_delete``,
+    a new collection registration in ``ensure_collection_registered``) calls it.
 
     Called after a committed ``store_put``/``store_delete`` (review finding,
     code-review-nexus-rbhci-516701aa3: ``_collections_cache`` was
@@ -1060,9 +1241,13 @@ def invalidate_collections_cache() -> None:
     Mirrors the existing ``_page_cache_invalidate()`` call at the same
     write sites in ``nexus.mcp.core``.
     """
-    global _collections_cache, _collections_counts_loaded
-    _collections_cache = ([], {}, {}, 0.0)
-    _collections_counts_loaded = True
+    global _collections_cache, _collections_counts_loaded, _collections_counts_ts
+    global _collections_cache_generation
+    with _collections_cache_lock:
+        _collections_cache = ([], {}, {}, 0.0)
+        _collections_counts_loaded = False
+        _collections_counts_ts = 0.0
+        _collections_cache_generation += 1
 
 
 #: nexus-m20mf P3 fold-in (critic finding 1/1b, hardened per round-2
@@ -3868,12 +4053,12 @@ def reset_singletons():
     instances (see ``nexus.hook_registry``); they are no longer
     module-globals on ``mcp_infra`` and therefore not cleared here.
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _collections_counts_loaded
+    global _t1_instance, _t1_isolated, _t3_instance
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
-    _collections_cache = ([], {}, {}, 0.0)
-    _collections_counts_loaded = True
+    # The same reset every write uses, so the counts clock cannot survive a reset as "fresh".
+    invalidate_collections_cache()
     # nexus-w1ip: the T2 singleton's reset (close + clear refcounts /
     # pending-close, same nexus-0dpli guard) is now the slot's own
     # responsibility.

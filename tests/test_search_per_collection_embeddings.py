@@ -9,10 +9,13 @@ the rows, the search makes none.
 
 The real ``HttpVectorClient`` and ``search_cross_corpus`` run against a fake transport (the module
 ``_request`` every ``_post`` funnels through), as ``tests/test_search_per_collection_route.py`` does;
-the engine half is pinned by ``VectorHandlerSearchPerCollectionTest`` (Java). The fake engine here
+the engine half is pinned by ``VectorHandlerSearchPerCollectionTest`` (Java). Only semantic clustering
+asks the route for vectors now; the contradiction check runs on the rendered page, not in
+``search_cross_corpus``, and fetches its few candidates by id (``tests/test_contradiction_scope.py``),
+so these tests run with ``cluster_by="semantic"`` and compare cluster labels. The fake engine here
 stores one deterministic vector per ``(collection, id)`` and serves it both ways, so a run that
 reads the vectors from the rows and a run that fetches them by id see the SAME vectors and must
-produce the same flags and clusters.
+produce the same clusters.
 """
 from __future__ import annotations
 
@@ -110,11 +113,8 @@ def _search(engine: _EmbeddingEngine, cols: list[str], **kw):
 
 
 def _signature(results) -> list[tuple]:
-    """What the two features add to the results: order, contradiction flags, cluster labels."""
-    return [
-        (r.collection, r.id, bool(r.metadata.get("_contradiction_flag")), r.metadata.get("_cluster_label"))
-        for r in results
-    ]
+    """What clustering adds to the results: order and cluster labels."""
+    return [(r.collection, r.id, r.metadata.get("_cluster_label")) for r in results]
 
 
 @pytest.fixture(autouse=True)
@@ -135,7 +135,7 @@ class TestTheRowsCarryTheVectors:
         assert engine.get_embedding_calls() == [], "zero get-embeddings calls"
         assert len(results) == 18
 
-    def test_same_flags_and_clusters_as_the_fetch_by_id_path(self, monkeypatch):
+    def test_same_clusters_as_the_fetch_by_id_path(self, monkeypatch):
         cols = _cols("code", _BGE, 3)
         with_rows = _search(_EmbeddingEngine(monkeypatch, _data(cols), serve_embeddings=True), cols)
         fetch_engine = _EmbeddingEngine(monkeypatch, _data(cols), serve_embeddings=False)
@@ -143,9 +143,8 @@ class TestTheRowsCarryTheVectors:
 
         assert len(fetch_engine.get_embedding_calls()) == 3, "control: one fetch per collection"
         assert _signature(with_rows) == _signature(by_fetch)
-        # Non-vacuous: the fixture really flags rows and really labels clusters.
-        assert any(flag for _, _, flag, _ in _signature(with_rows))
-        assert {label for _, _, _, label in _signature(with_rows)} - {None}
+        # Non-vacuous: the fixture really labels clusters.
+        assert {label for _, _, label in _signature(with_rows)} - {None}
 
     def test_the_vector_is_not_left_on_the_result_metadata(self, monkeypatch):
         cols = _cols("code", _BGE, 2)
@@ -186,7 +185,7 @@ class TestAnEngineThatDoesNotReturnThem:
         results = _search(engine, cols)
         assert all(b.get("include_embeddings") is True for b in engine.route_calls()), "it still asks"
         assert len(engine.get_embedding_calls()) == 3
-        assert any(flag for _, _, flag, _ in _signature(results))
+        assert {label for _, _, label in _signature(results)} - {None}
 
     def test_a_row_without_a_vector_is_fetched_alone_and_the_others_are_not(self, monkeypatch):
         cols = _cols("code", _BGE, 2)

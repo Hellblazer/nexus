@@ -1548,26 +1548,39 @@ def index_repo_cmd(
         # command ends so nothing else in the process inherits it.
         import nexus.config as _nx_config  # noqa: PLC0415 — circular-dep avoidance; module attribute so a patched nexus_config_dir is seen (nexus-78blw)
         from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
-            decide_taxonomy_deferral,
+            decide_taxonomy_deferral_window,
             engine_process_uptime_seconds,
             set_taxonomy_deferral,
+            taxonomy_deferral,
+            taxonomy_deferral_lifted_after_s,
             taxonomy_failure_marker_path,
         )
         _failure_marker = taxonomy_failure_marker_path(_nx_config.nexus_config_dir())
         _deferred_at_start = ""
+        _deferral_window_s = 0
+        _drain_ran = False
         # Not gated on --no-taxonomy: that flag skips discovery only, and the
         # per-flush assign (the path that lost chunks in mg8gx) still runs.
         if not frecency_only:
-            _deferred_at_start = decide_taxonomy_deferral(
+            _decision = decide_taxonomy_deferral_window(
                 uptime_fn=engine_process_uptime_seconds, marker=_failure_marker,
                 now_fn=time.time,
             )
-        set_taxonomy_deferral(_deferred_at_start, arm_breaker=True)
+            _deferred_at_start = _decision.reason
+            _deferral_window_s = _decision.expires_in_s
+        # The deferral is a time window, not a verdict on the run: a first
+        # index started shortly after `nx init` outlasts the engine warm-up by
+        # hours, and a flag fixed at start deferred all of it (22,848 chunks,
+        # 2.9 h, engine restarted 102 s before the run began).
+        set_taxonomy_deferral(
+            _deferred_at_start, arm_breaker=True,
+            expires_in_s=_deferral_window_s if _deferred_at_start else None,
+        )
         click.get_current_context().call_on_close(lambda: set_taxonomy_deferral(""))
         if _deferred_at_start:
             click.echo(
-                f"  Taxonomy deferred: {_deferred_at_start}; a later run's drain "
-                "assigns what this run skips"
+                f"  Taxonomy deferred: {_deferred_at_start}; assignment resumes "
+                f"{_deferral_window_s} s into this run; a drain assigns what was skipped"
             )
 
         stats: dict = {}
@@ -1668,7 +1681,11 @@ def index_repo_cmd(
             # One topic-existence probe serves both the qgc4b self-heal gate
             # and the tevzq subset (review Medium-2: was two T2 opens).
             no_topics = _collections_without_topics(collections, client=_t2_client)
-            if _deferred_at_start and (files_changed > 0 or no_topics):
+            # Re-read at the end: a deferral that was a time window has lifted
+            # by now on any run longer than the window, and the discovery and
+            # drain it held back are due.
+            _deferred_now = taxonomy_deferral() if _deferred_at_start else ""
+            if _deferred_now and (files_changed > 0 or no_topics):
                 # nexus-x3gig: discovery reads every embedding of a collection
                 # to the client (RDR-193 Gap 2), the heaviest cold read in the
                 # run, so it waits out the same window as assign. ONLY
@@ -1684,7 +1701,7 @@ def index_repo_cmd(
                 run_collection_postprocessing(
                     collections, repo_path=path, discover_collections=[],
                     client=_t2_client,
-                    discover_skip_reason=f"deferred: {_deferred_at_start}",
+                    discover_skip_reason=f"deferred: {_deferred_now}",
                     collections_without_topics=no_topics,
                 )
             elif files_changed > 0 or no_topics:
@@ -1731,7 +1748,8 @@ def index_repo_cmd(
             # drain still lost fails the run like any other lost assignment.
             from nexus.mcp_infra import taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import
             _before = taxonomy_assign_run_stats()
-            if not _deferred_at_start:
+            if not _deferred_now:
+                _drain_ran = True
                 _drain_repo_collections(collections, client=_t2_client)
             _after = taxonomy_assign_run_stats()
             for _key, _counter in (
@@ -1753,9 +1771,23 @@ def index_repo_cmd(
         from nexus.mcp_infra import taxonomy_assign_run_stats as _tars  # noqa: PLC0415 — deferred to avoid circular import
         _deferred_chunks = _tars().get("deferred_chunks", 0)
         if _deferred_chunks:
-            click.echo(
-                f"  Taxonomy: {_deferred_chunks} chunk(s) deferred; a later run's drain assigns them"
-            )
+            _lifted_after = taxonomy_deferral_lifted_after_s()
+            if _lifted_after is not None and _drain_ran:
+                click.echo(
+                    f"  Taxonomy: {_deferred_chunks} chunk(s) deferred during the first "
+                    f"{_lifted_after} s of the run ({_deferred_at_start}); "
+                    "the end-of-run drain assigns them"
+                )
+            else:
+                _held = (
+                    f"for the first {_lifted_after} s of the run ({_deferred_at_start})"
+                    if _lifted_after is not None
+                    else f"({taxonomy_deferral() or _deferred_at_start})"
+                )
+                click.echo(
+                    f"  Taxonomy: {_deferred_chunks} chunk(s) deferred {_held}; "
+                    "a later run's drain assigns them"
+                )
 
         if not frecency_only:
             try:

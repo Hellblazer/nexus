@@ -743,6 +743,14 @@ class VectorHandlerSearchPerCollectionTest {
         topKOnly.put("rerank_top_k", 5);
         assertBadRequest(topKOnly, "rerank_top_k requires");
 
+        Map<String, Object> maxCandidatesOnly = ok();
+        maxCandidatesOnly.put("rerank_max_candidates", 5);
+        assertBadRequest(maxCandidatesOnly, "rerank_max_candidates requires");
+        Map<String, Object> maxCandidatesZero = ok();
+        maxCandidatesZero.put("rerank", true);
+        maxCandidatesZero.put("rerank_max_candidates", 0);
+        assertBadRequest(maxCandidatesZero, "rerank_max_candidates");
+
         Map<String, Object> rerankTooWide = request(List.of(DENSE, SMALL), 300, 1001);
         rerankTooWide.put("rerank", true);
         assertBadRequest(rerankTooWide, "rerank scores at most 1000");

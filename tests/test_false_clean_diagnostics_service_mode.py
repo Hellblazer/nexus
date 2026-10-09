@@ -403,6 +403,54 @@ class TestAspectQueueCheckRoutes:
         assert "FAIL" not in printed
 
 
+class TestAspectQueueIdleWarning:
+    """The spawner declines to start the aspect worker without `claude` on PATH
+    and logs it once per process; doctor is the durable signal. A WARNING, not
+    a failure, and silent when nothing is pending (a virgin box stays clean)."""
+
+    @staticmethod
+    def _run(pending: int, claude_on_path: bool, monkeypatch) -> tuple[str, int | None]:
+        import click
+
+        import nexus.daemon.aspect_worker_daemon as awd
+        from nexus.commands import doctor as doctor_mod
+
+        monkeypatch.setattr(awd, "_claude_available", lambda: claude_on_path)
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            q.return_value.pending_count.return_value = pending
+            q.return_value.list_failed.return_value = []
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_aspect_queue()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                return out.getvalue().decode() + err.getvalue().decode(), exit_code
+
+    def test_pending_rows_and_no_claude_warns_without_failing(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        printed, exit_code = self._run(5, False, monkeypatch)
+        assert "aspect extraction is idle: 5 pending, `claude` not on PATH" in printed, printed
+        assert exit_code is None, "a warning, not a failure"
+        assert "✗" not in printed and "FAIL:" not in printed, printed
+
+    def test_nothing_pending_does_not_warn_even_without_claude(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        printed, exit_code = self._run(0, False, monkeypatch)
+        assert "idle" not in printed and "WARN" not in printed, printed
+        assert exit_code is None
+
+    def test_pending_rows_with_claude_do_not_warn(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        printed, exit_code = self._run(5, True, monkeypatch)
+        assert "idle" not in printed and "WARN" not in printed, printed
+        assert exit_code is None
+
+
 # ── console twin (nexus-k0luu, second surface) ──────────────────────────────
 
 

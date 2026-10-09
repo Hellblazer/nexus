@@ -667,7 +667,15 @@ def search_cmd(
         # invocation renders for a reader) — capping before this re-sort
         # would be undone by it; capping after the [:n] slice is too late,
         # the domination has already consumed the slots.
-        results = apply_file_diversity_cap(_scored + _unscored)[:n]
+        #
+        # The cap runs WITHIN each group, scored then unscored. Over the
+        # concatenation, a first-seen file's unscored row would sit in the
+        # cap's "kept" head ahead of a scored row that overflowed its file's
+        # quota; a scored row always outranks an unscored one, so the groups
+        # are capped separately and joined.
+        results = (
+            apply_file_diversity_cap(_scored) + apply_file_diversity_cap(_unscored)
+        )[:n]
     else:
         # No server scores (rerank off, single collection, legacy backend, or
         # fully degraded — the degrade was surfaced above): group by

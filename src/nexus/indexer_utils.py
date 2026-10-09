@@ -1352,13 +1352,55 @@ def build_doc_id_resolver(
 
 # ── Bounded file-level concurrency (nexus-cfc72) ─────────────────────────────
 
+#: Default file workers for ``nx index repo`` against the CLOUD service (and the floor of the
+#: local default below). Two, unchanged: the wider default was measured only against a local
+#: engine, and ``tests/e2e/index-throughput-bench/run.sh`` has not been run against the cloud.
+#: Raise this only after that run.
+DEFAULT_SERVICE_INDEX_CONCURRENCY: int = 2
+
+#: Ceiling of the LOCAL default. From a measured sweep (900-chunk repo slice, local engine,
+#: bge-768 ONNX on 16 cores, T2 ``nexus/index-embedding-throughput-2026-10-08``): wall time 114 s
+#: at 2 workers (mean 1.13 requests in flight, nothing in flight 34% of the time), 93 s at 3,
+#: 92 s at 4 (mean 2.1 in flight), 82 s at 6 and 80 s at 8. A source file over the 16-chunk local
+#: cap is written one request at a time by its own worker, so the worker count, not the flush
+#: pool, is what keeps more than one embedding batch in flight in local mode. The workers share
+#: the per-collection concurrent-write quota with the ChunkBatcher's flush pool
+#: (``nexus.indexer.FLUSH_CONCURRENCY``); a test keeps ``ceiling + flush workers`` inside
+#: ``QUOTAS.MAX_CONCURRENT_WRITES``.
+LOCAL_INDEX_CONCURRENCY_CEILING: int = 4
+
+
+def _cpu_count() -> int | None:
+    """``os.cpu_count()`` behind a module seam, so tests set the core count without patching ``os``."""
+    import os  # noqa: PLC0415 — leaf module keeps import surface minimal
+
+    return os.cpu_count()
+
+
+def local_index_concurrency_default(cpu_count: int | None) -> int:
+    """Default file workers for a LOCAL-mode index run: ``min(4, max(2, cores // 4))``.
+
+    The client and the engine share the box, and the engine admits ``cores / 2`` concurrent
+    embeds (``LocalOnnxAdmission``). File workers plus the flush pool (3) can all be inside an
+    embed at once, so on an 8-core machine 4 + 3 = 7 bulk embeds would hold all 4 permits and
+    leave an interactive search to time out with a 503. ``cores // 4`` keeps the bulk callers at
+    about half the permits. An unknown core count (``os.cpu_count()`` is ``None``) takes the floor.
+    """
+    cores = cpu_count if cpu_count and cpu_count > 0 else 0
+    return min(
+        LOCAL_INDEX_CONCURRENCY_CEILING,
+        max(DEFAULT_SERVICE_INDEX_CONCURRENCY, cores // 4),
+    )
+
 
 def resolve_index_concurrency() -> int:
     """Resolve the per-file indexing concurrency for ``nx index repo``.
 
     ``NX_INDEX_CONCURRENCY`` (>=1) wins when set and parseable. Otherwise
-    the default is 2 when BOTH the vectors and catalog backends are the
-    HTTP service (thread-safe httpx clients; the engine's TenantScope
+    the default, when BOTH the vectors and catalog backends are the HTTP service, is
+    :func:`local_index_concurrency_default` in local mode (scaled by core count, 2 to 4) and
+    :data:`DEFAULT_SERVICE_INDEX_CONCURRENCY` (2) against the cloud service
+     (thread-safe httpx clients; the engine's TenantScope
     admission control bounds bursts to typed 503s) and 1 everywhere else
     — the direct-SQLite catalog on the legacy ``=sqlite`` opt-out is not
     thread-safe. The gate self-retires once nexus-7bomn removes that
@@ -1402,7 +1444,11 @@ def resolve_index_concurrency() -> int:
         # nexus-i711w: the catalog conjunct collapsed — the catalog is
         # service-backed in every mode.
         if is_vector_service_mode():
-            return 2
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; config pulls in the full config stack
+
+            if is_local_mode():
+                return local_index_concurrency_default(_cpu_count())
+            return DEFAULT_SERVICE_INDEX_CONCURRENCY
         return 1
 
     raw = os.environ.get("NX_INDEX_CONCURRENCY", "").strip()

@@ -117,6 +117,97 @@ class RerankStageTest {
         assertThat(fake.calls).isZero();
     }
 
+    // ── Candidate cap (Sam, 2026-10-08): score at most N rows ────────────────
+
+    private static List<Map<String, Object>> tenRows() {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            rows.add(row("r" + i, "text r" + i, 0.01 * (i + 1)));
+        }
+        return rows;
+    }
+
+    @Test
+    void maxCandidatesScoresOnlyTheFirstNRowsAndKeepsTheRestInOrderBehind() {
+        var fake = new FakeReranker();
+        // Scored list is the capped document list [r0..r3]: r3 best, then r0, r2, r1.
+        fake.result = List.of(new Reranker.Scored(3, 0.9), new Reranker.Scored(0, 0.7),
+                              new Reranker.Scored(2, 0.4), new Reranker.Scored(1, 0.1));
+
+        Map<String, Object> env = new RerankStage(fake).apply("q", tenRows(), null, 4);
+
+        assertThat(fake.lastDocuments).containsExactly("text r0", "text r1", "text r2", "text r3");
+        assertThat(env.get("rerank_degraded")).isEqualTo(false);
+        List<Map<String, Object>> out = results(env);
+        // Result count unchanged; reranked four first, the other six in vector order.
+        assertThat(out).extracting(r -> r.get("id"))
+                .containsExactly("r3", "r0", "r2", "r1", "r4", "r5", "r6", "r7", "r8", "r9");
+        assertThat(out.subList(0, 4)).allSatisfy(r -> assertThat(r).containsKey("rerank_score"));
+        assertThat(out.subList(4, 10)).allSatisfy(r -> assertThat(r).doesNotContainKey("rerank_score"));
+    }
+
+    @Test
+    void maxCandidatesAtOrAboveRowCountBehavesExactlyAsNoCap() {
+        var capped = new FakeReranker();
+        var plain = new FakeReranker();
+        capped.result = plain.result = List.of(new Reranker.Scored(2, 0.9), new Reranker.Scored(0, 0.5),
+                                               new Reranker.Scored(1, 0.1));
+        var rows = List.of(row("a", "ta", 0.1), row("b", "tb", 0.2), row("c", "tc", 0.3));
+
+        Map<String, Object> a = new RerankStage(capped).apply("q", new ArrayList<>(rows), null, 3);
+        Map<String, Object> b = new RerankStage(capped).apply("q", new ArrayList<>(rows), null, 30);
+        Map<String, Object> c = new RerankStage(plain).apply("q", new ArrayList<>(rows), null);
+
+        assertThat(a).isEqualTo(c);
+        assertThat(b).isEqualTo(c);
+        assertThat(capped.lastDocuments).containsExactly("ta", "tb", "tc");
+    }
+
+    @Test
+    void maxCandidatesCountsScorableRowsNotTextlessOnes() {
+        var fake = new FakeReranker();
+        fake.result = List.of(new Reranker.Scored(1, 0.9), new Reranker.Scored(0, 0.2));
+        var rows = List.of(row("a", "ta", 0.1), row("b", null, 0.2), row("c", "tc", 0.3),
+                           row("d", "td", 0.4));
+
+        Map<String, Object> env = new RerankStage(fake).apply("q", new ArrayList<>(rows), null, 2);
+
+        // The textless row does not use up a slot: a and c are scored, d is the unscored tail.
+        assertThat(fake.lastDocuments).containsExactly("ta", "tc");
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("c", "a", "b", "d");
+    }
+
+    @Test
+    void maxCandidatesAndTopKCompose() {
+        var fake = new FakeReranker();
+        fake.result = List.of(new Reranker.Scored(1, 0.9));
+        Map<String, Object> env = new RerankStage(fake).apply("q", tenRows(), 1, 4);
+
+        assertThat(fake.lastDocuments).hasSize(4);
+        assertThat(fake.lastTopK).isEqualTo(1);
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("r1");
+    }
+
+    @Test
+    void degradeWithCapStillReturnsEveryRowInDistanceOrder() {
+        var fake = new FakeReranker();
+        fake.failure = new RerankUpstreamException("boom");
+
+        Map<String, Object> env = new RerankStage(fake).apply("q", tenRows(), null, 4);
+
+        assertThat(env.get("rerank_degraded")).isEqualTo(true);
+        assertThat(results(env)).hasSize(10);
+        assertThat(results(env).get(0).get("id")).isEqualTo("r0");
+    }
+
+    @Test
+    void nonPositiveMaxCandidatesIsACallerError() {
+        var fake = new FakeReranker();
+        assertThatThrownBy(() -> new RerankStage(fake).apply("q", tenRows(), null, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("rerank_max_candidates");
+    }
+
     // ── Textless-row mapping (reference-only chunks) ─────────────────────────
 
     @Test

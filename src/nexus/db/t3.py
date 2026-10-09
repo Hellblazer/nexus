@@ -782,9 +782,9 @@ class T3Database:
 
         Returns an ``(N, D)`` float32 ndarray with rows in REQUEST order;
         ids the store does not have are dropped (``N < len(ids)`` is the
-        caller's per-collection failure signal). Used by the clustering +
-        contradiction pipeline to avoid including embeddings in every
-        search response.
+        caller's per-collection failure signal). Used by semantic clustering's
+        fallback and the opt-in contradiction flag, which fetch vectors only
+        for the rows they need.
 
         nexus-pebfx.7 critic finding: Chroma's ``col.get(ids=...)`` returns
         rows in its INTERNAL insertion order (``ORDER BY embeddings_t.id``),

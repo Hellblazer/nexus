@@ -226,6 +226,10 @@ This is a per-chunk classification, based only on the chunk's own AST content, n
 
 Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code), compensating for higher noise in prose collections.
 
+### Rerank scores a capped candidate set
+
+`nx search` over more than one collection asks the engine to rerank. In local mode the engine scores the first `max(3 x n, 60)` candidates in vector order, where `n` is the number of results you asked for, not every candidate the over-fetch returned. The other candidates stay in the result, unscored and in vector order, behind the scored ones, so the result count and the page do not change shape. Local mode, where the cross-encoder (ms-marco-minilm-l6-v2) runs on the CPU, measured 3.5 to 4.9 s of a 4.0 to 5.4 s search scoring all 135 candidates; the cap scores 60 for a default `-n 10`. A cap of 30 was measured first and changed about a third of the page (6.5 of the uncapped top 10 kept, over 40 queries), and lost canonical answers; 60 keeps 9 of 10 and 90 matched uncapped. Cloud mode has no default cap and scores every candidate: the latency evidence is the local cross-encoder, and the page-quality measurement on file was taken in the cloud. A search that returns fewer candidates than the cap is scored in full. The cap is per request, so a search the client splits or batches into several requests scores up to the cap in each. Two cases are never capped: the lexical leg of `--lexical`, and any search whose filter runs after retrieval (`--path`, `--max-file-chunks`), where a cap would leave most of the surviving rows unscored. Set `search.rerank_max_candidates` in `.nexus.yml` to fix the cap in either mode (`0` scores every candidate); see [Configuration](configuration.md). An engine older than the field ignores it and scores every candidate.
+
 ### Catalog pre-filtering
 
 When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog (Postgres, served by `nexus-service`) and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.
@@ -247,7 +251,7 @@ When two results from the same collection have near-identical embeddings (cosine
 
 Two agents recorded conflicting claims; investigate and consolidate. The flag is informational; neither result is dropped.
 
-Enabled by default. Opt out via `search.contradiction_check: false` in `.nexus.yml`. The check adds one extra embedding fetch per collection (shared with clustering when both are enabled). See [Configuration](configuration.md).
+Off by default. Enable it with `search.contradiction_check: true` in `.nexus.yml`. A near-identical pair from two authors is a similarity signal, not proof of a contradiction, which is why it is opt-in. The check runs in the MCP `search` tool over the page it renders, after ranking, the file-diversity cap and paging, so a pair flags only when both rows are on one page; `nx search`, `query` and `structured=True` output do not show the flag. It fetches vectors only for rows on the page that carry a `source_agent` while another row from the same collection on that page carries a different one. That costs one fetch per such collection on the page, and none when no collection on the page holds a mixed-agent pair. The indexer stamps every code, docs and RDR chunk with one agent (an import can add a second), so those collections hold such a pair only when an import added one; a knowledge collection holding notes from two or more agents is a case that does. A collection with more than 30 such rows on the page is skipped. See [Configuration](configuration.md).
 
 ## See also
 

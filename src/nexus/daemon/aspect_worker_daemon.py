@@ -33,6 +33,7 @@ credential-bare spawn path is forbidden.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -608,8 +609,18 @@ class AspectWorkerDaemon:
         _log.info("aspect_worker_daemon.stopped", tenant=self._tenant)
 
 
+def _claude_available() -> bool:
+    """Whether the ``claude`` binary is on ``PATH``: the one precondition the
+    daemon's extraction needs and the spawner can check before it forks."""
+    return shutil.which("claude") is not None
+
+
 def _require_extraction_credentials() -> None:
     """Fail LOUD at entrypoint if the ``claude`` binary is not on ``PATH``.
+
+    The backstop. The spawner (:func:`ensure_aspect_worker_daemon`) checks the
+    same precondition first and does not fork a child that would only refuse;
+    this stays for a daemon started by hand or by an older spawner.
 
     Without it, the daemon would publish its lease, heartbeat healthy, and then
     silently fail extraction per-row inside ``claude -p`` — exactly the silent
@@ -618,9 +629,7 @@ def _require_extraction_credentials() -> None:
     + its test are Phase 2's job. It is the minimum guard so a credential-bare
     invocation refuses to start rather than masquerading as a working daemon.
     """
-    import shutil  # noqa: PLC0415 - branch-local; trivial stdlib
-
-    if shutil.which("claude") is None:
+    if not _claude_available():
         msg = (
             "aspect-worker daemon: the `claude` binary is not on PATH — `claude -p` "
             "extraction would silently fail every row. The daemon must be spawned as a "
@@ -643,6 +652,11 @@ def _require_extraction_credentials() -> None:
 # (cross-process convergence is still the registry's generation fencing).
 _spawn_lock = threading.Lock()
 _recent_spawn: dict[str, float] = {}  # tenant -> monotonic deadline
+#: Whether this process has already said that it is not spawning because
+#: ``claude`` is absent. One line per process: on a box without ``claude`` every
+#: indexing step and every ``nx store put`` reaches the spawner, and a child per
+#: call left 119 refusals and a 400 KB crash log in one measured run.
+_claude_absent_logged = False
 _SPAWN_SUPPRESS_WINDOW: float = 10.0
 
 
@@ -707,8 +721,13 @@ def ensure_aspect_worker_daemon(
 
     Returns True if a current-version daemon is up or a spawn was initiated;
     the spawned daemon may not have published its lease yet (the name is
-    "ensure", not "running").
+    "ensure", not "running"). Returns False, spawning nothing, when ``claude`` is
+    not on ``PATH``: the child's own credential guard would refuse it, so the
+    spawner checks first and says so once per process. Enqueued rows are
+    unaffected and wait in the service queue for a worker on a box that has
+    ``claude``.
     """
+    global _claude_absent_logged
     config_dir = Path(config_dir)
     registry = ServiceRegistry(dir=config_dir, tier=TIER, ttl=ttl_for_tier(TIER))
     current = _daemon_version()
@@ -719,6 +738,17 @@ def ensure_aspect_worker_daemon(
         # rec is None (absent) OR a stale-version lease (spawn fences it).
         if _recent_spawn.get(tenant, 0.0) > _clock():
             return True  # we spawned within the suppression window; it is coming up
+        if not _claude_available():
+            if not _claude_absent_logged:
+                _claude_absent_logged = True
+                _log.warning(
+                    "aspect_worker_daemon.spawn_skipped_claude_absent",
+                    tenant=tenant,
+                    hint="aspect extraction is off: the `claude` binary is not on PATH. "
+                         "Enqueued rows wait in the queue until a worker runs on a box "
+                         "that has it.",
+                )
+            return False
         _recent_spawn[tenant] = _clock() + _SPAWN_SUPPRESS_WINDOW
 
         from nexus.commands.daemon import (  # noqa: PLC0415 — deferred to break the CLI<->daemon import cycle
