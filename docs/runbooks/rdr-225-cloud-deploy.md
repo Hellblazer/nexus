@@ -419,7 +419,7 @@ conexus runs these; nexus watches and answers.
    to hours later; this step removes the wait.
 
    **What searches do until it has run.** The cardinality router (`NX_SEARCH_EXACT_MAX_ROWS`, default 10,000 at this
-   deploy and 60,000 since nexus-nqsa7, on by default) runs a probe before every plain search: it counts up to 10,001 rows of the (model, tenant, collections)
+   deploy and 30,000 since nexus-nqsa7 (60,000 in engine-service-v0.1.155 only), on by default) runs a probe before every plain search: it counts up to 10,001 rows of the (model, tenant, collections)
    selection in that one leaf (`PgVectorRepository.probeSelectedRowsQuery`). On a vacuumed leaf the planner reads those
    rows from the primary-key prefix as an Index Only Scan. On an unvacuumed leaf the same statement took a Seq Scan at
    a 26 percent share (measured in the P0.2 prototype and in the Phase 2 pin work; the cause is the empty visibility

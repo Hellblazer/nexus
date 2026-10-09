@@ -17,9 +17,9 @@ class PgSessionSearchExactMaxRowsTest {
     void defaultsToTheMeasuredConstant_whenUnsetOrBlank() {
         assertThat(PgSession.searchExactMaxRows(null)).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
         assertThat(PgSession.searchExactMaxRows("   ")).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
-        // nexus-nqsa7: 60000 from the 2026-10-09 fork measurement (see the constant's javadoc). A
-        // 27,893-row collection above the old 10000 lost its true nearest row to the HNSW walk.
-        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(60_000);
+        // nexus-nqsa7: 30000 (Sam, 2026-10-09). 60000 fixed the 27,893-row repro but put the
+        // 45k/58k collections on exact, about +1 s per warm default search on the live engine.
+        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(30_000);
     }
 
     @Test
