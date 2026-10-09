@@ -2471,6 +2471,8 @@ def _reset_search_telemetry_sink_if_loaded() -> None:
     infra = _sys.modules.get("nexus.mcp_infra")
     if infra is not None:
         infra.reset_search_telemetry_sink()
+        # The fan-out counts refresh is the other process-wide background worker.
+        infra.join_fanout_counts_refresh(2.0)
 
 
 @pytest.fixture(autouse=True)

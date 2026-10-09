@@ -1225,6 +1225,59 @@ def note_collection_written(name: str) -> None:
         invalidate_collections_cache()
 
 
+_fanout_counts_refresh_lock = threading.Lock()
+_fanout_counts_refresh: threading.Thread | None = None
+
+
+def get_fanout_counts() -> dict[str, int]:
+    """Counts for the default fan-out floor, never waiting on the full listing (nexus-vpa9q).
+
+    The floor (``nexus.mcp.core._fanout_exclusions_for_group``) only saves search cost: it drops
+    a near-empty collection beside a populous sibling, and an unknown count fails OPEN. The full
+    listing it reads costs ~1 s on a cold process (``/v1/vectors/stats`` counts every
+    collection's live chunks: 0.71-0.76 s engine time, measured 2026-10-09), serial before the
+    fan-out, to save a handful of cheap arms. So: counts loaded at any age are returned as they
+    are (the floor tolerates staleness), and when they are not fresh a single background
+    refresh is started. A cold cache returns ``{}``, so that search excludes nothing and the
+    next one has counts. Callers that print sizes keep :func:`get_collection_counts`.
+    """
+    with _collections_cache_lock:
+        loaded = _collections_counts_loaded
+        counts = _collections_cache[1]
+    if not _counts_are_fresh(_COLLECTION_COUNTS_TTL):
+        _start_fanout_counts_refresh()
+    return counts if loaded else {}
+
+
+def _start_fanout_counts_refresh() -> None:
+    global _fanout_counts_refresh
+    with _fanout_counts_refresh_lock:
+        if _fanout_counts_refresh is not None and _fanout_counts_refresh.is_alive():
+            return
+        _fanout_counts_refresh = threading.Thread(
+            target=_refresh_fanout_counts, name="nexus-collection-counts", daemon=True,
+        )
+        _fanout_counts_refresh.start()
+
+
+def _refresh_fanout_counts() -> None:
+    try:
+        get_collection_counts()
+    except Exception:  # noqa: BLE001 — best-effort; the floor fails open until counts load
+        import structlog  # noqa: PLC0415 — matches this module's branch-local logger imports
+
+        structlog.get_logger(__name__).debug("fanout_counts_refresh_failed", exc_info=True)
+
+
+def join_fanout_counts_refresh(timeout: float) -> bool:
+    """Wait up to *timeout* for a background counts refresh (tests). True when none is running."""
+    thread = _fanout_counts_refresh
+    if thread is None:
+        return True
+    thread.join(timeout)
+    return not thread.is_alive()
+
+
 def invalidate_collections_cache() -> None:
     """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
     call to refetch from T3 rather than serving up to
@@ -4164,6 +4217,8 @@ def reset_singletons():
     # Drain the telemetry sink BEFORE the slot reset: a batch written after
     # it would build a fresh T2Database in the cleared slot and leak it.
     reset_search_telemetry_sink()
+    # A background counts refresh (nexus-vpa9q) must not install into the cache after the reset.
+    join_fanout_counts_refresh(2.0)
     _default_t2_slot.reset_for_tests()
     clear_search_traces()
     reset_plan_cache_for_tests()

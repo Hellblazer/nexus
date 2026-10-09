@@ -60,6 +60,7 @@ from nexus.mcp_infra import (
     # quarantine / dormant / disputed collection is gc machinery, never a
     # search target). It keeps the `_get_collection_names` alias because that
     # name is the routing seam the MCP tests monkeypatch to inject a corpus.
+    get_fanout_counts as _get_fanout_counts,
     get_live_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
@@ -2893,6 +2894,7 @@ def _search_render(
     structured: bool = False,
     threshold: float | None = None,
     lexical: bool = False,
+    _target_memo: dict | None = None,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
 
@@ -2976,8 +2978,20 @@ def _search_render(
         # (nexus-hmxi) + resolve_corpus logic -- one implementation
         # instead of two that can drift (query()'s plain-corpus branch was
         # exactly that drift: nexus-z4j8d fix 1).
-        fanout_excluded: list[str] = []
-        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
+        # nexus-vpa9q: the search() wrapper renders twice per request (text, then structured)
+        # and the second render is served by the page cache, whose key holds the resolved
+        # target. A target that changed in between (background fan-out counts landing, a names
+        # refresh) made the second render search the whole corpus again, so the wrapper passes
+        # one memo and both renders share one resolution.
+        if _target_memo is not None and "target" in _target_memo:
+            target = _target_memo["target"]
+            fanout_excluded = list(_target_memo["excluded"])
+        else:
+            fanout_excluded = []
+            target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
+            if _target_memo is not None:
+                _target_memo["target"] = target
+                _target_memo["excluded"] = list(fanout_excluded)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3441,10 +3455,11 @@ def search(
         msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
                "Page with offset for more.")
         return {"error": msg} if structured else f"Error: {msg}"
+    target_memo: dict = {}
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
-        threshold=threshold, lexical=lexical,
+        threshold=threshold, lexical=lexical, _target_memo=target_memo,
     )
     if structured or not isinstance(result, str):
         # structured=True, or an error string that already reads like one —
@@ -3455,7 +3470,7 @@ def search(
     data = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=True,
-        threshold=threshold, lexical=lexical,
+        threshold=threshold, lexical=lexical, _target_memo=target_memo,
     )
     empty_shape = {
         "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
@@ -3660,10 +3675,11 @@ def _resolve_corpus_target(
     result can name what was skipped, the same way ``_no_results_message``
     already names backend-failed collections (nexus-pebfx.8).
 
-    Counts come from :func:`nexus.mcp_infra.get_collection_counts`, which
-    shares its cache with :func:`nexus.mcp_infra.get_collection_names` --
-    the same ``list_collections()`` call this function already makes
-    below, so the floor check costs no additional round trip.
+    Counts come from :func:`nexus.mcp_infra.get_fanout_counts`, which never
+    waits on the full listing: cached counts of any age are used and
+    refreshed in the background, and a cold cache gives none, so that call
+    excludes nothing (an unknown count fails open). Names come from the
+    cheap routing listing (nexus-vpa9q).
     """
     # nexus-bc7ps: fan-out is ROUTING; a quarantine / dormant / disputed
     # collection is gc machinery, never a search target, whether reached by
@@ -3682,11 +3698,13 @@ def _resolve_corpus_target(
         # candidate-string site as nexus.corpus.t3_collection_name's own ct/rest split.
         return split_candidate_collection_name(token)[1] != token
 
+    # nexus-vpa9q: the floor reads counts without waiting on the full listing (see
+    # get_fanout_counts); names come from the cheap routing listing.
     counts_up_front: dict[str, int] | None = None
     if corpus == "all" or any(
         part.strip() and not _names_a_collection(part.strip()) for part in corpus.split(",")
     ):
-        counts_up_front = _get_collection_counts()
+        counts_up_front = _get_fanout_counts()
     all_names = _get_collection_names()
     if corpus == "all":
         seen: list[str] = []
@@ -3725,7 +3743,7 @@ def _resolve_corpus_target(
             target.append(name)
         else:
             fanned_out = resolve_corpus(part, all_names)
-            counts = counts_up_front if counts_up_front is not None else _get_collection_counts()
+            counts = counts_up_front if counts_up_front is not None else _get_fanout_counts()
             excluded = _fanout_exclusions_for_group(fanned_out, counts)
             for name in fanned_out:
                 if name in excluded:
