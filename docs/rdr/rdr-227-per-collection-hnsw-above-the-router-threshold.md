@@ -610,3 +610,4 @@ Sam chose to pay that (2026-10-09).
   lifecycle (trigger, sweep, hysteresis, advisory lock, failed versus in-flight),
   routing table with `ef_search = 1000` as the no-index route, status object,
   Alternative 4 restated, RDR-226 abandoned (research `-4`, `-5`).
+- 2026-10-09: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `809a7dea8`; critique `nexus_rdr/227-gate-critique-2026-10-09-r2`.
