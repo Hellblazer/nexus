@@ -68,7 +68,7 @@ Under T = 30000 the floor moves to the mid-size exact arms, `code__1-20` (29,355
 rows) and `code__1-72` (27,893 rows), at about 0.8 s each under concurrency
 (statement maxima 710 to 989 ms, live on v0.1.156, `nexus_rdr/227-research-1`),
 and a warm default search stays 0.5 to 0.7 s slower than on v0.1.154. Lowering T below
-27,893 brings back Gap 1's miss on `code__1-72`. A T between 27,893 and 29,355
+27,893 puts `code__1-72` below the Gap 1 target (A4). A T between 27,893 and 29,355
 would move only `code__1-20` off the exact path, whose recall at
 `ef_search = 1000` was not measured; Phase 1 Step 3 measures it.
 
@@ -224,8 +224,8 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
 
 ### Approach
 
-For each collection above T, keep a partial HNSW index on its leaf restricted to
-that collection. A one-collection arm on such a collection then walks a graph of
+For each collection of at least B rows (Lifecycle), keep a partial HNSW index on
+its leaf restricted to that collection. A one-collection arm on such a collection then walks a graph of
 its own rows only: no collection filter, no crowd-out, HNSW speed (the
 live-row check and any caller filter still apply). The router sends an arm exact
 at or below T, and to the collection's own index above it. A collection above T
@@ -285,8 +285,8 @@ walk at `ef_search = 1000`.
     to one. `NX_SEARCH_PCI_BUILD_MIN_ROWS` (B, an integer >= 1, default 20000) is
     the build threshold; it is independent of the routing threshold T, and B <= T
     is what lets T be lowered to B later (Phase 2b). The routing probe cannot do
-    this job, because it counts at most T+1 rows and never reports a collection
-    below T (`nexus_rdr/227-research-7`).
+    this job, because it runs only on a search, only when T > 0, and flags
+    nothing at or below T (`nexus_rdr/227-research-7`).
   - *Sweep, read half.* Every engine, with no lock, once after boot and every
     10 minutes (`NX_SEARCH_PCI_SWEEP_SECONDS`, an integer >= 60): enumerate the
     per-collection indexes on every leaf by name prefix `pci_` in
@@ -475,8 +475,9 @@ without a valid index (Routing) and ships it first (Phase 2a).
 - More indexes per leaf: one per large collection per tenant, so the count grows
   with tenants times large collections. Each costs about 8.2 KB of disk per row
   (Phase 0) and write amplification on every insert into that collection.
-- A background index build after a collection crosses T, during which the
-  collection takes the `ef_search = 1000` leaf walk.
+- A background index build after a collection reaches B. While B < T the
+  collection keeps routing exact during the build; above T it takes the
+  `ef_search = 1000` leaf walk until its index is valid.
 - Insert cost into an indexed collection (a second HNSW insert per row) was not
   measured; Phase 1 measures it on the substrate, bulk load included.
 - The long-lived engine process now keeps the admin credentials it read at boot
@@ -563,7 +564,8 @@ alone as Phase 2a. Step 2: confirm on the managed instance (a read-only
 `pg_class.relowner` query by conexus) that `nexus_admin` owns the leaves, which
 A5's credential check did not show; then the reconciler and builder as specified
 (Lifecycle), the router's index set, the status object, the sampled plan check,
-the migrator's cancel of `nexus-pci-builder` backends, and the prewarm (A6).
+the migrator's termination of `nexus-pci-builder-` backends, and the prewarm
+(A6).
 Step 3: substrate measurements: insert and bulk-load cost into an indexed
 collection, build time with the Builder's timeouts, local build time at the local
 bundle's `maintenance_work_mem`, and recall at the Gap 1 target on own-topic
@@ -625,7 +627,7 @@ None.
   dropped.
 - Rename: after a canonical rename the old index is dropped and the new name is
   built on the next DDL pass.
-- Hysteresis: a collection between T/2 and T keeps its index.
+- Hysteresis: a collection between B/2 and B keeps its index.
 - Credentials: a wrong admin password sets `builder_state = auth_failed` and
   builds nothing.
 - Router refresh: the engine that loses the lock has the same valid-index set
@@ -752,3 +754,7 @@ Phase 2a's measured default search shows those exact arms still set the floor
   could not build collections below T), COPY rename keeps its index, counts in an
   explicit transaction, migrator terminates builder sessions, per-boot builder
   name, status semantics (research `-7`).
+- 2026-10-09: Stale-site corrections from fix check `ca4ca8962` (B, not T, as the build
+  threshold in the Approach and Consequences; terminate, not cancel, in Step 2;
+  B/2 in the hysteresis test; probe wording). Remaining counted items carried to
+  Phase 1 planning (`nexus_rdr/227-fix-check-ca4ca8962`).
