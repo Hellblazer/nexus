@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
     import httpx
 
+    from nexus.search_telemetry_sink import BackgroundSearchTelemetry
+
 
 def _parse_version(ver: str) -> tuple[int, ...]:
     """Parse a dotted version string into a comparable 3-component tuple.
@@ -1516,6 +1518,64 @@ def t2_index_write(write_fn, *, op: str = "t2_write"):
     threaded straight through for :func:`service_t2_op_stats` attribution.
     """
     return _service_t2_write_locked(write_fn, op=op)
+
+
+# ── Search telemetry sink (nexus-vpa9q) ──────────────────────────────────────
+# MCP search and query hand their per-call telemetry rows to this sink
+# instead of a per-call T2Database store. See nexus.search_telemetry_sink for
+# the measured cost it removes from the request path.
+
+#: Seconds the interpreter-exit hook waits for queued telemetry to drain.
+SEARCH_TELEMETRY_EXIT_FLUSH_SECONDS: float = 2.0
+
+_search_telemetry: BackgroundSearchTelemetry | None = None
+_search_telemetry_lock = threading.Lock()
+_search_telemetry_atexit_registered = False
+
+
+def _write_search_telemetry(rows: list) -> object:
+    # Resolved through the module global at call time, so a test that
+    # monkeypatches t2_index_write intercepts the worker's writes too.
+    return t2_index_write(
+        lambda db: db.telemetry.log_search_batch(rows), op="search_telemetry",
+    )
+
+
+def flush_search_telemetry_at_exit() -> None:
+    """Drain queued search telemetry, bounded by
+    :data:`SEARCH_TELEMETRY_EXIT_FLUSH_SECONDS` (atexit and the MCP SIGTERM
+    handler, which exits with ``os._exit`` and so skips atexit)."""
+    sink = _search_telemetry
+    if sink is not None:
+        sink.close(SEARCH_TELEMETRY_EXIT_FLUSH_SECONDS)
+
+
+def search_telemetry_sink() -> BackgroundSearchTelemetry:
+    """Return the process-lifetime search telemetry sink, built on first use.
+
+    Writes go through :func:`t2_index_write`, so they reuse the pooled
+    shared T2 client rather than opening a connection per search.
+    """
+    global _search_telemetry, _search_telemetry_atexit_registered
+    with _search_telemetry_lock:
+        if _search_telemetry is None:
+            from nexus.search_telemetry_sink import BackgroundSearchTelemetry  # noqa: PLC0415 — deferred; only MCP search/query need it
+            _search_telemetry = BackgroundSearchTelemetry(_write_search_telemetry)
+            if not _search_telemetry_atexit_registered:
+                import atexit  # noqa: PLC0415 — stdlib, branch-local
+
+                atexit.register(flush_search_telemetry_at_exit)
+                _search_telemetry_atexit_registered = True
+        return _search_telemetry
+
+
+def reset_search_telemetry_sink(timeout: float = 0.5) -> None:
+    """Close and forget the sink (tests; :func:`reset_singletons`)."""
+    global _search_telemetry
+    with _search_telemetry_lock:
+        sink, _search_telemetry = _search_telemetry, None
+    if sink is not None:
+        sink.close(timeout)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
@@ -4062,6 +4122,9 @@ def reset_singletons():
     # nexus-w1ip: the T2 singleton's reset (close + clear refcounts /
     # pending-close, same nexus-0dpli guard) is now the slot's own
     # responsibility.
+    # Drain the telemetry sink BEFORE the slot reset: a batch written after
+    # it would build a fresh T2Database in the cleared slot and leak it.
+    reset_search_telemetry_sink()
     _default_t2_slot.reset_for_tests()
     clear_search_traces()
     reset_plan_cache_for_tests()

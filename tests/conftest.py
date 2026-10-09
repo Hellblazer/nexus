@@ -2465,6 +2465,28 @@ def _isolate_index_run_collectors():
     _reset_index_run_collectors_if_loaded()
 
 
+def _reset_search_telemetry_sink_if_loaded() -> None:
+    import sys as _sys  # noqa: PLC0415 — local, matches this file's convention
+
+    infra = _sys.modules.get("nexus.mcp_infra")
+    if infra is not None:
+        infra.reset_search_telemetry_sink()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_telemetry_sink():
+    """Give every test its own MCP search telemetry worker (nexus-vpa9q).
+
+    ``nexus.mcp_infra`` keeps one process-wide background writer for MCP
+    search and query telemetry. Without this reset a batch queued by one
+    test could be written during the next, into whatever T2 endpoint that
+    test set up. Reads ``sys.modules`` instead of importing.
+    """
+    _reset_search_telemetry_sink_if_loaded()
+    yield
+    _reset_search_telemetry_sink_if_loaded()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_collection_registration_cache() -> None:
     """Clear ``nexus.corpus``'s per-process "known registered" cache

@@ -69,6 +69,8 @@ from nexus.mcp_infra import (
     invalidate_collections_cache as _invalidate_collections_cache,
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
+    flush_search_telemetry_at_exit as _flush_search_telemetry_at_exit,
+    search_telemetry_sink as _search_telemetry_sink,
     t2_ctx as _t2_ctx,
     t2_index_write as _t2_index_write,
 )
@@ -2432,6 +2434,9 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
         # interfere -- they hold the cleanup contract for this exit.
         return
 
+    # nexus-vpa9q: os._exit skips atexit, so drain queued search
+    # telemetry here (bounded) before the process goes.
+    _flush_search_telemetry_at_exit()
     _t1_shutdown()
     _os._exit(0)
 
@@ -3024,6 +3029,8 @@ def _search_render(
             with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
+            # nexus-vpa9q: the background sink writes off the request path
+            # through the pooled shared T2 client.
                 results = search_cross_corpus(
                     query, target, n_results=fetch_n, t3=t3, where=where_dict,
                     cluster_by=cluster_by or None,
@@ -3033,7 +3040,7 @@ def _search_render(
                     topic=topic or None,
                     threshold_override=threshold,
                     lexical=lexical,
-                    telemetry=_t2_db.telemetry,
+                    telemetry=_search_telemetry_sink(),
                     diagnostics_out=diag,
                     rerank=lexical_rerank,
                     rerank_meta_out=rerank_meta if lexical_rerank else None,
@@ -5048,7 +5055,7 @@ def query(
                 catalog=_get_catalog(),
                 link_boost=True,
                 taxonomy=_t2_db.taxonomy,
-                telemetry=_t2_db.telemetry,
+                telemetry=_search_telemetry_sink(),
                 diagnostics_out=qdiag,
                 # nexus-tnwm2: query groups by document and orders by
                 # hybrid_score; it never reads _topic_label or _cluster_label.
