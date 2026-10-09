@@ -10,6 +10,7 @@ import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PciIndexSet;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.PgVectorRepository.FanoutSettings;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionResult;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -29,6 +30,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -266,34 +269,69 @@ class PgVectorCardinalityRouterIntegrationTest {
 
     /**
      * A repository whose index set claims a valid per-collection index for every collection, so a single
-     * collection walks at the SERVING ef_search (RDR-227 Step 1). A single collection with no index now walks
-     * at 1000, which covers this fixture's whole ~320-row leaf, so the walk no longer starves; the starved
-     * walk these fallback cases need is the serving one.
+     * collection walks at the SERVING ef_search (RDR-227 Step 1). A single collection with no index walks at
+     * 1000, which covers this fixture's whole ~320-row leaf, so that walk does not starve; the starved walk
+     * the fallback cases below need is the serving one. The default repository (no index set) is the
+     * production Step 1 shape and is witnessed separately, in
+     * {@link #aSmallCollectionAboveT_onTheDefaultRepoWalksAtWidestAndNeedsNoFallback_theServingWalkStillFallsBack}.
      */
     private PgVectorRepository servingRepo() {
         return new PgVectorRepository(new TenantScope(ds), embedder, embedder, (model, tenant, collection) -> true);
     }
 
+    /**
+     * Witnesses the empty-result fallback on a statement that walks at the SERVING ef_search (an indexed or
+     * multi-collection statement), not on the default repository's ef 1000 walk.
+     */
     @Test
-    void aSmallCollectionAboveTStillGetsTodaysEmptyResultFallback() {
+    void aSmallCollectionAboveTOnTheServingEfWalkStillGetsTheEmptyResultFallback() {
         PgSession.overrideSearchExactMaxRowsForTests(SMALL_ROWS - 1);
         Counters before = Counters.now();
         assertThat(servingRepo().searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false).value())
             .as("repaired by the re-run").hasSize(SMALL_ROWS);
-        assertThat(Counters.now().since(before).fallback()).as("today's path is unchanged above T").isEqualTo(1);
+        assertThat(Counters.now().since(before).fallback())
+            .as("the serving-ef walk starves above T and the re-run repairs it").isEqualTo(1);
+    }
+
+    /**
+     * The production Step 1 shape (the default repository, no per-collection index): a small collection above
+     * T walks the leaf at 1000, which covers the fixture's whole leaf, so it returns every row with no
+     * fallback. The same statement over an indexed repository (the serving ef) starves and is repaired by the
+     * re-run, so the two are the two sides of the ef choice.
+     */
+    @Test
+    void aSmallCollectionAboveT_onTheDefaultRepoWalksAtWidestAndNeedsNoFallback_theServingWalkStillFallsBack() {
+        PgSession.overrideSearchExactMaxRowsForTests(SMALL_ROWS - 1);
+        Counters before = Counters.now();
+        List<Map<String, Object>> wide = flat(TENANT, List.of(S1), K);
+        Counters d = Counters.now().since(before);
+        assertThat(wide).as("every row of the collection, from the first walk").hasSize(SMALL_ROWS);
+        assertThat(d.hnsw()).as("above T: the HNSW route").isEqualTo(1);
+        assertThat(d.exact()).isZero();
+        assertThat(d.fallback()).as("ef 1000 reaches the collection: nothing starved, no re-run").isZero();
+
+        before = Counters.now();
+        List<Map<String, Object>> serving = servingRepo().searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false)
+            .value();
+        d = Counters.now().since(before);
+        assertThat(d.fallback()).as("the same statement at the serving ef starves and is repaired").isEqualTo(1);
+        assertThat(serving.stream().map(r -> r.get("id")).toList())
+            .as("both routes end with the same rows").containsExactlyInAnyOrderElementsOf(
+                wide.stream().map(r -> r.get("id")).toList());
     }
 
     // ── 3. T = 0 disables ─────────────────────────────────────────────────────
 
+    /** T = 0 on the SERVING ef walk (see {@link #servingRepo}): never exact, starved, repaired by the re-run. */
     @Test
-    void zeroNeverRoutesExact() {
+    void zeroNeverRoutesExact_onTheServingEfWalk() {
         PgSession.overrideSearchExactMaxRowsForTests(0);
         Counters before = Counters.now();
         List<Map<String, Object>> rows =
             servingRepo().searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false).value();
         Counters d = Counters.now().since(before);
 
-        assertThat(rows).as("still repaired, by today's re-run").hasSize(SMALL_ROWS);
+        assertThat(rows).as("still repaired, by the empty-result re-run").hasSize(SMALL_ROWS);
         assertThat(d.exact()).as("T = 0: never exact").isZero();
         assertThat(d.hnsw()).isEqualTo(1);
         assertThat(d.fallback()).as("the starved HNSW walk ran and was repaired").isEqualTo(1);
@@ -556,7 +594,8 @@ class PgVectorCardinalityRouterIntegrationTest {
         assertThat(stub.asked).as("asked once, with the statement's tenant and collection").hasSize(1);
         String[] q = stub.asked.get(0).split("\\|");
         assertThat(q).hasSize(3);
-        assertThat(q[0]).as("the model of the leaf").isNotBlank();
+        assertThat(q[0]).as("the model of the leaf the collection is registered under")
+            .isEqualTo(registeredModel(TENANT, BIG));
         assertThat(q[1]).isEqualTo(TENANT);
         assertThat(q[2]).isEqualTo(BIG);
     }
@@ -612,13 +651,18 @@ class PgVectorCardinalityRouterIntegrationTest {
         PgSession.overrideSearchExactMaxRowsForTests(10);
         var probe = new EfSearchProbe();
 
+        probe.clear();
         List<String> lines = phaseLines(() -> probedRepo(probe, PciIndexSet.NONE)
             .searchPerCollection(TENANT, QUERY, List.of(BIG), K, 100, null, null, false));
+        assertThat(probe.efSearchPerStatement()).as("hnsw.ef_search Postgres ran the arm with")
+            .containsExactly(Integer.toString(WIDEST));
         assertThat(lines).hasSize(1);
         assertThat(lines.get(0)).contains("ef1000_arms=1 ", "top_statements=" + BIG + ":hnsw:1000:");
 
+        probe.clear();
         lines = phaseLines(() -> probedRepo(probe, new StubIndexes(BIG))
             .searchPerCollection(TENANT, QUERY, List.of(BIG), K, 100, null, null, false));
+        assertThat(probe.efSearchPerStatement()).containsExactly(Integer.toString(EF_FLOOR));
         assertThat(lines).hasSize(1);
         assertThat(lines.get(0)).contains("ef1000_arms=0 ", "top_statements=" + BIG + ":hnsw:" + EF_FLOOR + ":");
     }
@@ -632,11 +676,16 @@ class PgVectorCardinalityRouterIntegrationTest {
     @Test
     void theArmPhasesLineNamesTheArmsByStatementTimeAndCountsTheEf1000Arms() {
         PgSession.overrideSearchExactMaxRowsForTests(10);
-        List<String> lines = phaseLines(() -> repo.searchPerCollection(
+        var probe = new EfSearchProbe();
+        List<String> lines = phaseLines(() -> probedRepo(probe, PciIndexSet.NONE).searchPerCollection(
             TENANT_X, QUERY, List.of(X_EXACT, X_HNSW1, X_HNSW2), K, 100, null, null, false));
+        assertThat(probe.efSearchPerStatement()).as("Postgres ran all three arms at 1000, the exact one included")
+            .hasSize(3).containsOnly(Integer.toString(WIDEST));
         assertThat(lines).as("one arm-phases line per request").hasSize(1);
         String line = lines.get(0);
         assertThat(line).contains("arms=3 ", "exact_arms=1 hnsw_arms=2", "ef1000_arms=2 ");
+        assertThat(line).as("the new fields come after the existing ones, so existing readers still match")
+            .matches(".* ef1000_arms=2 top_statements=\\S+ sum_hnsw_statement_ms=\\d+ max_hnsw_statement_ms=\\d+$");
 
         var m = java.util.regex.Pattern.compile(" top_statements=(\\S*)").matcher(line);
         assertThat(m.find()).as(line).isTrue();
@@ -653,6 +702,16 @@ class PgVectorCardinalityRouterIntegrationTest {
             previous = ms;
         }
         assertThat(byCollection.keySet()).containsExactlyInAnyOrder(X_EXACT, X_HNSW1, X_HNSW2);
+        // The HNSW route's own statement time: the sum and max cover the two HNSW arms and not the exact one.
+        long hnswMs = Long.parseLong(byCollection.get(X_HNSW1)[3]) + Long.parseLong(byCollection.get(X_HNSW2)[3]);
+        long hnswMaxMs = Math.max(Long.parseLong(byCollection.get(X_HNSW1)[3]),
+                                  Long.parseLong(byCollection.get(X_HNSW2)[3]));
+        var hm = java.util.regex.Pattern.compile("sum_hnsw_statement_ms=(\\d+) max_hnsw_statement_ms=(\\d+)")
+            .matcher(line);
+        assertThat(hm.find()).as(line).isTrue();
+        assertThat(Long.parseLong(hm.group(1))).as("sum over the HNSW arms (ms truncation tolerated)")
+            .isBetween(hnswMs, hnswMs + 2);
+        assertThat(Long.parseLong(hm.group(2))).isBetween(hnswMaxMs, hnswMaxMs + 1);
         assertThat(byCollection.get(X_EXACT)).as("route and ef_search of the exact arm")
             .containsSubsequence(X_EXACT, "exact", Integer.toString(WIDEST));
         assertThat(byCollection.get(X_HNSW1)).containsSubsequence(X_HNSW1, "hnsw", Integer.toString(WIDEST));
@@ -661,18 +720,20 @@ class PgVectorCardinalityRouterIntegrationTest {
 
     /** The field's ordering, limit and format, with the times fixed. */
     @Test
-    void topStatementsIsLargestFirst_limitedAndSkipsStatementsThatNeverFinished() {
+    void topStatementsIsLargestFirst_limited_marksStatementsThatDidNotReturn_andSkipsOnesNeverStarted() {
         var arms = List.of(
-            new PgVectorRepository.ArmStatement("a", false, 1000, 5_000_000L),
-            new PgVectorRepository.ArmStatement("b", true, 1000, 90_000_000L),
-            new PgVectorRepository.ArmStatement("c", false, 600, 40_000_000L),
-            new PgVectorRepository.ArmStatement("d", false, 1000, 70_000_000L),
-            new PgVectorRepository.ArmStatement("e", false, 1000, 0L));
+            new PgVectorRepository.ArmStatement("a", false, 1000, 5_000_000L, true),
+            new PgVectorRepository.ArmStatement("b", true, 1000, 90_000_000L, true),
+            new PgVectorRepository.ArmStatement("c", false, 600, 40_000_000L, true),
+            new PgVectorRepository.ArmStatement("d", false, 1000, 70_000_000L, true),
+            new PgVectorRepository.ArmStatement("t", false, 1000, 30_001_000_000L, false),
+            new PgVectorRepository.ArmStatement("e", false, 1000, 0L, false));
         assertThat(PgVectorRepository.topStatements(arms, 3))
-            .isEqualTo("b:exact:1000:90,d:hnsw:1000:70,c:hnsw:600:40");
+            .as("the arm that timed out ran longest, so it leads, marked")
+            .isEqualTo("t:hnsw:1000:30001!,b:exact:1000:90,d:hnsw:1000:70");
         assertThat(PgVectorRepository.topStatements(arms, 10))
-            .as("an arm that never finished a statement has no statement time to list")
-            .isEqualTo("b:exact:1000:90,d:hnsw:1000:70,c:hnsw:600:40,a:hnsw:1000:5");
+            .as("an arm that never started a statement has no statement time to list")
+            .isEqualTo("t:hnsw:1000:30001!,b:exact:1000:90,d:hnsw:1000:70,c:hnsw:600:40,a:hnsw:1000:5");
         assertThat(PgVectorRepository.topStatements(List.of(), 3)).isEmpty();
     }
 
@@ -704,6 +765,103 @@ class PgVectorCardinalityRouterIntegrationTest {
         } finally {
             logger.setLevel(was);
         }
+    }
+
+    /** The embedding model the catalog registered {@code collection} under: the leaf the statement reads. */
+    private String registeredModel(String tenant, String collection) {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection))
+                .fetchSingle().value1();
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * An arm whose statement runs into the search bound (SQLSTATE 57014) never returns, but it is the slowest
+     * statement of the request and the one the telemetry exists to name. It is listed in top_statements with
+     * the time it ran and a trailing {@code !}, counted in the HNSW statement time, and counted as an arm that
+     * walked at 1000. The router is off (T = 0) so the lock blocks the statement, not the probe.
+     */
+    @Test
+    void aStatementThatTimesOutIsNamedInTopStatementsWithAMarker_andCountsInTheHnswStatementTime()
+            throws Exception {
+        PgSession.overrideSearchExactMaxRowsForTests(0);
+        PerCollectionResult[] result = new PerCollectionResult[1];
+        List<String> lines;
+        Connection su = pg.createConnection("");
+        su.setAutoCommit(false);
+        try {
+            // An uncommitted rename holds the chunks table's exclusive lock: the arm's statement waits on it
+            // until its 400 ms statement_timeout cancels it.
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).renameTo("chunks_43ulx_lock").execute();
+            lines = phaseLines(() -> result[0] = repo.searchPerCollection(
+                TENANT, QUERY, List.of(BIG), K, 100, null, null, false, new FanoutSettings(1, 60_000, 400)));
+        } finally {
+            su.rollback();
+            su.close();
+        }
+        assertThat(result[0].perCollection()).hasSize(1);
+        assertThat(result[0].perCollection().get(0).errorKind())
+            .as("the arm timed out").isEqualTo(PgVectorRepository.ArmErrorKind.STATEMENT_TIMEOUT);
+        assertThat(lines).hasSize(1);
+        String line = lines.get(0);
+        var m = java.util.regex.Pattern.compile(" top_statements=" + BIG + ":hnsw:" + WIDEST + ":(\\d+)! ")
+            .matcher(line);
+        assertThat(m.find()).as("the timed-out arm is listed, marked: " + line).isTrue();
+        long ranMs = Long.parseLong(m.group(1));
+        assertThat(ranMs).as("the time it ran before the 400 ms bound cancelled it").isGreaterThanOrEqualTo(300L);
+        assertThat(line).contains("ef1000_arms=1 ");
+        var t = java.util.regex.Pattern.compile(
+            "sum_statement_ms=(\\d+) .*max_statement_ms=(\\d+) .*sum_hnsw_statement_ms=(\\d+) max_hnsw_statement_ms=(\\d+)")
+            .matcher(line);
+        assertThat(t.find()).as(line).isTrue();
+        for (int g = 1; g <= 4; g++) {
+            assertThat(Long.parseLong(t.group(g))).as("field %d counts the arm's running time: %s", g, line)
+                .isGreaterThanOrEqualTo(300L);
+        }
+    }
+
+    /**
+     * ef1000_arms records the decision, not the value: an arm served from a valid index whose serving
+     * ef_search happens to be 1000 (here a floor of 1000) is not an arm that walked wide.
+     */
+    @Test
+    void anArmServedAtAnEfOf1000ByTheServingFloorIsNotCountedAsAWideWalk() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        PgSession.overrideEfSearchFloorForTests(WIDEST);
+        try {
+            var probe = new EfSearchProbe();
+            List<String> lines = phaseLines(() -> probedRepo(probe, new StubIndexes(BIG))
+                .searchPerCollection(TENANT, QUERY, List.of(BIG), K, 100, null, null, false));
+            assertThat(probe.efSearchPerStatement()).as("Postgres ran the arm at 1000, from the serving floor")
+                .containsExactly(Integer.toString(WIDEST));
+            assertThat(lines).hasSize(1);
+            assertThat(lines.get(0)).contains("hnsw_arms=1", "ef1000_arms=0 ",
+                                              "top_statements=" + BIG + ":hnsw:" + WIDEST + ":");
+        } finally {
+            PgSession.overrideEfSearchFloorForTests(EF_FLOOR);
+        }
+    }
+
+    /** The same name twice is one collection: the single-collection rule applies. */
+    @Test
+    void aDuplicatedSingleCollectionIsOneCollection_andWalksAtWidest() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var probe = new EfSearchProbe();
+        var stub = new StubIndexes();
+        var r = probedRepo(probe, stub);
+        List<Map<String, Object>>[] rows = new List[1];
+        List<String> ef = efFor(probe, r, x -> rows[0] =
+            x.searchWithTokens(TENANT, QUERY, List.of(BIG, BIG), K, null, false).value());
+        assertThat(ef).as("[A, A] is the single collection A: no index, so 1000")
+            .isNotEmpty().containsOnly(Integer.toString(WIDEST));
+        assertThat(stub.asked).as("asked once, about A").hasSize(1);
+        assertThat(stub.asked.get(0)).endsWith("|" + TENANT + "|" + BIG);
+        assertThat(rows[0]).hasSize(K);
+        assertThat(rows[0].stream().map(x -> x.get("id")).distinct().count()).as("no duplicated rows").isEqualTo(K);
     }
 
     private static List<String> phaseLines(Runnable body) {

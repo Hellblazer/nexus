@@ -93,6 +93,10 @@ public final class PgSession {
      * T2 nexus_rdr/225-recall-per-leaf-analysis). The live sweep (conexus
      * T2 [29566]) restored 12/12 at ef 400 with latency flat to 1000; 600
      * keeps headroom over that measured point.
+     *
+     * <p>The floor governs every statement except a single-collection plain search whose collection has no
+     * per-collection index: that one runs at {@link #EF_SEARCH_WIDEST} (1000) regardless of this floor
+     * (RDR-227).
      */
     static final int DEFAULT_EF_SEARCH_FLOOR = 600;
 
@@ -1056,27 +1060,25 @@ public final class PgSession {
         batch.set("statement_timeout", Integer.toString(timeoutMs));
     }
 
-    /** {@link #setHnswEfSearch(DSLContext, int)} for a batch. */
-    public static void setHnswEfSearch(GucBatch batch, int nResults) {
-        batch.set("hnsw.ef_search", Integer.toString(efSearchFor(nResults)));
-    }
-
     /**
-     * The value {@link #setHnswEfSearch(GucBatch, int)} would set for {@code nResults}: the serving floor
-     * (or its test pin) clamped to pgvector's bound. For telemetry and for a caller that must know the
-     * value before the batch runs.
+     * {@link #setHnswEfSearch(DSLContext, int)} for a batch. Returns the value it put in the batch, so a caller
+     * that records it (telemetry) records the value that was set, not a second computation of it.
      */
-    public static int servingEfSearch(int nResults) {
-        return efSearchFor(nResults);
+    public static int setHnswEfSearch(GucBatch batch, int nResults) {
+        int ef = efSearchFor(nResults);
+        batch.set("hnsw.ef_search", Integer.toString(ef));
+        return ef;
     }
 
     /**
      * Set {@code hnsw.ef_search} to {@link #EF_SEARCH_WIDEST} for a batch, instead of the request-sized
      * serving value {@link #setHnswEfSearch(GucBatch, int)} sets (RDR-227 Step 1). A caller picks one of the
      * two per statement; it is the same setting, so the pairing {@code HnswServingGucParityTest} pins holds.
+     * Returns the value it put in the batch.
      */
-    public static void setHnswEfSearchWidest(GucBatch batch) {
+    public static int setHnswEfSearchWidest(GucBatch batch) {
         batch.set("hnsw.ef_search", Integer.toString(EF_SEARCH_WIDEST));
+        return EF_SEARCH_WIDEST;
     }
 
     /** {@link #setHnswScanBudget(DSLContext)} for a batch. */

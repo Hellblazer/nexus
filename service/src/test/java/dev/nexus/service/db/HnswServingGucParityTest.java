@@ -49,6 +49,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * text_gate_probe_<dim>} + {@code text_gated_search_hnsw_first_<dim>}), so
  * hybridSearch's {@code withTenant} block sets all four GUCs again, exactly
  * as before.
+ *
+ * <p>RDR-227 Step 1: {@link PgSession#setHnswEfSearchWidest} is the other way to set the same
+ * {@code hnsw.ef_search}. It is deliberately NOT matched by the {@code setHnswEfSearch(} literal count
+ * below, and it need not be: the one site that chooses between the two does so in a single ternary beside
+ * one {@code setHnswEfSearch(} call, so that site still has exactly one such call per iterative-scan
+ * setting and the count is neither loosened nor changed.
  */
 class HnswServingGucParityTest {
 

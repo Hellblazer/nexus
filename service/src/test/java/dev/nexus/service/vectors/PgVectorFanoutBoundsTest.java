@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.PgSession;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -176,6 +177,19 @@ class PgVectorFanoutBoundsTest {
         assertThat(t.otherNanos).isEqualTo(5_000_000L);
         assertThat(t.maxSetupNanos).isEqualTo(5_000_000L);
         assertThat(t.maxStatementNanos).isEqualTo(40_000_000L);
+        assertThat(t.hnswStatementNanos).as("only the arm not routed exact").isEqualTo(20_000_000L);
+        assertThat(t.maxHnswStatementNanos).isEqualTo(20_000_000L);
+        assertThat(t.ef1000Arms).as("counted on the walkedWide decision, never on an ef value").isZero();
+        b.walkedWide = true;
+        b.efSearch = 600;
+        var w = new PgVectorRepository.ArmPhaseTotals();
+        w.add(b, 26_000_000L);
+        assertThat(w.ef1000Arms).as("a wide walk counts whatever ef value was recorded").isEqualTo(1);
+        b.walkedWide = false;
+        b.efSearch = PgSession.EF_SEARCH_WIDEST;
+        var s1000 = new PgVectorRepository.ArmPhaseTotals();
+        s1000.add(b, 26_000_000L);
+        assertThat(s1000.ef1000Arms).as("a serving ef that equals 1000 is not a wide walk").isZero();
         // An arm whose phases overrun its measured total (clock granularity) never makes other negative.
         var c = new PgVectorRepository.ArmPhases();
         c.statementNanos = 9_000_000L;

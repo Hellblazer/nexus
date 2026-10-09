@@ -1371,6 +1371,9 @@ public final class PgVectorRepository {
         // fan-out — see registeredSurvivors' own javadoc.
         List<String> skippedCollections = new ArrayList<>();
         collectionNames = registeredSurvivors(tenant, collectionNames, "searchWithTokens", skippedCollections);
+        // RDR-227: the same name twice is one collection. The single-collection rule counts distinct names, and
+        // the statement's collection = ANY(...) selects the same rows either way.
+        collectionNames = new ArrayList<>(new java.util.LinkedHashSet<>(collectionNames));
         int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
             int colDim = dimForCollection(tenant, col);
@@ -1470,7 +1473,9 @@ public final class PgVectorRepository {
         // index and keeps the serving value. The other HNSW sites (the dense gate, the by-id sites) do not
         // change.
         final boolean walkWide = colls.length == 1 && !pciIndexes.hasValidIndex(model, tenant, colls[0]);
-        final int efSearch = walkWide ? PgSession.EF_SEARCH_WIDEST : PgSession.servingEfSearch(nResults);
+        // The value the batch sets, as the setter returns it: the one the telemetry and the route label record
+        // is the one Postgres was given, never a second computation of it.
+        final int[] efSet = {-1};
         // nexus-wym0l: the tenant stamp and every serving setting below travel in ONE statement, applied by
         // withTenant before the work runs (and so before the router probe and the search, which depend on
         // them). They were seven round trips per arm. The pairing and the order of the settings are the ones
@@ -1487,11 +1492,7 @@ public final class PgVectorRepository {
             // nexus-4ktfm: widen the traversal's candidate list too — iterative scan
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
-            if (walkWide) {
-                PgSession.setHnswEfSearchWidest(gucs);
-            } else {
-                PgSession.setHnswEfSearch(gucs, nResults);
-            }
+            efSet[0] = walkWide ? PgSession.setHnswEfSearchWidest(gucs) : PgSession.setHnswEfSearch(gucs, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(gucs);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
@@ -1501,6 +1502,7 @@ public final class PgVectorRepository {
         }, ctx -> {
             // nexus-tu8wp.6: the cardinality router. The threshold 0 disables it, and no probe runs.
             long startNanos = System.nanoTime();
+            final int efSearch = efSet[0];
             if (phases != null) {
                 phases.setupNanos = startNanos - setupStartNanos;
                 phases.efSearch = efSearch;
@@ -1509,16 +1511,20 @@ public final class PgVectorRepository {
             int probedRows = -1;
             boolean exact = false;
             boolean completed = false;
+            boolean statementStarted = false;
+            long statementStartNanos = 0L;
             try {
                 Result<? extends Record> result;
                 if (exactMaxRows > 0) {
                     probedRows = probeSelectedRows(ctx, dim, colls, model, tenant, exactMaxRows);
                     exact = probedRows <= exactMaxRows;
                 }
-                long statementStartNanos = System.nanoTime();
+                statementStartNanos = System.nanoTime();
+                statementStarted = true;
                 if (phases != null) {
                     phases.probeNanos = statementStartNanos - startNanos;
                     phases.exact = exact;
+                    phases.walkedWide = walkWide && !exact;
                     phases.probedRows = probedRows;
                 }
                 if (exact) {
@@ -1536,13 +1542,22 @@ public final class PgVectorRepository {
                     result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null);
                 }
                 completed = true;
-                if (phases != null) {
-                    phases.statementNanos = System.nanoTime() - statementStartNanos;
-                }
                 return result;
             } finally {
+                long endNanos = System.nanoTime();
+                if (phases != null) {
+                    // Stamped here so a statement that never returned (a 57014 timeout, an error) still shows
+                    // the time it ran: the slow arms are the ones the fan-out telemetry exists to find. A probe
+                    // that failed has no statement; its time is the probe's.
+                    phases.completed = completed;
+                    if (statementStarted) {
+                        phases.statementNanos = endNanos - statementStartNanos;
+                    } else {
+                        phases.probeNanos = endNanos - startNanos;
+                    }
+                }
                 logIfSlow(colls, slowRouteLabel(exactMaxRows, exact, probedRows, efSearch),
-                          probedRows, System.nanoTime() - startNanos, completed);
+                          probedRows, endNanos - startNanos, completed);
             }
         });
     }
@@ -1649,14 +1664,22 @@ public final class PgVectorRepository {
     /** How many statements the arm-phases line names (RDR-227 Step 1). */
     private static final int TOP_STATEMENTS = 3;
 
-    /** One fan-out arm's statement, for the request's {@code top_statements} field (RDR-227 Step 1). */
-    public record ArmStatement(String collection, boolean exact, int efSearch, long statementNanos) {}
+    /**
+     * One fan-out arm's statement, for the request's {@code top_statements} field (RDR-227 Step 1).
+     * {@code completed} is false for a statement that ran and did not return (a timeout, an error);
+     * {@code statementNanos} is then the time it ran.
+     */
+    public record ArmStatement(String collection, boolean exact, int efSearch, long statementNanos,
+                               boolean completed) {}
 
     /**
      * The {@code top_statements} value of the arm-phases line: the {@code limit} largest statement times of
      * the request, largest first, each as {@code collection:route:ef_search:statement_ms} (route {@code exact}
-     * or {@code hnsw}), comma-separated with no spaces. An arm whose statement never finished (a timeout, an
-     * error) has no statement time and is not listed. Empty when no arm finished a statement. The per-arm
+     * or {@code hnsw}), comma-separated with no spaces. A statement that ran and did not return (a timeout, an
+     * error) is listed with the time it ran and a trailing {@code !} ({@code coll:hnsw:1000:30001!}), because
+     * the slowest statements are the ones most worth naming. An arm that never started a statement (refused
+     * at the gate, a failed probe) has no statement time and is not listed. Empty when no arm started a
+     * statement. The per-arm
      * collection, route and time otherwise exist only in the DEBUG per-arm line, which the cloud engine does
      * not emit (RDR-227, the Phase 2 gate reads this field).
      */
@@ -1666,7 +1689,7 @@ public final class PgVectorRepository {
             .sorted(java.util.Comparator.comparingLong(ArmStatement::statementNanos).reversed())
             .limit(limit)
             .map(a -> a.collection() + ":" + (a.exact() ? "exact" : "hnsw") + ":" + a.efSearch() + ":"
-                      + a.statementNanos() / 1_000_000L)
+                      + a.statementNanos() / 1_000_000L + (a.completed() ? "" : "!"))
             .collect(java.util.stream.Collectors.joining(","));
     }
 
@@ -1943,14 +1966,21 @@ public final class PgVectorRepository {
         volatile int probedRows = -1;
         /** The {@code hnsw.ef_search} the arm's settings batch set (an arm the probe sends exact ignores it). */
         volatile int efSearch = -1;
+        /** True when the statement ran HNSW at the widest ef_search by the single-collection rule (RDR-227). */
+        volatile boolean walkedWide;
+        /** False when the statement started and did not return (a timeout, an error); its time is still stamped. */
+        volatile boolean completed;
     }
 
     /** Per-request sums and maxima of {@link ArmPhases}; {@code other} is the arm total minus the four phases. */
     static final class ArmPhaseTotals {
         int arms;
         int exactArms;
-        /** Arms that ran the HNSW route with {@code hnsw.ef_search} at pgvector's maximum (RDR-227 Step 1). */
+        /** Arms that ran HNSW at the widest {@code hnsw.ef_search} by the single-collection rule (RDR-227 Step 1). */
         int ef1000Arms;
+        /** Statement time of the arms that were not routed exact (the HNSW route), summed and maxed. */
+        long hnswStatementNanos;
+        long maxHnswStatementNanos;
         long permitWaitNanos;
         long setupNanos;
         long probeNanos;
@@ -1965,8 +1995,12 @@ public final class PgVectorRepository {
             arms++;
             if (p.exact) {
                 exactArms++;
-            } else if (p.efSearch == PgSession.EF_SEARCH_WIDEST) {
-                ef1000Arms++;
+            } else {
+                if (p.walkedWide) {
+                    ef1000Arms++;
+                }
+                hnswStatementNanos += p.statementNanos;
+                maxHnswStatementNanos = Math.max(maxHnswStatementNanos, p.statementNanos);
             }
             permitWaitNanos += p.permitWaitNanos;
             setupNanos += p.setupNanos;
@@ -2448,7 +2482,8 @@ public final class PgVectorRepository {
             ArmPhases p = armPhases[slot];
             if (p != null) {
                 phaseTotals.add(p, armNanos[slot]);
-                armStatements.add(new ArmStatement(cols.get(slot), p.exact, p.efSearch, p.statementNanos));
+                armStatements.add(new ArmStatement(cols.get(slot), p.exact, p.efSearch, p.statementNanos,
+                                                 p.completed));
             }
             if (log.isDebugEnabled()) {
                 PerCollectionStat s = stats.get(slot);
@@ -2466,14 +2501,15 @@ public final class PgVectorRepository {
         log.info("event=search_per_collection_arm_phases arms={} sum_arm_ms={} sum_permit_wait_ms={} "
                  + "sum_setup_ms={} sum_probe_ms={} sum_statement_ms={} sum_other_ms={} max_permit_wait_ms={} "
                  + "max_setup_ms={} max_probe_ms={} max_statement_ms={} exact_arms={} hnsw_arms={} "
-                 + "ef1000_arms={} top_statements={}",
+                 + "ef1000_arms={} top_statements={} sum_hnsw_statement_ms={} max_hnsw_statement_ms={}",
                  phaseTotals.arms, sumArmMs, phaseTotals.permitWaitNanos / 1_000_000L,
                  phaseTotals.setupNanos / 1_000_000L, phaseTotals.probeNanos / 1_000_000L,
                  phaseTotals.statementNanos / 1_000_000L, phaseTotals.otherNanos / 1_000_000L,
                  phaseTotals.maxPermitWaitNanos / 1_000_000L, phaseTotals.maxSetupNanos / 1_000_000L,
                  phaseTotals.maxProbeNanos / 1_000_000L, phaseTotals.maxStatementNanos / 1_000_000L,
                  phaseTotals.exactArms, phaseTotals.arms - phaseTotals.exactArms, phaseTotals.ef1000Arms,
-                 topStatements(armStatements, TOP_STATEMENTS));
+                 topStatements(armStatements, TOP_STATEMENTS), phaseTotals.hnswStatementNanos / 1_000_000L,
+                 phaseTotals.maxHnswStatementNanos / 1_000_000L);
         log.info("event=search_per_collection collections={} arms={} workers={} per_collection_k={} limit={} "
                  + "rows={} peak_retained_rows={} isolated_errors={} budget_exhausted={} statement_timeouts={} "
                  + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={} query_embed_ms={} "
