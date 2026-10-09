@@ -453,6 +453,17 @@ public final class PgContainerHelper {
     }
 
     /**
+     * {@link #runSuperuserDdl} for a statement PostgreSQL refuses inside a transaction block
+     * ({@code CREATE INDEX CONCURRENTLY}, {@code DROP INDEX CONCURRENTLY}; nexus-43ulx.11). The
+     * statement blocks until it ends, so a caller that wants to observe it mid-flight runs this on a
+     * thread of its own with its own connection.
+     */
+    public static void runSuperuserDdlOutsideTransaction(Connection su, String ddl) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-superuser-ddl-no-tx.xml",
+            "databasechangelog_test_superuser_ddl_no_tx", Map.of("ddl", ddl));
+    }
+
+    /**
      * Run a test changelog on {@code su} through its own bookkeeping table. Despite the name the
      * connection may be any role the changelog's statements are allowed for: the RDR-225 scratch
      * fixture runs as the schema owner so its scratch tables are owned by the role that owns the

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-43ulx.11: run ONE superuser DDL statement (${ddl}) OUTSIDE a transaction block, for the statements
+    PostgreSQL refuses inside one (CREATE INDEX CONCURRENTLY, DROP INDEX CONCURRENTLY). Same mechanism as
+    db.changelog-test-superuser-ddl.xml, which wraps its statement in the changeset's transaction.
+
+    Run on a superuser connection through its own databasechangelog table (see
+    PgContainerHelper#runSuperuserDdlOutsideTransaction). runAlways, so every call runs again.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-superuser-ddl-no-tx-1" author="nexus-43ulx.11" runAlways="true" runInTransaction="false">
+        <comment>Run the one DDL statement passed as the ddl parameter, with no enclosing transaction.</comment>
+        <sql splitStatements="false" stripComments="false">${ddl}</sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
