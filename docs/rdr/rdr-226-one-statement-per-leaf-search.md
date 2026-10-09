@@ -2,14 +2,15 @@
 title: "Per-Collection Search in One Statement per Leaf"
 id: RDR-226
 type: Architecture
-status: draft
+status: abandoned
+close_reason: "Sam's decision 2026-10-09: Phase 0 stop gate. On a production fork the grouped statement over the 61 knowledge collections ran 663-678 ms warm against a gate of about 631 ms (half the 61-arm handler), and in SQL it was slower than the separate statements in every case, so grouping does no less database work. Most arm time is outside the statement SQL; that lever moved to nexus-pgm7u."
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-08
 accepted_date:
-related_issues: [nexus-tu8wp, nexus-tu8wp.6, nexus-3wh8d, nexus-92q1p]
-related_rdrs: [RDR-225, RDR-192, RDR-217]
+related_issues: [nexus-tu8wp, nexus-tu8wp.6, nexus-3wh8d, nexus-92q1p, nexus-pgm7u, nexus-nqsa7]
+related_rdrs: [RDR-225, RDR-192, RDR-217, RDR-227]
 ---
 
 # RDR-226: Per-Collection Search in One Statement per Leaf
@@ -19,6 +20,34 @@ related_rdrs: [RDR-225, RDR-192, RDR-217]
 > Prose: see REGISTER.md beside this template.
 
 Drafted 2026-10-08 against develop `c991266e2`. No product code has changed.
+
+**Abandoned 2026-10-09 at the Phase 0 stop gate.** No product code was written.
+Step 0.2 ran on a fork of production with the engine's serving settings
+(T2 `nexus_rdr/226-research-14`, `conexus/rdr226-step02-fork-grouped-exact-2026-10-09`):
+
+- **The gate failed.** The gate was a grouped statement over the 61 knowledge
+  collections, warm, below half of the live 61-arm handler (about 1,262 ms, so
+  about 631 ms). It ran 663-678 ms at T = 10000 and 758 ms at T = 60000. The
+  variant without the join back ran 626 ms, at the line.
+- **Grouping does no less database work.** In SQL execution the grouped
+  statement was slower than the serial sum of the single-collection statements
+  in every case: context-3 663-678 against 531 ms, code-3 547-606 against 495 ms
+  at T = 10000. Its rows matched each collection's own exact top-k, with no
+  mismatches.
+- **The time is outside the statement.** The live 61 arms took about 5,554 ms
+  in total against 531 ms of serial SQL execution on the fork. That gap mixes
+  per-arm engine work (the transaction and settings stamp, the router probe,
+  connection and permit wait, round trips) with database contention from
+  concurrent arms, and the fork could not separate them. Finding where it goes
+  is nexus-pgm7u.
+- **A plan defect, for whoever revisits this.** With the join back to the full
+  rows, the planner chose a Hash Join over a Seq Scan of the leaf. The join back
+  needs to be a primary-key nested loop, or the inner query needs to carry the
+  wide columns.
+
+The router threshold T, which this RDR treated as an input, was settled
+separately under nexus-nqsa7: 30000 in engine-service-v0.1.156. Large
+collections above T are RDR-227.
 
 **Provenance.** Sam, 2026-10-08: making breadth cheap was the whole intent of
 RDR-225's partitioning. RDR-225 put every collection of one (embedding model,
@@ -1040,3 +1069,4 @@ Answered by conexus:
 ## Revision History
 
 - 2026-10-08: Created (draft).
+- 2026-10-09: Abandoned by Sam at the Phase 0 stop gate. Step 0.2's fork measurement failed the gate and showed the grouped statement does no less database work; the reason is in frontmatter `close_reason`, the numbers in the abandonment note under the title and in T2 `nexus_rdr/226-research-14`. The per-arm overhead it surfaced is nexus-pgm7u.

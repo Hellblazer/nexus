@@ -5458,6 +5458,7 @@ nexus-pfzgb.1
 nexus-pg7rp
 nexus-pgdcv
 nexus-pgdcv.1
+nexus-pgm7u
 nexus-ph718
 nexus-php10
 nexus-php10.1
