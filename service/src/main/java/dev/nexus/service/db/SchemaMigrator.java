@@ -1298,6 +1298,12 @@ public final class SchemaMigrator {
      * Liquibase's own {@link LockService#forceReleaseLock()} and lets Liquibase take its lock as before.
      * Liquibase's lock stays in place, so an engine that predates this lock still waits on the row.
      *
+     * <p>The lock is SESSION-scoped, so the migration connection must be a real PostgreSQL session for the
+     * whole walk. A transaction-mode pooler (PgBouncer {@code pool_mode=transaction}) between the migrator and
+     * PostgreSQL can hand each statement a different server session, which silently voids the lock: the
+     * migrator would then release a live walker's row. Point the migrator at PostgreSQL directly or through
+     * a session-mode pool.
+     *
      * <p>Accepted gap: an engine that predates this lock, walking at the same moment as one that has it,
      * holds the row but not the advisory lock, and would have its row released. That needs two engine
      * versions booting against one database at once; the cloud runs one engine and a local install one.
