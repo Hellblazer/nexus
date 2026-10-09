@@ -345,9 +345,15 @@ jobs:
       # command in a fresh clone after the fixups above, from a non-elevated
       # account without the symlink privilege: 1223 passed, 45 skipped,
       # 2 xfailed, 0 failed.
+      # tests/daemon/test_service_stop_mineru.py is POSIX-only by construction (real child
+      # processes, process groups and signals) and skips its whole module on win32. Run here, its
+      # nine skips pushed the count past --max-skipped below on 2026-10-09 (64 > 55, 0 failed).
+      # The stop-order logic it pins is platform-independent and stays covered on POSIX, so it is
+      # left out of this set rather than widening the skip ceiling, which exists to catch a suite
+      # that quietly stopped running.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/hooks/test_endpoint_resolve_lease_retry.py tests/test_mcpb_bootstrap.py tests/hooks/test_hook_launcher_uv.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/hooks/test_endpoint_resolve_lease_retry.py tests/test_mcpb_bootstrap.py tests/hooks/test_hook_launcher_uv.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,

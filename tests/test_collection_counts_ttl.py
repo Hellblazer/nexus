@@ -78,7 +78,10 @@ def test_a_second_search_inside_the_window_asks_for_no_full_listing(world):
     seen, clock, _ = world
     client = mcp_infra.get_t3()
     _search_routing(client)
-    assert seen == [_FULL], "the cold search pays the one full listing"
+    assert mcp_infra.join_fanout_counts_refresh(5)
+    # nexus-vpa9q: the cold search leaves the one full listing to a background refresh; its own
+    # names read is the routing listing, unless the refresh already installed fresher rows.
+    assert seen.count(_FULL) == 1 and set(seen) <= {_ROUTING, _FULL}
     seen.clear()
 
     clock.now += 5 * 60  # five minutes: far past the names clock, far inside the counts clock
@@ -91,6 +94,7 @@ def test_a_search_inside_sixty_seconds_makes_no_request_at_all(world):
     seen, clock, _ = world
     client = mcp_infra.get_t3()
     _search_routing(client)
+    assert mcp_infra.join_fanout_counts_refresh(5)
     seen.clear()
     clock.now += 30
     _search_routing(client)
@@ -106,7 +110,8 @@ def test_a_search_after_the_window_refetches_the_full_listing_once(world):
     state["count"] = 2  # another process shrank it; only a refetch can see that
     clock.now += 15 * 60 + 1
     _search_routing(client)
-    assert seen.count(_FULL) == 1
+    assert mcp_infra.join_fanout_counts_refresh(5)
+    assert seen.count(_FULL) == 1, "one background refresh"
     assert mcp_infra.get_collection_counts() == {_LIVE: 2}
     assert seen.count(_FULL) == 1, "and the fresh counts are served from the cache again"
 
@@ -217,3 +222,149 @@ def test_reset_singletons_leaves_no_fresh_counts_behind(world):
     assert mcp_infra.get_collection_counts()[_LIVE] == 10
     mcp_infra.reset_singletons()
     assert not mcp_infra._counts_are_fresh(mcp_infra._COLLECTION_COUNTS_TTL)
+
+
+# ── nexus-vpa9q: the fan-out floor never waits on the full listing ───────────────────────────
+
+_THIN = "code__thin__bge-base-en-v15-768__v1"
+_THIN_ATTRS = {**_ATTRS, "owner_id": "thin"}
+
+
+@pytest.fixture
+def floor_world(monkeypatch):
+    """Two code collections, one healthy (10 chunks) and one thin (1). The full listing blocks
+    until ``release`` is set, so a caller that waited on it would be visible."""
+    import threading
+
+    seen: list[str] = []
+    release = threading.Event()
+    full_started = threading.Event()
+
+    def fake_get(path: str, *, tenant: str = "default") -> Any:
+        seen.append(path)
+        rows = [{"name": _LIVE, **_ATTRS}, {"name": _THIN, **_THIN_ATTRS}]
+        if "fields=routing" in path:
+            return rows
+        full_started.set()
+        assert release.wait(5), "test never released the full listing"
+        return [{**rows[0], "dim": 768, "count": 10, "stored_count": 10},
+                {**rows[1], "dim": 768, "count": 1, "stored_count": 1}]
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+    clock = _Clock()
+    monkeypatch.setattr(mcp_infra, "_now", clock)
+    client = HttpVectorClient()
+    monkeypatch.setattr(mcp_infra, "get_t3", lambda: client)
+    monkeypatch.setattr("nexus.db.http_vector_client._process_default_tenant", lambda: "not-this-tenant")
+    mcp_infra.invalidate_collections_cache()
+    yield seen, clock, release, full_started, client
+    release.set()
+    mcp_infra.join_fanout_counts_refresh(5)
+    mcp_infra.invalidate_collections_cache()
+
+
+def test_a_cold_search_does_not_wait_for_the_full_listing_and_excludes_nothing(floor_world):
+    seen, _clock, release, full_started, client = floor_world
+    target = _search_routing(client)
+    assert full_started.wait(5), "the background refresh asked for the full listing"
+    assert not release.is_set(), "the search returned while the full listing was still in flight"
+    assert sorted(target) == sorted([_LIVE, _THIN]), "unknown counts fail open"
+    release.set()
+    assert mcp_infra.join_fanout_counts_refresh(5)
+    assert _search_routing(client) == [_LIVE], "the next search has the counts and drops the thin sibling"
+
+
+def test_stale_counts_are_used_while_the_refresh_runs(floor_world):
+    seen, clock, release, full_started, client = floor_world
+    release.set()
+    _search_routing(client)
+    assert mcp_infra.join_fanout_counts_refresh(5)
+    release.clear()
+    full_started.clear()
+    seen.clear()
+
+    clock.now += 15 * 60 + 1
+    target = _search_routing(client)
+    assert target == [_LIVE], "the floor ran on the stale counts"
+    assert full_started.wait(5), "and a refresh was started"
+    assert not release.is_set()
+    release.set()
+    assert mcp_infra.join_fanout_counts_refresh(5)
+
+
+def test_only_one_background_refresh_runs_at_a_time(floor_world):
+    seen, _clock, release, full_started, client = floor_world
+    _search_routing(client)
+    assert full_started.wait(5)
+    _search_routing(client)
+    _search_routing(client)
+    release.set()
+    assert mcp_infra.join_fanout_counts_refresh(5)
+    assert seen.count(_FULL) == 1
+
+
+def test_one_search_request_resolves_its_target_once(monkeypatch):
+    """The search() wrapper renders twice (text, then structured) and the second render is served
+    by the page cache, keyed on the resolved target. When the background counts land between the
+    two renders the floor changes the target; measured live (2026-10-09 06:59Z) that made every
+    cold first search run the whole fan-out twice. Both renders now share one resolution."""
+    from nexus.mcp import core
+
+    targets = iter([["knowledge__a", "knowledge__thin"], ["knowledge__a"]])
+    resolved: list[list[str]] = []
+
+    def resolve(corpus, t3, *, excluded_out=None):
+        target = next(targets)
+        resolved.append(target)
+        return target
+
+    searched: list[list[str]] = []
+
+    def fake_search(query, target, **kw):
+        searched.append(list(target))
+        return []
+
+    monkeypatch.setattr(core, "_get_t3", lambda: object())
+    monkeypatch.setattr(core, "_resolve_corpus_target", resolve)
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake_search)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
+    core._page_cache_invalidate()
+    try:
+        core.search(query="anything", corpus="knowledge")
+    finally:
+        core._page_cache_invalidate()
+    assert resolved == [["knowledge__a", "knowledge__thin"]]
+    assert searched == [["knowledge__a", "knowledge__thin"]]
+
+
+def test_mcp_search_and_query_ask_for_capped_row_text(monkeypatch):
+    """nexus-tao37: the MCP tools show at most 300 characters of a row, so both ask the engine for
+    no more; the CLI never passes content_chars and keeps the full text."""
+    from nexus.mcp import core
+
+    seen: list = []
+
+    def fake_search(query, target, **kw):
+        seen.append(kw.get("content_chars"))
+        return []
+
+    monkeypatch.setattr(core, "_get_t3", lambda: object())
+    monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, t3, **kw: ["knowledge__a"])
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake_search)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
+    core._page_cache_invalidate()
+    try:
+        core.search(query="anything", corpus="knowledge")
+        core.query(question="anything", corpus="knowledge")
+    finally:
+        core._page_cache_invalidate()
+    assert seen == [core._MCP_CONTENT_CHARS, core._MCP_CONTENT_CHARS]
+    assert core._MCP_CONTENT_CHARS >= 300, "query shows 300-character snippets"
+
+
+def test_the_cli_never_caps_row_text():
+    import inspect
+
+    from nexus.commands import search_cmd
+
+    assert "content_chars" not in inspect.getsource(search_cmd)

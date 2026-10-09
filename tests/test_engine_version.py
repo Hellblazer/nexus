@@ -581,6 +581,12 @@ class TestRequiredEngineVersion:
         # every search family. Local installs migrate on the first engine
         # start after the upgrade, so this pin is their only delivery
         # vehicle. Tagged on c857a33e1.
+        # ->(0,1,156) 2026-10-09 for 7.76.0 (all wire entries [additive],
+        # engine deployed BEFORE the client tag, 11:05Z): content_chars on
+        # search-per-collection (nexus-tao37), router default T=30000
+        # (nexus-nqsa7), stale changelog-lock recovery (nexus-8sph2), the
+        # arm-phase log (RDR-226). Skips v0.1.155 (T=60000, superseded).
+        # Tagged on f391a1a6c.
         # nexus-9gggv (2026-09-08): the tuple is no longer hand-typed here.
         # Every client release records its engine pairing in CHANGELOG.md's
         # newest released section (the first engine-service-vX.Y.Z it

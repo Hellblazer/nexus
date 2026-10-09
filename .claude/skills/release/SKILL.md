@@ -283,6 +283,36 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 
+### 4b. Move this release's wire-ledger entries to Shipped (IN the release commit)
+
+Every `docs/wire-contract-pending.md` `## Unshipped` entry whose commit this
+release carries moves to `## Shipped` in the release commit itself, in the
+Shipped form the lint enforces:
+`` - `<sha>` -- bead <id> -- shipped in `vX.Y.Z` -- engine half engine-service-vA.B.C (<when it deployed>) -- [additive] <note> ``.
+Keep the note and its direction-safety prose; rewrite only the head.
+
+Do it here, not after the tag. `scripts/check_wire_contract_pairing.py` calls
+an Unshipped entry STALE as soon as a `v*` tag containing its commit exists,
+and the ledger lint (`test_live_repo_ledger_is_clean`) is in `-m lint`. An
+entry left in Unshipped therefore turns `develop` red the moment the tag is
+pushed. That happened at 7.74.2, where four entries reddened develop's lint
+until a follow-up commit (a5d59f08b). Moving them in the release commit means
+the tagged tree and the back-merge are both clean. Doing it before the tag is
+safe: "declared" accepts either section, so the commits are still declared.
+The engine deploy that needed the Unshipped entries
+(`--client-precondition`) has already been decided by this point (Step 0).
+
+List the entries this release carries:
+```bash
+git merge-base --is-ancestor <sha> HEAD   # for each ## Unshipped sha; true = it ships in this release
+uv run python scripts/check_wire_contract_pairing.py   # must report clean after the move
+```
+`tests/e2e/release-preflight.sh` enforces this: its `wire-ledger-shipped` leg
+(`check_wire_contract_pairing.py --release-tree`, nexus-mm3u5) fails a release
+tree (pyproject newer than the newest `v*` tag) that still carries an
+`## Unshipped` entry whose commit is an ancestor of HEAD, naming each sha and
+bead. It reports NOT-APPLICABLE on any other tree.
+
 ### 4a. Set the privacy-policy effective date (nexus-5zv4j)
 
 `docs/privacy-policy.md` line 3 carries the effective date. If it reads
@@ -324,6 +354,19 @@ Trigger: this release carries a schema or data migration — a new `upgrade_ladd
 Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
+
+**When this release pins a NEW engine tag, open the PR only after that tag is
+published** (draft=false, every asset attached):
+```bash
+uv run python scripts/check_engine_release_floor.py --require-windows engine-service-vA.B.C   # exit 0 before `gh pr create` or any push to the open release branch
+```
+PR CI, the hellmini suite and the battery all boot the engine substrate,
+which downloads the PINNED tag's PG bundle. Before the tag is published,
+every substrate-backed test fails at setup. On 2026-10-08, 7.75.0's PR CI
+(12 shards) and a hellmini full suite (25,636 setup errors) both ran while
+engine-service-v0.1.154 was still building. The suite's session-start
+preflight now refuses such a run in seconds, but a refused CI run is still a
+wasted round: check first.
 
 Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), release commits go through a PR. CI gates the bump before it lands on main. No more direct-to-main exception.
 

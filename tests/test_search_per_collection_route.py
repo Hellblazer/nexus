@@ -1113,3 +1113,26 @@ class TestLexicalLeg:
         # the threshold is sent to the route, so the vector leg's far row is
         # dropped there and only the lexical copy survives
         assert engine.route_calls()[0]["thresholds"] == {cols[0]: 0.5, cols[1]: 0.5}
+
+
+# ── nexus-tao37: content_chars rides the request only when asked for ─────────
+
+
+class TestContentChars:
+    def test_sent_when_the_caller_asks(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        _search(engine, cols, content_chars=300)
+        assert [b["content_chars"] for b in engine.route_calls()] == [300]
+
+    def test_absent_by_default_so_the_request_is_unchanged(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        _search(engine, cols)
+        assert all("content_chars" not in b for b in engine.route_calls())
+
+    def test_an_engine_that_ignores_it_still_serves_full_rows(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        results = _search(engine, cols, content_chars=3)
+        assert results and all(r.content.startswith("text ") for r in results)

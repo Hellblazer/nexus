@@ -314,3 +314,142 @@ def test_direction_safety_token_is_a_statement_only_where_it_leads(tmp_path: pat
         assert wctp.shipped_is_in_convention_scope(note) is in_scope, note
         assert wctp._shipped_additive_token(note) is token, note
         assert wctp.shipped_engine_tag(note) == tag, note
+
+
+# ---------------------------------------------------------------------------
+# --release-tree: the release preflight's wire-ledger-shipped leg (nexus-mm3u5).
+# Real fixture git repos: the leg's whole job is answering "is this sha an ancestor of HEAD" and
+# "is pyproject newer than the newest v* tag", and a mock of either answers whatever it was told.
+# ---------------------------------------------------------------------------
+
+_LEDGER_ENTRY = (
+    "- `{sha}` -- bead {bead} -- engine tag `engine-service-v9.9.9` -- "
+    "[additive] old client + new engine is safe, fixture entry\n"
+)
+
+
+def _release_repo(
+    tmp_path: pathlib.Path, *, tags: tuple[str, ...], version: str
+) -> tuple[pathlib.Path, str, str]:
+    """A repo with pyproject ``version``; every tag in ``tags`` sits on the first commit.
+    Returns (repo, first commit sha, an ancestor-of-HEAD sha: the second commit).
+    The second commit is the one a ledger entry names."""
+    repo = tmp_path / "relrepo"
+    repo.mkdir()
+    _git_in(repo, "init", "-q", "-b", "main")
+    (repo / "pyproject.toml").write_text('[project]\nname = "fixture"\nversion = "0.0.1"\n')
+    _git_in(repo, "add", "pyproject.toml")
+    _git_in(repo, "commit", "-q", "-m", "first")
+    first = _git_in(repo, "rev-parse", "HEAD")
+    for tag in tags:
+        _git_in(repo, "tag", tag)
+    (repo / "feature.txt").write_text("wire change\n")
+    _git_in(repo, "add", "feature.txt")
+    _git_in(repo, "commit", "-q", "-m", "second: the commit a ledger entry names")
+    second = _git_in(repo, "rev-parse", "HEAD")
+    (repo / "pyproject.toml").write_text(f'[project]\nname = "fixture"\nversion = "{version}"\n')
+    _git_in(repo, "add", "pyproject.toml")
+    _git_in(repo, "commit", "-q", "-m", "release commit")
+    return repo, first, second
+
+
+def _write_unshipped(tmp_path: pathlib.Path, *entries: tuple[str, str]) -> pathlib.Path:
+    ledger = tmp_path / "ledger.md"
+    ledger.write_text(
+        "# ledger\n\n## Unshipped\n\n"
+        + "".join(_LEDGER_ENTRY.format(sha=sha, bead=bead) for sha, bead in entries)
+        + "\n## Shipped\n"
+    )
+    return ledger
+
+
+def test_release_tree_fails_naming_each_unshipped_entry_that_ships(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The 7.74.2 shape: pyproject is newer than the newest tag, and an Unshipped entry's commit is
+    an ancestor of HEAD. It must fail, naming sha and bead, with the Step 4b remedy."""
+    repo, _first, second = _release_repo(tmp_path, tags=("v0.0.1",), version="0.0.2")
+    ledger = _write_unshipped(tmp_path, (second, "nexus-shipsnow"))
+    assert wctp.check_release_tree(ledger_path=ledger, repo_root=repo) == 1
+    err = capsys.readouterr().err
+    assert second in err and "nexus-shipsnow" in err
+    assert "Step 4b" in err and "## Shipped" in err
+
+
+def test_release_tree_passes_an_unshipped_entry_that_is_not_an_ancestor(tmp_path: pathlib.Path) -> None:
+    """An Unshipped entry for a commit NOT in this release (a side branch never merged) stays put."""
+    repo, _first, _second = _release_repo(tmp_path, tags=("v0.0.1",), version="0.0.2")
+    _git_in(repo, "checkout", "-q", "-b", "elsewhere", "HEAD~2")
+    (repo / "other.txt").write_text("not in the release\n")
+    _git_in(repo, "add", "other.txt")
+    _git_in(repo, "commit", "-q", "-m", "unmerged work")
+    stranger = _git_in(repo, "rev-parse", "HEAD")
+    _git_in(repo, "checkout", "-q", "main")
+    # Non-vacuity: the fixture's sha really is absent from HEAD's history.
+    assert wctp.is_ancestor(stranger, "HEAD", repo_root=repo) is False
+    ledger = _write_unshipped(tmp_path, (stranger, "nexus-notyet"))
+    assert wctp.check_release_tree(ledger_path=ledger, repo_root=repo) == 0
+
+
+def test_release_tree_is_not_applicable_on_a_non_release_tree(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pyproject equal to the newest tag is a develop tree, not a release tree: NOT-APPLICABLE and
+    exit 0 even though the entry's commit is an ancestor of HEAD (the regular STALE check owns that)."""
+    repo, _first, second = _release_repo(tmp_path, tags=("v0.0.2",), version="0.0.2")
+    ledger = _write_unshipped(tmp_path, (second, "nexus-develop"))
+    assert wctp.check_release_tree(ledger_path=ledger, repo_root=repo) == 0
+    assert "NOT-APPLICABLE" in capsys.readouterr().out
+
+
+def test_release_tree_detection_reads_the_real_newest_tag(tmp_path: pathlib.Path) -> None:
+    """Non-vacuity of the detector: it compares against the newest tag by VERSION order (v0.10.0
+    beats v0.9.0, which lexical order would get backwards), not the first or last tag listed."""
+    repo, _first, second = _release_repo(tmp_path, tags=("v0.9.0", "v0.10.0", "v0.2.0"), version="0.9.5")
+    # 0.9.5 is newer than v0.9.0 but older than v0.10.0: not a release tree.
+    verdict = wctp.release_tree_verdict(repo_root=repo)
+    assert verdict is not wctp.GIT_UNAVAILABLE
+    assert verdict.applicable is False and "v0.10.0" in verdict.reason
+    ledger = _write_unshipped(tmp_path, (second, "nexus-order"))
+    assert wctp.check_release_tree(ledger_path=ledger, repo_root=repo) == 0
+
+    # Bump pyproject past v0.10.0 on the same repo: now it is a release tree and the entry fails.
+    (repo / "pyproject.toml").write_text('[project]\nname = "fixture"\nversion = "0.10.1"\n')
+    _git_in(repo, "add", "pyproject.toml")
+    _git_in(repo, "commit", "-q", "-m", "bump")
+    verdict = wctp.release_tree_verdict(repo_root=repo)
+    assert verdict.applicable is True
+    assert wctp.check_release_tree(ledger_path=ledger, repo_root=repo) == 1
+
+
+def test_release_tree_detection_on_the_live_repo_names_the_live_newest_tag() -> None:
+    """The detector is wired to this repo's real tags and pyproject, not a constant."""
+    newest = wctp.newest_client_tag(repo_root=_REPO_ROOT)
+    assert isinstance(newest, str), "no v* tags visible: the live non-vacuity check cannot run"
+    verdict = wctp.release_tree_verdict(repo_root=_REPO_ROOT)
+    assert verdict is not wctp.GIT_UNAVAILABLE
+    assert newest in verdict.reason
+
+
+def test_release_tree_cannot_verify_without_tags_or_with_an_unresolvable_sha(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 2, never a pass: no tags means 'newest tag' is unknowable; an unresolvable sha means
+    ancestry is unknowable."""
+    repo, _first, second = _release_repo(tmp_path, tags=(), version="0.0.2")
+    ledger = _write_unshipped(tmp_path, (second, "nexus-notags"))
+    assert wctp.check_release_tree(ledger_path=ledger, repo_root=repo) == 2
+
+    repo2 = tmp_path / "second"
+    repo2.mkdir()
+    repo2, _f, _s = _release_repo(repo2, tags=("v0.0.1",), version="0.0.2")
+    ghost = _write_unshipped(tmp_path, ("deadbeefdeadbeef", "nexus-ghost"))
+    assert wctp.check_release_tree(ledger_path=ghost, repo_root=repo2) == 2
+    assert "could not" in capsys.readouterr().err.lower()
+
+
+def test_release_tree_cli_mode(tmp_path: pathlib.Path) -> None:
+    """`--release-tree` is the surface the preflight calls: exit code follows check_release_tree."""
+    repo, _first, second = _release_repo(tmp_path, tags=("v0.0.1",), version="0.0.2")
+    ledger = _write_unshipped(tmp_path, (second, "nexus-cli"))
+    assert wctp.main(["--release-tree", "--ledger", str(ledger), "--repo-root", str(repo)]) == 1

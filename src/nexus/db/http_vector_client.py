@@ -2610,6 +2610,13 @@ def per_collection_route_enabled() -> bool:
     }
 
 
+#: The first engine release that serves ``/v1/vectors/search-per-collection``
+#: (engine-service-v0.1.147, 40ebdafce). A cloud client whose version probe
+#: read a release at or above it marks the route confirmed at construction,
+#: so the first search never serialises its groups behind the probe below
+#: (nexus-vpa9q: 5.8 s -> 4.8-5.0 s for a first default search, 2026-10-09).
+PER_COLLECTION_ROUTE_MIN_ENGINE: tuple[int, int, int] = (0, 1, 147)
+
 #: Serialises the probe of the route until one request has proved it present:
 #: the groups of one search run in parallel, and without this every group
 #: pays its own 404 before the first one sets the memo.
@@ -3621,6 +3628,7 @@ class HttpVectorClient:
         rerank_top_k: int | None = None,
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
+        content_chars: int | None = None,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -3666,6 +3674,10 @@ class HttpVectorClient:
         *rerank_max_candidates*: the engine scores at most that many of the merged
         rows, in distance order, and returns the rest unscored behind them.
 
+        *content_chars* (nexus-tao37) caps each returned row's text at that many
+        code points, applied after the rerank. A caller that shows only snippets
+        sends it; an engine that predates the field answers the full text.
+
         *include_embeddings* (nexus-92q1p) asks the engine for each surviving
         row's stored vector, read once after the merge, so a caller that needs
         the vectors (semantic clustering) makes no
@@ -3709,6 +3721,10 @@ class HttpVectorClient:
             body["include_embeddings"] = True
             if embeddings_limit is not None:
                 body["embeddings_limit"] = int(embeddings_limit)
+        if content_chars is not None:
+            # nexus-tao37: the engine caps each row's text after its rerank; an engine that
+            # predates the field ignores it and answers the full text.
+            body["content_chars"] = int(content_chars)
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -5767,6 +5783,12 @@ _version_probe_error: Exception | None = None
 #: unreachable-class retry window below. None whenever no failure is cached.
 _version_probe_failed_at: float | None = None
 
+#: The cloud probe's parsed engine release (nexus-vpa9q); ``None`` before a
+#: probe, in local mode, or when the release did not parse.
+_probed_release: tuple[int, int, int] | None = None
+#: The cloud probe's ``embedding_mode`` (nexus-vpa9q), seeded into the client's memo.
+_probed_embedding_mode: str | None = None
+
 #: nexus-5t1jp: how long a cached UNREACHABLE-class probe failure stays
 #: authoritative before the next call re-probes. Bounded, not per-call: a
 #: dead-host probe can burn its full connect timeout, and hammering that on
@@ -5936,7 +5958,7 @@ def get_http_vector_client() -> HttpVectorClient:
       untouched by this gate.
     """
     global _vector_client_instance, _version_probe_done, _version_probe_error
-    global _version_probe_failed_at
+    global _version_probe_failed_at, _probed_release, _probed_embedding_mode
     from nexus.config import is_local_mode  # noqa: PLC0415 -- deferred for test patchability
 
     cloud_mode = not is_local_mode()
@@ -5962,9 +5984,10 @@ def get_http_vector_client() -> HttpVectorClient:
                     ManagedServiceError,
                     probe_managed_service,
                 )
+                from nexus.engine_version import parse_engine_version  # noqa: PLC0415 -- deferred with the probe
 
                 try:
-                    probe_managed_service()
+                    caps = probe_managed_service()
                 except ManagedServiceError as exc:
                     wrapped = type(exc)(_cloud_probe_failure_message(exc))
                     _version_probe_error = wrapped
@@ -5984,12 +6007,25 @@ def get_http_vector_client() -> HttpVectorClient:
                     )
                     raise wrapped from exc
                 _version_probe_done = True
+                _probed_release = parse_engine_version(getattr(caps, "release_version", None))
+                _probed_embedding_mode = getattr(caps, "embedding_mode", None)
                 _log.debug("cloud_engine_version_probe_ok")
         if _vector_client_instance is None:
             # nexus-fryrd: constructed under the SAME tenant
             # _resolve_collection_row's identity check reads -- see
             # _process_default_tenant's docstring.
             _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
+            if (
+                cloud_mode and _probed_release is not None
+                and _probed_release >= PER_COLLECTION_ROUTE_MIN_ENGINE
+            ):
+                # The probed engine serves the route: skip the single-flight
+                # probe. A later write-off (edge refusal, 5xx) still resets it.
+                _vector_client_instance._per_collection_confirmed = True
+            if cloud_mode and _probed_embedding_mode in ("voyage", "onnx-local"):
+                # nexus-vpa9q: the probe already read /version; seeding the memo saves
+                # embedding_mode() a second GET /version on the first search.
+                _vector_client_instance._embedding_mode_memo = _probed_embedding_mode
     return _vector_client_instance
 
 
@@ -5997,8 +6033,11 @@ def reset_http_vector_client_for_tests() -> None:
     """Test helper: reset the singleton and the cloud version-probe cache."""
     global _vector_client_instance, _version_probe_done, _version_probe_error
     global _version_probe_failed_at
+    global _probed_release, _probed_embedding_mode
     with _vector_client_lock:
         _vector_client_instance = None
+        _probed_release = None
+        _probed_embedding_mode = None
         _version_probe_done = False
         _version_probe_error = None
         _version_probe_failed_at = None

@@ -60,6 +60,7 @@ from nexus.mcp_infra import (
     # quarantine / dormant / disputed collection is gc machinery, never a
     # search target). It keeps the `_get_collection_names` alias because that
     # name is the routing seam the MCP tests monkeypatch to inject a corpus.
+    get_fanout_counts as _get_fanout_counts,
     get_live_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
@@ -69,6 +70,10 @@ from nexus.mcp_infra import (
     invalidate_collections_cache as _invalidate_collections_cache,
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
+    flush_search_telemetry_at_exit as _flush_search_telemetry_at_exit,
+    search_taxonomy as _search_taxonomy,
+    search_telemetry_sink as _search_telemetry_sink,
+    warm_search_path_in_background as _warm_search_path_in_background,
     t2_ctx as _t2_ctx,
     t2_index_write as _t2_index_write,
 )
@@ -1737,6 +1742,10 @@ async def _t1_lifespan(_app: Any):
     from nexus.install_ping import ping_in_background  # noqa: PLC0415 — startup cost
     ping_in_background()
 
+    # nexus-vpa9q: do a first search's cheap cold steps (version probe, routing listing, warm
+    # connections) now, on a daemon thread; opt-out via NX_MCP_SEARCH_WARMUP=0.
+    _warm_search_path_in_background()
+
     # nexus-d76vc: start the T1 handoff-marker watcher UNCONDITIONALLY,
     # before the routing decision below picks a branch. A handoff can
     # arrive at any point after this server starts -- including onto a
@@ -2432,6 +2441,9 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
         # interfere -- they hold the cleanup contract for this exit.
         return
 
+    # nexus-vpa9q: os._exit skips atexit, so drain queued search
+    # telemetry here (bounded) before the process goes.
+    _flush_search_telemetry_at_exit()
     _t1_shutdown()
     _os._exit(0)
 
@@ -2887,6 +2899,7 @@ def _search_render(
     structured: bool = False,
     threshold: float | None = None,
     lexical: bool = False,
+    _target_memo: dict | None = None,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
 
@@ -2970,8 +2983,20 @@ def _search_render(
         # (nexus-hmxi) + resolve_corpus logic -- one implementation
         # instead of two that can drift (query()'s plain-corpus branch was
         # exactly that drift: nexus-z4j8d fix 1).
-        fanout_excluded: list[str] = []
-        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
+        # nexus-vpa9q: the search() wrapper renders twice per request (text, then structured)
+        # and the second render is served by the page cache, whose key holds the resolved
+        # target. A target that changed in between (background fan-out counts landing, a names
+        # refresh) made the second render search the whole corpus again, so the wrapper passes
+        # one memo and both renders share one resolution.
+        if _target_memo is not None and "target" in _target_memo:
+            target = _target_memo["target"]
+            fanout_excluded = list(_target_memo["excluded"])
+        else:
+            fanout_excluded = []
+            target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
+            if _target_memo is not None:
+                _target_memo["target"] = target
+                _target_memo["excluded"] = list(fanout_excluded)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3021,23 +3046,25 @@ def _search_render(
             # multi-collection case; see search_cmd.py).
             lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
             rerank_meta: dict = {}
-            with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
-                results = search_cross_corpus(
-                    query, target, n_results=fetch_n, t3=t3, where=where_dict,
-                    cluster_by=cluster_by or None,
-                    catalog=_get_catalog(),
-                    link_boost=False,
-                    taxonomy=_t2_db.taxonomy,
-                    topic=topic or None,
-                    threshold_override=threshold,
-                    lexical=lexical,
-                    telemetry=_t2_db.telemetry,
-                    diagnostics_out=diag,
-                    rerank=lexical_rerank,
-                    rerank_meta_out=rerank_meta if lexical_rerank else None,
-                )
+            # nexus-vpa9q: telemetry and taxonomy both go through the pooled
+            # shared T2 client; no per-call T2Database.
+            results = search_cross_corpus(
+                query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                cluster_by=cluster_by or None,
+                catalog=_get_catalog(),
+                link_boost=False,
+                taxonomy=_search_taxonomy(),
+                topic=topic or None,
+                threshold_override=threshold,
+                lexical=lexical,
+                telemetry=_search_telemetry_sink(),
+                diagnostics_out=diag,
+                rerank=lexical_rerank,
+                rerank_meta_out=rerank_meta if lexical_rerank else None,
+                content_chars=_MCP_CONTENT_CHARS,
+            )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
             # RDR-055 / the frecency-scoring work. Before this fix the MCP
@@ -3434,10 +3461,11 @@ def search(
         msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
                "Page with offset for more.")
         return {"error": msg} if structured else f"Error: {msg}"
+    target_memo: dict = {}
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
-        threshold=threshold, lexical=lexical,
+        threshold=threshold, lexical=lexical, _target_memo=target_memo,
     )
     if structured or not isinstance(result, str):
         # structured=True, or an error string that already reads like one —
@@ -3448,7 +3476,7 @@ def search(
     data = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=True,
-        threshold=threshold, lexical=lexical,
+        threshold=threshold, lexical=lexical, _target_memo=target_memo,
     )
     empty_shape = {
         "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
@@ -3492,6 +3520,10 @@ def search(
 #: them without holding stale results past content changes. Thread-safe via
 #: the lock (MCP tools can run concurrently).
 _PAGE_LOOKAHEAD_PAGES = 2
+
+#: nexus-tao37: the MCP search and query tools show at most 300 characters of a row
+#: (search's snippet is 200, query's is 300), so they ask the engine for no more.
+_MCP_CONTENT_CHARS: int = 300
 _PAGE_CACHE_TTL_S = 120.0
 _page_cache_lock = threading.Lock()
 _page_cache: dict[str, Any] = {}
@@ -3653,10 +3685,11 @@ def _resolve_corpus_target(
     result can name what was skipped, the same way ``_no_results_message``
     already names backend-failed collections (nexus-pebfx.8).
 
-    Counts come from :func:`nexus.mcp_infra.get_collection_counts`, which
-    shares its cache with :func:`nexus.mcp_infra.get_collection_names` --
-    the same ``list_collections()`` call this function already makes
-    below, so the floor check costs no additional round trip.
+    Counts come from :func:`nexus.mcp_infra.get_fanout_counts`, which never
+    waits on the full listing: cached counts of any age are used and
+    refreshed in the background, and a cold cache gives none, so that call
+    excludes nothing (an unknown count fails open). Names come from the
+    cheap routing listing (nexus-vpa9q).
     """
     # nexus-bc7ps: fan-out is ROUTING; a quarantine / dormant / disputed
     # collection is gc machinery, never a search target, whether reached by
@@ -3675,11 +3708,13 @@ def _resolve_corpus_target(
         # candidate-string site as nexus.corpus.t3_collection_name's own ct/rest split.
         return split_candidate_collection_name(token)[1] != token
 
+    # nexus-vpa9q: the floor reads counts without waiting on the full listing (see
+    # get_fanout_counts); names come from the cheap routing listing.
     counts_up_front: dict[str, int] | None = None
     if corpus == "all" or any(
         part.strip() and not _names_a_collection(part.strip()) for part in corpus.split(",")
     ):
-        counts_up_front = _get_collection_counts()
+        counts_up_front = _get_fanout_counts()
     all_names = _get_collection_names()
     if corpus == "all":
         seen: list[str] = []
@@ -3718,7 +3753,7 @@ def _resolve_corpus_target(
             target.append(name)
         else:
             fanned_out = resolve_corpus(part, all_names)
-            counts = counts_up_front if counts_up_front is not None else _get_collection_counts()
+            counts = counts_up_front if counts_up_front is not None else _get_fanout_counts()
             excluded = _fanout_exclusions_for_group(fanned_out, counts)
             for name in fanned_out:
                 if name in excluded:
@@ -5042,23 +5077,23 @@ def query(
         # nexus-uro6c: capture threshold-filter diagnostics to surface a
         # threshold drop on a zero-hit (same rationale as the search tool).
         qdiag: list = []
-        with _t2_ctx() as _t2_db:
-            results = search_cross_corpus(
-                question, target, n_results=fetch_n, t3=t3, where=where_dict,
-                catalog=_get_catalog(),
-                link_boost=True,
-                taxonomy=_t2_db.taxonomy,
-                telemetry=_t2_db.telemetry,
-                diagnostics_out=qdiag,
-                # nexus-tnwm2: query groups by document and orders by
-                # hybrid_score; it never reads _topic_label or _cluster_label.
-                # The inherited default ("semantic") made topic grouping look
-                # up every topic's label, one GET /topics/by_id each (the
-                # engine has no batched route): 7 serial round trips, ~1.6 s
-                # on the managed cloud. The topic BOOST does not depend on
-                # cluster_by and still runs.
-                cluster_by=None,
-            )
+        results = search_cross_corpus(
+            question, target, n_results=fetch_n, t3=t3, where=where_dict,
+            catalog=_get_catalog(),
+            link_boost=True,
+            taxonomy=_search_taxonomy(),
+            telemetry=_search_telemetry_sink(),
+            diagnostics_out=qdiag,
+            content_chars=_MCP_CONTENT_CHARS,
+            # nexus-tnwm2: query groups by document and orders by
+            # hybrid_score; it never reads _topic_label or _cluster_label.
+            # The inherited default ("semantic") made topic grouping look
+            # up every topic's label, one GET /topics/by_id each (the
+            # engine has no batched route): 7 serial round trips, ~1.6 s
+            # on the managed cloud. The topic BOOST does not depend on
+            # cluster_by and still runs.
+            cluster_by=None,
+        )
         # hybrid scoring + RDR-055 E2 quality boost — parity
         # with the CLI (search_cmd.py). Chunk-level ranking (and, below,
         # the per-document "best chunk" pick + document ordering) is now by

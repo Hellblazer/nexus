@@ -830,7 +830,8 @@ def _jar_ready_reason(jar: Path) -> str | None:
     worker's first boot. Wait for it through NX_BUILD_LEASE_WAIT as the gate
     does; the default 0 is a single look. Only the boot path waits:
     ``jar_freshness_skip_reason`` stays an immediate check, because the
-    session-start stale-jar warning also calls it and must never block.
+    session-start preflight (tests/conftest.py ``_preflight_engine_substrate``)
+    also calls it and must never block.
     """
     if build_in_progress_reason():
         wait_for_build_lease(build_lease_wait_seconds())
@@ -857,7 +858,7 @@ def _boot() -> dict:
         raise RuntimeError(
             f"T2 engine substrate unavailable: {stale}. The unit suite's T2 "
             "substrate is the real engine (RDR-155 P4b P0a', decision D-A) — "
-            "build it with: mvn -f service/pom.xml package -DskipTests"
+            "build it with: scripts/build-gate-jar.sh"
         )
     bin_dir = _pg_bin()
     if not bin_dir.exists():

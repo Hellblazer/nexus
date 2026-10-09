@@ -15,6 +15,7 @@
 #
 # THE CHECKS:
 #   wire-contract-ledger   check_engine_release_floor.py --ledger-only (merge-blocking on every PR to main)
+#   wire-ledger-shipped    on a release tree, no ## Unshipped wire-ledger entry may ship in it (release skill Step 4b)
 #   ci-evidence-contexts   the required-context drift tests, run with `-m ""` so the live check executes
 #   mandatory-pins         the GitHub-backed mandatory_regression_pin tests, under the operator's real HOME
 #   pin sweep              lint bucket (+ non-vacuity floor), the non-lint pin tests, wire-contract
@@ -165,6 +166,31 @@ check "pin-tests"                 uv run pytest -q -p no:cacheprovider \
                                     tests/test_ci_release_ledger_gate.py tests/test_pg_bundle_version_parity.py \
                                     tests/test_embed_deadline_default_ordering.py
 check "wire-contract-pairing"     uv run python scripts/check_wire_contract_pairing.py
+
+# 5. A release tree (pyproject newer than the newest v* tag) must already have moved every
+#    ## Unshipped wire-ledger entry it carries to ## Shipped (release skill Step 4b): the entry
+#    goes STALE the moment the v* tag exists and turns develop's -m lint red (7.74.2).
+#    NOT-APPLICABLE on any other tree. Exit 2 (tags or ancestry unreadable) is UNVERIFIED,
+#    never a pass. Seconds-scale: one tag listing and one ancestry query per Unshipped entry
+#    (nexus-mm3u5).
+wire_ledger_shipped_leg () {
+  local out rc
+  out="$(uv run python scripts/check_wire_contract_pairing.py --release-tree 2>&1)"; rc=$?
+  case $rc in
+    0)
+      if [[ "$out" == *NOT-APPLICABLE* ]]; then
+        record PASS "wire-ledger-shipped" "NOT-APPLICABLE: not a release tree"
+      else
+        record PASS "wire-ledger-shipped" ""
+      fi ;;
+    2)
+      record SKIP "wire-ledger-shipped" "UNVERIFIED: $(first_line "$out")" ;;
+    *)
+      printf '%s\n' "$out" | sed -e 's/^/      /'
+      record FAIL "wire-ledger-shipped" "$(first_line "$out")" ;;
+  esac
+}
+wire_ledger_shipped_leg
 check "ruff-src"                  uv run ruff check src
 
 echo

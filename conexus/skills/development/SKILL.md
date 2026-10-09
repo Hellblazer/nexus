@@ -35,6 +35,16 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 - Executing tasks from an approved implementation plan
 - Writing or modifying production code
 
+## Pre-Dispatch: Brief Checklist
+
+Answer these in the brief before dispatching. A brief that says only WHAT to change leaves them to the reviewer, and on 2026-10-08 each of four delegated changes cost a fix round that traced to one of them (T2 `nexus/critique-4d362d901-contradiction-scope-2026-10-08`, `nexus/rerank-cap-review-fixes-2026-10-08`, `nexus/review-a86acb113-index-workers-length-grouping-2026-10-08`, `nexus/debug-p2c-bench-empty-collections-cache-2026-10-08`). Where you do not know an answer, write `UNKNOWN: resolve first` and the agent resolves it before its first edit. The SubagentStart hook injects the same five questions into every implementer dispatch, so a missing answer is caught either way. Answering it here is cheaper.
+
+1. **Consumers.** Every caller and consumer of what changes, by name, and which of them filter, re-rank or page after it (e.g. `--path` and `--max-file-chunks` post-filter after retrieval).
+2. **Final point.** Where the output's real final order or display is decided (after boosts, caps, paging), and that the change acts there rather than on a proxy for it.
+3. **Modes.** Behaviour in local and cloud mode, and which was measured. A mode nobody measured is measured first or left unchanged.
+4. **Bounds.** Which pool, permit, memory or thread limit the change draws on (e.g. engine embed permits are cores/2), and its size against that limit on small and large boxes.
+5. **State.** Every cache or shared state touched, who invalidates it, the invalidate-versus-in-flight-fill race, the first-write and empty cases, and the test reset hooks (`reset_singletons`).
+
 ## Pre-Dispatch: Seed Link Context
 
 Before dispatching the developer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings. See `/conexus:catalog` skill for full reference.
@@ -56,6 +66,14 @@ Use the Agent tool to invoke **developer**:
 
 ### Input Artifacts
 - Files: [relevant files]
+
+### Brief Checklist
+1. Consumers: [callers and consumers; which post-filter, re-rank or page after it]
+2. Final point: [where final order/display is decided; the change acts there]
+3. Modes: [local / cloud behaviour; what was measured]
+4. Bounds: [pool, permit, memory, thread limits drawn on]
+5. State: [caches, invalidation, races, first-write/empty, reset hooks]
+(Any unknown: `UNKNOWN: resolve first`.)
 
 ### Deliverable
 Working implementation with tests

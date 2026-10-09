@@ -77,6 +77,15 @@ Usage::
     uv run python scripts/check_wire_contract_pairing.py
     uv run python scripts/check_wire_contract_pairing.py --rev-range v7.6.1..HEAD
 
+Release-tree mode (nexus-mm3u5), the release preflight's ``wire-ledger-shipped`` leg::
+
+    uv run python scripts/check_wire_contract_pairing.py --release-tree
+
+On a RELEASE tree (``pyproject.toml``'s version newer than the newest published
+``v*`` tag) it fails if ``## Unshipped`` still holds an entry whose commit is an
+ancestor of HEAD: those entries ship in this release and go STALE the moment the
+tag exists. On any other tree it prints NOT-APPLICABLE and exits 0.
+
 Exit codes: ``0`` ledger and detected state agree (nothing undeclared, nothing
 stale); ``1`` undeclared and/or stale entries found; ``2`` git state could not
 be interrogated ("could not verify" is never "must be fine").
@@ -88,6 +97,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -675,6 +685,112 @@ def check(
     return 0
 
 
+# ---------------------------------------------------------------------------
+# --release-tree (nexus-mm3u5): the release preflight's wire-ledger-shipped leg.
+# ---------------------------------------------------------------------------
+
+_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def _version_tuple(text: str) -> tuple[int, int, int] | None:
+    m = _VERSION_RE.match(text.strip())
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def pyproject_version(repo_root: pathlib.Path | None = None) -> str | None:
+    """``[project].version`` of the tree's ``pyproject.toml``, or ``None`` if unreadable."""
+    path = (repo_root or _REPO_ROOT) / "pyproject.toml"
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    version = data.get("project", {}).get("version")
+    return version if isinstance(version, str) else None
+
+
+@dataclass(frozen=True)
+class ReleaseTreeVerdict:
+    #: ``True`` when pyproject's version is newer than the newest published ``v*`` tag.
+    applicable: bool
+    #: Names the version and the tag compared, so a verdict is never an unexplained boolean.
+    reason: str
+
+
+def release_tree_verdict(
+    repo_root: pathlib.Path | None = None,
+) -> ReleaseTreeVerdict | object:
+    """Is this a release tree? :data:`GIT_UNAVAILABLE` when that cannot be established
+    (no readable tag, no readable pyproject version): never read as "not a release"."""
+    newest = newest_client_tag(repo_root=repo_root)
+    if newest is GIT_UNAVAILABLE or newest is None:
+        return GIT_UNAVAILABLE
+    tree_version = pyproject_version(repo_root)
+    tree = _version_tuple(tree_version) if tree_version else None
+    tag = _version_tuple(str(newest))
+    if tree is None or tag is None:
+        return GIT_UNAVAILABLE
+    applicable = tree > tag
+    relation = "newer than" if applicable else "not newer than"
+    return ReleaseTreeVerdict(
+        applicable=applicable,
+        reason=f"pyproject version {tree_version} is {relation} the newest tag {newest}",
+    )
+
+
+def check_release_tree(
+    ledger_path: pathlib.Path | None = None,
+    repo_root: pathlib.Path | None = None,
+) -> int:
+    """Exit code for ``--release-tree``: 0 pass or NOT-APPLICABLE, 1 shipping entries left in
+    ``## Unshipped``, 2 repository state could not answer."""
+    root = repo_root or _REPO_ROOT
+    path = ledger_path or DEFAULT_LEDGER_PATH
+    verdict = release_tree_verdict(repo_root=root)
+    if verdict is GIT_UNAVAILABLE:
+        print(
+            "WIRE-LEDGER-SHIPPED CHECK FAILED: could not establish whether this is a release "
+            "tree (need a readable pyproject version and at least one v* tag). Cannot verify -- "
+            "treat as a failed gate, not a pass.",
+            file=sys.stderr,
+        )
+        return 2
+    assert isinstance(verdict, ReleaseTreeVerdict)
+    if not verdict.applicable:
+        print(f"wire-ledger-shipped NOT-APPLICABLE: not a release tree ({verdict.reason})")
+        return 0
+
+    shipping: list[LedgerEntry] = []
+    for entry in parse_ledger(path).unshipped.values():
+        ancestor = is_ancestor(entry.sha, "HEAD", repo_root=root)
+        if ancestor is GIT_UNAVAILABLE:
+            print(
+                f"WIRE-LEDGER-SHIPPED CHECK FAILED: could not verify whether {entry.sha} "
+                f"(bead {entry.bead}) is an ancestor of HEAD. Treat as a failed gate, not a pass.",
+                file=sys.stderr,
+            )
+            return 2
+        if ancestor:
+            shipping.append(entry)
+    if shipping:
+        names = ", ".join(f"{e.sha[:9]} ({e.bead})" for e in shipping)
+        noun = "entry" if len(shipping) == 1 else "entries"
+        lines = [
+            f"WIRE-LEDGER-SHIPPED FAILED: {len(shipping)} ## Unshipped {noun} in {path.name} "
+            f"ship in this release ({verdict.reason}): {names}"
+        ]
+        lines += [f"  {e.sha}  bead {e.bead}" for e in shipping]
+        lines.append(
+            "Remedy: release skill Step 4b. Move each to ## Shipped in the release commit, in the "
+            "Shipped form: - `<sha>` -- bead <id> -- shipped in `vX.Y.Z` -- engine half "
+            "engine-service-vA.B.C (<when it deployed>) -- [additive] <note>. Left in ## Unshipped "
+            "they go STALE when the tag exists and turn develop's -m lint red."
+        )
+        print("\n".join(lines), file=sys.stderr)
+        return 1
+    print(f"wire-ledger-shipped clean: release tree ({verdict.reason}), no ## Unshipped entry ships in it")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -688,8 +804,22 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=f"Ledger path (default: {DEFAULT_LEDGER_PATH}).",
     )
+    parser.add_argument(
+        "--release-tree",
+        action="store_true",
+        help="Release-preflight mode: on a release tree, fail if ## Unshipped holds an entry "
+        "whose commit is an ancestor of HEAD; NOT-APPLICABLE elsewhere.",
+    )
+    parser.add_argument(
+        "--repo-root",
+        type=pathlib.Path,
+        default=None,
+        help="Repository to interrogate (default: this script's repository).",
+    )
     args = parser.parse_args(argv)
-    return check(rev_range=args.rev_range, ledger_path=args.ledger)
+    if args.release_tree:
+        return check_release_tree(ledger_path=args.ledger, repo_root=args.repo_root)
+    return check(rev_range=args.rev_range, ledger_path=args.ledger, repo_root=args.repo_root)
 
 
 if __name__ == "__main__":

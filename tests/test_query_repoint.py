@@ -169,17 +169,8 @@ def _wire(
     # Patch _get_collection_names (needed by the old path when catalog_collections is None)
     monkeypatch.setattr(core, "_get_collection_names", lambda: broad_target)
 
-    # Stub _t2_ctx as a context manager returning a fake T2 db
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _fake_t2_ctx():
-        fake_t2 = MagicMock()
-        fake_t2.taxonomy = None
-        fake_t2.telemetry = None
-        yield fake_t2
-
-    monkeypatch.setattr(core, "_t2_ctx", _fake_t2_ctx)
+    # No taxonomy store: the topic paths are best-effort.
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
 
     # Stub search_cross_corpus — old dance path
     if cross_corpus_result is None:

@@ -152,6 +152,55 @@ def _attach_from_chash_positions(
     return True
 
 
+class _TopicReads:
+    """Topic assignments, then the topic link pairs they name, read on one
+    worker thread (nexus-vpa9q). :meth:`assignments` keeps the old serial
+    path's contract (``None`` on failure, logged at debug); :meth:`links`
+    re-raises a failed links read so the caller's boost guard handles it
+    exactly as before."""
+
+    def __init__(self, taxonomy: Any, ids: list[str]) -> None:
+        self._taxonomy = taxonomy
+        self._ids = ids
+        self._assignments: dict[str, int] | None = None
+        self._links: dict[tuple[int, int], int] | None = None
+        self._links_error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="nexus-topic-reads", daemon=True,
+        )
+
+    @classmethod
+    def start(cls, taxonomy: Any, ids: list[str]) -> _TopicReads:
+        reads = cls(taxonomy, ids)
+        reads._thread.start()
+        return reads
+
+    def _run(self) -> None:
+        try:
+            self._assignments = self._taxonomy.get_assignments_for_docs(self._ids)
+        except Exception:  # noqa: BLE001 — best-effort topic assignment; failure logged at debug, boost/grouping skipped
+            _log.debug("topic_assignments_failed", exc_info=True)
+            return
+        if not self._assignments:
+            return
+        try:
+            self._links = self._taxonomy.get_topic_link_pairs(
+                list(set(self._assignments.values())),
+            ) or None
+        except Exception as exc:  # noqa: BLE001 — handed to the caller's boost guard by links()
+            self._links_error = exc
+
+    def assignments(self) -> dict[str, int] | None:
+        self._thread.join()
+        return self._assignments
+
+    def links(self) -> dict[tuple[int, int], int] | None:
+        self._thread.join()
+        if self._links_error is not None:
+            raise self._links_error
+        return self._links
+
+
 def _attach_doc_ids_from_catalog(
     results: list[SearchResult], catalog: Any | None,
 ) -> None:
@@ -938,6 +987,7 @@ def search_cross_corpus(
     rerank_meta_out: dict[str, dict] | None = None,
     lexical: bool = False,
     deep_candidates: bool = False,
+    content_chars: int | None = None,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -1035,6 +1085,11 @@ def search_cross_corpus(
     candidates for that collection (kept or dropped), not just the
     dropped subset — see ``SearchDiagnostics`` for the dropped-only
     variant.
+
+    *content_chars* (nexus-tao37) asks the per-collection route to cap each
+    row's text at that many code points. Pass it only when every reader of
+    the returned text shows a snippet (the MCP tools); the batched fallback
+    path and an engine that predates the field return the full text.
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -1511,6 +1566,8 @@ def search_cross_corpus(
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
                 **rerank_cap_kw,
+                # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
+                **({"content_chars": content_chars} if content_chars is not None else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(
@@ -1898,6 +1955,16 @@ def search_cross_corpus(
     )
     call_deadline.check("search_cross_corpus:before_doc_ids")
 
+    # nexus-vpa9q: the topic reads key on chunk ids (``r.id``), never on the
+    # doc_ids the catalog attach below adds, and the link boost keeps the id
+    # set, so they run on a worker while the catalog round trip runs here.
+    # Measured serial on a first cloud search: 0.4-0.6 s of catalog, then
+    # 0.5-0.7 s of taxonomy (2026-10-09, engine v0.1.154).
+    topic_reads = (
+        _TopicReads.start(taxonomy, [r.id for r in all_results])
+        if all_results and taxonomy is not None else None
+    )
+
     # nexus-rehf (RDR-108 Phase 4 review D-H1+H2): resolve doc_id via
     # the catalog manifest and inject into result metadata BEFORE any
     # downstream consumer reads ``r.metadata["doc_id"]``. Phase 3
@@ -1914,12 +1981,8 @@ def search_cross_corpus(
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None
     call_deadline.check("search_cross_corpus:before_topics")
-    if all_results and taxonomy is not None:
-        try:
-            result_ids = [r.id for r in all_results]
-            _topic_assignments = taxonomy.get_assignments_for_docs(result_ids)
-        except Exception:  # noqa: BLE001 — best-effort topic assignment; failure logged at debug, boost/grouping skipped
-            _log.debug("topic_assignments_failed", exc_info=True)
+    if topic_reads is not None:
+        _topic_assignments = topic_reads.assignments()
 
     # Semantic clustering needs a vector per pooled row (Ward fallback), fetched once here.
     # Per-collection failures are isolated: failed indices are excluded from clustering but
@@ -1987,11 +2050,10 @@ def search_cross_corpus(
         try:
             from nexus.scoring import apply_topic_boost  # noqa: PLC0415 — branch-local; only when topic assignments present
 
-            # Read cached topic links for linked-topic boost
-            topic_links: dict[tuple[int, int], int] | None = None
-            if taxonomy is not None:
-                relevant_ids = list(set(_topic_assignments.values()))
-                topic_links = taxonomy.get_topic_link_pairs(relevant_ids) or None
+            # Cached topic links for the linked-topic boost, read on the
+            # worker right after the assignments. A failed read raises here,
+            # skipping the boost as it always has.
+            topic_links = topic_reads.links() if topic_reads is not None else None
 
             all_results = apply_topic_boost(
                 all_results, _topic_assignments, topic_links=topic_links,

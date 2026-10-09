@@ -252,6 +252,14 @@ def _patch_t2(t2_path, monkeypatch):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
+def _warm_fanout_counts() -> None:
+    """Load the counts the way an earlier search in this process would have (nexus-vpa9q): a
+    cold cache gives the fan-out floor no counts, so it excludes nothing on that first search."""
+    from nexus import mcp_infra
+
+    mcp_infra.get_collection_counts()
+
 def _mock_t3(collections: list[dict]) -> MagicMock:
     """Create a mock T3 with preset list_collections and inject it.
 
@@ -1163,6 +1171,7 @@ def test_fanout_floor_excludes_thin_collection_beside_healthy_sibling():
         {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
         {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
+    _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         _search_render("test query", corpus="code")
@@ -1225,6 +1234,7 @@ def test_fanout_floor_applies_under_all_alias():
         {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
         {"name": "knowledge__notes", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 5},
     ])
+    _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         _search_render("test query", corpus="all")
@@ -1243,6 +1253,7 @@ def test_fanout_floor_boundary_exact():
         {"name": "code__at_floor", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT},
         {"name": "code__below_floor", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
     ])
+    _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         _search_render("test query", corpus="code")
@@ -1259,6 +1270,7 @@ def test_fanout_floor_applies_to_query_tool_too():
         {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
         {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
+    _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         query(question="test query", corpus="code")
@@ -1305,6 +1317,7 @@ def test_fanout_floor_negative_count_sentinel_fails_open():
         {"name": "code__healthy", "count": 20},
         {"name": "code__thin", "count": 1},
     ])
+    _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         _search_render("test query", corpus="code")
@@ -1333,6 +1346,7 @@ def test_fanout_floor_exclusion_visible_in_search_hit_footer():
         {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
         {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
+    _warm_fanout_counts()
     fake = lambda *a, **kw: [  # noqa: E731 — inline fixture fake, local to this test
         SearchResult(id="r1", content="hit", distance=0.1,
                      collection="code__healthy", metadata={})
@@ -1348,6 +1362,7 @@ def test_fanout_floor_exclusion_visible_on_zero_hit():
         {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
         {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
+    _warm_fanout_counts()
     with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: []):
         out = _search_render("test query", corpus="code")
     assert "[excluded below fan-out floor: code__thin]" in out
@@ -1371,6 +1386,7 @@ def test_fanout_floor_exclusion_visible_in_query_footer():
         {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
         {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
+    _warm_fanout_counts()
     fake = lambda *a, **kw: [  # noqa: E731 — inline fixture fake, local to this test
         SearchResult(id="r1", content="hit", distance=0.1,
                      collection="code__healthy", metadata={"title": "doc"})

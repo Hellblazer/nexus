@@ -403,6 +403,88 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(post(bad).statusCode()).as("embeddings_limit must be positive").isEqualTo(400);
     }
 
+    /**
+     * nexus-tao37: {@code content_chars} caps each row's text. A default MCP search shows 200-300 characters of
+     * a 10-row page from a 300-row pool, and the full text was about half of every 100-160 KB gzipped
+     * response (measured 2026-10-09). The rows, their order and every other field are unchanged, and the
+     * envelope echoes the cap so a client can tell an engine that applied it from one that predates it.
+     */
+    @Test
+    void contentChars_capsEachRowsText_echoesTheCap_andKeepsTheRows() throws Exception {
+        JsonNode full = json(post(ok())).get("results");
+        Map<String, Object> req = ok();
+        req.put("content_chars", 5);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.get("content_chars").asInt()).isEqualTo(5);
+        JsonNode capped = body.get("results");
+        assertThat(capped).hasSize(full.size());
+        for (int i = 0; i < full.size(); i++) {
+            assertThat(capped.get(i).get("id").asText()).isEqualTo(full.get(i).get("id").asText());
+            String whole = full.get(i).get("content").asText();
+            assertThat(capped.get(i).get("content").asText())
+                .isEqualTo(whole.substring(0, Math.min(5, whole.length())));
+            assertThat(capped.get(i).get("chash").asText()).isEqualTo(full.get(i).get("chash").asText());
+        }
+    }
+
+    @Test
+    void contentChars_mustBePositive() throws Exception {
+        for (Object bad : new Object[] {0, -3}) {
+            Map<String, Object> req = ok();
+            req.put("content_chars", bad);
+            assertThat(post(req).statusCode()).as("content_chars %s", bad).isEqualTo(400);
+        }
+    }
+
+    @Test
+    void contentChars_appliesAfterRerank() throws Exception {
+        Map<String, Object> req = ok();
+        req.put("rerank", true);
+        req.put("content_chars", 4);
+        var r = post(req);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.get("content_chars").asInt()).isEqualTo(4);
+        for (JsonNode row : body.get("results")) {
+            assertThat(row.get("content").asText().length()).isLessThanOrEqualTo(4);
+        }
+    }
+
+    /** RDR-226 Phase 0: every request logs where its arms' time went, one line per request. */
+    @Test
+    void eachRequestLogsItsArmPhases() throws Exception {
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(dev.nexus.service.vectors.PgVectorRepository.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            assertThat(post(ok()).statusCode()).isEqualTo(200);
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
+        var line = logs.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.startsWith("event=search_per_collection_arm_phases ")).findFirst();
+        assertThat(line).as("one arm-phases line per request").isPresent();
+        assertThat(line.get()).contains("arms=2 ", "sum_permit_wait_ms=", "sum_setup_ms=", "sum_probe_ms=",
+                                        "sum_statement_ms=", "sum_other_ms=", "exact_arms=", "hnsw_arms=");
+        var m = java.util.regex.Pattern.compile("exact_arms=(\\d+) hnsw_arms=(\\d+)").matcher(line.get());
+        assertThat(m.find()).isTrue();
+        assertThat(Integer.parseInt(m.group(1)) + Integer.parseInt(m.group(2))).isEqualTo(2);
+    }
+
+    @Test
+    void capCodePoints_neverSplitsASurrogatePair() {
+        String s = "a\uD83D\uDE00bc"; // a, grinning face (two UTF-16 units), b, c
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(s, 2)).isEqualTo("a\uD83D\uDE00");
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(s, 1)).isEqualTo("a");
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(s, 10)).isSameAs(s);
+        assertThat(dev.nexus.service.http.VectorHandler.capCodePoints(null, 3)).isNull();
+    }
+
     @Test
     void includeEmbeddings_isOptIn_theDefaultResponseIsUnchanged() throws Exception {
         for (Object flag : new Object[] {null, false}) {

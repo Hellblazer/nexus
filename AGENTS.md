@@ -32,7 +32,7 @@ uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
 
-Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/_engine_substrate.py`) or skip. **After any pull/rebase or edit touching `service/` (a comment in a Java file or a changelog XML counts: the gate is mtime-keyed), run `scripts/build-gate-jar.sh`** — the substrate's freshness gate rejects a stale/unstamped jar and every substrate-backed test errors at setup, lint-marked ones included, so a suite run beside a jar rebuild reports a wall of setup errors that is not a test failure. Never backdate mtimes to get past it; rebuild. Test-authoring directives (scenario journeys, lint bucket, contract-suite patterns, parametrize rules) live in [`tests/AGENTS.md`](tests/AGENTS.md).
+Unit tests use the in-process `InMemoryVectorClient` (`nexus.db.inmemory_vector_store`) + bundled ONNX MiniLM — no API keys or network; engine-substrate tests self-provision a local service (`ensure_engine`/`mint_test_tenant` in `tests/_engine_substrate.py`) or skip. **After any pull/rebase or edit touching `service/` (a comment in a Java file or a changelog XML counts: the gate is mtime-keyed), run `scripts/build-gate-jar.sh`** — the substrate's freshness gate rejects a stale/unstamped jar, lint-marked tests included, and a session start now refuses on it (exit 75, one line naming `scripts/build-gate-jar.sh`; the same preflight refuses when the pinned engine tag's PG bundle is not downloadable, and `NX_TEST_T2_SUBSTRATE=none` skips it). A jar rebuilt DURING a run is a different case: the preflight has already passed, so that run still reports a wall of setup errors that is not a test failure. Never backdate mtimes to get past it; rebuild. Test-authoring directives (scenario journeys, lint bucket, contract-suite patterns, parametrize rules) live in [`tests/AGENTS.md`](tests/AGENTS.md).
 
 ## Architecture at a glance
 
@@ -153,10 +153,12 @@ mini, macOS user `ghrunner`) is a self-hosted runner for release legs only: the
 engine-service release legs, the PG-bundle cache seed and the signing rehearsal
 (Sam, 2026-09-28, nexus-yd9po). `qwentescence` (WSL) is a test host reachable by
 ssh, not a runner; its native Windows side is the separate `win-release` runner
-described below. Both hosts take hand-run suites and gates through ssh;
-agents' full suites go to hellmini (Sam, 2026-10-02). The T2 how-tos
-`nexus/hellmini-second-test-host-howto` and `nexus/qwentescence-test-host-howto`
-carry the recipes.
+described below. `chas` (a native Ubuntu 26.04 box, 32 cores, 123 GB, ssh
+alias `chas-test`) is a test host only, never a runner. Agents' full Python
+suites and engine suites go to chas first (2026-10-08, nexus-y10bw). hellmini takes
+macOS-specific runs, and the overflow when chas is busy. The T2 how-tos
+`nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto` and
+`nexus/qwentescence-test-host-howto` carry the recipes.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two self-hosted registrations, `hellmini` and
@@ -430,16 +432,20 @@ things to avoid carefully; they are impossible.
 
 6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST
    SUBSTRATE-BACKED TEST.** `service/target/` is untracked build output, so
-   a fresh worktree has no service jar and every substrate-backed test
-   errors at setup. The fix is seconds rather than a nine-minute rebuild
-   because the cache key is on `service/` CONTENT and lives in the git
-   common dir, so every worktree on the box shares one build.
+   a fresh worktree has no service jar. The fix is seconds rather than a
+   nine-minute rebuild because the cache key is on `service/` CONTENT and
+   lives in the git common dir, so every worktree on the box shares one
+   build.
 
-   **This produces the SAME SYMPTOM as rule 5's exhaustion** — thousands of
-   setup errors that read as catastrophic breakage. Two causes, one
-   symptom. Check `ipcs -m` first because it is one command; if segments
-   are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
-   fresh worktree, zero shared-memory segments, missing jar.
+   A missing or stale jar used to produce the SAME SYMPTOM as rule 5's
+   exhaustion: thousands of setup errors (20673 on 2026-09-19, in a fresh
+   worktree with zero shared-memory segments). It no longer does. The
+   session-start substrate preflight (`tests/conftest.py`
+   `_preflight_engine_substrate`, `tests/_substrate_preflight.py`) exits 75
+   with one line naming `scripts/build-gate-jar.sh`, and does the same when
+   the pinned engine tag's PG bundle is not downloadable. The setup-error
+   wall now means shared-memory exhaustion (rule 5) or a jar rewritten
+   after the session started; check `ipcs -m` first.
 
 7. **Before pushing, ask whether a run someone is waiting on is in flight.**
    Worktrees split the tree; CI remains one shared resource with one queue,
@@ -521,7 +527,20 @@ things to avoid carefully; they are impossible.
     write tool, whenever you are not certain your session started inside
     the worktree it is editing.
 
-12. **A second test host, `hellmini`, takes full suites and gates.** A Mac
+12. **The default test host is `chas`; `hellmini` is the second.** chas
+    (`ssh chas-test`, user `nxtest`, no sudo) holds its own clone at
+    `~/src/nexus` (primary on `develop`, never edited) with worktrees in
+    `~/src/nexus-wt/`. Its leases live in that clone's git common dir. Push
+    with `git push chas HEAD:refs/heads/<unique-ref>` (laptop remote `chas`)
+    and add a worktree at that ref. `-n auto` there means 32 workers
+    (`PYTEST_XDIST_AUTO_NUM_WORKERS`); 32 workers peak at about 95 of 123 GB,
+    so do not raise it. Measured 2026-10-08 on develop 14fb28184: the Python
+    suite in about 11 min, `scripts/mvnw-leased.sh test` in 9 min. Detach a long
+    run with `setsid -f`, not `nohup ... &`: a backgrounded process inherits
+    SIGINT ignored, and one test reads that (nexus-jo8za). Details: T2
+    `nexus/chas-test-host-howto`.
+
+    hellmini, the second host, takes macOS runs and overflow. A Mac
     mini on the tailnet (`ssh hellmini`) holds its own clone at
     `/Volumes/Bulk/src/nexus` (primary on `develop`, never edited) with
     worktrees in `/Volumes/Bulk/src/nexus-wt/`. Its suite and build leases
@@ -545,13 +564,13 @@ anything moves); work that is already committed is cherry-picked, because a
 commit is recoverable where an applied-but-unverified diff is not.
 
 **A note on reading long runs.** Preconditions are warned at the TOP of a
-run (the stale-jar banner above is one). Whether such a warning reaches you
+run (the shared-memory cap note above is one). Whether such a warning reaches you
 depends on how much output follows it, which inverts against its value: the
 longer and more expensive the run, the further the warning sits from the
 tail. `head` as well as `tail`, or grep the warning shape.
 
 **A remote pytest hand run goes through `scripts/watched_pytest.py`** (nexus-hlvg1),
-on qwentescence, qwent-test and hellmini alike:
+on chas, qwentescence, qwent-test and hellmini alike:
 `python scripts/watched_pytest.py --stall 180 --status <file> -- uv run pytest ...`.
 It adds `-v` and `faulthandler_timeout`, kills the process tree after
 `--stall` seconds of silence and names the hung test (exit 124), names a run

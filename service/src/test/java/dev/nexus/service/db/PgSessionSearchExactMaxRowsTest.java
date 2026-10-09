@@ -14,10 +14,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PgSessionSearchExactMaxRowsTest {
 
     @Test
-    void defaultsToTheProvisionalConstant_whenUnsetOrBlank() {
+    void defaultsToTheMeasuredConstant_whenUnsetOrBlank() {
         assertThat(PgSession.searchExactMaxRows(null)).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
         assertThat(PgSession.searchExactMaxRows("   ")).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
-        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(10_000);
+        // nexus-nqsa7: 30000 (Sam, 2026-10-09). 60000 fixed the 27,893-row repro but put the
+        // 45k/58k collections on exact, about +1 s per warm default search on the live engine.
+        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(30_000);
     }
 
     @Test

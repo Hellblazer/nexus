@@ -289,9 +289,8 @@ def _render_state():
     inject_t3(None)
 
 
-@contextmanager
-def _fake_t2_ctx():
-    yield SimpleNamespace(taxonomy=None, telemetry=None)
+def _no_taxonomy():
+    return None
 
 
 def _spy_t3(vec: dict[str, list[float]], names: list[str]) -> tuple[_Vectors, MagicMock]:
@@ -323,7 +322,7 @@ def _render(rows: list[SearchResult], *, names: list[str], cfg=_CHECK_ON, fn="se
 
     with patch("nexus.search_engine.search_cross_corpus", _pool), \
          patch("nexus.config.load_config", return_value=cfg), \
-         patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx), \
+         patch("nexus.mcp.core._search_taxonomy", _no_taxonomy), \
          patch("nexus.mcp.core._get_catalog", return_value=None):
         if fn == "query":
             return mcp_core.query(question="anything", corpus=",".join(names), **kw)

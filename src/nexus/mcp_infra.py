@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
     import httpx
 
+    from nexus.search_telemetry_sink import BackgroundSearchTelemetry
+
 
 def _parse_version(ver: str) -> tuple[int, ...]:
     """Parse a dotted version string into a comparable 3-component tuple.
@@ -1223,6 +1225,138 @@ def note_collection_written(name: str) -> None:
         invalidate_collections_cache()
 
 
+#: A document id no catalog holds: the warm-up's catalog read resolves it to nothing.
+_WARMUP_ABSENT_DOC_ID = "0.0.0"
+
+#: ``0``/``false``/``off``/``no`` turns the MCP startup search warm-up off (nexus-vpa9q).
+SEARCH_WARMUP_ENV = "NX_MCP_SEARCH_WARMUP"
+
+
+def search_warmup_enabled() -> bool:
+    return os.environ.get(SEARCH_WARMUP_ENV, "").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def warm_search_path() -> None:
+    """Do the cheap cold-process steps of a first search ahead of it (nexus-vpa9q).
+
+    A cold MCP process paid these on its first search, all network round trips and TCP/TLS
+    setup (engine plus ALB 0.01-0.02 s of each, conexus ALB 2026-10-09): the cloud version
+    probe (~0.25 s), the routing listing (0.25-0.43 s), and a new connection for the second
+    model group's search request (0.2-0.3 s). This runs them at server start: the probe and the
+    vector client, the routing listing (names cache plus a pooled connection), a second routing
+    read concurrently so the pool holds two warm connections, the shared T2 slot and the
+    catalog handle. It never asks for the full stats listing (0.7 s of engine DB time per
+    call): a session that never searches should not pay it. Best-effort; each step's failure is
+    logged at debug and the rest still run.
+    """
+    import structlog  # noqa: PLC0415 — matches this module's branch-local logger imports
+
+    log = structlog.get_logger(__name__)
+    started = time.monotonic()
+
+    def step(name: str, fn: Any) -> None:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 — warm-up is best-effort; the first search does the work itself
+            log.debug("search_warmup_step_failed", step=name, exc_info=True)
+
+    t3_box: list[Any] = []
+    step("t3", lambda: t3_box.append(get_t3()))
+    t3 = t3_box[0] if t3_box else None
+    if t3 is not None and callable(getattr(t3, "embedding_mode", None)):
+        step("embedding_mode", t3.embedding_mode)
+
+    def second_connection() -> None:
+        from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+
+        if isinstance(t3, HttpVectorClient):
+            t3.list_collections(routing=True)
+
+    threads = [
+        threading.Thread(target=step, args=("names", get_live_collection_names), daemon=True),
+        threading.Thread(target=step, args=("second_connection", second_connection), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    # One real, near-free request on each so the first search's taxonomy and catalog calls ride
+    # an open connection (a cold one cost them 0.3-0.5 s): an empty link-pairs read on the shared
+    # T2, an absent document on the catalog. Neither read leaves client-side state, unlike the
+    # chash-positions route, whose failure backoff a warm-up must not trip.
+    step("t2", lambda: t2_index_write(
+        lambda db: db.taxonomy.get_topic_link_pairs([]), op="search_warmup",
+    ))
+    step("catalog", lambda: get_catalog().resolve_many([_WARMUP_ABSENT_DOC_ID]))
+    for t in threads:
+        t.join()
+    log.debug("search_warmup_done", elapsed_s=round(time.monotonic() - started, 3))
+
+
+def warm_search_path_in_background(
+    target: Any = None,
+) -> threading.Thread | None:
+    """Run :func:`warm_search_path` on a daemon thread; None when opted out."""
+    if not search_warmup_enabled():
+        return None
+    thread = threading.Thread(
+        target=target or warm_search_path, name="nexus-search-warmup", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+_fanout_counts_refresh_lock = threading.Lock()
+_fanout_counts_refresh: threading.Thread | None = None
+
+
+def get_fanout_counts() -> dict[str, int]:
+    """Counts for the default fan-out floor, never waiting on the full listing (nexus-vpa9q).
+
+    The floor (``nexus.mcp.core._fanout_exclusions_for_group``) only saves search cost: it drops
+    a near-empty collection beside a populous sibling, and an unknown count fails OPEN. The full
+    listing it reads costs ~1 s on a cold process (``/v1/vectors/stats`` counts every
+    collection's live chunks: 0.71-0.76 s engine time, measured 2026-10-09), serial before the
+    fan-out, to save a handful of cheap arms. So: counts loaded at any age are returned as they
+    are (the floor tolerates staleness), and when they are not fresh a single background
+    refresh is started. A cold cache returns ``{}``, so that search excludes nothing and the
+    next one has counts. Callers that print sizes keep :func:`get_collection_counts`.
+    """
+    with _collections_cache_lock:
+        loaded = _collections_counts_loaded
+        counts = _collections_cache[1]
+    if not _counts_are_fresh(_COLLECTION_COUNTS_TTL):
+        _start_fanout_counts_refresh()
+    return counts if loaded else {}
+
+
+def _start_fanout_counts_refresh() -> None:
+    global _fanout_counts_refresh
+    with _fanout_counts_refresh_lock:
+        if _fanout_counts_refresh is not None and _fanout_counts_refresh.is_alive():
+            return
+        _fanout_counts_refresh = threading.Thread(
+            target=_refresh_fanout_counts, name="nexus-collection-counts", daemon=True,
+        )
+        _fanout_counts_refresh.start()
+
+
+def _refresh_fanout_counts() -> None:
+    try:
+        get_collection_counts()
+    except Exception:  # noqa: BLE001 — best-effort; the floor fails open until counts load
+        import structlog  # noqa: PLC0415 — matches this module's branch-local logger imports
+
+        structlog.get_logger(__name__).debug("fanout_counts_refresh_failed", exc_info=True)
+
+
+def join_fanout_counts_refresh(timeout: float) -> bool:
+    """Wait up to *timeout* for a background counts refresh (tests). True when none is running."""
+    thread = _fanout_counts_refresh
+    if thread is None:
+        return True
+    thread.join(timeout)
+    return not thread.is_alive()
+
+
 def invalidate_collections_cache() -> None:
     """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
     call to refetch from T3 rather than serving up to
@@ -1516,6 +1650,103 @@ def t2_index_write(write_fn, *, op: str = "t2_write"):
     threaded straight through for :func:`service_t2_op_stats` attribution.
     """
     return _service_t2_write_locked(write_fn, op=op)
+
+
+# ── Search telemetry sink (nexus-vpa9q) ──────────────────────────────────────
+# MCP search and query hand their per-call telemetry rows to this sink
+# instead of a per-call T2Database store. See nexus.search_telemetry_sink for
+# the measured cost it removes from the request path.
+
+#: Seconds the interpreter-exit hook waits for queued telemetry to drain.
+SEARCH_TELEMETRY_EXIT_FLUSH_SECONDS: float = 2.0
+
+_search_telemetry: BackgroundSearchTelemetry | None = None
+_search_telemetry_lock = threading.Lock()
+_search_telemetry_atexit_registered = False
+
+
+def _write_search_telemetry(rows: list) -> object:
+    # Resolved through the module global at call time, so a test that
+    # monkeypatches t2_index_write intercepts the worker's writes too.
+    return t2_index_write(
+        lambda db: db.telemetry.log_search_batch(rows), op="search_telemetry",
+    )
+
+
+def flush_search_telemetry_at_exit() -> None:
+    """Drain queued search telemetry, bounded by
+    :data:`SEARCH_TELEMETRY_EXIT_FLUSH_SECONDS` (atexit and the MCP SIGTERM
+    handler, which exits with ``os._exit`` and so skips atexit)."""
+    sink = _search_telemetry
+    if sink is not None:
+        sink.close(SEARCH_TELEMETRY_EXIT_FLUSH_SECONDS)
+
+
+def search_telemetry_sink() -> BackgroundSearchTelemetry:
+    """Return the process-lifetime search telemetry sink, built on first use.
+
+    Writes go through :func:`t2_index_write`, so they reuse the pooled
+    shared T2 client rather than opening a connection per search.
+    """
+    global _search_telemetry, _search_telemetry_atexit_registered
+    with _search_telemetry_lock:
+        if _search_telemetry is None:
+            from nexus.search_telemetry_sink import BackgroundSearchTelemetry  # noqa: PLC0415 — deferred; only MCP search/query need it
+            _search_telemetry = BackgroundSearchTelemetry(_write_search_telemetry)
+            if not _search_telemetry_atexit_registered:
+                import atexit  # noqa: PLC0415 — stdlib, branch-local
+
+                atexit.register(flush_search_telemetry_at_exit)
+                _search_telemetry_atexit_registered = True
+        return _search_telemetry
+
+
+class SharedT2StoreReader:
+    """One T2 domain store's methods, each sent through :func:`t2_index_write`
+    (the pooled process-lifetime T2 client) instead of a per-call
+    :class:`T2Database` (nexus-vpa9q).
+
+    MCP search and query built a fresh ``T2Database`` per call only to read
+    the taxonomy store, so every search constructed nine httpx clients and
+    paid a new TCP/TLS connection for ``/v1/taxonomy/assignments/for_docs``
+    (conexus ALB, 2026-10-09: a new client port on every search, 0.08 s of
+    request processing against 0.01-0.02 s of target time). Stateless; the
+    slot owns connection reuse, eviction and credential refresh.
+    """
+
+    def __init__(self, store: str) -> None:
+        self._store = store
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        store = self._store
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return t2_index_write(
+                lambda db: getattr(getattr(db, store), name)(*args, **kwargs),
+                op=f"{store}.{name}",
+            )
+
+        call.__name__ = name
+        return call
+
+
+_SEARCH_TAXONOMY = SharedT2StoreReader("taxonomy")
+
+
+def search_taxonomy() -> SharedT2StoreReader:
+    """The taxonomy store MCP search and query read through the pooled T2."""
+    return _SEARCH_TAXONOMY
+
+
+def reset_search_telemetry_sink(timeout: float = 0.5) -> None:
+    """Close and forget the sink (tests; :func:`reset_singletons`)."""
+    global _search_telemetry
+    with _search_telemetry_lock:
+        sink, _search_telemetry = _search_telemetry, None
+    if sink is not None:
+        sink.close(timeout)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
@@ -4062,6 +4293,11 @@ def reset_singletons():
     # nexus-w1ip: the T2 singleton's reset (close + clear refcounts /
     # pending-close, same nexus-0dpli guard) is now the slot's own
     # responsibility.
+    # Drain the telemetry sink BEFORE the slot reset: a batch written after
+    # it would build a fresh T2Database in the cleared slot and leak it.
+    reset_search_telemetry_sink()
+    # A background counts refresh (nexus-vpa9q) must not install into the cache after the reset.
+    join_fanout_counts_refresh(2.0)
     _default_t2_slot.reset_for_tests()
     clear_search_traces()
     reset_plan_cache_for_tests()

@@ -384,7 +384,7 @@ def _gate_on_build_lease() -> None:
     wait that starts the suite when the holder is gone. ``_boot()``'s own
     check runs once per worker process at its first substrate boot and
     honours the same wait (``_engine_substrate._jar_ready_reason``; the
-    session-start stale-jar warning stays non-blocking), so a build that
+    session-start jar preflight stays non-blocking), so a build that
     starts after this gate and before a worker boots is waited for there
     too; one that starts after every
     worker has booted is not seen by either (the shell lease's own
@@ -416,48 +416,53 @@ def _gate_on_build_lease() -> None:
     )
 
 
-def _warn_if_service_jar_is_stale() -> None:
-    """Say ONCE, at session start, that the service jar is stale (nexus-zryqm).
+def _preflight_engine_substrate() -> None:
+    """Refuse the whole session ONCE when the engine substrate cannot boot.
 
-    The information already exists: ``jar_freshness_skip_reason`` is consulted
-    per-test by the engine-substrate fixtures, which fail LOUD with a directive
-    message. That is right for a targeted run and wrong for a full suite — it
-    surfaces as ~73 identical errors THIRTEEN MINUTES IN, after which the whole
-    run has to be discarded and repeated.
+    Two prerequisites used to fail per test instead: a missing or stale service
+    jar (nexus-zryqm only WARNED about it) and the pinned engine tag's PG
+    bundle (a tag not yet published, as on a release branch whose engine is
+    still building). ``ensure_engine()`` remembers the failure and re-raises it
+    for every substrate-backed test, so a full run reported 25,636 setup errors
+    (2026-10-08) that were one fact, after a full-length run, and twice after
+    the operator had read a note warning of exactly it. A documented
+    precondition that a human must remember is not a mechanism.
 
-    That happened three times in one day (2026-07-25), twice after the operator
-    had read a handoff note explicitly warning about it. A documented
-    precondition that a human must remember is not a mechanism; this makes the
-    same fact arrive at second 2 instead of minute 13.
+    Same footing as ``_gate_on_build_lease``: controller only, only when the
+    selected substrate boots an engine (``=none`` skips it), after the lease
+    gates, exit 75 with one line naming the cause and the remedy. The verdict
+    comes from ``tests/_substrate_preflight.refusal``, which asks the
+    substrate's own functions; the PG bundle is provisioned here when not
+    cached, once, before any worker spawns.
 
-    Deliberately a WARNING, not a hard stop: the stale jar only affects the
-    engine-substrate tests, and someone iterating on unrelated Python must not
-    be blocked by a Java artifact they never touched. The per-test fail-loud
-    guard is unchanged and still authoritative.
+    A nested pytest (a live holder pid that is not this process) skips it: its outer
+    run passed the same check, and a nested run that moves HOME or the cache
+    root (several do) would otherwise re-provision a bundle it never uses.
+    Same exemption, same reason, as ``_take_suite_lease``.
+
+    A bug in the preflight itself never breaks collection: it is logged to
+    stderr and the run goes on, as the lease gates do.
     """
-    try:
-        from tests.db._service_fixture import jar_freshness_skip_reason
-    except Exception:  # noqa: BLE001 — advisory only; never break collection
+    if not _selected_t2_substrate_boots_engine():
         return
     try:
-        reason = jar_freshness_skip_reason()
-    except Exception:  # noqa: BLE001 — advisory only
-        return
-    if not reason:
-        return
-    import sys as _sys
+        from tests import _substrate_preflight, _suite_lease  # noqa: PLC0415 — deferred: test-support modules, not needed unless this run boots an engine
 
-    banner = (
-        "\n"
-        "=" * 78 + "\n"
-        f"SERVICE JAR STALE — engine-substrate tests will error: {reason}\n"
-        "Rebuild BEFORE trusting this run, or ~73 errors will surface at the END:\n"
-        "    mvn -f service/pom.xml package -DskipTests\n"
-        "(nexus-zryqm: this notice exists because the same 13-minute run was\n"
-        " discarded three times in one day for exactly this reason.)\n"
-        + "=" * 78 + "\n"
-    )
-    print(banner, file=_sys.stderr)  # noqa: T201 — session banner, must be seen before the run
+        # ``_take_suite_lease`` has just put THIS pid in the holder variable, so
+        # ``inside_a_holder()`` alone is true for the holder itself. Nested means
+        # held by a live pid that is not this one.
+        held_by = os.environ.get(_suite_lease.HELD_BY_ENV, "").strip()
+        if held_by != str(os.getpid()) and _suite_lease.inside_a_holder():
+            return
+        reason = _substrate_preflight.refusal()
+    except Exception as exc:  # noqa: BLE001 — the preflight must never break collection on its own bug
+        import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+        _sys.stderr.write(f"engine-substrate preflight skipped on its own error: {exc!r}\n")
+        return
+    if reason is None:
+        return
+    pytest.exit(reason, returncode=75)
 
 
 #: True iff this process is the xdist CONTROLLER, or there is no xdist at
@@ -501,9 +506,10 @@ def pytest_sessionstart(session):
     during the session (nexus-nifd).
 
     Also snapshots the FULL real config dir for the broader nexus-pfuns
-    mutation guard (see ``_check_real_config_dir_mutations``), and emits
-    the stale-service-jar banner (nexus-zryqm) so a doomed engine-substrate
-    run is visible immediately rather than 13 minutes later.
+    mutation guard (see ``_check_real_config_dir_mutations``). The
+    engine-substrate preflight (``_preflight_engine_substrate``) runs right
+    after the lease gates, so a doomed engine-substrate run exits at second
+    2 instead of erroring every test 13 minutes in.
 
     nexus-pfuns round 2: both baselines are captured CONTROLLER/SERIAL
     ONLY (``_is_controller_or_serial``, computed here). A worker's own
@@ -530,6 +536,7 @@ def pytest_sessionstart(session):
     if _is_controller_or_serial:
         _gate_on_build_lease()
         _take_suite_lease()
+        _preflight_engine_substrate()
 
     # nexus-pfuns: FENCE $HOME before any test runs. The gates were fenced
     # first; this suite was not, and it runs with the operator's real home.
@@ -578,7 +585,6 @@ def pytest_sessionstart(session):
         _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
         _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
-    _warn_if_service_jar_is_stale()
 
 
 def _check_fixture_cache_leaks(session) -> None:
@@ -2457,6 +2463,37 @@ def _isolate_index_run_collectors():
     _reset_index_run_collectors_if_loaded()
     yield
     _reset_index_run_collectors_if_loaded()
+
+
+def _reset_search_telemetry_sink_if_loaded() -> None:
+    import sys as _sys  # noqa: PLC0415 — local, matches this file's convention
+
+    infra = _sys.modules.get("nexus.mcp_infra")
+    if infra is not None:
+        infra.reset_search_telemetry_sink()
+        # The fan-out counts refresh is the other process-wide background worker.
+        infra.join_fanout_counts_refresh(2.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_mcp_search_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MCP lifespan starts a search warm-up thread (nexus-vpa9q) that reaches the engine.
+    Off in the unit suite; tests/test_search_warmup.py turns it back on where it is the subject."""
+    monkeypatch.setenv("NX_MCP_SEARCH_WARMUP", "0")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_telemetry_sink():
+    """Give every test its own MCP search telemetry worker (nexus-vpa9q).
+
+    ``nexus.mcp_infra`` keeps one process-wide background writer for MCP
+    search and query telemetry. Without this reset a batch queued by one
+    test could be written during the next, into whatever T2 endpoint that
+    test set up. Reads ``sys.modules`` instead of importing.
+    """
+    _reset_search_telemetry_sink_if_loaded()
+    yield
+    _reset_search_telemetry_sink_if_loaded()
 
 
 @pytest.fixture(autouse=True)

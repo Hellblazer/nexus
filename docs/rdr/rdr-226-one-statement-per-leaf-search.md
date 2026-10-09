@@ -349,6 +349,22 @@ Inference from them:
   sort early (226-research-8).
 - **❓ Assumed** (A1, A4, A5 below; 226-research-9 to -11). Inlining of the new
   function, the cloud instance size, and the per-arm cost split (I2).
+- **✅ Verified** (measurement, 2026-10-09). With telemetry, the probe
+  serialisation, the blocking stats read and serial enrichment off the client
+  path, search-per-collection is the dominant cost of a default search: ALB
+  target 0.98-1.42 s per request. Running the two model-group requests
+  concurrently raised per-request target time from 0.52-0.96 s to 0.65-1.36 s,
+  which is the DB-throughput signature (226-research-12).
+- **✅ Verified** (measurement, 2026-10-09). T is a recall lever as well as a cost
+  lever. `code__1-72` (27,893 rows, one of A3's 7 HNSW arms) lost its nearest
+  row (page rank 7) at per-collection k up to 100 and recovered it at k 120 and
+  above. The fork measurement found no plan switch: the leaf's HNSW walk is
+  filtered to one collection, the filter discards about 80% of it, and
+  `relaxed_order` stops at the first k admitted rows. Recall against exact was
+  0.925 at k 40 and 0.983 at k 120. Exact arms for the 7 collections between 10k
+  and 60k rows cost 95-581 ms warm and 110-1046 ms on first touch, every plan a
+  primary-key bitmap scan. Filed as nexus-nqsa7, whose remedy raises the router
+  default (226-research-13).
 
 ### Critical Assumptions
 
