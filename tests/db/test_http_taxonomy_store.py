@@ -46,6 +46,7 @@ _TOPICS: dict[int, dict[str, Any]] = {}
 _ASSIGNMENTS: list[dict[str, Any]] = []
 _LINKS: list[dict[str, Any]] = []
 _META: dict[str, dict[str, Any]] = {}
+_BY_IDS_REQUESTS: list[list[int]] = []
 _STORE_LOCK = threading.Lock()
 _ID_SEQ = [0]
 
@@ -60,6 +61,7 @@ def _reset_stores() -> None:
     _ASSIGNMENTS.clear()
     _LINKS.clear()
     _META.clear()
+    _BY_IDS_REQUESTS.clear()
     _ID_SEQ[0] = 0
 
 
@@ -410,6 +412,12 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     "last_discover_at": discovered_at,
                 }
                 self._json(200, {"ok": True})
+
+            elif path == "/v1/taxonomy/topics/by_ids":
+                # nexus-w032x: mirrors TaxonomyHandler.handleGetByIds -- the
+                # by_id objects for ids that exist, the rest omitted.
+                _BY_IDS_REQUESTS.append(list(body.get("ids", [])))
+                self._json(200, [_TOPICS[i] for i in body.get("ids", []) if i in _TOPICS])
 
             elif path == "/v1/taxonomy/meta/last_discover_batch":
                 # nexus-l3dg2: mirrors TaxonomyRepository.getLastDiscoverStamps —
@@ -1282,6 +1290,8 @@ class TestMiscMethods:
         assert labels[1] == "alpha"
         assert labels[2] == "beta"
         assert 999 not in labels
+        # nexus-w032x: served by ONE batched request, not three by_id GETs.
+        assert _BY_IDS_REQUESTS == [[1, 2, 999]]
 
     def test_top_topics_for_collection(self, client: HttpTaxonomyStore) -> None:
         client.import_topic(

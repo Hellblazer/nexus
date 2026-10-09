@@ -34,6 +34,8 @@ import java.util.Optional;
  *   GET   /v1/taxonomy/topics/children     child topics (parent_id= required)
  *   GET   /v1/taxonomy/topics/unreviewed   pending topics (collection=, limit= optional)
  *   GET   /v1/taxonomy/topics/by_id        single topic (id= required)
+ *   POST  /v1/taxonomy/topics/by_ids       topics for {"ids":[...]} in one statement,
+ *         <=300 ids; unknown ids omitted (nexus-w032x)
  *   GET   /v1/taxonomy/topics/resolve      resolve label→id (label=, collection= optional)
  *   GET   /v1/taxonomy/topics/collections  distinct collection names
  *   POST  /v1/taxonomy/topics/insert       insert new topic
@@ -138,6 +140,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/topics/children"           -> handleGetChildTopics(exchange, tenant, method);
                 case "/topics/unreviewed"         -> handleGetUnreviewed(exchange, tenant, method);
                 case "/topics/by_id"              -> handleGetById(exchange, tenant, method);
+                case "/topics/by_ids"             -> handleGetByIds(exchange, tenant, method);
                 case "/topics/resolve"            -> handleResolveLabel(exchange, tenant, method);
                 case "/topics/collections"        -> handleGetCollections(exchange, tenant, method);
                 case "/topics/insert"             -> handleInsertTopic(exchange, tenant, method);
@@ -330,6 +333,43 @@ public final class TaxonomyHandler implements HttpHandler {
         } else {
             HttpUtil.send(ex, 200, json(row.get()));
         }
+    }
+
+    /**
+     * POST /v1/taxonomy/topics/by_ids (nexus-w032x): the batched counterpart of
+     * {@code /topics/by_id}. Body {@code {"ids":[<int>,...]}}, 1 to
+     * {@value TaxonomyRepository#MAX_TOPICS_BY_IDS} ids. Response 200: a JSON
+     * array of the same topic objects {@code by_id} returns, for the ids that
+     * exist under the tenant (others omitted, order unspecified). Search's topic
+     * grouping asks for every topic in a result window: one request here
+     * replaces about forty {@code by_id} GETs.
+     */
+    private void handleGetByIds(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body;
+        try {
+            body = readBody(ex);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            // Other routes let this fall to the 500 ladder; a client whose body is not
+            // a JSON object is the caller's fault, and the client treats 5xx as retryable.
+            throw new IllegalArgumentException("request body must be a JSON object");
+        }
+        Object raw = body.get("ids");
+        if (!(raw instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new IllegalArgumentException("field 'ids' must be a non-empty JSON array");
+        }
+        if (rawList.size() > TaxonomyRepository.MAX_TOPICS_BY_IDS) {
+            throw new IllegalArgumentException("too many ids (max "
+                + TaxonomyRepository.MAX_TOPICS_BY_IDS + ")");
+        }
+        List<Long> ids = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (!(o instanceof Integer || o instanceof Long)) {
+                throw new IllegalArgumentException("each element of 'ids' must be an integer");
+            }
+            ids.add(((Number) o).longValue());
+        }
+        HttpUtil.send(ex, 200, json(repo.getTopicsByIds(tenant, ids)));
     }
 
     private void handleResolveLabel(HttpExchange ex, String tenant, String method) throws IOException {

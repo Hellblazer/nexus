@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Search's topic grouping reads its labels in one request** (nexus-w032x). A default search (the CLI's `cluster_by="semantic"`) looked up every topic in the result window with its own `GET /v1/taxonomy/topics/by_id`: about 39 requests, 0.54 to 0.98 s on the managed service. New engine route `POST /v1/taxonomy/topics/by_ids` takes `{"ids": [...]}` (1 to 300 integers; anything else is a 400) and answers the same topic objects `by_id` returns, for the ids that exist under the tenant, in one statement; missing ids are omitted. `HttpTaxonomyStore.get_labels_for_ids` sends one request per 300 ids. Against an engine without the route (404, or the edge refusing the path) it remembers that for ten minutes and uses the pooled per-id path as before; a failing route is remembered for one minute. Takes effect with the next engine tag after engine-service-v0.1.157.
+
 ## [7.76.0] - 2026-10-09
 
 Pairs with engine-service-v0.1.156 (`REQUIRED_ENGINE_VERSION` moves from 0.1.154; v0.1.155 was deployed to the managed service and superseded the same morning, never pinned). Search latency on the MCP path. Telemetry is written off the request path, a first search no longer waits on the full stats listing or a single-flight route probe, the topic reads overlap the catalog attach, the MCP server warms a first search's cold steps at start, and the MCP tools ask the engine for at most 300 characters of each row's text. Measured against the managed service on v0.1.156, a warm default MCP search takes 2.53 s on this release and 3.67 s on 7.75.0. The engine's cardinality router now searches collections of up to 30,000 rows exactly, which fixes a full page missing its nearest rows.

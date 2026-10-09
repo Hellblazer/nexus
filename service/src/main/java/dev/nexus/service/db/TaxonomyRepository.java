@@ -286,6 +286,30 @@ public final class TaxonomyRepository {
                .stream().findFirst());
     }
 
+    /** Upper bound on ids accepted by {@code /topics/by_ids} (nexus-w032x) —
+     * the project convention batch cap. */
+    public static final int MAX_TOPICS_BY_IDS = 300;
+
+    /**
+     * Topics for a LIST of ids in ONE statement (nexus-w032x): the batched
+     * counterpart of {@link #getTopicById}, same row shape. Ids with no topic
+     * under this tenant are omitted (RLS scopes the read, so another tenant's
+     * id is indistinguishable from a missing one). Row order is unspecified;
+     * the caller keys by id.
+     */
+    public List<Map<String, Object>> getTopicsByIds(String tenant, List<Long> ids) {
+        if (ids.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(
+                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
+                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+               .from(TOPICS)
+               .where(TOPICS.ID.in(ids))
+               .fetch()
+               .map(TaxonomyRepository::buildTopicMap));
+    }
+
     /** Resolve topic label to id (exact match). Optionally scoped by collection. */
     public Optional<Long> resolveLabel(String tenant, String label, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
