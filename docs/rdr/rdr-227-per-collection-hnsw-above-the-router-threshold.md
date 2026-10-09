@@ -67,7 +67,10 @@ walk.
 On a fresh fork, the first HNSW search of a large collection took 2.2 to 3.6 s
 (5.4 to 7.2 s on three arms in the RDR-226 Step 0.2 run), while exact never
 exceeded 1.1 s cold. A restarted or failed-over database pays this. Any design
-that leans on HNSW for large collections must state its cold cost.
+that leans on HNSW for large collections must state its cold cost. Phase 0
+measured a per-collection index's first touch after a database restart at 86 to
+189 ms (OS page cache intact, so a lower bound); a first touch read from disk
+should be of the same order as the leaf index's 2 to 7 s.
 
 ## Relationship to Prior RDRs
 
@@ -123,37 +126,68 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
 - **✅ Verified** (measurement). Warm HNSW arms on the same collections: 6 to 9 ms.
 - **✅ Verified** (measurement). Cold HNSW first touch: 2.2 to 3.6 s (fork,
   nqsa7) and 5.4 to 7.2 s (fork, RDR-226 Step 0.2).
-- **❓ Assumed** (A1 to A4 below).
+- **✅ Verified** (Phase 0, fork, `nexus_rdr/227-research-2`). Positive
+  control: the fork reproduces production's code-group contention at 10
+  concurrent workers, not 5, because each worker waits a ~90 ms round trip
+  between arms; every Phase 0 cost is quoted at 10 workers with 5 and 15 as
+  brackets.
+- **✅ Verified** (Phase 0, `nexus_rdr/227-research-2`). A4: `ef_search = 1000`
+  removes the top-1 miss but leaves the nqsa7 repro at recall 0.975 (k 40) and
+  0.983 (k 120); `strict_order` alone is no better than serving.
+- **✅ Verified** (Phase 0, `nexus_rdr/227-research-3`). A1, A2, A3: a partial
+  index per collection is used by the bound, custom-planned arm (7 to 9 ms
+  exec), reaches recall >= 0.99 on every own-topic query including the nqsa7
+  repro, and builds CONCURRENTLY in 10 to 21 s without blocking writes.
+- **❓ Assumed** (A5 below).
 
 ### Critical Assumptions
 
-- [ ] **A1.** The planner uses a partial index `WHERE collection = 'X'` for an
+- [x] **A1.** The planner uses a partial index `WHERE collection = 'X'` for an
   inlined `plain_search_<dim>` arm whose `p_collections` is the one-element
   array `{X}` (predicate implication through `= ANY` of a one-element constant
   array), with `p_collections` BOUND as jOOQ binds it, under
   `plan_cache_mode = force_custom_plan`. A literal `'{X}'` in the SQL text can
   prove the implication while a bound array cannot, so only the bound form
-  counts. **Status**: Unverified. **Method**: Spike (Phase 0).
-- [ ] **A2.** An unfiltered walk over one collection's own graph returns that
+  counts. **Status**: ✅ Verified (Phase 0, `nexus_rdr/227-research-3`): with
+  bound parameters under `force_custom_plan` all four indexed arms used their
+  partial index, 7 to 9 ms exec. Under a GENERIC plan the arm does not use it
+  and walks every tenant leaf's HNSW, so the path must stay custom-planned.
+  **Method**: Spike (Phase 0).
+- [x] **A2.** An unfiltered walk over one collection's own graph returns that
   collection's exact top-k at the serving settings (recall >= 0.99 at k 40 to
   120 on real query vectors, the nqsa7 repro plus 18 natural-language queries
   over the three collections; queries seeded from the collection's own rows never
-  missed on nqsa7 and over-state recall). **Status**: Unverified.
-  **Method**: Spike (Phase 0).
-- [ ] **A3.** Building one partial HNSW index over 30k to 60k rows takes minutes,
+  missed on nqsa7 and over-state recall). **Status**: ✅ Verified (Phase 0,
+  `nexus_rdr/227-research-3`): `code__1-1`, `code__1-2` and `code__1-72` reach
+  >= 0.99 on every own-topic query at serving settings, the nqsa7 repro
+  included. `code__1-20`, queried only off-topic, read 0.975 to 0.983 on 1 to 5
+  of 19 queries at k >= 60 with no top-1 miss (ordinary HNSW approximation on
+  far queries). **Method**: Spike (Phase 0).
+- [x] **A3.** Building one partial HNSW index over 30k to 60k rows takes minutes,
   not hours, and `CREATE INDEX CONCURRENTLY` on a leaf does not block writes.
-  **Status**: Unverified. **Method**: Spike (Phase 0, fork).
-- [ ] **A4.** A cheaper alternative does not already close Gap 1: a larger
+  **Status**: ✅ Verified (Phase 0, `nexus_rdr/227-research-3`): 10 to 21 s and
+  229 to 480 MB per index (about 8.2 KB per row) at the instance defaults (about
+  655 MB `maintenance_work_mem`, 2 workers; raising them changed nothing). The
+  build held `ShareUpdateExclusiveLock` only; an insert into the same leaf every
+  0.2 s kept committing (max 0.6 s, 0 errors). **Method**: Spike (Phase 0, fork).
+- [x] **A4.** A cheaper alternative does not already close Gap 1: a larger
   `ef_search` (1000) or `strict_order` for single-collection arms on large
-  collections. **Status**: Unverified. **Method**: Spike (Phase 0).
+  collections. **Status**: ✅ Verified (Phase 0, `nexus_rdr/227-research-2`):
+  `ef_search = 1000` leaves the nqsa7 repro below 0.99 (0.975 to 0.983);
+  `strict_order` is no better than serving. Sam, 2026-10-09: continue to
+  per-collection indexes. **Method**: Spike (Phase 0).
 - [ ] **A5.** The engine can build and drop these indexes. `nexus_svc` does not
   own the leaves, and DDL is not governed by RLS, so `nexus_svc` cannot
   `CREATE INDEX` on a leaf at all. The builder needs either a `nexus_admin`
   connection in the engine or a `SECURITY DEFINER` function owned by the leaf
   owner that builds only the index this RDR names. `CREATE INDEX CONCURRENTLY`
   cannot run inside a transaction or a function, which rules out the second form
-  as written. **Status**: Unverified (conexus-1c review, 2026-10-09).
-  **Method**: Source read plus spike before Phase 1.
+  as written. **Status**: ✅ Verified (source read plus deployment check,
+  conexus-1c, 2026-10-09): the cloud engine carries `NX_DB_ADMIN_URL`, `_USER`
+  and `_PASS` as `nexus_admin` for its whole lifetime (rendered into its env by
+  conexus's `render-engine-env.sh`), and both URLs go direct to the database on
+  :5432, never through a pooler. The reconciler uses them (Technical Design,
+  Builder). **Method**: Source read plus deployment check.
 
 ## Proposed Solution
 
@@ -171,7 +205,30 @@ behaviour (exact, or the leaf walk).
 - **Index.** `CREATE INDEX CONCURRENTLY <name> ON <leaf> USING hnsw
   (embedding_<dim> vector_cosine_ops) WHERE collection = '<collection>'`, with the
   name derived from (model, tenant, collection) the way RDR-225 names leaf
-  objects. Build parameters match the leaf index's.
+  objects, hashed to fit the 63-byte identifier limit. Build parameters match the
+  leaf index's (m 16, ef_construction 64). The collection is written with
+  `format('%L')`, never concatenated.
+- **Leaf, not collection.** Collection names repeat across tenants (Phase 0's
+  first build landed on another tenant's leaf with the same `code__1-1`). The
+  builder resolves the (model, tenant) leaf first and names it in the DDL; it
+  never addresses the partitioned parent.
+- **Builder (A5).** `nexus_svc` cannot create an index on a leaf it does not
+  own, and `CREATE INDEX CONCURRENTLY` cannot run inside a function, so a
+  `SECURITY DEFINER` wrapper is out. The reconciler opens one direct connection
+  (never through the pooler: a concurrent build needs a session, the same reason
+  as the migration lock) with the `NX_DB_ADMIN_*` credentials `Main` already
+  reads for `SchemaMigrator`, in autocommit (a concurrent build cannot run in a
+  transaction block, so not through jOOQ's transaction wrapper), issues only
+  `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY IF EXISTS` for names
+  it derived, and closes it after each build. It holds no admin connection
+  between builds, because conexus rotates `nexus_admin` in place without an
+  engine restart; an authentication failure logs and retries on the next pass.
+  An engine without admin credentials logs once and builds nothing; routing then
+  behaves as today. A failed concurrent build leaves an INVALID index holding the
+  name; the next pass drops exactly that name and rebuilds, and routing treats
+  only `indisvalid` indexes as present. The non-concurrent alternative inside a `SECURITY DEFINER`
+  function was rejected: it blocks the leaf's writes for the whole build (10 to
+  21 s per index measured).
 - **Lifecycle.** The engine reconciles indexes against collection sizes, under
   the role A5 settles: a
   collection that crosses above T gets an index built in the background; one that
@@ -181,13 +238,18 @@ behaviour (exact, or the leaf walk).
   for a valid per-collection index. Exact at or below T; per-collection HNSW above
   T when an index exists; above T without one, exact if the collection is under
   a hard ceiling and the leaf walk otherwise (today's behaviour).
-- **Cold start.** Phase 0 measures the first touch of a per-collection index. If
-  it matches the leaf index's 2 to 7 s, a post-boot prewarm of these indexes is
-  part of the design (`pg_prewarm` or a synthetic query per index), or the router
-  uses exact until the index has been touched once.
+- **Plan mode.** The arm stays under `plan_cache_mode = force_custom_plan`
+  (A1): a generic plan skips the partial index and walks every tenant leaf. An
+  EXPLAIN pin guards it.
+- **Cold start.** A per-collection index's first touch after a restart was 86 to
+  189 ms with the OS cache intact; from disk it should match the leaf index's 2
+  to 7 s. The engine prewarms each valid per-collection index with one search
+  after boot and after each build. A database failover without an engine
+  restart is not covered and stays a Gap 3 residual.
 - **Schema.** No Liquibase changeset creates these indexes; they are runtime
-  objects keyed on data. A changeset may add a registry table if Phase 0 shows
-  the engine needs one to reconcile.
+  objects keyed on data. The reconciler needs no registry table: index names
+  are derived from (model, tenant, collection), so `pg_class` and `pg_index`
+  answer which exist and which are valid.
 
 ### Existing Infrastructure Audit
 
@@ -228,8 +290,9 @@ crossing of T. Kept as the fallback if A1 fails.
 
 Raise `ef_search` to 1000 or use `strict_order` for large single-collection
 arms. No DDL. It may narrow Gap 1 but cannot remove the crowd-out that causes it.
-Phase 0 measures it first (A4); if it reaches the recall target, this RDR stops
-there.
+Phase 0 measured it first (A4): `ef_search = 1000` fixes the top-1 miss and cuts
+the large arms to 15 to 171 ms, but leaves the nqsa7 repro at 0.975 to 0.983.
+Rejected by Sam on 2026-10-09 in favour of per-collection indexes.
 
 ### Briefly Rejected
 
@@ -242,7 +305,8 @@ there.
 ### Consequences
 
 - More indexes per leaf: one per large collection per tenant, so the count grows
-  with tenants times large collections. Each costs disk and write amplification.
+  with tenants times large collections. Each costs about 8.2 KB of disk per row
+  (Phase 0) and write amplification on every insert into that collection.
 - A background index build after a collection crosses T, during which the
   collection keeps today's path.
 
@@ -266,9 +330,13 @@ retries.
 
 ### Prerequisites
 
-- [ ] A1 to A4 measured (Phase 0); A5 settled before Phase 1.
-- [ ] Sam's decision on the stop rule: if Alternative 4 reaches the recall target
-  at acceptable cost, stop there.
+- [x] A1 to A4 measured (Phase 0, 2026-10-09).
+- [x] A5: the cloud engine's admin credentials confirmed present after boot
+  (conexus-1c, 2026-10-09).
+- [ ] conexus's `nexus_admin` rotation procedure verifies the reconciler
+  reconnects after a rotation (conexus-1c offered to add it).
+- [x] Sam's decision on the stop rule: continue to per-collection indexes
+  (2026-10-09).
 
 ### Minimum Viable Validation
 
@@ -279,7 +347,7 @@ null) through the inlined function with bound parameters at the serving
 settings. Recall >= 0.99 at k 40 to 120, warm
 arm time under 50 ms, and a stated cold first-touch time.
 
-### Phase 0: Measure (decides the approach, may stop the work)
+### Phase 0: Measure (decides the approach, may stop the work) — done 2026-10-09
 
 - **Positive control, fork, first.** One fan-out emulated as production runs it:
   the 28 code arms and the 61 knowledge arms through a 5-worker pool sharing
@@ -304,15 +372,19 @@ arm time under 50 ms, and a stated cold first-touch time.
 
 ### Phase 1: Engine
 
-The index reconciler, the router's per-collection-index branch, and the cold-start
-handling Phase 0 selects. Tests: the planner's choice (EXPLAIN pin), recall
+The index reconciler (admin connection per build, autocommit, invalid-index
+recovery), the router's per-collection-index branch, and the prewarm after boot
+and after each build. Tests: the planner's choice (EXPLAIN pin), recall
 against exact on a seeded leaf with a large collection beside larger siblings,
 and the degraded paths (no index, invalid index).
 
 ### Phase 2: Release
 
 One engine cut. Index builds on the managed instance run in a stated window after
-deploy, then T returns to a value chosen from Phase 0's numbers.
+deploy (Phase 0: 10 to 21 s each, no write blocking). T then drops below the
+mid-size collections Phase 0 measured indexed (`code__1-72` 27,893 rows,
+`code__1-20` 29,355), so they leave the exact path too; the value below that is
+set from Phase 1's substrate measurements of smaller indexed collections.
 
 ### Day 2 Operations
 
@@ -329,6 +401,10 @@ None.
   the arm's top-k equals exact.
 - Degraded: no index, invalid index, index being built.
 - Lifecycle: crossing T builds, dropping below T or deleting drops.
+- Invalid index: a failed concurrent build is dropped by name and rebuilt;
+  routing ignores it meanwhile (the EXPLAIN pin also asserts `indisvalid`).
+- Tenant targeting: two tenants with the same collection name each get an index
+  on their own leaf.
 
 ## Validation
 
@@ -339,7 +415,9 @@ fork measurements for scale.
 
 ### Performance Expectations
 
-Warm large arm under 50 ms, against 1.1 to 2.0 s exact under load. Warm default
+Warm large arm under 50 ms, against 1.1 to 2.0 s exact under load (Phase 0 at
+10 workers: indexed arms 10 to 22 ms against exact 0.4 to 1.2 s; code-group
+statement total 2.5 to 3.2 s against 4.8 to 5.9 s). Warm default
 search back to about its v0.1.154 time (2.0 s on develop, before the text cap),
 with correct recall on every collection.
 
@@ -352,7 +430,9 @@ design resolves them by measuring cold first touch before choosing (Phase 0).
 
 ### Assumption Verification
 
-A1 to A5 are unverified. A1 to A4 are Phase 0 spikes on a fork; A5 is a source read and spike before Phase 1.
+A1 to A4 were verified by the Phase 0 fork spikes on 2026-10-09
+(`nexus_rdr/227-research-2`, `-3`); A5 by a source read and a deployment check
+the same day.
 
 #### API Verification
 
@@ -376,7 +456,8 @@ The Minimum Viable Validation is in scope and runs in Phase 0.
 
 ### Proportionality
 
-Phase 0 is three fork measurements and can end the work at Alternative 4.
+Phase 0 was three fork measurements and could have ended the work at
+Alternative 4; it did not (A4).
 
 ## References
 
@@ -384,8 +465,15 @@ Phase 0 is three fork measurements and can end the work at Alternative 4.
 - T2 `conexus/rdr226-step02-fork-grouped-exact-2026-10-09`
 - T2 `nexus_rdr/226-research-13`, `nexus_rdr/226-research-14`
 - T2 `nexus/search-telemetry-and-perk-measurements-2026-10-09` [29728]
+- T2 `nexus_rdr/227-research-2`, `nexus_rdr/227-research-3`,
+  `conexus/rdr227-phase0-fork-2026-10-09`
 - Beads nexus-43ulx, nexus-nqsa7
 
 ## Revision History
 
 - 2026-10-09: drafted.
+- 2026-10-09: Phase 0 method revised from the fork owner's review (bound
+  parameters, real query vectors, concurrency control); A5 added.
+- 2026-10-09: Phase 0 results recorded (A1 to A4 verified; A4 fails the stop
+  rule); Sam chose per-collection indexes; Builder, plan-mode and cold-start
+  design filled in.
