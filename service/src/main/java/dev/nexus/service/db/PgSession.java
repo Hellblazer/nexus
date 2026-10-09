@@ -708,12 +708,20 @@ public final class PgSession {
      * hold at most this many PHYSICAL rows in the tenant, the statement runs exact (index scans
      * off) instead of walking the shared HNSW index. 0 disables the router.
      *
-     * <p>PROVISIONAL. 10000 is a placeholder chosen to sit well inside what an exact scan over a
-     * PK-prefix bitmap or seq scan costs on 768/1024-d rows; the conexus fork measurement B sets the
-     * real value, and no engine tag is cut on this number. Until then, set
-     * {@code NX_SEARCH_EXACT_MAX_ROWS} explicitly where it matters.
+     * <p>60000, measured (nexus-nqsa7, PITR fork of production, 2026-10-09, T2
+     * conexus/nqsa7-fork-hnsw-vs-exact-2026-10-09). Above the threshold an arm walks its leaf's HNSW
+     * index under {@code relaxed_order}, which stops at the first {@code k} rows the collection filter
+     * admits; in a leaf shared by many collections the filter discarded about 80% of the walk, and a
+     * full page missed the collection's true nearest row (recall against exact 0.925 at k=40, 0.983 at
+     * k=120, on a 27,893-row collection). The empty-result re-run cannot see that, because the page is
+     * full. Exact is complete. Its cost at k=120 on the seven collections between 10,000 and 58,576 rows:
+     * 95-581 ms warm, 110-1,046 ms cold, every plan a primary-key bitmap scan; HNSW cold was slower
+     * than exact cold on every one. 60000 covers every collection measured, at about +2 s of
+     * database time per full fan-out over those arms. The probe reads up to {@code limit + 1} keys, so a
+     * collection above the threshold pays a 60,001-key Index Only Scan before its HNSW walk.
+     * It was a provisional 10000 until this measurement.
      */
-    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 10_000;
+    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 60_000;
 
     /** Upper bound on the {@code NX_SEARCH_EXACT_MAX_ROWS} override: an exact scan over more rows than
      *  this would no longer be the cheap plan the router exists to take. */

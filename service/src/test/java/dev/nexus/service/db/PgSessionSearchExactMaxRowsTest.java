@@ -14,10 +14,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PgSessionSearchExactMaxRowsTest {
 
     @Test
-    void defaultsToTheProvisionalConstant_whenUnsetOrBlank() {
+    void defaultsToTheMeasuredConstant_whenUnsetOrBlank() {
         assertThat(PgSession.searchExactMaxRows(null)).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
         assertThat(PgSession.searchExactMaxRows("   ")).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
-        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(10_000);
+        // nexus-nqsa7: 60000 from the 2026-10-09 fork measurement (see the constant's javadoc). A
+        // 27,893-row collection above the old 10000 lost its true nearest row to the HNSW walk.
+        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(60_000);
     }
 
     @Test
