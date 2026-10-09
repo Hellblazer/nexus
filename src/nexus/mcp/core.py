@@ -70,6 +70,7 @@ from nexus.mcp_infra import (
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
     flush_search_telemetry_at_exit as _flush_search_telemetry_at_exit,
+    search_taxonomy as _search_taxonomy,
     search_telemetry_sink as _search_telemetry_sink,
     t2_ctx as _t2_ctx,
     t2_index_write as _t2_index_write,
@@ -3026,25 +3027,24 @@ def _search_render(
             # multi-collection case; see search_cmd.py).
             lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
             rerank_meta: dict = {}
-            with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
-            # nexus-vpa9q: the background sink writes off the request path
-            # through the pooled shared T2 client.
-                results = search_cross_corpus(
-                    query, target, n_results=fetch_n, t3=t3, where=where_dict,
-                    cluster_by=cluster_by or None,
-                    catalog=_get_catalog(),
-                    link_boost=False,
-                    taxonomy=_t2_db.taxonomy,
-                    topic=topic or None,
-                    threshold_override=threshold,
-                    lexical=lexical,
-                    telemetry=_search_telemetry_sink(),
-                    diagnostics_out=diag,
-                    rerank=lexical_rerank,
-                    rerank_meta_out=rerank_meta if lexical_rerank else None,
-                )
+            # nexus-vpa9q: telemetry and taxonomy both go through the pooled
+            # shared T2 client; no per-call T2Database.
+            results = search_cross_corpus(
+                query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                cluster_by=cluster_by or None,
+                catalog=_get_catalog(),
+                link_boost=False,
+                taxonomy=_search_taxonomy(),
+                topic=topic or None,
+                threshold_override=threshold,
+                lexical=lexical,
+                telemetry=_search_telemetry_sink(),
+                diagnostics_out=diag,
+                rerank=lexical_rerank,
+                rerank_meta_out=rerank_meta if lexical_rerank else None,
+            )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
             # RDR-055 / the frecency-scoring work. Before this fix the MCP
@@ -5049,23 +5049,22 @@ def query(
         # nexus-uro6c: capture threshold-filter diagnostics to surface a
         # threshold drop on a zero-hit (same rationale as the search tool).
         qdiag: list = []
-        with _t2_ctx() as _t2_db:
-            results = search_cross_corpus(
-                question, target, n_results=fetch_n, t3=t3, where=where_dict,
-                catalog=_get_catalog(),
-                link_boost=True,
-                taxonomy=_t2_db.taxonomy,
-                telemetry=_search_telemetry_sink(),
-                diagnostics_out=qdiag,
-                # nexus-tnwm2: query groups by document and orders by
-                # hybrid_score; it never reads _topic_label or _cluster_label.
-                # The inherited default ("semantic") made topic grouping look
-                # up every topic's label, one GET /topics/by_id each (the
-                # engine has no batched route): 7 serial round trips, ~1.6 s
-                # on the managed cloud. The topic BOOST does not depend on
-                # cluster_by and still runs.
-                cluster_by=None,
-            )
+        results = search_cross_corpus(
+            question, target, n_results=fetch_n, t3=t3, where=where_dict,
+            catalog=_get_catalog(),
+            link_boost=True,
+            taxonomy=_search_taxonomy(),
+            telemetry=_search_telemetry_sink(),
+            diagnostics_out=qdiag,
+            # nexus-tnwm2: query groups by document and orders by
+            # hybrid_score; it never reads _topic_label or _cluster_label.
+            # The inherited default ("semantic") made topic grouping look
+            # up every topic's label, one GET /topics/by_id each (the
+            # engine has no batched route): 7 serial round trips, ~1.6 s
+            # on the managed cloud. The topic BOOST does not depend on
+            # cluster_by and still runs.
+            cluster_by=None,
+        )
         # hybrid scoring + RDR-055 E2 quality boost — parity
         # with the CLI (search_cmd.py). Chunk-level ranking (and, below,
         # the per-document "best chunk" pick + document ordering) is now by

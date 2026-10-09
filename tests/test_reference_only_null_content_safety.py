@@ -19,7 +19,7 @@ is coerced to ``""`` at the ``SearchResult`` construction boundary
 (``search_engine.py``'s per-row list-comprehension building the raw
 engine dict into a ``SearchResult``).
 
-No T2/engine substrate needed -- ``_t2_ctx``/``_get_catalog`` are
+No T2/engine substrate needed -- ``_search_taxonomy``/``_get_catalog`` are
 monkeypatched to lightweight in-memory stand-ins so this file runs
 identically under ``NX_TEST_T2_SUBSTRATE=none``.
 """
@@ -66,12 +66,10 @@ def _mock_t3_for_core(collections: list[dict]) -> MagicMock:
     return mock
 
 
-@contextmanager
-def _fake_t2_ctx():
-    """Stand-in for ``_t2_ctx()`` carrying only the two attributes
-    ``search_cross_corpus`` reads (``taxonomy``, ``telemetry``) -- both
-    tolerate ``None`` (best-effort paths, exception-guarded internally)."""
-    yield SimpleNamespace(taxonomy=None, telemetry=None)
+def _no_taxonomy():
+    """Stand-in for ``_search_taxonomy()``: ``search_cross_corpus`` tolerates
+    ``None`` (best-effort topic paths, exception-guarded internally)."""
+    return None
 
 
 class TestSearchCrossCorpusNoneContentBoundary:
@@ -128,7 +126,7 @@ class TestMcpRenderNoneContentSafety:
         )
         with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: [refonly]), \
              patch("nexus.config.load_config", return_value=_NO_CONTRADICTION_CFG), \
-             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx), \
+             patch("nexus.mcp.core._search_taxonomy", _no_taxonomy), \
              patch("nexus.mcp.core._get_catalog", return_value=None):
             out = _search_render(query="anything", corpus="knowledge__refonly")
         assert isinstance(out, str)
@@ -158,7 +156,7 @@ class TestMcpRenderNoneContentSafety:
         )
         with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: [row1, row2]), \
              patch("nexus.config.load_config", return_value=_NO_CONTRADICTION_CFG), \
-             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx), \
+             patch("nexus.mcp.core._search_taxonomy", _no_taxonomy), \
              patch("nexus.mcp.core._get_catalog", return_value=None):
             out = query(question="anything", corpus="code__refonly")
         assert isinstance(out, str)

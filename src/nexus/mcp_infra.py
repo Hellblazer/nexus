@@ -1569,6 +1569,45 @@ def search_telemetry_sink() -> BackgroundSearchTelemetry:
         return _search_telemetry
 
 
+class SharedT2StoreReader:
+    """One T2 domain store's methods, each sent through :func:`t2_index_write`
+    (the pooled process-lifetime T2 client) instead of a per-call
+    :class:`T2Database` (nexus-vpa9q).
+
+    MCP search and query built a fresh ``T2Database`` per call only to read
+    the taxonomy store, so every search constructed nine httpx clients and
+    paid a new TCP/TLS connection for ``/v1/taxonomy/assignments/for_docs``
+    (conexus ALB, 2026-10-09: a new client port on every search, 0.08 s of
+    request processing against 0.01-0.02 s of target time). Stateless; the
+    slot owns connection reuse, eviction and credential refresh.
+    """
+
+    def __init__(self, store: str) -> None:
+        self._store = store
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        store = self._store
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return t2_index_write(
+                lambda db: getattr(getattr(db, store), name)(*args, **kwargs),
+                op=f"{store}.{name}",
+            )
+
+        call.__name__ = name
+        return call
+
+
+_SEARCH_TAXONOMY = SharedT2StoreReader("taxonomy")
+
+
+def search_taxonomy() -> SharedT2StoreReader:
+    """The taxonomy store MCP search and query read through the pooled T2."""
+    return _SEARCH_TAXONOMY
+
+
 def reset_search_telemetry_sink(timeout: float = 0.5) -> None:
     """Close and forget the sink (tests; :func:`reset_singletons`)."""
     global _search_telemetry

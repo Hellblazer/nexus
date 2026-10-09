@@ -262,7 +262,7 @@ class _RecordingEngine:
 
 @pytest.fixture
 def mcp_wired(monkeypatch):
-    """Real MCP tools, a per-call T2 context with NO telemetry store, and the
+    """Real MCP tools, no taxonomy store, and the
     sink's shared writer pointed at a real HttpTelemetryStore over a
     recording transport. A row can reach the engine only through the sink."""
     engine = _RecordingEngine()
@@ -276,15 +276,11 @@ def mcp_wired(monkeypatch):
         writer_threads.append(threading.current_thread().name)
         return fn(SimpleNamespace(telemetry=store))
 
-    @contextmanager
-    def _t2():
-        yield SimpleNamespace(taxonomy=None, telemetry=None)
-
     cfg = {"search": {}, "telemetry": {"search_enabled": True}}
     monkeypatch.setattr(mcp_infra, "t2_index_write", _shared_write)
     monkeypatch.setattr(core, "_get_t3", lambda: _FakeT3())
     monkeypatch.setattr(core, "_get_catalog", lambda **_kw: None)
-    monkeypatch.setattr(core, "_t2_ctx", _t2)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
     monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, _t3, **_kw: [_COLLECTION])
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
     monkeypatch.setattr("nexus.config.load_config", lambda **_kw: cfg)

@@ -79,13 +79,9 @@ def wired(monkeypatch):
         client=httpx.Client(transport=httpx.MockTransport(engine.handler)),
     )
 
-    @contextmanager
-    def _t2():
-        yield SimpleNamespace(taxonomy=store, telemetry=None)
-
     monkeypatch.setattr(core, "_get_t3", lambda: _FakeT3())
     monkeypatch.setattr(core, "_get_catalog", lambda **_kw: None)
-    monkeypatch.setattr(core, "_t2_ctx", _t2)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: store)
     monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, _t3, **_kw: [_COLLECTION])
     # Hybrid scoring asks the T3 collection registry whether a result's
     # collection is code (a cached /v1/vectors/stats read): keep it offline.
