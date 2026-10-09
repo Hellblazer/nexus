@@ -40,7 +40,8 @@ class MainPciWiringTest {
         int sweepStart = src.indexOf("pciSweep.start();");
         int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
         int listenerStop = src.indexOf("service.stop();", hook);
-        int reaper = src.indexOf("BackendReaper.terminateOwnBackends(", hook);
+        // nexus-43ulx.17: the pool's reaper and the builder's run together inside terminateAtShutdown.
+        int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
         int sweepStop = src.indexOf("pciSweep.stop();", hook);
         int poolClose = src.indexOf("ds.close();", hook);
 

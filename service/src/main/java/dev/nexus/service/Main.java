@@ -434,9 +434,19 @@ public final class Main {
             }, () -> log.warn("event=parent_death_watchdog_skipped reason=no_parent_handle"));
         }
 
+        // RDR-227 (nexus-43ulx.17): the per-collection index builder's backend is named
+        // nexus-pci-builder-<this boot's nonce> and runs as the admin role.
+        String pciBuilderApplicationName = dev.nexus.service.vectors.PciBuilderSession.builderApplicationName(
+                dev.nexus.service.db.BackendReaper.bootNonce(applicationName));
+        // nexus-43ulx.19: the reconciler's scheduler stops here with shutdownNow() and NO await (an in-flight
+        // CREATE INDEX CONCURRENTLY is ended by the builder reaper below, not waited for). Nothing to stop until
+        // the reconciler exists; .19 replaces this no-op.
+        Runnable stopPciReconciler = () -> { };
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
+            stopPciReconciler.run();
             // nexus-g17tf: FIRST after the listener stops, ahead of the embedder
             // closes (each can wait up to 5s) so the reaper always runs inside a
             // 10s container stop grace. Hikari's close aborts the sockets, and a
@@ -445,9 +455,17 @@ public final class Main {
             // a pool borrow (the pool is what the runaways hold). SIGKILL (OOM, an
             // expired grace) runs no hook at all: that path is bounded only by the
             // statement_timeout on the search transactions.
-            dev.nexus.service.db.BackendReaper.terminateOwnBackends(
+            //
+            // nexus-43ulx.17: the pool's reaper (application role) and the builder's
+            // (admin role: pg_terminate_backend needs the target's role) run TOGETHER
+            // under one 9 s deadline. Worst case: each call is 3 s connect + 6 s socket
+            // read = 9 s, so in sequence they could take 18 s and miss the 10 s stop
+            // grace; together the pair costs 9 s, what the pool's call alone always did.
+            // A call still running at the deadline is abandoned and logged.
+            dev.nexus.service.db.BackendReaper.terminateAtShutdown(
                     dbUrl, dbUser, dbPass, applicationName,
-                    ds.getHikariPoolMXBean().getActiveConnections());
+                    ds.getHikariPoolMXBean().getActiveConnections(),
+                    adminConnection, pciBuilderApplicationName);
             // nexus-43ulx.12: end the catalog reads before the pool they borrow from closes. AFTER the reaper and
             // never waiting: a read on a silent socket ignores the interrupt, and the reaper has a 10 s grace to
             // keep; closing the pool below aborts that socket.

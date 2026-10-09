@@ -48,7 +48,10 @@ import java.util.Properties;
  * {@code pg_locks} for the migration lock ({@link SchemaMigrator#migrationLockHolderPid}, the one copy of the
  * predicate) after it connects and again before every statement. If the migrator holds it the pass ends its DDL,
  * logs {@code event=pci_ddl_skipped reason=migration_in_progress} and closes. A migration that starts between the
- * check and the statement is the migrator's to handle (it terminates the builder backend; nexus-43ulx.17).
+ * check and the statement terminates the builder backend once it holds its lock ({@code SchemaMigrator.migrate},
+ * nexus-43ulx.17): the next statement fails with {@code 57P01} or {@code 08xxx}, which ends the pass
+ * ({@link DdlOutcome#FAILED}), so no later build in it starts. The shutdown hook ends the backend the same way
+ * ({@link BackendReaper#terminateAtShutdown}).
  *
  * <p><b>State.</b> {@link BuilderState} is what the status object reports as {@code builder_state}.
  */
@@ -64,6 +67,14 @@ public final class PciBuilderSession {
 
     /** The builder backend's {@code application_name} is this plus the engine's per-boot nonce. */
     public static final String APPLICATION_NAME_PREFIX = "nexus-pci-builder-";
+
+    /**
+     * The builder backend's {@code application_name} for this boot: {@link #APPLICATION_NAME_PREFIX} plus the nonce
+     * from {@link BackendReaper#bootNonce}. The shutdown hook ends the backend by this name.
+     */
+    public static String builderApplicationName(String bootNonce) {
+        return APPLICATION_NAME_PREFIX + bootNonce;
+    }
 
     /** HNSW {@code m} and {@code ef_construction}: must equal the leaf index's own (vectors-004, vectors-030). */
     public static final int BUILD_M = 16;
@@ -150,7 +161,7 @@ public final class PciBuilderSession {
         if (Objects.requireNonNull(bootNonce, "bootNonce").isBlank()) {
             throw new IllegalArgumentException("bootNonce must not be blank");
         }
-        this.applicationName = APPLICATION_NAME_PREFIX + bootNonce;
+        this.applicationName = builderApplicationName(bootNonce);
         this.settings = Objects.requireNonNull(settings, "settings");
     }
 
