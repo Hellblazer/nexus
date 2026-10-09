@@ -312,6 +312,8 @@ public final class PgVectorRepository {
     private final EmbedderRouter queryRouter;    // nullable; preferred over queryEmbedder
     /** RDR-227: valid per-collection indexes, consulted to choose {@code hnsw.ef_search}; never null. */
     private final PciIndexSet    pciIndexes;
+    /** RDR-227: the sampled check that the planner still reaches a per-collection index; never null. */
+    private final PciPlanCheck   planCheck;
 
     /**
      * The RLS-stamping gateway this repository was constructed with (RDR-204 Phase 2,
@@ -353,13 +355,25 @@ public final class PgVectorRepository {
      */
     public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                               Embedder queryEmbedder) {
-        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE);
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE,
+             PciPlanCheck.production());
     }
 
     /** {@link #PgVectorRepository(TenantScope, Embedder, Embedder)} with the per-collection index set (RDR-227). */
     public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                               Embedder queryEmbedder, PciIndexSet pciIndexes) {
-        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes);
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes,
+             PciPlanCheck.production());
+    }
+
+    /**
+     * Package-private overload with the plan check's sampling interval and plan source, so a test can sample every
+     * arm and read or break the EXPLAIN (RDR-227). Production takes the other constructors, which sample one
+     * indexed arm in {@link PciPlanCheck#DEFAULT_EVERY}.
+     */
+    PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
+                       Embedder queryEmbedder, PciIndexSet pciIndexes, PciPlanCheck planCheck) {
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes, planCheck);
     }
 
     /**
@@ -375,11 +389,13 @@ public final class PgVectorRepository {
      */
     PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                        Embedder queryEmbedder, int getAllMetadataMaxRows) {
-        this(tenantScope, docEmbedder, queryEmbedder, getAllMetadataMaxRows, PciIndexSet.NONE);
+        this(tenantScope, docEmbedder, queryEmbedder, getAllMetadataMaxRows, PciIndexSet.NONE,
+             PciPlanCheck.production());
     }
 
     private PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
-                               Embedder queryEmbedder, int getAllMetadataMaxRows, PciIndexSet pciIndexes) {
+                               Embedder queryEmbedder, int getAllMetadataMaxRows, PciIndexSet pciIndexes,
+                               PciPlanCheck planCheck) {
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docEmbedder;
         this.queryEmbedder = queryEmbedder;
@@ -387,6 +403,7 @@ public final class PgVectorRepository {
         this.queryRouter   = null;
         this.getAllMetadataMaxRows = getAllMetadataMaxRows;
         this.pciIndexes    = java.util.Objects.requireNonNull(pciIndexes, "pciIndexes");
+        this.planCheck     = java.util.Objects.requireNonNull(planCheck, "planCheck");
     }
 
     /**
@@ -400,13 +417,15 @@ public final class PgVectorRepository {
      */
     public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                               EmbedderRouter queryRouter) {
-        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE);
+        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE,
+             PciPlanCheck.production());
     }
 
     /** {@link #PgVectorRepository(TenantScope, EmbedderRouter, EmbedderRouter)} with the per-collection index set (RDR-227). */
     public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                               EmbedderRouter queryRouter, PciIndexSet pciIndexes) {
-        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, pciIndexes);
+        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, pciIndexes,
+             PciPlanCheck.production());
     }
 
     /**
@@ -417,11 +436,13 @@ public final class PgVectorRepository {
      */
     PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                        EmbedderRouter queryRouter, int getAllMetadataMaxRows) {
-        this(tenantScope, docRouter, queryRouter, getAllMetadataMaxRows, PciIndexSet.NONE);
+        this(tenantScope, docRouter, queryRouter, getAllMetadataMaxRows, PciIndexSet.NONE,
+             PciPlanCheck.production());
     }
 
     private PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
-                               EmbedderRouter queryRouter, int getAllMetadataMaxRows, PciIndexSet pciIndexes) {
+                               EmbedderRouter queryRouter, int getAllMetadataMaxRows, PciIndexSet pciIndexes,
+                               PciPlanCheck planCheck) {
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (ONNX fallback)
         this.queryEmbedder = queryRouter;
@@ -429,6 +450,7 @@ public final class PgVectorRepository {
         this.queryRouter   = queryRouter;
         this.getAllMetadataMaxRows = getAllMetadataMaxRows;
         this.pciIndexes    = java.util.Objects.requireNonNull(pciIndexes, "pciIndexes");
+        this.planCheck     = java.util.Objects.requireNonNull(planCheck, "planCheck");
     }
 
     /**
@@ -1472,7 +1494,8 @@ public final class PgVectorRepository {
         // then sends exact ignores ef_search. A statement over several collections cannot use a per-collection
         // index and keeps the serving value. The other HNSW sites (the dense gate, the by-id sites) do not
         // change.
-        final boolean walkWide = colls.length == 1 && !pciIndexes.hasValidIndex(model, tenant, colls[0]);
+        final boolean indexed = colls.length == 1 && pciIndexes.hasValidIndex(model, tenant, colls[0]);
+        final boolean walkWide = colls.length == 1 && !indexed;
         // The value the batch sets, as the setter returns it: the one the telemetry and the route label record
         // is the one Postgres was given, never a second computation of it.
         final int[] efSet = {-1};
@@ -1536,6 +1559,12 @@ public final class PgVectorRepository {
                     result = ctx.selectFrom(fn).fetch();
                 } else {
                     ROUTED_HNSW.incrementAndGet();
+                    if (indexed) {
+                        // RDR-227: one arm in PciPlanCheck.DEFAULT_EVERY asks the planner what it would do with
+                        // this very statement, under this transaction's settings, and logs whether it chose the
+                        // collection's own index. Never fails the arm.
+                        planCheck.sample(ctx, ctx.selectFrom(fn), model, tenant, colls[0]);
+                    }
                     // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
                     // exactOnUnderReturn for the nexus-bq06h exact fallback.
