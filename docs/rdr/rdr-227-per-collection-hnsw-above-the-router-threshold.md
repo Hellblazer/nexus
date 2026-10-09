@@ -213,12 +213,20 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
   :5432, never through a pooler. The engine reads them once at boot
   (`nexus_rdr/227-research-4`), so a builder that uses them is bound to the
   password the engine booted with; the design makes that explicit (Technical
-  Design, Builder). Not shown: that `nexus_admin` owns the leaves on the managed
-  instance; Phase 1 Step 2 checks it first. **Method**: Source read plus
-  deployment check.
+  Design, Builder). Leaf ownership checked in Phase 1 Step 2
+  (`nexus_rdr/227-research-10`, 2026-10-09): `nexus_admin` owns all 24 chunks
+  leaves on the managed instance. **Method**: Source read plus deployment check.
 - [ ] **A6.** `pg_prewarm` is available on the managed instance and in the local
   PG bundle, and prewarming a per-collection index makes its first search warm.
-  **Status**: Unverified. **Method**: Spike (Phase 1).
+  **Status**: ❌ Not held as stated (Phase 1 spike, `nexus_rdr/227-research-9`,
+  2026-10-09): on the managed instance `pg_prewarm` 1.2 is available but not
+  installed; the local bundle does not ship it (`build_pg_bundle.sh` builds only
+  `pg_trgm`). With the OS page cache warm, prewarming a 195 MB partial index cut
+  the first search from about 45 to about 35 ms when the index fit in
+  `shared_buffers` (512 MB), and by about 4 ms at the local default of 128 MB; a
+  cold-cache first search was not measured. Sam, 2026-10-09: prewarm deferred
+  (`nexus_rdr/227-prewarm-decision`): no `CREATE EXTENSION` changeset and no
+  bundle change in this RDR. **Method**: Spike (Phase 1).
 
 ## Proposed Solution
 
