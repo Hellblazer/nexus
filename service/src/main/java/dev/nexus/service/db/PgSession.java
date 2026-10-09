@@ -790,7 +790,7 @@ public final class PgSession {
     /** Default for {@code NX_SEARCH_PCI_SWEEP_SECONDS}: ten minutes between catalog sweeps. */
     static final int DEFAULT_SEARCH_PCI_SWEEP_SECONDS = 600;
     static final int SEARCH_PCI_SWEEP_SECONDS_MIN = 60;
-    static final int SEARCH_PCI_SWEEP_SECONDS_MAX = 86_400;
+    static final int SEARCH_PCI_SWEEP_SECONDS_MAX = 3_600;
 
     /** Default for {@code NX_SEARCH_PCI_MAX_PER_LEAF}: indexes per leaf table; 0 builds none. */
     static final int DEFAULT_SEARCH_PCI_MAX_PER_LEAF = 16;
@@ -843,7 +843,7 @@ public final class PgSession {
             SEARCH_PCI_BUILD_MIN_ROWS_MIN, SEARCH_PCI_BUILD_MIN_ROWS_MAX);
     }
 
-    /** Parse {@code NX_SEARCH_PCI_SWEEP_SECONDS}: integer in [60, 86400], default 600. */
+    /** Parse {@code NX_SEARCH_PCI_SWEEP_SECONDS}: integer in [60, 3600], default 600. */
     static int searchPciSweepSeconds(String raw) {
         return boundedInt("NX_SEARCH_PCI_SWEEP_SECONDS", raw, DEFAULT_SEARCH_PCI_SWEEP_SECONDS,
             SEARCH_PCI_SWEEP_SECONDS_MIN, SEARCH_PCI_SWEEP_SECONDS_MAX);

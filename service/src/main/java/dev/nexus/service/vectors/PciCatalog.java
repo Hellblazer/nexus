@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.SweepBounds;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -10,12 +11,16 @@ import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.SQLDataType;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -45,6 +50,14 @@ import java.util.regex.Pattern;
  * nexus.partition_bound_value} does the same job server-side but is granted to no role. One statement means one
  * snapshot, so a leaf is never listed with indexes from two different instants.
  *
+ * <p><b>The read is bounded</b> (nexus-u9zkn convention). It runs on ONE borrowed connection inside a transaction
+ * that opens with {@code set_config('statement_timeout', '<bound> ms', true)} through
+ * {@link SweepBounds#applyStatementTimeout}, which also gives the connection a network (socket read) timeout of the
+ * bound plus {@code NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS}. A statement stuck behind a lock ends at the bound with
+ * SQLSTATE 57014; a server gone silent (no RST, the 2026-10-05 failover) ends at bound plus margin. Either way the
+ * read throws, which the sweep treats as a failed read. The bound is {@link #DEFAULT_READ_BOUND}, the engine's
+ * established bound for a background sweep statement.
+ *
  * <p><b>Unparsed rule</b> (the RDR leaves it open; Sam's decision 4, T2 {@code nexus_rdr/227-planner-decisions-confirmed},
  * extended by the session in nexus-43ulx.11's fix round). An index is <i>parsed</i> only when ALL of these hold: its
  * name matches {@code ^pci_[0-9a-f]{24}$} (the shape {@link #indexName} makes), its access method is {@code hnsw}
@@ -66,6 +79,9 @@ public final class PciCatalog {
 
     /** The prefix of every per-collection index name; the reader considers no other index. */
     public static final String PREFIX = "pci_";
+
+    /** The longest the catalog statement may run: {@link SweepBounds#STATEMENT_TIMEOUT}, the sweep-statement bound. */
+    public static final Duration DEFAULT_READ_BOUND = SweepBounds.STATEMENT_TIMEOUT;
 
     private static final int HASH_HEX_DIGITS = 24;
 
@@ -180,10 +196,25 @@ public final class PciCatalog {
     }
 
     private final DataSource dataSource;
+    private final Duration readBound;
 
     /** @param dataSource the pool the engine's role connects through; the read borrows one connection per call */
     public PciCatalog(DataSource dataSource) {
+        this(dataSource, DEFAULT_READ_BOUND);
+    }
+
+    /** As {@link #PciCatalog(DataSource)} with the statement bound named, which no production caller needs. */
+    PciCatalog(DataSource dataSource, Duration readBound) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.readBound = Objects.requireNonNull(readBound, "readBound");
+        if (readBound.toMillis() < 1) {
+            throw new IllegalArgumentException("readBound must be at least 1 ms (0 would disable it), got " + readBound);
+        }
+    }
+
+    /** The statement bound of {@link #read()}: how long a read may run before it fails. */
+    public Duration readBound() {
+        return readBound;
     }
 
     /**
@@ -251,9 +282,37 @@ public final class PciCatalog {
         return m.matches() ? Optional.of(m.group(1).replace("''", "'")) : Optional.empty();
     }
 
-    /** Read the catalog on a connection borrowed from the pool and returned before this method does. */
+    /**
+     * Read the catalog on a connection borrowed from the pool and returned before this method does, bounded as the
+     * class comment says.
+     *
+     * @throws DataAccessException when the statement fails, hits {@link #readBound()} (SQLSTATE 57014) or the server
+     *                             stays silent past the bound plus the network margin
+     */
     public Snapshot read() {
-        return read(DSL.using(dataSource, SQLDialect.POSTGRES));
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+                SweepBounds.applyStatementTimeout(ctx, readBound);
+                Snapshot snapshot = read(ctx);
+                conn.commit();
+                return snapshot;
+            } catch (RuntimeException e) {
+                rollbackQuietly(conn, e);
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw new DataAccessException("PCI catalog read failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static void rollbackQuietly(Connection conn, RuntimeException cause) {
+        try {
+            conn.rollback();
+        } catch (SQLException e) {
+            cause.addSuppressed(e);
+        }
     }
 
     /** Read the catalog through {@code ctx}: one statement, so one snapshot. */

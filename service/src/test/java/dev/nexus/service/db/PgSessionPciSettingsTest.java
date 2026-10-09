@@ -81,13 +81,12 @@ class PgSessionPciSettingsTest {
     void sweepSeconds_takesTheBounds() {
         assertThat(PgSession.searchPciSweepSeconds("60")).isEqualTo(60);
         assertThat(PgSession.searchPciSweepSeconds(" 3600 ")).isEqualTo(3_600);
-        assertThat(PgSession.searchPciSweepSeconds("86400")).isEqualTo(86_400);
     }
 
     @Test
     void sweepSeconds_refusesOnePastEachBoundAndGarbage() {
         assertRefused("NX_SEARCH_PCI_SWEEP_SECONDS", PgSession::searchPciSweepSeconds,
-            "59", "0", "-60", "86401", "99999999999", "ten minutes", "600s", "1.5");
+            "59", "0", "-60", "3601", "86400", "99999999999", "ten minutes", "600s", "1.5");
     }
 
     // ---- NX_SEARCH_PCI_MAX_PER_LEAF --------------------------------------------------------
@@ -155,7 +154,7 @@ class PgSessionPciSettingsTest {
         // The static initializer ran against the real environment; whatever it resolved is in range.
         PgSession.PciSettings s = PgSession.startupPciSettings();
         assertThat(s.buildMinRows()).isBetween(1, 1_000_000);
-        assertThat(s.sweepSeconds()).isBetween(60, 86_400);
+        assertThat(s.sweepSeconds()).isBetween(60, 3_600);
         assertThat(s.maxPerLeaf()).isBetween(0, 1_000);
     }
 

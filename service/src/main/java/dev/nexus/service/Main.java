@@ -111,6 +111,62 @@ public final class Main {
         hikari.addDataSourceProperty("ApplicationName", applicationName);
         var ds = new HikariDataSource(hikari);
 
+        // Boot validation of every env-resolved PgSession setting. PgSession resolves them in static
+        // initializers, so the FIRST PgSession static call anywhere in the process runs the parse, and a malformed
+        // value there arrives as ExceptionInInitializerError. This block is that first call on purpose: it needs
+        // only the pool, and it runs before anything else that touches PgSession (LocalOnnxAdmission.fromEnv in
+        // the local-mode branch below, then the embedding-profile seed through TenantScope), so the one catch
+        // below reports the failure as event=pg_session_env_invalid and exits 1 instead of letting a stack trace
+        // escape main. MainPciWiringTest pins this order; nexus-43ulx.12 fix round (review I3).
+        // nexus-4ktfm review fold: force NX_HNSW_EF_SEARCH validation NOW —
+        // PgSession resolves it in a static initializer, and without this
+        // boot-time touch a malformed value would surface only at the first
+        // query and then poison the class (NoClassDefFoundError) for the
+        // process's life, invisible to health checks. Throwable, not Exception:
+        // a static-init failure arrives as ExceptionInInitializerError.
+        try {
+            log.info("event=hnsw_ef_search_floor floor={}",
+                     dev.nexus.service.db.PgSession.startupEfSearchFloor());
+            // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
+            log.info("event=search_statement_timeout timeout_ms={}",
+                     dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
+            // nexus-wbfpw.47: the search scan budget. Validates NX_HNSW_MAX_SCAN_TUPLES /
+            // NX_HNSW_SCAN_MEM_BUDGET_MB, reads the engine role's effective work_mem and
+            // derives hnsw.scan_mem_multiplier from the fixed memory budget.
+            var scanBudget = dev.nexus.service.db.PgSession.startupScanBudget(
+                org.jooq.impl.DSL.using(ds, org.jooq.SQLDialect.POSTGRES));
+            log.info("event=hnsw_scan_budget max_scan_tuples={} work_mem_bytes={} "
+                     + "mem_budget_bytes={} mem_multiplier={} effective_mem_bytes={}",
+                     scanBudget.maxScanTuples(), scanBudget.workMemBytes(),
+                     scanBudget.budgetBytes(), scanBudget.memMultiplier(),
+                     scanBudget.effectiveMemBytes());
+            // nexus-tu8wp.6: same fail-fast for the cardinality router's NX_SEARCH_EXACT_MAX_ROWS.
+            log.info("event=search_exact_router max_rows={}",
+                     dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
+            // nexus-43ulx.10 (RDR-227): same fail-fast for the four NX_SEARCH_PCI* settings; logs
+            // event=pci_settings, plus a WARN when B > T (T > 0).
+            dev.nexus.service.db.PgSession.logPciBootSettings(
+                dev.nexus.service.db.PgSession.startupPciSettings(),
+                dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
+            // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
+            log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
+                     dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
+                     dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
+            // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
+            log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
+                     dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());
+        } catch (Throwable t) {
+            ds.close();
+            // One catch for every env-resolved PgSession bound above (ef_search,
+            // the search statement timeout, the scan budget, the taxonomy assign bounds, the network
+            // bound margin); the
+            // parse's own message names the variable that failed.
+            // A static-init failure arrives wrapped; its message is null and the cause names the variable.
+            Throwable cause = (t instanceof ExceptionInInitializerError && t.getCause() != null) ? t.getCause() : t;
+            log.error("event=pg_session_env_invalid error=\"{}\"", cause.getMessage(), t);
+            System.exit(1);
+        }
+
         // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
         // Run Liquibase BEFORE the HTTP server binds so the service never serves
         // requests against an unmigrated database.  Fail fast on any error so
@@ -304,56 +360,6 @@ public final class Main {
             System.exit(1);
         }
 
-        // nexus-4ktfm review fold: force NX_HNSW_EF_SEARCH validation NOW —
-        // PgSession resolves it in a static initializer, and without this
-        // boot-time touch a malformed value would surface only at the first
-        // query and then poison the class (NoClassDefFoundError) for the
-        // process's life, invisible to health checks. Same fail-fast-at-boot
-        // ordering as the PoolerModeCheck above. Throwable, not Exception:
-        // a static-init failure arrives as ExceptionInInitializerError.
-        try {
-            log.info("event=hnsw_ef_search_floor floor={}",
-                     dev.nexus.service.db.PgSession.startupEfSearchFloor());
-            // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
-            log.info("event=search_statement_timeout timeout_ms={}",
-                     dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
-            // nexus-wbfpw.47: the search scan budget. Validates NX_HNSW_MAX_SCAN_TUPLES /
-            // NX_HNSW_SCAN_MEM_BUDGET_MB, reads the engine role's effective work_mem and
-            // derives hnsw.scan_mem_multiplier from the fixed memory budget.
-            var scanBudget = dev.nexus.service.db.PgSession.startupScanBudget(
-                org.jooq.impl.DSL.using(ds, org.jooq.SQLDialect.POSTGRES));
-            log.info("event=hnsw_scan_budget max_scan_tuples={} work_mem_bytes={} "
-                     + "mem_budget_bytes={} mem_multiplier={} effective_mem_bytes={}",
-                     scanBudget.maxScanTuples(), scanBudget.workMemBytes(),
-                     scanBudget.budgetBytes(), scanBudget.memMultiplier(),
-                     scanBudget.effectiveMemBytes());
-            // nexus-tu8wp.6: same fail-fast for the cardinality router's NX_SEARCH_EXACT_MAX_ROWS.
-            log.info("event=search_exact_router max_rows={}",
-                     dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
-            // nexus-43ulx.10 (RDR-227): same fail-fast for the four NX_SEARCH_PCI* settings; logs
-            // event=pci_settings, plus a WARN when B > T (T > 0).
-            dev.nexus.service.db.PgSession.logPciBootSettings(
-                dev.nexus.service.db.PgSession.startupPciSettings(),
-                dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
-            // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
-            log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
-                     dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
-                     dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
-            // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
-            log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
-                     dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());
-        } catch (Throwable t) {
-            ds.close();
-            // One catch for every env-resolved PgSession bound above (ef_search,
-            // the search statement timeout, the scan budget, the taxonomy assign bounds, the network
-            // bound margin); the
-            // parse's own message names the variable that failed.
-            // A static-init failure arrives wrapped; its message is null and the cause names the variable.
-            Throwable cause = (t instanceof ExceptionInInitializerError && t.getCause() != null) ? t.getCause() : t;
-            log.error("event=pg_session_env_invalid error=\"{}\"", cause.getMessage(), t);
-            System.exit(1);
-        }
-
         // RDR-205 (bead nexus-em75s.4): load + boot-check the tuple template
         // registry BEFORE the service starts serving — a breach (an
         // unparseable/malformed template, or a claim-log TTL that does not
@@ -372,10 +378,9 @@ public final class Main {
             return;
         }
 
-        // nexus-43ulx.12 (RDR-227): the router's valid-index set. Built here, after the boot catch above has
-        // validated the NX_SEARCH_PCI* settings (PgSession resolves them in a static initializer, so touching
-        // them any earlier would let a malformed value escape main as ExceptionInInitializerError), and handed
-        // to the repository as its only index set (the empty default belongs to tests, never to production).
+        // nexus-43ulx.12 (RDR-227): the router's valid-index set, built from the NX_SEARCH_PCI* settings the boot
+        // validation block after the pool (above the schema migration) has already parsed, and handed to the
+        // repository as its only index set (the empty default belongs to tests, never to production).
         var pciSweep = dev.nexus.service.vectors.PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings());
         var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter, qryEmbedRouter, pciSweep);
         // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
@@ -386,7 +391,7 @@ public final class Main {
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
         // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
-        // shutdown hook before ds.close(). Until the first read lands the set is empty and every single-collection
+        // shutdown hook after the backend reaper and before ds.close(). Until the first read lands the set is empty and every single-collection
         // statement above the router threshold walks at hnsw.ef_search 1000, the safe direction.
         pciSweep.start();
 
@@ -430,8 +435,6 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
-            // nexus-43ulx.12: end the catalog reads before the pool they borrow from closes.
-            pciSweep.stop();
             // nexus-g17tf: FIRST after the listener stops, ahead of the embedder
             // closes (each can wait up to 5s) so the reaper always runs inside a
             // 10s container stop grace. Hikari's close aborts the sockets, and a
@@ -443,6 +446,10 @@ public final class Main {
             dev.nexus.service.db.BackendReaper.terminateOwnBackends(
                     dbUrl, dbUser, dbPass, applicationName,
                     ds.getHikariPoolMXBean().getActiveConnections());
+            // nexus-43ulx.12: end the catalog reads before the pool they borrow from closes. AFTER the reaper and
+            // never waiting: a read on a silent socket ignores the interrupt, and the reaper has a 10 s grace to
+            // keep; closing the pool below aborts that socket.
+            pciSweep.stop();
             // doc and qry routers each hold their OWN AdmissionControlledEmbedder
             // (different acquisition policy — see LocalOnnxAdmission), but both
             // wrap the SAME underlying "bge" delegate, so closing either

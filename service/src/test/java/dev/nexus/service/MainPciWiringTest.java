@@ -34,20 +34,33 @@ class MainPciWiringTest {
     }
 
     @Test
-    void theSweepStartsAfterTheService_andStopsBeforeThePoolCloses() throws Exception {
-        String src = main();
+    void theSweepStartsAfterTheService_andStopsAfterTheReaper_beforeThePoolCloses() throws Exception {
+        String src = code(main());
         int serviceStart = src.indexOf("service.start();");
         int sweepStart = src.indexOf("pciSweep.start();");
         int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+        int listenerStop = src.indexOf("service.stop();", hook);
+        int reaper = src.indexOf("BackendReaper.terminateOwnBackends(", hook);
         int sweepStop = src.indexOf("pciSweep.stop();", hook);
         int poolClose = src.indexOf("ds.close();", hook);
 
         assertThat(serviceStart).isPositive();
         assertThat(sweepStart).as("started").isGreaterThan(serviceStart);
         assertThat(hook).isGreaterThan(sweepStart);
-        assertThat(sweepStop).as("stopped in the shutdown hook").isGreaterThan(hook);
-        assertThat(poolClose).as("before the hook closes the pool").isGreaterThan(sweepStop);
+        assertThat(listenerStop).as("the listener stops first").isGreaterThan(hook);
+        assertThat(reaper).as("the reaper runs next, inside the container's 10 s grace").isGreaterThan(listenerStop);
+        assertThat(sweepStop).as("the sweep stops after the reaper, so a read that ignores the interrupt cannot"
+            + " delay it").isGreaterThan(reaper);
+        assertThat(poolClose).as("before the hook closes the pool, which aborts a stuck read").isGreaterThan(sweepStop);
         assertThat(src.indexOf("pciSweep.start();", sweepStart + 1)).as("started once").isNegative();
+        assertThat(src.indexOf("pciSweep.stop();", sweepStop + 1)).as("stopped once").isNegative();
+    }
+
+    @Test
+    void stopDoesNotWait() throws Exception {
+        String sweep = code(Files.readString(Path.of("src/main/java/dev/nexus/service/vectors/PciIndexSweep.java")));
+        assertThat(sweep).as("a stop that waits starts the reaper late exactly when a read is hung on a silent socket")
+            .doesNotContain("awaitTermination");
     }
 
     @Test
@@ -58,5 +71,47 @@ class MainPciWiringTest {
         assertThat(validated).isPositive();
         assertThat(repo).as("a malformed NX_SEARCH_PCI* value must reach the boot catch, not escape main")
             .isGreaterThan(validated);
+    }
+
+    /**
+     * PgSession parses its env in static initializers, so the first PgSession static call anywhere in the process
+     * runs the parse and fails with ExceptionInInitializerError on a malformed value. The boot validation block, whose
+     * catch reports event=pg_session_env_invalid and exits 1, must be that first call. Nothing before it in the
+     * code (comments excluded) may name PgSession or a class that calls it on the way: LocalOnnxAdmission.fromEnv
+     * (local-mode branch), TenantScope (seedEmbeddingProfile's withTenant -> PgSession.gucBatch), the repositories.
+     */
+    @Test
+    void theBootValidationBlockPrecedesTheFirstPgSessionUse() throws Exception {
+        String src = code(main());
+        int firstValidation = src.indexOf("PgSession.startupEfSearchFloor()");
+        assertThat(firstValidation).as("the validation block exists").isPositive();
+
+        String before = src.substring(0, firstValidation);
+        assertThat(before).as("no PgSession static call precedes the validation block")
+            .doesNotContain("PgSession");
+        assertThat(before).doesNotContain("LocalOnnxAdmission").doesNotContain("new TenantScope(")
+            .doesNotContain("seedEmbeddingProfile").doesNotContain("PgVectorRepository(")
+            .doesNotContain("NexusService(");
+
+        // It is the try block whose catch reports the event, not a bare call.
+        int tryOpen = src.lastIndexOf("try {", firstValidation);
+        int catchEvent = src.indexOf("event=pg_session_env_invalid", firstValidation);
+        int nextTry = src.indexOf("try {", firstValidation);
+        assertThat(tryOpen).isPositive();
+        assertThat(src.substring(tryOpen, firstValidation)).as("the try opens right at the validation block")
+            .doesNotContain("catch").doesNotContain("System.exit");
+        assertThat(catchEvent).as("its catch reports event=pg_session_env_invalid").isGreaterThan(firstValidation);
+        assertThat(nextTry).as("before any other try block").isGreaterThan(catchEvent);
+
+        // And the four NX_SEARCH_PCI* settings are among what it validates.
+        assertThat(src.indexOf("PgSession.logPciBootSettings(")).isBetween(firstValidation, catchEvent);
+        // The first uses that would have escaped come after it.
+        assertThat(src.indexOf("seedEmbeddingProfile")).isGreaterThan(catchEvent);
+        assertThat(src.indexOf("LocalOnnxAdmission.fromEnv()")).isGreaterThan(catchEvent);
+    }
+
+    /** Main's text with block and line comments removed, so a word in prose cannot satisfy or break a pin. */
+    private static String code(String src) {
+        return src.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
     }
 }

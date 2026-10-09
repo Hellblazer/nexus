@@ -5,8 +5,10 @@ package dev.nexus.service.vectors;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.PgSession;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
@@ -19,17 +21,23 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-227 Step 2 (nexus-43ulx.11): {@link PciCatalog}'s catalog read against the real partitioned layout.
@@ -443,5 +451,117 @@ class PciCatalogIntegrationTest {
             }
         }).get(BOUND.toSeconds(), TimeUnit.SECONDS);
         assertThat(catalog.read().hasValidIndex(M1024, T2, collection)).isTrue();
+    }
+
+    // -- the read is bounded (nexus-43ulx.12 fix round; nexus-u9zkn convention) -------------------------------
+
+    /**
+     * The read touches {@code pg_catalog.pg_am}; a superuser holding ACCESS EXCLUSIVE on it makes the statement wait.
+     * The holder is one Liquibase test changeset (one transaction) that takes the lock and then sleeps 8 s, so the lock
+     * is held for a known window. With the bound the read ends at the statement timeout (SQLSTATE 57014) well inside
+     * that window; unbounded, it would return only after the holder let go.
+     */
+    @Test
+    void aReadBlockedByALock_failsAtTheStatementBound_whileTheLockIsStillHeld() throws Exception {
+        PciCatalog bounded = new PciCatalog(svcDs, Duration.ofMillis(500));
+        assertThat(bounded.readBound()).isEqualTo(Duration.ofMillis(500));
+        var activityPid = DSL.field(DSL.name("pid"), Integer.class);
+        var activityWait = DSL.field(DSL.name("wait_event"), String.class);
+        var activityQuery = DSL.field(DSL.name("query"), String.class);
+        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+
+        CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.runSuperuserDdl(su,
+                    "LOCK TABLE pg_catalog.pg_am IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(8)");
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        try (Connection monitor = pg.createConnection("")) {
+            monitor.setAutoCommit(true);
+            DSLContext asSuperuser = DSL.using(monitor, SQLDialect.POSTGRES);
+            await("the holder to sleep while holding the lock", () -> {
+                if (holder.isDone()) {
+                    holder.join();   // surfaces the holder's failure instead of timing out
+                    throw new AssertionError("the holder ended before the read began");
+                }
+                return asSuperuser.fetchCount(activity,
+                    activityWait.eq("PgSleep").and(activityQuery.like("%pg_sleep(8)%"))
+                        .and(activityPid.ne(DSL.function("pg_backend_pid", Integer.class)))) > 0;
+            });
+
+            long began = System.nanoTime();
+            CompletableFuture<PciCatalog.Snapshot> read = CompletableFuture.supplyAsync(bounded::read);
+
+            assertThatThrownBy(() -> read.get(30, TimeUnit.SECONDS))
+                .as("the read must end while the lock is held, not wait for its release")
+                .isInstanceOf(ExecutionException.class)
+                .hasCauseInstanceOf(DataAccessException.class)
+                .satisfies(e -> assertThat(((DataAccessException) e.getCause()).sqlState())
+                    .as("statement_timeout").isEqualTo("57014"));
+            long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began);
+            assertThat(holder).as("the lock was still held when the read gave up").isNotDone();
+            assertThat(tookMs).as("it waited out the bound, not less").isGreaterThanOrEqualTo(400);
+        } finally {
+            holder.get(60, TimeUnit.SECONDS);
+        }
+
+        assertThat(catalog.read().leaves()).as("the pool is healthy and the lock is gone").isNotEmpty();
+        // The bound was transaction-local: the pooled connection comes back with no statement_timeout.
+        try (Connection c = svcDs.getConnection()) {
+            assertThat(DSL.using(c, SQLDialect.POSTGRES)
+                .select(DSL.function("current_setting", String.class, DSL.val("statement_timeout")))
+                .fetchSingle().value1()).isEqualTo("0");
+        }
+    }
+
+    /** The statement bound and the socket read bound are set together: bound plus the margin. */
+    @Test
+    void theReadGivesItsConnectionANetworkTimeoutOfTheBoundPlusTheMargin() throws Exception {
+        List<Integer> networkTimeouts = new CopyOnWriteArrayList<>();
+        DataSource recording = recordingDataSource(svcDs, networkTimeouts);
+        PgSession.setNetworkBoundMarginMsForTests(7_000);
+        try {
+            PciCatalog.Snapshot snap = new PciCatalog(recording, Duration.ofSeconds(2)).read();
+
+            assertThat(snap.leaves()).isNotEmpty();
+            assertThat(networkTimeouts).as("setNetworkTimeout(statement bound 2000 ms + margin 7000 ms)").contains(9_000);
+        } finally {
+            PgSession.setNetworkBoundMarginMsForTests(-1);
+        }
+    }
+
+    @Test
+    void theDefaultReadBound_isTheSweepStatementBound() {
+        assertThat(new PciCatalog(svcDs).readBound()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(PciCatalog.DEFAULT_READ_BOUND).isEqualTo(dev.nexus.service.db.SweepBounds.STATEMENT_TIMEOUT);
+    }
+
+    /** A pool whose connections report every {@code setNetworkTimeout} argument to {@code sink}. */
+    static DataSource recordingDataSource(DataSource target, List<Integer> sink) {
+        return (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(), new Class<?>[] {DataSource.class},
+            (proxy, method, args) -> {
+                try {
+                    Object result = method.invoke(target, args);
+                    if (!"getConnection".equals(method.getName())) {
+                        return result;
+                    }
+                    Connection real = (Connection) result;
+                    return Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[] {Connection.class},
+                        (cp, cm, cargs) -> {
+                            if ("setNetworkTimeout".equals(cm.getName())) {
+                                sink.add((Integer) cargs[1]);
+                            }
+                            try {
+                                return cm.invoke(real, cargs);
+                            } catch (InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+                } catch (InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            });
     }
 }
