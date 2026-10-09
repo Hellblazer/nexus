@@ -442,7 +442,7 @@ tested query; see Alternative 4.
 Give each large collection its own partition, with its own HNSW index, so
 partition pruning routes the arm. Same search behaviour as Approach, but moving a
 collection between partitions moves its rows, which costs a large write per
-crossing of T. Kept as the fallback if A1 fails.
+crossing of T. Not pursued: A1 held, and RDR-225 rejected the wider form of this layout.
 
 ### Alternative 4: More walk effort for single-collection arms
 
