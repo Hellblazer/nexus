@@ -780,6 +780,128 @@ public final class PgSession {
         return SEARCH_EXACT_MAX_ROWS;
     }
 
+    // ---- RDR-227 per-collection partial HNSW indexes (nexus-43ulx.10) ---------------------------
+
+    /** Default for {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B): a collection at or above this many rows is a build candidate. */
+    static final int DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS = 20_000;
+    static final int SEARCH_PCI_BUILD_MIN_ROWS_MIN = 1;
+    static final int SEARCH_PCI_BUILD_MIN_ROWS_MAX = 1_000_000;
+
+    /** Default for {@code NX_SEARCH_PCI_SWEEP_SECONDS}: ten minutes between catalog sweeps. */
+    static final int DEFAULT_SEARCH_PCI_SWEEP_SECONDS = 600;
+    static final int SEARCH_PCI_SWEEP_SECONDS_MIN = 60;
+    static final int SEARCH_PCI_SWEEP_SECONDS_MAX = 86_400;
+
+    /** Default for {@code NX_SEARCH_PCI_MAX_PER_LEAF}: indexes per leaf table; 0 builds none. */
+    static final int DEFAULT_SEARCH_PCI_MAX_PER_LEAF = 16;
+    static final int SEARCH_PCI_MAX_PER_LEAF_MAX = 1_000;
+
+    /**
+     * The four {@code NX_SEARCH_PCI*} settings, resolved once at class init.
+     *
+     * @param enabled        {@code NX_SEARCH_PCI}: the DDL (build/drop) half; the read half runs regardless
+     * @param buildMinRows   {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B)
+     * @param sweepSeconds   {@code NX_SEARCH_PCI_SWEEP_SECONDS}
+     * @param maxPerLeaf     {@code NX_SEARCH_PCI_MAX_PER_LEAF}
+     */
+    public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) { }
+
+    private static final PciSettings PCI_SETTINGS = new PciSettings(
+        searchPci(System.getenv("NX_SEARCH_PCI")),
+        searchPciBuildMinRows(System.getenv("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
+        searchPciSweepSeconds(System.getenv("NX_SEARCH_PCI_SWEEP_SECONDS")),
+        searchPciMaxPerLeaf(System.getenv("NX_SEARCH_PCI_MAX_PER_LEAF")));
+
+    /**
+     * Parse {@code NX_SEARCH_PCI}. Null/blank means on; the only other accepted values are exactly
+     * {@code "1"} (on) and {@code "0"} (off) after trimming. "true", "yes" and the rest are refused:
+     * a switch that guards DDL does not guess.
+     */
+    static boolean searchPci(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return true;
+        }
+        return switch (raw.trim()) {
+            case "1" -> true;
+            case "0" -> false;
+            default -> throw new IllegalArgumentException(
+                "NX_SEARCH_PCI must be 1 (on) or 0 (off), got: " + raw);
+        };
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B): integer in [1, 1000000], default 20000. */
+    static int searchPciBuildMinRows(String raw) {
+        return boundedInt("NX_SEARCH_PCI_BUILD_MIN_ROWS", raw, DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS,
+            SEARCH_PCI_BUILD_MIN_ROWS_MIN, SEARCH_PCI_BUILD_MIN_ROWS_MAX);
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_SWEEP_SECONDS}: integer in [60, 86400], default 600. */
+    static int searchPciSweepSeconds(String raw) {
+        return boundedInt("NX_SEARCH_PCI_SWEEP_SECONDS", raw, DEFAULT_SEARCH_PCI_SWEEP_SECONDS,
+            SEARCH_PCI_SWEEP_SECONDS_MIN, SEARCH_PCI_SWEEP_SECONDS_MAX);
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_MAX_PER_LEAF}: integer in [0, 1000], default 16; 0 builds none. */
+    static int searchPciMaxPerLeaf(String raw) {
+        return boundedInt("NX_SEARCH_PCI_MAX_PER_LEAF", raw, DEFAULT_SEARCH_PCI_MAX_PER_LEAF,
+            0, SEARCH_PCI_MAX_PER_LEAF_MAX);
+    }
+
+    private static int boundedInt(String variable, String raw, int dflt, int min, int max) {
+        if (raw == null || raw.isBlank()) {
+            return dflt;
+        }
+        int v;
+        try {
+            v = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(variable + " must be an integer, got: " + raw, e);
+        }
+        if (v < min || v > max) {
+            throw new IllegalArgumentException(variable + " must be in " + min + ".." + max + ", got: " + v);
+        }
+        return v;
+    }
+
+    /**
+     * Boot-time touch for the four {@code NX_SEARCH_PCI*} settings, for the same class-init reason as
+     * {@link #startupSearchExactMaxRows()}: a malformed value must fail at boot, not at first use.
+     */
+    public static PciSettings startupPciSettings() {
+        return PCI_SETTINGS;
+    }
+
+    /** The resolved {@code NX_SEARCH_PCI*} settings. */
+    public static PciSettings pciSettings() {
+        return PCI_SETTINGS;
+    }
+
+    /**
+     * True when a collection could sit between the router threshold T and the build threshold B: the
+     * router is on ({@code T > 0}) and {@code B > T}. Such a collection is routed to HNSW (so it walks
+     * at ef_search 1000) yet is too small to get an index. With the router off every statement takes
+     * HNSW regardless, so B above T strands nothing.
+     */
+    public static boolean pciBuildThresholdAboveRouter(int buildMinRows, int routerMaxRows) {
+        return routerMaxRows > 0 && buildMinRows > routerMaxRows;
+    }
+
+    /**
+     * Log the resolved settings ({@code event=pci_settings}) and, when
+     * {@link #pciBuildThresholdAboveRouter} holds, the WARN {@code event=pci_build_threshold_above_router}.
+     * Called from {@code Main} inside the boot try block that refuses on a bad value.
+     */
+    public static void logPciBootSettings(PciSettings s, int routerMaxRows) {
+        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={}",
+            s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf());
+        if (pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {
+            log.warn("event=pci_build_threshold_above_router build_min_rows={} router_max_rows={} "
+                + "detail=\"collections with more than router_max_rows and fewer than build_min_rows rows "
+                + "walk at hnsw.ef_search 1000 and never get an index\"",
+                s.buildMinRows(), routerMaxRows);
+        }
+    }
+
     /** The threshold the router compares against: the test pin when set, else the env-resolved value. */
     public static int searchExactMaxRows() {
         Integer o = searchExactMaxRowsOverride;

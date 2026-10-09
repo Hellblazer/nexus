@@ -334,6 +334,11 @@ public final class Main {
             // nexus-tu8wp.6: same fail-fast for the cardinality router's NX_SEARCH_EXACT_MAX_ROWS.
             log.info("event=search_exact_router max_rows={}",
                      dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
+            // nexus-43ulx.10 (RDR-227): same fail-fast for the four NX_SEARCH_PCI* settings; logs
+            // event=pci_settings, plus a WARN when B > T (T > 0).
+            dev.nexus.service.db.PgSession.logPciBootSettings(
+                dev.nexus.service.db.PgSession.startupPciSettings(),
+                dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
             // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
             log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
