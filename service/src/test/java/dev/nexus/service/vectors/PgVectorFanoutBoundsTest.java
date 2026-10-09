@@ -148,4 +148,38 @@ class PgVectorFanoutBoundsTest {
         assertThat(PgVectorRepository.MERGE_ORDER.compare(b, otherId)).as("id before collection").isNegative();
         assertThat(PgVectorRepository.MERGE_ORDER.compare(nearer, a)).isNegative();
     }
+
+    /** RDR-226 Phase 0 (2026-10-09): the per-request phase totals behind event=search_per_collection_arm_phases. */
+    @Test
+    void armPhaseTotals_sumTheFourPhases_keepTheMaxima_andPutTheRestInOther() {
+        var a = new PgVectorRepository.ArmPhases();
+        a.permitWaitNanos = 10_000_000L;
+        a.setupNanos = 2_000_000L;
+        a.probeNanos = 3_000_000L;
+        a.statementNanos = 40_000_000L;
+        a.exact = true;
+        var b = new PgVectorRepository.ArmPhases();
+        b.permitWaitNanos = 0L;
+        b.setupNanos = 5_000_000L;
+        b.probeNanos = 1_000_000L;
+        b.statementNanos = 20_000_000L;
+        b.exact = false;
+        var t = new PgVectorRepository.ArmPhaseTotals();
+        t.add(a, 60_000_000L);  // 5 ms not in any phase
+        t.add(b, 26_000_000L);  // exactly the phases
+        assertThat(t.arms).isEqualTo(2);
+        assertThat(t.exactArms).isEqualTo(1);
+        assertThat(t.permitWaitNanos).isEqualTo(10_000_000L);
+        assertThat(t.setupNanos).isEqualTo(7_000_000L);
+        assertThat(t.probeNanos).isEqualTo(4_000_000L);
+        assertThat(t.statementNanos).isEqualTo(60_000_000L);
+        assertThat(t.otherNanos).isEqualTo(5_000_000L);
+        assertThat(t.maxSetupNanos).isEqualTo(5_000_000L);
+        assertThat(t.maxStatementNanos).isEqualTo(40_000_000L);
+        // An arm whose phases overrun its measured total (clock granularity) never makes other negative.
+        var c = new PgVectorRepository.ArmPhases();
+        c.statementNanos = 9_000_000L;
+        t.add(c, 8_000_000L);
+        assertThat(t.otherNanos).isEqualTo(5_000_000L);
+    }
 }

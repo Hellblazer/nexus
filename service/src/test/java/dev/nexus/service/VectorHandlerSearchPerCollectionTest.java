@@ -452,6 +452,30 @@ class VectorHandlerSearchPerCollectionTest {
         }
     }
 
+    /** RDR-226 Phase 0: every request logs where its arms' time went, one line per request. */
+    @Test
+    void eachRequestLogsItsArmPhases() throws Exception {
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(dev.nexus.service.vectors.PgVectorRepository.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            assertThat(post(ok()).statusCode()).isEqualTo(200);
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
+        var line = logs.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.startsWith("event=search_per_collection_arm_phases ")).findFirst();
+        assertThat(line).as("one arm-phases line per request").isPresent();
+        assertThat(line.get()).contains("arms=2 ", "sum_permit_wait_ms=", "sum_setup_ms=", "sum_probe_ms=",
+                                        "sum_statement_ms=", "sum_other_ms=", "exact_arms=", "hnsw_arms=");
+        var m = java.util.regex.Pattern.compile("exact_arms=(\\d+) hnsw_arms=(\\d+)").matcher(line.get());
+        assertThat(m.find()).isTrue();
+        assertThat(Integer.parseInt(m.group(1)) + Integer.parseInt(m.group(2))).isEqualTo(2);
+    }
+
     @Test
     void capCodePoints_neverSplitsASurrogatePair() {
         String s = "a\uD83D\uDE00bc"; // a, grinning face (two UTF-16 units), b, c

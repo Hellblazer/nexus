@@ -1424,6 +1424,18 @@ public final class PgVectorRepository {
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
+        return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
+                                       rebindBeforeExactRerun, null);
+    }
+
+    /** As above; {@code phases}, when not null, receives the setup, probe and statement timings. */
+    private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
+                                                             int dim, String[] colls,
+                                                             int nResults,
+                                                             java.util.function.IntSupplier statementTimeoutMs,
+                                                             boolean rebindBeforeExactRerun,
+                                                             ArmPhases phases) {
+        final long setupStartNanos = System.nanoTime();
         // nexus-wym0l: the tenant stamp and every serving setting below travel in ONE statement, applied by
         // withTenant before the work runs (and so before the router probe and the search, which depend on
         // them). They were seven round trips per arm. The pairing and the order of the settings are the ones
@@ -1450,6 +1462,9 @@ public final class PgVectorRepository {
         }, ctx -> {
             // nexus-tu8wp.6: the cardinality router. The threshold 0 disables it, and no probe runs.
             long startNanos = System.nanoTime();
+            if (phases != null) {
+                phases.setupNanos = startNanos - setupStartNanos;
+            }
             int exactMaxRows = PgSession.searchExactMaxRows();
             int probedRows = -1;
             boolean exact = false;
@@ -1459,6 +1474,12 @@ public final class PgVectorRepository {
                 if (exactMaxRows > 0) {
                     probedRows = probeSelectedRows(ctx, dim, colls, model, tenant, exactMaxRows);
                     exact = probedRows <= exactMaxRows;
+                }
+                long statementStartNanos = System.nanoTime();
+                if (phases != null) {
+                    phases.probeNanos = statementStartNanos - startNanos;
+                    phases.exact = exact;
+                    phases.probedRows = probedRows;
                 }
                 if (exact) {
                     // The selected set is small enough that the exact plan (PK-prefix bitmap scan or
@@ -1475,6 +1496,9 @@ public final class PgVectorRepository {
                     result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null);
                 }
                 completed = true;
+                if (phases != null) {
+                    phases.statementNanos = System.nanoTime() - statementStartNanos;
+                }
                 return result;
             } finally {
                 logIfSlow(colls, slowRouteLabel(exactMaxRows, exact, probedRows),
@@ -1833,6 +1857,55 @@ public final class PgVectorRepository {
     private static final class ArmRun {
         volatile Limiter limiter = Limiter.SEARCH;
         volatile int boundMs;
+        /** nexus-tao37 follow-up (RDR-226 Phase 0): where one arm's time goes. */
+        final ArmPhases phases = new ArmPhases();
+    }
+
+    /**
+     * Phase timings of one fan-out arm (RDR-226 Phase 0, 2026-10-09). On a fork the 61 knowledge arms'
+     * statements took 531 ms serially while production's arms summed to ~5,554 ms, so the arm time is mostly
+     * NOT the search statement: these split it into the permit wait, the connection plus the batched GUC
+     * stamp ({@code setup}), the router probe, and the statement. The remainder (commit, row conversion)
+     * is the arm total minus these four. Written by the arm's own thread, read after the fan-out joins.
+     */
+    static final class ArmPhases {
+        volatile long permitWaitNanos;
+        volatile long setupNanos;
+        volatile long probeNanos;
+        volatile long statementNanos;
+        volatile boolean exact;
+        volatile int probedRows = -1;
+    }
+
+    /** Per-request sums and maxima of {@link ArmPhases}; {@code other} is the arm total minus the four phases. */
+    static final class ArmPhaseTotals {
+        int arms;
+        int exactArms;
+        long permitWaitNanos;
+        long setupNanos;
+        long probeNanos;
+        long statementNanos;
+        long otherNanos;
+        long maxPermitWaitNanos;
+        long maxSetupNanos;
+        long maxProbeNanos;
+        long maxStatementNanos;
+
+        void add(ArmPhases p, long armNanos) {
+            arms++;
+            if (p.exact) {
+                exactArms++;
+            }
+            permitWaitNanos += p.permitWaitNanos;
+            setupNanos += p.setupNanos;
+            probeNanos += p.probeNanos;
+            statementNanos += p.statementNanos;
+            otherNanos += Math.max(0L, armNanos - p.permitWaitNanos - p.setupNanos - p.probeNanos - p.statementNanos);
+            maxPermitWaitNanos = Math.max(maxPermitWaitNanos, p.permitWaitNanos);
+            maxSetupNanos = Math.max(maxSetupNanos, p.setupNanos);
+            maxProbeNanos = Math.max(maxProbeNanos, p.probeNanos);
+            maxStatementNanos = Math.max(maxStatementNanos, p.statementNanos);
+        }
     }
 
     /**
@@ -2226,6 +2299,7 @@ public final class PgVectorRepository {
         AtomicInteger cursor = new AtomicInteger();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         long[] armNanos = new long[n];
+        ArmPhases[] armPhases = new ArmPhases[n];
         if (!runnable.isEmpty()) {
             try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
                 for (int w = 0; w < workers; w++) {
@@ -2250,6 +2324,7 @@ public final class PgVectorRepository {
                                 settleArmFailure(t, i, col, run, fanoutBudgetMs, merger, failure);
                             } finally {
                                 armNanos[i] = System.nanoTime() - armStart;
+                                armPhases[i] = run.phases;
                             }
                         }
                     });
@@ -2292,16 +2367,35 @@ public final class PgVectorRepository {
         long fanoutMs = (System.nanoTime() - startNanos) / 1_000_000L;
         long slowestArmMs = 0L;
         long sumArmMs = 0L;
+        ArmPhaseTotals phaseTotals = new ArmPhaseTotals();
         for (int slot : runnable) {
             long ms = armNanos[slot] / 1_000_000L;
             slowestArmMs = Math.max(slowestArmMs, ms);
             sumArmMs += ms;
+            ArmPhases p = armPhases[slot];
+            if (p != null) {
+                phaseTotals.add(p, armNanos[slot]);
+            }
             if (log.isDebugEnabled()) {
                 PerCollectionStat s = stats.get(slot);
-                log.debug("event=search_per_collection_arm collection={} arm_ms={} raw_count={} error_kind={}",
-                          cols.get(slot), ms, s.rawCount(), s.errorKind() == null ? null : s.errorKind().wire());
+                log.debug("event=search_per_collection_arm collection={} arm_ms={} raw_count={} error_kind={} "
+                          + "permit_wait_ms={} setup_ms={} probe_ms={} statement_ms={} route={} probed_rows={}",
+                          cols.get(slot), ms, s.rawCount(), s.errorKind() == null ? null : s.errorKind().wire(),
+                          p == null ? -1 : p.permitWaitNanos / 1_000_000L, p == null ? -1 : p.setupNanos / 1_000_000L,
+                          p == null ? -1 : p.probeNanos / 1_000_000L, p == null ? -1 : p.statementNanos / 1_000_000L,
+                          p == null ? null : (p.exact ? "exact" : "hnsw"), p == null ? -1 : p.probedRows);
             }
         }
+        // RDR-226 Phase 0 (2026-10-09): where the arm time goes, summed over the request's arms.
+        log.info("event=search_per_collection_arm_phases arms={} sum_arm_ms={} sum_permit_wait_ms={} "
+                 + "sum_setup_ms={} sum_probe_ms={} sum_statement_ms={} sum_other_ms={} max_permit_wait_ms={} "
+                 + "max_setup_ms={} max_probe_ms={} max_statement_ms={} exact_arms={} hnsw_arms={}",
+                 phaseTotals.arms, sumArmMs, phaseTotals.permitWaitNanos / 1_000_000L,
+                 phaseTotals.setupNanos / 1_000_000L, phaseTotals.probeNanos / 1_000_000L,
+                 phaseTotals.statementNanos / 1_000_000L, phaseTotals.otherNanos / 1_000_000L,
+                 phaseTotals.maxPermitWaitNanos / 1_000_000L, phaseTotals.maxSetupNanos / 1_000_000L,
+                 phaseTotals.maxProbeNanos / 1_000_000L, phaseTotals.maxStatementNanos / 1_000_000L,
+                 phaseTotals.exactArms, phaseTotals.arms - phaseTotals.exactArms);
         log.info("event=search_per_collection collections={} arms={} workers={} per_collection_k={} limit={} "
                  + "rows={} peak_retained_rows={} isolated_errors={} budget_exhausted={} statement_timeouts={} "
                  + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={} query_embed_ms={} "
@@ -2445,7 +2539,9 @@ public final class PgVectorRepository {
                                    ArmRun run) {
         String[] colls = new String[] {collection};
         org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, k, model, tenant);
+        long permitStartNanos = System.nanoTime();
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
+        run.phases.permitWaitNanos = System.nanoTime() - permitStartNanos;
         try {
             return plainSearchCandidates(runPlainSearchStatement(tenant, model, fn, dim, colls, k, () -> {
                 ArmBound bound = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(),
@@ -2453,7 +2549,7 @@ public final class PgVectorRepository {
                 run.limiter = bound.limiter();
                 run.boundMs = bound.timeoutMs();
                 return bound.timeoutMs();
-            }, true));
+            }, true, run.phases));
         } finally {
             armGate.release();
         }
