@@ -791,17 +791,17 @@ class PgVectorCardinalityRouterIntegrationTest {
         PgSession.overrideSearchExactMaxRowsForTests(0);
         PerCollectionResult[] result = new PerCollectionResult[1];
         List<String> lines;
-        Connection su = pg.createConnection("");
-        su.setAutoCommit(false);
-        try {
-            // An uncommitted rename holds the chunks table's exclusive lock: the arm's statement waits on it
-            // until its 400 ms statement_timeout cancels it.
-            DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).renameTo("chunks_43ulx_lock").execute();
-            lines = phaseLines(() -> result[0] = repo.searchPerCollection(
-                TENANT, QUERY, List.of(BIG), K, 100, null, null, false, new FanoutSettings(1, 60_000, 400)));
-        } finally {
-            su.rollback();
-            su.close();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            try {
+                // An uncommitted rename holds the chunks table's exclusive lock: the arm's statement waits on it
+                // until its 400 ms statement_timeout cancels it.
+                DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).renameTo("chunks_43ulx_lock").execute();
+                lines = phaseLines(() -> result[0] = repo.searchPerCollection(
+                    TENANT, QUERY, List.of(BIG), K, 100, null, null, false, new FanoutSettings(1, 60_000, 400)));
+            } finally {
+                su.rollback();
+            }
         }
         assertThat(result[0].perCollection()).hasSize(1);
         assertThat(result[0].perCollection().get(0).errorKind())
@@ -822,6 +822,43 @@ class PgVectorCardinalityRouterIntegrationTest {
             assertThat(Long.parseLong(t.group(g))).as("field %d counts the arm's running time: %s", g, line)
                 .isGreaterThanOrEqualTo(300L);
         }
+    }
+
+    /**
+     * A probe that runs into the search bound (57014) never reaches its statement: the arm is not an arm that
+     * walked at 1000, it has no statement time so top_statements does not name it, and the time it ran is
+     * the probe's. The router is on (T &gt; 0) and the same uncommitted rename blocks the probe's count.
+     */
+    @Test
+    void aProbeThatTimesOutCountsInTheProbeTimeAndNotInTheStatementTimeOrTheEf1000Arms() throws Exception {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        PerCollectionResult[] result = new PerCollectionResult[1];
+        List<String> lines;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            try {
+                DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).renameTo("chunks_43ulx_lock").execute();
+                lines = phaseLines(() -> result[0] = repo.searchPerCollection(
+                    TENANT, QUERY, List.of(BIG), K, 100, null, null, false, new FanoutSettings(1, 60_000, 400)));
+            } finally {
+                su.rollback();
+            }
+        }
+        assertThat(result[0].perCollection()).hasSize(1);
+        assertThat(result[0].perCollection().get(0).errorKind())
+            .as("the probe timed out").isEqualTo(PgVectorRepository.ArmErrorKind.STATEMENT_TIMEOUT);
+        assertThat(lines).hasSize(1);
+        String line = lines.get(0);
+        assertThat(line).as("a probe that failed has no statement to name").contains(" top_statements= ");
+        assertThat(line).contains("ef1000_arms=0 ");
+        var t = java.util.regex.Pattern.compile(
+            "sum_probe_ms=(\\d+) sum_statement_ms=(\\d+) .*sum_hnsw_statement_ms=(\\d+) ").matcher(line);
+        assertThat(t.find()).as(line).isTrue();
+        // A lower bound only: the 400 ms bound cancelled the probe, so it ran for most of that.
+        assertThat(Long.parseLong(t.group(1))).as("the probe's time is the time it ran: %s", line)
+            .isGreaterThanOrEqualTo(300L);
+        assertThat(Long.parseLong(t.group(2))).as("no statement ran: %s", line).isZero();
+        assertThat(Long.parseLong(t.group(3))).as("no HNSW statement ran: %s", line).isZero();
     }
 
     /**
