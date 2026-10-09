@@ -111,3 +111,26 @@ fence_home_env() {
     mkdir -p "$gate_home/xdg-runtime"
     export XDG_RUNTIME_DIR="$gate_home/xdg-runtime"
 }
+
+# fence_uv_env <real_home>
+#
+# Pin uv's HOME-derived roots to the REAL home before any uv call runs under
+# the fenced one. Call it after HOME is exported. Twin of fence_uv_env in
+# tests/_fence_home.py. An explicit outer value wins.
+#
+# UV_PYTHON_INSTALL_DIR (nexus-t0pke): ~/.local is a real directory in the
+# mirror (.local/state is shadowed), so uv finds its managed Pythons at
+# <gate_home>/.local/share/uv/python, a path that runs through a symlink in the
+# scratch dir. A `uv run` in a checkout with no .venv (a fresh worktree) builds
+# .venv on that path: bin/python and pyvenv.cfg `home =` point into the scratch
+# dir. The gate deletes the scratch dir on exit and the checkout's .venv
+# dangles; a later `uv build` under that VIRTUAL_ENV fails with a broken
+# interpreter path. Pinned here, the venv records the real path.
+#
+# UV_CACHE_DIR: uv resolves its cache off HOME at process start; pinned so the
+# mirror is not the only thing between the gate and a cold resolve.
+fence_uv_env() {
+    local real_home="$1"
+    export UV_CACHE_DIR="${UV_CACHE_DIR:-$real_home/.cache/uv}"
+    export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${XDG_DATA_HOME:-$real_home/.local/share}/uv/python}"
+}

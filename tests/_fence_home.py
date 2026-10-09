@@ -211,7 +211,26 @@ def install_fence(gate_home: Path, shadow: str = ".config/nexus") -> Path | None
         root = gate_home / sub
         root.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault(var, str(root))
-    # uv resolves its cache off HOME at process start; pin it explicitly so the
-    # mirror is not the only thing between the suite and a cold resolve.
-    os.environ.setdefault("UV_CACHE_DIR", str(real_home / ".cache" / "uv"))
+    fence_uv_env(real_home)
     return gate_home
+
+
+def fence_uv_env(real_home: Path) -> None:
+    """Pin uv's HOME-derived roots to the real home; an explicit outer value wins.
+
+    ``UV_PYTHON_INSTALL_DIR`` (nexus-t0pke): ``.local`` is a real directory in
+    the mirror, so uv finds its managed Pythons at
+    ``<gate_home>/.local/share/uv/python``, through a symlink in the fenced
+    home. A ``uv run`` in a checkout with no ``.venv`` builds ``.venv`` on that
+    path, and it dangles once the fenced home is deleted. ``UV_CACHE_DIR``: uv
+    resolves its cache off HOME at process start; pinned so the mirror is not
+    the only thing between the suite and a cold resolve.
+
+    Twin of ``fence_uv_env`` in ``tests/e2e/lib/fence_home.sh``, including its
+    ``${VAR:-default}`` reading: an EMPTY outer value counts as unset.
+    """
+    if not os.environ.get("UV_CACHE_DIR"):
+        os.environ["UV_CACHE_DIR"] = str(real_home / ".cache" / "uv")
+    if not os.environ.get("UV_PYTHON_INSTALL_DIR"):
+        data_home = os.environ.get("XDG_DATA_HOME") or str(real_home / ".local" / "share")
+        os.environ["UV_PYTHON_INSTALL_DIR"] = str(Path(data_home) / "uv" / "python")

@@ -318,10 +318,11 @@ export HOME="$GATE_HOME"
 # XDG_RUNTIME_DIR / no bus address (Linux) and NX_FENCED_HOME, which makes every
 # `nx` this gate spawns refuse mutating launchctl/systemctl verbs.
 fence_home_env "$GATE_HOME"
-# uv resolves its cache off HOME at process start; pin it explicitly so the
-# mirror is not the only thing between this gate and a cold 250-package
-# resolve.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$REAL_HOME/.cache/uv}"
+# uv's cache and managed-Python roots resolve off HOME; pin both to the real
+# home. Without the Python pin, a `uv run` here in a checkout with no .venv
+# builds .venv on a path inside $SCRATCH, which dangles once cleanup() deletes
+# it (nexus-t0pke; see fence_uv_env).
+fence_uv_env "$REAL_HOME"
 
 # LAYER 2 -- PATH. A bare ``nx`` resolves to the INSTALLED tool, a different
 # build from the tree under test: the 2026-08-24 stamp read 7.16.3 while the
