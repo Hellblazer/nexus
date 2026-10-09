@@ -244,6 +244,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Accepted | 2026-09-30 |
 | [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Accepted | 2026-10-05 |
 | [RDR-226](rdr-226-one-statement-per-leaf-search.md) | Per-Collection Search in One Statement per Leaf | Architecture | Draft | 2026-10-08 |
+| [RDR-227](rdr-227-per-collection-hnsw-above-the-router-threshold.md) | Per-Collection HNSW Indexes Above the Router Threshold | Architecture | Draft | 2026-10-09 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 
