@@ -4281,9 +4281,10 @@ def _check_per_collection_indexes(
     * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with neither; ``off`` passes with a note that
       builds are disabled by ``NX_SEARCH_PCI=0``.
 
-    Not applicable (ok, no warning) when the engine cannot be reached, when it predates the object, and when the
-    object cannot be read, which includes a ``builder_state`` this client does not know. A count that is not a
-    non-negative int is read as 0, as the reaper row reads its counters.
+    Not applicable (ok, no warning) when the engine cannot be reached or predates the object. A present object
+    that cannot be read, or a ``builder_state`` outside the closed vocabulary above, warns and names what it got:
+    a rotation check reads that vocabulary, and a green row over an unrecognised state would hide the one case the
+    row exists to show. A count that is not a non-negative int is read as 0, as the reaper row reads its counters.
     """
     label = _PCI_LABEL
     status: dict | None
@@ -4307,8 +4308,23 @@ def _check_per_collection_indexes(
         return _na("this engine predates the per-collection index status field")
     this_engine = pci.get("this_engine") if isinstance(pci, dict) else None
     state = this_engine.get("builder_state") if isinstance(this_engine, dict) else None
-    if not isinstance(state, str) or state not in _PCI_BUILDER_STATES:
-        return _na("the engine's per-collection index status could not be read")
+
+    def _unreadable(why: str) -> list[HealthResult]:
+        return [HealthResult(
+            label=label, ok=False, warn=True, detail=why,
+            fix_suggestions=[
+                "The engine reports a per_collection_indexes object this client does not understand: check that "
+                "the client and engine versions match (`nx doctor` reports both)",
+                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+            ],
+        )]
+
+    if not isinstance(state, str):
+        return _unreadable("the engine's per_collection_indexes object could not be read "
+                           f"(this_engine.builder_state missing or not a string; got {repr(pci)[:80]})")
+    if state not in _PCI_BUILDER_STATES:
+        return _unreadable(f"unknown builder_state {state!r}; this client knows "
+                           f"{', '.join(sorted(_PCI_BUILDER_STATES))}")
 
     now = now or datetime.now(UTC)
     valid, invalid = _status_int(pci.get("valid")), _status_int(pci.get("invalid"))

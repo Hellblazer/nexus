@@ -64,11 +64,23 @@ def test_an_engine_that_predates_the_object_is_not_applicable_and_green() -> Non
     assert "not applicable" in r.detail and "predates" in r.detail
 
 
-def test_a_body_the_row_cannot_read_is_not_applicable_rather_than_a_crash() -> None:
+# ── a present object the row cannot read warns ───────────────────────────────
+# The key being present means the engine claims to report the builder; a body this client cannot read, or a
+# builder_state outside the closed vocabulary a rotation check reads, is what a doctor exists to surface.
+
+
+def test_a_malformed_object_warns_rather_than_reading_green_or_crashing() -> None:
     for pci in ("on", [], 3, {}, {"valid": 1}, {"this_engine": "ok"}, {"this_engine": {}},
-                {"this_engine": {"builder_state": 7}}, {"this_engine": {"builder_state": "melting"}}):
+                {"this_engine": {"builder_state": 7}}):
         r = _row({"per_collection_indexes": pci})
-        assert r.ok is True and not r.warn and "not applicable" in r.detail, pci
+        assert r.ok is False and r.warn is True, pci
+        assert "not applicable" not in r.detail and "could not be read" in r.detail, pci
+
+
+def test_an_unknown_builder_state_warns_and_names_the_value() -> None:
+    r = _row(_status(state="melting"))
+    assert r.ok is False and r.warn is True
+    assert "'melting'" in r.detail and "not applicable" not in r.detail
 
 
 # ── pass ─────────────────────────────────────────────────────────────────────
