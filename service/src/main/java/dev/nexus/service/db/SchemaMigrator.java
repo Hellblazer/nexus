@@ -393,6 +393,36 @@ public final class SchemaMigrator {
     public static final long MIGRATION_ADVISORY_LOCK_KEY = 0x6e65787573L;
 
     /**
+     * The pid of the session holding {@link #MIGRATION_ADVISORY_LOCK_KEY} in the current database, or -1 when no
+     * session holds it. The one copy of the {@code pg_locks} predicate: {@link MigrationLock} reads it for its
+     * log line, and the per-collection index builder (RDR-227, nexus-43ulx.16) reads it to skip DDL while a
+     * migration walks. Advisory locks are database-scoped ({@code pg_locks.database} is the database oid for an
+     * advisory lock), so the read is limited to this database's rows.
+     *
+     * @throws DataAccessException when {@code pg_locks} cannot be read; a caller that gates DDL on the answer
+     *                             must treat that as "unknown", never as "not held"
+     */
+    public static int migrationLockHolderPid(DSLContext ctx) {
+        Integer pid = ctx.select(DSL.field(DSL.name("pid"), Integer.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
+            .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+            .and(DSL.field(DSL.name("granted"), Boolean.class).isTrue())
+            .and(DSL.field(DSL.name("database"), Long.class).cast(SQLDataType.BIGINT)
+                .eq(DSL.field(ctx.select(DSL.field(DSL.name("oid"), Long.class).cast(SQLDataType.BIGINT))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_database")))
+                    .where(DSL.field(DSL.name("datname"), String.class)
+                        .eq(DSL.function("current_database", SQLDataType.VARCHAR))))))
+            .and(DSL.field(DSL.name("classid"), Long.class).cast(SQLDataType.BIGINT)
+                .eq(MIGRATION_ADVISORY_LOCK_KEY >>> 32))
+            .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT)
+                .eq(MIGRATION_ADVISORY_LOCK_KEY & 0xffffffffL))
+            .and(DSL.field(DSL.name("objsubid"), Integer.class).eq(1))
+            .limit(1)
+            .fetchOne(0, Integer.class);
+        return pid == null ? -1 : pid;
+    }
+
+    /**
      * How long a migrator waits for another live migrator's advisory lock before it refuses to boot.
      * Liquibase's own default wait for its changelog lock, so a contended boot fails on the same clock
      * it always has.
@@ -1358,18 +1388,7 @@ public final class SchemaMigrator {
         /** The pid holding the migration lock, or -1 when none is visible; for the log line only. */
         private static int holderPid(DSLContext ctx) {
             try {
-                Integer pid = ctx.select(DSL.field(DSL.name("pid"), Integer.class))
-                    .from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
-                    .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
-                    .and(DSL.field(DSL.name("granted"), Boolean.class).isTrue())
-                    .and(DSL.field(DSL.name("classid"), Long.class).cast(SQLDataType.BIGINT)
-                        .eq(MIGRATION_ADVISORY_LOCK_KEY >>> 32))
-                    .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT)
-                        .eq(MIGRATION_ADVISORY_LOCK_KEY & 0xffffffffL))
-                    .and(DSL.field(DSL.name("objsubid"), Integer.class).eq(1))
-                    .limit(1)
-                    .fetchOne(0, Integer.class);
-                return pid == null ? -1 : pid;
+                return migrationLockHolderPid(ctx);
             } catch (DataAccessException e) {
                 return -1;
             }

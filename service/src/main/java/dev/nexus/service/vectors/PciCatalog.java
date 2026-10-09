@@ -246,6 +246,14 @@ public final class PciCatalog {
     }
 
     /**
+     * Whether {@code name} has the shape {@link #indexName} makes ({@code ^pci_[0-9a-f]{24}$}). The builder checks
+     * it before it renders DDL for a name, with the same pattern the reader uses to decide an index is parsed.
+     */
+    static boolean isBuilderName(String name) {
+        return name != null && BUILDER_NAME.matcher(name).matches();
+    }
+
+    /**
      * The collection an index selects, from its deparsed predicate ({@code pg_get_expr(indpred, indrelid)}), which
      * for the builder's indexes reads {@code (collection = '<name>'::text)}. A quote inside the name is doubled in
      * that text and undoubled here. Anything else, including a null predicate, is empty (unparsed).
@@ -268,7 +276,7 @@ public final class PciCatalog {
     static Optional<String> attributedCollection(String indexName, String accessMethod, String deparsedPredicate,
                                                  boolean leafBoundsParsed, String standardConformingStrings) {
         if (!"on".equals(standardConformingStrings) || !leafBoundsParsed || !ACCESS_METHOD.equals(accessMethod)
-            || indexName == null || !BUILDER_NAME.matcher(indexName).matches()) {
+            || !isBuilderName(indexName)) {
             return Optional.empty();
         }
         return parseCollection(deparsedPredicate);

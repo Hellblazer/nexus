@@ -176,7 +176,9 @@ public final class Main {
         // pool whose credentials have DDL rights (schema-owner or superuser).
         // Falls back to NX_DB_* when NX_DB_ADMIN_* are absent, covering dev/test
         // setups where the application role also owns the schema.
-        var migrationDs = buildMigrationDataSource(dbUrl, dbUser, dbPass);
+        // RDR-227: the resolved admin values stay in scope for the per-collection index builder.
+        var adminConnection = dev.nexus.service.db.AdminConnection.resolve(System::getenv, dbUrl, dbUser, dbPass);
+        var migrationDs = buildMigrationDataSource(adminConnection);
         try {
             SchemaMigrator.migrate(migrationDs);
         } catch (SchemaMigrator.MigrationException e) {
@@ -484,32 +486,12 @@ public final class Main {
      *
      * <p>Pool size 1: Liquibase uses a single connection sequentially.
      */
-    private static HikariDataSource buildMigrationDataSource(String defaultUrl,
-                                                              String defaultUser,
-                                                              String defaultPass) {
-        String adminUrl  = System.getenv("NX_DB_ADMIN_URL");
-        String adminUser = System.getenv("NX_DB_ADMIN_USER");
-        String adminPass = System.getenv("NX_DB_ADMIN_PASS");
-
-        // Partial-config guard: require all-or-nothing.
-        long adminSet = (adminUrl != null ? 1 : 0)
-                      + (adminUser != null ? 1 : 0)
-                      + (adminPass != null ? 1 : 0);
-        if (adminSet > 0 && adminSet < 3) {
-            throw new IllegalStateException(
-                "Partial NX_DB_ADMIN_* configuration detected (" + adminSet + "/3 vars set). " +
-                "Set all of NX_DB_ADMIN_URL, NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS, " +
-                "or none (to fall back to NX_DB_* credentials).");
-        }
-
-        String url  = adminSet == 3 ? adminUrl  : defaultUrl;
-        String user = adminSet == 3 ? adminUser : defaultUser;
-        String pass = adminSet == 3 ? adminPass : defaultPass;
-
+    private static HikariDataSource buildMigrationDataSource(dev.nexus.service.db.AdminConnection admin) {
+        String url = admin.url();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(url);
-        cfg.setUsername(user);
-        cfg.setPassword(pass);
+        cfg.setUsername(admin.user());
+        cfg.setPassword(admin.password());
         cfg.setMaximumPoolSize(1);
         cfg.setMinimumIdle(1);
         cfg.setConnectionTimeout(30_000);

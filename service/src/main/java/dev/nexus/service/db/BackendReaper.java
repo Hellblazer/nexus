@@ -45,7 +45,7 @@ public final class BackendReaper {
     static final String APPLICATION_NAME_PREFIX = "nexus-service/";
 
     /** Connect + terminate must finish well inside a 10s container stop grace period. */
-    static final int CONNECT_TIMEOUT_SECONDS = 3;
+    public static final int CONNECT_TIMEOUT_SECONDS = 3;
 
     private BackendReaper() {
     }
@@ -56,6 +56,20 @@ public final class BackendReaper {
         byte[] nonce = new byte[4];
         ThreadLocalRandom.current().nextBytes(nonce);
         return APPLICATION_NAME_PREFIX + release + "/" + HexFormat.of().formatHex(nonce);
+    }
+
+    /**
+     * This boot's nonce: the last segment of the name {@link #newApplicationName} made. The per-collection index
+     * builder (RDR-227) names its backend with it, so one boot has one id and the builder mints no second one.
+     *
+     * @throws IllegalArgumentException when {@code applicationName} has no non-empty last segment
+     */
+    public static String bootNonce(String applicationName) {
+        int slash = applicationName == null ? -1 : applicationName.lastIndexOf('/');
+        if (slash < 0 || slash == applicationName.length() - 1) {
+            throw new IllegalArgumentException("not an application name from newApplicationName: " + applicationName);
+        }
+        return applicationName.substring(slash + 1);
     }
 
     /**

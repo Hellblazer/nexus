@@ -393,7 +393,18 @@ class RawSqlGateTest {
             // built, so the concatenation is not an injection surface. Single-homed:
             // CatalogRepository#purgeTrash's post-commit VACUUM step is the only caller.
             "vacuumAnalyze", Map.of(
-                ".execute(\"VACUUM (ANALYZE) \" + table)", 1)))
+                ".execute(\"VACUUM (ANALYZE) \" + table)", 1))),
+        Map.entry("PciBuilderSession.java", Map.of(
+            // SANCTIONED RAW (RDR-227, nexus-43ulx.16): CREATE INDEX CONCURRENTLY has no typed jOOQ form and cannot
+            // run inside a function or a transaction block, so a SECURITY DEFINER wrapper is out and the builder
+            // sends the statement on its own autocommit admin connection. The text is rendered by PostgreSQL's
+            // format() with %I and %L (PciBuilderSession.Pass#render), so no identifier or collection is
+            // concatenated in Java. Plain JDBC Statement.execute, not jOOQ's execute(String), which would parse
+            // the text for bind markers and braces a collection name may contain. Single-homed: Pass#build.
+            "runBuild", Map.of(".execute(sql)", 1),
+            // SANCTIONED RAW (RDR-227, nexus-43ulx.16): DROP INDEX CONCURRENTLY, same reasons as runBuild.
+            // Single-homed: Pass#drop.
+            "runDrop", Map.of(".execute(sql)", 1)))
     );
 
     /**
