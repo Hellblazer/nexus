@@ -9,6 +9,7 @@ topic-label reads (T2 ``nexus/w032x-listing-prefetch-cloud-ab-2026-10-10``).
 
 from __future__ import annotations
 
+import contextvars
 import threading
 from types import SimpleNamespace
 
@@ -130,3 +131,43 @@ def test_a_doc_id_the_prefetch_missed_is_resolved_at_the_end() -> None:
 def test_no_doc_ids_starts_no_lookup() -> None:
     results = [SearchResult(id="c0", content="x", distance=0.1, collection=_COL, metadata={})]
     assert _DisplayLookup.start(results, _Catalog()) is None
+
+
+class _FailingCatalog(_Catalog):
+    def resolve_many(self, doc_ids):
+        self.resolved.append(set(doc_ids))
+        raise RuntimeError("catalog down")
+
+
+def test_a_failed_lookup_leaves_results_without_display_paths_as_before() -> None:
+    catalog = _FailingCatalog()
+
+    results = search_cross_corpus(
+        "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
+        taxonomy=None, cluster_by=None, link_boost=False,
+    )
+
+    assert len(results) == 4
+    assert len(catalog.resolved) == 1, "a failed lookup must not be retried"
+    assert not any(r.metadata.get("_display_path") for r in results)
+    assert {r.metadata.get("doc_id") for r in results} == {f"1.1.{i}" for i in range(4)}
+
+
+_PROBE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("w032x_probe", default="unset")
+
+
+def test_the_lookup_runs_in_the_callers_context() -> None:
+    seen: list[str] = []
+
+    class _CtxCatalog(_Catalog):
+        def resolve_many(self, doc_ids):
+            seen.append(_PROBE_VAR.get())
+            return super().resolve_many(doc_ids)
+
+    token = _PROBE_VAR.set("caller")
+    try:
+        lookup = _DisplayLookup.start([_result("1.1.0")], _CtxCatalog())
+        lookup.maps()
+    finally:
+        _PROBE_VAR.reset(token)
+    assert seen == ["caller"]

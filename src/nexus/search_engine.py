@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import contextvars
 import threading
 import time
 from dataclasses import dataclass, field
@@ -480,8 +481,11 @@ class _DisplayLookup:
         self.doc_ids = doc_ids
         self._catalog = catalog
         self._maps: tuple[dict[str, str], dict[str, str], dict[str, str]] = ({}, {}, {})
+        # Run in the caller's context so a ContextVar the catalog client
+        # reads (a per-call deadline, for one) reaches the worker too.
+        ctx = contextvars.copy_context()
         self._thread = threading.Thread(
-            target=self._run, name="nexus-display-lookup", daemon=True,
+            target=ctx.run, args=(self._run,), name="nexus-display-lookup", daemon=True,
         )
 
     @classmethod
