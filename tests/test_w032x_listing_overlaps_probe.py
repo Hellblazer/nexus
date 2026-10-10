@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import nexus.db.http_vector_client as hvc
+from nexus.commands.store import _t3
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     VectorServiceError,
@@ -38,6 +39,11 @@ def _fresh_client():
     reset_http_vector_client_for_tests()
     invalidate_collections_cache()
     yield
+    # An unconsumed prefetch primes the row cache when it finishes; wait for
+    # it so that prime cannot land in a later test.
+    for t in threading.enumerate():
+        if t.name == "nx-routing-listing-prefetch":
+            t.join(5)
     reset_http_vector_client_for_tests()
     invalidate_collections_cache()
 
@@ -111,7 +117,7 @@ def test_failed_probe_raises_and_drops_the_prefetch(monkeypatch, stats) -> None:
 
 
 @pytest.mark.usefixtures("cloud_mode")
-def test_failed_prefetch_is_repeated_by_the_consuming_call(monkeypatch) -> None:
+def test_failed_prefetch_reports_like_an_unprefetched_call(monkeypatch) -> None:
     calls: list[bool] = []
     started = threading.Event()
 
@@ -130,8 +136,10 @@ def test_failed_prefetch_is_repeated_by_the_consuming_call(monkeypatch) -> None:
 
     rows = client.list_collections(routing=True)
 
-    assert [r["name"] for r in rows] == [_ROW["name"]]
-    assert calls == [True, True]
+    # The non-strict listing's contract: a non-404 failure is an empty listing
+    # with a warning, and the request is not paid for twice.
+    assert rows == []
+    assert calls == [True]
 
 
 def test_local_mode_ignores_the_flag(monkeypatch, stats) -> None:
@@ -155,3 +163,49 @@ def test_without_the_flag_the_probe_runs_alone(monkeypatch, stats) -> None:
 
     assert client._routing_prefetch is None
     assert stats.calls == []
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_any_probe_failure_drops_the_prefetch(monkeypatch, stats) -> None:
+    def broken_probe(*_a, **_k):
+        assert stats.started.wait(5)
+        raise ValueError("malformed service URL")
+
+    monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", broken_probe)
+
+    with pytest.raises(ValueError):
+        get_http_vector_client(prefetch_routing_listing=True)
+    assert hvc._vector_client_instance._routing_prefetch is None
+
+
+@pytest.mark.usefixtures("cloud_mode")
+@pytest.mark.parametrize(
+    "kwargs", [{"lifecycle_state": "live"}, {"strict": True}], ids=["filtered", "strict"],
+)
+def test_filtered_or_strict_listing_never_takes_the_prefetch(monkeypatch, stats, kwargs) -> None:
+    """The prefetch is the unfiltered listing: a live-only router (nexus-bc7ps)
+    or a strict caller must make its own request and leave it parked."""
+    monkeypatch.setattr(
+        "nexus.db.managed_endpoint.probe_managed_service", _probe_waiting_for(stats.started),
+    )
+    client = get_http_vector_client(prefetch_routing_listing=True)
+    parked = client._routing_prefetch
+    parked.result(5)
+
+    client.list_collections(routing=True, **kwargs)
+
+    assert stats.calls == [True, True]
+    assert client._routing_prefetch is parked
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_store_t3_forwards_the_flag_to_the_client(monkeypatch, stats) -> None:
+    """search_cmd's tests mock _t3, so this pins the _t3 -> make_t3 ->
+    get_http_vector_client hops they cannot see."""
+    monkeypatch.setattr(
+        "nexus.db.managed_endpoint.probe_managed_service", _probe_waiting_for(stats.started),
+    )
+    client = _t3(prefetch_routing_listing=True)
+
+    assert client is hvc._vector_client_instance
+    assert client._routing_prefetch is not None

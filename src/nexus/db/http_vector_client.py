@@ -4723,6 +4723,13 @@ class HttpVectorClient:
             if prefetched is not None:
                 try:
                     return prefetched.result()
+                except VectorServiceError as exc:
+                    # Report it as the unprefetched call below would, without
+                    # paying the request's retry schedule a second time. A 404
+                    # (pre-catalog-005 engine) falls through to that fallback.
+                    if exc.code != 404:
+                        _log.warning("http_vector_list_collections_failed", error=str(exc))
+                        return []
                 except Exception as exc:  # noqa: BLE001 -- the call below reports the failure its own way
                     _log.debug("routing_listing_prefetch_failed", error=str(exc))
         try:
@@ -6036,6 +6043,13 @@ def get_http_vector_client(*, prefetch_routing_listing: bool = False) -> HttpVec
                         error=str(wrapped),
                     )
                     raise wrapped from exc
+                except BaseException:
+                    # Any other probe failure (a malformed URL, an httpx error
+                    # the probe does not wrap) must not leave a listing parked
+                    # for a later call to take.
+                    if _vector_client_instance is not None:
+                        _vector_client_instance._routing_prefetch = None
+                    raise
                 _version_probe_done = True
                 _probed_release = parse_engine_version(getattr(caps, "release_version", None))
                 _probed_embedding_mode = getattr(caps, "embedding_mode", None)
@@ -6070,8 +6084,8 @@ def _start_routing_prefetch(client: HttpVectorClient) -> None:
     park its future on *client* (nexus-w032x; caller holds the lock).
 
     ``strict=True`` so a failure lands in the future instead of a WARNING
-    line printed beside a probe error; the consuming call repeats the
-    request on failure and reports it as an unprefetched call would.
+    line printed beside a probe error; the consuming call reports it as an
+    unprefetched call would.
     """
     if client._routing_prefetch is not None:
         return
