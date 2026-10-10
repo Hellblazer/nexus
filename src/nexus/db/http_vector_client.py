@@ -6001,6 +6001,15 @@ def get_http_vector_client(*, prefetch_routing_listing: bool = False) -> HttpVec
         return _vector_client_instance
 
     with _vector_client_lock:
+        if _vector_client_instance is None:
+            # nexus-fryrd: constructed under the SAME tenant
+            # _resolve_collection_row's identity check reads -- see
+            # _process_default_tenant's docstring. Built before the cloud
+            # probe (construction does no I/O) so a prefetch can use it; the
+            # fast path above hands it out only once the probe has passed.
+            _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
+            if cloud_mode and _version_probe_done:
+                _seed_from_probe(_vector_client_instance)
         if cloud_mode:
             if (cached_failure := _authoritative_cached_probe_error()) is not None:
                 _reraise_cached_probe_error(cached_failure)
@@ -6018,14 +6027,11 @@ def get_http_vector_client(*, prefetch_routing_listing: bool = False) -> HttpVec
                 from nexus.engine_version import parse_engine_version  # noqa: PLC0415 -- deferred with the probe
 
                 if prefetch_routing_listing:
-                    if _vector_client_instance is None:
-                        _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
                     _start_routing_prefetch(_vector_client_instance)
                 try:
                     caps = probe_managed_service()
                 except ManagedServiceError as exc:
-                    if _vector_client_instance is not None:
-                        _vector_client_instance._routing_prefetch = None
+                    _vector_client_instance._routing_prefetch = None
                     wrapped = type(exc)(_cloud_probe_failure_message(exc))
                     _version_probe_error = wrapped
                     _version_probe_failed_at = _monotonic()
@@ -6047,22 +6053,12 @@ def get_http_vector_client(*, prefetch_routing_listing: bool = False) -> HttpVec
                     # Any other probe failure (a malformed URL, an httpx error
                     # the probe does not wrap) must not leave a listing parked
                     # for a later call to take.
-                    if _vector_client_instance is not None:
-                        _vector_client_instance._routing_prefetch = None
+                    _vector_client_instance._routing_prefetch = None
                     raise
                 _version_probe_done = True
                 _probed_release = parse_engine_version(getattr(caps, "release_version", None))
                 _probed_embedding_mode = getattr(caps, "embedding_mode", None)
                 _log.debug("cloud_engine_version_probe_ok")
-                if _vector_client_instance is not None:
-                    # Built before the probe for a prefetch: seed it now.
-                    _seed_from_probe(_vector_client_instance)
-        if _vector_client_instance is None:
-            # nexus-fryrd: constructed under the SAME tenant
-            # _resolve_collection_row's identity check reads -- see
-            # _process_default_tenant's docstring.
-            _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
-            if cloud_mode:
                 _seed_from_probe(_vector_client_instance)
     return _vector_client_instance
 
