@@ -149,6 +149,23 @@ def _bash3() -> Path | None:
     return bash if out == "3" else None
 
 
+#: Non-vacuity bound for the bash 3.x skip below (tests/test_skip_bound_lint.py):
+#: the behavioural half may skip only where /bin/bash is not 3.x, which is Linux
+#: CI; on macOS, the platform whose system shell is 3.2 and the one this guards,
+#: it must run, so the number of macOS skips allowed is zero.
+BASH32_MAX_SKIP_ON_DARWIN: int = 0
+
+
+def test_the_bash32_behavioural_half_runs_on_macos() -> None:
+    if sys.platform != "darwin":
+        return
+    skips = 0 if _bash3() is not None else 1
+    assert skips <= BASH32_MAX_SKIP_ON_DARWIN, (
+        "/bin/bash is not 3.x on this macOS host, so the bash 3.2 behavioural check would skip "
+        "on the one platform it exists for"
+    )
+
+
 _STUB_VARS = (
     "SMOKE_UID=4242\n"
     'SMOKE_OWNER_PREFIX="9.$SMOKE_UID"\n'

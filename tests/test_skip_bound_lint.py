@@ -558,6 +558,13 @@ def _has_local_bound(tree: ast.AST) -> bool:
                     sub in t.id for sub in _BOUND_ASSIGN_SUBSTRINGS
                 ):
                     return True
+        elif isinstance(node, ast.AnnAssign):
+            # A typed module constant (``FOO_MAX_SKIP: int = 0``) is the same
+            # bound; the repo wants type hints on module constants (nexus-ecjo8).
+            if isinstance(node.target, ast.Name) and any(
+                sub in node.target.id for sub in _BOUND_ASSIGN_SUBSTRINGS
+            ):
+                return True
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if any(sub in node.value for sub in _BOUND_ASSIGN_SUBSTRINGS):
                 return True
@@ -859,3 +866,11 @@ def test_keywords_match_whole_words_not_substrings():
     assert _classify_file("tests/test_tuple_error_table_pin.py", tree) == "gate-like"
     assert _classify_file("tests/test_plugin_structure.py", tree) == "gate-like"
     assert _classify_file("tests/scripts/test_reinstall_tool_generations.py", tree) == "gate-like"
+
+
+def test_a_typed_skip_budget_constant_counts_as_a_local_bound() -> None:
+    """``FOO_MAX_SKIP: int = 0`` is the same bound as ``FOO_MAX_SKIP = 0``; an
+    unrelated typed constant is not (nexus-ecjo8)."""
+    assert _has_local_bound(ast.parse("BASH32_MAX_SKIP_ON_DARWIN: int = 0\n"))
+    assert _has_local_bound(ast.parse("X_SKIP_BUDGET: int = 2\n"))
+    assert not _has_local_bound(ast.parse("TIMEOUT_SECONDS: int = 0\n"))
