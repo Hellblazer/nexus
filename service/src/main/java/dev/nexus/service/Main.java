@@ -396,6 +396,13 @@ public final class Main {
         // shutdown hook after the backend reaper and before ds.close(). Until the first read lands the set is empty and every single-collection
         // statement above the router threshold walks at hnsw.ef_search 1000, the safe direction.
         pciSweep.start();
+        // nexus-43ulx.19: the DDL half, on a task of its own beside the read half. It acts only when NX_SEARCH_PCI=1
+        // (start() schedules nothing otherwise) and only on the engine that holds the builder lock. Started after
+        // the read half so its first refresh() has a set to replace; stopped first in the hook's tail below.
+        String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
+        var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
+                dev.nexus.service.db.PgSession.startupPciSettings());
+        pciReconciler.start();
 
         log.info("event=service_ready port={}", service.getPort());
 
@@ -437,11 +444,10 @@ public final class Main {
         // RDR-227 (nexus-43ulx.17): the per-collection index builder's backend is named
         // nexus-pci-builder-<this boot's nonce> and runs as the admin role.
         String pciBuilderApplicationName = dev.nexus.service.vectors.PciBuilderSession.builderApplicationName(
-                dev.nexus.service.db.BackendReaper.bootNonce(applicationName));
+                pciBootNonce);
         // nexus-43ulx.19: the reconciler's scheduler stops here with shutdownNow() and NO await (an in-flight
-        // CREATE INDEX CONCURRENTLY is ended by the builder reaper below, not waited for). Nothing to stop until
-        // the reconciler exists; .19 replaces this no-op.
-        Runnable stopPciReconciler = () -> { };
+        // CREATE INDEX CONCURRENTLY is ended by the builder reaper below, not waited for).
+        Runnable stopPciReconciler = pciReconciler::stop;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");

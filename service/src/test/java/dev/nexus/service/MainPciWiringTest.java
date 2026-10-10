@@ -100,6 +100,41 @@ class MainPciWiringTest {
         String sweep = code(Files.readString(Path.of("src/main/java/dev/nexus/service/vectors/PciIndexSweep.java")));
         assertThat(sweep).as("a stop that waits starts the reaper late exactly when a read is hung on a silent socket")
             .doesNotContain("awaitTermination");
+        String reconciler = code(Files.readString(
+            Path.of("src/main/java/dev/nexus/service/vectors/PciReconciler.java")));
+        assertThat(reconciler).as("an in-flight CREATE INDEX CONCURRENTLY ignores the interrupt; the builder reaper"
+            + " ends it, so the hook must not wait for the pass").doesNotContain("awaitTermination");
+    }
+
+    /**
+     * nexus-43ulx.19: the DDL half is built with the admin values and the boot nonce, starts after the service and
+     * after the read half, and stops in the hook right after the listener and BEFORE the builder reaper, so a pass
+     * cannot open a new builder connection after the reaper has ended the old one.
+     */
+    @Test
+    void theReconcilerStartsAfterTheReadHalf_andStopsAfterTheListener_beforeTheReaper() throws Exception {
+        String src = code(main());
+        int serviceStart = src.indexOf("service.start();");
+        int sweepStart = src.indexOf("pciSweep.start();");
+        int create = src.indexOf("PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,");
+        int reconcilerStart = src.indexOf("pciReconciler.start();");
+        int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+        int stopBinding = src.indexOf("Runnable stopPciReconciler = pciReconciler::stop;");
+        int listenerStop = src.indexOf("service.stop();", hook);
+        int reconcilerStop = src.indexOf("stopPciReconciler.run();", hook);
+        int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
+
+        assertThat(create).as("built from the pool, the admin values, the boot nonce and the real sweep").isPositive();
+        assertThat(create).isGreaterThan(sweepStart);
+        assertThat(sweepStart).isGreaterThan(serviceStart);
+        assertThat(reconcilerStart).as("started after the read half").isGreaterThan(create);
+        assertThat(stopBinding).as("the hook's stop is the reconciler's own stop()").isPositive().isLessThan(hook);
+        assertThat(listenerStop).isGreaterThan(hook);
+        assertThat(reconcilerStop).as("stopped right after the listener").isGreaterThan(listenerStop);
+        assertThat(reaper).as("and before the builder reaper").isGreaterThan(reconcilerStop);
+        assertThat(src.indexOf("pciReconciler.start();", reconcilerStart + 1)).as("started once").isNegative();
+        assertThat(src.indexOf("stopPciReconciler.run();", reconcilerStop + 1)).as("stopped once").isNegative();
+        assertThat(src).as("the placeholder no-op is gone").doesNotContain("stopPciReconciler = () -> { }");
     }
 
     @Test

@@ -389,6 +389,22 @@ public final class PgSession {
         }
     }
 
+    /**
+     * Put {@code conn}'s network (socket read) timeout back to {@code timeoutMs}, for a connection that owns its own
+     * bound and is not a pool borrow (RDR-227's index builder, nexus-43ulx.19). {@link #setLocal} binds a short
+     * network timeout for {@code statement_timeout} that "does not outlive the borrow"; a connection that outlives
+     * its statement keeps it, and a 30-minute {@code CREATE INDEX CONCURRENTLY} behind a 31 second read bound would
+     * fail on the client side. The one place a network timeout is set outside {@link #setLocal} is here, so
+     * {@code NetworkBoundStatementTimeoutGateTest} stays the single audit point. A failure is logged and not thrown.
+     */
+    public static void restoreNetworkTimeout(java.sql.Connection conn, int timeoutMs) {
+        try {
+            conn.setNetworkTimeout(Runnable::run, timeoutMs);
+        } catch (java.sql.SQLException | RuntimeException e) {
+            log.warn("event=pg_network_timeout_not_set stage=restore error=\"{}\"", e.getMessage());
+        }
+    }
+
     private PgSession() {
     }
 

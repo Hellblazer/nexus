@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.db.BackendReaper;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.SchemaMigrator;
 import org.jooq.DSLContext;
@@ -289,6 +290,80 @@ public final class PciBuilderSession {
         }
 
         /**
+         * True while the pass can still send a statement: it holds the builder lock and has not ended for a
+         * migration, a privilege error or a lost connection. A request on a pass that is not live returns its
+         * ending outcome without sending anything, so a caller that counts outcomes must check this first.
+         */
+        public boolean live() {
+            return ended == null;
+        }
+
+        /**
+         * Check the migrator's lock now. When it is held the pass ends exactly as it does before a DDL statement
+         * ({@code event=pci_ddl_skipped}) and this returns true. A failed read throws: unknown is not "free".
+         */
+        public boolean migrationInProgress() {
+            if (ended != null) {
+                return skippedForMigration;
+            }
+            if (migrationHolds()) {
+                endForMigration();
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * Run {@code work} in ONE explicit transaction on this pass's admin connection, then commit. Autocommit is
+         * off for the duration and back on afterwards, so the DDL that follows still runs outside any transaction
+         * block. A failure rolls back and rethrows; if the connection is gone (terminated, or a network error)
+         * the pass ends as a failed statement does.
+         *
+         * @throws IllegalStateException when the pass is not live
+         */
+        public <T> T transaction(java.util.function.Function<DSLContext, T> work) {
+            if (ended != null) {
+                throw new IllegalStateException("the builder pass is over: " + ended);
+            }
+            try {
+                conn.setAutoCommit(false);
+                try {
+                    T result = work.apply(ctx);
+                    conn.commit();
+                    return result;
+                } catch (RuntimeException e) {
+                    try {
+                        conn.rollback();
+                    } catch (SQLException rollbackFailure) {
+                        e.addSuppressed(rollbackFailure);
+                    }
+                    throw e;
+                } finally {
+                    try {
+                        conn.setAutoCommit(true);
+                    } finally {
+                        // A transaction that bound a statement timeout also bound a short network timeout
+                        // (PgSession#setLocal); the DDL after it needs this connection's own, longer one.
+                        PgSession.restoreNetworkTimeout(conn, SOCKET_TIMEOUT_SECONDS * 1000);
+                    }
+                }
+            } catch (SQLException e) {
+                connectionLost(e.getSQLState());
+                throw new DataAccessException("builder transaction failed: " + e.getMessage(), e);
+            } catch (DataAccessException e) {
+                connectionLost(e.sqlState());
+                throw e;
+            }
+        }
+
+        private void connectionLost(String sqlState) {
+            if (sqlState != null && (sqlState.startsWith("08") || "57P01".equals(sqlState))) {
+                ended = DdlOutcome.FAILED;
+                close();
+            }
+        }
+
+        /**
          * Build the index for {@code collection} on {@code leaf}, whose embedding column is {@code embedding_<dim>}.
          * The name is {@link PciCatalog#indexName} of the leaf's model and tenant and the collection.
          */
@@ -385,11 +460,8 @@ public final class PciBuilderSession {
             }
             log.warn("event=pci_ddl_failed op={} index={} leaf={}.{} sqlstate={} cause=\"{}\"", op, indexName,
                 leaf.schema(), leaf.name(), sqlState, e.getMessage());
-            if (sqlState != null && (sqlState.startsWith("08") || "57P01".equals(sqlState))) {
-                // The connection is gone (network, or terminated by the migrator or shutdown): nothing more can run.
-                ended = DdlOutcome.FAILED;
-                close();
-            }
+            // If the connection is gone (network, or terminated by the migrator or shutdown) nothing more can run.
+            connectionLost(sqlState);
             return DdlOutcome.FAILED;
         }
 
@@ -435,6 +507,11 @@ public final class PciBuilderSession {
             try (java.sql.Statement st = conn.createStatement()) {
                 st.execute(sql);
             }
+        }
+
+        /** The connection's network timeout in milliseconds, for tests. */
+        int networkTimeoutMs() throws SQLException {
+            return conn.getNetworkTimeout();
         }
 
         /** The session's current value of {@code name}, for tests. */
