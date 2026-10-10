@@ -910,6 +910,8 @@ class PciReconcilerIntegrationTest {
             assertThat(r.status().failing()).isNull();
             assertThat(r.status().passInProgress()).isFalse();
             assertThat(r.status().passStartedAt()).isNull();
+            assertThat(r.status().sweepSeconds()).as("a standby reports the period it runs at (60), not the setting (600)")
+                .isEqualTo(60);
             assertThat(r.status().lastDdlPassAt()).as("this engine's own history survives becoming a standby")
                 .isEqualTo(completed);
             JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
@@ -1561,6 +1563,8 @@ class PciReconcilerIntegrationTest {
         assertThat(r.isRunning()).isFalse();
         assertThat(r.status().builderState()).isEqualTo(BuilderState.OFF);
         assertThat(r.status().building()).isNull();
+        assertThat(r.status().sweepSeconds()).as("the period the reconciler was built with (60), not the setting (600)")
+            .isEqualTo(60);
     }
 
     @Test

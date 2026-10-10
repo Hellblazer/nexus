@@ -788,6 +788,24 @@ class PciIndexSweepTest {
     }
 
     @Test
+    void aSetThatExpiredAndRecovered_isANewRun_soItsIndexesAreSinceTheRecoveryNotTheFirstRead() {
+        Instant t0 = Instant.parse("2026-10-10T08:00:00Z");
+        var clock = new MutableClock(t0);
+        sweep = new PciIndexSweep(() -> snapshot(index(HASH_A, true, "c1")), SETTINGS, clock);
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::since).isEqualTo(t0);
+
+        Instant recovered = t0.plus(Duration.ofSeconds(3 * 600).plus(PciCatalog.DEFAULT_READ_BOUND)).plusSeconds(1);
+        clock.set(recovered);
+        assertThat(sweep.validIndex(M, T, "c1")).as("expired").isEmpty();
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::since)
+            .as("the index was unanswerable in between, so the plan check must sample it again at once")
+            .isEqualTo(recovered);
+    }
+
+    @Test
     void aChangeOfTheSet_logsOneLineNamingWhatWasAddedAndRemoved_andAnUnchangedSetLogsNothing() {
         var state = new java.util.concurrent.atomic.AtomicReference<>(snapshot(index(HASH_A, true, "c1")));
         sweep = new PciIndexSweep(state::get, SETTINGS);

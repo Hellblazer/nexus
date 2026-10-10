@@ -44,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -561,8 +562,11 @@ class PciPlanAndRecallIntegrationTest {
     @Test
     @Order(3)
     void anIndexBeingBuilt_andAnInvalidOne_degradeToRows_andThePlanCheckReadsUsedFalse() throws Exception {
+        String appName = "pciplan-build";
+        java.util.concurrent.atomic.AtomicReference<CompletableFuture<Void>> buildRef =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        Throwable failure = null;
         try {
-            String appName = "pciplan-build";
             var activityApp = DSL.field(DSL.name("application_name"), String.class);
             var activityPid = DSL.field(DSL.name("pid"), Integer.class);
             var activityWait = DSL.field(DSL.name("wait_event_type"), String.class);
@@ -584,6 +588,7 @@ class PciPlanAndRecallIntegrationTest {
                         throw new IllegalStateException(e);
                     }
                 });
+                buildRef.set(build);
                 try {
                     java.util.function.Supplier<Integer> buildPid = () -> asSuperuser.select(activityPid).from(activity)
                         .where(activityApp.eq(appName)).and(activityWait.eq("Lock")).limit(1).fetchOne(0, Integer.class);
@@ -606,6 +611,12 @@ class PciPlanAndRecallIntegrationTest {
                         PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
                     }
                 } finally {
+                    // A failed assertion above must not let the build run on once the blocker lets go: end it first.
+                    try {
+                        terminateBackendsNamed(appName);
+                    } catch (Exception e) {
+                        System.out.println("PCI-CLEANUP could not end the build backend: " + e);
+                    }
                     blocker.rollback();
                 }
             }
@@ -614,10 +625,73 @@ class PciPlanAndRecallIntegrationTest {
             assertThat(sweep.refresh()).isTrue();
             assertThat(sweep.hasValidIndex(MODEL, TENANT, TARGET)).isFalse();
             degradedArmsReturnRows("invalid", hnswIndex);
+        } catch (Throwable t) {
+            failure = t;
+            throw t;
         } finally {
-            // A failure part-way must not leave the invalid index behind: the next tests would fail on "already exists".
-            dropIfExists(targetIndex);
+            cleanUpBuildTest(appName, buildRef.get(), failure);
         }
+    }
+
+    /**
+     * A failure part-way must not leave the invalid index behind (the next tests would fail on "already exists"), and
+     * the cleanup must not hide the failure: the build is ended and awaited before the DROP, so the DROP does not
+     * meet a concurrent CREATE INDEX CONCURRENTLY ("deadlock detected"), and a cleanup failure is added to the
+     * test's own failure as suppressed rather than replacing it.
+     */
+    private void cleanUpBuildTest(String appName, CompletableFuture<Void> build, Throwable primary) throws Exception {
+        Throwable[] first = {primary};
+        java.util.function.BiConsumer<String, Callable<?>> step = (what, action) -> {
+            try {
+                action.call();
+            } catch (Exception e) {
+                Exception wrapped = new IllegalStateException("cleanup: " + what, e);
+                if (first[0] == null) {
+                    first[0] = wrapped;
+                } else {
+                    first[0].addSuppressed(wrapped);
+                }
+            }
+        };
+        step.accept("end the build backend", () -> terminateBackendsNamed(appName));
+        if (build != null) {
+            step.accept("await the build statement", () -> {
+                try {
+                    build.get(BOUND.toSeconds(), java.util.concurrent.TimeUnit.SECONDS);
+                } catch (java.util.concurrent.ExecutionException e) {
+                    // The terminated statement ends exceptionally; that is the expected end.
+                }
+                return null;
+            });
+        }
+        step.accept("clear the build's Liquibase lock", () -> {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
+            }
+            return null;
+        });
+        step.accept("drop " + targetIndex, () -> {
+            dropIfExists(targetIndex);
+            return null;
+        });
+        if (primary == null && first[0] != null) {
+            throw first[0] instanceof Exception e ? e : new IllegalStateException(first[0]);
+        }
+    }
+
+    /** End every backend whose application_name is {@code appName}; none is not an error. */
+    private Object terminateBackendsNamed(String appName) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var pid = DSL.field(DSL.name("pid"), Integer.class);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.field(DSL.name("application_name"), String.class).eq(appName))
+                .and(pid.ne(DSL.function("pg_backend_pid", Integer.class)))
+                .fetch();
+        }
+        return null;
     }
 
     private void dropIfExists(String index) throws Exception {
@@ -808,7 +882,9 @@ class PciPlanAndRecallIntegrationTest {
     @Order(12)
     void aSampledArmsExplainIsNotCountedAsItsStatementTime() throws Exception {
         ensureTargetIndex();
-        long sleepMillis = 1500;
+        // 3000 ms of EXPLAIN against a 1500 ms bound: a slow 2-vCPU runner would have to take 1.5 s for one HNSW arm
+        // for the statement time to reach the bound, where the old 1500/750 pair needed only 0.75 s.
+        long sleepMillis = 3000;
         AtomicInteger explains = new AtomicInteger();
         PciPlanCheck slow = new PciPlanCheck(1, Duration.ofMinutes(15), Clock.systemUTC(), (ctx, q) -> {
             explains.incrementAndGet();

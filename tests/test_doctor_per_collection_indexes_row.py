@@ -375,6 +375,9 @@ def test_the_stall_threshold_follows_the_engines_reported_sweep_period() -> None
     assert _row(_status(last_ddl=timedelta(hours=3), sweep_seconds=3600)).warn is False
     # An engine that does not report the period is judged at the setting's default.
     assert _row(_status(last_ddl=timedelta(minutes=46), sweep_seconds=None)).warn is True
+    # ... and the default is 600 s (threshold 45 min), not a short period that would warn at 20 min.
+    assert _row(_status(last_ddl=timedelta(minutes=20), sweep_seconds=None)).warn is False
+    assert _row(_status(last_ddl=timedelta(minutes=44), sweep_seconds=None)).warn is False
 
 
 def test_a_standby_or_disabled_engine_with_an_old_last_pass_is_not_a_stall() -> None:

@@ -2,13 +2,26 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.nexus.service.vectors.PciIndexSet.ValidIndex;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.Savepoint;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -232,5 +245,91 @@ class PciPlanCheckTest {
         assertThat(PciPlanCheck.describePlan(null)).isEqualTo("top=\"\" scans=\"\"");
         assertThat(PciPlanCheck.describePlan("")).isEqualTo("top=\"\" scans=\"\"");
         assertThat(PciPlanCheck.describePlan("stub plan")).isEqualTo("top=\"\" scans=\"\"");
+    }
+
+    // ── sample(): the statement is built only for a sampled arm, and a plan without the index is a WARN ─────
+
+    /** A connection that accepts the savepoint calls the check makes and nothing else; no database. */
+    private static DSLContext savepointOnlyContext() {
+        Savepoint savepoint = (Savepoint) Proxy.newProxyInstance(PciPlanCheckTest.class.getClassLoader(),
+            new Class<?>[] {Savepoint.class}, (proxy, method, args) -> null);
+        Connection connection = (Connection) Proxy.newProxyInstance(PciPlanCheckTest.class.getClassLoader(),
+            new Class<?>[] {Connection.class}, (proxy, method, args) -> switch (method.getName()) {
+                case "setSavepoint" -> savepoint;
+                case "getAutoCommit" -> false;
+                case "isClosed" -> false;
+                default -> null;
+            });
+        return DSL.using(connection, SQLDialect.POSTGRES);
+    }
+
+    private static final String PLAN_WITHOUT_INDEX = """
+        Limit  (cost=1.00..2.00 rows=40 width=96)
+          ->  Index Scan using chunks_leaf_hnsw on chunks_leaf  (cost=0.00..1.00 rows=100 width=96)
+        """;
+    private static final String PLAN_WITH_INDEX = """
+        Limit  (cost=1.00..2.00 rows=40 width=96)
+          ->  Index Scan using pci_a on chunks_leaf  (cost=0.00..1.00 rows=100 width=96)
+        """;
+
+    private static List<ILoggingEvent> planCheckEvents(Runnable action) {
+        Logger logger = (Logger) LoggerFactory.getLogger(PciPlanCheck.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            action.run();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+        return List.copyOf(appender.list);
+    }
+
+    @Test
+    void sample_buildsTheStatementOnlyForASampledArm() {
+        var clock = new MutableClock(T0);
+        PciPlanCheck check = new PciPlanCheck(1_000_000, INTERVAL, clock, (ctx, statement) -> PLAN_WITH_INDEX);
+        ValidIndex a = index("pci_a", Instant.EPOCH);
+        DSLContext ctx = savepointOnlyContext();
+        var built = new AtomicInteger();
+
+        assertThat(check.sample(ctx, () -> {
+            built.incrementAndGet();
+            return DSL.using(SQLDialect.POSTGRES).selectOne();
+        }, a, "c1")).as("the first arm of the index").isTrue();
+        assertThat(built).as("built for the sampled arm").hasValue(1);
+
+        for (int i = 0; i < 50; i++) {
+            assertThat(check.sample(ctx, () -> {
+                built.incrementAndGet();
+                return DSL.using(SQLDialect.POSTGRES).selectOne();
+            }, a, "c1")).as("arm %d, inside the interval", i).isFalse();
+        }
+        assertThat(built).as("an unsampled arm never builds its statement").hasValue(1);
+    }
+
+    @Test
+    void sample_logsAPlanThatDoesNotNameTheIndexAtWarn_andOneThatDoesAtInfo() {
+        var clock = new MutableClock(T0);
+        ValidIndex a = index("pci_a", Instant.EPOCH);
+        DSLContext ctx = savepointOnlyContext();
+
+        PciPlanCheck missing = new PciPlanCheck(1_000_000, INTERVAL, clock, (c, statement) -> PLAN_WITHOUT_INDEX);
+        List<ILoggingEvent> unused = planCheckEvents(
+            () -> missing.sample(ctx, () -> DSL.using(SQLDialect.POSTGRES).selectOne(), a, "c1"));
+        assertThat(unused).singleElement().satisfies(e -> {
+            assertThat(e.getLevel()).as("used=false is a WARN").isEqualTo(Level.WARN);
+            assertThat(e.getFormattedMessage()).contains("event=pci_plan_check").contains("used=false")
+                .contains("index=pci_a").contains("collection=c1").contains("chunks_leaf_hnsw");
+        });
+
+        PciPlanCheck named = new PciPlanCheck(1_000_000, INTERVAL, clock, (c, statement) -> PLAN_WITH_INDEX);
+        List<ILoggingEvent> used = planCheckEvents(
+            () -> named.sample(ctx, () -> DSL.using(SQLDialect.POSTGRES).selectOne(), a, "c1"));
+        assertThat(used).singleElement().satisfies(e -> {
+            assertThat(e.getLevel()).as("used=true is INFO").isEqualTo(Level.INFO);
+            assertThat(e.getFormattedMessage()).contains("used=true");
+        });
     }
 }
