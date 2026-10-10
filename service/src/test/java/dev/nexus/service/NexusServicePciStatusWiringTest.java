@@ -37,7 +37,7 @@ class NexusServicePciStatusWiringTest {
     private PostgreSQLContainer<?> pg;
     private com.zaxxer.hikari.HikariDataSource ds;
     private NexusService service;
-    private final HttpClient http = HttpClient.newHttpClient();
+    private final HttpClient http = TestHttp.client();
 
     @BeforeAll
     void startAll() throws Exception {

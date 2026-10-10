@@ -38,7 +38,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
@@ -427,7 +426,7 @@ class PciReconcilerIntegrationTest {
             () -> StatusHandler.PerCollectionIndexes.of(sweep.status(), r.status())));
         server.start();
         try {
-            HttpResponse<String> resp = HttpClient.newHttpClient().send(
+            HttpResponse<String> resp = dev.nexus.service.TestHttp.client().send(
                 HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/status"))
                     .GET().build(), HttpResponse.BodyHandlers.ofString());
             assertThat(resp.statusCode()).isEqualTo(200);
