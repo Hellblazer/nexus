@@ -393,6 +393,36 @@ public final class SchemaMigrator {
     public static final long MIGRATION_ADVISORY_LOCK_KEY = 0x6e65787573L;
 
     /**
+     * The pid of the session holding {@link #MIGRATION_ADVISORY_LOCK_KEY} in the current database, or -1 when no
+     * session holds it. The one copy of the {@code pg_locks} predicate: {@link MigrationLock} reads it for its
+     * log line, and the per-collection index builder (RDR-227, nexus-43ulx.16) reads it to skip DDL while a
+     * migration walks. Advisory locks are database-scoped ({@code pg_locks.database} is the database oid for an
+     * advisory lock), so the read is limited to this database's rows.
+     *
+     * @throws DataAccessException when {@code pg_locks} cannot be read; a caller that gates DDL on the answer
+     *                             must treat that as "unknown", never as "not held"
+     */
+    public static int migrationLockHolderPid(DSLContext ctx) {
+        Integer pid = ctx.select(DSL.field(DSL.name("pid"), Integer.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
+            .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+            .and(DSL.field(DSL.name("granted"), Boolean.class).isTrue())
+            .and(DSL.field(DSL.name("database"), Long.class).cast(SQLDataType.BIGINT)
+                .eq(DSL.field(ctx.select(DSL.field(DSL.name("oid"), Long.class).cast(SQLDataType.BIGINT))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_database")))
+                    .where(DSL.field(DSL.name("datname"), String.class)
+                        .eq(DSL.function("current_database", SQLDataType.VARCHAR))))))
+            .and(DSL.field(DSL.name("classid"), Long.class).cast(SQLDataType.BIGINT)
+                .eq(MIGRATION_ADVISORY_LOCK_KEY >>> 32))
+            .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT)
+                .eq(MIGRATION_ADVISORY_LOCK_KEY & 0xffffffffL))
+            .and(DSL.field(DSL.name("objsubid"), Integer.class).eq(1))
+            .limit(1)
+            .fetchOne(0, Integer.class);
+        return pid == null ? -1 : pid;
+    }
+
+    /**
      * How long a migrator waits for another live migrator's advisory lock before it refuses to boot.
      * Liquibase's own default wait for its changelog lock, so a contended boot fails on the same clock
      * it always has.
@@ -537,6 +567,9 @@ public final class SchemaMigrator {
                     new ClassLoaderResourceAccessor(),
                     database);
                  MigrationLock migrationLock = MigrationLock.acquire(conn, database, migrationLockWait)) {
+
+                // RDR-227 (nexus-43ulx.17): the lock is held, nothing has walked. End any index builder first.
+                terminatePciBuilders(conn);
 
                 // Count pending changesets for the structured log entry.
                 int pending = liquibase.listUnrunChangeSets(
@@ -750,6 +783,57 @@ public final class SchemaMigrator {
                 .fetchOne();
         } catch (DataAccessException e) {
             throw new SQLException("pinning the migration session's search_path to public failed", e);
+        }
+    }
+
+    /**
+     * The {@code application_name} prefix of the per-collection index builder's backend (RDR-227). Equal to
+     * {@code PciBuilderSession.APPLICATION_NAME_PREFIX}; held here too because {@code db} does not depend on
+     * {@code vectors}, and {@code PciBuilderSessionIntegrationTest}/{@code PciBuilderTerminationIntegrationTest}
+     * pin the two together through the real backend's name.
+     */
+    static final String PCI_BUILDER_APPLICATION_NAME_PREFIX = "nexus-pci-builder-";
+
+    /**
+     * RDR-227 Migrations (nexus-43ulx.17): end every per-collection index builder backend in this database before
+     * the walk. A walk that alters a leaf queues behind an in-flight {@code CREATE INDEX CONCURRENTLY}, and the
+     * build waits for the walk's transactions in turn; ending the build's session settles it. Terminate, never
+     * cancel: a cancel ends the statement, not the pass, and the pass would start its next build in the middle of
+     * the walk. Ending the session ends the pass ({@code PciBuilderSession} reads {@code 57P01} and {@code 08xxx}
+     * as the end of the pass) and releases the builder's advisory lock, so no later build starts; the interrupted
+     * build leaves an INVALID index that a later pass drops and rebuilds.
+     *
+     * <p>Called once the migration lock is held, so the builder's own pre-statement check (it skips DDL while the
+     * migrator holds the lock) and this termination cover both orders: a builder that started its statement before
+     * the lock is ended here, and one that checks afterwards skips.
+     *
+     * <p>Scope: this database only ({@code datname = current_database()}), and not this session. Failure to read or
+     * signal is logged and the walk goes on: the builder is optional, and a boot that dies because it could not end
+     * one would turn an optional feature into an outage. The signal needs the target's role, which is the
+     * migrator's own when {@code NX_DB_ADMIN_*} serve both, as they do in the supported configuration. A failure
+     * is logged at ERROR, not WARN: with a split-role configuration it means a build the walk can deadlock with
+     * was left running, which an operator must see.
+     */
+    private static void terminatePciBuilders(Connection conn) {
+        var pid = DSL.field(DSL.name("pid"), Integer.class);
+        var applicationName = DSL.field(DSL.name("application_name"), String.class);
+        var datname = DSL.field(DSL.name("datname"), String.class);
+        try {
+            int terminated = 0;
+            for (Boolean ended : DSL.using(conn, SQLDialect.POSTGRES)
+                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                    .where(applicationName.startsWith(PCI_BUILDER_APPLICATION_NAME_PREFIX))
+                    .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
+                    .and(datname.eq(DSL.function("current_database", SQLDataType.VARCHAR)))
+                    .fetch(0, Boolean.class)) {
+                if (Boolean.TRUE.equals(ended)) {
+                    terminated++;
+                }
+            }
+            log.info("event=pci_builders_terminated count={}", terminated);
+        } catch (DataAccessException e) {
+            log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
         }
     }
 
@@ -1358,18 +1442,7 @@ public final class SchemaMigrator {
         /** The pid holding the migration lock, or -1 when none is visible; for the log line only. */
         private static int holderPid(DSLContext ctx) {
             try {
-                Integer pid = ctx.select(DSL.field(DSL.name("pid"), Integer.class))
-                    .from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
-                    .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
-                    .and(DSL.field(DSL.name("granted"), Boolean.class).isTrue())
-                    .and(DSL.field(DSL.name("classid"), Long.class).cast(SQLDataType.BIGINT)
-                        .eq(MIGRATION_ADVISORY_LOCK_KEY >>> 32))
-                    .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT)
-                        .eq(MIGRATION_ADVISORY_LOCK_KEY & 0xffffffffL))
-                    .and(DSL.field(DSL.name("objsubid"), Integer.class).eq(1))
-                    .limit(1)
-                    .fetchOne(0, Integer.class);
-                return pid == null ? -1 : pid;
+                return migrationLockHolderPid(ctx);
             } catch (DataAccessException e) {
                 return -1;
             }

@@ -647,7 +647,17 @@ from __future__ import annotations
 #: (nexus-nqsa7), stale changelog-lock recovery (nexus-8sph2) and the per-arm
 #: phase log (RDR-226 Phase 0). The one wire entry is [additive]; the engine
 #: deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 156)
+#:
+#: 7.77.0 pairs with engine-service-v0.1.159 (tagged 2026-10-10 on abc96883c,
+#: deployed and gated 17:34Z), which skips v0.1.157 and v0.1.158: both were
+#: deployed to the managed service and never pinned. v0.1.159 carries RDR-227
+#: (ef_search 1000 for a single collection with no index of its own, from
+#: v0.1.157; per-collection partial HNSW indexes with their builder, reconciler
+#: and the `per_collection_indexes` status object, from v0.1.158), the batched
+#: `POST /v1/taxonomy/topics/by_ids` route (nexus-w032x) and the cardinality
+#: router default 20000 (nexus-43ulx.35). No changeset. Both wire entries are
+#: [additive]; the engine deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 159)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

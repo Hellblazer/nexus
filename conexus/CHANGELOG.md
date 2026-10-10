@@ -1,5 +1,9 @@
 # Changelog
 
+## [7.77.0] - 2026-10-10
+
+Plugin version aligned with conexus 7.77.0. No plugin-side changes: `PENDING_RELEASE.md` held no entries.
+
 ## [7.76.0] - 2026-10-09
 
 Plugin version aligned with conexus 7.76.0. This plugin change becomes live at this pin (the deferred `PENDING_RELEASE.md` entry, now emptied):

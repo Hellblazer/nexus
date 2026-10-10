@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -199,8 +200,33 @@ def _uniform_embedding_matrix(
 #: operator still has to fill in by hand is only half-reachable, and calling
 #: that "swept the sibling" overstated it (round-4 critique).
 #: Concurrent by-id topic reads in :meth:`HttpTaxonomyStore.get_labels_for_ids`
-#: (nexus-w032x); the engine has no batched by-id route.
+#: (nexus-w032x), used only against an engine without ``/topics/by_ids``.
 _LABEL_FETCH_WORKERS: int = 8
+
+#: Ids per ``POST /v1/taxonomy/topics/by_ids`` request: the engine's
+#: ``TaxonomyRepository.MAX_TOPICS_BY_IDS`` (nexus-w032x). Parity-pinned
+#: against the Java constant by tests/test_w032x_search_round_trips.py.
+_TOPICS_BY_IDS_PAGE: int = 300
+
+#: How long an answer that means "this engine or edge does not serve
+#: ``/topics/by_ids``" (404, the edge refusing the path with 403, 405, 501) is
+#: trusted before the route is probed again. Same posture as the catalog's
+#: chash_positions memo: an old engine costs one extra round trip per
+#: interval, and a process that outlives an engine upgrade starts using the
+#: route without a restart.
+_TOPICS_BY_IDS_ROUTE_RETRY_S: float = 600.0
+
+#: How long a failure of a PRESENT route (a 5xx, a transport error, a
+#: malformed body) is trusted. Briefer: it is not the expected pre-upgrade
+#: state. The pooled per-id path serves the call meanwhile.
+_TOPICS_BY_IDS_FAILURE_RETRY_S: float = 60.0
+
+#: Statuses on which the route is written off as absent.
+_TOPICS_BY_IDS_ABSENT_CODES: frozenset[int] = frozenset({403, 404, 405, 501})
+
+#: Clock for the by_ids backoff; a module alias so a test can move it without
+#: freezing time.monotonic for the whole process.
+_monotonic = time.monotonic
 
 _REBUILD_REMEDY = (
     "A rebuild cannot preserve operator labels across incommensurable "
@@ -2709,35 +2735,87 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def get_labels_for_ids(self, topic_ids: list[int]) -> dict[int, str]:
         """Return {topic_id: label} for given ids.
 
-        The engine has no batched by-id route, and search's topic grouping
-        (the CLI default, cluster_by="semantic") calls this with every topic
-        in the result window: 9 serial GETs in the 7.64.1 shakeout profile
-        (nexus-w032x). The lookups are independent reads, so they run in a
-        small pool; the result keeps the input order.
+        Search's topic grouping (the CLI default, cluster_by="semantic") calls
+        this with every topic in the result window: 9 serial GETs in the 7.64.1
+        shakeout profile, about 39 on a default managed search (nexus-w032x).
+        With more than one id it makes ONE ``POST /topics/by_ids`` request per
+        <=300 ids. An engine without the route is remembered for
+        ``_TOPICS_BY_IDS_ROUTE_RETRY_S`` and served by the pooled per-id path;
+        a failing route falls back the same way for
+        ``_TOPICS_BY_IDS_FAILURE_RETRY_S``. Ids with no topic are omitted; the
+        result keeps the input order.
         """
+        ids = list(dict.fromkeys(topic_ids))
+        by_id = self._topics_by_ids(ids) if len(ids) > 1 else None
+        topics: list[dict[str, Any] | None]
+        if by_id is not None:
+            topics = [by_id.get(int(t)) for t in ids]
+        else:
+            topics = self._topics_per_id(ids)
+        return {tid: t["label"] for tid, t in zip(ids, topics) if t}
+
+    #: ``(monotonic start, window)`` of the last ``/topics/by_ids`` write-off,
+    #: per store instance (per process: the stores are process-lifetime).
+    _topics_by_ids_backoff: tuple[float, float] | None = None
+
+    def _topics_by_ids(self, ids: list[int]) -> dict[int, dict[str, Any]] | None:
+        """Topics for *ids* from ``POST /topics/by_ids``, keyed by id; ids with
+        no topic are absent. ``None`` when the route cannot serve the call (the
+        caller uses the per-id path): written off, absent, failing or broken.
+        """
+        backoff = self._topics_by_ids_backoff
+        if backoff is not None and _monotonic() - backoff[0] < backoff[1]:
+            return None
+        found: dict[int, dict[str, Any]] = {}
+        for start in range(0, len(ids), _TOPICS_BY_IDS_PAGE):
+            page = [int(t) for t in ids[start : start + _TOPICS_BY_IDS_PAGE]]
+            try:
+                rows = self._post("/topics/by_ids", {"ids": page}, mutates=False)
+            except httpx.HTTPStatusError as exc:
+                code = exc.response.status_code if exc.response is not None else 0
+                if code in _TOPICS_BY_IDS_ABSENT_CODES:
+                    self._topics_by_ids_backoff = (_monotonic(), _TOPICS_BY_IDS_ROUTE_RETRY_S)
+                    _log.debug("http_taxonomy_store.topics_by_ids_route_absent", status=code)
+                else:
+                    self._topics_by_ids_backoff = (_monotonic(), _TOPICS_BY_IDS_FAILURE_RETRY_S)
+                    _log.debug("http_taxonomy_store.topics_by_ids_failed", status=code)
+                return None
+            except Exception as exc:  # noqa: BLE001 — the per-id path decides whether this is fatal
+                self._topics_by_ids_backoff = (_monotonic(), _TOPICS_BY_IDS_FAILURE_RETRY_S)
+                _log.debug("http_taxonomy_store.topics_by_ids_failed", error=type(exc).__name__)
+                return None
+            if not isinstance(rows, list) or not all(
+                isinstance(r, dict) and "id" in r and "label" in r for r in rows
+            ):
+                self._topics_by_ids_backoff = (_monotonic(), _TOPICS_BY_IDS_FAILURE_RETRY_S)
+                _log.debug("http_taxonomy_store.topics_by_ids_malformed")
+                return None
+            for r in rows:
+                found[int(r["id"])] = r
+        return found
+
+    def _topics_per_id(self, ids: list[int]) -> list[dict[str, Any] | None]:
+        """One ``GET /topics/by_id`` per id, in a small pool, in input order."""
         from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only when labels are fetched
 
-        ids = list(dict.fromkeys(topic_ids))
         if len(ids) <= 1:
-            topics = [self.get_topic_by_id(t) for t in ids]
-        else:
-            # The client's self-heal (re-resolve on a 401 or reset) is
-            # unlocked and retries once per call; several pool workers
-            # failing together can each exhaust their retry where the serial
-            # loop heals on the first (review of 791bc1a81). So the ids that
-            # failed in the pool are retried serially, and only those (a
-            # blanket re-fetch doubled the load at exactly that moment;
-            # review of 80fdf540c). A genuine failure still raises.
-            fetched: dict[int, Any] = {}
-            failed: list[int] = []
-            with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
-                futures = {tid: pool.submit(self.get_topic_by_id, tid) for tid in ids}
-            for tid, fut in futures.items():
-                try:
-                    fetched[tid] = fut.result()
-                except Exception:  # noqa: BLE001 — retried serially below
-                    failed.append(tid)
-            for tid in failed:
-                fetched[tid] = self.get_topic_by_id(tid)
-            topics = [fetched[t] for t in ids]
-        return {tid: t["label"] for tid, t in zip(ids, topics) if t}
+            return [self.get_topic_by_id(t) for t in ids]
+        # The client's self-heal (re-resolve on a 401 or reset) is
+        # unlocked and retries once per call; several pool workers
+        # failing together can each exhaust their retry where the serial
+        # loop heals on the first (review of 791bc1a81). So the ids that
+        # failed in the pool are retried serially, and only those (a
+        # blanket re-fetch doubled the load at exactly that moment;
+        # review of 80fdf540c). A genuine failure still raises.
+        fetched: dict[int, Any] = {}
+        failed: list[int] = []
+        with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
+            futures = {tid: pool.submit(self.get_topic_by_id, tid) for tid in ids}
+        for tid, fut in futures.items():
+            try:
+                fetched[tid] = fut.result()
+            except Exception:  # noqa: BLE001 — retried serially below
+                failed.append(tid)
+        for tid in failed:
+            fetched[tid] = self.get_topic_by_id(tid)
+        return [fetched[t] for t in ids]

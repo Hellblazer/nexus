@@ -111,6 +111,62 @@ public final class Main {
         hikari.addDataSourceProperty("ApplicationName", applicationName);
         var ds = new HikariDataSource(hikari);
 
+        // Boot validation of every env-resolved PgSession setting. PgSession resolves them in static
+        // initializers, so the FIRST PgSession static call anywhere in the process runs the parse, and a malformed
+        // value there arrives as ExceptionInInitializerError. This block is that first call on purpose: it needs
+        // only the pool, and it runs before anything else that touches PgSession (LocalOnnxAdmission.fromEnv in
+        // the local-mode branch below, then the embedding-profile seed through TenantScope), so the one catch
+        // below reports the failure as event=pg_session_env_invalid and exits 1 instead of letting a stack trace
+        // escape main. MainPciWiringTest pins this order; nexus-43ulx.12 fix round (review I3).
+        // nexus-4ktfm review fold: force NX_HNSW_EF_SEARCH validation NOW —
+        // PgSession resolves it in a static initializer, and without this
+        // boot-time touch a malformed value would surface only at the first
+        // query and then poison the class (NoClassDefFoundError) for the
+        // process's life, invisible to health checks. Throwable, not Exception:
+        // a static-init failure arrives as ExceptionInInitializerError.
+        try {
+            log.info("event=hnsw_ef_search_floor floor={}",
+                     dev.nexus.service.db.PgSession.startupEfSearchFloor());
+            // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
+            log.info("event=search_statement_timeout timeout_ms={}",
+                     dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
+            // nexus-wbfpw.47: the search scan budget. Validates NX_HNSW_MAX_SCAN_TUPLES /
+            // NX_HNSW_SCAN_MEM_BUDGET_MB, reads the engine role's effective work_mem and
+            // derives hnsw.scan_mem_multiplier from the fixed memory budget.
+            var scanBudget = dev.nexus.service.db.PgSession.startupScanBudget(
+                org.jooq.impl.DSL.using(ds, org.jooq.SQLDialect.POSTGRES));
+            log.info("event=hnsw_scan_budget max_scan_tuples={} work_mem_bytes={} "
+                     + "mem_budget_bytes={} mem_multiplier={} effective_mem_bytes={}",
+                     scanBudget.maxScanTuples(), scanBudget.workMemBytes(),
+                     scanBudget.budgetBytes(), scanBudget.memMultiplier(),
+                     scanBudget.effectiveMemBytes());
+            // nexus-tu8wp.6: same fail-fast for the cardinality router's NX_SEARCH_EXACT_MAX_ROWS.
+            log.info("event=search_exact_router max_rows={}",
+                     dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
+            // nexus-43ulx.10 (RDR-227): same fail-fast for the four NX_SEARCH_PCI* settings; logs
+            // event=pci_settings, plus a WARN when B > T (T > 0).
+            dev.nexus.service.db.PgSession.logPciBootSettings(
+                dev.nexus.service.db.PgSession.startupPciSettings(),
+                dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
+            // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
+            log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
+                     dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
+                     dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
+            // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
+            log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
+                     dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());
+        } catch (Throwable t) {
+            ds.close();
+            // One catch for every env-resolved PgSession bound above (ef_search,
+            // the search statement timeout, the scan budget, the taxonomy assign bounds, the network
+            // bound margin); the
+            // parse's own message names the variable that failed.
+            // A static-init failure arrives wrapped; its message is null and the cause names the variable.
+            Throwable cause = (t instanceof ExceptionInInitializerError && t.getCause() != null) ? t.getCause() : t;
+            log.error("event=pg_session_env_invalid error=\"{}\"", cause.getMessage(), t);
+            System.exit(1);
+        }
+
         // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
         // Run Liquibase BEFORE the HTTP server binds so the service never serves
         // requests against an unmigrated database.  Fail fast on any error so
@@ -120,7 +176,9 @@ public final class Main {
         // pool whose credentials have DDL rights (schema-owner or superuser).
         // Falls back to NX_DB_* when NX_DB_ADMIN_* are absent, covering dev/test
         // setups where the application role also owns the schema.
-        var migrationDs = buildMigrationDataSource(dbUrl, dbUser, dbPass);
+        // RDR-227: the resolved admin values stay in scope for the per-collection index builder.
+        var adminConnection = dev.nexus.service.db.AdminConnection.resolve(System::getenv, dbUrl, dbUser, dbPass);
+        var migrationDs = buildMigrationDataSource(adminConnection);
         try {
             SchemaMigrator.migrate(migrationDs);
         } catch (SchemaMigrator.MigrationException e) {
@@ -272,10 +330,6 @@ public final class Main {
                     reranker.modelToken());
         }
         var tenantScope = new TenantScope(ds);
-        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter,
-                                                  qryEmbedRouter);
-        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
-        pgVectorRepo.startupFanoutArmPermits();
 
         // Embedding profile (RDR-204 Phase 1, bead nexus-ft04v.6): the engine is
         // the only writer of nexus.embedding_profile, and this mode decision
@@ -308,49 +362,6 @@ public final class Main {
             System.exit(1);
         }
 
-        // nexus-4ktfm review fold: force NX_HNSW_EF_SEARCH validation NOW —
-        // PgSession resolves it in a static initializer, and without this
-        // boot-time touch a malformed value would surface only at the first
-        // query and then poison the class (NoClassDefFoundError) for the
-        // process's life, invisible to health checks. Same fail-fast-at-boot
-        // ordering as the PoolerModeCheck above. Throwable, not Exception:
-        // a static-init failure arrives as ExceptionInInitializerError.
-        try {
-            log.info("event=hnsw_ef_search_floor floor={}",
-                     dev.nexus.service.db.PgSession.startupEfSearchFloor());
-            // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
-            log.info("event=search_statement_timeout timeout_ms={}",
-                     dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
-            // nexus-wbfpw.47: the search scan budget. Validates NX_HNSW_MAX_SCAN_TUPLES /
-            // NX_HNSW_SCAN_MEM_BUDGET_MB, reads the engine role's effective work_mem and
-            // derives hnsw.scan_mem_multiplier from the fixed memory budget.
-            var scanBudget = dev.nexus.service.db.PgSession.startupScanBudget(
-                org.jooq.impl.DSL.using(ds, org.jooq.SQLDialect.POSTGRES));
-            log.info("event=hnsw_scan_budget max_scan_tuples={} work_mem_bytes={} "
-                     + "mem_budget_bytes={} mem_multiplier={} effective_mem_bytes={}",
-                     scanBudget.maxScanTuples(), scanBudget.workMemBytes(),
-                     scanBudget.budgetBytes(), scanBudget.memMultiplier(),
-                     scanBudget.effectiveMemBytes());
-            // nexus-tu8wp.6: same fail-fast for the cardinality router's NX_SEARCH_EXACT_MAX_ROWS.
-            log.info("event=search_exact_router max_rows={}",
-                     dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
-            // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
-            log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
-                     dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
-                     dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
-            // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
-            log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
-                     dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());
-        } catch (Throwable t) {
-            ds.close();
-            // One catch for every env-resolved PgSession bound above (ef_search,
-            // the search statement timeout, the scan budget, the taxonomy assign bounds, the network
-            // bound margin); the
-            // parse's own message names the variable that failed.
-            log.error("event=pg_session_env_invalid error=\"{}\"", t.getMessage(), t);
-            System.exit(1);
-        }
-
         // RDR-205 (bead nexus-em75s.4): load + boot-check the tuple template
         // registry BEFORE the service starts serving — a breach (an
         // unparseable/malformed template, or a claim-log TTL that does not
@@ -369,9 +380,35 @@ public final class Main {
             return;
         }
 
+        // nexus-43ulx.12 (RDR-227): the router's valid-index set, built from the NX_SEARCH_PCI* settings the boot
+        // validation block after the pool (above the schema migration) has already parsed, and handed to the
+        // repository as its only index set (the empty default belongs to tests, never to production).
+        var pciSweep = dev.nexus.service.vectors.PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings());
+        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter, qryEmbedRouter, pciSweep);
+        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
+        pgVectorRepo.startupFanoutArmPermits();
+
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
                 localEmbedActivitySupplier, tupleTemplateRegistry);
         service.start();
+        // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
+        // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
+        // shutdown hook after the backend reaper and before ds.close(). Until the first read lands the set is empty and every single-collection
+        // statement above the router threshold walks at hnsw.ef_search 1000, the safe direction.
+        pciSweep.start();
+        // nexus-43ulx.19: the DDL half, on a task of its own beside the read half. It acts only when NX_SEARCH_PCI=1
+        // (start() schedules nothing otherwise) and only on the engine that holds the builder lock. Started after
+        // the read half so its first refresh() has a set to replace; stopped in the hook right after the listener and
+        // before the builder reaper, so a pass cannot open a new builder connection after the reaper ended the old one.
+        String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
+        var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
+                dev.nexus.service.db.PgSession.startupPciSettings());
+        pciReconciler.start();
+        // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
+        // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the
+        // route is registered in NexusService's constructor, before either half exists; the key is omitted until now.
+        service.perCollectionIndexes(() -> dev.nexus.service.http.StatusHandler.PerCollectionIndexes.of(
+                pciSweep.status(), pciReconciler.status()));
 
         log.info("event=service_ready port={}", service.getPort());
 
@@ -410,10 +447,20 @@ public final class Main {
             }, () -> log.warn("event=parent_death_watchdog_skipped reason=no_parent_handle"));
         }
 
+        // RDR-227 (nexus-43ulx.17): the per-collection index builder's backend is named
+        // nexus-pci-builder-<this boot's nonce> and runs as the admin role.
+        String pciBuilderApplicationName = dev.nexus.service.vectors.PciBuilderSession.builderApplicationName(
+                pciBootNonce);
+        // nexus-43ulx.19: the reconciler's scheduler stops here with shutdownNow() and NO await (an in-flight
+        // CREATE INDEX CONCURRENTLY is ended by the builder reaper below, not waited for).
+        Runnable stopPciReconciler = pciReconciler::stop;
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
-            // nexus-g17tf: FIRST after the listener stops, ahead of the embedder
+            stopPciReconciler.run();
+            // nexus-g17tf: right after the listener stops and the reconciler's stop
+            // (both return at once: neither waits), ahead of the embedder
             // closes (each can wait up to 5s) so the reaper always runs inside a
             // 10s container stop grace. Hikari's close aborts the sockets, and a
             // CPU-bound backend never notices a closed socket; only the postmaster
@@ -421,9 +468,21 @@ public final class Main {
             // a pool borrow (the pool is what the runaways hold). SIGKILL (OOM, an
             // expired grace) runs no hook at all: that path is bounded only by the
             // statement_timeout on the search transactions.
-            dev.nexus.service.db.BackendReaper.terminateOwnBackends(
+            //
+            // nexus-43ulx.17: the pool's reaper (application role) and the builder's
+            // (admin role: pg_terminate_backend needs the target's role) run TOGETHER
+            // under one 9 s deadline. Worst case: each call is 3 s connect + 6 s socket
+            // read = 9 s, so in sequence they could take 18 s and miss the 10 s stop
+            // grace; together the pair costs 9 s, what the pool's call alone always did.
+            // A call still running at the deadline is abandoned and logged.
+            dev.nexus.service.db.BackendReaper.terminateAtShutdown(
                     dbUrl, dbUser, dbPass, applicationName,
-                    ds.getHikariPoolMXBean().getActiveConnections());
+                    ds.getHikariPoolMXBean().getActiveConnections(),
+                    adminConnection, pciBuilderApplicationName);
+            // nexus-43ulx.12: end the catalog reads before the pool they borrow from closes. AFTER the reaper and
+            // never waiting: a read on a silent socket ignores the interrupt, and the reaper has a 10 s grace to
+            // keep; closing the pool below aborts that socket.
+            pciSweep.stop();
             // doc and qry routers each hold their OWN AdmissionControlledEmbedder
             // (different acquisition policy — see LocalOnnxAdmission), but both
             // wrap the SAME underlying "bge" delegate, so closing either
@@ -450,40 +509,18 @@ public final class Main {
      * {@code defaultUrl/defaultUser/defaultPass} (the regular application
      * credentials) for dev/test setups where one role owns both DDL and DML.
      *
-     * <p><strong>Partial-config guard</strong>: if any one of {@code NX_DB_ADMIN_URL},
-     * {@code NX_DB_ADMIN_USER}, or {@code NX_DB_ADMIN_PASS} is set, all three must be
-     * set. A partial configuration (e.g. ADMIN_USER set but ADMIN_PASS absent) would
-     * silently mix admin and app credentials, producing a cryptic auth error at connect
-     * time instead of a clear startup failure.
+     * <p>The partial-config guard (all three {@code NX_DB_ADMIN_*} values or none) lives in
+     * {@link dev.nexus.service.db.AdminConnection#resolve}, which {@code main} calls once; this method
+     * only turns the resolved values into a pool.
      *
      * <p>Pool size 1: Liquibase uses a single connection sequentially.
      */
-    private static HikariDataSource buildMigrationDataSource(String defaultUrl,
-                                                              String defaultUser,
-                                                              String defaultPass) {
-        String adminUrl  = System.getenv("NX_DB_ADMIN_URL");
-        String adminUser = System.getenv("NX_DB_ADMIN_USER");
-        String adminPass = System.getenv("NX_DB_ADMIN_PASS");
-
-        // Partial-config guard: require all-or-nothing.
-        long adminSet = (adminUrl != null ? 1 : 0)
-                      + (adminUser != null ? 1 : 0)
-                      + (adminPass != null ? 1 : 0);
-        if (adminSet > 0 && adminSet < 3) {
-            throw new IllegalStateException(
-                "Partial NX_DB_ADMIN_* configuration detected (" + adminSet + "/3 vars set). " +
-                "Set all of NX_DB_ADMIN_URL, NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS, " +
-                "or none (to fall back to NX_DB_* credentials).");
-        }
-
-        String url  = adminSet == 3 ? adminUrl  : defaultUrl;
-        String user = adminSet == 3 ? adminUser : defaultUser;
-        String pass = adminSet == 3 ? adminPass : defaultPass;
-
+    private static HikariDataSource buildMigrationDataSource(dev.nexus.service.db.AdminConnection admin) {
+        String url = admin.url();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(url);
-        cfg.setUsername(user);
-        cfg.setPassword(pass);
+        cfg.setUsername(admin.user());
+        cfg.setPassword(admin.password());
         cfg.setMaximumPoolSize(1);
         cfg.setMinimumIdle(1);
         cfg.setConnectionTimeout(30_000);

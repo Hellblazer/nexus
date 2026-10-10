@@ -766,6 +766,20 @@ def check_data_effect_relay(tag: str, repo_root: pathlib.Path | None = None) -> 
             "to diff a DATA EFFECT range against."
         )
         return 0
+    # Before the cut, *tag* names nothing: the range has no upper end to read
+    # a changelog from. That is "cannot verify yet", not a failed attestation.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}"],
+        cwd=root, capture_output=True, text=True, timeout=30, check=False,
+    )
+    if resolved.returncode != 0:
+        print(
+            f"CANNOT VERIFY: {tag} is not a tag in this checkout (not cut yet, or not fetched), "
+            f"so the DATA EFFECT range {from_tag}..{tag} cannot be read. This check gates the "
+            "deploy: run it again once the tag exists (git fetch --tags).",
+            file=sys.stderr,
+        )
+        return 2
     return _data_effects.verify_relay_attestation(from_tag, tag, root)
 
 

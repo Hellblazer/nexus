@@ -37,6 +37,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any, NoReturn
 
@@ -2686,6 +2687,10 @@ class HttpVectorClient:
         # ``None`` (the default) means ``_resolve_collection_row`` picks
         # the resolver itself, based on ``tenant``.
         self._row_resolver = _row_resolver
+        # nexus-w032x: the routing listing started by
+        # get_http_vector_client(prefetch_routing_listing=True) while the cloud
+        # version probe runs; the next list_collections(routing=True) takes it.
+        self._routing_prefetch: Future[list[dict]] | None = None
 
     # ── Context manager (no-op: stateless HTTP, parity with T3Database) ──────
 
@@ -4713,6 +4718,20 @@ class HttpVectorClient:
         way — that branch is a known pre-catalog-005 accommodation, not a
         failure.
         """
+        if routing and lifecycle_state is None and not strict:
+            prefetched, self._routing_prefetch = self._routing_prefetch, None
+            if prefetched is not None:
+                try:
+                    return prefetched.result()
+                except VectorServiceError as exc:
+                    # Report it as the unprefetched call below would, without
+                    # paying the request's retry schedule a second time. A 404
+                    # (pre-catalog-005 engine) falls through to that fallback.
+                    if exc.code != 404:
+                        _log.warning("http_vector_list_collections_failed", error=str(exc))
+                        return []
+                except Exception as exc:  # noqa: BLE001 -- the call below reports the failure its own way
+                    _log.debug("routing_listing_prefetch_failed", error=str(exc))
         try:
             stats = self.collection_stats(lifecycle_state, routing=routing)
         except VectorServiceError as e:
@@ -5925,7 +5944,7 @@ def _cloud_probe_failure_message(exc: Exception) -> str:
     )
 
 
-def get_http_vector_client() -> HttpVectorClient:
+def get_http_vector_client(*, prefetch_routing_listing: bool = False) -> HttpVectorClient:
     """Return the process-local HttpVectorClient singleton.
 
     Cloud mode (``not is_local_mode()``) runs a one-time-per-process
@@ -5956,6 +5975,27 @@ def get_http_vector_client() -> HttpVectorClient:
     * Local mode: the probe is skipped entirely. Local mode's own floor
       enforcement (the ``nx upgrade`` / engine-convergence flow) is
       untouched by this gate.
+
+    ``prefetch_routing_listing`` (nexus-w032x): when this call is about to
+    run the cloud probe, also start ``list_collections(routing=True)`` on a
+    background thread, so a cold CLI search pays the two round trips at
+    once instead of one after the other (0.24-0.34 s each, measured on the
+    managed service, T2 ``nexus/w032x-cli-cold-start-trace-2026-10-10``).
+    The listing is a read. Its rows reach a caller only through
+    :meth:`HttpVectorClient.list_collections` on a client this function has
+    returned, so only after the probe passed; a failed probe drops them. (The
+    thread primes the collection-row cache as every listing does, so the one
+    caller, ``nx search``, is a process a failed probe ends.) When no probe
+    runs (local mode, or already probed) the flag does nothing.
+
+    Trade-off, accepted (Sam, 2026-10-10): the listing is an authenticated
+    request (bearer token, and a data-token mint where one is armed), so it
+    reaches the configured endpoint BEFORE the probe has confirmed it is a
+    nexus service. Without the flag the first request is the probe's
+    unauthenticated ``/version``, and a mistyped or foreign
+    ``NX_SERVICE_URL`` is refused before the token leaves. The endpoint is
+    the user's own configuration, and restricting the prefetch to an
+    already-probed endpoint would remove the saving on every cold process.
     """
     global _vector_client_instance, _version_probe_done, _version_probe_error
     global _version_probe_failed_at, _probed_release, _probed_embedding_mode
@@ -5970,6 +6010,15 @@ def get_http_vector_client() -> HttpVectorClient:
         return _vector_client_instance
 
     with _vector_client_lock:
+        if _vector_client_instance is None:
+            # nexus-fryrd: constructed under the SAME tenant
+            # _resolve_collection_row's identity check reads -- see
+            # _process_default_tenant's docstring. Built before the cloud
+            # probe (construction does no I/O) so a prefetch can use it; the
+            # fast path above hands it out only once the probe has passed.
+            _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
+            if cloud_mode and _version_probe_done:
+                _seed_from_probe(_vector_client_instance)
         if cloud_mode:
             if (cached_failure := _authoritative_cached_probe_error()) is not None:
                 _reraise_cached_probe_error(cached_failure)
@@ -5986,9 +6035,12 @@ def get_http_vector_client() -> HttpVectorClient:
                 )
                 from nexus.engine_version import parse_engine_version  # noqa: PLC0415 -- deferred with the probe
 
+                if prefetch_routing_listing:
+                    _start_routing_prefetch(_vector_client_instance)
                 try:
                     caps = probe_managed_service()
                 except ManagedServiceError as exc:
+                    _vector_client_instance._routing_prefetch = None
                     wrapped = type(exc)(_cloud_probe_failure_message(exc))
                     _version_probe_error = wrapped
                     _version_probe_failed_at = _monotonic()
@@ -6006,27 +6058,52 @@ def get_http_vector_client() -> HttpVectorClient:
                         error=str(wrapped),
                     )
                     raise wrapped from exc
+                except BaseException:
+                    # Any other probe failure (a malformed URL, an httpx error
+                    # the probe does not wrap) must not leave a listing parked
+                    # for a later call to take.
+                    _vector_client_instance._routing_prefetch = None
+                    raise
                 _version_probe_done = True
                 _probed_release = parse_engine_version(getattr(caps, "release_version", None))
                 _probed_embedding_mode = getattr(caps, "embedding_mode", None)
                 _log.debug("cloud_engine_version_probe_ok")
-        if _vector_client_instance is None:
-            # nexus-fryrd: constructed under the SAME tenant
-            # _resolve_collection_row's identity check reads -- see
-            # _process_default_tenant's docstring.
-            _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
-            if (
-                cloud_mode and _probed_release is not None
-                and _probed_release >= PER_COLLECTION_ROUTE_MIN_ENGINE
-            ):
-                # The probed engine serves the route: skip the single-flight
-                # probe. A later write-off (edge refusal, 5xx) still resets it.
-                _vector_client_instance._per_collection_confirmed = True
-            if cloud_mode and _probed_embedding_mode in ("voyage", "onnx-local"):
-                # nexus-vpa9q: the probe already read /version; seeding the memo saves
-                # embedding_mode() a second GET /version on the first search.
-                _vector_client_instance._embedding_mode_memo = _probed_embedding_mode
+                _seed_from_probe(_vector_client_instance)
     return _vector_client_instance
+
+
+def _seed_from_probe(client: HttpVectorClient) -> None:
+    """Carry the cloud probe's findings into *client* (caller holds the lock)."""
+    if _probed_release is not None and _probed_release >= PER_COLLECTION_ROUTE_MIN_ENGINE:
+        # The probed engine serves the route: skip the single-flight
+        # probe. A later write-off (edge refusal, 5xx) still resets it.
+        client._per_collection_confirmed = True
+    if _probed_embedding_mode in ("voyage", "onnx-local"):
+        # nexus-vpa9q: the probe already read /version; seeding the memo saves
+        # embedding_mode() a second GET /version on the first search.
+        client._embedding_mode_memo = _probed_embedding_mode
+
+
+def _start_routing_prefetch(client: HttpVectorClient) -> None:
+    """Start ``client.list_collections(routing=True)`` on a daemon thread and
+    park its future on *client* (nexus-w032x; caller holds the lock).
+
+    ``strict=True`` so a failure lands in the future instead of a WARNING
+    line printed beside a probe error; the consuming call reports it as an
+    unprefetched call would.
+    """
+    if client._routing_prefetch is not None:
+        return
+    future: Future[list[dict]] = Future()
+    client._routing_prefetch = future
+
+    def _run() -> None:
+        try:
+            future.set_result(client.list_collections(routing=True, strict=True))
+        except BaseException as exc:  # noqa: BLE001 -- handed to the consumer through the future
+            future.set_exception(exc)
+
+    threading.Thread(target=_run, name="nx-routing-listing-prefetch", daemon=True).start()
 
 
 def reset_http_vector_client_for_tests() -> None:

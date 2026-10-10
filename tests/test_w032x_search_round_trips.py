@@ -14,6 +14,9 @@ from __future__ import annotations
 import threading
 import time
 
+import httpx
+
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.search_engine import SearchResult, _attach_doc_ids_from_catalog, search_cross_corpus
 
 
@@ -82,13 +85,27 @@ def test_a_legacy_doc_id_the_reverse_lookup_missed_still_gets_its_manifest() -> 
     assert rows[0].metadata["chunk_count"] == 2
 
 
-def test_topic_labels_are_fetched_concurrently_and_completely() -> None:
-    """The engine has no batched by-id topic route; search's topic grouping
-    (the CLI default) looked labels up one serial GET at a time: 9 in the
-    shakeout profile."""
-    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-
+def _store_on_an_engine_without_by_ids():
+    """A taxonomy store whose engine predates ``POST /topics/by_ids`` (404), so
+    ``get_labels_for_ids`` takes the pooled per-id path the tests below pin.
+    ``get_topic_by_id`` is replaced by each test."""
     store = object.__new__(HttpTaxonomyStore)
+
+    def _post(path, body, **_kw):
+        request = httpx.Request("POST", "http://engine.invalid/v1/taxonomy" + path)
+        raise httpx.HTTPStatusError(
+            "not found", request=request, response=httpx.Response(404, request=request),
+        )
+
+    store._post = _post
+    return store
+
+
+def test_topic_labels_are_fetched_concurrently_and_completely() -> None:
+    """Against an engine without the batched by-ids route, search's topic
+    grouping (the CLI default) looks labels up through a pool of per-id GETs
+    (it was one serial GET at a time: 9 in the shakeout profile)."""
+    store = _store_on_an_engine_without_by_ids()
     lock = threading.Lock()
     state = {"active": 0, "peak": 0}
 
@@ -113,9 +130,7 @@ def test_topic_labels_are_fetched_concurrently_and_completely() -> None:
 def test_a_failing_concurrent_label_fetch_falls_back_to_the_serial_loop() -> None:
     """Review of 791bc1a81: concurrent workers share one client whose
     self-heal is unlocked; when the pool fails, the serial loop runs."""
-    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-
-    store = object.__new__(HttpTaxonomyStore)
+    store = _store_on_an_engine_without_by_ids()
     calls = {"n": 0}
     lock = threading.Lock()
 
@@ -134,9 +149,7 @@ def test_a_failing_concurrent_label_fetch_falls_back_to_the_serial_loop() -> Non
 def test_the_serial_retry_refetches_only_the_ids_that_failed() -> None:
     """Review of 80fdf540c: re-fetching every id doubled the load during
     exactly the failure the fallback exists for."""
-    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-
-    store = object.__new__(HttpTaxonomyStore)
+    store = _store_on_an_engine_without_by_ids()
     seen: list[int] = []
     lock = threading.Lock()
     failed_once = {"done": False}

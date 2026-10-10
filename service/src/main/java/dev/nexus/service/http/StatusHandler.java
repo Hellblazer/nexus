@@ -112,6 +112,7 @@ public final class StatusHandler implements HttpHandler {
     private final OwnerlessWritePolicy ownerlessWritePolicy;   // nullable — mode field omitted
     private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
     private final Supplier<Boolean> chunksTenantIsolationIntact; // nullable — key omitted
+    private final Supplier<PerCollectionIndexes> perCollectionIndexes; // nullable — key omitted
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -242,12 +243,89 @@ public final class StatusHandler implements HttpHandler {
             OwnerlessWritePolicy ownerlessWritePolicy,
             Supplier<ReaperStatus> reaperStatus,
             Supplier<Boolean> chunksTenantIsolationIntact) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, ownerlessWritePolicy, reaperStatus,
+            chunksTenantIsolationIntact, null);
+    }
+
+    /**
+     * What the per-collection index machinery reports on this route (RDR-227 Step 2, bead nexus-43ulx.23,
+     * [additive]). Two halves with different scopes, kept apart so no reader takes an engine's own state for a
+     * global fact:
+     *
+     * <ul>
+     *   <li>the READ half's last catalog read, global (the same on every engine, up to when each last read):
+     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code last_read_at}, and {@code expired}, true when
+     *       the set is older than three sweep periods plus the read bound and so is answering as empty;</li>
+     *   <li>{@code this_engine}, the DDL half of THIS process only.</li>
+     * </ul>
+     *
+     * <p>Served from values the sweep and the reconciler already hold; the route runs no catalog query.
+     *
+     * @param valid      parsed {@code pci_} indexes with {@code indisvalid} true at the last read
+     * @param invalid    parsed indexes with {@code indisvalid} false (a failed or in-flight build)
+     * @param unparsed   {@code pci_} indexes that failed any part of the name-and-definition rule
+     * @param lastReadAt when the last successful read finished; null before the first
+     * @param expired    the set is older than {@code 3 * period + readBound} and the router ignores it
+     * @param thisEngine this process's DDL half
+     * @param sweepSeconds the period of the DDL passes ({@code NX_SEARCH_PCI_SWEEP_SECONDS}); a client reads it to
+     *                   judge how old {@code last_ddl_pass_at} may be before it is a stall
+     */
+    public record PerCollectionIndexes(int valid, int invalid, int unparsed, java.time.Instant lastReadAt,
+                                       boolean expired, ThisEngine thisEngine, long sweepSeconds) {
+
+        /**
+         * @param builderState  {@code ok}, {@code auth_failed}, {@code no_privilege}, {@code off} or {@code standby}
+         *                      ({@code standby}: a peer engine holds the builder lock)
+         * @param building      1 while this engine's build runs, 0 otherwise; null unless this engine holds the lock
+         * @param failing       collections with three or more consecutive failed builds on this engine; null unless
+         *                      this engine holds the lock
+         * @param lastDdlPassAt when this engine's last lock-holding pass that processed a leaf finished; kept when
+         *                      the engine is standby now, null only before its first
+         * @param passStartedAt when the lock-holding pass in flight started; null when none is (always on a
+         *                      non-holder)
+         * @param passInProgress whether a lock-holding pass is in flight, so a long first pass is visible while
+         *                      {@code lastDdlPassAt} is still null
+         */
+        public record ThisEngine(String builderState, Integer building, Integer failing,
+                                 java.time.Instant lastDdlPassAt, java.time.Instant passStartedAt,
+                                 boolean passInProgress) {
+            public ThisEngine(String builderState, Integer building, Integer failing, java.time.Instant lastDdlPassAt) {
+                this(builderState, building, failing, lastDdlPassAt, null, false);
+            }
+        }
+
+        /** The object as the sweep's last read and the reconciler's status say it. */
+        public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
+                                              dev.nexus.service.vectors.PciReconciler.DdlStatus ddl) {
+            return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(), sweep.lastReadAt(),
+                sweep.expired(),
+                new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
+                    ddl.passStartedAt(), ddl.passInProgress()),
+                ddl.sweepSeconds());
+        }
+    }
+
+    /**
+     * @param perCollectionIndexes nexus-43ulx.23 ([additive]): the {@code per_collection_indexes} object. A null
+     *                     supplier omits the key (an engine, or a wiring, that predates it); a supplier that returns
+     *                     null omits it too (the sweep and reconciler are not built yet). A client reads a missing
+     *                     key as "cannot tell", never as zero indexes.
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy,
+            Supplier<ReaperStatus> reaperStatus,
+            Supplier<Boolean> chunksTenantIsolationIntact,
+            Supplier<PerCollectionIndexes> perCollectionIndexes) {
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
         this.ownerlessWritePolicy = ownerlessWritePolicy;
         this.reaperStatus = reaperStatus;
         this.chunksTenantIsolationIntact = chunksTenantIsolationIntact;
+        this.perCollectionIndexes = perCollectionIndexes;
     }
 
     @Override
@@ -334,6 +412,15 @@ public final class StatusHandler implements HttpHandler {
             }
         }
 
+        // RDR-227 Step 2 (bead nexus-43ulx.23), [additive]: the per-collection index set the router reads and this
+        // engine's builder. Absent = an engine that predates it, or one whose sweep is not built yet.
+        if (perCollectionIndexes != null) {
+            PerCollectionIndexes p = perCollectionIndexes.get();
+            if (p != null) {
+                appendPerCollectionIndexes(body, p);
+            }
+        }
+
         // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
         // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
         // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
@@ -353,6 +440,35 @@ public final class StatusHandler implements HttpHandler {
 
         body.append('}');
         HttpUtil.send(exchange, 200, body.toString());
+    }
+
+    private static void appendPerCollectionIndexes(StringBuilder body, PerCollectionIndexes p) {
+        body.append(",\"per_collection_indexes\":{\"valid\":").append(p.valid())
+            .append(",\"invalid\":").append(p.invalid())
+            .append(",\"unparsed\":").append(p.unparsed())
+            .append(",\"last_read_at\":");
+        appendSeconds(body, p.lastReadAt());
+        body.append(",\"expired\":").append(p.expired())
+            .append(",\"sweep_seconds\":").append(p.sweepSeconds())
+            .append(",\"this_engine\":{\"builder_state\":")
+            .append(HttpUtil.jsonString(p.thisEngine().builderState()))
+            .append(",\"building\":").append(p.thisEngine().building())
+            .append(",\"failing\":").append(p.thisEngine().failing())
+            .append(",\"last_ddl_pass_at\":");
+        appendSeconds(body, p.thisEngine().lastDdlPassAt());
+        body.append(",\"pass_started_at\":");
+        appendSeconds(body, p.thisEngine().passStartedAt());
+        body.append(",\"pass_in_progress\":").append(p.thisEngine().passInProgress());
+        body.append("}}");
+    }
+
+    /** A time in whole seconds, as the reaper's are, or JSON null. */
+    private static void appendSeconds(StringBuilder body, java.time.Instant at) {
+        if (at == null) {
+            body.append("null");
+        } else {
+            body.append(HttpUtil.jsonString(at.truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString()));
+        }
     }
 
     private static void appendSnapshot(StringBuilder body, EmbedActivitySnapshot snap) {

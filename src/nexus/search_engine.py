@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import contextvars
 import threading
 import time
 from dataclasses import dataclass, field
@@ -360,6 +361,7 @@ def _attach_doc_ids_from_catalog(
 
 def _attach_display_paths(
     results: list[SearchResult], catalog: Any | None,
+    *, prefetched: _DisplayLookup | None = None,
 ) -> None:
     """nexus-1qed: annotate each result's metadata with a derived
     ``_display_path`` resolved through the catalog.
@@ -378,9 +380,39 @@ def _attach_display_paths(
     Pairs with :func:`_attach_doc_ids_from_catalog`: under Phase 3
     chunk metadata no longer carries ``doc_id``, so this function
     must run AFTER ``_attach_doc_ids_from_catalog`` injects it.
+
+    *prefetched* (nexus-w032x) is a :class:`_DisplayLookup` started on the
+    same results earlier; its maps are used when they cover every doc_id
+    the results now name, and the lookup runs here otherwise.
     """
     if catalog is None or not results:
         return
+    doc_ids = _display_doc_ids(results)
+    if not doc_ids:
+        return
+    if prefetched is not None and doc_ids <= prefetched.doc_ids:
+        cache, titles, homes = prefetched.maps()
+    else:
+        cache, titles, homes = _resolve_display_maps(doc_ids, catalog)
+    for r in results:
+        did = r.metadata.get("doc_id", "")
+        path = cache.get(did) if did else None
+        if path:
+            r.metadata["_display_path"] = path
+        owners = (r.metadata.get("_owner_doc_ids") or ([did] if did else []))[:_OWNER_TITLE_RESOLVE_CAP]
+        # The owner lookups are tenant-wide (chash is a function of text
+        # alone), so an owner in another collection is kept out: a hit
+        # names only documents in its own collection, or a ghost with none.
+        live = [
+            titles[o] for o in owners
+            if titles.get(o) and homes.get(o, "") in ("", r.collection)
+        ]
+        if live:
+            r.metadata["_display_title"] = owner_titles(live)
+
+
+def _display_doc_ids(results: list[SearchResult]) -> set[str]:
+    """The doc_ids :func:`_attach_display_paths` resolves for *results*."""
     doc_ids = {
         r.metadata.get("doc_id", "") for r in results
         if r.metadata.get("doc_id")
@@ -392,8 +424,13 @@ def _attach_display_paths(
         o for r in results
         for o in r.metadata.get("_owner_doc_ids", ())[:_OWNER_TITLE_RESOLVE_CAP]
     }
-    if not doc_ids:
-        return
+    return doc_ids
+
+
+def _resolve_display_maps(
+    doc_ids: set[str], catalog: Any,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """``(file_path, title, physical_collection)`` per doc_id, best-effort."""
     # Batch-resolve all doc_ids in one call when the catalog backend
     # supports resolve_many() (nexus-7lm3q).  Falls back to the per-doc
     # by_doc_id() loop for older/local catalogs that lack the method.
@@ -429,21 +466,44 @@ def _attach_display_paths(
             if entry is not None:
                 titles[did] = getattr(entry, "title", "") or ""
                 homes[did] = getattr(entry, "physical_collection", "") or ""
-    for r in results:
-        did = r.metadata.get("doc_id", "")
-        path = cache.get(did) if did else None
-        if path:
-            r.metadata["_display_path"] = path
-        owners = (r.metadata.get("_owner_doc_ids") or ([did] if did else []))[:_OWNER_TITLE_RESOLVE_CAP]
-        # The owner lookups are tenant-wide (chash is a function of text
-        # alone), so an owner in another collection is kept out: a hit
-        # names only documents in its own collection, or a ghost with none.
-        live = [
-            titles[o] for o in owners
-            if titles.get(o) and homes.get(o, "") in ("", r.collection)
-        ]
-        if live:
-            r.metadata["_display_title"] = owner_titles(live)
+    return cache, titles, homes
+
+
+class _DisplayLookup:
+    """The display-path catalog lookup for a result set, run on a worker
+    thread (nexus-w032x). It needs only the doc_ids, which are known once
+    :func:`_attach_doc_ids_from_catalog` has run, so it overlaps the topic
+    grouping and boost instead of following them (0.15-0.17 s of
+    ``resolve_many`` on a cold cloud search, T2
+    ``nexus/w032x-listing-prefetch-cloud-ab-2026-10-10``)."""
+
+    def __init__(self, doc_ids: set[str], catalog: Any) -> None:
+        self.doc_ids = doc_ids
+        self._catalog = catalog
+        self._maps: tuple[dict[str, str], dict[str, str], dict[str, str]] = ({}, {}, {})
+        # Run in the caller's context so a ContextVar the catalog client
+        # reads (a per-call deadline, for one) reaches the worker too.
+        ctx = contextvars.copy_context()
+        self._thread = threading.Thread(
+            target=ctx.run, args=(self._run,), name="nexus-display-lookup", daemon=True,
+        )
+
+    @classmethod
+    def start(cls, results: list[SearchResult], catalog: Any) -> _DisplayLookup | None:
+        doc_ids = _display_doc_ids(results)
+        if not doc_ids:
+            return None
+        lookup = cls(doc_ids, catalog)
+        lookup._thread.start()
+        return lookup
+
+    def _run(self) -> None:
+        # _resolve_display_maps is best-effort and catches its own failures.
+        self._maps = _resolve_display_maps(self.doc_ids, self._catalog)
+
+    def maps(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        self._thread.join()
+        return self._maps
 
 
 #: The most owners of one hit's chunk resolved for its display title.
@@ -988,6 +1048,7 @@ def search_cross_corpus(
     lexical: bool = False,
     deep_candidates: bool = False,
     content_chars: int | None = None,
+    per_collection_k_cap: int | None = None,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -1090,6 +1151,16 @@ def search_cross_corpus(
     row's text at that many code points. Pass it only when every reader of
     the returned text shows a snippet (the MCP tools); the batched fallback
     path and an engine that predates the field return the full text.
+
+    *per_collection_k_cap* (nexus-ann50) lowers each per-collection route
+    request's ``per_collection_k`` to at most ``max(cap, n_results)``: never
+    below *n_results*, so a single-collection search or a deep page still
+    fills. Measured 2026-10-09 on the managed service (T2
+    ``nexus/ann50-k-sweep-2026-10-09``): at 40 the pool's 30 nearest rows by
+    raw distance were identical to k=300 on all 8 queries, and an MCP search
+    took 2.41 s median against 2.99 s at the default; the boosted page can
+    shift near ties, as it already did between 120 and 300 (nexus-cbg2s).
+    The batched fallback path ignores it.
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -1148,7 +1219,14 @@ def search_cross_corpus(
     # latency, nexus-92q1p follow-up, Sam 2026-10-08): it runs on the rows a search DISPLAYS,
     # after the caller's boosts, caps and paging, in :func:`flag_displayed_contradictions`.
     # Only the opt-in semantic clustering still wants a vector per pooled row.
-    want_embeddings = cluster_by == "semantic"
+    #
+    # nexus-w032x: and only its Ward fallback reads them. With a taxonomy, topic grouping is
+    # tried first and fires whenever it covers over half the pool, which it did in every
+    # profiled default CLI search (2026-10-09); asking the route for the vectors anyway made
+    # the code-group response 1.05-1.46 MB and the search ~1.4 s slower. So the route is asked
+    # only when there is no taxonomy to group by; otherwise the Ward branch below fetches
+    # them by id, and only when grouping did not fire.
+    want_embeddings = cluster_by == "semantic" and taxonomy is None
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
@@ -1551,6 +1629,8 @@ def search_cross_corpus(
         per_collection_k, limit = _per_collection_request_sizes(
             n_results, mult, rerank=bool(server_rerank),
         )
+        if per_collection_k_cap is not None:
+            per_collection_k = min(per_collection_k, max(per_collection_k_cap, n_results))
         # Finite thresholds only: the client method omits None and non-finite
         # values, and a threshold_override of inf (--no-threshold, the parity
         # gate) is not valid JSON.
@@ -1970,8 +2050,12 @@ def search_cross_corpus(
     # downstream consumer reads ``r.metadata["doc_id"]``. Phase 3
     # removed doc_id from chunk metadata; without this step,
     # apply_link_boost and _attach_display_paths silently no-op.
+    display_lookup: _DisplayLookup | None = None
     if catalog is not None and all_results:
         _attach_doc_ids_from_catalog(all_results, catalog)
+        # nexus-w032x: the display-path lookup needs only these doc_ids, so
+        # it runs on a worker while the boosts and topic grouping run here.
+        display_lookup = _DisplayLookup.start(all_results, catalog)
 
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
@@ -1983,18 +2067,6 @@ def search_cross_corpus(
     call_deadline.check("search_cross_corpus:before_topics")
     if topic_reads is not None:
         _topic_assignments = topic_reads.assignments()
-
-    # Semantic clustering needs a vector per pooled row (Ward fallback), fetched once here.
-    # Per-collection failures are isolated: failed indices are excluded from clustering but
-    # do not suppress it for successfully-fetched collections (R3-1).
-    fetched_embeddings = None
-    failed_indices: set[int] = set()
-    if cluster_by == "semantic" and all_results:
-        call_deadline.check("search_cross_corpus:before_embeddings")
-        fetched_embeddings, failed_indices = _embeddings_for_results(
-            all_results, t3, prefetched_embeddings,
-        )
-        call_deadline.check("search_cross_corpus:after_embeddings")
 
     if cluster_by == "semantic" and all_results:
         topic_grouped = False
@@ -2016,7 +2088,19 @@ def search_cross_corpus(
             except Exception:  # noqa: BLE001 — best-effort topic grouping; failure logged at debug, falls back to Ward clustering
                 _log.debug("topic_grouping_failed", exc_info=True)
 
-        # Fall back to Ward clustering if topic grouping didn't fire
+        # Fall back to Ward clustering if topic grouping didn't fire. It needs a vector per
+        # pooled row, assembled only now (nexus-w032x): from the route's rows when it was
+        # asked for them, by id otherwise. Per-collection failures are isolated: failed
+        # indices are excluded from clustering but do not suppress it for
+        # successfully-fetched collections (R3-1).
+        fetched_embeddings = None
+        failed_indices: set[int] = set()
+        if not topic_grouped:
+            call_deadline.check("search_cross_corpus:before_embeddings")
+            fetched_embeddings, failed_indices = _embeddings_for_results(
+                all_results, t3, prefetched_embeddings,
+            )
+            call_deadline.check("search_cross_corpus:after_embeddings")
         if not topic_grouped and fetched_embeddings is not None:
             if not failed_indices:
                 all_results = _apply_clustering(all_results, fetched_embeddings)
@@ -2065,7 +2149,7 @@ def search_cross_corpus(
     # so formatters never need to import the catalog. Best-effort;
     # absent catalog or missing doc_ids leave _display_path unset and
     # formatters fall back to source_path / file_path.
-    _attach_display_paths(all_results, catalog)
+    _attach_display_paths(all_results, catalog, prefetched=display_lookup)
 
     return all_results
 

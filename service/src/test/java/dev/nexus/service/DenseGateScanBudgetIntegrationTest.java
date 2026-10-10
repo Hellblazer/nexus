@@ -182,6 +182,12 @@ class DenseGateScanBudgetIntegrationTest {
             // hybridSearch's HNSW-first branch SET LOCALs the serving budget, which would
             // override one (nexus-wbfpw.47).
             // The cloud's post-conversion state: a freshly REBUILT graph.
+            // nexus-zpd9o: build it serially. A parallel pgvector HNSW build holds the
+            // graph (maintenance_work_mem, 64 MB) in dynamic shared memory, which does not
+            // fit a container's default 64 MB /dev/shm ("could not resize shared memory
+            // segment ... No space left on device" on chas). Session-level, this connection only.
+            DSL.using(su, SQLDialect.POSTGRES)
+                .set(DSL.name("max_parallel_maintenance_workers"), DSL.inline(0)).execute();
             su.createStatement().execute(
                 "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "USING hnsw (" + DimTables.embeddingColumn(384) + " nexus.vector_cosine_ops)");

@@ -3253,7 +3253,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # ── Health check path — delegates to nexus.health ─────────────────────────
     from nexus.health import run_health_checks, format_health_for_cli, format_health_for_json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    # One GET /v1/status serves the "Ownerless writes" and "Engine reaper" rows and the engine-activity block.
+    # One GET /v1/status serves the "Ownerless writes", "Engine reaper" and "Per-collection indexes" rows and the engine-activity block.
     from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     engine_status = fetch_engine_status()

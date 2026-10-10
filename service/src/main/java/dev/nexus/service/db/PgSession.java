@@ -69,6 +69,12 @@ public final class PgSession {
     static final int EF_SEARCH_MAX = 1000;
 
     /**
+     * The widest {@code hnsw.ef_search} pgvector accepts, for a single-collection walk of the shared leaf
+     * index that has no per-collection index of its own (RDR-227 Step 1). Same value as the clamp.
+     */
+    public static final int EF_SEARCH_WIDEST = EF_SEARCH_MAX;
+
+    /**
      * Serving floor for {@code hnsw.ef_search} (nexus-4ktfm; design of record
      * T2 nexus/design-4ktfm-hnsw-crowding-remedy). The chunks HNSW index is
      * ONE index across all tenants with RLS filtering AFTER the scan, so at
@@ -87,6 +93,10 @@ public final class PgSession {
      * T2 nexus_rdr/225-recall-per-leaf-analysis). The live sweep (conexus
      * T2 [29566]) restored 12/12 at ef 400 with latency flat to 1000; 600
      * keeps headroom over that measured point.
+     *
+     * <p>The floor governs every statement except a single-collection plain search whose collection has no
+     * per-collection index: that one runs at {@link #EF_SEARCH_WIDEST} (1000) regardless of this floor
+     * (RDR-227).
      */
     static final int DEFAULT_EF_SEARCH_FLOOR = 600;
 
@@ -376,6 +386,28 @@ public final class PgSession {
             conn.setNetworkTimeout(Runnable::run, on ? stampNetworkTimeoutMs(marginMs) : 0);
         } catch (java.sql.SQLException e) {
             log.warn("event=pg_network_timeout_not_set stage=tenant_stamp error=\"{}\"", e.getMessage());
+        }
+    }
+
+    /**
+     * Put {@code conn}'s network (socket read) timeout back to {@code timeoutMs}, for a connection that owns its own
+     * bound and is not a pool borrow (RDR-227's index builder, nexus-43ulx.19). {@link #setLocal} binds a short
+     * network timeout for {@code statement_timeout} that "does not outlive the borrow"; a connection that outlives
+     * its statement keeps it, and a 30-minute {@code CREATE INDEX CONCURRENTLY} behind a 31 second read bound would
+     * fail on the client side. The one place a network timeout is set outside {@link #setLocal} is here, so
+     * {@code NetworkBoundStatementTimeoutGateTest} stays the single audit point. A failure is logged and not thrown;
+     * it returns false so a caller that owns the connection can end its use of it (a short socket bound left under a
+     * 30-minute build would cut the build off on the client side).
+     *
+     * @return true when the timeout is back, false when it could not be set
+     */
+    public static boolean restoreNetworkTimeout(java.sql.Connection conn, int timeoutMs) {
+        try {
+            conn.setNetworkTimeout(Runnable::run, timeoutMs);
+            return true;
+        } catch (java.sql.SQLException | RuntimeException e) {
+            log.warn("event=pg_network_timeout_not_set stage=restore error=\"{}\"", e.getMessage());
+            return false;
         }
     }
 
@@ -708,24 +740,35 @@ public final class PgSession {
      * hold at most this many PHYSICAL rows in the tenant, the statement runs exact (index scans
      * off) instead of walking the shared HNSW index. 0 disables the router.
      *
-     * <p>30000 (nexus-nqsa7, Sam's decision 2026-10-09). Above the threshold an arm walks its leaf's HNSW
-     * index under {@code relaxed_order}, which stops at the first {@code k} rows the collection filter
-     * admits; in a leaf shared by many collections the filter discarded about 80% of the walk, and a full
-     * page missed the collection's true nearest row (recall against exact 0.925 at k=40 on code__1-72,
-     * 27,893 rows; T2 conexus/nqsa7-fork-hnsw-vs-exact-2026-10-09). The empty-result re-run cannot see
-     * that, because the page is full. Exact is complete.
+     * <p>20000 (RDR-227, nexus-43ulx.35, Sam's decision 2026-10-10): equal to
+     * {@link #DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS}, so a collection leaves the exact scan at the row count
+     * where the builder gives it a partial HNSW index of its own. Measured on the live engine with the
+     * threshold set to 20000 by environment (T2 nexus_rdr/227-research-13): the two code collections of
+     * 27,893 and 29,355 rows moved from exact arms of 0.6-0.9 s under fan-out to index arms of 25-50 ms, and
+     * the slowest statement of a default code search fell from about 800 ms to about 330 ms.
      *
-     * <p>Why not higher. engine-service-v0.1.155 shipped 60000, and on the live engine the five code
-     * collections then searched exact ran five at a time and each took about 2.5x its solo time on the
-     * fork (CPU and memory-bandwidth contention, zero permit wait): the two largest, 58,588 and 45,525 rows,
-     * took 1.1-2.0 s, and a warm default search got about 1 s slower. More fan-out permits would add
-     * concurrent exact scans and make it worse. 30000 keeps the measured repro and the 29,355-row collection
-     * exact and puts the two largest back on HNSW, which leaves them exposed to the same miss; a remedy
-     * independent of this threshold is tracked as its own bead. It was a provisional 10000 before v0.1.155.
-     * The probe reads up to {@code limit + 1} keys, so a collection above the threshold pays a 30,001-key
-     * Index Only Scan before its HNSW walk.
+     * <p>What the per-collection index repairs. Above the threshold an arm with no index of its own walks
+     * its leaf's shared HNSW index under {@code relaxed_order}, which stops at the first {@code k} rows the
+     * collection filter admits; in a leaf shared by many collections the filter discarded about 80% of the
+     * walk, and a full page missed the collection's true nearest row (recall against exact 0.925 at k=40 on
+     * code__1-72, 27,893 rows; T2 conexus/nqsa7-fork-hnsw-vs-exact-2026-10-09). The empty-result re-run
+     * cannot see that, because the page is full. With its own index the same collection recalled 0.99 or
+     * better at k 40 to 120 (T2 nexus_rdr/227-research-12).
+     *
+     * <p>There is no margin between the two thresholds. A collection above this one with no valid index
+     * walks the shared index at {@code hnsw.ef_search} 1000: after it crosses the build threshold and
+     * before the next DDL pass, between a boot and the first sweep read, and for as long as the builder
+     * cannot run (no admin credentials, or a role without the privilege). That walk measured 0.975 at
+     * worst on code__1-72. Do not lower this below the build threshold, and not below 20000 on the
+     * evidence so far: prose collections indexed at 10,000 rows reached only 0.9833 at the tail.
+     *
+     * <p>History. A provisional 10000 before engine-service-v0.1.155; 60000 in v0.1.155, where the five
+     * code collections then searched exact ran five at a time at about 2.5x their solo time and a warm
+     * default search got about 1 s slower; 30000 from v0.1.156 (nexus-nqsa7). The probe reads up to
+     * {@code limit + 1} keys, so a collection above the threshold pays a 20,001-key Index Only Scan before
+     * its HNSW walk.
      */
-    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 30_000;
+    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 20_000;
 
     /** Upper bound on the {@code NX_SEARCH_EXACT_MAX_ROWS} override: an exact scan over more rows than
      *  this would no longer be the cheap plan the router exists to take. */
@@ -768,6 +811,134 @@ public final class PgSession {
      */
     public static int startupSearchExactMaxRows() {
         return SEARCH_EXACT_MAX_ROWS;
+    }
+
+    // ---- RDR-227 per-collection partial HNSW indexes (nexus-43ulx.10) ---------------------------
+
+    /** Default for {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B): a collection at or above this many rows is a build candidate. */
+    static final int DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS = 20_000;
+    static final int SEARCH_PCI_BUILD_MIN_ROWS_MIN = 1;
+    static final int SEARCH_PCI_BUILD_MIN_ROWS_MAX = 1_000_000;
+
+    /** Default for {@code NX_SEARCH_PCI_SWEEP_SECONDS}: ten minutes between catalog sweeps. */
+    static final int DEFAULT_SEARCH_PCI_SWEEP_SECONDS = 600;
+    static final int SEARCH_PCI_SWEEP_SECONDS_MIN = 60;
+    static final int SEARCH_PCI_SWEEP_SECONDS_MAX = 3_600;
+
+    /** Default for {@code NX_SEARCH_PCI_MAX_PER_LEAF}: indexes per leaf table; 0 builds none. */
+    static final int DEFAULT_SEARCH_PCI_MAX_PER_LEAF = 16;
+    static final int SEARCH_PCI_MAX_PER_LEAF_MAX = 1_000;
+
+    /**
+     * The four {@code NX_SEARCH_PCI*} settings, resolved once at class init.
+     *
+     * @param enabled        {@code NX_SEARCH_PCI}: the DDL (build/drop) half; the read half runs regardless
+     * @param buildMinRows   {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B)
+     * @param sweepSeconds   {@code NX_SEARCH_PCI_SWEEP_SECONDS}
+     * @param maxPerLeaf     {@code NX_SEARCH_PCI_MAX_PER_LEAF}
+     */
+    public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) { }
+
+    private static final PciSettings PCI_SETTINGS = resolvePciSettings(System::getenv);
+
+    /**
+     * Resolve the four {@code NX_SEARCH_PCI*} settings from {@code env} (a variable name to its value, or
+     * null). The static initializer passes {@code System::getenv}; a test passes a map.
+     */
+    static PciSettings resolvePciSettings(java.util.function.Function<String, String> env) {
+        return new PciSettings(
+            searchPci(env.apply("NX_SEARCH_PCI")),
+            searchPciBuildMinRows(env.apply("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
+            searchPciSweepSeconds(env.apply("NX_SEARCH_PCI_SWEEP_SECONDS")),
+            searchPciMaxPerLeaf(env.apply("NX_SEARCH_PCI_MAX_PER_LEAF")));
+    }
+
+    /**
+     * Parse {@code NX_SEARCH_PCI}. Null/blank means on; the only other accepted values are exactly
+     * {@code "1"} (on) and {@code "0"} (off) after trimming. "true", "yes" and the rest are refused:
+     * a switch that guards DDL does not guess.
+     */
+    static boolean searchPci(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return true;
+        }
+        return switch (raw.trim()) {
+            case "1" -> true;
+            case "0" -> false;
+            default -> throw new IllegalArgumentException(
+                "NX_SEARCH_PCI must be 1 (on) or 0 (off), got: " + raw);
+        };
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B): integer in [1, 1000000], default 20000. */
+    static int searchPciBuildMinRows(String raw) {
+        return boundedInt("NX_SEARCH_PCI_BUILD_MIN_ROWS", raw, DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS,
+            SEARCH_PCI_BUILD_MIN_ROWS_MIN, SEARCH_PCI_BUILD_MIN_ROWS_MAX);
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_SWEEP_SECONDS}: integer in [60, 3600], default 600. */
+    static int searchPciSweepSeconds(String raw) {
+        return boundedInt("NX_SEARCH_PCI_SWEEP_SECONDS", raw, DEFAULT_SEARCH_PCI_SWEEP_SECONDS,
+            SEARCH_PCI_SWEEP_SECONDS_MIN, SEARCH_PCI_SWEEP_SECONDS_MAX);
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_MAX_PER_LEAF}: integer in [0, 1000], default 16; 0 builds none. */
+    static int searchPciMaxPerLeaf(String raw) {
+        return boundedInt("NX_SEARCH_PCI_MAX_PER_LEAF", raw, DEFAULT_SEARCH_PCI_MAX_PER_LEAF,
+            0, SEARCH_PCI_MAX_PER_LEAF_MAX);
+    }
+
+    private static int boundedInt(String variable, String raw, int dflt, int min, int max) {
+        if (raw == null || raw.isBlank()) {
+            return dflt;
+        }
+        int v;
+        try {
+            v = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(variable + " must be an integer, got: " + raw, e);
+        }
+        if (v < min || v > max) {
+            throw new IllegalArgumentException(variable + " must be in " + min + ".." + max + ", got: " + v);
+        }
+        return v;
+    }
+
+    /**
+     * Boot-time touch for the four {@code NX_SEARCH_PCI*} settings, for the same class-init reason as
+     * {@link #startupSearchExactMaxRows()}: a malformed value must fail at boot, not at first use.
+     */
+    public static PciSettings startupPciSettings() {
+        return PCI_SETTINGS;
+    }
+
+    /**
+     * True when a collection could sit between the router threshold T and the build threshold B: the
+     * router is on ({@code T > 0}) and {@code B > T}. Such a collection is routed to HNSW (so it walks
+     * at ef_search 1000) yet is too small to get an index. With the router off every statement takes
+     * HNSW regardless, so B above T strands nothing.
+     */
+    public static boolean pciBuildThresholdAboveRouter(int buildMinRows, int routerMaxRows) {
+        return routerMaxRows > 0 && buildMinRows > routerMaxRows;
+    }
+
+    /**
+     * Log the resolved settings ({@code event=pci_settings}) and, when something builds
+     * ({@code enabled} and {@code maxPerLeaf > 0}) and {@link #pciBuildThresholdAboveRouter} holds, the
+     * WARN {@code event=pci_build_threshold_above_router}.
+     * Called from {@code Main} inside the boot try block that refuses on a bad value.
+     */
+    public static void logPciBootSettings(PciSettings s, int routerMaxRows) {
+        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={}",
+            s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf());
+        // Nothing builds when the switch is off or the per-leaf cap is 0, so B above T strands nothing new.
+        boolean builds = s.enabled() && s.maxPerLeaf() > 0;
+        if (builds && pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {
+            log.warn("event=pci_build_threshold_above_router build_min_rows={} router_max_rows={} "
+                + "detail=\"collections with more than router_max_rows and fewer than build_min_rows rows "
+                + "walk at hnsw.ef_search 1000 and never get an index\"",
+                s.buildMinRows(), routerMaxRows);
+        }
     }
 
     /** The threshold the router compares against: the test pin when set, else the env-resolved value. */
@@ -1050,9 +1221,25 @@ public final class PgSession {
         batch.set("statement_timeout", Integer.toString(timeoutMs));
     }
 
-    /** {@link #setHnswEfSearch(DSLContext, int)} for a batch. */
-    public static void setHnswEfSearch(GucBatch batch, int nResults) {
-        batch.set("hnsw.ef_search", Integer.toString(efSearchFor(nResults)));
+    /**
+     * {@link #setHnswEfSearch(DSLContext, int)} for a batch. Returns the value it put in the batch, so a caller
+     * that records it (telemetry) records the value that was set, not a second computation of it.
+     */
+    public static int setHnswEfSearch(GucBatch batch, int nResults) {
+        int ef = efSearchFor(nResults);
+        batch.set("hnsw.ef_search", Integer.toString(ef));
+        return ef;
+    }
+
+    /**
+     * Set {@code hnsw.ef_search} to {@link #EF_SEARCH_WIDEST} for a batch, instead of the request-sized
+     * serving value {@link #setHnswEfSearch(GucBatch, int)} sets (RDR-227 Step 1). A caller picks one of the
+     * two per statement; it is the same setting, so the pairing {@code HnswServingGucParityTest} pins holds.
+     * Returns the value it put in the batch.
+     */
+    public static int setHnswEfSearchWidest(GucBatch batch) {
+        batch.set("hnsw.ef_search", Integer.toString(EF_SEARCH_WIDEST));
+        return EF_SEARCH_WIDEST;
     }
 
     /** {@link #setHnswScanBudget(DSLContext)} for a batch. */

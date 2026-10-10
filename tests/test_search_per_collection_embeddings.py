@@ -203,6 +203,52 @@ class TestAnEngineThatDoesNotReturnThem:
         assert _signature(results) == _signature(reference)
 
 
+class _Taxonomy:
+    """The three reads search_cross_corpus makes of the taxonomy, over a fixed id -> topic map."""
+
+    def __init__(self, assignments: dict[str, int]) -> None:
+        self._assignments = assignments
+
+    def get_assignments_for_docs(self, ids):
+        return {i: self._assignments[i] for i in ids if i in self._assignments}
+
+    def get_topic_link_pairs(self, topic_ids):
+        return {}
+
+    def get_labels_for_ids(self, topic_ids):
+        return {t: f"topic-{t}" for t in topic_ids}
+
+
+class TestWithATaxonomyTheVectorsWaitForTheWardFallback:
+    """nexus-w032x: with a taxonomy, topic grouping is tried first and the vectors serve only the Ward
+    fallback. Measured 2026-10-09 on the managed service: topic grouping ran in all 12 profiled default
+    CLI searches, while the prefetched vectors made the code-group response 1.05-1.46 MB and the search
+    ~1.4 s slower (T2 nexus/w032x-embeddings-ab-2026-10-09). So the route is not asked for them, and
+    they are fetched by id only when grouping does not fire."""
+
+    def test_topic_grouping_fires_and_no_vector_is_asked_for_or_fetched(self, monkeypatch):
+        cols = _cols("code", _BGE, 1)
+        engine = _EmbeddingEngine(monkeypatch, _data(cols))
+        taxonomy = _Taxonomy({rid: 1 if rid.startswith("a") else 2 for rid, _ in _data(cols)[cols[0]]})
+        results = _search(engine, cols, taxonomy=taxonomy)
+
+        assert engine.route_calls()
+        assert all("include_embeddings" not in b for b in engine.route_calls())
+        assert engine.get_embedding_calls() == []
+        assert {r.metadata.get("_topic_label") for r in results} == {"topic-1", "topic-2"}
+
+    def test_low_coverage_falls_back_to_ward_on_vectors_fetched_then(self, monkeypatch):
+        cols = _cols("code", _BGE, 1)
+        reference = _search(_EmbeddingEngine(monkeypatch, _data(cols)), cols)   # no taxonomy: prefetched
+        engine = _EmbeddingEngine(monkeypatch, _data(cols))
+        results = _search(engine, cols, taxonomy=_Taxonomy({"a0": 1}))          # coverage 1/6
+
+        assert all("include_embeddings" not in b for b in engine.route_calls())
+        assert len(engine.get_embedding_calls()) == 1, "fetched only once Ward needs them"
+        assert _signature(results) == _signature(reference)
+        assert {label for _, _, label in _signature(results)} - {None}, "non-vacuous: Ward labelled"
+
+
 class TestTheClientSide:
     def _envelope(self, rows, **extra):
         return {"results": rows, "per_collection": [], "per_collection_k": 5, "limit": 5, **extra}

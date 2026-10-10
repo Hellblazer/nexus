@@ -3827,6 +3827,22 @@ that refuses every collection (legacy chunks, `CENSUS_SCOPE_MISMATCH`, a stateme
 still reads green here; the per-collection refusals are in `gc_audit` (`reaper_refused`). An engine that sends no `last_pass` is
 judged on the time alone.
 
+**Per-collection indexes (nexus-43ulx.24, RDR-227).** `nx doctor`'s "Per-collection indexes" row reads the
+`per_collection_indexes` object of the same `GET /v1/status` body: the read half's `valid`, `invalid` and `unparsed`
+counts and, under `this_engine`, `builder_state` (`ok`, `standby`, `off`, `auth_failed`, `no_privilege`), `failing` and
+`last_ddl_pass_at`. It fails (hard) on `auth_failed` (restart the engine after a `nexus_admin` rotation) and on
+`no_privilege` (the engine's admin role cannot create indexes on the leaves), checked before the counts so a dead builder
+cannot read green; it warns when `invalid` or `failing` is above zero, when a DDL pass has been in flight for more than an
+hour (`pass_started_at`; there is no pass deadline), and when `builder_state` is `ok` with no completed pass
+(`last_ddl_pass_at`, or the engine's `process_start_time` before its first) for three sweep periods plus 15 minutes (the
+engine's `sweep_seconds`, 600 when absent); it passes on `ok` and `standby` (a peer holds the builder lock; a standby
+with a fresh read passes `invalid` above zero with a note, since the invalid index may be the peer's build in flight), and
+on `off` with the note "builds disabled by `NX_SEARCH_PCI=0`". `unparsed` is shown, never a warning.
+The row is green and says "not applicable" when the engine cannot be reached or its status does not include the object (an
+older engine, or one still starting). An object the row
+cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `off` and `standby`, warns and names what
+it got. It works in local and managed mode alike, over HTTP only.
+
 **Chunk tenant isolation (nexus-wbfpw.48).** `nx doctor`'s "Chunk tenant isolation" row reads
 `chunks_tenant_isolation_intact` from `GET /v1/status`: true when no permissive row-level-security
 policy on `nexus.chunks` other than `tenant_isolation` applies to the role the engine serves
