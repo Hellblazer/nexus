@@ -360,6 +360,7 @@ def _attach_doc_ids_from_catalog(
 
 def _attach_display_paths(
     results: list[SearchResult], catalog: Any | None,
+    *, prefetched: _DisplayLookup | None = None,
 ) -> None:
     """nexus-1qed: annotate each result's metadata with a derived
     ``_display_path`` resolved through the catalog.
@@ -378,9 +379,39 @@ def _attach_display_paths(
     Pairs with :func:`_attach_doc_ids_from_catalog`: under Phase 3
     chunk metadata no longer carries ``doc_id``, so this function
     must run AFTER ``_attach_doc_ids_from_catalog`` injects it.
+
+    *prefetched* (nexus-w032x) is a :class:`_DisplayLookup` started on the
+    same results earlier; its maps are used when they cover every doc_id
+    the results now name, and the lookup runs here otherwise.
     """
     if catalog is None or not results:
         return
+    doc_ids = _display_doc_ids(results)
+    if not doc_ids:
+        return
+    if prefetched is not None and doc_ids <= prefetched.doc_ids:
+        cache, titles, homes = prefetched.maps()
+    else:
+        cache, titles, homes = _resolve_display_maps(doc_ids, catalog)
+    for r in results:
+        did = r.metadata.get("doc_id", "")
+        path = cache.get(did) if did else None
+        if path:
+            r.metadata["_display_path"] = path
+        owners = (r.metadata.get("_owner_doc_ids") or ([did] if did else []))[:_OWNER_TITLE_RESOLVE_CAP]
+        # The owner lookups are tenant-wide (chash is a function of text
+        # alone), so an owner in another collection is kept out: a hit
+        # names only documents in its own collection, or a ghost with none.
+        live = [
+            titles[o] for o in owners
+            if titles.get(o) and homes.get(o, "") in ("", r.collection)
+        ]
+        if live:
+            r.metadata["_display_title"] = owner_titles(live)
+
+
+def _display_doc_ids(results: list[SearchResult]) -> set[str]:
+    """The doc_ids :func:`_attach_display_paths` resolves for *results*."""
     doc_ids = {
         r.metadata.get("doc_id", "") for r in results
         if r.metadata.get("doc_id")
@@ -392,8 +423,13 @@ def _attach_display_paths(
         o for r in results
         for o in r.metadata.get("_owner_doc_ids", ())[:_OWNER_TITLE_RESOLVE_CAP]
     }
-    if not doc_ids:
-        return
+    return doc_ids
+
+
+def _resolve_display_maps(
+    doc_ids: set[str], catalog: Any,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """``(file_path, title, physical_collection)`` per doc_id, best-effort."""
     # Batch-resolve all doc_ids in one call when the catalog backend
     # supports resolve_many() (nexus-7lm3q).  Falls back to the per-doc
     # by_doc_id() loop for older/local catalogs that lack the method.
@@ -429,21 +465,41 @@ def _attach_display_paths(
             if entry is not None:
                 titles[did] = getattr(entry, "title", "") or ""
                 homes[did] = getattr(entry, "physical_collection", "") or ""
-    for r in results:
-        did = r.metadata.get("doc_id", "")
-        path = cache.get(did) if did else None
-        if path:
-            r.metadata["_display_path"] = path
-        owners = (r.metadata.get("_owner_doc_ids") or ([did] if did else []))[:_OWNER_TITLE_RESOLVE_CAP]
-        # The owner lookups are tenant-wide (chash is a function of text
-        # alone), so an owner in another collection is kept out: a hit
-        # names only documents in its own collection, or a ghost with none.
-        live = [
-            titles[o] for o in owners
-            if titles.get(o) and homes.get(o, "") in ("", r.collection)
-        ]
-        if live:
-            r.metadata["_display_title"] = owner_titles(live)
+    return cache, titles, homes
+
+
+class _DisplayLookup:
+    """The display-path catalog lookup for a result set, run on a worker
+    thread (nexus-w032x). It needs only the doc_ids, which are known once
+    :func:`_attach_doc_ids_from_catalog` has run, so it overlaps the topic
+    grouping and boost instead of following them (0.15-0.17 s of
+    ``resolve_many`` on a cold cloud search, T2
+    ``nexus/w032x-listing-prefetch-cloud-ab-2026-10-10``)."""
+
+    def __init__(self, doc_ids: set[str], catalog: Any) -> None:
+        self.doc_ids = doc_ids
+        self._catalog = catalog
+        self._maps: tuple[dict[str, str], dict[str, str], dict[str, str]] = ({}, {}, {})
+        self._thread = threading.Thread(
+            target=self._run, name="nexus-display-lookup", daemon=True,
+        )
+
+    @classmethod
+    def start(cls, results: list[SearchResult], catalog: Any) -> _DisplayLookup | None:
+        doc_ids = _display_doc_ids(results)
+        if not doc_ids:
+            return None
+        lookup = cls(doc_ids, catalog)
+        lookup._thread.start()
+        return lookup
+
+    def _run(self) -> None:
+        # _resolve_display_maps is best-effort and catches its own failures.
+        self._maps = _resolve_display_maps(self.doc_ids, self._catalog)
+
+    def maps(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        self._thread.join()
+        return self._maps
 
 
 #: The most owners of one hit's chunk resolved for its display title.
@@ -1990,8 +2046,12 @@ def search_cross_corpus(
     # downstream consumer reads ``r.metadata["doc_id"]``. Phase 3
     # removed doc_id from chunk metadata; without this step,
     # apply_link_boost and _attach_display_paths silently no-op.
+    display_lookup: _DisplayLookup | None = None
     if catalog is not None and all_results:
         _attach_doc_ids_from_catalog(all_results, catalog)
+        # nexus-w032x: the display-path lookup needs only these doc_ids, so
+        # it runs on a worker while the boosts and topic grouping run here.
+        display_lookup = _DisplayLookup.start(all_results, catalog)
 
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
@@ -2085,7 +2145,7 @@ def search_cross_corpus(
     # so formatters never need to import the catalog. Best-effort;
     # absent catalog or missing doc_ids leave _display_path unset and
     # formatters fall back to source_path / file_path.
-    _attach_display_paths(all_results, catalog)
+    _attach_display_paths(all_results, catalog, prefetched=display_lookup)
 
     return all_results
 
