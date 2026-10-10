@@ -395,13 +395,19 @@ public final class PgSession {
      * network timeout for {@code statement_timeout} that "does not outlive the borrow"; a connection that outlives
      * its statement keeps it, and a 30-minute {@code CREATE INDEX CONCURRENTLY} behind a 31 second read bound would
      * fail on the client side. The one place a network timeout is set outside {@link #setLocal} is here, so
-     * {@code NetworkBoundStatementTimeoutGateTest} stays the single audit point. A failure is logged and not thrown.
+     * {@code NetworkBoundStatementTimeoutGateTest} stays the single audit point. A failure is logged and not thrown;
+     * it returns false so a caller that owns the connection can end its use of it (a short socket bound left under a
+     * 30-minute build would cut the build off on the client side).
+     *
+     * @return true when the timeout is back, false when it could not be set
      */
-    public static void restoreNetworkTimeout(java.sql.Connection conn, int timeoutMs) {
+    public static boolean restoreNetworkTimeout(java.sql.Connection conn, int timeoutMs) {
         try {
             conn.setNetworkTimeout(Runnable::run, timeoutMs);
+            return true;
         } catch (java.sql.SQLException | RuntimeException e) {
             log.warn("event=pg_network_timeout_not_set stage=restore error=\"{}\"", e.getMessage());
+            return false;
         }
     }
 

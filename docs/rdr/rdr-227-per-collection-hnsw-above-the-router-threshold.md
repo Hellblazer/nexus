@@ -654,8 +654,23 @@ kept in separate places so no reader takes one for the other:
   "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
   "this_engine": {
     "builder_state": "ok", "building": 0, "failing": 0,
-    "last_ddl_pass_at": "2026-10-10T07:30:00Z"
+    "last_ddl_pass_at": "2026-10-10T07:30:00Z",
+    "pass_started_at": null, "pass_in_progress": false
   }
+}
+```
+
+A standby engine, and an engine whose admin credentials were refused, read:
+
+```json
+"this_engine": {
+  "builder_state": "standby", "building": null, "failing": null,
+  "last_ddl_pass_at": "2026-10-10T07:30:00Z",
+  "pass_started_at": null, "pass_in_progress": false
+}
+"this_engine": {
+  "builder_state": "auth_failed", "building": null, "failing": null,
+  "last_ddl_pass_at": null, "pass_started_at": null, "pass_in_progress": false
 }
 ```
 
@@ -666,18 +681,24 @@ kept in separate places so no reader takes one for the other:
   plus the read bound and the router is answering as empty, so an operator can
   see a frozen set. The counts stay the last read's while `expired`.
 - *This engine* (`this_engine`): `builder_state`, one of `ok`, `auth_failed`,
-  `no_privilege`, `off` and `standby` (`standby`: a peer holds the builder lock);
+  `no_privilege`, `off` and `standby` (`standby`: a peer holds the builder lock;
+  `no_privilege` and `auth_failed` are shown while they last, not only in the log);
   `building`, 0 or 1, the lock holder's own build in flight; `failing`, the
-  collections with three or more consecutive failed builds; and
-  `last_ddl_pass_at`, when the last lock-holding pass ran to its end.
-  `building`, `failing` and `last_ddl_pass_at` are **null on an engine that does
-  not hold the lock** (and `last_ddl_pass_at` is null on the holder before its
-  first pass): building and failing are the holder's own state, and another
-  role's `pg_stat_progress_create_index` rows are not visible, so a count of
-  builds in flight across engines is not reported. This replaces the earlier
-  design of a global building count read from `pg_stat_progress_create_index`
-  (`nexus_rdr/227-fix-check-ca4ca8962`). A non-holder reports `standby` (or
-  `off`, or `auth_failed`) and those nulls.
+  collections on this engine with three or more consecutive failed builds;
+  `last_ddl_pass_at`, when this engine's last pass that held the lock, ran to
+  its end and counted at least one leaf finished (a pass that skipped every leaf
+  on a count timeout or a failed read does not move it); and `pass_started_at`
+  with `pass_in_progress`, the pass in flight, so a long first pass (several
+  serial builds) is visible while `last_ddl_pass_at` is still null.
+  `building`, `failing` and `pass_started_at` are **null on an engine that does
+  not hold the lock** (`pass_in_progress` is false there): building and failing
+  are the holder's own state, and another role's `pg_stat_progress_create_index`
+  rows are not visible, so a count of builds in flight across engines is not
+  reported. `last_ddl_pass_at` is this engine's own history and stays after the
+  engine becomes a standby; it is null only before the engine's first completed
+  pass. This replaces the earlier design of a global building count read from
+  `pg_stat_progress_create_index` (`nexus_rdr/227-fix-check-ca4ca8962`). A
+  non-holder reports `standby` (or `off`, or `auth_failed`) with those nulls.
 
 The counts are global, not per tenant, like the existing `reaper` object on the
 same unauthenticated route. The object is additive and goes in the wire ledger;
@@ -696,6 +717,20 @@ its own read half. A standby engine's `valid` converges to the holder's within
 and an engine restart, check `builder_state = ok`, a `last_ddl_pass_at` later than
 the restart on the holder, and no `event=pci_builder_auth_failed` since
 `service_started`.
+
+**Retry is per engine.** The retry state (the 10 minute to 24 hour backoff and
+the `failing` count) is in memory on the engine that ran the build and is lost on
+restart. The builder lock serialises passes but is held per pass, so with more
+than one engine the holder alternates. A failed concurrent build leaves an
+invalid index that must be dropped before the name can be built again, and a peer
+with no failure entry drops it and rebuilds on its first pass after the drop.
+Across N engines a failing build is therefore retried at most once per sweep
+period by whichever engine holds the lock: bounded, but not backed off
+exponentially, and `failing` is per engine, so read it on every engine. A build
+ended because a schema migration or the engine's shutdown terminated the builder
+session (or the network dropped) is not a failure and is not charged. The
+reconciler's first pass starts after a random delay of up to 60 seconds or a
+tenth of the period, whichever is shorter.
 
 ### New Dependencies
 
@@ -740,9 +775,12 @@ None.
   build in that pass starts.
 - Status: the `per_collection_indexes` object reports the read half's counts,
   `expired` and `last_read_at` globally, and `builder_state`, `building`,
-  `failing` and `last_ddl_pass_at` for this engine; a non-holder reports
-  `standby` with null `building`, `failing` and `last_ddl_pass_at`; the key is
-  absent when no source is wired.
+  `failing`, `last_ddl_pass_at`, `pass_started_at` and `pass_in_progress` for
+  this engine; a non-holder reports `standby` with null `building`, `failing`
+  and `pass_started_at` and its own `last_ddl_pass_at` (null only before its
+  first pass); a role without privilege and a wrong admin password show as
+  `no_privilege` and `auth_failed` while they last; the key is absent when no
+  source is wired.
 - Plan check: the sampled EXPLAIN logs `used=false` when the index is skipped.
 
 ## Validation

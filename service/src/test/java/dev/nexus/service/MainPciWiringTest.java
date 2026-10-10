@@ -157,6 +157,53 @@ class MainPciWiringTest {
         assertThat(src.indexOf("service.perCollectionIndexes(", bind + 1)).as("bound once").isNegative();
     }
 
+    /**
+     * nexus-43ulx.17 fix round: the shutdown hook's call has to carry the admin values and THIS boot's builder name,
+     * not only appear in the right place. A call with the pool's own values would compile, run, and reach nothing
+     * (the application role cannot signal the admin role's backend); a name from a second nonce would match no
+     * backend. Pinned on the arguments, since {@code main} cannot run in a test.
+     */
+    @Test
+    void theShutdownReaperIsHandedTheAdminValuesAndThisBootsBuilderName() throws Exception {
+        String src = code(main());
+        int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+
+        assertThat(src.substring(hook)).as("inside the hook, the one seven-argument call")
+            .containsPattern("BackendReaper\\.terminateAtShutdown\\(\\s*dbUrl,\\s*dbUser,\\s*dbPass,\\s*"
+                + "applicationName,\\s*ds\\.getHikariPoolMXBean\\(\\)\\.getActiveConnections\\(\\),\\s*"
+                + "adminConnection,\\s*pciBuilderApplicationName\\)");
+        assertThat(src).as("the admin values are the ones resolved from NX_DB_ADMIN_* once, at boot")
+            .containsPattern("var adminConnection = dev\\.nexus\\.service\\.db\\.AdminConnection\\.resolve\\("
+                + "System::getenv,\\s*dbUrl,\\s*dbUser,\\s*dbPass\\);");
+        assertThat(src).as("the builder's name is the one PciBuilderSession gives backends, from the boot nonce")
+            .containsPattern("pciBuilderApplicationName\\s*=\\s*dev\\.nexus\\.service\\.vectors\\."
+                + "PciBuilderSession\\.builderApplicationName\\(\\s*pciBootNonce\\);");
+        assertThat(src).as("and the nonce is the pool name's own last segment, the one the reconciler is built with")
+            .containsPattern("pciBootNonce\\s*=\\s*dev\\.nexus\\.service\\.db\\.BackendReaper\\."
+                + "bootNonce\\(applicationName\\);")
+            .containsPattern("PciReconciler\\.create\\(ds,\\s*adminConnection,\\s*pciBootNonce,");
+        assertThat(src.indexOf("adminConnection =", src.indexOf("adminConnection =") + 1))
+            .as("adminConnection is assigned once").isNegative();
+        assertThat(src.indexOf("pciBuilderApplicationName =", src.indexOf("pciBuilderApplicationName =") + 1))
+            .as("and so is the builder name").isNegative();
+    }
+
+    /** {@code terminateAtShutdown}'s seven-argument form, the one {@code main} calls, runs under the shared budget. */
+    @Test
+    void theSevenArgumentShutdownReapRunsUnderTheSharedBudget() throws Exception {
+        String reaper = code(Files.readString(Path.of("src/main/java/dev/nexus/service/db/BackendReaper.java")));
+        assertThat(reaper).containsPattern("public static ShutdownReap terminateAtShutdown\\([^)]*\\)\\s*\\{\\s*"
+            + "return terminateAtShutdown\\(poolUrl,\\s*poolUser,\\s*poolPassword,\\s*poolApplicationName,\\s*"
+            + "poolActive,\\s*admin,\\s*builderApplicationName,\\s*SHUTDOWN_BUDGET_MILLIS\\);");
+        assertThat(reaper).as("the budgeted form hands the same budget to the concurrent join")
+            .containsPattern("builderApplicationName\\)\\),\\s*budgetMillis\\);");
+        assertThat(reaper).as("the pool's call and the builder's call are the two it runs together")
+            .containsPattern("terminateOwnBackends\\(poolUrl,\\s*poolUser,\\s*poolPassword,\\s*"
+                + "poolApplicationName,\\s*poolActive\\)")
+            .containsPattern("terminateOwnBackends\\(admin\\.url\\(\\),\\s*admin\\.user\\(\\),\\s*"
+                + "admin\\.password\\(\\),\\s*builderApplicationName\\)");
+    }
+
     @Test
     void theRepositoryIsBuiltAfterTheBootSettingsAreValidated() throws Exception {
         String src = main();

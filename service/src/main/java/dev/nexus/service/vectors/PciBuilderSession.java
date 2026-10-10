@@ -84,6 +84,12 @@ public final class PciBuilderSession {
     /** Above the 30-minute statement timeout, so the server gives up on a build before the socket does. */
     static final int SOCKET_TIMEOUT_SECONDS = 35 * 60;
 
+    /**
+     * pgjdbc {@code loginTimeout}: the whole connect-and-authenticate handshake. {@code connectTimeout} bounds only
+     * the TCP connect, so without this a server that accepts and then stalls would hold a pass for the socket timeout.
+     */
+    static final int LOGIN_TIMEOUT_SECONDS = 30;
+
     private static final String BUILD_LOCK_TIMEOUT = "0";
     private static final String BUILD_STATEMENT_TIMEOUT = "30min";
     private static final String DROP_LOCK_TIMEOUT = "5s";
@@ -137,7 +143,14 @@ public final class PciBuilderSession {
         /** The request failed the name or shape check; nothing was sent. */
         REJECTED,
         /** The statement, or a check before it, failed; see the log. A failed build may leave an INVALID index. */
-        FAILED
+        FAILED,
+        /**
+         * The builder's backend was ended or the connection was lost ({@code 57P01}: a schema migration or the
+         * engine's shutdown terminated it; {@code 08xxx}: the network). The pass is over. Unlike {@link #FAILED} this
+         * says nothing about the statement: the same build may succeed on the next pass, so a caller that backs off
+         * failing builds must not charge it.
+         */
+        CONNECTION_LOST
     }
 
     private final String url;
@@ -190,11 +203,13 @@ public final class PciBuilderSession {
             String sqlState = e.getSQLState();
             if (INVALID_PASSWORD.equals(sqlState) || INVALID_AUTHORIZATION.equals(sqlState)) {
                 state = BuilderState.AUTH_FAILED;
-                log.warn("event=pci_builder_auth_failed sqlstate={} user={} hint=\"NX_DB_ADMIN_* are read once at boot; "
-                    + "restart the engine after rotating the admin password\"", sqlState, user);
+                log.warn("event=pci_builder_auth_failed sqlstate={} user={} cause=\"{}\" hint=\"NX_DB_ADMIN_* are read "
+                    + "once at boot; restart the engine after rotating the admin password\"", sqlState, user,
+                    scrub(e.getMessage()));
                 return Pass.inactive(this, BuilderState.AUTH_FAILED);
             }
-            throw new IllegalStateException("pci builder could not connect: sqlstate=" + sqlState, e);
+            throw new IllegalStateException("pci builder could not connect: sqlstate=" + sqlState + " cause=\""
+                + scrub(e.getMessage()) + "\"", e);
         }
         Pass pass = null;
         try {
@@ -225,13 +240,7 @@ public final class PciBuilderSession {
     }
 
     private Connection connect() throws SQLException {
-        Properties props = new Properties();
-        props.setProperty("user", user);
-        props.setProperty("password", password);
-        props.setProperty("ApplicationName", applicationName);
-        props.setProperty("connectTimeout", Integer.toString(BackendReaper.CONNECT_TIMEOUT_SECONDS));
-        props.setProperty("socketTimeout", Integer.toString(SOCKET_TIMEOUT_SECONDS));
-        Connection conn = DriverManager.getConnection(url, props);
+        Connection conn = DriverManager.getConnection(url, connectionProperties());
         try {
             conn.setAutoCommit(true);
         } catch (SQLException | RuntimeException e) {
@@ -239,6 +248,40 @@ public final class PciBuilderSession {
             throw e;
         }
         return conn;
+    }
+
+    /** The driver properties of the builder's connection: its role, name and every bound; for tests. */
+    Properties connectionProperties() {
+        Properties props = new Properties();
+        props.setProperty("user", user);
+        props.setProperty("password", password);
+        props.setProperty("ApplicationName", applicationName);
+        props.setProperty("connectTimeout", Integer.toString(BackendReaper.CONNECT_TIMEOUT_SECONDS));
+        props.setProperty("loginTimeout", Integer.toString(LOGIN_TIMEOUT_SECONDS));
+        props.setProperty("socketTimeout", Integer.toString(SOCKET_TIMEOUT_SECONDS));
+        // A build holds this socket idle-looking for up to 30 minutes: let the OS notice a peer that vanished.
+        props.setProperty("tcpKeepAlive", "true");
+        return props;
+    }
+
+    private static final java.util.regex.Pattern PASSWORD_PARAM =
+        java.util.regex.Pattern.compile("(?i)(password|passwd|pwd)=[^&\\s;]*");
+
+    /**
+     * A driver message made safe to log: this session's password and any {@code password=} URL parameter are masked
+     * (a driver can echo the URL, e.g. "No suitable driver found for ..."), and quotes and line breaks are flattened so
+     * the value stays inside the log line's {@code cause="..."} field.
+     */
+    String scrub(String message) {
+        if (message == null) {
+            return "";
+        }
+        String out = message;
+        if (!password.isEmpty()) {
+            out = out.replace(password, "***");
+        }
+        out = PASSWORD_PARAM.matcher(out).replaceAll("$1=***");
+        return out.replace('"', '\'').replaceAll("\\s*[\\r\\n]+\\s*", " ").strip();
     }
 
     private static void closeQuietly(Connection conn) {
@@ -343,8 +386,13 @@ public final class PciBuilderSession {
                         conn.setAutoCommit(true);
                     } finally {
                         // A transaction that bound a statement timeout also bound a short network timeout
-                        // (PgSession#setLocal); the DDL after it needs this connection's own, longer one.
-                        PgSession.restoreNetworkTimeout(conn, SOCKET_TIMEOUT_SECONDS * 1000);
+                        // (PgSession#setLocal); the DDL after it needs this connection's own, longer one. If it
+                        // cannot be put back the pass ends: a build under the short bound would be cut off by the
+                        // client after about half a minute, and a CIC the client abandons keeps running server-side.
+                        if (!PgSession.restoreNetworkTimeout(conn, SOCKET_TIMEOUT_SECONDS * 1000)) {
+                            log.warn("event=pci_builder_pass_ended reason=network_timeout_not_restored");
+                            end(DdlOutcome.CONNECTION_LOST);
+                        }
                     }
                 }
             } catch (SQLException e) {
@@ -356,11 +404,35 @@ public final class PciBuilderSession {
             }
         }
 
-        private void connectionLost(String sqlState) {
-            if (sqlState != null && (sqlState.startsWith("08") || "57P01".equals(sqlState))) {
-                ended = DdlOutcome.FAILED;
-                close();
+        /** True for the SQLSTATEs of a connection that is gone: {@code 08xxx}, and {@code 57P01} (terminated). */
+        private static boolean isConnectionLoss(String sqlState) {
+            return sqlState != null && (sqlState.startsWith("08") || "57P01".equals(sqlState));
+        }
+
+        /** Ends the pass when {@code sqlState} says the connection is gone; returns whether it did. */
+        private boolean connectionLost(String sqlState) {
+            if (isConnectionLoss(sqlState)) {
+                end(DdlOutcome.CONNECTION_LOST);
+                return true;
             }
+            return false;
+        }
+
+        private void end(DdlOutcome outcome) {
+            if (ended == null) {
+                ended = outcome;
+            }
+            close();
+        }
+
+        /**
+         * End the pass because a check the caller made on it failed with {@code cause}: the connection is gone (the
+         * migrator or a peer ended the idle builder session between statements) or its state is unknown. Nothing
+         * more is sent on it, and a request returns {@link DdlOutcome#CONNECTION_LOST}. Idempotent.
+         */
+        public void abandon(DataAccessException cause) {
+            log.info("event=pci_builder_pass_ended reason=connection_lost sqlstate={}", cause.sqlState());
+            end(DdlOutcome.CONNECTION_LOST);
         }
 
         /**
@@ -460,9 +532,9 @@ public final class PciBuilderSession {
             }
             log.warn("event=pci_ddl_failed op={} index={} leaf={}.{} sqlstate={} cause=\"{}\"", op, indexName,
                 leaf.schema(), leaf.name(), sqlState, e.getMessage());
-            // If the connection is gone (network, or terminated by the migrator or shutdown) nothing more can run.
-            connectionLost(sqlState);
-            return DdlOutcome.FAILED;
+            // If the connection is gone (network, or terminated by the migrator or shutdown) nothing more can run,
+            // and the statement is not at fault.
+            return connectionLost(sqlState) ? DdlOutcome.CONNECTION_LOST : DdlOutcome.FAILED;
         }
 
         private boolean migrationHolds() {

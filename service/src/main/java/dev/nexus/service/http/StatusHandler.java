@@ -275,20 +275,30 @@ public final class StatusHandler implements HttpHandler {
          * @param builderState  {@code ok}, {@code auth_failed}, {@code no_privilege}, {@code off} or {@code standby}
          *                      ({@code standby}: a peer engine holds the builder lock)
          * @param building      1 while this engine's build runs, 0 otherwise; null unless this engine holds the lock
-         * @param failing       collections with three or more consecutive failed builds; null unless this engine
-         *                      holds the lock
-         * @param lastDdlPassAt when the last lock-holding pass finished; null unless this engine holds the lock, and
-         *                      null before its first such pass
+         * @param failing       collections with three or more consecutive failed builds on this engine; null unless
+         *                      this engine holds the lock
+         * @param lastDdlPassAt when this engine's last lock-holding pass that processed a leaf finished; kept when
+         *                      the engine is standby now, null only before its first
+         * @param passStartedAt when the lock-holding pass in flight started; null when none is (always on a
+         *                      non-holder)
+         * @param passInProgress whether a lock-holding pass is in flight, so a long first pass is visible while
+         *                      {@code lastDdlPassAt} is still null
          */
         public record ThisEngine(String builderState, Integer building, Integer failing,
-                                 java.time.Instant lastDdlPassAt) { }
+                                 java.time.Instant lastDdlPassAt, java.time.Instant passStartedAt,
+                                 boolean passInProgress) {
+            public ThisEngine(String builderState, Integer building, Integer failing, java.time.Instant lastDdlPassAt) {
+                this(builderState, building, failing, lastDdlPassAt, null, false);
+            }
+        }
 
         /** The object as the sweep's last read and the reconciler's status say it. */
         public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
                                               dev.nexus.service.vectors.PciReconciler.DdlStatus ddl) {
             return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(), sweep.lastReadAt(),
                 sweep.expired(),
-                new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt()));
+                new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
+                    ddl.passStartedAt(), ddl.passInProgress()));
         }
     }
 
@@ -442,6 +452,9 @@ public final class StatusHandler implements HttpHandler {
             .append(",\"failing\":").append(p.thisEngine().failing())
             .append(",\"last_ddl_pass_at\":");
         appendSeconds(body, p.thisEngine().lastDdlPassAt());
+        body.append(",\"pass_started_at\":");
+        appendSeconds(body, p.thisEngine().passStartedAt());
+        body.append(",\"pass_in_progress\":").append(p.thisEngine().passInProgress());
         body.append("}}");
     }
 

@@ -398,7 +398,8 @@ public final class Main {
         pciSweep.start();
         // nexus-43ulx.19: the DDL half, on a task of its own beside the read half. It acts only when NX_SEARCH_PCI=1
         // (start() schedules nothing otherwise) and only on the engine that holds the builder lock. Started after
-        // the read half so its first refresh() has a set to replace; stopped first in the hook's tail below.
+        // the read half so its first refresh() has a set to replace; stopped in the hook right after the listener and
+        // before the builder reaper, so a pass cannot open a new builder connection after the reaper ended the old one.
         String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
                 dev.nexus.service.db.PgSession.startupPciSettings());
@@ -458,7 +459,8 @@ public final class Main {
             log.info("event=shutdown_signal");
             service.stop();
             stopPciReconciler.run();
-            // nexus-g17tf: FIRST after the listener stops, ahead of the embedder
+            // nexus-g17tf: right after the listener stops and the reconciler's stop
+            // (both return at once: neither waits), ahead of the embedder
             // closes (each can wait up to 5s) so the reaper always runs inside a
             // 10s container stop grace. Hikari's close aborts the sockets, and a
             // CPU-bound backend never notices a closed socket; only the postmaster
@@ -507,11 +509,9 @@ public final class Main {
      * {@code defaultUrl/defaultUser/defaultPass} (the regular application
      * credentials) for dev/test setups where one role owns both DDL and DML.
      *
-     * <p><strong>Partial-config guard</strong>: if any one of {@code NX_DB_ADMIN_URL},
-     * {@code NX_DB_ADMIN_USER}, or {@code NX_DB_ADMIN_PASS} is set, all three must be
-     * set. A partial configuration (e.g. ADMIN_USER set but ADMIN_PASS absent) would
-     * silently mix admin and app credentials, producing a cryptic auth error at connect
-     * time instead of a clear startup failure.
+     * <p>The partial-config guard (all three {@code NX_DB_ADMIN_*} values or none) lives in
+     * {@link dev.nexus.service.db.AdminConnection#resolve}, which {@code main} calls once; this method
+     * only turns the resolved values into a pool.
      *
      * <p>Pool size 1: Liquibase uses a single connection sequentially.
      */

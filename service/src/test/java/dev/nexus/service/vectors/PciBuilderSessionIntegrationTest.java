@@ -433,6 +433,47 @@ class PciBuilderSessionIntegrationTest {
         assertThat(asSuperuser(SchemaMigrator::migrationLockHolderPid)).isEqualTo(-1);
     }
 
+    /**
+     * Advisory locks are database-scoped, and {@code pg_locks} lists a lock from every database of the cluster. A
+     * migration walking in ANOTHER database on the same cluster must not make this database's builder skip DDL, so
+     * {@code migrationLockHolderPid} filters on the current database. Without the filter this reports the other
+     * database's pid (the control below proves the row is visible in {@code pg_locks}).
+     */
+    @Test
+    void aMigrationLockHeldInAnotherDatabase_isNotAHolderHere_butIsInItsOwn() throws Exception {
+        String other = "pcibld_otherdb";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "CREATE DATABASE " + other);
+        }
+        try {
+            String url = pg.getJdbcUrl().replace("/" + pg.getDatabaseName(), "/" + other);
+            assertThat(url).as("the url names the other database").isNotEqualTo(pg.getJdbcUrl());
+            try (Connection elsewhere = java.sql.DriverManager.getConnection(url, pg.getUsername(), pg.getPassword())) {
+                elsewhere.setAutoCommit(true);
+                DSLContext there = DSL.using(elsewhere, SQLDialect.POSTGRES);
+                there.select(DSL.function("pg_advisory_lock", SQLDataType.OTHER,
+                    DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();
+                int elsewherePid = there.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER))
+                    .fetchOne(0, Integer.class);
+
+                assertThat(holdersOf(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))
+                    .as("control: the row is in pg_locks (a cluster-wide view), held by the other database's session")
+                    .isEqualTo(1);
+                assertThat(asSuperuser(SchemaMigrator::migrationLockHolderPid))
+                    .as("but it is not this database's migration").isEqualTo(-1);
+                assertThat(SchemaMigrator.migrationLockHolderPid(there)).as("and it is, in its own database")
+                    .isEqualTo(elsewherePid);
+                try (PciBuilderSession.Pass pass = adminSession().open()) {
+                    assertThat(pass.skippedForMigration()).as("this database's pass is not skipped").isFalse();
+                }
+            }
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.runSuperuserDdlOutsideTransaction(su, "DROP DATABASE IF EXISTS " + other);
+            }
+        }
+    }
+
     @Test
     void aWrongAdminPassword_givesAuthFailed_onEveryPass_andRunsNoDdl() throws Exception {
         String collection = collectionName("auth");
@@ -454,6 +495,8 @@ class PciBuilderSessionIntegrationTest {
 
         assertThat(count(logs, "event=pci_builder_auth_failed")).as("logged on every pass").isEqualTo(2);
         assertThat(logs).noneMatch(l -> l.contains(wrong));
+        assertThat(logs).as("the driver's reason is logged, so an operator sees why")
+            .anyMatch(l -> l.contains("event=pci_builder_auth_failed") && l.contains("password authentication failed"));
         assertThat(indexOn(M1024, T1, PciCatalog.indexName(M1024, T1, collection))).isEmpty();
     }
 

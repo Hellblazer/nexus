@@ -366,8 +366,10 @@ class PciBuilderTerminationIntegrationTest {
                 .as("and the migrator released its own").isZero();
 
             // The pass reports closed and starts nothing: a terminated connection ends it.
-            assertThat(pass.build(leaf, 1024, second)).isEqualTo(DdlOutcome.FAILED);
-            assertThat(pass.build(leaf, 1024, second)).as("the pass stays ended").isEqualTo(DdlOutcome.FAILED);
+            assertThat(pass.build(leaf, 1024, second)).as("a terminated connection is not the statement's failure")
+                .isEqualTo(DdlOutcome.CONNECTION_LOST);
+            assertThat(pass.build(leaf, 1024, second)).as("the pass stays ended")
+                .isEqualTo(DdlOutcome.CONNECTION_LOST);
             assertThat(indexExists(secondIndex)).as("no later build started").isFalse();
             assertThat(indexExists(PciCatalog.indexName(M1024, T1, first))).as("the finished build stays").isTrue();
 

@@ -810,7 +810,9 @@ public final class SchemaMigrator {
      * <p>Scope: this database only ({@code datname = current_database()}), and not this session. Failure to read or
      * signal is logged and the walk goes on: the builder is optional, and a boot that dies because it could not end
      * one would turn an optional feature into an outage. The signal needs the target's role, which is the
-     * migrator's own when {@code NX_DB_ADMIN_*} serve both, as they do in the supported configuration.
+     * migrator's own when {@code NX_DB_ADMIN_*} serve both, as they do in the supported configuration. A failure
+     * is logged at ERROR, not WARN: with a split-role configuration it means a build the walk can deadlock with
+     * was left running, which an operator must see.
      */
     private static void terminatePciBuilders(Connection conn) {
         var pid = DSL.field(DSL.name("pid"), Integer.class);
@@ -831,7 +833,7 @@ public final class SchemaMigrator {
             }
             log.info("event=pci_builders_terminated count={}", terminated);
         } catch (DataAccessException e) {
-            log.warn("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
+            log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
         }
     }
 

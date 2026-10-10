@@ -38,6 +38,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
+import java.util.random.RandomGenerator;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
@@ -87,21 +89,37 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * before each statement ({@code PciBuilderSession}) and this class checks it before each leaf's counting. After
  * every successful BUILD and every successful DROP it calls {@link PciIndexSweep#refresh()}: a router set that still
  * lists a dropped index sends its collection to the serving {@code ef_search} with no graph behind it. A
- * {@code refresh()} that returns false (a lock-wait skip or a failed read) is not fatal; the read half's next tick
- * repairs the set. When the pass ends (a migration, a lost connection, a privilege error) the remaining actions
- * are not sent, and a build that never started is not charged to backoff.
+ * {@code refresh()} that returns false (a lock-wait skip or a failed read) is not fatal, since the read half's next
+ * tick repairs the set, but after a DROP it is tried once more because that is the unsafe direction. When the pass
+ * ends (a migration, a lost connection, a privilege error) the remaining actions are not sent, and a build that never
+ * started, or whose backend was terminated, is not charged to backoff.
  *
- * <p><b>Retry state is in memory, on the lock holder, and is lost on restart.</b> After a failed build of
+ * <p><b>Retry state is in memory, per engine, and is lost on restart.</b> After a failed build of
  * (leaf, collection) the first retry comes no sooner than {@link #FIRST_RETRY} later, doubling to
  * {@link #MAX_RETRY}; the collection is handed to the planner as backed off until then. After
  * {@link #FAILING_AFTER} consecutive failures it counts as <i>failing</i>. A restart forgets all of it, so a build
  * that always fails is retried at once after each boot and then backs off again. A success clears the entry, and so
- * does a collection leaving the registry or gaining a valid index.
+ * does a collection leaving the registry, being superseded or quarantined, or gaining a valid index. A build ended
+ * by the connection being terminated (a schema migration, the engine's shutdown) or lost is not a failure of the
+ * build and is not charged.
  *
- * <p><b>Status for the status object</b> (nexus-43ulx.23 builds the object; {@link #status()} is its source). Only
- * the lock holder reports {@code building} (0 or 1), {@code failing} and the last DDL pass time: other engines cannot
- * see another role's {@code pg_stat_progress_create_index} and hold none of this state. A non-holder reports
- * {@code builder_state = standby} (or {@code off}, {@code auth_failed}) and nulls.
+ * <p><b>With more than one engine the backoff is bounded, not exponential.</b> The builder lock serialises passes,
+ * but it is held per pass, so the holder alternates between engines, while the backoff and the failure count live in
+ * the memory of the engine that ran the build. A failed concurrent build leaves an INVALID index that must be
+ * dropped before the name can be built again, and a peer with no entry for the collection drops it and rebuilds on
+ * its first pass after the drop. So across N engines a failing build is retried at most once per sweep period
+ * ({@code NX_SEARCH_PCI_SWEEP_SECONDS}) by whichever engine holds the lock, which bounds the cost but does not back
+ * it off to {@link #MAX_RETRY}; each engine's own retries do back off, and its {@code failing} count is its own, so
+ * an operator reads {@code failing} on every engine. A shared, catalog-backed backoff is deliberately not built
+ * (the retry state is a session decision: in memory, lost on restart).
+ *
+ * <p><b>Status for the status object</b> (nexus-43ulx.23 builds the object; {@link #status()} is its source).
+ * {@code builder_state} is the builder's own current state, so a privilege or authentication failure shows up while
+ * it holds. Only the lock holder reports {@code building} (0 or 1), {@code failing} and the progress of a pass in
+ * flight ({@code pass_started_at}, {@code pass_in_progress}): other engines cannot see another role's
+ * {@code pg_stat_progress_create_index} and hold none of this state. The last DDL pass time is this engine's own,
+ * reported whether or not it holds the lock now (null only before its first completed pass). A non-holder reports
+ * {@code builder_state = standby} (or {@code off}, {@code auth_failed}) and nulls for the holder-only fields.
  */
 public final class PciReconciler {
 
@@ -142,10 +160,19 @@ public final class PciReconciler {
      * @param building     1 while this holder's build runs, else 0; {@code null} unless this engine holds the lock
      * @param failing      collections with {@value #FAILING_AFTER} or more consecutive failed builds; {@code null}
      *                     unless this engine holds the lock
-     * @param lastDdlPassAt when the last pass that held the lock and ran to its end finished; {@code null} unless
-     *                     this engine holds the lock, or before the first such pass
+     * @param lastDdlPassAt when this engine's last pass that held the lock, ran to its end and processed at least one
+     *                     leaf finished; kept when the engine is standby now, {@code null} only before its first
+     * @param passStartedAt when the pass in flight started; {@code null} when none is, and always on a non-holder
+     * @param passInProgress whether a lock-holding pass is in flight (the long first pass shows here, not in
+     *                     {@code lastDdlPassAt})
      */
-    public record DdlStatus(BuilderState builderState, Integer building, Integer failing, Instant lastDdlPassAt) { }
+    public record DdlStatus(BuilderState builderState, Integer building, Integer failing, Instant lastDdlPassAt,
+                            Instant passStartedAt, boolean passInProgress) {
+        /** A status with no pass in flight. */
+        public DdlStatus(BuilderState builderState, Integer building, Integer failing, Instant lastDdlPassAt) {
+            this(builderState, building, failing, lastDdlPassAt, null, false);
+        }
+    }
 
     /** What one pass did; for tests and the pass log line. */
     record PassReport(BuilderState state, boolean ranToEnd, int leaves, int drops, int builds, int failedBuilds,
@@ -155,11 +182,14 @@ public final class PciReconciler {
         }
     }
 
+    /** The longest start jitter: a pass at boot waits a random time up to this, or a tenth of the period. */
+    static final Duration MAX_START_JITTER = Duration.ofSeconds(60);
+
     private record LeafKey(String leaf, String collection) { }
 
     private record Failure(int consecutive, Instant nextRetryAt) { }
 
-    private final PciCatalog catalog;
+    private final Supplier<PciCatalog.Snapshot> catalog;
     private final PciBuilderSession builder;
     private final PciIndexSweep sweep;
     private final PciSettings settings;
@@ -167,13 +197,14 @@ public final class PciReconciler {
     private final TenantBinder tenantBinder;
     private final Duration countTimeout;
     private final Duration period;
+    private final RandomGenerator random;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
     private final AtomicReference<String> building = new AtomicReference<>();
     private final AtomicInteger passes = new AtomicInteger();
     private volatile boolean holder;
     private volatile Instant lastDdlPassAt;
-    private volatile BuilderState lastState;
+    private volatile Instant passStartedAt;
 
     private final Object lifecycle = new Object();
     private ScheduledExecutorService scheduler;   // guarded by lifecycle
@@ -186,6 +217,15 @@ public final class PciReconciler {
 
     PciReconciler(PciCatalog catalog, PciBuilderSession builder, PciIndexSweep sweep, PciSettings settings,
                   Clock clock, TenantBinder tenantBinder, Duration countTimeout, Duration period) {
+        this(Objects.requireNonNull(catalog, "catalog")::read, builder, sweep, settings, clock, tenantBinder,
+            countTimeout, period, RandomGenerator.getDefault());
+    }
+
+    /** As above with the catalog read and the start jitter's source injected (tests). */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random) {
+        this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.builder = Objects.requireNonNull(builder, "builder");
         this.sweep = Objects.requireNonNull(sweep, "sweep");
@@ -213,14 +253,19 @@ public final class PciReconciler {
 
     /** The DDL half's status; see the class comment for who reports what. */
     public DdlStatus status() {
+        Instant lastPass = lastDdlPassAt;
         if (!settings.enabled()) {
-            return new DdlStatus(BuilderState.OFF, null, null, null);
+            return new DdlStatus(BuilderState.OFF, null, null, lastPass);
         }
-        BuilderState state = lastState != null ? lastState : builder.state();
+        // The builder's own current state, not a copy taken at the start of a pass: a privilege error in the middle
+        // of a pass (and an authentication failure at its start) is what this field exists to show.
+        BuilderState state = builder.state();
         if (!holder) {
-            return new DdlStatus(state, null, null, null);
+            return new DdlStatus(state, null, null, lastPass);
         }
-        return new DdlStatus(state, building.get() != null ? 1 : 0, failingCount(), lastDdlPassAt);
+        Instant startedAt = passStartedAt;
+        return new DdlStatus(state, building.get() != null ? 1 : 0, failingCount(), lastPass, startedAt,
+            startedAt != null);
     }
 
     /** Collections with {@value #FAILING_AFTER} or more consecutive failed builds. */
@@ -233,10 +278,16 @@ public final class PciReconciler {
         return passes.get();
     }
 
+    /** Collections with a failure entry (any count), for tests; {@link #status()} reports only the failing ones. */
+    int trackedFailures() {
+        return failures.size();
+    }
+
     // -- schedule --------------------------------------------------------------------------------------------
 
     /**
-     * Start the DDL task: one pass at once, then one {@code period} after each pass ends. Idempotent while running.
+     * Start the DDL task: one pass after a short random delay ({@link #startJitterMillis}), then one {@code period}
+     * after each pass ends. Idempotent while running.
      * Does nothing when {@code NX_SEARCH_PCI=0}. Call after the service and the read half have started. A reconciler
      * that has been stopped does not restart.
      */
@@ -245,6 +296,7 @@ public final class PciReconciler {
             log.info("event=pci_reconciler_off reason=NX_SEARCH_PCI_0");
             return;
         }
+        long jitterMillis;
         synchronized (lifecycle) {
             if (stopped) {
                 throw new IllegalStateException("the PCI reconciler was stopped and does not restart");
@@ -252,14 +304,26 @@ public final class PciReconciler {
             if (scheduler != null) {
                 return;
             }
+            jitterMillis = startJitterMillis(period, random);
             scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, THREAD_NAME);
                 t.setDaemon(true);
                 return t;
             });
-            scheduler.scheduleWithFixedDelay(this::scheduledPass, 0, period.toMillis(), TimeUnit.MILLISECONDS);
+            // A jittered first run: engines restarted together (a rolling deploy, a node reboot) would otherwise all
+            // open their counting transactions at once. The builder lock still lets one build; this spreads the rest.
+            scheduler.scheduleWithFixedDelay(this::scheduledPass, jitterMillis, period.toMillis(),
+                TimeUnit.MILLISECONDS);
         }
-        log.info("event=pci_reconciler_started period_seconds={}", period.toSeconds());
+        log.info("event=pci_reconciler_started period_seconds={} start_delay_ms={}", period.toSeconds(), jitterMillis);
+    }
+
+    /**
+     * A random delay in {@code [0, min(MAX_START_JITTER, period / 10)]} milliseconds, drawn from {@code random}.
+     */
+    static long startJitterMillis(Duration period, RandomGenerator random) {
+        long max = Math.min(MAX_START_JITTER.toMillis(), period.toMillis() / 10);
+        return max <= 0 ? 0 : random.nextLong(max + 1);
     }
 
     /** A thrown task is never rescheduled by the executor, so nothing may escape this method. */
@@ -300,7 +364,7 @@ public final class PciReconciler {
     PassReport reconcileOnce() {
         passes.incrementAndGet();
         if (!settings.enabled()) {
-            lastState = BuilderState.OFF;
+            holder = false;
             return PassReport.inactive(BuilderState.OFF);
         }
         long startedNanos = System.nanoTime();
@@ -308,19 +372,23 @@ public final class PciReconciler {
         try {
             pass = builder.open();
         } catch (IllegalStateException e) {
+            // The database is unreachable: this engine does not hold the lock now, and nothing is building.
+            holder = false;
+            building.set(null);
+            passStartedAt = null;
             log.warn("event=pci_reconcile_pass_failed reason=builder_open cause=\"{}\"", e.getMessage());
             return PassReport.inactive(builder.state());
         }
         try (pass) {
-            BuilderState state = pass.state();
-            lastState = state;
+            BuilderState state = builder.state();
             holder = state == BuilderState.OK || state == BuilderState.NO_PRIVILEGE;
             if (!holder || !pass.live()) {
                 return PassReport.inactive(state);
             }
+            passStartedAt = clock.instant();
             PciCatalog.Snapshot snapshot;
             try {
-                snapshot = catalog.read();
+                snapshot = catalog.get();
             } catch (RuntimeException e) {
                 log.warn("event=pci_reconcile_pass_failed reason=catalog_read cause=\"{}\"", e.getMessage());
                 return PassReport.inactive(state);
@@ -336,25 +404,32 @@ public final class PciReconciler {
                     break;
                 }
                 tally.leaves++;
-                reconcileLeaf(pass, leaf, tally);
+                if (!reconcileLeaf(pass, leaf, tally)) {
+                    break;
+                }
             }
             boolean ranToEnd = pass.live() && !Thread.currentThread().isInterrupted();
-            if (ranToEnd) {
+            // A pass whose every leaf was skipped (a count timeout, a failed read) did no reconciling: reporting it
+            // as the last completed pass would hide that nothing has been checked.
+            if (ranToEnd && tally.processedLeaves > 0) {
                 lastDdlPassAt = clock.instant();
             }
-            log.info("event=pci_reconcile_pass ran_to_end={} leaves={} drops={} builds={} failed_builds={} "
-                + "skipped_leaves={} took_ms={} builder_state={} failing={}", ranToEnd, tally.leaves, tally.drops,
-                tally.builds, tally.failedBuilds, tally.skippedLeaves, (System.nanoTime() - startedNanos) / 1_000_000,
-                pass.state().wire(), failingCount());
-            return new PassReport(pass.state(), ranToEnd, tally.leaves, tally.drops, tally.builds,
+            log.info("event=pci_reconcile_pass ran_to_end={} leaves={} processed_leaves={} drops={} builds={} "
+                + "failed_builds={} skipped_leaves={} took_ms={} builder_state={} failing={}", ranToEnd, tally.leaves,
+                tally.processedLeaves, tally.drops, tally.builds, tally.failedBuilds, tally.skippedLeaves,
+                (System.nanoTime() - startedNanos) / 1_000_000, builder.state().wire(), failingCount());
+            return new PassReport(builder.state(), ranToEnd, tally.leaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves);
         } finally {
             building.set(null);
+            passStartedAt = null;
         }
     }
 
     private static final class Tally {
         int leaves;
+        /** Leaves that were counted and planned (not skipped); the pass counts as done only if there was one. */
+        int processedLeaves;
         int drops;
         int builds;
         int failedBuilds;
@@ -365,13 +440,24 @@ public final class PciReconciler {
         return leaf.schema() + "." + leaf.name();
     }
 
-    private void reconcileLeaf(PciBuilderSession.Pass pass, Leaf leaf, Tally tally) {
+    /** @return false when the pass cannot go on (its connection is gone); the caller ends the loop */
+    private boolean reconcileLeaf(PciBuilderSession.Pass pass, Leaf leaf, Tally tally) {
         if (leaf.model() == null || leaf.tenant() == null) {
             // Its indexes are unparsed (never touched) and a name cannot be made without both.
-            return;
+            return true;
         }
-        if (pass.migrationInProgress()) {
-            return;
+        try {
+            if (pass.migrationInProgress()) {
+                return false;
+            }
+        } catch (DataAccessException e) {
+            // The idle builder session was ended between statements (the migrator of a rolling deploy does this), or
+            // pg_locks could not be read, and unknown is not "free". One line, no stack: it is routine, and the next
+            // pass starts clean.
+            log.warn("event=pci_reconcile_pass_failed reason=migration_check sqlstate={} cause=\"{}\"",
+                e.sqlState(), e.getMessage());
+            pass.abandon(e);
+            return false;
         }
         Planned planned;
         try {
@@ -384,13 +470,15 @@ public final class PciReconciler {
                 log.warn("event=pci_count_failed leaf={} sqlstate={} cause=\"{}\"", leafId(leaf), e.sqlState(),
                     e.getMessage());
             }
-            return;
+            return true;
         }
         if (planned == null) {
             tally.skippedLeaves++;
-            return;
+            return true;
         }
+        tally.processedLeaves++;
         execute(pass, leaf, planned.dimension(), planned.actions(), tally);
+        return true;
     }
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
@@ -430,11 +518,13 @@ public final class PciReconciler {
             .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
             .fetch(r -> new RegistryRow(r.value1(), r.value2(), r.value3()));
 
-        Set<String> listed = new HashSet<>();
+        Set<String> buildable = new HashSet<>();
         for (RegistryRow row : registry) {
-            listed.add(row.name());
+            if (row.live() && !row.superseded()) {
+                buildable.add(row.name());
+            }
         }
-        forgetStaleBackoff(leaf, listed);
+        forgetStaleBackoff(leaf, buildable);
 
         Set<String> indexed = new LinkedHashSet<>();
         for (Index index : leaf.indexes()) {
@@ -519,7 +609,9 @@ public final class PciReconciler {
             tally.drops++;
             log.info("event=pci_index_dropped leaf={} index={} collection={} reason={}", leafId(leaf), drop.name(),
                 drop.collection(), drop.reason().label());
-            refreshSweep("drop");
+            // A router set that still lists the dropped index sends its collection to the serving ef_search with no
+            // graph behind it: the unsafe direction. A refresh that failed or was skipped is tried once more.
+            refreshSweep("drop", true);
         } else {
             log.info("event=pci_index_drop_not_done leaf={} index={} outcome={} detail=\"the next pass retries\"",
                 leafId(leaf), drop.name(), outcome);
@@ -541,20 +633,31 @@ public final class PciReconciler {
                 failures.remove(key);
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());
-                refreshSweep("build");
+                refreshSweep("build", false);
             }
             case FAILED, REJECTED -> {
                 tally.failedBuilds++;
                 recordFailure(key, build.name());
             }
-            // The pass ended before the statement went out (a migration, a privilege error): not this collection's fault.
+            // The pass ended before the statement went out (a migration, a privilege error), or the backend was ended
+            // under it (a migration walk or the shutdown terminated it; the network dropped): not this collection's fault.
             default -> log.info("event=pci_index_build_not_done leaf={} index={} outcome={}", leafId(leaf),
                 build.name(), outcome);
         }
     }
 
-    private void refreshSweep(String after) {
-        if (!sweep.refresh()) {
+    private void refreshSweep(String after, boolean retryOnce) {
+        if (sweep.refresh()) {
+            return;
+        }
+        if (retryOnce && sweep.refresh()) {
+            log.info("event=pci_reconcile_refresh_retried after={} applied=true", after);
+            return;
+        }
+        if (retryOnce) {
+            log.warn("event=pci_reconcile_refresh_not_applied after={} retried=true detail=\"the router set may still "
+                + "list a dropped index until the read half's next tick\"", after);
+        } else {
             log.debug("event=pci_reconcile_refresh_not_applied after={} detail=\"the read half repairs the set on "
                 + "its next tick\"", after);
         }
@@ -596,9 +699,12 @@ public final class PciReconciler {
         return out;
     }
 
-    /** A collection that left the registry has nothing to retry. */
-    private void forgetStaleBackoff(Leaf leaf, Set<String> listed) {
+    /**
+     * A collection that left the registry, was superseded or is no longer live can no longer build, so it has nothing
+     * to retry and must not hold {@code failing} above zero.
+     */
+    private void forgetStaleBackoff(Leaf leaf, Set<String> buildable) {
         String id = leafId(leaf);
-        failures.keySet().removeIf(k -> k.leaf().equals(id) && !listed.contains(k.collection()));
+        failures.keySet().removeIf(k -> k.leaf().equals(id) && !buildable.contains(k.collection()));
     }
 }

@@ -5,6 +5,9 @@ package dev.nexus.service.vectors;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -13,6 +16,7 @@ import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.http.StatusHandler;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PciBuilderSession.BuilderState;
 import dev.nexus.service.vectors.PciReconciler.PassReport;
@@ -28,9 +32,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
@@ -40,12 +50,16 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -332,18 +346,93 @@ class PciReconcilerIntegrationTest {
             .fetch());
     }
 
+    /** End the builder's current STATEMENT (57014); its session, and so the pass, carries on. */
+    void cancelBuilder() throws Exception {
+        asSuperuser(su -> su.select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN,
+                DSL.field(DSL.name("pid"), Integer.class)))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+            .where(DSL.field(DSL.name("application_name"), String.class)
+                .eq(PciBuilderSession.builderApplicationName(NONCE)))
+            .fetch());
+    }
+
+    long builderBackends() throws Exception {
+        return asSuperuser(su -> su.selectCount().from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+            .where(DSL.field(DSL.name("application_name"), String.class)
+                .eq(PciBuilderSession.builderApplicationName(NONCE)))
+            .fetchOne(0, Long.class));
+    }
+
     CompletableFuture<PassReport> inBackground(PciReconciler r) {
         return CompletableFuture.supplyAsync(r::reconcileOnce, async);
     }
 
-    /** Hold a build open, then kill the builder's backend: one failed build, an invalid index left behind. */
+    /**
+     * Hold a build open, then cancel the builder's statement: one FAILED build (57014: the statement's own failure,
+     * which is charged to backoff), an invalid index left behind. The session survives, as after a statement timeout.
+     */
     PassReport failOneBuild(String tenant, PciReconciler r) throws Exception {
+        try (HeldWrite held = new HeldWrite(tenant)) {
+            CompletableFuture<PassReport> pass = inBackground(r);
+            await(() -> hasInvalid(tenant), "the concurrent build's invalid index");
+            cancelBuilder();
+            held.close();
+            return pass.get(60, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * Hold a build open, then end the builder's BACKEND (57P01), as a migration walk or the shutdown hook does: not
+     * the statement's failure, and not charged. The pass is over.
+     */
+    PassReport terminateOneBuild(String tenant, PciReconciler r) throws Exception {
         try (HeldWrite held = new HeldWrite(tenant)) {
             CompletableFuture<PassReport> pass = inBackground(r);
             await(() -> hasInvalid(tenant), "the concurrent build's invalid index");
             terminateBuilder();
             held.close();
             return pass.get(60, TimeUnit.SECONDS);
+        }
+    }
+
+    /** A session of the test that holds the migration lock, as a migrator mid-walk does. */
+    final class HeldMigrationLock implements AutoCloseable {
+        private final Connection conn;
+
+        HeldMigrationLock() throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(true);
+            DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_lock", SQLDataType.OTHER,
+                DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();
+        }
+
+        @Override
+        public void close() throws Exception {
+            conn.close();
+        }
+    }
+
+    void setLifecycle(String tenant, String collection, String state) throws Exception {
+        asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, state)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection)).execute());
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** GET /v1/status through the real {@link StatusHandler}, fed the reconciler's and the sweep's own status. */
+    JsonNode statusJson(PciReconciler r, PciIndexSweep sweep) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/status", new StatusHandler(null, null, 0L, null, null, null,
+            () -> StatusHandler.PerCollectionIndexes.of(sweep.status(), r.status())));
+        server.start();
+        try {
+            HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/status"))
+                    .GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertThat(resp.statusCode()).isEqualTo(200);
+            return MAPPER.readTree(resp.body());
+        } finally {
+            server.stop(0);
         }
     }
 
@@ -618,7 +707,7 @@ class PciReconcilerIntegrationTest {
     // -- failed builds -----------------------------------------------------------------------------------
 
     @Test
-    void aKilledConcurrentBuild_leavesAnInvalidIndexRoutingIgnores_theNextPassDropsItByName_andTheOneAfterRebuilds()
+    void aFailedConcurrentBuild_leavesAnInvalidIndexRoutingIgnores_theNextPassDropsItByName_andTheOneAfterRebuilds()
             throws Exception {
         String tenant = newTenant("inv");
         collection(tenant, name("victim"), 300);
@@ -694,6 +783,475 @@ class PciReconcilerIntegrationTest {
         assertThat(PciReconciler.retryDelay(8)).isEqualTo(Duration.ofMinutes(1280));
         assertThat(PciReconciler.retryDelay(9)).isEqualTo(Duration.ofHours(24));
         assertThat(PciReconciler.retryDelay(500)).isEqualTo(Duration.ofHours(24));
+    }
+
+    // -- status truthfulness (nexus-43ulx.23 fix round) -----------------------------------------------------------
+
+    void superuserDdl(String ddl) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, ddl);
+        }
+    }
+
+    private PciReconciler reconcilerAs(String user, String password, PciSettings s, PciIndexSweep sweep, Clock clock) {
+        return new PciReconciler(catalog, new PciBuilderSession(pg.getJdbcUrl(), user, password, NONCE, s), sweep, s,
+            clock, PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60));
+    }
+
+    @Test
+    void aRoleWithoutPrivilege_showsAsNoPrivilegeInTheStatus_andTheIndexesThatExistKeepServing() throws Exception {
+        String tenant = newTenant("nopriv");
+        collection(tenant, name("had"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        reconciler(s, sweep).reconcileOnce();
+        assertThat(validIndexed(tenant)).containsExactly(name("had"));
+        collection(tenant, name("wanted"), 300);
+
+        // The service role: it counts (it is the application's role) and owns no leaf, so the first CREATE is 42501.
+        PciReconciler r = reconcilerAs(PgContainerHelper.SVC_USERNAME, PgContainerHelper.SVC_PASSWORD, s, sweep,
+            Clock.systemUTC());
+        PassReport report = r.reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.NO_PRIVILEGE);
+        assertThat(report.builds()).isZero();
+        assertThat(r.status().builderState()).as("the status object, not only the pass report")
+            .isEqualTo(BuilderState.NO_PRIVILEGE);
+        assertThat(validIndexed(tenant)).as("what exists keeps serving").containsExactly(name("had"));
+        JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
+        assertThat(me.get("builder_state").asText()).isEqualTo("no_privilege");
+        assertThat(me.get("pass_in_progress").asBoolean()).isFalse();
+
+        // It stays so on the next pass: no success has cleared it.
+        r.reconcileOnce();
+        assertThat(r.status().builderState()).isEqualTo(BuilderState.NO_PRIVILEGE);
+        assertThat(validIndexed(tenant)).containsExactly(name("had"));
+        assertThat(sweep.hasValidIndex(M384, tenant, name("had"))).isTrue();
+    }
+
+    @Test
+    void aWrongAdminPassword_showsAsAuthFailedInTheStatus_buildsNothing_andNeverLogsThePassword() throws Exception {
+        String tenant = newTenant("authfail");
+        collection(tenant, name("had"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        reconciler(s, sweep).reconcileOnce();
+        collection(tenant, name("wanted"), 300);
+        String wrong = "wrong-" + UUID.randomUUID();       // never written to an assertion message
+
+        PciReconciler r = reconcilerAs(ADMIN_ROLE, wrong, s, sweep, Clock.systemUTC());
+        PassReport report = r.reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.AUTH_FAILED);
+        assertThat(report.leaves()).isZero();
+        assertThat(r.status().builderState()).isEqualTo(BuilderState.AUTH_FAILED);
+        assertThat(r.status().building()).isNull();
+        assertThat(r.status().failing()).isNull();
+        JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
+        assertThat(me.get("builder_state").asText()).isEqualTo("auth_failed");
+        assertThat(me.get("building").isNull()).isTrue();
+        assertThat(me.get("last_ddl_pass_at").isNull()).as("this engine never completed a pass").isTrue();
+        assertThat(validIndexed(tenant)).as("nothing built, nothing dropped").containsExactly(name("had"));
+        assertThat(logs()).noneMatch(l -> l.contains(wrong));
+        assertThat(logged("event=pci_builder_auth_failed")).isEqualTo(1);
+    }
+
+    @Test
+    void aStandbyEngineKeepsItsLastCompletedPassTime_andReportsNoBuildingFailingOrPassInFlight() throws Exception {
+        String tenant = newTenant("standby");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        MutableClock clock = new MutableClock();
+        PciReconciler r = reconciler(s, sweep, clock);
+        assertThat(r.status().lastDdlPassAt()).as("before its first pass").isNull();
+        r.reconcileOnce();
+        Instant completed = r.status().lastDdlPassAt();
+        assertThat(completed).isEqualTo(clock.instant());
+
+        clock.advance(Duration.ofHours(1));
+        try (PciBuilderSession.Pass peer = builderSession(s).open()) {      // a peer engine holds the builder lock
+            assertThat(peer.state()).isEqualTo(BuilderState.OK);
+            PassReport standby = r.reconcileOnce();
+
+            assertThat(standby.state()).isEqualTo(BuilderState.STANDBY);
+            assertThat(r.status().builderState()).isEqualTo(BuilderState.STANDBY);
+            assertThat(r.status().building()).isNull();
+            assertThat(r.status().failing()).isNull();
+            assertThat(r.status().passInProgress()).isFalse();
+            assertThat(r.status().passStartedAt()).isNull();
+            assertThat(r.status().lastDdlPassAt()).as("this engine's own history survives becoming a standby")
+                .isEqualTo(completed);
+            JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
+            assertThat(me.get("builder_state").asText()).isEqualTo("standby");
+            assertThat(me.get("last_ddl_pass_at").asText()).isEqualTo(completed.truncatedTo(
+                java.time.temporal.ChronoUnit.SECONDS).toString());
+            assertThat(me.get("failing").isNull()).isTrue();
+        }
+    }
+
+    @Test
+    void anOpenFailure_resetsTheHolderAndBuilding_butKeepsTheLastPassTime_andLogsTheDriversReason() throws Exception {
+        String tenant = newTenant("openfail");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconciler(s, sweep(s));
+        r.reconcileOnce();
+        assertThat(r.status().building()).as("a holder").isZero();
+        Instant completed = r.status().lastDdlPassAt();
+        assertThat(completed).isNotNull();
+
+        superuserDdl("ALTER ROLE " + ADMIN_ROLE + " CONNECTION LIMIT 0");
+        try {
+            PassReport report = r.reconcileOnce();
+
+            assertThat(report.ranToEnd()).isFalse();
+            assertThat(r.status().building()).as("no longer a holder: the database is unreachable").isNull();
+            assertThat(r.status().failing()).isNull();
+            assertThat(r.status().lastDdlPassAt()).isEqualTo(completed);
+            assertThat(logs()).as("the driver's reason is in the log")
+                .anyMatch(l -> l.contains("event=pci_reconcile_pass_failed reason=builder_open")
+                    && l.contains("too many connections"));
+        } finally {
+            superuserDdl("ALTER ROLE " + ADMIN_ROLE + " CONNECTION LIMIT -1");
+        }
+    }
+
+    @Test
+    void aPassThatSkippedEveryLeaf_doesNotCountAsTheLastCompletedPass() throws Exception {
+        String tenant = newTenant("allskip");
+        collection(tenant, name("keep"), 300);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciReconciler impatient = new PciReconciler(catalog, builderSession(s), sweep(s), s, clock,
+            PciReconciler.SET_LOCAL_TENANT, Duration.ofMillis(1500), Duration.ofSeconds(60));
+        PassReport report;
+        try (Connection locker = pg.createConnection("")) {
+            locker.setAutoCommit(false);
+            DSL.using(locker, SQLDialect.POSTGRES).alterTable(CATALOG_COLLECTIONS)
+                .addColumn(DSL.name("pcirec_lock_probe2"), SQLDataType.INTEGER).execute();
+            report = impatient.reconcileOnce();
+            locker.rollback();
+        }
+
+        assertThat(report.ranToEnd()).as("the pass got to its end").isTrue();
+        assertThat(report.skippedLeaves()).isEqualTo(report.leaves()).isPositive();
+        assertThat(impatient.status().lastDdlPassAt()).as("but nothing was checked").isNull();
+
+        PciReconciler normal = reconciler(s, sweep(s), clock);
+        normal.reconcileOnce();
+        assertThat(normal.status().lastDdlPassAt()).as("a pass that counted a leaf does").isEqualTo(clock.instant());
+    }
+
+    @Test
+    void aFailureEntry_isClearedWhenTheCollectionIsQuarantined_notOnlyWhenItIsDeleted() throws Exception {
+        assertThatAFailureEntryClearsWhen("quar",
+            (tenant, collection) -> setLifecycle(tenant, collection, "quarantine"));
+    }
+
+    @Test
+    void aFailureEntry_isClearedWhenTheCollectionIsSuperseded() throws Exception {
+        assertThatAFailureEntryClearsWhen("super", (tenant, collection) -> {
+            collection(tenant, name("elsewhere"), 0);
+            asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("elsewhere"))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection))
+                .execute());
+        });
+    }
+
+    @FunctionalInterface
+    interface RegistryChange {
+        void apply(String tenant, String collection) throws Exception;
+    }
+
+    private void assertThatAFailureEntryClearsWhen(String tag, RegistryChange change) throws Exception {
+        String tenant = newTenant("fail-" + tag);
+        collection(tenant, name("victim"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconciler(s, sweep(s), new MutableClock());
+
+        failOneBuild(tenant, r);
+        assertThat(r.trackedFailures()).as("a failed build is tracked").isEqualTo(1);
+
+        change.apply(tenant, name("victim"));
+        r.reconcileOnce();
+
+        assertThat(r.trackedFailures()).as("a collection that can no longer build has nothing to retry").isZero();
+        assertThat(r.status().failing()).isZero();
+    }
+
+    @Test
+    void aBuildEndedByTheBackendBeingTerminated_isNotAFailure_andIsRetriedAtOnce() throws Exception {
+        String tenant = newTenant("term");
+        collection(tenant, name("victim"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        PciReconciler r = reconciler(s, sweep, new MutableClock());       // the clock never moves: no backoff can lapse
+
+        PassReport ended = terminateOneBuild(tenant, r);
+
+        assertThat(ended.ranToEnd()).as("the pass is over").isFalse();
+        assertThat(ended.failedBuilds()).as("not the statement's failure").isZero();
+        assertThat(r.trackedFailures()).as("nothing to back off").isZero();
+        assertThat(r.status().lastDdlPassAt()).as("an interrupted pass is not a completed one").isNull();
+        assertThat(hasInvalid(tenant)).as("the terminated CIC left its invalid index").isTrue();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_build_not_done") && l.contains("CONNECTION_LOST"));
+
+        assertThat(r.reconcileOnce().drops()).as("the next pass drops it").isEqualTo(1);
+        assertThat(r.reconcileOnce().builds()).as("and rebuilds with no backoff to wait out").isEqualTo(1);
+        assertThat(validIndexed(tenant)).containsExactly(name("victim"));
+    }
+
+    /**
+     * A real CREATE INDEX CONCURRENTLY, held open behind a writer, terminated by a real {@code SchemaMigrator.migrate}
+     * walk (not a {@code pg_sleep}): the pass ends, the build is not charged to backoff, and the walk completes.
+     */
+    @Test
+    @Timeout(value = 600, unit = TimeUnit.SECONDS)
+    void aRealMigrationWalk_terminatesARealBuild_theBuildIsNotCharged_andTheWalkCompletes() throws Exception {
+        String tenant = newTenant("walk");
+        collection(tenant, name("victim"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconciler(s, sweep(s), new MutableClock());
+        var migrator = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(SchemaMigrator.class);
+        var migratorLogs = new ListAppender<ILoggingEvent>();
+        migratorLogs.start();
+        migrator.addAppender(migratorLogs);
+        try (HeldWrite held = new HeldWrite(tenant)) {
+            CompletableFuture<PassReport> pass = inBackground(r);
+            await(() -> hasInvalid(tenant), "the real concurrent build's invalid index");
+            assertThat(builderBackends()).as("a live builder session, mid-CIC").isEqualTo(1);
+
+            CompletableFuture<Void> walk = CompletableFuture.runAsync(() -> SchemaMigrator.migrate(adminDs), async);
+            PassReport ended = pass.get(120, TimeUnit.SECONDS);             // the walk's first act ends the builder
+            held.close();
+            walk.get(300, TimeUnit.SECONDS);                                // and the walk itself completes
+
+            assertThat(ended.ranToEnd()).isFalse();
+            assertThat(ended.builds()).isZero();
+            assertThat(ended.failedBuilds()).as("terminated, so not a failed build").isZero();
+        } finally {
+            migrator.detachAppender(migratorLogs);
+        }
+        assertThat(migratorLogs.list.stream().map(ILoggingEvent::getFormattedMessage))
+            .anyMatch(l -> l.contains("event=pci_builders_terminated") && !l.contains("count=0"));
+        assertThat(builderBackends()).as("the builder session is gone and so is its lock").isZero();
+        assertThat(r.trackedFailures()).isZero();
+        assertThat(r.reconcileOnce().drops()).as("the invalid index goes").isEqualTo(1);
+        assertThat(r.reconcileOnce().builds()).as("the rebuild needs no backoff to lapse").isEqualTo(1);
+        assertThat(validIndexed(tenant)).containsExactly(name("victim"));
+    }
+
+    // -- the migration check inside a pass -----------------------------------------------------------------------
+
+    @Test
+    void aMigrationLockHeldWhenThePassOpens_endsThePassBeforeAnyCountOrBuild_andTheNextPassBuildsAtOnce()
+            throws Exception {
+        String tenant = newTenant("migopen");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconciler(s, sweep(s), new MutableClock());
+
+        try (HeldMigrationLock migrating = new HeldMigrationLock()) {
+            PassReport report = r.reconcileOnce();
+
+            assertThat(report.ranToEnd()).isFalse();
+            assertThat(report.leaves()).as("not even a count").isZero();
+            assertThat(report.builds()).isZero();
+            assertThat(r.status().lastDdlPassAt()).isNull();
+            assertThat(logged("event=pci_ddl_skipped reason=migration_in_progress")).isEqualTo(1);
+        }
+        assertThat(validIndexed(tenant)).isEmpty();
+        assertThat(r.trackedFailures()).isZero();
+        assertThat(r.reconcileOnce().builds()).as("the migration is over; no backoff was charged").isEqualTo(1);
+    }
+
+    @Test
+    void aMigrationLockTakenMidPass_skipsTheBuild_endsThePass_andChargesNothing() throws Exception {
+        String tenant = newTenant("migmid");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        AtomicReference<HeldMigrationLock> migrating = new AtomicReference<>();
+        // A tenant has one leaf per embedding model, and the pass counts them in the catalog's order. The migration
+        // must begin while THIS leaf (the one with the work) is being counted: after the pass opened and checked and
+        // after the check before this leaf's count, so that the only check left is the one before the statement.
+        PciCatalog.Leaf target = leaf(tenant);
+        List<PciCatalog.Leaf> counted = catalog.read().leaves().stream()
+            .filter(l -> l.model() != null && l.tenant() != null).toList();
+        int targetPosition = -1;
+        for (int i = 0; i < counted.size(); i++) {
+            if (counted.get(i).name().equals(target.name()) && counted.get(i).schema().equals(target.schema())) {
+                targetPosition = i;
+            }
+        }
+        assertThat(targetPosition).as("the target leaf is among the counted ones").isGreaterThanOrEqualTo(0);
+        int startsAt = targetPosition;
+        AtomicInteger counts = new AtomicInteger();
+        PciReconciler.TenantBinder startsAMigration = (tx, t) -> {
+            PciReconciler.SET_LOCAL_TENANT.bind(tx, t);
+            if (counts.getAndIncrement() == startsAt) {
+                try {
+                    migrating.set(new HeldMigrationLock());
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+        MutableClock clock = new MutableClock();
+        PciReconciler r = new PciReconciler(catalog, builderSession(s), sweep(s), s, clock, startsAMigration,
+            PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60));
+        try {
+            PassReport report = r.reconcileOnce();
+
+            assertThat(migrating.get()).as("the migration began mid-pass").isNotNull();
+            assertThat(report.ranToEnd()).as("the pass ended on the migration").isFalse();
+            assertThat(report.builds()).isZero();
+            assertThat(report.failedBuilds()).isZero();
+            assertThat(r.trackedFailures()).as("a build that never started is not charged").isZero();
+            assertThat(r.status().lastDdlPassAt()).isNull();
+            assertThat(validIndexed(tenant)).isEmpty();
+            assertThat(hasInvalid(tenant)).as("no statement was sent").isFalse();
+            assertThat(logs()).anyMatch(l -> l.contains("event=pci_ddl_skipped reason=migration_in_progress"));
+        } finally {
+            migrating.get().close();
+        }
+        assertThat(r.reconcileOnce().builds()).as("the next pass builds with no clock advance").isEqualTo(1);
+        assertThat(validIndexed(tenant)).containsExactly(name("big"));
+    }
+
+    @Test
+    void aBuilderSessionEndedWhileIdleBetweenStatements_endsThePassQuietly_noErrorLine() throws Exception {
+        String tenant = newTenant("idlekill");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        // The catalog read happens with the pass open and idle: end the builder's session there, as a peer migrator
+        // of a rolling deploy does. The first leaf's migration check is then the first statement on a dead session.
+        PciReconciler r = new PciReconciler(() -> {
+            PciCatalog.Snapshot snapshot = catalog.read();
+            try {
+                terminateBuilder();
+                await(() -> {
+                    try {
+                        return builderBackends() == 0;
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                }, "the builder session to end");
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return snapshot;
+        }, builderSession(s), sweep, s, Clock.systemUTC(), PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT,
+            Duration.ofSeconds(60), new Random(1));
+
+        PassReport report = r.reconcileOnce();
+
+        assertThat(report.ranToEnd()).isFalse();
+        assertThat(report.builds()).isZero();
+        assertThat(logged("event=pci_reconcile_pass_failed reason=migration_check")).as("one WARN").isEqualTo(1);
+        assertThat(appender.list).as("no ERROR line and no stack: a routine end of a pass")
+            .noneMatch(e -> e.getLevel() == Level.ERROR || e.getThrowableProxy() != null);
+        assertThat(validIndexed(tenant)).isEmpty();
+        assertThat(reconciler(s, sweep).reconcileOnce().builds()).as("the next pass starts clean").isEqualTo(1);
+    }
+
+    // -- the pass in flight ----------------------------------------------------------------------------------
+
+    @Test
+    void aPassInFlight_isVisibleInTheStatus_whileLastPassTimeIsStillNull() throws Exception {
+        String tenant = newTenant("inflight");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        MutableClock clock = new MutableClock();
+        PciReconciler r = reconciler(s, sweep, clock);
+        assertThat(r.status().passInProgress()).isFalse();
+        assertThat(r.status().passStartedAt()).isNull();
+
+        try (HeldWrite held = new HeldWrite(tenant)) {
+            CompletableFuture<PassReport> pass = inBackground(r);
+            await(() -> r.status().passInProgress(), "the pass to be in progress");
+
+            assertThat(r.status().passStartedAt()).isEqualTo(clock.instant());
+            assertThat(r.status().lastDdlPassAt()).as("a long first pass shows nothing here until it ends").isNull();
+            JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
+            assertThat(me.get("pass_in_progress").asBoolean()).isTrue();
+            assertThat(me.get("pass_started_at").asText()).isEqualTo("2026-10-10T00:00:00Z");
+            assertThat(me.get("last_ddl_pass_at").isNull()).isTrue();
+
+            held.close();
+            pass.get(60, TimeUnit.SECONDS);
+        }
+        assertThat(r.status().passInProgress()).isFalse();
+        assertThat(r.status().passStartedAt()).isNull();
+        assertThat(r.status().lastDdlPassAt()).isEqualTo(clock.instant());
+        JsonNode me = statusJson(r, sweep).at("/per_collection_indexes/this_engine");
+        assertThat(me.get("pass_in_progress").asBoolean()).isFalse();
+        assertThat(me.get("pass_started_at").isNull()).isTrue();
+    }
+
+    // -- the router set after a drop -------------------------------------------------------------------------------
+
+    @Test
+    void aRefreshThatFailsAfterADrop_isTriedOnceMore_soTheRouterSetDoesNotKeepTheDroppedIndex() throws Exception {
+        String tenant = newTenant("refreshretry");
+        collection(tenant, name("shrink"), B);
+        PciSettings s = settings(16);
+        AtomicInteger reads = new AtomicInteger();
+        AtomicInteger failNext = new AtomicInteger();
+        PciIndexSweep sweep = new PciIndexSweep(() -> {
+            reads.incrementAndGet();
+            return failNext.getAndUpdate(n -> Math.max(0, n - 1)) > 0 ? null : catalog.read();
+        }, s);
+        reconciler(s, sweep).reconcileOnce();
+        assertThat(sweep.hasValidIndex(M384, tenant, name("shrink"))).isTrue();
+
+        setRows(tenant, name("shrink"), B / 2 - 1);
+        reads.set(0);
+        failNext.set(1);                                                  // the refresh right after the drop fails once
+        PassReport drop = reconciler(s, sweep).reconcileOnce();
+
+        assertThat(drop.drops()).isEqualTo(1);
+        assertThat(reads.get()).as("the failed refresh and its retry").isEqualTo(2);
+        assertThat(sweep.hasValidIndex(M384, tenant, name("shrink")))
+            .as("the dropped index is out of the router set without waiting for a tick").isFalse();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reconcile_refresh_retried"));
+    }
+
+    // -- the registry's states reach the planner -------------------------------------------------------------------
+
+    @Test
+    void theRegistrysLifecycleStates_reachThePlanner_aStateAloneNeverDrops_aNonLiveCollectionNeverBuilds()
+            throws Exception {
+        String tenant = newTenant("states");
+        collection(tenant, name("live"), 300);
+        collection(tenant, name("stays"), 300);
+        collection(tenant, name("moved"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        reconciler(s, sweep).reconcileOnce();
+        assertThat(validIndexed(tenant)).containsExactlyInAnyOrder(name("live"), name("stays"), name("moved"));
+
+        // "stays": quarantined with its rows still there. "moved": quarantined and its rows moved away (count 0).
+        // "never-q" and "never-d" arrive already non-live with plenty of rows.
+        setLifecycle(tenant, name("stays"), "quarantine");
+        setLifecycle(tenant, name("moved"), "quarantine");
+        asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION.eq(name("moved"))).execute());
+        collection(tenant, name("never-q"), 300);
+        collection(tenant, name("never-d"), 300);
+        setLifecycle(tenant, name("never-q"), "quarantine");
+        setLifecycle(tenant, name("never-d"), "disputed");
+
+        PassReport report = reconciler(s, sweep).reconcileOnce();
+
+        assertThat(report.builds()).as("a collection that is not 'live' never builds").isZero();
+        assertThat(report.drops()).as("only the one whose rows are gone (not suspect: it is not live)").isEqualTo(1);
+        assertThat(validIndexed(tenant)).as("the state alone drops nothing")
+            .containsExactlyInAnyOrder(name("live"), name("stays"));
+        assertThat(logs()).as("a non-live zero is not a counting failure")
+            .noneMatch(l -> l.contains("event=pci_count_zero_indexed") && l.contains(name("moved")));
     }
 
     // -- two reconcilers ---------------------------------------------------------------------------------
@@ -842,14 +1400,16 @@ class PciReconcilerIntegrationTest {
         assertThat(r.isRunning()).isTrue();
         assertThat(Thread.getAllStackTraces().keySet().stream().map(Thread::getName))
             .contains(PciReconciler.THREAD_NAME);
+        // Read the status BEFORE stop(): stop interrupts the pass in flight, and a connect that is interrupted is an
+        // open failure, which (rightly) ends this engine's claim to be the holder.
+        assertThat(r.status().lastDdlPassAt()).isNotNull();
+        assertThat(r.status().builderState()).isEqualTo(BuilderState.OK);
+        assertThat(r.status().building()).isZero();
         long start = System.nanoTime();
         r.stop();
         assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
         assertThat(r.isRunning()).isFalse();
         assertThat(validIndexed(tenant)).containsExactly(name("big"));
-        assertThat(r.status().lastDdlPassAt()).isNotNull();
-        assertThat(r.status().builderState()).isEqualTo(BuilderState.OK);
-        assertThat(r.status().building()).isZero();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, r::start);
     }
 }

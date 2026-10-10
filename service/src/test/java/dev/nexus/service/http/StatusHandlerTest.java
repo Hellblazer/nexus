@@ -383,9 +383,52 @@ class StatusHandlerTest {
             .isEqualTo(4);
         JsonNode me = o.get("this_engine");
         assertThat(me.get("builder_state").asText()).isEqualTo("standby");
-        for (String k : new String[] {"building", "failing", "last_ddl_pass_at"}) {
+        for (String k : new String[] {"building", "failing", "last_ddl_pass_at", "pass_started_at"}) {
             assertThat(me.has(k)).as(k + " is present, not omitted").isTrue();
-            assertThat(me.get(k).isNull()).as(k + " is null on a non-holder").isTrue();
+            assertThat(me.get(k).isNull()).as(k + " is null on this non-holder, which never ran a pass").isTrue();
+        }
+        assertThat(me.get("pass_in_progress").asBoolean()).isFalse();
+    }
+
+    @Test
+    void perCollectionIndexes_aStandbyKeepsItsOwnLastPassTime_butNoBuildingFailingOrPassInFlight() throws Exception {
+        // This engine completed a pass, then a peer took the lock: its own history stays, the holder-only fields go.
+        var standby = pci(read(4, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, DDL_AT));
+        start(withPci(() -> standby));
+
+        JsonNode me = get().at("/per_collection_indexes/this_engine");
+        assertThat(me.get("builder_state").asText()).isEqualTo("standby");
+        assertThat(me.get("last_ddl_pass_at").asText()).isEqualTo("2026-10-10T07:30:00Z");
+        assertThat(me.get("building").isNull()).isTrue();
+        assertThat(me.get("failing").isNull()).isTrue();
+        assertThat(me.get("pass_started_at").isNull()).isTrue();
+        assertThat(me.get("pass_in_progress").asBoolean()).isFalse();
+    }
+
+    @Test
+    void perCollectionIndexes_aPassInFlightShowsItsStartAndTheFlag_whileTheLastPassTimeIsStillNull() throws Exception {
+        var running = pci(read(0, 0, 0, false), new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 1, 0,
+            null, java.time.Instant.parse("2026-10-10T07:58:30.500Z"), true));
+        start(withPci(() -> running));
+
+        JsonNode me = get().at("/per_collection_indexes/this_engine");
+        assertThat(me.get("pass_in_progress").asBoolean()).isTrue();
+        assertThat(me.get("pass_started_at").asText()).as("whole seconds").isEqualTo("2026-10-10T07:58:30Z");
+        assertThat(me.get("last_ddl_pass_at").isNull()).isTrue();
+        assertThat(me.get("building").asInt()).isEqualTo(1);
+    }
+
+    @Test
+    void perCollectionIndexes_noPrivilegeAndAuthFailedRenderAsThePrivilegeAndAuthenticationFailuresTheyAre()
+            throws Exception {
+        for (var state : new PciBuilderSession.BuilderState[] {PciBuilderSession.BuilderState.NO_PRIVILEGE,
+                PciBuilderSession.BuilderState.AUTH_FAILED}) {
+            var s = pci(read(2, 0, 0, false), new PciReconciler.DdlStatus(state, 0, 0, DDL_AT));
+            start(withPci(() -> s));
+            assertThat(get().at("/per_collection_indexes/this_engine/builder_state").asText())
+                .isEqualTo(state.wire());
+            stop();
         }
     }
 
@@ -451,7 +494,8 @@ class StatusHandlerTest {
         assertThat(top).containsExactly("valid", "invalid", "unparsed", "last_read_at", "expired", "this_engine");
         var inner = new java.util.ArrayList<String>();
         o.get("this_engine").fieldNames().forEachRemaining(inner::add);
-        assertThat(inner).containsExactly("builder_state", "building", "failing", "last_ddl_pass_at");
+        assertThat(inner).containsExactly("builder_state", "building", "failing", "last_ddl_pass_at",
+            "pass_started_at", "pass_in_progress");
     }
 
     @Test
