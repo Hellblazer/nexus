@@ -607,7 +607,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     void searchMetadataScoped_shape_usesFullHnswIndex_1024() throws Exception {
         Table<?> fn = SEARCH_METADATA_SCOPED_1024.call(
             queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, 10, MODEL_1024, TENANT);
-        String plan = explain(fn);
+        // Reachability, not the cost choice (explainIndexReachable's javadoc): what this pins is that the
+        // guard does not defeat the bind. With the natural planner develop's CI runner picked a Seq Scan on
+        // the leaf under load (b3a85d90b, nexus-h9zkm; an earlier red rerun green on f391a1a6c) while the
+        // laptop, chas and hellmini picked the index. A guard that makes the index unreachable still fails.
+        String plan = explainIndexReachable(fn);
         assertThat(plan)
             .as("search_metadata_scoped_1024's embedding_1024 IS NOT NULL guard "
                 + "(vectors-006-1) must not defeat the FULL idx_chunks_embedding_1024 "

@@ -3129,6 +3129,7 @@ nexus-f1syh
 nexus-f1syh.1
 nexus-f20el
 nexus-f2g8u
+nexus-f2nx4
 nexus-f2qvx
 nexus-f2qvx.1
 nexus-f2qvx.1.1
@@ -3781,6 +3782,7 @@ nexus-h8rf6.9.1
 nexus-h9f1w
 nexus-h9f1w.1
 nexus-h9qyp
+nexus-h9zkm
 nexus-haet
 nexus-haf6p
 nexus-hak6p
