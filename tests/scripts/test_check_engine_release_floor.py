@@ -799,6 +799,14 @@ class TestCheckDataEffectRelay:
         assert rc == 0
         assert "NOT-APPLICABLE" in capsys.readouterr().out
 
+    def test_a_tag_not_cut_yet_is_cannot_verify_not_a_traceback(self, two_tag_repo, capsys) -> None:
+        """Run before the tag exists (the engine-release skill's pre-tag pass), the range's
+        upper end resolves to nothing; that is exit 2 with the reason, never a RuntimeError."""
+        rc = gate.check_data_effect_relay("engine-service-v0.1.3", two_tag_repo)
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "CANNOT VERIFY" in err and "engine-service-v0.1.3" in err and "not a tag" in err
+
 
 # ── --require-windows (nexus-f9bgu.28, RDR-224 critique S4) ─────────────────
 
