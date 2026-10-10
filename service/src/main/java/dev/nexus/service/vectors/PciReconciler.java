@@ -56,16 +56,29 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * <p><b>Counting</b> (one explicit transaction per leaf, on the pass's admin session; autocommit is off for it only):
  * <ol>
  *   <li>{@code set_config('nexus.tenant', <leaf tenant>, true)}, a {@code statement_timeout} of
- *       {@link #COUNT_TIMEOUT} (30 s to start; Step 3 measures it) and {@code plan_cache_mode = force_custom_plan}
- *       (a generic plan would not prune to the leaf), all transaction-local.</li>
- *   <li>Read {@code current_setting('nexus.tenant')} back. {@code nexus.chunks} is FORCE ROW LEVEL SECURITY, so the
- *       owner role reads nothing for any other tenant, and a registry read under the wrong tenant is an EMPTY list,
- *       which the planner reads as "everything was deleted". On a mismatch the leaf is skipped
- *       ({@code event=pci_count_tenant_mismatch}) and nothing is dropped or built.</li>
+ *       {@link #COUNT_TIMEOUT} and {@code plan_cache_mode = force_custom_plan} (a generic plan would not prune to the
+ *       leaf), all transaction-local. The 30 s is per STATEMENT, not per leaf (nexus-43ulx.30, T2
+ *       nexus_rdr/227-research-11, on local NVMe): the worst single count took 0.55 s cold, and a whole leaf's
+ *       counting took 11 to 20 s cold, projected at about 45 s for 200 saturating collections. The leaf's
+ *       transaction as a whole is therefore NOT bounded at 30 s. No {@code transaction_timeout} is set: it is a
+ *       PostgreSQL 17 setting, setting it from inside the open transaction was not verified, and a per-leaf bound needs
+ *       a value of its own (300 s was proposed, about 6.7 times the NVMe projection). A leaf with a statement past 30 s
+ *       is skipped.</li>
+ *   <li>Read {@code current_setting('nexus.tenant')} back. {@code catalog_collections} is FORCE ROW LEVEL SECURITY and
+ *       has no policy for the owner, so a registry read under the wrong tenant is an EMPTY list, which the planner
+ *       reads as "everything was deleted". On a mismatch the leaf is skipped ({@code event=pci_count_tenant_mismatch})
+ *       and nothing is dropped or built. This check does NOT protect the chunk counts: {@code vectors-029} gave the
+ *       migrating role ({@code nexus_admin} in production, the builder's role) a permissive
+ *       {@code chunks_gate_probe_owner_read} policy, {@code USING (true)}, on {@code nexus.chunks}, so the admin
+ *       session reads every tenant's chunks whatever {@code nexus.tenant} says.</li>
  *   <li>Read the registry ({@code catalog_collections}: name, lifecycle_state, superseded_by) for that tenant and
  *       the leaf's model, and the model's dimension. A failed read skips the leaf; it is never an empty registry.</li>
  *   <li>Count rows per collection, capped at B+1, with {@link PgVectorRepository#probeSelectedRowsQuery} (the router's
- *       probe: a count over a {@code LIMIT B+1} subquery on the leaf's (model, tenant, collection) key). Only
+ *       probe: a count over a {@code LIMIT B+1} subquery on the leaf's (model, tenant, collection) key). Its explicit
+ *       {@code tenant_id} predicate is what makes a count per-tenant (see the policy above), and the registry read's
+ *       own {@code tenant_id} predicate is what keeps a same-named collection of another tenant out of a leaf's
+ *       registry when the admin role bypasses row-level security: both are required for correctness, and each has a
+ *       test that fails without it. Only
  *       collections that can build (live, unsuperseded) or that hold a {@code pci_} index are counted; a collection
  *       that is neither can neither build nor drop, so its count would decide nothing.</li>
  *   <li>Commit. A statement timeout ({@code 57014}) skips the leaf for this pass
@@ -511,6 +524,8 @@ public final class PciReconciler {
             log.warn("event=pci_reconcile_leaf_skipped leaf={} reason=unknown_model model={}", leafId(leaf), model);
             return null;
         }
+        // The tenant predicate below is REQUIRED, not belt and braces: a superuser or BYPASSRLS admin role is not filtered
+        // by row-level security, and another tenant's live row of the same name would mask this leaf's NOT_IN_REGISTRY drop.
         List<RegistryRow> registry = tx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                 CATALOG_COLLECTIONS.SUPERSEDED_BY)
             .from(CATALOG_COLLECTIONS)
@@ -575,7 +590,12 @@ public final class PciReconciler {
         return new Planned(actions, dimension);
     }
 
-    /** Rows of {@code collection} on the leaf's (model, tenant) key, stopped at {@code cap + 1}. */
+    /**
+     * Rows of {@code collection} on the leaf's (model, tenant) key, stopped at {@code cap + 1}. The probe's explicit
+     * {@code tenant_id} predicate is REQUIRED for correctness: the admin role reads every tenant's chunks
+     * ({@code chunks_gate_probe_owner_read}, vectors-029), so without it a same-named collection of another tenant would
+     * be added to the count and a leaf would build an index its own rows do not warrant.
+     */
     private static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap) {
         Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {collection}, model, tenant, cap)
             .fetchOne(0, Integer.class);

@@ -4277,8 +4277,12 @@ def _check_per_collection_indexes(
     * fail (hard ✗): ``builder_state`` ``auth_failed`` (the engine's admin credential was rejected, typically after a
       ``nexus_admin`` rotation) or ``no_privilege`` (the admin role cannot create indexes on the leaves). Checked
       before the counts, so a dead builder cannot read green on ``invalid=0``.
-    * warn: ``invalid`` > 0 or ``failing`` > 0.
-    * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with neither; ``off`` passes with a note that
+    * warn: ``expired`` (the router's index set is frozen and answering as empty, so every statement walks at the
+      serving ``ef_search``), ``invalid`` > 0 or ``failing`` > 0. While this engine's builder is mid-build
+      (``this_engine.building`` is 1, or ``pass_in_progress`` is true) ``invalid`` does NOT warn: the index being built is
+      invalid by design until its ``CREATE INDEX CONCURRENTLY`` finishes, and the row says "first pass in progress" or
+      "build in progress" instead. ``expired`` and ``failing`` still warn then.
+    * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with none of those; ``off`` passes with a note that
       builds are disabled by ``NX_SEARCH_PCI=0``.
 
     Not applicable (ok, no warning) when the engine cannot be reached or predates the object. A present object
@@ -4333,6 +4337,14 @@ def _check_per_collection_indexes(
     ddl_note = ("no DDL pass yet" if last_ddl is None
                 else f"last DDL pass {_span(max(0.0, (now - last_ddl).total_seconds()))} ago")
     counts = f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+    expired = pci.get("expired") is True
+    building_now = _status_int(this_engine.get("building")) == 1
+    pass_in_flight = this_engine.get("pass_in_progress") is True
+    in_flight = building_now or pass_in_flight
+    if in_flight:
+        progress = ("first pass in progress" if pass_in_flight and last_ddl is None
+                    else "build in progress" if building_now else "pass in progress")
+        ddl_note = progress if last_ddl is None else f"{progress}, {ddl_note}"
 
     if state in ("auth_failed", "no_privilege"):
         why = ("the engine's admin credential was rejected" if state == "auth_failed"
@@ -4351,14 +4363,18 @@ def _check_per_collection_indexes(
             ],
         )]
     off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
-    if invalid or failing:
-        parts = [f"{n} {what}" for n, what in ((invalid, "invalid"), (failing, "failing")) if n]
+    warn_invalid = invalid if not in_flight else 0   # the index being built is invalid until its build finishes
+    if expired or warn_invalid or failing:
+        parts = ["router index set expired (no successful catalog read for three sweep periods; every statement "
+                 "walks at the serving ef_search until a read succeeds)"] if expired else []
+        parts += [f"{n} {what}" for n, what in ((warn_invalid, "invalid"), (failing, "failing")) if n]
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(f"{', '.join(parts)} ({counts}); builder_state {state}, {ddl_note}{off_note}"),
             fix_suggestions=[
-                "Read the engine log for event=pci_sweep (the read half's counts, one line per sweep) and the "
-                "builder's own lines for the collection that fails",
+                "Read the engine log for event=pci_sweep (the read half's counts, one line per sweep; "
+                "event=pci_sweep_set_expired marks a frozen set) and the builder's own lines for the collection "
+                "that fails",
                 "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
             ],
         )]

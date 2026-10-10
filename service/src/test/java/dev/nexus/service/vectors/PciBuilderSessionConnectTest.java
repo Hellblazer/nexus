@@ -49,6 +49,18 @@ class PciBuilderSessionConnectTest {
             .satisfies(e -> assertThat(e.getMessage()).doesNotContain(secret));
     }
 
+    /** The whole {@code 08xxx} class and {@code 57P01} end a pass as a lost connection; a failed statement does not. */
+    @Test
+    void isConnectionLoss_coversTheWholeConnectionExceptionClass_andTheTerminationState() {
+        for (String lost : new String[] {"08000", "08001", "08003", "08006", "08P01", "57P01"}) {
+            assertThat(PciBuilderSession.Pass.isConnectionLoss(lost)).as(lost).isTrue();
+        }
+        for (String statement : new String[] {"57014", "42501", "42P07", "55P03", "28000", "28P01", "0A000", "40001"}) {
+            assertThat(PciBuilderSession.Pass.isConnectionLoss(statement)).as(statement).isFalse();
+        }
+        assertThat(PciBuilderSession.Pass.isConnectionLoss(null)).isFalse();
+    }
+
     @Test
     void scrub_masksThePasswordAndAnyPasswordUrlParameter_andKeepsTheLineOnOneRow() {
         var session = new PciBuilderSession("jdbc:postgresql://h/d", "u", "hunter2", "n1", ON);

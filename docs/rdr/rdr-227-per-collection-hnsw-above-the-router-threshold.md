@@ -320,11 +320,27 @@ walk at `ef_search = 1000`.
     it resolves the leaf's tenant from the partition bound, then, in one explicit
     transaction on the admin session (`SET LOCAL` has no effect outside one,
     `nexus_rdr/227-research-7`), sets `SET LOCAL nexus.tenant` to that tenant and
-    counts rows per collection on the leaf. `nexus.chunks` is FORCE ROW LEVEL
-    SECURITY, so the owner role sees only that tenant's rows
-    (`nexus_rdr/227-research-5`). It reads the collection registry under the same
-    tenant. It then drops by the rules below and builds the missing indexes. Building and
-    dropping run outside that transaction, in autocommit.
+    counts rows per collection on the leaf. The owner role does NOT see only
+    that tenant's chunk rows: `vectors-029` added `chunks_gate_probe_owner_read`,
+    a permissive `SELECT ... USING (true)` policy on `nexus.chunks` for the
+    migrating role (`nexus_admin` in production, the builder's role), so the
+    admin session reads every tenant's chunks whatever `nexus.tenant` says
+    (`nexus_rdr/227-research-11`, finding A; this corrects the earlier reading
+    in `nexus_rdr/227-research-5`). Counting is per-tenant because the count
+    carries an explicit `tenant_id` predicate, and the `current_setting` check
+    cannot catch a count that omits it. `catalog_collections` has no such policy:
+    it is FORCE ROW LEVEL SECURITY to the owner, so a registry read under the
+    wrong tenant is an empty list, which is why the read also carries its own
+    `tenant_id` predicate (a superuser or BYPASSRLS admin role is not filtered).
+    Each count runs under a 30 s statement timeout, per statement and not per leaf
+    (`set_config('statement_timeout', ...)`; PostgreSQL restarts the clock at each
+    statement). Measured on local NVMe (`nexus_rdr/227-research-11`): the worst
+    single count took 0.55 s cold, and a whole leaf's counting transaction took
+    11 to 20 s cold, about 45 s projected at 200 saturating collections, so the
+    transaction as a whole is not bounded at 30 s. A per-leaf bound (PostgreSQL 17
+    `transaction_timeout`, 300 s proposed) is not built. The registry is read under
+    the same tenant. The pass then drops by the rules below and builds the missing
+    indexes. Building and dropping run outside that transaction, in autocommit.
   - *Build and retirement rules.* Build when a collection that is live in the
     registry (`superseded_by` empty) counts at least B rows on its leaf and has no
     `pci_` index. Drop when its count falls below B/2, when the registry no longer
@@ -746,7 +762,9 @@ None.
   drops; a COPY rename keeps the index; a collection between B and T has an index
   and still routes exact.
 - Counting: a count taken without the tenant set (zero rows for a live,
-  populated collection) is logged and never drops an index.
+  populated collection) is logged and never drops an index. Under the admin role,
+  which reads every tenant's chunks, two tenants with the same collection name are
+  counted separately, and a leaf's registry never lists another tenant's row.
 - Invalid index: a failed concurrent build is dropped by name and rebuilt;
   routing ignores it meanwhile (the EXPLAIN pin also asserts `indisvalid`).
 - Tenant targeting: two tenants with the same collection name each get an index

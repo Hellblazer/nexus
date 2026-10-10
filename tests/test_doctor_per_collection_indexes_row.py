@@ -12,7 +12,10 @@ Not-applicable cases come first: an engine that predates the object must stay gr
 """
 from __future__ import annotations
 
+import copy
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -30,11 +33,24 @@ def _iso(delta: timedelta) -> str:
 
 def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: int = 0,
             building: int | None = 0, failing: int | None = 0,
-            last_ddl: timedelta | None = timedelta(minutes=5)) -> dict:
+            last_ddl: timedelta | None = timedelta(minutes=5), expired: bool = False,
+            pass_in_progress: bool = False) -> dict:
     return {"embedding_mode": "onnx-local", "per_collection_indexes": {
         "valid": valid, "invalid": invalid, "unparsed": unparsed, "last_read_at": _iso(timedelta(minutes=1)),
+        "expired": expired,
         "this_engine": {"builder_state": state, "building": building, "failing": failing,
-                        "last_ddl_pass_at": None if last_ddl is None else _iso(last_ddl)}}}
+                        "last_ddl_pass_at": None if last_ddl is None else _iso(last_ddl),
+                        "pass_started_at": None, "pass_in_progress": pass_in_progress}}}
+
+
+# The bodies the ENGINE emits, rendered by StatusHandlerTest through the real StatusHandler and committed as a golden
+# fixture (the Java test asserts equality; this file feeds the same objects to the row). Hand-built bodies above can
+# only prove the row reads the names the author remembered; these prove it reads the names the engine writes.
+_GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "pci_status_bodies.json").read_text())["cases"]
+
+
+def _golden(name: str) -> dict:
+    return {"embedding_mode": "onnx-local", "per_collection_indexes": copy.deepcopy(_GOLDEN[name])}
 
 
 def _row(status, **kw):
@@ -208,3 +224,81 @@ def test_the_default_sweep_makes_one_status_request_and_prints_the_row(monkeypat
     assert calls["n"] == 1, result.output
     assert "Per-collection indexes" in result.output
     assert "no_privilege" in result.output
+
+
+# ── the engine's own bodies (golden fixture shared with StatusHandlerTest) ──────────────────────────────────
+
+
+def test_the_golden_holder_body_mid_build_reads_as_a_build_in_progress_not_as_an_invalid_index() -> None:
+    r = _row(_golden("holder"))
+    assert r.ok is True and not r.warn
+    assert "build in progress" in r.detail and "1 invalid" in r.detail
+
+
+def test_the_golden_first_pass_body_reports_the_first_pass_instead_of_warning() -> None:
+    r = _row(_golden("first_pass_in_flight"))
+    assert r.ok is True and not r.warn
+    assert "first pass in progress" in r.detail and "no DDL pass yet" not in r.detail
+
+
+def test_the_golden_standby_body_passes() -> None:
+    r = _row(_golden("standby"))
+    assert r.ok is True and not r.warn and "peer" in r.detail
+
+
+def test_the_golden_auth_failed_and_no_privilege_bodies_fail() -> None:
+    for name, word in (("auth_failed", "auth_failed"), ("no_privilege", "no_privilege")):
+        r = _row(_golden(name))
+        assert r.ok is False and not r.warn and word in r.detail, name
+
+
+def test_the_golden_expired_body_warns_that_the_router_set_is_frozen() -> None:
+    r = _row(_golden("expired"))
+    assert r.ok is False and r.warn is True and "expired" in r.detail
+    assert "ef_search" in r.detail
+
+
+def test_the_golden_off_body_passes_with_the_switch_note() -> None:
+    r = _row(_golden("off"))
+    assert r.ok is True and not r.warn and "NX_SEARCH_PCI=0" in r.detail
+
+
+def test_every_golden_case_has_an_expectation_here() -> None:
+    """A case added to the fixture must be read by this file; otherwise the shared fixture guards nothing for it."""
+    covered = {"holder", "first_pass_in_flight", "standby", "auth_failed", "no_privilege", "expired", "off"}
+    assert set(_GOLDEN) == covered
+
+
+# ── expired, and a build in flight ───────────────────────────────────────────
+
+
+def test_an_expired_router_set_warns_even_when_the_builder_is_healthy() -> None:
+    r = _row(_status(expired=True, invalid=0, failing=0))
+    assert r.ok is False and r.warn is True and "expired" in r.detail
+    assert "event=pci_sweep_set_expired" in " ".join(r.fix_suggestions)
+
+
+def test_an_expired_set_still_warns_while_a_build_is_in_flight() -> None:
+    r = _row(_status(expired=True, building=1, invalid=1))
+    assert r.warn is True and "expired" in r.detail and "invalid" not in r.detail.split("(")[0]
+
+
+def test_an_invalid_index_during_a_build_is_not_a_warning() -> None:
+    r = _row(_status(building=1, invalid=1))
+    assert r.ok is True and not r.warn and "build in progress" in r.detail
+
+
+def test_an_invalid_index_during_a_pass_is_not_a_warning_and_keeps_the_last_pass_time() -> None:
+    r = _row(_status(pass_in_progress=True, building=0, invalid=2, last_ddl=timedelta(minutes=5)))
+    assert r.ok is True and not r.warn
+    assert "pass in progress" in r.detail and "5 minutes ago" in r.detail
+
+
+def test_failing_builds_still_warn_while_another_build_is_in_flight() -> None:
+    r = _row(_status(building=1, invalid=1, failing=2))
+    assert r.warn is True and "2 failing" in r.detail
+
+
+def test_an_invalid_index_with_no_build_in_flight_still_warns() -> None:
+    r = _row(_status(building=0, pass_in_progress=False, invalid=1))
+    assert r.warn is True and "1 invalid" in r.detail

@@ -498,6 +498,45 @@ class StatusHandlerTest {
             "pass_started_at", "pass_in_progress");
     }
 
+    /**
+     * The golden fixture the Python doctor row also reads ({@code tests/fixtures/pci_status_bodies.json}): the bodies
+     * the engine emits for a holder, a first pass in flight, a standby, an auth failure, a privilege failure, an
+     * expired router set and a switched-off engine, rendered here through the real handler. A field renamed or
+     * retyped on this side fails this test until the fixture is updated, and the doctor row's test then reads the
+     * updated bodies, so the two halves cannot drift apart unseen.
+     */
+    @Test
+    void perCollectionIndexes_bodiesMatchTheGoldenFixtureThePythonDoctorRowReads() throws Exception {
+        JsonNode golden = MAPPER.readTree(java.nio.file.Files.readString(
+            java.nio.file.Path.of("..", "tests", "fixtures", "pci_status_bodies.json"))).get("cases");
+        var cases = new java.util.LinkedHashMap<String, StatusHandler.PerCollectionIndexes>();
+        cases.put("holder", pci(read(4, 1, 2, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT)));
+        cases.put("first_pass_in_flight", pci(read(0, 1, 0, false), new PciReconciler.DdlStatus(
+            PciBuilderSession.BuilderState.OK, 1, 0, null, java.time.Instant.parse("2026-10-10T07:58:30.500Z"), true)));
+        cases.put("standby", pci(read(4, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null)));
+        cases.put("auth_failed", pci(read(2, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.AUTH_FAILED, null, null, null)));
+        cases.put("no_privilege", pci(read(2, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.NO_PRIVILEGE, 0, 0, DDL_AT)));
+        cases.put("expired", pci(read(3, 0, 0, true),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null)));
+        cases.put("off", pci(new PciIndexSweep.Status(false, 0, 0, 0, null, null, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OFF, null, null, null)));
+
+        var goldenNames = new java.util.ArrayList<String>();
+        golden.fieldNames().forEachRemaining(goldenNames::add);
+        assertThat(goldenNames).as("the fixture holds exactly the cases rendered here").containsExactlyElementsOf(
+            cases.keySet());
+        for (var entry : cases.entrySet()) {
+            var supplied = entry.getValue();
+            start(withPci(() -> supplied));
+            assertThat(get().get("per_collection_indexes")).as(entry.getKey()).isEqualTo(golden.get(entry.getKey()));
+            stop();
+        }
+    }
+
     @Test
     void perCollectionIndexes_isServedFromTheSuppliedValue_oneCallPerRequest() throws Exception {
         // The route reads a cached value: the handler asks the supplier once per request and does no catalog read of

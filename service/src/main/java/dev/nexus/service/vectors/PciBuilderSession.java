@@ -405,7 +405,7 @@ public final class PciBuilderSession {
         }
 
         /** True for the SQLSTATEs of a connection that is gone: {@code 08xxx}, and {@code 57P01} (terminated). */
-        private static boolean isConnectionLoss(String sqlState) {
+        static boolean isConnectionLoss(String sqlState) {
             return sqlState != null && (sqlState.startsWith("08") || "57P01".equals(sqlState));
         }
 

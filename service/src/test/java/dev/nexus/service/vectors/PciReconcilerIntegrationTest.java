@@ -69,7 +69,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-227 Step 2 (nexus-43ulx.19): {@link PciReconciler}, the DDL half, against the real partitioned layout in
  * production's shape: a DEDICATED container migrated by a non-superuser schema owner that the reconciler connects as
- * (so {@code nexus.chunks} is FORCE ROW LEVEL SECURITY to it, and a count taken without the tenant reads nothing).
+ * (so {@code catalog_collections} is FORCE ROW LEVEL SECURITY to it and a registry read without the tenant is empty;
+ * {@code nexus.chunks} is not filtered for it, since {@code vectors-029}'s owner-read policy lets it read every tenant).
  * Seeding goes through the container superuser, which bypasses row-level security; each test uses tenants of its own
  * and removes their leaves afterwards, so a pass over "every leaf" only ever sees the test's own data. B is 200.
  *
@@ -1365,6 +1366,153 @@ class PciReconcilerIntegrationTest {
         assertThat(report.builds()).isZero();
         assertThat(report.drops()).isEqualTo(1);
         assertThat(validIndexed(tenant)).isEmpty();
+    }
+
+    // -- recovery, the production factory and the tenant predicates (Batch B test-validation fixes) --------------
+
+    /**
+     * The path out of {@code no_privilege}: a role that could not create an index is later granted the right, and the
+     * next pass builds and reports {@code ok}. Two things have to hold for that: the success clears the session's
+     * state, and the pass still treats a {@code no_privilege} engine as the lock holder (a holder that drops
+     * {@code NO_PRIVILEGE} would stop every later pass, so the engine could never recover by itself).
+     */
+    @Test
+    void anEngineThatWasNoPrivilege_recovers_onceTheRoleCanCreateTheIndex() throws Exception {
+        String tenant = newTenant("recov");
+        collection(tenant, name("wanted"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconcilerAs(PgContainerHelper.SVC_USERNAME, PgContainerHelper.SVC_PASSWORD, s, sweep(s),
+            Clock.systemUTC());
+
+        r.reconcileOnce();
+        assertThat(r.status().builderState()).isEqualTo(BuilderState.NO_PRIVILEGE);
+        assertThat(validIndexed(tenant)).isEmpty();
+
+        PciCatalog.Leaf leaf = leaf(tenant);
+        superuserDdl("ALTER TABLE " + leaf.schema() + "." + leaf.name() + " OWNER TO " + PgContainerHelper.SVC_USERNAME);
+        superuserDdl("GRANT CREATE ON SCHEMA " + leaf.schema() + " TO " + PgContainerHelper.SVC_USERNAME);
+        try {
+            PassReport second = r.reconcileOnce();
+            assertThat(second.builds()).as("the next pass tries again and builds").isEqualTo(1);
+            assertThat(r.status().builderState()).as("a success clears no_privilege").isEqualTo(BuilderState.OK);
+            assertThat(validIndexed(tenant)).containsExactly(name("wanted"));
+        } finally {
+            superuserDdl("REVOKE CREATE ON SCHEMA " + leaf.schema() + " FROM " + PgContainerHelper.SVC_USERNAME);
+            superuserDdl("ALTER TABLE " + leaf.schema() + "." + leaf.name() + " OWNER TO " + ADMIN_ROLE);
+        }
+    }
+
+    /** The factory Main calls: it must connect the builder with the admin values, user and password in order. */
+    @Test
+    void theProductionFactory_buildsWithTheAdminValues() throws Exception {
+        String tenant = newTenant("factory");
+        collection(tenant, name("wanted"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = PciReconciler.create(svcDs,
+            new dev.nexus.service.db.AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS), NONCE, sweep(s), s);
+
+        PassReport report = r.reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OK);
+        assertThat(report.builds()).isEqualTo(1);
+        assertThat(validIndexed(tenant)).containsExactly(name("wanted"));
+    }
+
+    /**
+     * With a superuser (or BYPASSRLS) admin role, row-level security filters nothing, so the registry read's own
+     * {@code tenant_id} predicate is the only thing between a leaf and another tenant's registry row of the same name.
+     * Tenant B keeps a live row called {@code same}; tenant A's registry row and rows are gone. A's index must drop.
+     * Without the predicate A's registry shows B's live {@code same}, the planner reads it as still registered, and
+     * the index stays.
+     */
+    @Test
+    void asSuperuserAdmin_aDeletedCollectionsIndexIsDropped_evenWhenAnotherTenantHasTheSameName() throws Exception {
+        String a = newTenant("suA");
+        String b = newTenant("suB");
+        collection(a, name("same"), 300);
+        collection(b, name("same"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconcilerAs(pg.getUsername(), pg.getPassword(), s, sweep(s), Clock.systemUTC());
+        r.reconcileOnce();
+        assertThat(validIndexed(a)).containsExactly(name("same"));
+        assertThat(validIndexed(b)).containsExactly(name("same"));
+
+        asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(a))
+            .and(CHUNKS.COLLECTION.eq(name("same"))).execute());
+        asSuperuser(su -> su.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(a))
+            .and(CATALOG_COLLECTIONS.NAME.eq(name("same"))).execute());
+        r.reconcileOnce();
+
+        assertThat(validIndexed(a)).as("A's collection left the registry: its index is dropped").isEmpty();
+        assertThat(validIndexed(b)).as("B is untouched").containsExactly(name("same"));
+    }
+
+    /**
+     * {@code vectors-029} gave the migrating role (here {@value #ADMIN_ROLE}, in production {@code nexus_admin}) a
+     * permissive {@code SELECT ... USING (true)} policy on {@code nexus.chunks}. The builder's admin session therefore
+     * reads EVERY tenant's chunks whatever {@code nexus.tenant} says, and the count is per-tenant only because its
+     * probe carries an explicit {@code tenant_id} predicate. Tenant A holds 100 rows of {@code same} (below B, so no
+     * index) and tenant B holds 300 of the same name. A count that read both would reach 400 and build on A's leaf.
+     * The control proves the premise on this substrate: the admin role does see the other tenant's rows.
+     */
+    @Test
+    void underTheAdminRoleWhichReadsEveryTenantsChunks_theCountIsStillPerTenant() throws Exception {
+        String a = newTenant("cntA");
+        String b = newTenant("cntB");
+        collection(a, name("same"), B / 2);
+        collection(b, name("same"), 300);
+
+        try (Connection owner = adminDs.getConnection()) {
+            owner.setAutoCommit(false);
+            DSLContext ctx = DSL.using(owner, SQLDialect.POSTGRES);
+            PciReconciler.SET_LOCAL_TENANT.bind(ctx, a);
+            int seenFromA = ctx.selectCount().from(CHUNKS).where(CHUNKS.COLLECTION.eq(name("same")))
+                .fetchOne(0, Integer.class);
+            owner.rollback();
+            assertThat(seenFromA).as("control: with nexus.tenant = A the admin role still sees B's rows (vectors-029)")
+                .isEqualTo(B / 2 + 300);
+        }
+
+        PciSettings s = settings(16);
+        PassReport report = reconciler(s, sweep(s)).reconcileOnce();
+
+        assertThat(report.builds()).isEqualTo(1);
+        assertThat(validIndexed(a)).as("A has 100 rows of its own: below B, no index").isEmpty();
+        assertThat(validIndexed(b)).containsExactly(name("same"));
+    }
+
+    /**
+     * A failure entry exists only on the engine that ran the failing builds. When a peer later succeeds, the next pass
+     * here sees a valid index for that collection and must forget the failures: otherwise {@code failing} warns the
+     * doctor forever on an engine that has nothing left to retry.
+     */
+    @Test
+    void aFailureEntry_isClearedWhenAValidIndexAppearsFromAPeer() throws Exception {
+        String tenant = newTenant("peerok");
+        collection(tenant, name("stubborn"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        MutableClock clock = new MutableClock();
+        PciReconciler failing = reconciler(s, sweep, clock);
+
+        failOneBuild(tenant, failing);
+        clock.advance(Duration.ofMinutes(11));
+        failing.reconcileOnce();                                              // drops the invalid index
+        failOneBuild(tenant, failing);
+        clock.advance(Duration.ofMinutes(21));
+        failing.reconcileOnce();
+        failOneBuild(tenant, failing);
+        assertThat(failing.status().failing()).as("three in a row").isEqualTo(1);
+
+        // A peer with no failure history drops the invalid index and builds the collection.
+        PciReconciler peer = reconciler(s, sweep, new MutableClock());
+        peer.reconcileOnce();
+        assertThat(peer.reconcileOnce().builds()).isEqualTo(1);
+        assertThat(validIndexed(tenant)).containsExactly(name("stubborn"));
+
+        failing.reconcileOnce();                                              // still inside its own 40 minute backoff
+        assertThat(failing.status().failing()).as("a valid index from a peer ends the failing").isZero();
+        assertThat(failing.trackedFailures()).isZero();
     }
 
     // -- switches and schedule ---------------------------------------------------------------------------

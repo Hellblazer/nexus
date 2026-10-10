@@ -22,13 +22,17 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,6 +48,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @Tag("integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+// A test that waits on a lock (a drop behind an open transaction, a queued advisory lock) must fail, not hang to the
+// fork cap: a mutant that removed the lock timeout hung 1500 s once. A thread blocked in a JDBC socket read ignores
+// the interrupt the same-thread mode sends, so the timeout runs the test on a thread of its own.
+@Timeout(value = 300, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class PciBuilderSessionIntegrationTest {
 
     static final String SVC_ROLE = "svc_pcibld";
@@ -305,6 +313,7 @@ class PciBuilderSessionIntegrationTest {
     }
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aDropBlockedByAnOpenTransaction_givesUpAfterFiveSeconds_andLeavesTheIndex() throws Exception {
         String collection = collectionName("droptimeout");
         String name = PciCatalog.indexName(M1024, T1, collection);
@@ -434,6 +443,67 @@ class PciBuilderSessionIntegrationTest {
     }
 
     /**
+     * {@code pg_locks} also lists a session that is still WAITING for the lock ({@code granted = false}); that session
+     * holds nothing, and naming it would point an operator at the wrong backend. With four waiters queued behind the
+     * holder, only the holder's pid may come back.
+     */
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void migrationLockHolderPid_namesTheHolder_neverASessionStillWaitingForTheLock() throws Exception {
+        int waiting = 4;
+        List<Connection> conns = new ArrayList<>();
+        List<Integer> pids = new ArrayList<>();
+        try (HeldMigrationLock migrating = new HeldMigrationLock()) {
+            try {
+                for (int i = 0; i < waiting; i++) {
+                    Connection c = pg.createConnection("");
+                    c.setAutoCommit(true);
+                    conns.add(c);
+                    DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+                    pids.add(ctx.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class));
+                    CompletableFuture.runAsync(() -> {
+                        try {
+                            ctx.select(DSL.function("pg_advisory_lock", SQLDataType.OTHER,
+                                DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();
+                        } catch (RuntimeException expectedWhenTerminated) {
+                            // the test ends the waiter
+                        }
+                    });
+                }
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                while (waitersFor(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY) < waiting) {
+                    assertThat(System.nanoTime()).as("the waiters queued").isLessThan(deadline);
+                    Thread.sleep(50);
+                }
+                assertThat(asSuperuser(SchemaMigrator::migrationLockHolderPid)).isEqualTo(migrating.pid);
+            } finally {
+                for (int pid : pids) {
+                    asSuperuser(ctx -> ctx.select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, DSL.val(pid)))
+                        .fetchOne(0, Boolean.class));
+                }
+                for (Connection c : conns) {
+                    try {
+                        c.close();
+                    } catch (Exception ignored) {
+                        // a terminated session
+                    }
+                }
+            }
+        }
+    }
+
+    /** Sessions queued for the advisory lock {@code key} ({@code granted = false}). */
+    long waitersFor(long key) throws Exception {
+        return asSuperuser(ctx -> ctx.selectCount()
+            .from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
+            .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+            .and(DSL.field(DSL.name("granted"), Boolean.class).isFalse())
+            .and(DSL.field(DSL.name("classid"), Long.class).cast(SQLDataType.BIGINT).eq(key >>> 32))
+            .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT).eq(key & 0xffffffffL))
+            .fetchOne(0, Long.class));
+    }
+
+    /**
      * Advisory locks are database-scoped, and {@code pg_locks} lists a lock from every database of the cluster. A
      * migration walking in ANOTHER database on the same cluster must not make this database's builder skip DDL, so
      * {@code migrationLockHolderPid} filters on the current database. Without the filter this reports the other
@@ -498,6 +568,37 @@ class PciBuilderSessionIntegrationTest {
         assertThat(logs).as("the driver's reason is logged, so an operator sees why")
             .anyMatch(l -> l.contains("event=pci_builder_auth_failed") && l.contains("password authentication failed"));
         assertThat(indexOn(M1024, T1, PciCatalog.indexName(M1024, T1, collection))).isEmpty();
+    }
+
+    /**
+     * SQLSTATE 28000 (invalid authorization specification) is the other half of {@code auth_failed}: the password is
+     * right and the server still refuses the login, here because the role may not log in. It must read as an
+     * authentication failure, not as an unreachable database.
+     */
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aRoleThatMayNotLogIn_givesAuthFailed_withSqlState28000() throws Exception {
+        String role = "pcibld_nologin";
+        String password = "nologin-" + UUID.randomUUID();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE " + role + " PASSWORD '" + password + "' NOLOGIN");
+        }
+        try {
+            PciBuilderSession session = new PciBuilderSession(pg.getJdbcUrl(), role, password, NONCE, ON);
+            List<String> logs = captureLogs(ignored -> {
+                try (PciBuilderSession.Pass p = session.open()) {
+                    assertThat(p.state()).isEqualTo(BuilderState.AUTH_FAILED);
+                }
+                return null;
+            });
+            assertThat(session.state()).isEqualTo(BuilderState.AUTH_FAILED);
+            assertThat(logs).anyMatch(l -> l.contains("event=pci_builder_auth_failed") && l.contains("sqlstate=28000"));
+            assertThat(logs).noneMatch(l -> l.contains(password));
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.runSuperuserDdl(su, "DROP ROLE IF EXISTS " + role);
+            }
+        }
     }
 
     @Test
