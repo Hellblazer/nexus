@@ -17,9 +17,12 @@ class PgSessionSearchExactMaxRowsTest {
     void defaultsToTheMeasuredConstant_whenUnsetOrBlank() {
         assertThat(PgSession.searchExactMaxRows(null)).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
         assertThat(PgSession.searchExactMaxRows("   ")).isEqualTo(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS);
-        // nexus-nqsa7: 30000 (Sam, 2026-10-09). 60000 fixed the 27,893-row repro but put the
-        // 45k/58k collections on exact, about +1 s per warm default search on the live engine.
-        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(30_000);
+        // RDR-227 (nexus-43ulx.35): 20000, the per-collection index build threshold, so a collection
+        // leaves the exact scan at the row count where it gets its own index. It was 30000 (nexus-nqsa7).
+        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS).isEqualTo(20_000);
+        assertThat(PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS)
+            .as("the router default equals the build default: no collection sits between them unindexed")
+            .isEqualTo(PgSession.DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS);
     }
 
     @Test
