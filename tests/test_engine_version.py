@@ -587,6 +587,12 @@ class TestRequiredEngineVersion:
         # (nexus-nqsa7), stale changelog-lock recovery (nexus-8sph2), the
         # arm-phase log (RDR-226). Skips v0.1.155 (T=60000, superseded).
         # Tagged on f391a1a6c.
+        # ->(0,1,159) 2026-10-10 for 7.77.0 (both wire entries [additive],
+        # engine deployed BEFORE the client tag, 17:34Z): RDR-227
+        # per-collection partial HNSW indexes and their status object
+        # (nexus-43ulx), topics/by_ids (nexus-w032x), router default
+        # T=20000 (nexus-43ulx.35). Skips v0.1.157 and v0.1.158, deployed
+        # to the managed service and never pinned. Tagged on abc96883c.
         # nexus-9gggv (2026-09-08): the tuple is no longer hand-typed here.
         # Every client release records its engine pairing in CHANGELOG.md's
         # newest released section (the first engine-service-vX.Y.Z it
