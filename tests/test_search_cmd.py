@@ -240,6 +240,39 @@ def test_explicit_conformant_collection_name_skips_list_collections(
 
 
 @pytest.mark.usefixtures("cloud_mode")
+def test_search_needing_the_listing_asks_for_it_with_the_probe(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """nexus-w032x: a prefix --corpus needs the routing listing, so search asks
+    _t3() to start it alongside the cloud version probe."""
+    mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3) as m_t3, \
+         patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    m_t3.assert_called_once_with(prefetch_routing_listing=True)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_search_with_explicit_names_does_not_prefetch_the_listing(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """nexus-w032x: explicit collection names never read the listing (d9xt2),
+    so nothing is prefetched."""
+    mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1"])
+    mock_t3.collection_exists_raw.return_value = True
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3) as m_t3, \
+         patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge__test__voyage-context-3__v1"],
+        )
+    assert result.exit_code == 0, result.output
+    m_t3.assert_called_once_with(prefetch_routing_listing=False)
+
+
+@pytest.mark.usefixtures("cloud_mode")
 def test_nonexistent_conformant_collection_name_surfaces_named_warning(
     runner: CliRunner, cloud_env,
 ) -> None:

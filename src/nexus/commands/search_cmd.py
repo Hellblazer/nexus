@@ -299,8 +299,6 @@ def search_cmd(
     # against the catalog manifest length (D2 authoritative source);
     # the query no longer carries ``chunk_count`` to chroma.
 
-    db = _t3()
-
     # Pre-split each --corpus value on commas so the CLI accepts the
     # same CSV form that MCP search(corpus=...) documents (#538 /
     # nexus-v8cj). Mixed forms work: `--corpus a,b --corpus c` expands
@@ -369,9 +367,13 @@ def search_cmd(
     # a missing collection. A wildcard, prefix, or legacy short-form
     # corpus value still pays the one list_collections() call, exactly as
     # before.
-    if expanded_corpus and all(
+    names_are_explicit = bool(expanded_corpus) and all(
         is_conformant_collection_name(c) for c in expanded_corpus
-    ):
+    )
+    # nexus-w032x: a search that needs the listing starts it alongside the
+    # cloud engine version probe instead of after it.
+    db = _t3(prefetch_routing_listing=not names_are_explicit)
+    if names_are_explicit:
         target_collections = []
         for c in dict.fromkeys(expanded_corpus):
             try:

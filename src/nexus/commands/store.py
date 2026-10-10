@@ -15,7 +15,7 @@ from nexus.errors import PutOversizedError
 from nexus.ttl import parse_ttl
 
 
-def _t3() -> T3Database:
+def _t3(*, prefetch_routing_listing: bool = False) -> T3Database:
     # No credential pre-flight (nexus-c7aj3): make_t3() constructs the
     # service-backed client unconditionally (RDR-155 P4a.2) — no call site
     # here can reach a direct-Chroma client, so a Chroma/Voyage cred check
@@ -24,6 +24,9 @@ def _t3() -> T3Database:
     # reads them does its own checks. Real construction failures surface
     # as make_t3()'s own honest errors.
     try:
+        if prefetch_routing_listing:
+            # nexus-w032x: see get_http_vector_client.
+            return make_t3(prefetch_routing_listing=True)
         return make_t3()
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc

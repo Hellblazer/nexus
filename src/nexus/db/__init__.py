@@ -40,7 +40,9 @@ if TYPE_CHECKING:
     from nexus.db.t3 import T3Database
 
 
-def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClient":
+def make_t3(
+    *, _client=None, _ef_override=None, prefetch_routing_listing: bool = False,
+) -> "T3Database | HttpVectorClient":
     """Return the T3 vector-store handle for the current configuration.
 
     Dispatch (RDR-155 P4a.2 — serving-path Chroma retired):
@@ -65,6 +67,9 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
     * ``_ef_override`` — override the embedding function (e.g.
       ``DefaultEmbeddingFunction()``) to avoid real embedding API calls.
       Only meaningful together with ``_client``.
+
+    ``prefetch_routing_listing`` is passed to
+    :func:`~nexus.db.http_vector_client.get_http_vector_client` (nexus-w032x).
     """
     if _client is None:
         # RDR-155 P4a.2 (nexus-1k8s1): pgvector service serves T3 in both
@@ -72,6 +77,8 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
         # CloudClient leg are retired.
         from nexus.db.http_vector_client import get_http_vector_client  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
 
+        if prefetch_routing_listing:
+            return get_http_vector_client(prefetch_routing_listing=True)
         return get_http_vector_client()
 
     from nexus.config import load_config  # noqa: PLC0415 — deferred to avoid circular import (config)
