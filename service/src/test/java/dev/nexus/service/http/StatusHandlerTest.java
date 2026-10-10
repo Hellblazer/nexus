@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.PciBuilderSession;
+import dev.nexus.service.vectors.PciIndexSweep;
+import dev.nexus.service.vectors.PciReconciler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -319,6 +322,152 @@ class StatusHandlerTest {
         assertThat(body.get("chunks_tenant_isolation_intact").asBoolean()).isFalse();
         assertThat(body.toString()).as("an unauthenticated route never names a policy or a role")
             .doesNotContain("chunks_gate_probe_owner_read").doesNotContain("nexus_admin");
+    }
+
+    // ── nexus-43ulx.23 (RDR-227 Step 2), [additive]: per_collection_indexes ─────────────────────────────────────
+
+    private static final java.time.Instant READ_AT = java.time.Instant.parse("2026-10-10T08:00:00Z");
+    private static final java.time.Instant DDL_AT = java.time.Instant.parse("2026-10-10T07:30:00.987Z");
+
+    private static StatusHandler.PerCollectionIndexes pci(PciIndexSweep.Status sweep, PciReconciler.DdlStatus ddl) {
+        return StatusHandler.PerCollectionIndexes.of(sweep, ddl);
+    }
+
+    private static PciIndexSweep.Status read(int valid, int invalid, int unparsed, boolean expired) {
+        return new PciIndexSweep.Status(true, valid, invalid, unparsed, READ_AT, null, 0, expired);
+    }
+
+    private StatusHandler withPci(java.util.function.Supplier<StatusHandler.PerCollectionIndexes> supplier) {
+        return new StatusHandler(null, null, 0L, null, null, null, supplier);
+    }
+
+    @Test
+    void perCollectionIndexes_keyIsAbsentWhenNoSupplierIsWired_andWhenTheSupplierHasNothingYet() throws Exception {
+        // An engine that predates the field answers without the key, and so does one whose sweep and reconciler are
+        // not built yet (the boot window): a client reads "no key" as "cannot tell", never as zero indexes.
+        start(new StatusHandler(null));
+        assertThat(get().has("per_collection_indexes")).isFalse();
+        stop();
+        start(withPci(() -> null));
+        assertThat(get().has("per_collection_indexes")).isFalse();
+    }
+
+    @Test
+    void perCollectionIndexes_theHolderReportsEveryField() throws Exception {
+        var holder = pci(read(4, 1, 2, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT));
+        start(withPci(() -> holder));
+
+        JsonNode o = get().get("per_collection_indexes");
+        assertThat(o.get("valid").asInt()).isEqualTo(4);
+        assertThat(o.get("invalid").asInt()).isEqualTo(1);
+        assertThat(o.get("unparsed").asInt()).isEqualTo(2);
+        assertThat(o.get("last_read_at").asText()).isEqualTo("2026-10-10T08:00:00Z");
+        assertThat(o.get("expired").asBoolean()).isFalse();
+        JsonNode me = o.get("this_engine");
+        assertThat(me.get("builder_state").asText()).isEqualTo("ok");
+        assertThat(me.get("building").asInt()).isEqualTo(1);
+        assertThat(me.get("failing").asInt()).isEqualTo(0);
+        assertThat(me.get("last_ddl_pass_at").asText()).as("whole seconds, like the reaper's times")
+            .isEqualTo("2026-10-10T07:30:00Z");
+    }
+
+    @Test
+    void perCollectionIndexes_aNonHolderIsStandbyWithNullBuildingFailingAndPassTime() throws Exception {
+        var standby = pci(read(4, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null));
+        start(withPci(() -> standby));
+
+        JsonNode o = get().get("per_collection_indexes");
+        assertThat(o.get("valid").asInt()).as("the read half's counts are global, the same on every engine")
+            .isEqualTo(4);
+        JsonNode me = o.get("this_engine");
+        assertThat(me.get("builder_state").asText()).isEqualTo("standby");
+        for (String k : new String[] {"building", "failing", "last_ddl_pass_at"}) {
+            assertThat(me.has(k)).as(k + " is present, not omitted").isTrue();
+            assertThat(me.get(k).isNull()).as(k + " is null on a non-holder").isTrue();
+        }
+    }
+
+    @Test
+    void perCollectionIndexes_everyBuilderStateRendersItsWireName() throws Exception {
+        for (var state : PciBuilderSession.BuilderState.values()) {
+            var s = pci(read(0, 0, 0, false), new PciReconciler.DdlStatus(state, null, null, null));
+            start(withPci(() -> s));
+            assertThat(get().at("/per_collection_indexes/this_engine/builder_state").asText())
+                .isEqualTo(state.wire());
+            stop();
+        }
+        assertThat(java.util.Arrays.stream(PciBuilderSession.BuilderState.values())
+            .map(PciBuilderSession.BuilderState::wire).toList())
+            .containsExactlyInAnyOrder("ok", "auth_failed", "no_privilege", "off", "standby");
+    }
+
+    @Test
+    void perCollectionIndexes_aHolderThatNeverRanAPassHasANullPassTime_andABuildingZero() throws Exception {
+        var fresh = pci(read(0, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, null));
+        start(withPci(() -> fresh));
+
+        JsonNode me = get().at("/per_collection_indexes/this_engine");
+        assertThat(me.get("building").asInt()).isEqualTo(0);
+        assertThat(me.get("last_ddl_pass_at").isNull()).as("not a fabricated time").isTrue();
+    }
+
+    @Test
+    void perCollectionIndexes_beforeTheFirstSuccessfulReadTheLastReadTimeIsNull() throws Exception {
+        var never = pci(new PciIndexSweep.Status(false, 0, 0, 0, null, null, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OFF, null, null, null));
+        start(withPci(() -> never));
+
+        JsonNode o = get().get("per_collection_indexes");
+        assertThat(o.has("last_read_at")).isTrue();
+        assertThat(o.get("last_read_at").isNull()).isTrue();
+        assertThat(o.get("valid").asInt()).isZero();
+        assertThat(o.get("expired").asBoolean()).isFalse();
+    }
+
+    @Test
+    void perCollectionIndexes_aFrozenSetShowsAsExpiredAtTheGlobalLevel() throws Exception {
+        var frozen = pci(read(3, 0, 0, true),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null));
+        start(withPci(() -> frozen));
+
+        JsonNode o = get().get("per_collection_indexes");
+        assertThat(o.get("expired").asBoolean()).as("an operator can see the router is answering as empty").isTrue();
+        assertThat(o.get("valid").asInt()).as("the counts stay the last read's").isEqualTo(3);
+        assertThat(o.get("this_engine").has("expired")).as("a global fact, not a per-engine one").isFalse();
+    }
+
+    @Test
+    void perCollectionIndexes_hasExactlyTheDocumentedKeysInOrder() throws Exception {
+        var holder = pci(read(1, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT));
+        start(withPci(() -> holder));
+
+        JsonNode o = get().get("per_collection_indexes");
+        var top = new java.util.ArrayList<String>();
+        o.fieldNames().forEachRemaining(top::add);
+        assertThat(top).containsExactly("valid", "invalid", "unparsed", "last_read_at", "expired", "this_engine");
+        var inner = new java.util.ArrayList<String>();
+        o.get("this_engine").fieldNames().forEachRemaining(inner::add);
+        assertThat(inner).containsExactly("builder_state", "building", "failing", "last_ddl_pass_at");
+    }
+
+    @Test
+    void perCollectionIndexes_isServedFromTheSuppliedValue_oneCallPerRequest() throws Exception {
+        // The route reads a cached value: the handler asks the supplier once per request and does no catalog read of
+        // its own (it has no data source to read with).
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var v = pci(read(1, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT));
+        start(withPci(() -> {
+            calls.incrementAndGet();
+            return v;
+        }));
+        get();
+        get();
+        assertThat(calls.get()).isEqualTo(2);
     }
 
     @Test

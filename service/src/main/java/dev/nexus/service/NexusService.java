@@ -239,6 +239,15 @@ public final class NexusService {
     private final Runnable reaperScheduledTask;
 
     /**
+     * RDR-227 Step 2 (bead nexus-43ulx.23): the source of {@code GET /v1/status}'s {@code per_collection_indexes}
+     * object. Bound late, by {@link #perCollectionIndexes(java.util.function.Supplier)}: the status route is
+     * registered in the constructor, and {@code Main} builds the sweep and the reconciler it reads from after the
+     * service. Null until bound, and the route omits the key until then.
+     */
+    private volatile java.util.function.Supplier<dev.nexus.service.http.StatusHandler.PerCollectionIndexes>
+        perCollectionIndexes;
+
+    /**
      * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
      * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
      * (rather than only inside {@link UriSchemeResolverRegistry}, which has no
@@ -515,7 +524,8 @@ public final class NexusService {
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
                         versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
                         dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
-                                dataSource, java.time.Clock.systemUTC())));
+                                dataSource, java.time.Clock.systemUTC()),
+                        this::perCollectionIndexesStatus));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -777,6 +787,22 @@ public final class NexusService {
             r.settings().wallClockBudget().toSeconds(), r.lastCompletedPassAt(), r.failedPassesTotal(),
             last == null ? null : new dev.nexus.service.http.StatusHandler.ReaperStatus.LastPass(
                 last.tenantsVisited(), last.tenantsErrored(), last.tenantsRefused(), last.tenantsEmpty()));
+    }
+
+    /**
+     * Bind the source of {@code per_collection_indexes} on {@code GET /v1/status} (nexus-43ulx.23). {@code Main}
+     * calls it once the sweep and the reconciler exist; the supplier must answer from values those hold, with no
+     * catalog query, because the route is unauthenticated and polled.
+     */
+    public void perCollectionIndexes(
+            java.util.function.Supplier<dev.nexus.service.http.StatusHandler.PerCollectionIndexes> supplier) {
+        this.perCollectionIndexes = supplier;
+    }
+
+    /** The bound object, or null before {@link #perCollectionIndexes(java.util.function.Supplier)} (key omitted). */
+    dev.nexus.service.http.StatusHandler.PerCollectionIndexes perCollectionIndexesStatus() {
+        var supplier = perCollectionIndexes;
+        return supplier == null ? null : supplier.get();
     }
 
     /**

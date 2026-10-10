@@ -69,7 +69,7 @@ import java.util.regex.Pattern;
  * status object reports it), whatever its validity. It is never routed to ({@link Snapshot#hasValidIndex} cannot
  * return true for it), never built, and never dropped: no DDL consumer may act on an index that is not
  * {@link Index#parsed()}. This NARROWS the RDR Schema sentence saying operator-made {@code pci_} indexes follow the
- * build and retire rules; the amendment is pending in nexus-43ulx.23.
+ * build and retire rules; the RDR's Schema paragraph carries the narrowed rule (nexus-43ulx.23).
  *
  * <p><b>Deparse depends on a setting.</b> {@code pg_get_expr} writes string literals according to
  * {@code standard_conforming_strings} (backslashes are doubled when it is off). The read takes the setting in the same

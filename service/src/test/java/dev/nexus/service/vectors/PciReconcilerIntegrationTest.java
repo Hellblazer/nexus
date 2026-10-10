@@ -457,6 +457,18 @@ class PciReconcilerIntegrationTest {
             && l.contains("collection=" + name("emptied")));
     }
 
+    /** nexus-43ulx.23: the pass line carries the two per-engine status fields, so a log reader sees what /v1/status says. */
+    @Test
+    void thePassLineCarriesTheBuilderStateAndTheFailingCount() throws Exception {
+        String tenant = newTenant("passline");
+        collection(tenant, name("passline"), 300);
+        PciSettings s = settings(16);
+        reconciler(s, sweep(s)).reconcileOnce();
+
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reconcile_pass ")
+            && l.contains(" builder_state=ok failing=0"));
+    }
+
     @Test
     void aCollectionBetweenBAndT_getsAnIndex_andStillRoutesExact_aboveTItWalksTheIndex() throws Exception {
         String tenant = newTenant("band");

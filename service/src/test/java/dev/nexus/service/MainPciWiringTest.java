@@ -137,6 +137,26 @@ class MainPciWiringTest {
         assertThat(src).as("the placeholder no-op is gone").doesNotContain("stopPciReconciler = () -> { }");
     }
 
+    /**
+     * nexus-43ulx.23: {@code per_collection_indexes} on {@code /v1/status} is bound in Main from the SAME sweep and
+     * reconciler that run (not a copy, not {@code PciIndexSet.NONE}), after both exist. Without the call the route
+     * silently omits the key and every client reads "cannot tell"; no other test would notice.
+     */
+    @Test
+    void theStatusObjectIsBoundFromTheRunningSweepAndReconciler_afterBothExist() throws Exception {
+        String src = code(main());
+        int reconcilerStart = src.indexOf("pciReconciler.start();");
+        int bind = src.indexOf("service.perCollectionIndexes(");
+        int ready = src.indexOf("event=service_ready");
+        assertThat(bind).as("Main binds the status source").isPositive();
+        assertThat(bind).as("after the reconciler it reads").isGreaterThan(reconcilerStart);
+        assertThat(bind).as("before the service is declared ready").isLessThan(ready);
+        assertThat(src).as("built from the running sweep's and reconciler's own status, nothing re-read")
+            .containsPattern("StatusHandler\\.PerCollectionIndexes\\.of\\(\\s*pciSweep\\.status\\(\\),\\s*"
+                + "pciReconciler\\.status\\(\\)\\)");
+        assertThat(src.indexOf("service.perCollectionIndexes(", bind + 1)).as("bound once").isNegative();
+    }
+
     @Test
     void theRepositoryIsBuiltAfterTheBootSettingsAreValidated() throws Exception {
         String src = main();

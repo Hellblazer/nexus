@@ -403,6 +403,11 @@ public final class Main {
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
                 dev.nexus.service.db.PgSession.startupPciSettings());
         pciReconciler.start();
+        // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
+        // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the
+        // route is registered in NexusService's constructor, before either half exists; the key is omitted until now.
+        service.perCollectionIndexes(() -> dev.nexus.service.http.StatusHandler.PerCollectionIndexes.of(
+                pciSweep.status(), pciReconciler.status()));
 
         log.info("event=service_ready port={}", service.getPort());
 

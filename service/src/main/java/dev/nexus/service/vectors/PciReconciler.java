@@ -220,8 +220,12 @@ public final class PciReconciler {
         if (!holder) {
             return new DdlStatus(state, null, null, null);
         }
-        int failing = (int) failures.values().stream().filter(f -> f.consecutive() >= FAILING_AFTER).count();
-        return new DdlStatus(state, building.get() != null ? 1 : 0, failing, lastDdlPassAt);
+        return new DdlStatus(state, building.get() != null ? 1 : 0, failingCount(), lastDdlPassAt);
+    }
+
+    /** Collections with {@value #FAILING_AFTER} or more consecutive failed builds. */
+    private int failingCount() {
+        return (int) failures.values().stream().filter(f -> f.consecutive() >= FAILING_AFTER).count();
     }
 
     /** Passes started since boot, for tests. */
@@ -339,8 +343,9 @@ public final class PciReconciler {
                 lastDdlPassAt = clock.instant();
             }
             log.info("event=pci_reconcile_pass ran_to_end={} leaves={} drops={} builds={} failed_builds={} "
-                + "skipped_leaves={} took_ms={}", ranToEnd, tally.leaves, tally.drops, tally.builds,
-                tally.failedBuilds, tally.skippedLeaves, (System.nanoTime() - startedNanos) / 1_000_000);
+                + "skipped_leaves={} took_ms={} builder_state={} failing={}", ranToEnd, tally.leaves, tally.drops,
+                tally.builds, tally.failedBuilds, tally.skippedLeaves, (System.nanoTime() - startedNanos) / 1_000_000,
+                pass.state().wire(), failingCount());
             return new PassReport(pass.state(), ranToEnd, tally.leaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves);
         } finally {

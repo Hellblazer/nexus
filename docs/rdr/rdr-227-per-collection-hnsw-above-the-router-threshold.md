@@ -243,9 +243,11 @@ walk at `ef_search = 1000`.
 ### Technical Design
 
 - **Index.** `CREATE INDEX CONCURRENTLY <name> ON <leaf> USING hnsw
-  (embedding_<dim> vector_cosine_ops) WHERE collection = '<collection>'`, with the
+  (embedding_<dim> nexus.vector_cosine_ops) WHERE collection = '<collection>'`, with the
   name `pci_` plus a hash of (model, tenant, collection), to fit the 63-byte
-  identifier limit (Index name, below). Build parameters match the
+  identifier limit (Index name, below). The operator class is schema-qualified:
+  pgvector is installed in the `nexus` schema, which the builder's admin session
+  does not have on its `search_path`, so the bare name does not resolve. Build parameters match the
   leaf index's (m 16, ef_construction 64). The collection is written with
   `format('%L')`, never concatenated.
 - **Leaf, not collection.** Collection names repeat across tenants (Phase 0's
@@ -296,14 +298,24 @@ walk at `ef_search = 1000`.
     this job, because it runs only on a search, only when T > 0, and flags
     nothing at or below T (`nexus_rdr/227-research-7`).
   - *Sweep, read half.* Every engine, with no lock, once after boot and every
-    10 minutes (`NX_SEARCH_PCI_SWEEP_SECONDS`, an integer >= 60): enumerate the
+    10 minutes (`NX_SEARCH_PCI_SWEEP_SECONDS`, an integer from 60 to 3600): enumerate the
     per-collection indexes on every leaf by name prefix `pci_` in
     `pg_class`/`pg_index` (catalogs are not row-secured), parse each index's
     collection from its deparsed predicate (`pg_get_expr(indpred, indrelid)`,
     which reads `(collection = '<name>'::text)`), and replace the router's
     valid-index set with the `indisvalid` ones. Until the first read the set is
     empty. The read half runs on its own pooled connection as `nexus_svc`, which
-    can read the catalogs, and it runs whatever `NX_SEARCH_PCI` says.
+    can read the catalogs, and it runs whatever `NX_SEARCH_PCI` says. The read is
+    bounded: it runs under the engine's 30 s sweep statement bound
+    (`nexus_rdr/227-batch-a-fix-round`), and the wait for the read lock that
+    serialises it with the builder's post-change refresh is bounded by the same
+    time, so a stuck read never stalls the builder. A failed read keeps the
+    previous set, and the set **expires**: with no successful read for three
+    periods plus the read bound (`3 * NX_SEARCH_PCI_SWEEP_SECONDS + 30 s`) it
+    answers as empty, so every statement walks at `ef_search = 1000` (the safe
+    direction) rather than routing on a frozen set that may list a dropped index.
+    `event=pci_sweep_set_expired` logs once and `event=pci_sweep_set_recovered` at
+    the next good read. The status object's `expired` says so (Day 2 Operations).
   - *Sweep, DDL half.* Only the lock holder (One builder, below). For each leaf
     it resolves the leaf's tenant from the partition bound, then, in one explicit
     transaction on the admin session (`SET LOCAL` has no effect outside one,
@@ -311,8 +323,8 @@ walk at `ef_search = 1000`.
     counts rows per collection on the leaf. `nexus.chunks` is FORCE ROW LEVEL
     SECURITY, so the owner role sees only that tenant's rows
     (`nexus_rdr/227-research-5`). It reads the collection registry under the same
-    tenant. It then drops by the rules below, builds the missing indexes, and
-    prewarms. Building and dropping run outside that transaction, in autocommit.
+    tenant. It then drops by the rules below and builds the missing indexes. Building and
+    dropping run outside that transaction, in autocommit.
   - *Build and retirement rules.* Build when a collection that is live in the
     registry (`superseded_by` empty) counts at least B rows on its leaf and has no
     `pci_` index. Drop when its count falls below B/2, when the registry no longer
@@ -377,6 +389,24 @@ walk at `ef_search = 1000`.
 
   A statement over several collections cannot use a partial index (its
   predicate does not imply one collection) and keeps today's leaf walk.
+
+  The set is refreshed after each local build **and each local drop**; a peer
+  engine converges at its next read, within `NX_SEARCH_PCI_SWEEP_SECONDS`. The
+  staleness windows, by direction:
+  - *After a build*, a peer does not see the new index until its next read (up
+    to one period), so it walks that collection at `ef_search = 1000`: latency
+    only.
+  - *After a drop*, a peer still lists the index for up to one period plus the
+    30 s read bound, so it routes the collection to the serving `ef_search` with
+    no per-collection graph behind it. That is harmful only when the drop is not a
+    count drop (an index superseded, or dropped by an operator) or when T is below
+    half of B; after a count drop the collection holds under B/2 rows and a router
+    that is on sends it to exact.
+  - *With no successful read at all*, the set expires to empty after three
+    periods plus the read bound (Lifecycle, sweep, read half).
+  The setting's maximum, 3600 s, bounds the first two: it was lowered from 86400
+  in the change that added the read half because the period is also how long a
+  peer can route on a stale answer.
 - **Plan mode.** The plain-search arm reaches a per-collection index through
   `runPlainSearchStatement`'s GUC batch, which sets
   `plan_cache_mode = force_custom_plan` (`PgVectorRepository.java:1458-1461`;
@@ -390,19 +420,31 @@ walk at `ef_search = 1000`.
   shows up.
 - **Cold start.** A per-collection index's first touch after a restart was 86 to
   189 ms with the OS cache intact (a lower bound); from disk it should be of the
-  order of the leaf index's 2 to 7 s (not measured for a partial index). The
-  lock holder runs `pg_prewarm` on its admin session (the leaf owner, which
-  Phase 1 Step 2 confirms) on
-  each valid per-collection index after boot and after each build, if the
-  extension is installed (A6). One search would warm
-  only its own walk, not the graph. A database failover without an engine
-  restart is not covered and stays a Gap 3 residual.
+  order of the leaf index's 2 to 7 s (not measured for a partial index). A
+  `pg_prewarm` step by the lock holder on each valid index was designed here and
+  is **deferred** (Sam, 2026-10-09, `nexus_rdr/227-prewarm-decision`; A6): the
+  managed instance has the extension available but not installed, the local
+  bundle does not ship it, and the measured warm-cache benefit is about 10 ms
+  (about 4 ms at the local 128 MB default). There is no `CREATE EXTENSION`
+  changeset, no bundle change, and no prewarm statement in the builder. Reopen
+  only on a cloud number: after the Phase 2b deploy, a material first-search
+  penalty on a `pci_` index after a restart, read from `top_statements`. One
+  search warms only its own walk, not the graph, and a database failover without
+  an engine restart is not covered; both stay Gap 3 residuals.
 - **Schema.** No Liquibase changeset creates these indexes; they are runtime
   objects keyed on data. The reconciler needs no registry table: the `pci_`
   prefix and each index's predicate let `pg_class` and `pg_index` answer which
   exist, for which collection, and which are valid. Only the builder creates
-  `pci_` names; an operator-made index with that prefix is treated like the
-  builder's own and falls under the build and retirement rules.
+  `pci_` names. Only an index whose name matches `^pci_[0-9a-f]{24}$` (the shape
+  the builder makes), whose access method is `hnsw`, whose predicate is exactly
+  `(collection = '<name>'::text)` and whose leaf and parent bounds are
+  single-value LIST bounds counts as one of its own. Every other index whose name
+  starts with `pci_` (an operator-made `pci_foo`, a `REINDEX CONCURRENTLY`
+  leftover `pci_<hash>_ccnew`, a non-`hnsw` index, a hand-edited predicate, a
+  PostgreSQL that deparses differently) is **unparsed**: counted in the status
+  object, never routed to, never built over, never dropped. This extends Sam's
+  decision 4 (`nexus_rdr/227-planner-decisions-confirmed`) and replaces the earlier
+  text that treated an operator-made `pci_` index like the builder's own.
 - **Index name.** `pci_` plus the first 24 hex digits of the SHA-256 of model,
   tenant and collection joined by a NUL byte.
 
@@ -495,8 +537,8 @@ without a valid index (Routing) and ships it first (Phase 2a).
   the advisory lock, catalog reads and leaf resolution, per-tenant row counts and
   registry reads inside a transaction under `SET LOCAL nexus.tenant` for the leaf
   it is reconciling, `CREATE INDEX CONCURRENTLY IF NOT EXISTS` and
-  `DROP INDEX CONCURRENTLY IF EXISTS` on `pci_` names it derived or read, and
-  `pg_prewarm`. The collection is `%L`-quoted. This is a deliberate
+  `DROP INDEX CONCURRENTLY IF EXISTS` on `pci_` names it derived or read. The
+  collection is `%L`-quoted. This is a deliberate
   widening of the admin path, recorded here.
 - A nexus_admin rotation requires an engine restart (Credentials are
   restart-bound).
@@ -510,8 +552,9 @@ without a valid index (Routing) and ships it first (Phase 2a).
   pass after Phase 2b deploys, for every live collection at or above B. Mitigation: concurrent builds, one at a time
   (A3: 10 to 21 s each, no write blocking). To defer them, deploy with
   `NX_SEARCH_PCI=0` and restart without it at a chosen time.
-- **Cold first touch** (Gap 3). Mitigation: `pg_prewarm` after boot and after
-  each build (A6).
+- **Cold first touch** (Gap 3). Not mitigated in this RDR: `pg_prewarm` is
+  deferred (A6, `nexus_rdr/227-prewarm-decision`), with a stated trigger to
+  reopen it.
 
 ### Failure Modes
 
@@ -572,8 +615,8 @@ alone as Phase 2a. Step 2: confirm on the managed instance (a read-only
 `pg_class.relowner` query by conexus) that `nexus_admin` owns the leaves, which
 A5's credential check did not show; then the reconciler and builder as specified
 (Lifecycle), the router's index set, the status object, the sampled plan check,
-the migrator's termination of `nexus-pci-builder-` backends, and the prewarm
-(A6).
+and the migrator's termination of `nexus-pci-builder-` backends. The prewarm
+is deferred (A6).
 Step 3: substrate measurements: insert and bulk-load cost into an indexed
 collection, build time with the Builder's timeouts, local build time at the local
 bundle's `maintenance_work_mem`, and recall at the Gap 1 target on own-topic
@@ -600,16 +643,59 @@ and the degraded paths (no index, invalid index).
 
 ### Day 2 Operations
 
-The engine's status response gains a `per_collection_indexes` object: valid,
-invalid and building counts, read from `pg_index` and
-`pg_stat_progress_create_index` so every engine reports the same numbers, and the
-answering engine's own `builder_state` (`ok`, `auth_failed`, `no_privilege`,
-`off`), failing count and last DDL pass time, which are per engine and labelled
-so. The counts are global, not per tenant, like the existing `reaper` object on
-the same unauthenticated route. It
-is additive and goes in the wire ledger. Each sweep also logs `event=pci_sweep`
-with the same counts. `nx doctor` reads the object over HTTP, so it works on a
-managed install as well as a local one.
+The engine's `GET /v1/status` gains a `per_collection_indexes` object, served
+from values the engine already holds (the read half's last catalog read and the
+reconciler's cached status); the route runs no catalog query. It has two scopes,
+kept in separate places so no reader takes one for the other:
+
+```json
+"per_collection_indexes": {
+  "valid": 4, "invalid": 0, "unparsed": 0,
+  "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+  "this_engine": {
+    "builder_state": "ok", "building": 0, "failing": 0,
+    "last_ddl_pass_at": "2026-10-10T07:30:00Z"
+  }
+}
+```
+
+- *Global* (the read half's last read; the same on every engine, up to when each
+  last read): `valid`; `invalid` (a failed or in-flight build); `unparsed`
+  (Schema: counted, never routed, built or dropped); `last_read_at` (null before
+  the first read); and `expired`, true when the set is older than three periods
+  plus the read bound and the router is answering as empty, so an operator can
+  see a frozen set. The counts stay the last read's while `expired`.
+- *This engine* (`this_engine`): `builder_state`, one of `ok`, `auth_failed`,
+  `no_privilege`, `off` and `standby` (`standby`: a peer holds the builder lock);
+  `building`, 0 or 1, the lock holder's own build in flight; `failing`, the
+  collections with three or more consecutive failed builds; and
+  `last_ddl_pass_at`, when the last lock-holding pass ran to its end.
+  `building`, `failing` and `last_ddl_pass_at` are **null on an engine that does
+  not hold the lock** (and `last_ddl_pass_at` is null on the holder before its
+  first pass): building and failing are the holder's own state, and another
+  role's `pg_stat_progress_create_index` rows are not visible, so a count of
+  builds in flight across engines is not reported. This replaces the earlier
+  design of a global building count read from `pg_stat_progress_create_index`
+  (`nexus_rdr/227-fix-check-ca4ca8962`). A non-holder reports `standby` (or
+  `off`, or `auth_failed`) and those nulls.
+
+The counts are global, not per tenant, like the existing `reaper` object on the
+same unauthenticated route. The object is additive and goes in the wire ledger;
+a client against an engine that predates it finds no key and reports
+not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed=`,
+and the DDL half's `event=pci_reconcile_pass` line carries `builder_state=` and
+`failing=`. An authentication failure logs `event=pci_builder_auth_failed` on
+every pass until it clears. `nx doctor` reads the object over HTTP, so it works on
+a managed install as well as a local one.
+
+**Who builds, and what a peer shows.** Only the engine holding the builder
+advisory lock builds or drops; every other
+engine reports `builder_state = standby` and still refreshes its router set from
+its own read half. A standby engine's `valid` converges to the holder's within
+`NX_SEARCH_PCI_SWEEP_SECONDS` of a build or drop. After a `nexus_admin` rotation
+and an engine restart, check `builder_state = ok`, a `last_ddl_pass_at` later than
+the restart on the holder, and no `event=pci_builder_auth_failed` since
+`service_started`.
 
 ### New Dependencies
 
@@ -652,7 +738,11 @@ None.
 - Retry: a failing build backs off and is counted as failing after three tries.
 - Migration: a migrator terminates an in-flight builder session, and no later
   build in that pass starts.
-- Status: the `per_collection_indexes` object reports the counts above.
+- Status: the `per_collection_indexes` object reports the read half's counts,
+  `expired` and `last_read_at` globally, and `builder_state`, `building`,
+  `failing` and `last_ddl_pass_at` for this engine; a non-holder reports
+  `standby` with null `building`, `failing` and `last_ddl_pass_at`; the key is
+  absent when no source is wired.
 - Plan check: the sampled EXPLAIN logs `used=false` when the index is skipped.
 
 ## Validation
@@ -766,3 +856,13 @@ Phase 2a's measured default search shows those exact arms still set the floor
   threshold in the Approach and Consequences; terminate, not cancel, in Step 2;
   B/2 in the hysteresis test; probe wording). Remaining counted items carried to
   Phase 1 planning (`nexus_rdr/227-fix-check-ca4ca8962`).
+- 2026-10-10: Status-object amendments (nexus-43ulx.23): opclass is
+  `nexus.vector_cosine_ops`; the Schema rule for `pci_` names narrowed to
+  `^pci_[0-9a-f]{24}$` on an `hnsw` index with everything else unparsed (extends
+  Sam's decision 4); the set is refreshed after builds and drops and peers
+  converge within `NX_SEARCH_PCI_SWEEP_SECONDS` (maximum 3600); the sweep's
+  bounded read and three-period expiry (`nexus_rdr/227-batch-a-fix-round`) and the
+  staleness windows recorded; `pg_prewarm` deferred
+  (`nexus_rdr/227-prewarm-decision`); Day 2 Operations rewritten to the served
+  object (building from the lock holder only, `standby` added, `expired` added;
+  `nexus_rdr/227-fix-check-ca4ca8962`).
