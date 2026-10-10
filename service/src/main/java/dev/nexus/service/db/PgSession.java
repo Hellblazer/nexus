@@ -740,24 +740,35 @@ public final class PgSession {
      * hold at most this many PHYSICAL rows in the tenant, the statement runs exact (index scans
      * off) instead of walking the shared HNSW index. 0 disables the router.
      *
-     * <p>30000 (nexus-nqsa7, Sam's decision 2026-10-09). Above the threshold an arm walks its leaf's HNSW
-     * index under {@code relaxed_order}, which stops at the first {@code k} rows the collection filter
-     * admits; in a leaf shared by many collections the filter discarded about 80% of the walk, and a full
-     * page missed the collection's true nearest row (recall against exact 0.925 at k=40 on code__1-72,
-     * 27,893 rows; T2 conexus/nqsa7-fork-hnsw-vs-exact-2026-10-09). The empty-result re-run cannot see
-     * that, because the page is full. Exact is complete.
+     * <p>20000 (RDR-227, nexus-43ulx.35, Sam's decision 2026-10-10): equal to
+     * {@link #DEFAULT_SEARCH_PCI_BUILD_MIN_ROWS}, so a collection leaves the exact scan at the row count
+     * where the builder gives it a partial HNSW index of its own. Measured on the live engine with the
+     * threshold set to 20000 by environment (T2 nexus_rdr/227-research-13): the two code collections of
+     * 27,893 and 29,355 rows moved from exact arms of 0.6-0.9 s under fan-out to index arms of 25-50 ms, and
+     * the slowest statement of a default code search fell from about 800 ms to about 330 ms.
      *
-     * <p>Why not higher. engine-service-v0.1.155 shipped 60000, and on the live engine the five code
-     * collections then searched exact ran five at a time and each took about 2.5x its solo time on the
-     * fork (CPU and memory-bandwidth contention, zero permit wait): the two largest, 58,588 and 45,525 rows,
-     * took 1.1-2.0 s, and a warm default search got about 1 s slower. More fan-out permits would add
-     * concurrent exact scans and make it worse. 30000 keeps the measured repro and the 29,355-row collection
-     * exact and puts the two largest back on HNSW, which leaves them exposed to the same miss; a remedy
-     * independent of this threshold is tracked as its own bead. It was a provisional 10000 before v0.1.155.
-     * The probe reads up to {@code limit + 1} keys, so a collection above the threshold pays a 30,001-key
-     * Index Only Scan before its HNSW walk.
+     * <p>What the per-collection index repairs. Above the threshold an arm with no index of its own walks
+     * its leaf's shared HNSW index under {@code relaxed_order}, which stops at the first {@code k} rows the
+     * collection filter admits; in a leaf shared by many collections the filter discarded about 80% of the
+     * walk, and a full page missed the collection's true nearest row (recall against exact 0.925 at k=40 on
+     * code__1-72, 27,893 rows; T2 conexus/nqsa7-fork-hnsw-vs-exact-2026-10-09). The empty-result re-run
+     * cannot see that, because the page is full. With its own index the same collection recalled 0.99 or
+     * better at k 40 to 120 (T2 nexus_rdr/227-research-12).
+     *
+     * <p>There is no margin between the two thresholds. A collection above this one with no valid index
+     * walks the shared index at {@code hnsw.ef_search} 1000: after it crosses the build threshold and
+     * before the next DDL pass, between a boot and the first sweep read, and for as long as the builder
+     * cannot run (no admin credentials, or a role without the privilege). That walk measured 0.975 at
+     * worst on code__1-72. Do not lower this below the build threshold, and not below 20000 on the
+     * evidence so far: prose collections indexed at 10,000 rows reached only 0.9833 at the tail.
+     *
+     * <p>History. A provisional 10000 before engine-service-v0.1.155; 60000 in v0.1.155, where the five
+     * code collections then searched exact ran five at a time at about 2.5x their solo time and a warm
+     * default search got about 1 s slower; 30000 from v0.1.156 (nexus-nqsa7). The probe reads up to
+     * {@code limit + 1} keys, so a collection above the threshold pays a 20,001-key Index Only Scan before
+     * its HNSW walk.
      */
-    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 30_000;
+    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 20_000;
 
     /** Upper bound on the {@code NX_SEARCH_EXACT_MAX_ROWS} override: an exact scan over more rows than
      *  this would no longer be the cheap plan the router exists to take. */
