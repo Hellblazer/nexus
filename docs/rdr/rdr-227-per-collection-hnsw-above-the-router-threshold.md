@@ -431,9 +431,9 @@ walk at `ef_search = 1000`.
   every tenant leaf (A1). The sampled check below binds `p_collections` the way
   the arm does, since a literal can prove the predicate where a bound array
   cannot. An EXPLAIN pin guards it in tests, and in
-  production one arm in 1000 on an indexed collection runs `EXPLAIN` first and
+  production a sampled arm on an indexed collection runs `EXPLAIN` first and
   logs `event=pci_plan_check used=<bool>`, so a silent fall back to the leaf walk
-  shows up.
+  shows up. Sampling is per index, not only a global counter (Day 2 Operations).
 - **Cold start.** A per-collection index's first touch after a restart was 86 to
   189 ms with the OS cache intact (a lower bound); from disk it should be of the
   order of the leaf index's 2 to 7 s (not measured for a partial index). A
@@ -667,7 +667,7 @@ kept in separate places so no reader takes one for the other:
 ```json
 "per_collection_indexes": {
   "valid": 4, "invalid": 0, "unparsed": 0,
-  "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+  "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
   "this_engine": {
     "builder_state": "ok", "building": 0, "failing": 0,
     "last_ddl_pass_at": "2026-10-10T07:30:00Z",
@@ -696,6 +696,9 @@ A standby engine, and an engine whose admin credentials were refused, read:
   the first read); and `expired`, true when the set is older than three periods
   plus the read bound and the router is answering as empty, so an operator can
   see a frozen set. The counts stay the last read's while `expired`.
+  `sweep_seconds` is `NX_SEARCH_PCI_SWEEP_SECONDS`, the period of the passes, so a
+  client can judge how old `last_ddl_pass_at` may be before it is a stall (`nx
+  doctor` warns at three periods plus 15 minutes).
 - *This engine* (`this_engine`): `builder_state`, one of `ok`, `auth_failed`,
   `no_privilege`, `off` and `standby` (`standby`: a peer holds the builder lock;
   `no_privilege` and `auth_failed` are shown while they last, not only in the log);
@@ -720,19 +723,52 @@ The counts are global, not per tenant, like the existing `reaper` object on the
 same unauthenticated route. The object is additive and goes in the wire ledger;
 a client against an engine that predates it finds no key and reports
 not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed=`,
-and the DDL half's `event=pci_reconcile_pass` line carries `builder_state=` and
-`failing=`. An authentication failure logs `event=pci_builder_auth_failed` on
+and `event=pci_sweep_set_changed added_count= removed_count= added= removed=` when
+the router's set changed between two reads (`leaf:collection:index` entries, cut at
+20 with the exact counts; the first read after a boot lists what the boot found, and
+a read that changed nothing logs nothing). The DDL half's
+`event=pci_reconcile_pass` line carries `builder_state=`, `failing=`,
+`sum_count_ms=` and `max_count_ms=`, the sum and the longest of the per-leaf
+counting transactions of the pass, which is the figure to read against the 30 s
+count timeout; the per-leaf `event=pci_count_done` stays at DEBUG (one line per
+leaf per pass is a lot at 20,000 collections). An authentication failure logs `event=pci_builder_auth_failed` on
 every pass until it clears. `nx doctor` reads the object over HTTP, so it works on
 a managed install as well as a local one.
 
 **Who builds, and what a peer shows.** Only the engine holding the builder
-advisory lock builds or drops; every other
-engine reports `builder_state = standby` and still refreshes its router set from
-its own read half. A standby engine's `valid` converges to the holder's within
-`NX_SEARCH_PCI_SWEEP_SECONDS` of a build or drop. After a `nexus_admin` rotation
-and an engine restart, check `builder_state = ok`, a `last_ddl_pass_at` later than
-the restart on the holder, and no `event=pci_builder_auth_failed` since
-`service_started`.
+advisory lock builds or drops, but the lock is held per pass (seconds, except
+while a long build runs), and every engine runs its own pass each period. So with
+more than one engine **every engine normally reads `builder_state = ok`**, and
+`standby` is transient: an engine reads it when its pass found the lock held by a
+peer's overlapping pass, which is most likely during the first DDL pass after a
+deploy, when the holder builds serially for minutes to hours. Read every engine:
+expect `ok` everywhere in steady state, treat a `standby` that persists as a peer
+holding a long pass, and remember that `building`, `failing` and `pass_started_at`
+are per engine. A standby engine still refreshes its router set from its own read
+half, and its `valid` converges to the holder's within `NX_SEARCH_PCI_SWEEP_SECONDS`
+of a build or drop. The global `invalid` can be a peer's build in flight, which a
+standby cannot tell from a failed one, so `nx doctor` passes a standby with `invalid`
+above zero when its read is fresh and says so. Doctor warns on the holder when a
+pass has been in flight for more than an hour, and when `builder_state = ok` with
+no completed pass for three periods plus 15 minutes. After a `nexus_admin`
+rotation and an engine restart, check `builder_state = ok`, a `last_ddl_pass_at`
+later than the restart on the engine you restarted, and no
+`event=pci_builder_auth_failed` since `service_started`. A status answers for the
+engine the load balancer chose: to check a rotation, address the restarted engine,
+not the balancer.
+
+**The plan check samples per index.** A sampled indexed arm runs `EXPLAIN` on its
+own statement and logs `event=pci_plan_check used=<bool> index= collection=`. An
+arm is sampled when (1) it is the first eligible arm for an index after the router's
+set gained it (a boot, a build, a rebuild after a drop), (2) it is the first for
+that index in the last 15 minutes, or (3) it is the 1000th eligible arm counted
+across all indexes. The 1-in-1000 counter is **process-global**, so a busy
+collection takes most of its samples and a quiet one almost none; the per-index
+triggers are what cover the quiet ones, and after a deploy there is one line per
+index within the first request that reaches it. `used=false` logs at WARN with
+`top=` (the plan's first node) and `scans=` (the scans the planner chose, with the
+index names), so the cause is in the line. The sample's own time (a savepoint, the
+`EXPLAIN` and a release) is not counted as the arm's statement time.
 
 **Retry is per engine.** The retry state (the 10 minute to 24 hour backoff and
 the `failing` count) is in memory on the engine that ran the build and is lost on
@@ -799,7 +835,11 @@ None.
   first pass); a role without privilege and a wrong admin password show as
   `no_privilege` and `auth_failed` while they last; the key is absent when no
   source is wired.
-- Plan check: the sampled EXPLAIN logs `used=false` when the index is skipped.
+- Plan check: the sampled EXPLAIN logs `used=false` when the index is skipped,
+  with the plan's top node and the scans it chose; the first arm of each index and
+  one arm per index per 15 minutes are sampled besides the 1-in-1000 counter, the
+  sample's time stays out of the arm's statement time, and the shipped cadence
+  (`production()`) is pinned.
 
 ## Validation
 

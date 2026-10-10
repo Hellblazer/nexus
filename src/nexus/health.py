@@ -4263,6 +4263,19 @@ _PCI_LABEL = "Per-collection indexes"
 #: this client and reads not applicable rather than a guess.
 _PCI_BUILDER_STATES = frozenset({"ok", "auth_failed", "no_privilege", "off", "standby"})
 
+#: A pass that has been in flight this long is stuck or unusually long. There is no pass deadline (serial
+#: ``CREATE INDEX CONCURRENTLY`` builds run up to 30 minutes each), so an hour is the point at which an operator should
+#: look; a very long first pass over many collections warns too, and the detail says so.
+_PCI_PASS_STUCK_SECONDS = 3600
+
+#: The DDL sweep period when the engine does not report ``sweep_seconds`` (the setting's default, 600 s).
+_PCI_DEFAULT_SWEEP_SECONDS = 600
+
+#: Margin added to three sweep periods before a holder with no new completed pass reads as stalled: the read bound
+#: (the engine's catalog statement bound, 5 minutes by default) with room for one slow counting transaction.
+_PCI_STALL_MARGIN_SECONDS = 900
+_PCI_STALL_SECONDS_PERIODS = 3
+
 
 def _check_per_collection_indexes(
     engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
@@ -4281,11 +4294,20 @@ def _check_per_collection_indexes(
       serving ``ef_search``), ``invalid`` > 0 or ``failing`` > 0. While this engine's builder is mid-build
       (``this_engine.building`` is 1, or ``pass_in_progress`` is true) ``invalid`` does NOT warn: the index being built is
       invalid by design until its ``CREATE INDEX CONCURRENTLY`` finishes, and the row says "first pass in progress" or
-      "build in progress" instead. ``expired`` and ``failing`` still warn then.
+      "build in progress" instead. ``expired`` and ``failing`` still warn then. On a ``standby`` engine whose last
+      catalog read is fresh (not ``expired``), ``invalid`` does not warn either: a peer holds the builder lock and the
+      invalid index may be its build in flight (this engine cannot tell a build from a failed one), so the row passes
+      with a note.
+    * warn, too: a pass in flight for more than an hour (``pass_started_at``; there is no pass deadline, so a hung
+      or very long pass is otherwise green), and a holder (``builder_state`` ``ok``) with no completed pass for three
+      sweep periods plus 15 minutes (``last_ddl_pass_at``; a holder whose every leaf is skipped by count timeouts
+      completes no pass and would otherwise read green). The period is the engine's ``sweep_seconds`` (600 when an
+      older engine does not report it). A holder that has never completed a pass warns on the same threshold, read
+      from the engine's ``process_start_time``.
     * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with none of those; ``off`` passes with a note that
       builds are disabled by ``NX_SEARCH_PCI=0``.
 
-    Not applicable (ok, no warning) when the engine cannot be reached or predates the object. A present object
+    Not applicable (ok, no warning) when the engine cannot be reached or does not report the object. A present object
     that cannot be read, or a ``builder_state`` outside the closed vocabulary above, warns and names what it got:
     a rotation check reads that vocabulary, and a green row over an unrecognised state would hide the one case the
     row exists to show. A count that is not a non-negative int is read as 0, as the reaper row reads its counters.
@@ -4309,7 +4331,8 @@ def _check_per_collection_indexes(
         return _na("the engine's status endpoint could not be read")
     pci = status.get("per_collection_indexes")
     if pci is None:
-        return _na("this engine predates the per-collection index status field")
+        return _na("this engine's status does not include the per-collection index object (an older engine, or "
+                   "one that is still starting)")
     this_engine = pci.get("this_engine") if isinstance(pci, dict) else None
     state = this_engine.get("builder_state") if isinstance(this_engine, dict) else None
 
@@ -4341,9 +4364,13 @@ def _check_per_collection_indexes(
     building_now = _status_int(this_engine.get("building")) == 1
     pass_in_flight = this_engine.get("pass_in_progress") is True
     in_flight = building_now or pass_in_flight
+    pass_started = _instant(this_engine.get("pass_started_at"))
+    pass_age = None if pass_started is None else max(0.0, (now - pass_started).total_seconds())
     if in_flight:
         progress = ("first pass in progress" if pass_in_flight and last_ddl is None
                     else "build in progress" if building_now else "pass in progress")
+        if pass_age is not None:
+            progress = f"{progress} for {_span(pass_age)}"
         ddl_note = progress if last_ddl is None else f"{progress}, {ddl_note}"
 
     if state in ("auth_failed", "no_privilege"):
@@ -4363,24 +4390,53 @@ def _check_per_collection_indexes(
             ],
         )]
     off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
-    warn_invalid = invalid if not in_flight else 0   # the index being built is invalid until its build finishes
-    if expired or warn_invalid or failing:
+    peer_may_be_building = (state == "standby" and not expired and _instant(pci.get("last_read_at")) is not None
+                            and invalid > 0)
+    # The index being built is invalid until its build finishes; on a standby with a fresh read it may be a peer's.
+    warn_invalid = 0 if in_flight or peer_may_be_building else invalid
+
+    sweep_seconds = _status_int(pci.get("sweep_seconds")) or _PCI_DEFAULT_SWEEP_SECONDS
+    stall_seconds = _PCI_STALL_SECONDS_PERIODS * sweep_seconds + _PCI_STALL_MARGIN_SECONDS
+    stuck = pass_in_flight and pass_age is not None and pass_age > _PCI_PASS_STUCK_SECONDS
+    stalled = False
+    stall_note = ""
+    if state == "ok" and not in_flight:
+        if last_ddl is not None:
+            idle = max(0.0, (now - last_ddl).total_seconds())
+            stalled = idle > stall_seconds
+            stall_note = f"no completed DDL pass for {_span(idle)}"
+        else:
+            started = _instant(status.get("process_start_time"))
+            uptime = None if started is None else max(0.0, (now - started).total_seconds())
+            stalled = uptime is not None and uptime > stall_seconds
+            stall_note = ("no DDL pass has completed" if uptime is None
+                          else f"no DDL pass has completed in the {_span(uptime)} since the engine started")
+    if expired or warn_invalid or failing or stuck or stalled:
         parts = ["router index set expired (no successful catalog read for three sweep periods; every statement "
                  "walks at the serving ef_search until a read succeeds)"] if expired else []
         parts += [f"{n} {what}" for n, what in ((warn_invalid, "invalid"), (failing, "failing")) if n]
+        if stuck:
+            parts.append(f"a DDL pass has been in flight for {_span(pass_age)}, more than "
+                         f"{_span(_PCI_PASS_STUCK_SECONDS)} (hung, or a very long first pass)")
+        if stalled:
+            parts.append(f"{stall_note}, more than {_PCI_STALL_SECONDS_PERIODS} sweep periods of "
+                         f"{_span(sweep_seconds)} plus {_span(_PCI_STALL_MARGIN_SECONDS)} (every leaf skipped, or the "
+                         "pass task is not running)")
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(f"{', '.join(parts)} ({counts}); builder_state {state}, {ddl_note}{off_note}"),
             fix_suggestions=[
                 "Read the engine log for event=pci_sweep (the read half's counts, one line per sweep; "
                 "event=pci_sweep_set_expired marks a frozen set) and the builder's own lines for the collection "
-                "that fails",
+                "that fails; event=pci_reconcile_pass shows whether passes complete (ran_to_end, skipped_leaves, "
+                "max_count_ms against the 30 s count timeout)",
                 "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
             ],
         )]
     if state == "standby":
+        note = "; the invalid index may be a peer's build in flight" if peer_may_be_building else ""
         return [HealthResult(label=label, ok=True,
-                             detail=f"{counts}; a peer engine holds the builder lock (standby)")]
+                             detail=f"{counts}; a peer engine holds the builder lock (standby){note}")]
     return [HealthResult(label=label, ok=True, detail=f"{counts}; builder_state {state}, {ddl_note}{off_note}")]
 
 

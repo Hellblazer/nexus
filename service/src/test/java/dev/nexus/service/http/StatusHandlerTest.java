@@ -491,7 +491,8 @@ class StatusHandlerTest {
         JsonNode o = get().get("per_collection_indexes");
         var top = new java.util.ArrayList<String>();
         o.fieldNames().forEachRemaining(top::add);
-        assertThat(top).containsExactly("valid", "invalid", "unparsed", "last_read_at", "expired", "this_engine");
+        assertThat(top).containsExactly("valid", "invalid", "unparsed", "last_read_at", "expired",
+            "sweep_seconds", "this_engine");
         var inner = new java.util.ArrayList<String>();
         o.get("this_engine").fieldNames().forEachRemaining(inner::add);
         assertThat(inner).containsExactly("builder_state", "building", "failing", "last_ddl_pass_at",
@@ -510,8 +511,10 @@ class StatusHandlerTest {
         JsonNode golden = MAPPER.readTree(java.nio.file.Files.readString(
             java.nio.file.Path.of("..", "tests", "fixtures", "pci_status_bodies.json"))).get("cases");
         var cases = new java.util.LinkedHashMap<String, StatusHandler.PerCollectionIndexes>();
-        cases.put("holder", pci(read(4, 1, 2, false),
-            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT)));
+        // A build in flight is a pass in flight: PciReconciler.status() cannot report building 1 without a started pass.
+        cases.put("holder", pci(read(4, 1, 2, false), new PciReconciler.DdlStatus(
+            PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT, java.time.Instant.parse("2026-10-10T07:58:30.250Z"),
+            true)));
         cases.put("first_pass_in_flight", pci(read(0, 1, 0, false), new PciReconciler.DdlStatus(
             PciBuilderSession.BuilderState.OK, 1, 0, null, java.time.Instant.parse("2026-10-10T07:58:30.500Z"), true)));
         cases.put("standby", pci(read(4, 0, 0, false),
@@ -535,6 +538,20 @@ class StatusHandlerTest {
             assertThat(get().get("per_collection_indexes")).as(entry.getKey()).isEqualTo(golden.get(entry.getKey()));
             stop();
         }
+    }
+
+    @Test
+    void perCollectionIndexes_reportsThePeriodOfTheDdlPasses() throws Exception {
+        // A client judges how stale last_ddl_pass_at may be from this; it is the setting, not a constant.
+        var v = pci(read(1, 0, 0, false), new PciReconciler.DdlStatus(
+            PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT, null, false, 900));
+        start(withPci(() -> v));
+
+        JsonNode pci = get().get("per_collection_indexes");
+
+        assertThat(pci.get("sweep_seconds").isIntegralNumber()).isTrue();
+        assertThat(pci.get("sweep_seconds").asLong()).isEqualTo(900);
+        assertThat(pci.has("this_engine")).isTrue();
     }
 
     @Test

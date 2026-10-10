@@ -21,7 +21,9 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -124,7 +126,7 @@ public final class PciCatalog {
      */
     public record Leaf(String schema, String name, String model, String tenant, List<Index> indexes) { }
 
-    private record Key(String model, String tenant, String collection) { }
+    record Key(String model, String tenant, String collection) { }
 
     /**
      * What one catalog read saw, immutable. It answers the router's question as a {@link PciIndexSet}.
@@ -136,14 +138,14 @@ public final class PciCatalog {
      */
     public static final class Snapshot implements PciIndexSet {
         private final List<Leaf> leaves;
-        private final Set<Key> valid;
+        private final Map<Key, String> valid;
         private final int validCount;
         private final int invalidCount;
         private final int unparsedCount;
 
         Snapshot(List<Leaf> leaves) {
             this.leaves = List.copyOf(leaves);
-            Set<Key> validKeys = new LinkedHashSet<>();
+            Map<Key, String> validKeys = new LinkedHashMap<>();
             int validIndexes = 0;
             int invalidIndexes = 0;
             int unparsedIndexes = 0;
@@ -153,13 +155,13 @@ public final class PciCatalog {
                         unparsedIndexes++;
                     } else if (index.valid()) {
                         validIndexes++;
-                        validKeys.add(new Key(leaf.model(), leaf.tenant(), index.collection()));
+                        validKeys.putIfAbsent(new Key(leaf.model(), leaf.tenant(), index.collection()), index.name());
                     } else {
                         invalidIndexes++;
                     }
                 }
             }
-            this.valid = Set.copyOf(validKeys);
+            this.valid = Collections.unmodifiableMap(validKeys);
             this.validCount = validIndexes;
             this.invalidCount = invalidIndexes;
             this.unparsedCount = unparsedIndexes;
@@ -176,7 +178,35 @@ public final class PciCatalog {
         /** True when a valid, parsed index exists for exactly this (model, tenant, collection). */
         @Override
         public boolean hasValidIndex(String model, String tenant, String collection) {
-            return valid.contains(new Key(model, tenant, collection));
+            return valid.containsKey(new Key(model, tenant, collection));
+        }
+
+        /** The index name this read saw for the key, with no history ({@link Instant#EPOCH}). */
+        @Override
+        public Optional<ValidIndex> validIndex(String model, String tenant, String collection) {
+            String name = valid.get(new Key(model, tenant, collection));
+            return name == null ? Optional.empty() : Optional.of(new ValidIndex(name, Instant.EPOCH));
+        }
+
+        /** The keys that have a valid parsed index, for the sweep's history. */
+        Set<Key> validKeys() {
+            return valid.keySet();
+        }
+
+        /**
+         * One entry per valid parsed index, {@code leaf:collection:index}, sorted: the unit the sweep compares between
+         * reads to log a change of the router's set.
+         */
+        java.util.SortedSet<String> validEntries() {
+            java.util.SortedSet<String> entries = new java.util.TreeSet<>();
+            for (Leaf leaf : leaves) {
+                for (Index index : leaf.indexes()) {
+                    if (index.parsed() && index.valid()) {
+                        entries.add(leaf.name() + ":" + index.collection() + ":" + index.name());
+                    }
+                }
+            }
+            return entries;
         }
 
         /** Parsed indexes with {@code indisvalid} true. */

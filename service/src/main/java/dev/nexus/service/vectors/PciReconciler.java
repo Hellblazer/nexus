@@ -178,9 +178,21 @@ public final class PciReconciler {
      * @param passStartedAt when the pass in flight started; {@code null} when none is, and always on a non-holder
      * @param passInProgress whether a lock-holding pass is in flight (the long first pass shows here, not in
      *                     {@code lastDdlPassAt})
+     * @param sweepSeconds the period this engine's passes run at ({@code NX_SEARCH_PCI_SWEEP_SECONDS}); a client reads
+     *                     it to judge how stale {@code lastDdlPassAt} may be
      */
     public record DdlStatus(BuilderState builderState, Integer building, Integer failing, Instant lastDdlPassAt,
-                            Instant passStartedAt, boolean passInProgress) {
+                            Instant passStartedAt, boolean passInProgress, long sweepSeconds) {
+        /** The setting's default period, for a status built without one (tests). */
+        static final long DEFAULT_SWEEP_SECONDS = 600;
+
+        /** A status with the default period. */
+        public DdlStatus(BuilderState builderState, Integer building, Integer failing, Instant lastDdlPassAt,
+                         Instant passStartedAt, boolean passInProgress) {
+            this(builderState, building, failing, lastDdlPassAt, passStartedAt, passInProgress,
+                DEFAULT_SWEEP_SECONDS);
+        }
+
         /** A status with no pass in flight. */
         public DdlStatus(BuilderState builderState, Integer building, Integer failing, Instant lastDdlPassAt) {
             this(builderState, building, failing, lastDdlPassAt, null, false);
@@ -268,17 +280,17 @@ public final class PciReconciler {
     public DdlStatus status() {
         Instant lastPass = lastDdlPassAt;
         if (!settings.enabled()) {
-            return new DdlStatus(BuilderState.OFF, null, null, lastPass);
+            return new DdlStatus(BuilderState.OFF, null, null, lastPass, null, false, period.toSeconds());
         }
         // The builder's own current state, not a copy taken at the start of a pass: a privilege error in the middle
         // of a pass (and an authentication failure at its start) is what this field exists to show.
         BuilderState state = builder.state();
         if (!holder) {
-            return new DdlStatus(state, null, null, lastPass);
+            return new DdlStatus(state, null, null, lastPass, null, false, period.toSeconds());
         }
         Instant startedAt = passStartedAt;
         return new DdlStatus(state, building.get() != null ? 1 : 0, failingCount(), lastPass, startedAt,
-            startedAt != null);
+            startedAt != null, period.toSeconds());
     }
 
     /** Collections with {@value #FAILING_AFTER} or more consecutive failed builds. */
@@ -428,9 +440,10 @@ public final class PciReconciler {
                 lastDdlPassAt = clock.instant();
             }
             log.info("event=pci_reconcile_pass ran_to_end={} leaves={} processed_leaves={} drops={} builds={} "
-                + "failed_builds={} skipped_leaves={} took_ms={} builder_state={} failing={}", ranToEnd, tally.leaves,
-                tally.processedLeaves, tally.drops, tally.builds, tally.failedBuilds, tally.skippedLeaves,
-                (System.nanoTime() - startedNanos) / 1_000_000, builder.state().wire(), failingCount());
+                + "failed_builds={} skipped_leaves={} took_ms={} sum_count_ms={} max_count_ms={} builder_state={} "
+                + "failing={}", ranToEnd, tally.leaves, tally.processedLeaves, tally.drops, tally.builds,
+                tally.failedBuilds, tally.skippedLeaves, (System.nanoTime() - startedNanos) / 1_000_000,
+                tally.sumCountMillis, tally.maxCountMillis, builder.state().wire(), failingCount());
             return new PassReport(builder.state(), ranToEnd, tally.leaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves);
         } finally {
@@ -447,6 +460,9 @@ public final class PciReconciler {
         int builds;
         int failedBuilds;
         int skippedLeaves;
+        /** The counting transactions' wall time over the leaves processed: their sum and their longest. */
+        long sumCountMillis;
+        long maxCountMillis;
     }
 
     private static String leafId(Leaf leaf) {
@@ -490,13 +506,15 @@ public final class PciReconciler {
             return true;
         }
         tally.processedLeaves++;
+        tally.sumCountMillis += planned.countMillis();
+        tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
         execute(pass, leaf, planned.dimension(), planned.actions(), tally);
         return true;
     }
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
 
-    private record Planned(List<Action> actions, int dimension) { }
+    private record Planned(List<Action> actions, int dimension, long countMillis) { }
 
     /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
     private Planned countAndPlan(DSLContext tx, Leaf leaf) {
@@ -584,10 +602,12 @@ public final class PciReconciler {
             }
         }
         List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
+        // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
+        // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
+        long tookMs = (System.nanoTime() - startedNanos) / 1_000_000;
         log.debug("event=pci_count_done leaf={} counted={} recounted={} actions={} took_ms={}", leafId(leaf),
-            counts.size(), recounted ? candidates.size() : 0, actions.size(),
-            (System.nanoTime() - startedNanos) / 1_000_000);
-        return new Planned(actions, dimension);
+            counts.size(), recounted ? candidates.size() : 0, actions.size(), tookMs);
+        return new Planned(actions, dimension, tookMs);
     }
 
     /**

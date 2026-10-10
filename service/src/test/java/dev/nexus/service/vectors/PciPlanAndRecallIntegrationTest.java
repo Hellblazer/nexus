@@ -7,6 +7,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.EfSearchProbe;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
@@ -32,7 +33,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -65,6 +68,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * fixed; the data is the same on every run, and the leaf's incremental HNSW insert order is the one thing a run
  * does not repeat, which is why the crowd-out is asserted with a wide margin and measured over several runs.
  *
+ * <p><b>What the recall rows prove, and what they do not.</b> They prove the arm reaches the collection's own index
+ * (routing, the planner, the custom plan, no filter over a shared graph) and that the index recovers what the leaf
+ * walk loses on THIS fixture. They do not prove the RDR's claim at production scale: at 3000 rows of dimension 384
+ * with {@code ef_search} 600 the own-index walk examines a fifth of the index, which is near-exhaustive, and the
+ * widest leaf walk also reads close to 1.0 here. Whether an index beats the ef 1000 remedy at 25,000 to 60,000 rows
+ * of dimension 1024 is measured by nexus-43ulx.31 on production-shaped data, not here. The crowd-out is asserted with
+ * robust statistics, the worst query of each k (below 0.9 for the leaf walk, and more than 0.1 under the indexed
+ * worst query), because the leaf's graph is built by incremental insert and is one draw per run: over 20 runs the
+ * leaf-walk mean ranged from 0.50 to 0.95 (a mean-based gap failed once in 20) while its worst query stayed at or
+ * below 0.79.
+ *
  * <p><b>Order matters.</b> The crowd-out is measured before the target's index exists, and the index tests build it.
  * Tests are ordered for that reason ({@code @Order}), and the first one asserts the leaf holds no
  * {@code pci_} index so the order cannot silently flip.
@@ -93,6 +107,10 @@ class PciPlanAndRecallIntegrationTest {
     /** The router threshold for this class: above it for every collection here, so every arm walks HNSW. */
     static final int ROUTER_T = 1000;
     static final double TARGET_RECALL = 0.99;
+    /** The worst own-topic query of the leaf walk must fall below this at every k (robust to a lucky graph draw). */
+    static final double CROWD_OUT_WORST_QUERY_BELOW = 0.9;
+    /** The indexed worst query must beat the leaf-walk's worst query by more than this at every k. */
+    static final double INDEX_GAIN_ABOVE = 0.1;
     static final Duration BOUND = Duration.ofSeconds(120);
 
     PostgreSQLContainer<?> pg;
@@ -103,6 +121,10 @@ class PciPlanAndRecallIntegrationTest {
     String leaf;
     String targetIndex;
     String smallIndex;
+    /** Leaf-walk recall per k, recorded by the crowd-out test for the with-index test to compare against. */
+    final double[] leafWalkMean = new double[KS.length];
+    final double[] leafWalkMin = new double[KS.length];
+    boolean leafWalkRecorded;
 
     /** chash hex to vector, target collection only: the exact baseline. */
     final Map<String, float[]> targetVectors = new LinkedHashMap<>();
@@ -344,12 +366,25 @@ class PciPlanAndRecallIntegrationTest {
         }
     }
 
+    /**
+     * The statement {@link PciBuilderSession} sends, byte for byte in what it sets: the same operator class, the
+     * same {@code WITH (m, ef_construction)}, the same predicate. A test index built any other way would be
+     * measured for recall the builder does not produce.
+     */
+    static String builderDdl(String name, String collection) {
+        return "CREATE INDEX CONCURRENTLY " + name + " ON nexus." + PciCatalogIntegrationTest.leafName(MODEL, TENANT)
+            + " USING hnsw (" + PciCatalogIntegrationTest.column(MODEL) + " nexus.vector_cosine_ops) WITH (m = "
+            + PciBuilderSession.BUILD_M + ", ef_construction = " + PciBuilderSession.BUILD_EF_CONSTRUCTION
+            + ") WHERE collection = " + PciCatalogIntegrationTest.lit(collection);
+    }
+
     private void buildIndex(String collection) throws Exception {
-        String name = PciCatalog.indexName(MODEL, TENANT, collection);
+        buildIndexNamed(PciCatalog.indexName(MODEL, TENANT, collection), collection);
+    }
+
+    private void buildIndexNamed(String name, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
-                PciCatalogIntegrationTest.createIndexDdl("CONCURRENTLY ", name, MODEL, TENANT,
-                    "collection = " + PciCatalogIntegrationTest.lit(collection)));
+            PgContainerHelper.runSuperuserDdlOutsideTransaction(su, builderDdl(name, collection));
         }
     }
 
@@ -426,13 +461,17 @@ class PciPlanAndRecallIntegrationTest {
         long exactBefore = PgVectorRepository.routedExactCount();
         PgVectorRepository leafWalk = claimingRepo(neverSample());
         List<String> table = new ArrayList<>();
-        for (int k : KS) {
+        for (int ki = 0; ki < KS.length; ki++) {
+            int k = KS[ki];
             double[] r = recalls(leafWalk, k);
+            leafWalkMean[ki] = mean(r);
+            leafWalkMin[ki] = min(r);
+            leafWalkRecorded = true;
             table.add(String.format("k=%d mean=%.4f min=%.4f", k, mean(r), min(r)));
-            assertThat(mean(r))
-                .as("crowd-out at k=%d: the filtered leaf walk at serving ef must lose recall (seed %d); a seed that "
-                    + "does not reproduce it is a failed test", k, SEED)
-                .isLessThan(TARGET_RECALL);
+            assertThat(min(r))
+                .as("crowd-out at k=%d: the worst own-topic query of the filtered leaf walk at serving ef must lose "
+                    + "recall (seed %d); a seed that does not reproduce it is a failed test", k, SEED)
+                .isLessThan(CROWD_OUT_WORST_QUERY_BELOW);
         }
         System.out.println("PCI-CROWDOUT seed=" + SEED + " leaf-walk-serving-ef " + String.join(" | ", table));
 
@@ -445,11 +484,26 @@ class PciPlanAndRecallIntegrationTest {
     @Test
     @Order(2)
     void noIndex_theWidestWalkReturnsRows() {
-        PgVectorRepository none = new PgVectorRepository(scope, embedder, embedder, PciIndexSet.NONE);
+        // The walk must be the widest one, not merely a walk that returned rows: read hnsw.ef_search back from the
+        // connection the statement is prepared on, as the router test does.
+        var probe = new EfSearchProbe();
+        PgVectorRepository none = new PgVectorRepository(new TenantScope(probe.wrap(svcDs)), embedder, embedder,
+            PciIndexSet.NONE);
+        long hnswBefore = PgVectorRepository.routedHnswCount();
+        List<String> widest = new ArrayList<>();
         for (int k : KS) {
             assertThat(search(none, TARGET, 0, k)).as("no index, ef 1000 walk, k=%d", k).hasSize(k);
+            double[] r = recalls(none, k);
+            widest.add(String.format("k=%d mean=%.4f min=%.4f", k, mean(r), min(r)));
         }
         assertThat(search(none, SMALL, 0, 40)).hasSize(40);
+        assertThat(probe.efSearchPerStatement()).as("every statement ran at hnsw.ef_search 1000")
+            .isNotEmpty().containsOnly(Integer.toString(PgSession.EF_SEARCH_WIDEST));
+        assertThat(PgVectorRepository.routedHnswCount() - hnswBefore)
+            .as("every search walked HNSW, none was routed exact").isPositive();
+        // Reported, not asserted: how much of the crowd-out the Step 1 remedy (ef 1000, no index) recovers on this fixture.
+        System.out.println("PCI-WIDEST ef=" + PgSession.EF_SEARCH_WIDEST + " leaf-walk-ef-1000 "
+            + String.join(" | ", widest));
     }
 
     // -- 2. the planner pin, the plan check, and recall with the index --------------------------------------
@@ -482,12 +536,20 @@ class PciPlanAndRecallIntegrationTest {
         long hnswBefore = PgVectorRepository.routedHnswCount();
         PgVectorRepository repo = realRepo(neverSample());
         List<String> table = new ArrayList<>();
-        for (int k : KS) {
+        for (int ki = 0; ki < KS.length; ki++) {
+            int k = KS[ki];
             double[] r = recalls(repo, k);
             table.add(String.format("k=%d mean=%.4f min=%.4f", k, mean(r), min(r)));
             assertThat(mean(r)).as("mean recall at k=%d with the index", k).isGreaterThanOrEqualTo(TARGET_RECALL);
             assertThat(min(r)).as("worst own-topic query at k=%d with the index", k)
                 .isGreaterThanOrEqualTo(TARGET_RECALL);
+            assertThat(leafWalkRecorded).as("the crowd-out test (Order 1) recorded the leaf walk").isTrue();
+            assertThat(min(r) - leafWalkMin[ki])
+                .as("the index must beat the filtered leaf walk, worst query against worst query, by more than %.2f "
+                    + "at k=%d (indexed min %.4f, leaf-walk min %.4f; means %.4f and %.4f are reported, not asserted: "
+                    + "the leaf's graph is one draw per run and its mean ranged 0.50 to 0.95 over 20 runs)",
+                    INDEX_GAIN_ABOVE, k, min(r), leafWalkMin[ki], mean(r), leafWalkMean[ki])
+                .isGreaterThan(INDEX_GAIN_ABOVE);
         }
         System.out.println("PCI-INDEXED seed=" + SEED + " own-index " + String.join(" | ", table));
         assertThat(PgVectorRepository.routedHnswCount() - hnswBefore)
@@ -499,62 +561,67 @@ class PciPlanAndRecallIntegrationTest {
     @Test
     @Order(3)
     void anIndexBeingBuilt_andAnInvalidOne_degradeToRows_andThePlanCheckReadsUsedFalse() throws Exception {
-        String appName = "pciplan-build";
-        var activityApp = DSL.field(DSL.name("application_name"), String.class);
-        var activityPid = DSL.field(DSL.name("pid"), Integer.class);
-        var activityWait = DSL.field(DSL.name("wait_event_type"), String.class);
-        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
-        String hnswIndex = leafHnswIndex();
+        try {
+            String appName = "pciplan-build";
+            var activityApp = DSL.field(DSL.name("application_name"), String.class);
+            var activityPid = DSL.field(DSL.name("pid"), Integer.class);
+            var activityWait = DSL.field(DSL.name("wait_event_type"), String.class);
+            var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+            String hnswIndex = leafHnswIndex();
 
-        try (Connection monitor = pg.createConnection(""); Connection blocker = pg.createConnection("")) {
-            monitor.setAutoCommit(true);
-            DSLContext asSuperuser = DSL.using(monitor, SQLDialect.POSTGRES);
-            blocker.setAutoCommit(false);
-            // A DELETE that matches nothing still holds ROW EXCLUSIVE on the leaf to the end of the transaction,
-            // which a concurrent build waits out AFTER it has committed its (invalid) catalog entry.
-            DSL.using(blocker, SQLDialect.POSTGRES).deleteFrom(DSL.table(DSL.name("nexus", leaf)))
-                .where(DSL.falseCondition()).execute();
-            CompletableFuture<Void> build = CompletableFuture.runAsync(() -> {
-                try (Connection c = pg.createConnection("?ApplicationName=" + appName)) {
-                    PgContainerHelper.runSuperuserDdlOutsideTransaction(c,
-                        PciCatalogIntegrationTest.createIndexDdl("CONCURRENTLY ", targetIndex, MODEL, TENANT,
-                            "collection = " + PciCatalogIntegrationTest.lit(TARGET)));
-                } catch (Exception e) {
-                    throw new IllegalStateException(e);
+            try (Connection monitor = pg.createConnection(""); Connection blocker = pg.createConnection("")) {
+                monitor.setAutoCommit(true);
+                DSLContext asSuperuser = DSL.using(monitor, SQLDialect.POSTGRES);
+                blocker.setAutoCommit(false);
+                // A DELETE that matches nothing still holds ROW EXCLUSIVE on the leaf to the end of the transaction,
+                // which a concurrent build waits out AFTER it has committed its (invalid) catalog entry.
+                DSL.using(blocker, SQLDialect.POSTGRES).deleteFrom(DSL.table(DSL.name("nexus", leaf)))
+                    .where(DSL.falseCondition()).execute();
+                CompletableFuture<Void> build = CompletableFuture.runAsync(() -> {
+                    try (Connection c = pg.createConnection("?ApplicationName=" + appName)) {
+                        PgContainerHelper.runSuperuserDdlOutsideTransaction(c, builderDdl(targetIndex, TARGET));
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+                try {
+                    java.util.function.Supplier<Integer> buildPid = () -> asSuperuser.select(activityPid).from(activity)
+                        .where(activityApp.eq(appName)).and(activityWait.eq("Lock")).limit(1).fetchOne(0, Integer.class);
+                    await("the concurrent build to wait on the blocker's lock", () -> buildPid.get() != null);
+                    Integer pid = buildPid.get();
+
+                    // In flight: the catalog lists the index, and it is not valid.
+                    assertThat(indexIsValid(targetIndex)).as("being built").isFalse();
+                    assertThat(sweep.refresh()).isTrue();
+                    assertThat(sweep.hasValidIndex(MODEL, TENANT, TARGET)).as("never routed to while building").isFalse();
+                    degradedArmsReturnRows("being built", hnswIndex);
+
+                    Boolean terminated = asSuperuser
+                        .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, DSL.val(pid)))
+                        .fetchOne(0, Boolean.class);
+                    assertThat(terminated).isTrue();
+                    await("the build statement to end", build::isDone);
+                    assertThat(build).isCompletedExceptionally();
+                    try (Connection su = pg.createConnection("")) {
+                        PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
+                    }
+                } finally {
+                    blocker.rollback();
                 }
-            });
-            try {
-                java.util.function.Supplier<Integer> buildPid = () -> asSuperuser.select(activityPid).from(activity)
-                    .where(activityApp.eq(appName)).and(activityWait.eq("Lock")).limit(1).fetchOne(0, Integer.class);
-                await("the concurrent build to wait on the blocker's lock", () -> buildPid.get() != null);
-                Integer pid = buildPid.get();
-
-                // In flight: the catalog lists the index, and it is not valid.
-                assertThat(indexIsValid(targetIndex)).as("being built").isFalse();
-                assertThat(sweep.refresh()).isTrue();
-                assertThat(sweep.hasValidIndex(MODEL, TENANT, TARGET)).as("never routed to while building").isFalse();
-                degradedArmsReturnRows("being built", hnswIndex);
-
-                Boolean terminated = asSuperuser
-                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, DSL.val(pid)))
-                    .fetchOne(0, Boolean.class);
-                assertThat(terminated).isTrue();
-                await("the build statement to end", build::isDone);
-                assertThat(build).isCompletedExceptionally();
-                try (Connection su = pg.createConnection("")) {
-                    PgContainerHelper.clearSuperuserDdlOutsideTransactionLock(su);
-                }
-            } finally {
-                blocker.rollback();
             }
+
+            assertThat(indexIsValid(targetIndex)).as("the terminated build left an invalid index").isFalse();
+            assertThat(sweep.refresh()).isTrue();
+            assertThat(sweep.hasValidIndex(MODEL, TENANT, TARGET)).isFalse();
+            degradedArmsReturnRows("invalid", hnswIndex);
+        } finally {
+            // A failure part-way must not leave the invalid index behind: the next tests would fail on "already exists".
+            dropIfExists(targetIndex);
         }
+    }
 
-        assertThat(indexIsValid(targetIndex)).as("the terminated build left an invalid index").isFalse();
-        assertThat(sweep.refresh()).isTrue();
-        assertThat(sweep.hasValidIndex(MODEL, TENANT, TARGET)).isFalse();
-        degradedArmsReturnRows("invalid", hnswIndex);
-
-        ddl("DROP INDEX nexus." + targetIndex);
+    private void dropIfExists(String index) throws Exception {
+        ddl("DROP INDEX IF EXISTS nexus." + index);
     }
 
     /**
@@ -576,7 +643,9 @@ class PciPlanAndRecallIntegrationTest {
             .doesNotContain(targetIndex).contains(hnswIndex);
         assertThat(checkMessages().subList(before, checkMessages().size())).anySatisfy(m -> assertThat(m)
             .contains("event=pci_plan_check").contains("used=false")
-            .contains("index=" + targetIndex).contains("collection=" + TARGET));
+            .contains("index=" + targetIndex).contains("collection=" + TARGET)
+            .as("a used=false line says what the planner chose instead").contains("top=\"")
+            .contains("scans=\"Index Scan using " + hnswIndex));
     }
 
     // -- 4. the sampling cadence ----------------------------------------------------------------------------
@@ -662,5 +731,137 @@ class PciPlanAndRecallIntegrationTest {
     void theSamplingIntervalMustBePositive() {
         assertThatThrownBy(() -> new PciPlanCheck(0, (ctx, q) -> "")).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new PciPlanCheck(-1, (ctx, q) -> "")).isInstanceOf(IllegalArgumentException.class);
+    }
+    // -- 6. the cadence a deployment gets: production() and the per-index triggers -----------------------------
+
+    private static final class MutableClock extends Clock {
+        private volatile Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advance(Duration d) {
+            now = now.plus(d);
+        }
+
+        @Override public java.time.ZoneId getZone() {
+            return java.time.ZoneOffset.UTC;
+        }
+
+        @Override public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override public Instant instant() {
+            return now;
+        }
+    }
+
+    private long planCheckLines() {
+        return checkMessages().stream().filter(m -> m.contains("event=pci_plan_check ")).count();
+    }
+
+    @Test
+    @Order(10)
+    void theProductionCheck_explainsTheFirstArmOfAnIndexWithTheRealExplain_andNotTheNextOnes() throws Exception {
+        ensureTargetIndex();
+        PgVectorRepository repo = realRepo(PciPlanCheck.production());
+        long before = planCheckLines();
+
+        for (int i = 0; i < 4; i++) {
+            assertThat(search(repo, TARGET, i, 40)).hasSize(40);
+        }
+
+        assertThat(planCheckLines() - before).as("four arms of one index in one quarter hour: the first only")
+            .isEqualTo(1);
+        assertThat(checkMessages()).anySatisfy(m -> assertThat(m)
+            .contains("event=pci_plan_check").contains("used=true").contains("index=" + targetIndex));
+    }
+
+    @Test
+    @Order(11)
+    void eachIndexIsSampledOnItsFirstArm_thenOncePerInterval_andAnIndexTheSetRegainedAtOnce() {
+        var clock = new MutableClock(Instant.parse("2026-10-10T08:00:00Z"));
+        AtomicInteger explains = new AtomicInteger();
+        PciPlanCheck check = new PciPlanCheck(1_000_000, Duration.ofMinutes(15), clock, (ctx, q) -> {
+            explains.incrementAndGet();
+            return "stub plan";
+        });
+        PgVectorRepository claiming = claimingRepo(check);
+
+        for (int i = 0; i < 5; i++) {
+            assertThat(search(claiming, SMALL, i, 20)).hasSize(20);
+        }
+        assertThat(explains.get()).as("five arms of SMALL: its first only").isEqualTo(1);
+
+        assertThat(search(claiming, TARGET, 0, 20)).hasSize(20);
+        assertThat(explains.get()).as("the first arm of a second index").isEqualTo(2);
+
+        clock.advance(Duration.ofMinutes(16));
+        assertThat(search(claiming, SMALL, 0, 20)).hasSize(20);
+        assertThat(search(claiming, SMALL, 1, 20)).hasSize(20);
+        assertThat(explains.get()).as("sixteen minutes on, one more arm of SMALL").isEqualTo(3);
+    }
+
+    @Test
+    @Order(12)
+    void aSampledArmsExplainIsNotCountedAsItsStatementTime() throws Exception {
+        ensureTargetIndex();
+        long sleepMillis = 1500;
+        AtomicInteger explains = new AtomicInteger();
+        PciPlanCheck slow = new PciPlanCheck(1, Duration.ofMinutes(15), Clock.systemUTC(), (ctx, q) -> {
+            explains.incrementAndGet();
+            try {
+                Thread.sleep(sleepMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+            return ctx.explain(q).plan();
+        });
+        Logger repoLogger = (Logger) LoggerFactory.getLogger(PgVectorRepository.class);
+        ListAppender<ILoggingEvent> repoLogs = new ListAppender<>();
+        repoLogs.list = new CopyOnWriteArrayList<>();
+        repoLogs.start();
+        repoLogger.addAppender(repoLogs);
+        try {
+            realRepo(slow).searchPerCollection(TENANT, "q0", List.of(TARGET), 40, 40, null, null, false);
+        } finally {
+            repoLogger.detachAppender(repoLogs);
+            repoLogs.stop();
+        }
+
+        assertThat(explains.get()).as("the arm was sampled, and the sample took over a second").isEqualTo(1);
+        String phases = repoLogs.list.stream().map(ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.contains("event=search_per_collection_arm_phases")).findFirst().orElseThrow();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("max_hnsw_statement_ms=(\\d+)").matcher(phases);
+        assertThat(m.find()).as(phases).isTrue();
+        assertThat(Long.parseLong(m.group(1)))
+            .as("the arm's own statement, not the %d ms EXPLAIN that ran before it (%s)", sleepMillis, phases)
+            .isLessThan(sleepMillis / 2);
+    }
+
+    @Test
+    @Order(13)
+    void aPciIndexUnderAnotherHashIsMatchedByTheNameTheSetHolds() throws Exception {
+        String odd = "pci_" + "0".repeat(24);
+        assertThat(odd).isNotEqualTo(smallIndex);
+        buildIndexNamed(odd, SMALL);
+        try {
+            assertThat(sweep.refresh()).isTrue();
+            assertThat(sweep.validIndex(MODEL, TENANT, SMALL)).get()
+                .extracting(PciIndexSet.ValidIndex::name).isEqualTo(odd);
+            int mark = checkMessages().size();
+
+            assertThat(search(realRepo(new PciPlanCheck(1, (ctx, q) -> ctx.explain(q).plan())), SMALL, 0, 40))
+                .hasSize(40);
+
+            assertThat(checkMessages().subList(mark, checkMessages().size())).anySatisfy(m -> assertThat(m)
+                .contains("event=pci_plan_check").contains("used=true").contains("index=" + odd));
+        } finally {
+            dropIfExists(odd);
+            assertThat(sweep.refresh()).isTrue();
+        }
     }
 }

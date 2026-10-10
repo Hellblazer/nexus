@@ -732,6 +732,124 @@ class PciIndexSweepTest {
         assertThat(sweepLog.getEffectiveLevel().isGreaterOrEqual(Level.WARN)).isFalse();
     }
 
+    // ── nexus-43ulx.25 fix round: the index as the set holds it, and a line when the set changes ─────────────────
+
+    @Test
+    void validIndex_returnsTheNameTheReadSaw_notAComputedOne() {
+        // HASH_A is not PciCatalog.indexName(M, T, "c1"): a pci_ index the sweep admitted under another hash.
+        sweep = new PciIndexSweep(() -> snapshot(index(HASH_A, true, "c1")), SETTINGS);
+        assertThat(sweep.validIndex(M, T, "c1")).as("nothing before the first read").isEmpty();
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::name).isEqualTo(HASH_A);
+        assertThat(HASH_A).isNotEqualTo(PciCatalog.indexName(M, T, "c1"));
+        assertThat(sweep.validIndex(M, T, "other")).isEmpty();
+        assertThat(sweep.validIndex(M, "other-tenant", "c1")).isEmpty();
+    }
+
+    @Test
+    void validIndex_isSinceTheFirstReadOfAnUnbrokenRun_andRestartsWhenTheIndexLeavesAndComesBack() {
+        Instant t0 = Instant.parse("2026-10-10T08:00:00Z");
+        var clock = new MutableClock(t0);
+        var withIndex = new java.util.concurrent.atomic.AtomicBoolean(true);
+        sweep = new PciIndexSweep(() -> withIndex.get() ? snapshot(index(HASH_A, true, "c1")) : snapshot(),
+            SETTINGS, clock);
+
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::since).isEqualTo(t0);
+
+        clock.set(t0.plusSeconds(60));
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::since)
+            .as("still listed: the date of the first read of the run").isEqualTo(t0);
+
+        withIndex.set(false);
+        clock.set(t0.plusSeconds(120));
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.validIndex(M, T, "c1")).isEmpty();
+
+        withIndex.set(true);
+        clock.set(t0.plusSeconds(180));
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::since)
+            .as("dropped and rebuilt: a new run").isEqualTo(t0.plusSeconds(180));
+    }
+
+    @Test
+    void validIndex_answersEmptyOnceTheSetHasExpired_likeHasValidIndex() {
+        Instant t0 = Instant.parse("2026-10-10T08:00:00Z");
+        var clock = new MutableClock(t0);
+        sweep = new PciIndexSweep(() -> snapshot(index(HASH_A, true, "c1")), SETTINGS, clock);
+        assertThat(sweep.refresh()).isTrue();
+        clock.set(t0.plus(Duration.ofSeconds(3 * 600).plus(PciCatalog.DEFAULT_READ_BOUND)).plusSeconds(1));
+
+        assertThat(sweep.hasValidIndex(M, T, "c1")).isFalse();
+        assertThat(sweep.validIndex(M, T, "c1")).isEmpty();
+    }
+
+    @Test
+    void aChangeOfTheSet_logsOneLineNamingWhatWasAddedAndRemoved_andAnUnchangedSetLogsNothing() {
+        var state = new java.util.concurrent.atomic.AtomicReference<>(snapshot(index(HASH_A, true, "c1")));
+        sweep = new PciIndexSweep(state::get, SETTINGS);
+
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(lines("pci_sweep_set_changed")).singleElement().satisfies(l -> assertThat(l)
+            .contains("added_count=1").contains("removed_count=0")
+            .contains("added=chunks_leaf:c1:" + HASH_A).contains("removed=-"));
+
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(lines("pci_sweep_set_changed")).as("same set, no line").hasSize(1);
+
+        // c1 is dropped, c2 appears, and an invalid index is not part of the router's set at all.
+        state.set(snapshot(index(HASH_B, true, "c2"), index("pci_" + "c".repeat(24), false, "c3")));
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(lines("pci_sweep_set_changed")).hasSize(2).last().satisfies(l -> assertThat(l)
+            .contains("added_count=1").contains("removed_count=1")
+            .contains("added=chunks_leaf:c2:" + HASH_B).contains("removed=chunks_leaf:c1:" + HASH_A)
+            .doesNotContain("c3"));
+    }
+
+    @Test
+    void aLargeChange_isCutAtTheBound_butTheCountsAreExact() {
+        int n = PciIndexSweep.MAX_LOGGED_ENTRIES + 15;
+        PciCatalog.Index[] many = new PciCatalog.Index[n];
+        for (int i = 0; i < n; i++) {
+            many[i] = index(String.format("pci_%024x", i), true, "c" + i);
+        }
+        sweep = new PciIndexSweep(() -> snapshot(many), SETTINGS);
+
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(lines("pci_sweep_set_changed")).singleElement().satisfies(l -> {
+            assertThat(l).contains("added_count=" + n).contains(",...+15");
+            assertThat(l.split("chunks_leaf:", -1).length - 1).as("entries named").isEqualTo(PciIndexSweep.MAX_LOGGED_ENTRIES);
+        });
+    }
+
+    @Test
+    void aFailedRead_keepsTheSinceDates_andLogsNoChange() {
+        Instant t0 = Instant.parse("2026-10-10T08:00:00Z");
+        var clock = new MutableClock(t0);
+        var fail = new java.util.concurrent.atomic.AtomicBoolean();
+        sweep = new PciIndexSweep(() -> {
+            if (fail.get()) {
+                throw new IllegalStateException("db down");
+            }
+            return snapshot(index(HASH_A, true, "c1"));
+        }, SETTINGS, clock);
+        assertThat(sweep.refresh()).isTrue();
+
+        fail.set(true);
+        clock.set(t0.plusSeconds(100));
+        assertThat(sweep.refresh()).isFalse();
+        fail.set(false);
+        clock.set(t0.plusSeconds(200));
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(sweep.validIndex(M, T, "c1")).get().extracting(PciIndexSet.ValidIndex::since).isEqualTo(t0);
+        assertThat(lines("pci_sweep_set_changed")).as("the failed read changed nothing").hasSize(1);
+    }
+
     private static final class MutableClock extends Clock {
         private volatile Instant now;
 

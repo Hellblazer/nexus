@@ -559,6 +559,36 @@ class PciReconcilerIntegrationTest {
     }
 
     @Test
+    void thePassLineCarriesTheCountingTime_asTheSumAndTheMaxOfTheLeafFigures_andTheLeafLineStaysDebug()
+            throws Exception {
+        String tenant = newTenant("countms");
+        collection(tenant, name("countms"), 300);
+        PciSettings s = settings(16);
+        PciReconciler r = reconciler(s, sweep(s));
+        int mark = appender.list.size();
+
+        r.reconcileOnce();
+
+        var events = appender.list.subList(mark, appender.list.size());
+        var leafLines = events.stream().filter(e -> e.getFormattedMessage().contains("event=pci_count_done ")).toList();
+        assertThat(leafLines).as("one per processed leaf").isNotEmpty()
+            .allSatisfy(e -> assertThat(e.getLevel()).as("per-leaf lines stay DEBUG").isEqualTo(Level.DEBUG));
+        long sum = 0;
+        long max = 0;
+        for (var e : leafLines) {
+            long took = Long.parseLong(e.getFormattedMessage().replaceAll(".* took_ms=(\\d+).*", "$1"));
+            sum += took;
+            max = Math.max(max, took);
+        }
+        String passLine = events.stream().map(e -> e.getFormattedMessage())
+            .filter(m -> m.contains("event=pci_reconcile_pass ")).findFirst().orElseThrow();
+        assertThat(passLine).contains(" sum_count_ms=" + sum + " max_count_ms=" + max + " builder_state=ok");
+        assertThat(events.stream().filter(e -> e.getFormattedMessage().contains("event=pci_reconcile_pass "))
+            .allMatch(e -> e.getLevel() == Level.INFO)).isTrue();
+        assertThat(r.status().sweepSeconds()).as("the status reports the period the passes run at").isEqualTo(60);
+    }
+
+    @Test
     void aCollectionBetweenBAndT_getsAnIndex_andStillRoutesExact_aboveTItWalksTheIndex() throws Exception {
         String tenant = newTenant("band");
         String coll = name("band");

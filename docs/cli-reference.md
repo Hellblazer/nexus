@@ -3832,9 +3832,14 @@ judged on the time alone.
 counts and, under `this_engine`, `builder_state` (`ok`, `standby`, `off`, `auth_failed`, `no_privilege`), `failing` and
 `last_ddl_pass_at`. It fails (hard) on `auth_failed` (restart the engine after a `nexus_admin` rotation) and on
 `no_privilege` (the engine's admin role cannot create indexes on the leaves), checked before the counts so a dead builder
-cannot read green; it warns when `invalid` or `failing` is above zero; it passes on `ok` and `standby` (a peer holds the
-builder lock), and on `off` with the note "builds disabled by `NX_SEARCH_PCI=0`". `unparsed` is shown, never a warning.
-The row is green and says "not applicable" when the engine cannot be reached or predates the object. An object the row
+cannot read green; it warns when `invalid` or `failing` is above zero, when a DDL pass has been in flight for more than an
+hour (`pass_started_at`; there is no pass deadline), and when `builder_state` is `ok` with no completed pass
+(`last_ddl_pass_at`, or the engine's `process_start_time` before its first) for three sweep periods plus 15 minutes (the
+engine's `sweep_seconds`, 600 when absent); it passes on `ok` and `standby` (a peer holds the builder lock; a standby
+with a fresh read passes `invalid` above zero with a note, since the invalid index may be the peer's build in flight), and
+on `off` with the note "builds disabled by `NX_SEARCH_PCI=0`". `unparsed` is shown, never a warning.
+The row is green and says "not applicable" when the engine cannot be reached or its status does not include the object (an
+older engine, or one still starting). An object the row
 cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `off` and `standby`, warns and names what
 it got. It works in local and managed mode alike, over HTTP only.
 

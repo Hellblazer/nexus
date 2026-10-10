@@ -10,7 +10,12 @@ import javax.sql.DataSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -95,11 +100,15 @@ public final class PciIndexSweep implements PciIndexSet {
      * {@code expiryLogged} belongs to the state, not the sweep: a reader that raced a newer read and flags the older
      * state expired marks only that state, and a failed read carries the flag forward so the expiry logs once.
      */
-    private record State(PciIndexSet set, Status status, AtomicBoolean expiryLogged) {
+    private record State(PciIndexSet set, Status status, AtomicBoolean expiryLogged,
+                         Map<PciCatalog.Key, Instant> since, SortedSet<String> entries) {
         State(PciIndexSet set, Status status) {
-            this(set, status, new AtomicBoolean());
+            this(set, status, new AtomicBoolean(), Map.of(), new TreeSet<>());
         }
     }
+
+    /** The longest list of entries a {@code pci_sweep_set_changed} line names; the counts say how many there were. */
+    static final int MAX_LOGGED_ENTRIES = 20;
 
     private final Supplier<PciCatalog.Snapshot> reader;
     private final Duration period;
@@ -191,6 +200,25 @@ public final class PciIndexSweep implements PciIndexSet {
         return s.set().hasValidIndex(model, tenant, collection);
     }
 
+    /**
+     * As {@link PciIndexSet#validIndex}, from memory, with the name the last read saw and since when this key has been
+     * listed without a break (a set that expired and recovered counts as a new run). An expired set answers empty.
+     */
+    @Override
+    public Optional<ValidIndex> validIndex(String model, String tenant, String collection) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return Optional.empty();
+        }
+        Optional<ValidIndex> held = s.set().validIndex(model, tenant, collection);
+        if (held.isEmpty()) {
+            return held;
+        }
+        Instant since = s.since().get(new PciCatalog.Key(model, tenant, collection));
+        return Optional.of(new ValidIndex(held.get().name(), since == null ? Instant.EPOCH : since));
+    }
+
     /** The counts and times of the last successful read, the failures since, and whether it has expired. */
     public Status status() {
         State s = state.get();
@@ -250,9 +278,19 @@ public final class PciIndexSweep implements PciIndexSet {
                 return failed("no_partition_leaves", null);
             }
             State previous = state.get();
+            Instant now = clock.instant();
             Status status = new Status(true, snapshot.validCount(), snapshot.invalidCount(),
-                snapshot.unparsedCount(), clock.instant(), previous.status().lastFailureAt(), 0, false);
-            state.set(new State(snapshot, status));
+                snapshot.unparsedCount(), now, previous.status().lastFailureAt(), 0, false);
+            // A key listed by the read before this one, which had not expired, keeps its date; any other is new now.
+            boolean continuous = !expired(previous);
+            Map<PciCatalog.Key, Instant> since = new HashMap<>();
+            for (PciCatalog.Key key : snapshot.validKeys()) {
+                Instant earlier = continuous ? previous.since().get(key) : null;
+                since.put(key, earlier == null ? now : earlier);
+            }
+            SortedSet<String> entries = snapshot.validEntries();
+            state.set(new State(snapshot, status, new AtomicBoolean(), Map.copyOf(since), entries));
+            logSetChange(previous.entries(), entries);
             if (status.unparsed() > 0 && status.valid() == 0) {
                 // Indexes named pci_ exist and none parsed: a deparse change after a PostgreSQL upgrade looks
                 // exactly like this, and routes every collection as if it had no index.
@@ -272,10 +310,47 @@ public final class PciIndexSweep implements PciIndexSet {
         }
     }
 
+    /**
+     * One line when the router's set changed between two reads, naming what was added and removed as
+     * {@code leaf:collection:index}; silent when nothing changed. The lists are cut at {@value #MAX_LOGGED_ENTRIES}
+     * entries (the first read after boot lists every index) and the counts are always exact.
+     */
+    private static void logSetChange(SortedSet<String> before, SortedSet<String> after) {
+        SortedSet<String> added = new TreeSet<>(after);
+        added.removeAll(before);
+        SortedSet<String> removed = new TreeSet<>(before);
+        removed.removeAll(after);
+        if (added.isEmpty() && removed.isEmpty()) {
+            return;
+        }
+        log.info("event=pci_sweep_set_changed added_count={} removed_count={} added={} removed={}", added.size(),
+            removed.size(), bounded(added), bounded(removed));
+    }
+
+    private static String bounded(SortedSet<String> entries) {
+        if (entries.isEmpty()) {
+            return "-";
+        }
+        StringBuilder out = new StringBuilder();
+        int n = 0;
+        for (String entry : entries) {
+            if (n == MAX_LOGGED_ENTRIES) {
+                out.append(",...+").append(entries.size() - n);
+                break;
+            }
+            if (n++ > 0) {
+                out.append(',');
+            }
+            out.append(entry);
+        }
+        return out.toString();
+    }
+
     /** Caller holds the read lock, so the state it replaces is the one it read. */
     private boolean failed(String reason, RuntimeException cause) {
         State previous = state.get();
-        state.set(new State(previous.set(), previous.status().failedAt(clock.instant()), previous.expiryLogged()));
+        state.set(new State(previous.set(), previous.status().failedAt(clock.instant()), previous.expiryLogged(),
+            previous.since(), previous.entries()));
         String detail = cause == null ? "the read saw no partition leaves of nexus.chunks"
             : String.valueOf(cause.getMessage() != null ? cause.getMessage() : cause.toString());
         if (isStopping()) {

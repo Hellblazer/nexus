@@ -2,37 +2,37 @@
   "_source": "service/src/test/java/dev/nexus/service/http/StatusHandlerTest.java, perCollectionIndexes_bodiesMatchTheGoldenFixtureThePythonDoctorRowReads: the Java test renders each case through the real StatusHandler and asserts it equals the object below, so this file is what the engine emits. tests/test_doctor_per_collection_indexes_row.py feeds the same objects to the doctor row. Change a field on one side and the other test fails until this file is updated (nexus-43ulx.24).",
   "cases": {
     "holder": {
-      "valid": 4, "invalid": 1, "unparsed": 2, "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+      "valid": 4, "invalid": 1, "unparsed": 2, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "ok", "building": 1, "failing": 0, "last_ddl_pass_at": "2026-10-10T07:30:00Z",
-                      "pass_started_at": null, "pass_in_progress": false}
+                      "pass_started_at": "2026-10-10T07:58:30Z", "pass_in_progress": true}
     },
     "first_pass_in_flight": {
-      "valid": 0, "invalid": 1, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+      "valid": 0, "invalid": 1, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "ok", "building": 1, "failing": 0, "last_ddl_pass_at": null,
                       "pass_started_at": "2026-10-10T07:58:30Z", "pass_in_progress": true}
     },
     "standby": {
-      "valid": 4, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+      "valid": 4, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "standby", "building": null, "failing": null, "last_ddl_pass_at": null,
                       "pass_started_at": null, "pass_in_progress": false}
     },
     "auth_failed": {
-      "valid": 2, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+      "valid": 2, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "auth_failed", "building": null, "failing": null, "last_ddl_pass_at": null,
                       "pass_started_at": null, "pass_in_progress": false}
     },
     "no_privilege": {
-      "valid": 2, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false,
+      "valid": 2, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "no_privilege", "building": 0, "failing": 0, "last_ddl_pass_at": "2026-10-10T07:30:00Z",
                       "pass_started_at": null, "pass_in_progress": false}
     },
     "expired": {
-      "valid": 3, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": true,
+      "valid": 3, "invalid": 0, "unparsed": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": true, "sweep_seconds": 600,
       "this_engine": {"builder_state": "standby", "building": null, "failing": null, "last_ddl_pass_at": null,
                       "pass_started_at": null, "pass_in_progress": false}
     },
     "off": {
-      "valid": 0, "invalid": 0, "unparsed": 0, "last_read_at": null, "expired": false,
+      "valid": 0, "invalid": 0, "unparsed": 0, "last_read_at": null, "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "off", "building": null, "failing": null, "last_ddl_pass_at": null,
                       "pass_started_at": null, "pass_in_progress": false}
     }

@@ -34,13 +34,24 @@ def _iso(delta: timedelta) -> str:
 def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: int = 0,
             building: int | None = 0, failing: int | None = 0,
             last_ddl: timedelta | None = timedelta(minutes=5), expired: bool = False,
-            pass_in_progress: bool = False) -> dict:
-    return {"embedding_mode": "onnx-local", "per_collection_indexes": {
-        "valid": valid, "invalid": invalid, "unparsed": unparsed, "last_read_at": _iso(timedelta(minutes=1)),
+            pass_in_progress: bool = False, pass_age: timedelta = timedelta(minutes=2),
+            sweep_seconds: int | None = 600, last_read: timedelta | None = timedelta(minutes=1),
+            process_age: timedelta | None = None) -> dict:
+    # The producer cannot report a build without a started pass (PciReconciler.status()), so a build in flight
+    # implies pass_in_progress and a pass_started_at here too.
+    in_pass = pass_in_progress or building == 1
+    body = {"embedding_mode": "onnx-local", "per_collection_indexes": {
+        "valid": valid, "invalid": invalid, "unparsed": unparsed,
+        "last_read_at": None if last_read is None else _iso(last_read),
         "expired": expired,
         "this_engine": {"builder_state": state, "building": building, "failing": failing,
                         "last_ddl_pass_at": None if last_ddl is None else _iso(last_ddl),
-                        "pass_started_at": None, "pass_in_progress": pass_in_progress}}}
+                        "pass_started_at": _iso(pass_age) if in_pass else None, "pass_in_progress": in_pass}}}
+    if sweep_seconds is not None:
+        body["per_collection_indexes"]["sweep_seconds"] = sweep_seconds
+    if process_age is not None:
+        body["process_start_time"] = _iso(process_age)
+    return body
 
 
 # The bodies the ENGINE emits, rendered by StatusHandlerTest through the real StatusHandler and committed as a golden
@@ -53,8 +64,8 @@ def _golden(name: str) -> dict:
     return {"embedding_mode": "onnx-local", "per_collection_indexes": copy.deepcopy(_GOLDEN[name])}
 
 
-def _row(status, **kw):
-    rows = _check_per_collection_indexes(status, now=NOW, **kw)
+def _row(status, now=NOW):
+    rows = _check_per_collection_indexes(status, now=now)
     assert len(rows) == 1
     assert rows[0].label == "Per-collection indexes"
     return rows[0]
@@ -77,7 +88,8 @@ def test_a_probe_that_raises_is_not_applicable_and_green() -> None:
 def test_an_engine_that_predates_the_object_is_not_applicable_and_green() -> None:
     r = _row({"embedding_mode": "onnx-local", "reaper": {"enabled": True}})
     assert r.ok is True and not r.warn
-    assert "not applicable" in r.detail and "predates" in r.detail
+    # Not "predates": a booting engine has no object yet either, and the row must not claim which it is.
+    assert "not applicable" in r.detail and "does not include" in r.detail and "predates" not in r.detail
 
 
 # ── a present object the row cannot read warns ───────────────────────────────
@@ -155,9 +167,24 @@ def test_a_disabled_builder_with_invalid_indexes_still_warns_and_keeps_the_note(
     assert r.warn is True and "1 invalid" in r.detail and "NX_SEARCH_PCI=0" in r.detail
 
 
-def test_a_standby_engine_warns_on_the_global_invalid_count() -> None:
+def test_a_standby_engine_with_a_fresh_read_passes_an_invalid_count_with_a_note() -> None:
+    # The invalid count is global; a standby cannot tell a peer's build in flight from a failed one, and the first
+    # DDL pass builds several indexes over minutes to hours. Warning here would make the row depend on which engine
+    # the load balancer answered.
     r = _row(_status(state="standby", invalid=4, building=None, failing=None))
-    assert r.warn is True and "4 invalid" in r.detail
+    assert r.ok is True and not r.warn
+    assert "4 invalid" in r.detail and "peer's build in flight" in r.detail
+
+
+def test_a_standby_engine_still_warns_on_invalid_when_its_read_is_expired_or_missing() -> None:
+    expired = _row(_status(state="standby", invalid=4, building=None, failing=None, expired=True))
+    assert expired.warn is True and "expired" in expired.detail
+    never_read = _row(_status(state="standby", invalid=4, building=None, failing=None, last_read=None))
+    assert never_read.warn is True and "4 invalid" in never_read.detail
+
+
+def test_a_standby_engine_still_warns_on_a_failing_count() -> None:
+    assert _row(_status(state="standby", invalid=4, building=0, failing=2)).warn is True
 
 
 def test_unreadable_counts_are_read_as_zero_not_as_a_crash_or_a_warning() -> None:
@@ -302,3 +329,80 @@ def test_failing_builds_still_warn_while_another_build_is_in_flight() -> None:
 def test_an_invalid_index_with_no_build_in_flight_still_warns() -> None:
     r = _row(_status(building=0, pass_in_progress=False, invalid=1))
     assert r.warn is True and "1 invalid" in r.detail
+
+
+# ── a pass in flight too long, and a holder that stopped completing passes ───────────────────────────────────
+# There is no pass deadline (serial CREATE INDEX CONCURRENTLY runs up to 30 minutes each) and a holder whose every
+# leaf is skipped by count timeouts never completes a pass, so neither can read green forever.
+
+
+def test_a_pass_in_flight_for_over_an_hour_warns_and_says_how_long() -> None:
+    r = _row(_status(pass_in_progress=True, building=1, invalid=1, pass_age=timedelta(minutes=61)))
+    assert r.ok is False and r.warn is True and not r.fatal
+    assert "in flight for 61 minutes" in r.detail and "hung" in r.detail
+    assert "invalid" not in r.detail.split("(")[0], "the index being built is still not counted as invalid"
+
+
+def test_a_pass_in_flight_for_under_an_hour_stays_green() -> None:
+    r = _row(_status(pass_in_progress=True, building=1, invalid=1, pass_age=timedelta(minutes=59)))
+    assert r.ok is True and not r.warn
+    assert "build in progress for 59 minutes" in r.detail
+
+
+def test_a_first_pass_in_flight_for_over_an_hour_warns() -> None:
+    r = _row(_status(pass_in_progress=True, building=0, last_ddl=None, pass_age=timedelta(hours=3)))
+    assert r.warn is True and "in flight for 3 hours" in r.detail
+
+
+def test_a_holder_with_no_completed_pass_for_three_periods_plus_a_margin_warns() -> None:
+    # 3 x 600 s + 15 min = 45 min.
+    r = _row(_status(last_ddl=timedelta(minutes=46)))
+    assert r.ok is False and r.warn is True and not r.fatal
+    assert "no completed DDL pass for 46 minutes" in r.detail
+    assert "3 sweep periods of 10 minutes" in r.detail and "pci_reconcile_pass" in " ".join(r.fix_suggestions)
+
+
+def test_a_holder_just_inside_the_stall_threshold_stays_green() -> None:
+    r = _row(_status(last_ddl=timedelta(minutes=44)))
+    assert r.ok is True and not r.warn
+
+
+def test_the_stall_threshold_follows_the_engines_reported_sweep_period() -> None:
+    # 3 x 60 s + 15 min = 18 min.
+    assert _row(_status(last_ddl=timedelta(minutes=20), sweep_seconds=60)).warn is True
+    assert _row(_status(last_ddl=timedelta(minutes=17), sweep_seconds=60)).warn is False
+    # 3 x 3600 s + 15 min: an hour-long period tolerates three hours.
+    assert _row(_status(last_ddl=timedelta(hours=3), sweep_seconds=3600)).warn is False
+    # An engine that does not report the period is judged at the setting's default.
+    assert _row(_status(last_ddl=timedelta(minutes=46), sweep_seconds=None)).warn is True
+
+
+def test_a_standby_or_disabled_engine_with_an_old_last_pass_is_not_a_stall() -> None:
+    # A standby's own last pass is old by design while a peer builds; off never builds.
+    assert _row(_status(state="standby", building=None, failing=None, last_ddl=timedelta(hours=9))).ok is True
+    assert _row(_status(state="off", building=None, failing=None, last_ddl=timedelta(hours=9))).ok is True
+
+
+def test_an_old_last_pass_is_not_a_stall_while_a_fresh_pass_is_in_flight() -> None:
+    r = _row(_status(pass_in_progress=True, building=0, last_ddl=timedelta(hours=3), pass_age=timedelta(minutes=5)))
+    assert r.ok is True and not r.warn and "pass in progress for 5 minutes" in r.detail
+
+
+def test_a_holder_that_never_completed_a_pass_warns_once_the_engine_has_run_past_the_threshold() -> None:
+    r = _row(_status(last_ddl=None, process_age=timedelta(hours=2)))
+    assert r.warn is True and "no DDL pass has completed in the 2 hours since the engine started" in r.detail
+
+
+def test_a_holder_that_has_not_yet_had_time_for_a_first_pass_stays_green() -> None:
+    r = _row(_status(last_ddl=None, process_age=timedelta(minutes=10)))
+    assert r.ok is True and not r.warn and "no DDL pass yet" in r.detail
+    # No start time in the body (an older engine): cannot tell, stays green as before.
+    assert _row(_status(last_ddl=None, process_age=None)).ok is True
+
+
+def test_the_golden_holder_body_warns_when_its_pass_is_old_and_a_rotation_check_still_reads_the_names() -> None:
+    later = datetime(2026, 10, 10, 12, 0, 0, tzinfo=UTC)   # four hours after the golden pass started
+    r = _row(_golden("holder"), now=later)
+    assert r.warn is True and "in flight for" in r.detail
+    body = _golden("holder")["per_collection_indexes"]
+    assert body["sweep_seconds"] == 600 and body["this_engine"]["pass_in_progress"] is True

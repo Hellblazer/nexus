@@ -18,22 +18,22 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * the pooled connection at the moment a {@code plain_search_<dim>} statement is PREPARED, which is when the
  * search transaction is about to run it. This is what Postgres will run the statement with, read inside the
  * statement's own transaction, not what the Java side meant to set. Same technique as
- * {@link ScanBudgetProbe}.
+ * {@link ScanBudgetProbe}. An {@code EXPLAIN} of such a statement (the plan check's sample) is not recorded.
  */
-final class EfSearchProbe {
+public final class EfSearchProbe {
 
     private final List<String> efSearch = new CopyOnWriteArrayList<>();
 
     /** {@code hnsw.ef_search} in effect at each plain-search statement prepared so far, in order. */
-    List<String> efSearchPerStatement() {
+    public List<String> efSearchPerStatement() {
         return efSearch;
     }
 
-    void clear() {
+    public void clear() {
         efSearch.clear();
     }
 
-    DataSource wrap(DataSource delegate) {
+    public DataSource wrap(DataSource delegate) {
         return (DataSource) Proxy.newProxyInstance(
             DataSource.class.getClassLoader(), new Class<?>[] {DataSource.class},
             (proxy, method, args) -> {
@@ -58,7 +58,9 @@ final class EfSearchProbe {
                         && (method.getName().equals("prepareStatement")
                             || method.getName().equals("prepareCall")
                             || method.getName().equals("createStatement"))
-                        && sql.toLowerCase(Locale.ROOT).contains("plain_search_")) {
+                        && sql.toLowerCase(Locale.ROOT).contains("plain_search_")
+                        // The plan check's EXPLAIN of the arm (RDR-227) names the function too; it is not an arm.
+                        && !sql.stripLeading().toLowerCase(Locale.ROOT).startsWith("explain")) {
                     efSearch.add(DSL.using(real, SQLDialect.POSTGRES)
                         .select(DSL.function("current_setting", String.class,
                                              DSL.val("hnsw.ef_search"), DSL.inline(true)))

@@ -368,8 +368,8 @@ public final class PgVectorRepository {
 
     /**
      * Package-private overload with the plan check's sampling interval and plan source, so a test can sample every
-     * arm and read or break the EXPLAIN (RDR-227). Production takes the other constructors, which sample one
-     * indexed arm in {@link PciPlanCheck#DEFAULT_EVERY}.
+     * arm and read or break the EXPLAIN (RDR-227). Production takes the other constructors, which use
+     * {@link PciPlanCheck#production()}.
      */
     PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                        Embedder queryEmbedder, PciIndexSet pciIndexes, PciPlanCheck planCheck) {
@@ -1560,10 +1560,18 @@ public final class PgVectorRepository {
                 } else {
                     ROUTED_HNSW.incrementAndGet();
                     if (indexed) {
-                        // RDR-227: one arm in PciPlanCheck.DEFAULT_EVERY asks the planner what it would do with
-                        // this very statement, under this transaction's settings, and logs whether it chose the
-                        // collection's own index. Never fails the arm.
-                        planCheck.sample(ctx, ctx.selectFrom(fn), model, tenant, colls[0]);
+                        // RDR-227: a sampled arm (PciPlanCheck: the first arm of a new index, one per index per
+                        // interval, one in DEFAULT_EVERY) asks the planner what it would do with this very
+                        // statement, under this transaction's settings, and logs whether it chose the collection's
+                        // own index. Never fails the arm. The statement is built only when the arm is sampled, and
+                        // the sample's own time is taken out of the arm's statement time.
+                        long sampleStart = System.nanoTime();
+                        PciIndexSet.ValidIndex held = pciIndexes.validIndex(model, tenant, colls[0])
+                            .orElseGet(() -> new PciIndexSet.ValidIndex(PciCatalog.indexName(model, tenant, colls[0]),
+                                java.time.Instant.EPOCH));
+                        if (planCheck.sample(ctx, () -> ctx.selectFrom(fn), held, colls[0])) {
+                            statementStartNanos += System.nanoTime() - sampleStart;
+                        }
                     }
                     // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
