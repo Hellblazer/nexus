@@ -5987,6 +5987,15 @@ def get_http_vector_client(*, prefetch_routing_listing: bool = False) -> HttpVec
     thread primes the collection-row cache as every listing does, so the one
     caller, ``nx search``, is a process a failed probe ends.) When no probe
     runs (local mode, or already probed) the flag does nothing.
+
+    Trade-off, accepted (Sam, 2026-10-10): the listing is an authenticated
+    request (bearer token, and a data-token mint where one is armed), so it
+    reaches the configured endpoint BEFORE the probe has confirmed it is a
+    nexus service. Without the flag the first request is the probe's
+    unauthenticated ``/version``, and a mistyped or foreign
+    ``NX_SERVICE_URL`` is refused before the token leaves. The endpoint is
+    the user's own configuration, and restricting the prefetch to an
+    already-probed endpoint would remove the saving on every cold process.
     """
     global _vector_client_instance, _version_probe_done, _version_probe_error
     global _version_probe_failed_at, _probed_release, _probed_embedding_mode
