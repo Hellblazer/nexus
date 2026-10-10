@@ -66,7 +66,8 @@ fence_home() {
 
     # Only <top>/<leaf> shadows mirror entries through; a bare <top> stays empty.
     for top in $(for rel in "${shadows[@]}"; do
-                     case "$rel" in */*) echo "${rel%%/*}" ;; esac
+                     # The leading "(" keeps macOS /bin/bash 3.2 from closing the $( ) at the pattern's ")".
+                     case "$rel" in (*/*) echo "${rel%%/*}" ;; esac
                  done | sort -u); do
         for entry in "$real_home/$top"/*; do
             base="$(basename "$entry")"
