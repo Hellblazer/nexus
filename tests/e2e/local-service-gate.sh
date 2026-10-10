@@ -637,6 +637,16 @@ smoke_fail() {
   # absent) — curl's own error text (curl.err) is the only diagnostic in
   # that case, so surface it too.
   [ -s "$SMOKE_DIR/curl.err" ] && echo "[gate]   curl: $(cat "$SMOKE_DIR/curl.err" 2>/dev/null)" >&2
+  # The engine's response body carries only the SQLSTATE; the column, the
+  # constraint and the driver message are in the engine log, which cleanup()
+  # deletes with $SCRATCH on exit. Surface its WARN/ERROR tail here, or the
+  # failure is undiagnosable after the fact (nexus-ecjo8).
+  local elog
+  for elog in "$SCRATCH/logs/storage_service_jar.log" "$SCRATCH/logs/storage_service_native.log"; do
+    [ -s "$elog" ] || continue
+    echo "[gate]   engine log ($elog), last WARN/ERROR lines:" >&2
+    grep -E ' (WARN|ERROR) ' "$elog" | tail -n 20 | sed 's/^/[gate]     /' >&2
+  done
   exit 1
 }
 
