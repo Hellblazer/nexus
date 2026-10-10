@@ -3064,6 +3064,9 @@ def _search_render(
                 rerank=lexical_rerank,
                 rerank_meta_out=rerank_meta if lexical_rerank else None,
                 content_chars=_MCP_CONTENT_CHARS,
+                # nexus-ann50: measured without server rerank only; a reranked
+                # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
+                per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
             )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -3524,6 +3527,10 @@ _PAGE_LOOKAHEAD_PAGES = 2
 #: nexus-tao37: the MCP search and query tools show at most 300 characters of a row
 #: (search's snippet is 200, query's is 300), so they ask the engine for no more.
 _MCP_CONTENT_CHARS: int = 300
+#: nexus-ann50: the MCP search tool's per-collection k on the route (default 60/120
+#: for page 1). At 40 the 30 nearest rows matched k=300 on every measured query and
+#: a search took ~0.5 s less (T2 nexus/ann50-k-sweep-2026-10-09).
+_MCP_PER_COLLECTION_K: int = 40
 _PAGE_CACHE_TTL_S = 120.0
 _page_cache_lock = threading.Lock()
 _page_cache: dict[str, Any] = {}

@@ -988,6 +988,7 @@ def search_cross_corpus(
     lexical: bool = False,
     deep_candidates: bool = False,
     content_chars: int | None = None,
+    per_collection_k_cap: int | None = None,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -1090,6 +1091,16 @@ def search_cross_corpus(
     row's text at that many code points. Pass it only when every reader of
     the returned text shows a snippet (the MCP tools); the batched fallback
     path and an engine that predates the field return the full text.
+
+    *per_collection_k_cap* (nexus-ann50) lowers each per-collection route
+    request's ``per_collection_k`` to at most ``max(cap, n_results)``: never
+    below *n_results*, so a single-collection search or a deep page still
+    fills. Measured 2026-10-09 on the managed service (T2
+    ``nexus/ann50-k-sweep-2026-10-09``): at 40 the pool's 30 nearest rows by
+    raw distance were identical to k=300 on all 8 queries, and an MCP search
+    took 2.41 s median against 2.99 s at the default; the boosted page can
+    shift near ties, as it already did between 120 and 300 (nexus-cbg2s).
+    The batched fallback path ignores it.
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -1558,6 +1569,8 @@ def search_cross_corpus(
         per_collection_k, limit = _per_collection_request_sizes(
             n_results, mult, rerank=bool(server_rerank),
         )
+        if per_collection_k_cap is not None:
+            per_collection_k = min(per_collection_k, max(per_collection_k_cap, n_results))
         # Finite thresholds only: the client method omits None and non-finite
         # values, and a threshold_override of inf (--no-threshold, the parity
         # gate) is not valid JSON.

@@ -2207,6 +2207,7 @@ nexus-alsq3
 nexus-ampq0
 nexus-an5cd
 nexus-anjo
+nexus-ann50
 nexus-ao29z
 nexus-ao29z.1
 nexus-aold
@@ -2498,6 +2499,7 @@ nexus-ca669
 nexus-cah9n
 nexus-caifp
 nexus-camz6
+nexus-cbg2s
 nexus-cbo4a
 nexus-cck6z
 nexus-ccre5
@@ -2946,6 +2948,7 @@ nexus-ebx0s
 nexus-ebz
 nexus-ebz6
 nexus-eceik
+nexus-ecjo8
 nexus-edjmu
 nexus-edjmu.1
 nexus-edkp
