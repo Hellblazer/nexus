@@ -453,6 +453,9 @@ class PciBuilderSessionIntegrationTest {
         int waiting = 4;
         List<Connection> conns = new ArrayList<>();
         List<Integer> pids = new ArrayList<>();
+        // One thread per waiter, never the common ForkJoinPool: on a 2-vCPU runner its parallelism is 1, the first
+        // waiter blocks on the lock forever and the other three never start (develop CI, b8d694b86, nexus-43ulx.29).
+        java.util.concurrent.ExecutorService waiters = java.util.concurrent.Executors.newFixedThreadPool(waiting);
         try (HeldMigrationLock migrating = new HeldMigrationLock()) {
             try {
                 for (int i = 0; i < waiting; i++) {
@@ -468,7 +471,7 @@ class PciBuilderSessionIntegrationTest {
                         } catch (RuntimeException expectedWhenTerminated) {
                             // the test ends the waiter
                         }
-                    });
+                    }, waiters);
                 }
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
                 while (waitersFor(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY) < waiting) {
@@ -488,6 +491,7 @@ class PciBuilderSessionIntegrationTest {
                         // a terminated session
                     }
                 }
+                waiters.shutdownNow();
             }
         }
     }
