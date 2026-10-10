@@ -25,7 +25,7 @@ class MainPciWiringTest {
 
     @Test
     void theProductionRepositoryIsHandedTheRealSweep_notNone() throws Exception {
-        String src = main();
+        String src = code(main());   // code only: the right text in a trailing comment must not satisfy the pin
         assertThat(src).as("the sweep is built from the pool and the validated settings")
             .contains("PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings())");
         assertThat(src).as("the repository takes the sweep as its index set")
@@ -54,6 +54,44 @@ class MainPciWiringTest {
         assertThat(poolClose).as("before the hook closes the pool, which aborts a stuck read").isGreaterThan(sweepStop);
         assertThat(src.indexOf("pciSweep.start();", sweepStart + 1)).as("started once").isNegative();
         assertThat(src.indexOf("pciSweep.stop();", sweepStop + 1)).as("stopped once").isNegative();
+
+        // Unguarded: the read half runs whatever NX_SEARCH_PCI says, so neither call may sit under an if, a loop or
+        // a ternary. Each is a plain statement (the token before it ends a statement or a block) at the brace depth
+        // of its neighbour that always runs.
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, serviceStart)).as("service.start() is a top-level statement of main")
+            .isEqualTo(mainDepth);
+        assertThat(depthAt(src, sweepStart)).as("pciSweep.start() is at main's top level, not in a block")
+            .isEqualTo(mainDepth);
+        assertThat(precedingToken(src, sweepStart)).as("pciSweep.start() follows a statement, not an if/else/loop head")
+            .isIn(";", "}");
+        assertThat(depthAt(src, sweepStop)).as("pciSweep.stop() is at the hook's top level, beside service.stop()")
+            .isEqualTo(depthAt(src, listenerStop));
+        assertThat(depthAt(src, sweepStop)).isEqualTo(depthAt(src, reaper));
+        assertThat(precedingToken(src, sweepStop)).as("pciSweep.stop() follows a statement, not an if/else/loop head")
+            .isIn(";", "}");
+    }
+
+    /** The validation catch must end the process; without it a refused boot runs on into the schema migration. */
+    @Test
+    void theValidationCatchReportsTheEvent_unwrapsTheInitializerError_andExitsOne() throws Exception {
+        String src = code(main());
+        int event = src.indexOf("event=pg_session_env_invalid");
+        assertThat(event).isPositive();
+        int catchOpen = src.lastIndexOf("catch (Throwable t) {", event);
+        assertThat(catchOpen).as("the event is logged by the Throwable catch of the validation block").isPositive();
+        int open = src.indexOf('{', catchOpen);
+        int close = matchingClose(src, open);
+        String body = src.substring(open + 1, close);
+
+        assertThat(body).contains("event=pg_session_env_invalid");
+        assertThat(body).as("a static-init failure arrives wrapped; the cause carries the variable's message")
+            .contains("instanceof ExceptionInInitializerError").contains("getCause()");
+        assertThat(body.strip()).as("the catch ends the process as its last statement").endsWith("System.exit(1);");
+        assertThat(depthAt(src, open + 1 + body.lastIndexOf("System.exit(1);")))
+            .as("System.exit(1) is a statement of the catch itself, not of a nested if")
+            .isEqualTo(depthAt(src, open + 1));
+        assertThat(precedingToken(src, open + 1 + body.lastIndexOf("System.exit(1);"))).isEqualTo(";");
     }
 
     @Test
@@ -89,6 +127,9 @@ class MainPciWiringTest {
         String before = src.substring(0, firstValidation);
         assertThat(before).as("no PgSession static call precedes the validation block")
             .doesNotContain("PgSession");
+        assertThat(before).as("no reflective spelling of a PgSession touch either")
+            .doesNotContain("Class.forName").doesNotContain("loadClass(").doesNotContain("MethodHandles")
+            .doesNotContain("java.lang.reflect");
         assertThat(before).doesNotContain("LocalOnnxAdmission").doesNotContain("new TenantScope(")
             .doesNotContain("seedEmbeddingProfile").doesNotContain("PgVectorRepository(")
             .doesNotContain("NexusService(");
@@ -110,8 +151,99 @@ class MainPciWiringTest {
         assertThat(src.indexOf("LocalOnnxAdmission.fromEnv()")).isGreaterThan(catchEvent);
     }
 
-    /** Main's text with block and line comments removed, so a word in prose cannot satisfy or break a pin. */
+    /**
+     * The source with block and line comments removed, so a word in prose cannot satisfy or break a pin. Scans
+     * string and char literals, so a {@code //} inside one (a URL) does not eat the rest of its line. Newlines inside
+     * a block comment are kept, which keeps line numbers.
+     */
     private static String code(String src) {
-        return src.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
+        StringBuilder out = new StringBuilder(src.length());
+        int i = 0;
+        int n = src.length();
+        while (i < n) {
+            char c = src.charAt(i);
+            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '/') {
+                while (i < n && src.charAt(i) != '\n') {
+                    i++;
+                }
+            } else if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
+                int end = src.indexOf("*/", i + 2);
+                end = end < 0 ? n : end + 2;
+                for (int k = i; k < end; k++) {
+                    if (src.charAt(k) == '\n') {
+                        out.append('\n');
+                    }
+                }
+                i = end;
+            } else if (c == '"' || c == '\'') {
+                int end = literalEnd(src, i);
+                out.append(src, i, end);
+                i = end;
+            } else {
+                out.append(c);
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    /** Index just past the string or char literal that opens at {@code start}. */
+    private static int literalEnd(String src, int start) {
+        char quote = src.charAt(start);
+        int i = start + 1;
+        while (i < src.length() && src.charAt(i) != quote && src.charAt(i) != '\n') {
+            i += src.charAt(i) == '\\' ? 2 : 1;
+        }
+        return Math.min(i + 1, src.length());
+    }
+
+    /** Open braces minus close braces before {@code idx}, outside string and char literals. */
+    private static int depthAt(String code, int idx) {
+        assertThat(idx).as("a statement the pin looks for is missing").isNotNegative();
+        int depth = 0;
+        int i = 0;
+        while (i < idx) {
+            char c = code.charAt(i);
+            if (c == '"' || c == '\'') {
+                i = literalEnd(code, i);
+                continue;
+            }
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+            }
+            i++;
+        }
+        return depth;
+    }
+
+    /** Index of the brace that closes the one at {@code open}. */
+    private static int matchingClose(String code, int open) {
+        int depth = 0;
+        int i = open;
+        while (i < code.length()) {
+            char c = code.charAt(i);
+            if (c == '"' || c == '\'') {
+                i = literalEnd(code, i);
+                continue;
+            }
+            if (c == '{') {
+                depth++;
+            } else if (c == '}' && --depth == 0) {
+                return i;
+            }
+            i++;
+        }
+        throw new AssertionError("unbalanced braces from " + open);
+    }
+
+    /** The last non-whitespace character before {@code idx}, as a string; "" at the start of the text. */
+    private static String precedingToken(String code, int idx) {
+        int i = idx - 1;
+        while (i >= 0 && Character.isWhitespace(code.charAt(i))) {
+            i--;
+        }
+        return i < 0 ? "" : String.valueOf(code.charAt(i));
     }
 }

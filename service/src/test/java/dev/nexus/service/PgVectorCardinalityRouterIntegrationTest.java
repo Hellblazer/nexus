@@ -429,6 +429,7 @@ class PgVectorCardinalityRouterIntegrationTest {
     private static List<String> slowLines(Runnable body) {
         var root = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.list = new java.util.concurrent.CopyOnWriteArrayList<>();
         logs.start();
         root.addAppender(logs);
         try {
@@ -859,6 +860,25 @@ class PgVectorCardinalityRouterIntegrationTest {
         }
     }
 
+    /**
+     * The production factory, not the test constructors: {@code create(ds, settings)} builds the catalog reader over
+     * the engine's pool, so a wiring slip in it (a reader over the wrong source, a throwing factory) shows here.
+     */
+    @Test
+    void theProductionFactory_readsTheRealCatalog() throws Exception {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var sweep = PciIndexSweep.create(ds, SWEEP_SETTINGS);
+        createPciIndex(TENANT_X, X_HNSW1);
+        try {
+            assertThat(sweep.refresh()).as("create(ds, settings) reads the catalog").isTrue();
+            assertThat(sweep.status().valid()).as("exactly the one index built here").isEqualTo(1);
+            assertThat(sweep.hasValidIndex(registeredModel(TENANT_X, X_HNSW1), TENANT_X, X_HNSW1)).isTrue();
+            assertThat(sweep.hasValidIndex(registeredModel(TENANT_X, X_HNSW2), TENANT_X, X_HNSW2)).isFalse();
+        } finally {
+            dropPciIndex(TENANT_X, X_HNSW1);
+        }
+    }
+
     /** Router off (NX_SEARCH_EXACT_MAX_ROWS=0): the indexed collection still serves, the rest walk at 1000. */
     @Test
     void routerOff_sweptIndexedCollectionServes_theRestWalkWidest() throws Exception {
@@ -1080,6 +1100,7 @@ class PgVectorCardinalityRouterIntegrationTest {
     private static List<String> capture(Runnable body, String prefix) {
         var root = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.list = new java.util.concurrent.CopyOnWriteArrayList<>();
         logs.start();
         root.addAppender(logs);
         try {

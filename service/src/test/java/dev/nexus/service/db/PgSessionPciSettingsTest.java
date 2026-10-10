@@ -247,6 +247,7 @@ class PgSessionPciSettingsTest {
         ch.qos.logback.classic.Logger root =
             (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.list = new java.util.concurrent.CopyOnWriteArrayList<>();
         logs.start();
         root.addAppender(logs);
         try {

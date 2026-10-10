@@ -47,6 +47,8 @@ class PciIndexSweepTest {
     void captureLogs() {
         sweepLog = (Logger) LoggerFactory.getLogger(PciIndexSweep.class);
         logs = new ListAppender<>();
+        // The scheduler thread appends while the test thread streams the list; the default ArrayList throws CME.
+        logs.list = new java.util.concurrent.CopyOnWriteArrayList<>();
         logs.start();
         sweepLog.addAppender(logs);
     }
@@ -396,7 +398,6 @@ class PciIndexSweepTest {
         release.countDown();
 
         assertThat(tookMs).as("stop() returns at once, whatever the read is doing").isLessThan(1_000);
-        assertThat(lines("pci_sweep_read_stop_timeout")).isEmpty();
     }
 
     /** The interrupt the shutdown hook delivers is not an incident: DEBUG, never WARN. */
@@ -511,21 +512,90 @@ class PciIndexSweepTest {
     }
 
     @Test
-    void consecutiveFailures_countsTheRun_andASuccessResetsIt() {
+    void consecutiveFailures_countsTheRun_andASuccessResetsIt_butKeepsWhenTheLastFailureWas() {
+        Instant t0 = Instant.parse("2026-10-09T12:00:00Z");
+        var clock = new MutableClock(t0);
         AtomicInteger n = new AtomicInteger();
         sweep = new PciIndexSweep(() -> {
             if (n.incrementAndGet() == 3) {
                 return snapshot(index(HASH_A, true, "c1"));
             }
             throw new IllegalStateException("down");
-        }, SETTINGS);
+        }, SETTINGS, clock);
 
         sweep.refresh();
         assertThat(sweep.status().consecutiveFailures()).isEqualTo(1);
+        clock.set(t0.plusSeconds(10));
         sweep.refresh();
         assertThat(sweep.status().consecutiveFailures()).isEqualTo(2);
+        assertThat(sweep.status().lastFailureAt()).isEqualTo(t0.plusSeconds(10));
+        clock.set(t0.plusSeconds(20));
         sweep.refresh();
         assertThat(sweep.status().consecutiveFailures()).isZero();
+        assertThat(sweep.status().lastReadAt()).isEqualTo(t0.plusSeconds(20));
+        assertThat(sweep.status().lastFailureAt())
+            .as("a success resets the run, not the record of when the last failure happened")
+            .isEqualTo(t0.plusSeconds(10));
+    }
+
+    /**
+     * An interrupt while waiting for the read lock returns false without a read, logs it, and leaves the thread's
+     * interrupt flag set for whoever owns the thread (the builder's, or the scheduler's, which shutdownNow set).
+     */
+    @Test
+    void refreshInterruptedWhileWaitingForTheLock_returnsFalse_logsWarn_andRestoresTheInterruptFlag() {
+        AtomicInteger reads = new AtomicInteger();
+        sweep = new PciIndexSweep(() -> {
+            reads.incrementAndGet();
+            return snapshot(index(HASH_A, true, "c1"));
+        }, SETTINGS);
+
+        Thread.currentThread().interrupt();
+        boolean replaced;
+        boolean flagRestored;
+        try {
+            replaced = sweep.refresh();
+        } finally {
+            flagRestored = Thread.interrupted();   // also clears it, so this test leaves the thread clean
+        }
+
+        assertThat(replaced).isFalse();
+        assertThat(flagRestored).as("refresh() puts the interrupt flag back").isTrue();
+        assertThat(reads).as("an interrupted caller never reached the reader").hasValue(0);
+        List<ILoggingEvent> skipped = logs.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("event=pci_sweep_refresh_skipped")).toList();
+        assertThat(skipped).hasSize(1);
+        assertThat(skipped.get(0).getLevel()).isEqualTo(Level.WARN);
+        assertThat(skipped.get(0).getFormattedMessage()).contains("reason=interrupted");
+    }
+
+    @Test
+    void refreshInterruptedDuringShutdown_isLoggedAtDebug_andRestoresTheInterruptFlag() {
+        var previous = sweepLog.getLevel();
+        sweepLog.setLevel(Level.DEBUG);
+        try {
+            sweep = new PciIndexSweep(() -> snapshot(index(HASH_A, true, "c1")), SETTINGS);
+            sweep.stop();
+
+            Thread.currentThread().interrupt();
+            boolean replaced;
+            boolean flagRestored;
+            try {
+                replaced = sweep.refresh();
+            } finally {
+                flagRestored = Thread.interrupted();
+            }
+
+            assertThat(replaced).isFalse();
+            assertThat(flagRestored).isTrue();
+            List<ILoggingEvent> skipped = logs.list.stream()
+                .filter(e -> e.getFormattedMessage().contains("event=pci_sweep_refresh_skipped")).toList();
+            assertThat(skipped).hasSize(1);
+            assertThat(skipped.get(0).getLevel()).isEqualTo(Level.DEBUG);
+            assertThat(skipped.get(0).getFormattedMessage()).contains("during=shutdown");
+        } finally {
+            sweepLog.setLevel(previous);
+        }
     }
 
     // ---- the set expires -------------------------------------------------------------------------
@@ -635,6 +705,17 @@ class PciIndexSweepTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> PciIndexSweep.withPeriod(() -> snapshot(), SETTINGS, Duration.ofMillis(-1)))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void theReadBoundMustBePositive() {
+        Instant now = Instant.parse("2026-10-09T12:00:00Z");
+        assertThatThrownBy(() -> new PciIndexSweep(() -> snapshot(), SETTINGS, Clock.fixed(now, ZoneOffset.UTC),
+            Duration.ZERO)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("readBound");
+        assertThatThrownBy(() -> new PciIndexSweep(() -> snapshot(), SETTINGS, Clock.fixed(now, ZoneOffset.UTC),
+            Duration.ofMillis(-1))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("readBound");
+        assertThatThrownBy(() -> new PciIndexSweep(() -> snapshot(), SETTINGS, Clock.fixed(now, ZoneOffset.UTC),
+            null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test

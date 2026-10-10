@@ -830,6 +830,34 @@ fi
 
 smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 
+# RDR-227 Step 2 (nexus-43ulx.12, test-validation I-3(d)): the PCI sweep's read half runs in every engine, whatever
+# NX_SEARCH_PCI says, and a unit test cannot see Main start it. Assert the real boot's own engine log carries both
+# the start line and a completed read. A fresh database already has its tenant leaves, so the first read lands at
+# once; event=pci_sweep is the success line (event=pci_sweep_read_failed would not match it).
+# Non-vacuity: at least one engine log must exist and be non-empty, so an engine that logged elsewhere fails here
+# instead of passing a grep over nothing.
+engine_log_expect() {
+  local log found=0 seen=0
+  for log in "$SCRATCH/logs/storage_service_jar.log" "$SCRATCH/logs/storage_service_native.log"; do
+    [ -s "$log" ] || continue
+    seen=1
+    if grep -qF -- "$1" "$log"; then
+      found=1
+    fi
+  done
+  if [ "$seen" -ne 1 ]; then
+    echo "[gate] ENGINE LOG LEG FAILED: no non-empty engine log under $SCRATCH/logs (looked for $1)" >&2
+    exit 1
+  fi
+  if [ "$found" -ne 1 ]; then
+    echo "[gate] ENGINE LOG LEG FAILED: the engine log has no '$1' line" >&2
+    exit 1
+  fi
+  echo "[gate] engine log ok: $1"
+}
+engine_log_expect "event=pci_sweep_read_started"
+engine_log_expect "event=pci_sweep valid="
+
 # The NX_SERVICE_* env leg below pins the SERVICE at the throwaway
 # instance (.env was sourced up top, before the service spawned). HOST/PORT
 # halves only — deliberately NOT NX_SERVICE_URL: the URL leg outranks the
