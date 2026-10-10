@@ -117,6 +117,54 @@ class CatalogHandlerTumblerGrammarTest {
         assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(200);
     }
 
+    // ── owner identity fields (nexus-ecjo8) ──────────────────────────────────
+    //
+    // name and owner_type are NOT NULL on catalog_owners. An upsert that omits
+    // one used to reach the INSERT and come back as a bare 409 sqlstate 23502,
+    // which names neither the field nor the request defect. The case that found
+    // it: local-service-gate.sh under macOS /bin/bash 3.2 sent an EMPTY body
+    // (bash brace-expanded the JSON builder), the handler read {} and took the
+    // auto-mint path, and the INSERT 23502'd on name.
+
+    @Test
+    void ownersUpsert_emptyBody_400sNamingName() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/owners/upsert", "");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("'name'");
+    }
+
+    @Test
+    void ownersUpsert_missingOwnerType_400sNamingOwnerType() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/owners/upsert",
+            "{\"tumbler_prefix\":\"1.7790\",\"name\":\"http-no-owner-type\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("'owner_type'");
+    }
+
+    @Test
+    void legacyRegister_ownerHalfMissingName_400sNamingName() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/register",
+            "{\"tumbler_prefix\":\"1.7791\",\"owner_type\":\"repo\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("'name'");
+    }
+
+    @Test
+    void importOwner_rowMissingName_400sAndWritesNothing() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/import/owner",
+            "{\"rows\":[{\"tumbler_prefix\":\"1.7792\",\"name\":\"http-import-ok\",\"owner_type\":\"repo\"},"
+            + "{\"tumbler_prefix\":\"1.7793\",\"owner_type\":\"repo\"}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("'name'");
+        assertThat(repo.listOwners(TENANT, true))
+            .as("all-or-nothing: the valid row in a refused batch is not written")
+            .noneMatch(o -> "1.7792".equals(o.get("tumbler_prefix")));
+    }
+
     // ── legacy /register — owner half ───────────────────────────────────────
 
     @Test

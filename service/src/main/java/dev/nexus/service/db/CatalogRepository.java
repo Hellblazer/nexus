@@ -596,6 +596,25 @@ public final class CatalogRepository {
         return upd;
     }
 
+    /**
+     * nexus-ecjo8: refuse an owner row without {@code name} or {@code owner_type} before it
+     * reaches the INSERT. Both columns are NOT NULL, so such a row can never be written; left
+     * to the database it came back as a bare 409 {@code sqlstate 23502} that named neither the
+     * field nor the defect. Absent or non-string is refused; an explicit {@code ""} is still a
+     * value the column accepts and is not changed here. Thrown as
+     * {@link IllegalArgumentException}, which the handler ladder maps to a 400 carrying this
+     * message.
+     */
+    private static void requireOwnerIdentityFields(Map<String, Object> o) {
+        for (String field : new String[] {"name", "owner_type"}) {
+            if (s(o, field) == null) {
+                throw new IllegalArgumentException(
+                    "owner row requires '" + field + "' (missing, null or not a string; catalog_owners."
+                    + field + " is NOT NULL)");
+            }
+        }
+    }
+
     /** Upsert an owner row. ON CONFLICT update all mutable fields. */
     public void upsertOwner(String tenant, Map<String, Object> o) {
         // nexus-45ykb: the wildcard sentinel '*' can never be a registered owner. Enforce
@@ -606,6 +625,7 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
+        requireOwnerIdentityFields(o);
         UniqueRaceRetry.run("upsertOwner", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
             // nexus-0cy4b: tumbler_prefix is NOT NULL. The SQLite catalog
@@ -10642,6 +10662,7 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
+        requireOwnerIdentityFields(o);
         tenantScope.withTenant(tenant, ctx -> {
             doImportOwner(ctx, tenant, o);
             return null;
@@ -10665,6 +10686,8 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
+        // All-or-nothing: every row is checked before the first chunk is written.
+        for (var o : rows) requireOwnerIdentityFields(o);
         return tenantScope.withTenant(tenant, ctx -> {
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
             for (var o : rows) unique.put(s(o, "tumbler_prefix"), o);
