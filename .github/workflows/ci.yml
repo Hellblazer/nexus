@@ -462,10 +462,14 @@ jobs:
     # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-6c18g` is the owned lab pool
     # (6 cores, 18 GB hard cap, see AGENTS.md § Self-hosted runners and fork
     # PRs). The class is shaped for this job: six of them fit on chas at once
-    # (118 GB allocatable). The test step runs 4 xdist workers: five fit in
-    # memory (peaks of 12 to 16 GB, 2026-10-11) but each worker also drives an
-    # engine JVM and a Postgres, and at five on six CPUs a different
-    # timing-sensitive test failed on each of three runs.
+    # (118 GB allocatable). The test step is SERIAL, as on a hosted runner.
+    # xdist inside the shard was tried on 2026-10-11 and is off again: at 5
+    # workers three runs each lost a different timing-sensitive test, and at 4
+    # one run was green and the next (the push run on a86359fd6) lost two
+    # shards, one to the engine's SIGSEGV on SIGTERM during model load
+    # (nexus-y6aj0) and one to a worker's engine vanishing mid-run with no OOM
+    # kill (nexus-kmfz6). Turn it back on only with both closed and several
+    # green runs in hand, not one.
     # A larger class runs fewer shards at a time: only two `lab-l` fit.
     # A pull request from a FORK stays on `ubuntu-latest`, so outside code
     # never reaches owned hardware even if its run is approved by mistake.
@@ -806,12 +810,8 @@ jobs:
         # extra ids for tests since removed are simply ignored. No CI
         # enforcement of freshness by design — this is a scheduling hint,
         # not a correctness input. On a hosted runner execution WITHIN the
-        # shard is serial (4 cores, 16 GB). On the pool each shard also runs
-        # 4 xdist workers (nexus-480wm, Sam 2026-10-10): not `-n auto`, which
-        # there means one worker per granted core, 6, with no CPU left for
-        # the engine and Postgres each worker boots. pytest-split picks the
-        # shard's tests first and xdist spreads them, so the split is the same
-        # on both.
+        # shard is serial (4 cores, 16 GB), and on the pool too for now (see
+        # the RUNNER note on this job for why xdist is off).
         #
         # TMPDIR on the pool: /tmp there is tmpfs, so every worker's Postgres
         # data directory and every tmp_path lived in memory and was charged to
@@ -833,7 +833,7 @@ jobs:
             # nexus-y6aj0). The engines inherit this from the test environment.
             export NX_ONNX_INTRA_OP_THREADS=2
           fi
-          uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 4' || '' }} \
+          uv run pytest tests/ -q --durations=25 \
             --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
 

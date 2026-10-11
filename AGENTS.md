@@ -167,7 +167,8 @@ is a set of single-use runners that a scheduler on chas starts per job, with
 labels `lab-s`, `lab-m`, `lab-6c18g`, `lab-16c16g`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
 (macOS on hellmini). Two jobs use it: the Service CI Java job on `lab-16c16g` (16 cores, 16 GB) and the
 pytest shard matrix on `lab-6c18g` (6 cores, 18 GB; six fit on chas at once),
-with 4 xdist workers per shard. Every other job stays where it was. Three things
+serial inside each shard (xdist there is off until nexus-y6aj0 and
+nexus-kmfz6 are closed). Every other job stays where it was. Three things
 differ from a GitHub-hosted runner:
 
 - **A pull request from a fork never runs there.** Both jobs choose the runner
