@@ -72,6 +72,7 @@ runs:
         PERSISTENT_HOME: ${{ inputs.persistent-home }}
       run: |
         set -euo pipefail
+        PERSISTENT_HOME="${PERSISTENT_HOME:-false}"
         target="$HOME/.cache/nexus/docling-artifacts"
         marker=".complete-${ASSET_TAG}"
         if [ "$PERSISTENT_HOME" = "true" ] && [ -f "$target/$marker" ]; then
@@ -98,7 +99,8 @@ runs:
         fi
         # Shared $HOME (nexus-480wm): extract beside the target and rename the
         # whole directory in, so a job running at the same time sees either no
-        # directory or a complete one. `mv -T` is GNU; the pool is Linux.
+        # directory or a complete one. rename(2) through python3, because
+        # `mv` onto an existing directory moves INTO it and `mv -T` is GNU only.
         staging="$(mktemp -d "$(dirname "$target")/docling-artifacts.staging.XXXXXX")"
         trap 'rm -f "$tarball"; rm -rf "$staging"' EXIT
         tar -xzf "$tarball" -C "$staging"
@@ -107,7 +109,7 @@ runs:
           # No marker: another asset tag's files, or an extract that died.
           rm -rf "$target"
         fi
-        if ! mv -T "$staging" "$target" 2>/dev/null; then
+        if ! python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$staging" "$target" 2>/dev/null; then
           # A sibling job renamed its copy in first.
           test -f "$target/$marker" || { echo "::error::docling artifacts at $target are incomplete and could not be replaced"; exit 1; }
           echo "a sibling job provisioned the docling artifacts first; using them."
