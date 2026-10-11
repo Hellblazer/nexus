@@ -92,6 +92,39 @@ public final class HttpUtil {
      * transfer). A client that does not ask gets the identity body, byte for byte as before. The compressed
      * length is known before the headers go, so {@code Content-Length} is exact and nothing is chunked.
      */
+    /**
+     * How much unread request body {@link #send} takes off the connection before answering: the JDK
+     * server's own drain amount ({@code sun.net.httpserver.drainAmount}, 64 KiB).
+     */
+    static final long UNREAD_BODY_DRAIN_CAP_BYTES = 64L * 1024;
+
+    /**
+     * A handler that answers before reading the request body (a retired route's 410, an unknown path's
+     * 404, a refusal made on the headers) leaves that body on the connection. The JDK server takes up to
+     * its drain amount when the exchange ends and silently CLOSES the connection if more remains, with
+     * no {@code Connection: close} on the response already sent; a keep-alive client then sends its
+     * next request into a closed socket. Take the same amount here, before the headers go, and when
+     * more remains say so, so the client opens a new connection instead (found reading nexus-632u4;
+     * not shown to be that bead's cause).
+     */
+    private static void settleUnreadRequestBody(HttpExchange exchange) {
+        try {
+            java.io.InputStream in = exchange.getRequestBody();
+            byte[] buf = new byte[8192];
+            long left = UNREAD_BODY_DRAIN_CAP_BYTES;
+            while (left > 0) {
+                int n = in.read(buf, 0, (int) Math.min(buf.length, left));
+                if (n < 0) return;
+                left -= n;
+            }
+            if (in.read() >= 0) {
+                exchange.getResponseHeaders().set("Connection", "close");
+            }
+        } catch (IOException e) {
+            // The handler already closed the stream, or the client went away: nothing left to settle.
+        }
+    }
+
     public static void send(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
@@ -116,6 +149,7 @@ public final class HttpUtil {
                 }
             }
         }
+        settleUnreadRequestBody(exchange);
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
