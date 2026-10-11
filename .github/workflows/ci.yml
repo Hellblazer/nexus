@@ -810,8 +810,18 @@ jobs:
         # 18 GB cap that kills the step (exit 137). pytest-split picks the
         # shard's tests first and xdist spreads them, so the split is the same
         # on both.
+        #
+        # TMPDIR on the pool: /tmp there is tmpfs, so every worker's Postgres
+        # data directory and every tmp_path lived in memory and was charged to
+        # the job's 18 GB cap. Measured on the first -n 5 run (2026-10-11): 3.3
+        # to 4.0 GB of shmem per shard, with one shard pinned at the cap.
+        # $RUNNER_TEMP is on disk and is deleted with the job.
         run: |
           set -euo pipefail
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            export TMPDIR="$RUNNER_TEMP/tmp"
+            mkdir -p "$TMPDIR"
+          fi
           uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 5' || '' }} \
             --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
