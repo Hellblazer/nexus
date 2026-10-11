@@ -38,7 +38,7 @@ class MainPciWiringTest {
         String src = code(main());
         int serviceStart = src.indexOf("service.start();");
         int sweepStart = src.indexOf("pciSweep.start();");
-        int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+        int hook = shutdownSteps(src);
         int listenerStop = src.indexOf("service.stop();", hook);
         // nexus-43ulx.17: the pool's reaper and the builder's run together inside terminateAtShutdown.
         int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
@@ -71,6 +71,40 @@ class MainPciWiringTest {
         assertThat(depthAt(src, sweepStop)).isEqualTo(depthAt(src, reaper));
         assertThat(precedingToken(src, sweepStop)).as("pciSweep.stop() follows a statement, not an if/else/loop head")
             .isIn(";", "}");
+    }
+
+    /**
+     * nexus-y6aj0: the shutdown steps that do not touch ONNX Runtime live in one Runnable, because two paths run
+     * them: the shutdown hook, and the gate's expired-bound path, which leaves without the hook phase. The order
+     * pins in this class read that block.
+     */
+    private static int shutdownSteps(String src) {
+        int block = src.indexOf("Runnable stopAllButEmbedders = () -> {");
+        assertThat(block).as("the shared shutdown steps").isPositive();
+        return block;
+    }
+
+    @Test
+    void theHookAndTheExpiredBoundPathBothRunTheSharedSteps_andOnlyTheHookClosesEmbeddersAndThePool() throws Exception {
+        String src = code(main());
+        int block = shutdownSteps(src);
+        int blockEnd = matchingClose(src, src.indexOf('{', block));
+        int expired = src.indexOf("OrtInitGate.process().onBoundExpired(stopAllButEmbedders);");
+        int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+        int hookRuns = src.indexOf("stopAllButEmbedders.run();", hook);
+        int embedders = src.indexOf("docEmbedRouter.close();", hook);
+        int poolClose = src.indexOf("ds.close();", hook);
+
+        assertThat(expired).as("the expired-bound path is handed the shared steps, nothing more").isGreaterThan(blockEnd);
+        assertThat(hook).isGreaterThan(blockEnd);
+        assertThat(hookRuns).as("the hook runs the shared steps first").isGreaterThan(hook);
+        assertThat(embedders).as("then closes the embedders").isGreaterThan(hookRuns);
+        assertThat(poolClose).as("then the pool").isGreaterThan(embedders);
+        String steps = src.substring(block, blockEnd);
+        assertThat(steps).as("the shared steps run with native model work possibly live: no session close, and no"
+            + " pool close, which can stall on a dead PG with nothing left to end the process")
+            .doesNotContain("EmbedRouter.close()").doesNotContain("ds.close()");
+        assertThat(src.indexOf("stopAllButEmbedders.run();", hookRuns + 1)).as("run once by the hook").isNegative();
     }
 
     /** The validation catch must end the process; without it a refused boot runs on into the schema migration. */
@@ -118,7 +152,7 @@ class MainPciWiringTest {
         int sweepStart = src.indexOf("pciSweep.start();");
         int create = src.indexOf("PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,");
         int reconcilerStart = src.indexOf("pciReconciler.start();");
-        int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+        int hook = shutdownSteps(src);
         int stopBinding = src.indexOf("Runnable stopPciReconciler = pciReconciler::stop;");
         int listenerStop = src.indexOf("service.stop();", hook);
         int reconcilerStop = src.indexOf("stopPciReconciler.run();", hook);
@@ -166,7 +200,7 @@ class MainPciWiringTest {
     @Test
     void theShutdownReaperIsHandedTheAdminValuesAndThisBootsBuilderName() throws Exception {
         String src = code(main());
-        int hook = src.indexOf("Runtime.getRuntime().addShutdownHook");
+        int hook = shutdownSteps(src);
 
         assertThat(src.substring(hook)).as("inside the hook, the one seven-argument call")
             .containsPattern("BackendReaper\\.terminateAtShutdown\\(\\s*dbUrl,\\s*dbUser,\\s*dbPass,\\s*"
