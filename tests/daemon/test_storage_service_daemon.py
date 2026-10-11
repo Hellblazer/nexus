@@ -2561,6 +2561,126 @@ class TestMinimalSuperviseLoop:
 
 
 # ---------------------------------------------------------------------------
+# nexus-qk6p6: the exit-reason readers
+# ---------------------------------------------------------------------------
+class TestExitReasonReaders:
+    """``last_engine_error_line`` and ``last_supervisor_error_line`` read what a
+    child log gained since a pre-spawn size mark."""
+
+    _ERR = (
+        "2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - "
+        'event=pg_session_env_invalid error="X must be in 60..3600, got: 10"'
+    )
+
+    def test_a_rotated_log_is_read_from_its_start(self, tmp_path: Path) -> None:
+        """The log is size-rotated at open, so the pre-spawn mark can be past
+        the end of the fresh file. That is this boot's whole output, not none."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._ERR + "\n")
+        reason = ssd.last_engine_error_line(log, 50_000_000)
+        assert reason is not None and "must be in 60..3600" in reason
+
+    def test_crlf_line_ends_and_stack_frames(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_bytes(
+            (self._ERR + "\r\n\tat dev.nexus.service.Main.main(Main.java:166)\r\n"
+             "\t... 3 more\r\n").encode()
+        )
+        assert ssd.last_engine_error_line(log, 0) == self._ERR
+
+    def test_no_error_line_falls_back_to_the_last_output_that_is_not_a_frame(
+        self, tmp_path: Path
+    ) -> None:
+        """A crash outside logback (bad argv, an uncaught exception) has no
+        ERROR line; the root ``Caused by:`` is the reason, its frames are not."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_jar.log"
+        log.write_text(
+            'Exception in thread "main" java.lang.ExceptionInInitializerError\n'
+            "\tat dev.nexus.service.Main.main(Main.java:1)\n"
+            "Caused by: java.lang.IllegalStateException: no PG_PORT\n"
+            "\tat dev.nexus.service.db.PgSession.<clinit>(PgSession.java:9)\n"
+            "\t... 1 more\n"
+        )
+        assert (
+            ssd.last_engine_error_line(log, 0)
+            == "Caused by: java.lang.IllegalStateException: no PG_PORT"
+        )
+
+    def test_crash_output_after_an_error_line_is_reported_with_it(
+        self, tmp_path: Path
+    ) -> None:
+        """An ERROR logged earlier in the boot must not hide the fatal output
+        that followed it; a later logback line at another level is not that."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._ERR + "\n"
+            "2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - retrying\n"
+        )
+        assert ssd.last_engine_error_line(log, 0) == self._ERR
+        # The ERROR line's own trace, ending in a cause that repeats its
+        # message, is not a second reason.
+        with log.open("a") as fh:
+            fh.write(
+                "java.lang.ExceptionInInitializerError\n"
+                "\tat dev.nexus.service.Main.main(Main.java:1)\n"
+                "Caused by: java.lang.IllegalArgumentException: "
+                "X must be in 60..3600, got: 10\n"
+                "\t... 2 more\n"
+            )
+        assert ssd.last_engine_error_line(log, 0) == self._ERR
+        with log.open("a") as fh:
+            fh.write("Fatal error: java.lang.OutOfMemoryError: Java heap space\n")
+        reason = ssd.last_engine_error_line(log, 0)
+        assert reason is not None
+        assert reason.startswith(self._ERR)
+        assert reason.endswith("last output: Fatal error: java.lang.OutOfMemoryError: Java heap space")
+
+    def test_nothing_new_and_missing_files_read_as_no_reason(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        assert ssd.last_engine_error_line(log, 0) is None
+        log.write_text(self._ERR + "\n")
+        assert ssd.last_engine_error_line(log, log.stat().st_size) is None
+        assert ssd.last_supervisor_error_line(tmp_path / "absent.log", 0) is None
+
+    def test_engine_exit_reason_picks_the_log_that_grew(self, tmp_path: Path) -> None:
+        """A jar launch writes storage_service_jar.log; a native log left by an
+        earlier install did not change and is not the source."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "storage_service_native.log").write_text(self._ERR + " OLD\n")
+        marks = ssd.engine_log_marks(tmp_path)
+        assert ssd.engine_exit_reason(marks) is None
+        (logs / "storage_service_jar.log").write_text(self._ERR + "\n")
+        found = ssd.engine_exit_reason(marks)
+        assert found == (logs / "storage_service_jar.log", self._ERR)
+
+
+def test_replace_quiesce_start_service_imports_the_launcher(tmp_path: Path) -> None:
+    """``default_ops(...).start_service`` imported ``ensure_storage_supervisor``
+    from ``storage_service_daemon``, where it has never been defined, so the
+    real restart after a quiesced replace raised ImportError (found reviewing
+    nexus-qk6p6; every test injected its own ``QuiesceOps``)."""
+    import nexus.commands.daemon as daemon_mod
+    from nexus.daemon import replace_quiesce
+
+    with patch.object(daemon_mod, "ensure_storage_supervisor") as ensure:
+        replace_quiesce.default_ops(tmp_path).start_service()
+    ensure.assert_called_once_with(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # nexus-qke1e: ensure_storage_supervisor — the single persistent-start path
 # ---------------------------------------------------------------------------
 class TestEnsureStorageSupervisor:
@@ -2706,12 +2826,219 @@ class TestEnsureStorageSupervisor:
         ticks = iter([0.0, 10_000.0, 10_000.0])
         module_time(monkeypatch, daemon_mod).monotonic = lambda: next(ticks)
         module_time(monkeypatch, daemon_mod).sleep = lambda _s: None
+        # The supervisor stays alive (poll() is None) the whole time, so this is
+        # the timeout arm, not the supervisor-exited arm (nexus-qk6p6).
         with (
             patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
-            patch.object(daemon_mod, "_popen", return_value=MagicMock()),
+            patch.object(daemon_mod, "_popen", return_value=_FakeProc(pid=42790)),
         ):
-            with pytest.raises(StorageServiceStartError):
+            with pytest.raises(StorageServiceStartError) as exc_info:
                 daemon_mod.ensure_storage_supervisor(config_dir)
+        msg = str(exc_info.value)
+        assert "did not become ready within 60s" in msg
+        # The engine's own output is in a different file from the supervisor's.
+        assert str(config_dir / "logs" / "storage_service_native.log") in msg
+        assert str(config_dir / "logs" / "storage_service.log") in msg
+
+    _ENGINE_ERROR = (
+        "2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - "
+        'event=pg_session_env_invalid error="NX_SEARCH_PCI_SWEEP_SECONDS=10 '
+        'must be in 60..3600"'
+    )
+
+    def _no_wait(self, monkeypatch, daemon_mod) -> list[float]:
+        """Fail the test if the wait loop keeps sleeping: a supervisor that is
+        already dead must be noticed without waiting."""
+        sleeps: list[float] = []
+
+        def _sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            raise AssertionError(
+                "ensure_storage_supervisor waited on a supervisor that had exited"
+            )
+
+        module_time(monkeypatch, daemon_mod).sleep = _sleep
+        return sleeps
+
+    def test_supervisor_exit_fails_at_once_with_the_engine_reason(
+        self, config_dir: Path, monkeypatch
+    ) -> None:
+        """nexus-qk6p6: an engine that refuses to start (an out-of-range env
+        value) exits in a second and takes the supervisor with it. The start
+        command must report that when it happens, with the engine's own ERROR
+        line and the log that holds it, not wait out the 60 s lease poll and
+        point at the supervisor log."""
+        import nexus.commands.daemon as daemon_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        logs = config_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        native_log = logs / "storage_service_native.log"
+        # An earlier boot's failure is already in the file: it is not this
+        # start's reason and must not be reported as it.
+        native_log.write_text(
+            "2026-10-09 08:00:00,000 ERROR [main] d.n.service.Main - "
+            'event=stale_reason_from_an_earlier_boot error="old"\n'
+        )
+
+        def _popen_engine_refuses(*_a, **_k):
+            with native_log.open("a") as fh:
+                fh.write("2026-10-11 02:10:02,900 INFO  [main] d.n.service.Main - boot\n")
+                fh.write(self._ENGINE_ERROR + "\n")
+                fh.write("java.lang.IllegalArgumentException: must be in 60..3600\n")
+                fh.write("\tat dev.nexus.service.db.PgSession.<clinit>(PgSession.java:1)\n")
+            return _FakeProc(pid=42791, returncode=1)
+
+        sleeps = self._no_wait(monkeypatch, daemon_mod)
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_popen_engine_refuses),
+        ):
+            with pytest.raises(StorageServiceStartError) as exc_info:
+                daemon_mod.ensure_storage_supervisor(config_dir)
+
+        msg = str(exc_info.value)
+        assert "exited with code 1" in msg
+        assert "NX_SEARCH_PCI_SWEEP_SECONDS=10 must be in 60..3600" in msg
+        assert str(native_log) in msg
+        assert "stale_reason_from_an_earlier_boot" not in msg
+        assert "PgSession.java" not in msg, "the stack trace is not the reason line"
+        assert "within 60s" not in msg
+        assert sleeps == []
+
+    def test_supervisor_exit_with_no_engine_output_names_the_logs(
+        self, config_dir: Path, monkeypatch
+    ) -> None:
+        """A supervisor that dies before the engine wrote anything (bad argv,
+        import error) still fails at once and names where to look."""
+        import nexus.commands.daemon as daemon_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        sleeps = self._no_wait(monkeypatch, daemon_mod)
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(
+                daemon_mod, "_popen", return_value=_FakeProc(pid=42792, returncode=1)
+            ),
+        ):
+            with pytest.raises(StorageServiceStartError) as exc_info:
+                daemon_mod.ensure_storage_supervisor(config_dir)
+
+        msg = str(exc_info.value)
+        assert "exited with code 1" in msg
+        assert str(config_dir / "logs" / "storage_service.log") in msg
+        assert str(config_dir / "logs" / "storage_service.crash.log") in msg
+        assert sleeps == []
+
+    def test_supervisor_exit_reports_the_supervisors_own_error(
+        self, config_dir: Path, monkeypatch
+    ) -> None:
+        """The supervisor's ``Error: ...`` line goes to its stderr, which the
+        launcher points at the crash-channel log. That line is the reason for
+        every start failure the supervisor reports, one with no engine output
+        included (PostgreSQL did not start). An earlier start's line is not
+        this one's, and a credential value in it is redacted."""
+        import nexus.commands.daemon as daemon_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        logs = config_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        crash_log = logs / "storage_service.crash.log"
+        crash_log.write_text("Error: an earlier start's failure\n")
+
+        def _popen_supervisor_reports(*_a, **_k):
+            with crash_log.open("a") as fh:
+                fh.write(
+                    "Error: PostgreSQL did not start on port 15432 "
+                    "(password=hunter2-not-a-real-one)\n"
+                )
+            return _FakeProc(pid=42794, returncode=2)
+
+        self._no_wait(monkeypatch, daemon_mod)
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_popen_supervisor_reports),
+        ):
+            with pytest.raises(StorageServiceStartError) as exc_info:
+                daemon_mod.ensure_storage_supervisor(config_dir)
+
+        msg = str(exc_info.value)
+        assert "exited with code 2" in msg
+        assert "PostgreSQL did not start on port 15432" in msg
+        assert "an earlier start's failure" not in msg
+        assert "hunter2" not in msg and "[redacted]" in msg
+        assert str(crash_log) in msg
+
+    def test_a_live_supervisor_is_waited_on_until_it_publishes(
+        self, config_dir: Path, monkeypatch
+    ) -> None:
+        """The exit check must not end the wait for a supervisor that is still
+        starting: with the supervisor alive, the loop keeps polling and returns
+        the lease when it appears (here on the third in-loop lookup)."""
+        import nexus.commands.daemon as daemon_mod
+        from nexus.db import service_endpoint
+
+        sleeps: list[float] = []
+        module_time(monkeypatch, daemon_mod).sleep = sleeps.append
+        real_discover = service_endpoint.discover_storage_service_lease
+        lookups: list[int] = []
+
+        def _discover(registry, scope):
+            lookups.append(1)
+            if len(lookups) < 4:  # the pre-spawn lookup and two in-loop misses
+                return None
+            if len(lookups) == 4:
+                self._publish_fresh_lease(config_dir, port=18094)
+            return real_discover(registry, scope)
+
+        with (
+            patch("nexus.daemon.service_registry.process_state", return_value="S"),
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", return_value=_FakeProc(pid=42795)),
+            patch.object(
+                service_endpoint, "discover_storage_service_lease", side_effect=_discover
+            ),
+        ):
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        assert rec is not None and rec.endpoint.get("port") == 18094
+        assert len(sleeps) == 2
+
+    def test_supervisor_exit_after_publishing_returns_the_lease(
+        self, config_dir: Path, monkeypatch
+    ) -> None:
+        """A supervisor that exits 0 because a healthy one already owns the
+        lease (GH #1369) is not a failed start: the lease is there to return.
+        The in-loop lookup misses and the one made after the exit is seen hits."""
+        import nexus.commands.daemon as daemon_mod
+        from nexus.db import service_endpoint
+
+        self._no_wait(monkeypatch, daemon_mod)
+        real_discover = service_endpoint.discover_storage_service_lease
+        lookups: list[int] = []
+
+        def _discover(registry, scope):
+            lookups.append(1)
+            if len(lookups) == 2:  # the in-loop lookup that precedes poll()
+                return None
+            if len(lookups) == 3:
+                self._publish_fresh_lease(config_dir, port=18093)
+            return real_discover(registry, scope)
+
+        with (
+            patch("nexus.daemon.service_registry.process_state", return_value="S"),
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(
+                daemon_mod, "_popen", return_value=_FakeProc(pid=42793, returncode=0)
+            ),
+            patch.object(
+                service_endpoint, "discover_storage_service_lease", side_effect=_discover
+            ),
+        ):
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        assert rec is not None and rec.endpoint.get("port") == 18093
+        assert len(lookups) == 3
 
     def test_dead_supervisor_pid_relinquishes_and_respawns(
         self, config_dir: Path
@@ -4207,6 +4534,45 @@ class TestWaitForServiceReadyMigrationAware:
         ):
             with pytest.raises(StorageServiceStartError, match="exited with code 7"):
                 sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
+
+    def test_process_exit_reports_the_engines_own_error_line(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-qk6p6: the engine names why it refused to start in its own
+        log. The supervisor's error carries that line and the log's path, so
+        ``--foreground`` and the supervisor log both show the reason. Lines
+        from before this spawn's offset belong to an earlier boot."""
+        sup = _make_supervisor(config_dir, clock)
+        sup._log_path.parent.mkdir(parents=True, exist_ok=True)
+        earlier = (
+            "2026-10-09 08:00:00,000 ERROR [main] d.n.service.Main - "
+            'event=earlier_boot error="old"\n'
+        )
+        sup._log_path.write_text(earlier)
+        sup._log_offset_at_spawn = len(earlier.encode())
+        with sup._log_path.open("a") as fh:
+            fh.write(
+                "2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - "
+                'event=pg_session_env_invalid error="NX_SEARCH_PCI_SWEEP_SECONDS=10 '
+                'must be in 60..3600"\n'
+                "\tat dev.nexus.service.Main.main(Main.java:166)\n"
+            )
+        fake_proc = _FakeProc(pid=51002, returncode=1)
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
+            ),
+            patch.object(sup, "_release_stale_changelog_lock"),
+        ):
+            with pytest.raises(StorageServiceStartError) as exc_info:
+                sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
+
+        msg = str(exc_info.value)
+        assert "exited with code 1" in msg
+        assert "NX_SEARCH_PCI_SWEEP_SECONDS=10 must be in 60..3600" in msg
+        assert str(sup._log_path) in msg
+        assert "earlier_boot" not in msg
+        assert "Main.java:166" not in msg
 
     def test_process_exit_triggers_stale_lock_cleanup(
         self, config_dir: Path, clock: _FakeClock

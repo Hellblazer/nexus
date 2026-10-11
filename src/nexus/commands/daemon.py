@@ -646,6 +646,16 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
+    # nexus-qk6p6: where each engine log ends before the spawn, so a failed
+    # start reports this boot's reason and not an earlier one's.
+    engine_marks = _ssd.engine_log_marks(config_dir)
+    # The supervisor's stderr goes to the crash-channel log, so its own
+    # "Error: ..." line lands there. Marked after the open above, which rotates.
+    crash_log = config_dir / "logs" / "storage_service.crash.log"
+    try:
+        crash_mark = crash_log.stat().st_size
+    except OSError:
+        crash_mark = 0
     try:
         # nexus-6y4e0 surveyed this site and left it without a Job Object:
         # the supervisor this spawns is stopped by a LATER, separate CLI
@@ -655,7 +665,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
         # (RDR-224, nexus-f9bgu.17) is the spawn flags below plus a console
         # CTRL_BREAK from the stopper; the Job Object lives one level down,
         # around the ENGINE, in the supervisor.
-        _popen(
+        supervisor = _popen(
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,
@@ -665,15 +675,50 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     finally:
         if not isinstance(spawn_log, int):
             spawn_log.close()
+    logs_dir = config_dir / "logs"
+    supervisor_log = logs_dir / "storage_service.log"
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         existing = _service_endpoint.discover_storage_service_lease(registry, scope)
         if existing is not None:
             return existing
+        # nexus-qk6p6: a supervisor that has exited will never publish. An
+        # engine that refuses to start takes it down within a second, and
+        # polling for a lease alone waited out the full minute before saying
+        # so. One more lookup first: a supervisor that found a healthy owner
+        # already holding the lease exits 0 (GH #1369), and that lease is the
+        # answer.
+        returncode = supervisor.poll()
+        if returncode is not None:
+            existing = _service_endpoint.discover_storage_service_lease(registry, scope)
+            if existing is not None:
+                return existing
+            # The supervisor's own error first: it covers a failure with no
+            # engine output (PG did not start, no binary) and already carries
+            # the engine's line when the engine was the cause. The engine log
+            # is the fallback for a supervisor killed before it could report.
+            supervisor_error = _ssd.last_supervisor_error_line(crash_log, crash_mark)
+            if supervisor_error is not None:
+                detail = f"{supervisor_error}\n"
+            elif (found := _ssd.engine_exit_reason(engine_marks)) is not None:
+                engine_log, reason = found
+                detail = f"The engine reported: {reason}\nEngine log: {engine_log}\n"
+            else:
+                detail = "Neither the supervisor nor the engine left a reason.\n"
+            raise StorageServiceStartError(
+                f"Storage service supervisor exited with code {returncode} "
+                f"before the service became ready.\n{detail}"
+                f"Supervisor log: {supervisor_log}\n"
+                f"Supervisor stderr: {crash_log}"
+            )
         time.sleep(0.5)
+    engine_logs = [path for path in engine_marks if path.exists()] or [
+        next(iter(engine_marks))
+    ]
     raise StorageServiceStartError(
         "Storage service supervisor did not become ready within 60s. "
-        f"Check {config_dir / 'logs' / 'storage_service.log'} "
+        f"Check {supervisor_log} (supervisor) and "
+        f"{', '.join(str(path) for path in engine_logs)} (engine), "
         "or run 'nx daemon service start --foreground' to see the error."
     )
 

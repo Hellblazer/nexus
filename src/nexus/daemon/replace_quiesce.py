@@ -117,7 +117,7 @@ def default_ops(config_dir: Path) -> QuiesceOps:
         )
 
     def start_service() -> None:
-        from nexus.daemon.storage_service_daemon import ensure_storage_supervisor  # noqa: PLC0415 - deferred, heavy import
+        from nexus.commands.daemon import ensure_storage_supervisor  # noqa: PLC0415 - deferred, heavy import
 
         ensure_storage_supervisor(config_dir)
 
