@@ -799,8 +799,10 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         )
                         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred with its sibling
 
-                        new_pid = ensure_aspect_worker_daemon(config_dir=nexus_config_dir())
-                        if new_pid is False:
+                        # A bool, never a pid: True means a current-version
+                        # worker is up or a spawn was initiated (nexus-g9kjz).
+                        restarted = ensure_aspect_worker_daemon(config_dir=nexus_config_dir())
+                        if restarted is False:
                             # The spawner declined: `claude` is not on PATH, so a
                             # child would only refuse. Say it, not "started pid False".
                             actions.append(
@@ -812,7 +814,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         else:
                             actions.append(
                                 f"cycled {proc.kind} (pid {proc.pid} drained; "
-                                f"started pid {new_pid})"
+                                "restart initiated)"
                             )
                     except Exception as exc:  # noqa: BLE001 — never fail the finish pass on a respawn
                         # Say so loudly rather than reporting a restart:
