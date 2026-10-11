@@ -9,6 +9,12 @@ self-hosted-runner:
   # Windows release legs and the Windows rehearsal only (RDR-224 P0.1,
   # nexus-f9bgu.14). Registered the same way, so also a bare custom label. Its
   # jobs are gated on the repo variable NX_WINDOWS_RELEASE_LEGS == 'on'.
+  #
+  # lab-mac-s, lab-mac-m: the lab pool's macOS classes on hellmini (single-use
+  # runners, user ghlab; T2 homelab/labrun-pool-howto). The Linux classes are
+  # only ever named inside runs-on expressions, which actionlint does not check.
   labels:
     - hellmini
     - win-release
+    - lab-mac-s
+    - lab-mac-m

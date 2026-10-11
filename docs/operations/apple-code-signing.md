@@ -174,7 +174,8 @@ codesign -dv /tmp/testsign 2>&1 | grep TeamIdentifier   # must NOT say "not set"
 ### Rehearse on the release runner
 
 `.github/workflows/mac-signing-rehearsal.yml` runs `service/deploy/mac-sign.sh`,
-the same script the release runs, on hellmini against a throwaway binary: sign,
+the same script the release runs, against a throwaway binary on both mac runners
+(hellmini's persistent runner and the lab pool's `lab-mac-s` class): sign,
 notarize, then TeamIdentifier, Hardened Runtime, the entitlement and Gatekeeper
 on a quarantined copy. It fails on missing secrets. It runs on a develop push
 that touches the signing inputs, or by dispatch once the file is on `main`. Do

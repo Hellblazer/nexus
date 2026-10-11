@@ -20,6 +20,14 @@
 # seconds plus the notary wait.
 # Unlike the release, missing secrets FAIL here: a rehearsal that skips proves
 # nothing.
+#
+# Two runners (Sam, 2026-10-11): hellmini's persistent runner (user ghrunner),
+# and the lab pool's lab-mac-s class, a single-use runner on the same machine as
+# user ghlab, started with no login session and no keychain of its own. The mac
+# release legs are moving to the pool; this leg is what shows the real Developer
+# ID identity signs, notarizes and passes Gatekeeper there. The pool leg carries
+# the same owner guard and environment, and this workflow still never runs on
+# pull_request.
 name: mac-signing-rehearsal
 
 on:
@@ -47,10 +55,14 @@ concurrency:
 
 jobs:
   rehearse:
-    name: Sign + notarize a throwaway binary (hellmini)
+    name: Sign + notarize a throwaway binary (${{ matrix.runner }})
     # Guard: public repo, self-hosted runner.
     if: github.actor == 'Hellblazer'
-    runs-on: hellmini
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [hellmini, lab-mac-s]
+    runs-on: ${{ matrix.runner }}
     # The APPLE_* secrets are scoped to this environment; its deployment
     # policy admits develop, which is where this is dispatched from.
     environment: apple-signing
@@ -138,3 +150,14 @@ jobs:
       - name: Clean up signing keychain
         if: always()
         run: SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh cleanup
+
+      - name: The search list no longer names the temp keychain
+        if: always()
+        run: |
+          set -euo pipefail
+          list="$(security list-keychains -d user)"
+          printf '%s\n' "$list"
+          if [[ "$list" == *"sign.keychain-db"* ]]; then
+            echo "FAIL: cleanup left the deleted temp keychain on the user search list" >&2
+            exit 1
+          fi
