@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -63,9 +64,36 @@ class OrtShutdownSafetyTest {
         // regression on a host that is supposed to have the model.
         OrtTestModel.requireBgeOrSkip();
 
+        assertSweepExitsCleanly(work, Map.of());
+    }
+
+    /**
+     * nexus-y6aj0 — the wait bound expiring with init still in flight must also end in 143.
+     * A bound of zero makes that the case on every run that lands in init, which is what a
+     * slow host does to the default bound (observed on a 6-CPU cgroup with five suites
+     * running: {@code ort_init_shutdown_wait_timeout in_flight=1 bound_ms=3000}, then SIGSEGV
+     * in libonnxruntime). Before the fix the expiry called {@code System.exit}, whose hook
+     * phase lets onnxruntime-java free the environment under the live init.
+     */
+    @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void sigtermWithInitOutlastingTheBound_exitsCleanlyNeverCrashes(@TempDir Path work) throws Exception {
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"),
+                "SIGTERM semantics are POSIX-only");
+        OrtTestModel.requireBgeOrSkip();
+
+        List<Outcome> outcomes = assertSweepExitsCleanly(work, Map.of(OrtInitGate.WAIT_ENV, "0"));
+        long halted = outcomes.stream().filter(o -> o.output().contains("event=ort_init_shutdown_halt")).count();
+        assertThat(halted)
+                .as("non-vacuity: the bound must have expired with init in flight on at least "
+                        + MIN_MID_INIT_KILLS + " sweep points (outcomes: %s)", outcomes)
+                .isGreaterThanOrEqualTo(MIN_MID_INIT_KILLS);
+    }
+
+    private static List<Outcome> assertSweepExitsCleanly(Path work, Map<String, String> env) throws Exception {
         List<Outcome> outcomes = new ArrayList<>();
         for (int delay : KILL_DELAYS_MS) {
-            outcomes.add(runOnce(work, delay));
+            outcomes.add(runOnce(work, delay, env));
         }
 
         for (Outcome o : outcomes) {
@@ -85,9 +113,11 @@ class OrtShutdownSafetyTest {
                 .as("non-vacuity: SIGTERM must have landed inside session creation on at least "
                         + MIN_MID_INIT_KILLS + " sweep points (outcomes: %s)", outcomes)
                 .isGreaterThanOrEqualTo(MIN_MID_INIT_KILLS);
+        return outcomes;
     }
 
-    private static Outcome runOnce(Path work, int delayMs) throws IOException, InterruptedException {
+    private static Outcome runOnce(Path work, int delayMs, Map<String, String> env)
+            throws IOException, InterruptedException {
         Path java = Path.of(System.getProperty("java.home"), "bin", "java");
         ProcessBuilder pb = new ProcessBuilder(
                 java.toString(),
@@ -96,6 +126,7 @@ class OrtShutdownSafetyTest {
                 OrtShutdownProbe.class.getName())
                 .directory(work.toFile())
                 .redirectErrorStream(true);
+        pb.environment().putAll(env);
         Process p = pb.start();
 
         List<String> lines = new CopyOnWriteArrayList<>();

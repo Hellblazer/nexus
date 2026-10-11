@@ -74,13 +74,22 @@ import java.util.function.UnaryOperator;
  * init on hellmini (M-series, external NVMe): 0.56 to 0.60 s warm (4 runs); after
  * {@code purge} 0.73, 0.73, 0.80, 0.94, 2.08, 4.83 and 4.97 s (7 runs). So 3 s
  * covers warm and most cold starts, and the worst cold start (about 5 s) does NOT
- * fit any bound that also fits a 5 s grace: there the wait expires and exit can
- * still crash. Raise the bound and the stop grace together on such hosts. On expiry
- * exit proceeds anyway and
- * logs {@code event=ort_init_shutdown_wait_timeout}; an operator whose disk makes
- * init slower than the bound can raise it together with the stop grace.
+ * fit any bound that also fits a 5 s grace. An operator whose disk makes init
+ * slower than the bound can raise it together with the stop grace.
  * {@code tests/test_ort_init_gate_bound_lint.py} fails if the default reaches the
  * supervisor's grace.
+ *
+ * <p><b>When the bound expires</b> (nexus-y6aj0) native work is still live, so the
+ * hook phase must not start at all: {@code System.exit} there is the original
+ * crash (observed on a 6-CPU cgroup with five suites running:
+ * {@code ort_init_shutdown_wait_timeout in_flight=1 bound_ms=3000}, then SIGSEGV
+ * in libonnxruntime). The deferred-exit thread instead logs
+ * {@code event=ort_init_shutdown_halt}, runs the {@link #onBoundExpired cleanup
+ * the application registered} (the parts of its shutdown hook that do not touch
+ * ORT), and ends the process with {@code Runtime.halt(128+n)}. No hook runs, so
+ * onnxruntime-java never frees the environment, and the exit status is the one a
+ * clean stop gives. Sessions and the environment are not released; the process is
+ * ending and the OS reclaims them.
  *
  * <p>Not covered: a {@code System.exit} called from application code while a
  * lazy init is in flight (the only callers are boot-time failure paths, which
@@ -210,11 +219,16 @@ public final class OrtInitGate {
     private final long waitMillis;
     private final SignalInstaller signals;
     private final IntConsumer exitAction;
+    private final IntConsumer haltAction;
     private final List<String> exitSignals;
+    /** Application cleanup for the expired-bound path; see {@link #onBoundExpired}. */
+    private volatile Runnable boundExpiredCleanup;
+    /** One expired-bound exit per process: a second signal must not cut the first one's cleanup short. */
+    private final AtomicBoolean halting = new AtomicBoolean();
 
     OrtInitGate() {
         this(resolveWaitMillis(System::getenv), OrtInitGate::installJvmSignal, System::exit,
-                System.getProperty("os.name"));
+                Runtime.getRuntime()::halt, System.getProperty("os.name"));
     }
 
     /** Test seam: explicit bound, signal installer and exit action, on this JVM's own OS. */
@@ -224,10 +238,28 @@ public final class OrtInitGate {
 
     /** Test seam: as above with the OS name injected, so the Windows signal set runs on any host. */
     OrtInitGate(long waitMillis, SignalInstaller signals, IntConsumer exitAction, String osName) {
+        this(waitMillis, signals, exitAction, status -> { }, osName);
+    }
+
+    /** Test seam: as above with the expired-bound halt injected too. */
+    OrtInitGate(long waitMillis, SignalInstaller signals, IntConsumer exitAction, IntConsumer haltAction,
+                String osName) {
         this.waitMillis = waitMillis;
         this.signals = signals;
         this.exitAction = exitAction;
+        this.haltAction = haltAction;
         this.exitSignals = exitSignals(osName);
+    }
+
+    /**
+     * Register what the application must still do when the wait bound expires with
+     * native work in flight (nexus-y6aj0). That path ends in {@code Runtime.halt},
+     * so no shutdown hook runs; this is the hook's replacement there. It must not
+     * close an ORT session or the environment (the reason hooks are skipped), and
+     * it runs inside whatever is left of the stop grace.
+     */
+    public void onBoundExpired(Runnable cleanup) {
+        this.boundExpiredCleanup = cleanup;
     }
 
     /** {@value #WAIT_ENV} as milliseconds, or {@link #DEFAULT_WAIT_MILLIS} when unset or invalid. */
@@ -270,10 +302,33 @@ public final class OrtInitGate {
     /** Runs on the JVM's signal thread: hand the wait to a fresh thread, never block dispatch. */
     private void onExitSignal(int exitStatus) {
         Thread t = new Thread(() -> {
-            quiesce(waitMillis);
-            exitAction.accept(exitStatus);
+            if (quiesce(waitMillis)) {
+                exitAction.accept(exitStatus);
+            } else {
+                haltWithNativeWorkInFlight(exitStatus);
+            }
         }, "ort-init-deferred-exit");
         t.start();
+    }
+
+    /**
+     * The bound expired (or the wait was interrupted) with native work still live.
+     * {@code System.exit} would start onnxruntime-java's hook under it, so run the
+     * application's own cleanup and halt.
+     */
+    private void haltWithNativeWorkInFlight(int exitStatus) {
+        if (!halting.compareAndSet(false, true)) return;
+        Runnable cleanup = boundExpiredCleanup;
+        log.warn("event=ort_init_shutdown_halt status={} cleanup={} reason=native_work_in_flight",
+                exitStatus, cleanup != null);
+        if (cleanup != null) {
+            try {
+                cleanup.run();
+            } catch (Throwable t) {
+                log.warn("event=ort_init_shutdown_halt_cleanup_failed error=\"{}\"", t.toString());
+            }
+        }
+        haltAction.accept(exitStatus);
     }
 
     /**
@@ -320,7 +375,8 @@ public final class OrtInitGate {
      * {@code timeoutMillis} for all in-flight work to return. Inits have no
      * canceller and are waited for.
      *
-     * @return true when nothing is in flight on return; false on timeout or interrupt
+     * @return true when nothing is in flight on return; false on timeout or interrupt,
+     *         in which case the caller must not start the JVM's hook phase
      */
     public boolean quiesce(long timeoutMillis) {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);

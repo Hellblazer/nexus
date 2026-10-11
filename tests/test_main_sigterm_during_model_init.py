@@ -14,7 +14,8 @@ HOW. Spawn the jar, wait until it logs ``onnx_model_root`` (Main is about to con
 embedder), then SIGTERM at a sweep of offsets across the init window. Every run must exit
 143. Non-vacuity: several runs must have LANDED in init, which the fixed engine proves by
 logging ``ort_init_shutdown_wait`` (a pre-fix engine logs nothing there, so it fails this
-guard even on offsets where it happened not to crash).
+guard even on offsets where it happened not to crash). A second case runs the same sweep
+with the wait bound at zero, where the engine must halt with 143 instead (nexus-y6aj0).
 
 MODEL-GATED. Needs the ~416MB bge model. Nothing provisioned: skip, loudly. Half
 provisioned, or ``NX_REQUIRE_ORT_MODEL=1``: FAIL, so a skip cannot hide a regression on a
@@ -73,7 +74,7 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def _spawn(state: dict, dbname: str, log_path: Path):
+def _spawn(state: dict, dbname: str, log_path: Path, extra_env: dict[str, str]):
     java = shutil.which("java")
     assert java is not None, "no java on PATH"
     env = {
@@ -87,6 +88,7 @@ def _spawn(state: dict, dbname: str, log_path: Path):
         "NX_DB_ADMIN_URL": f"jdbc:postgresql://127.0.0.1:{state['pg_port']}/{dbname}",
         "NX_DB_ADMIN_USER": state["pg_user"],
         "NX_DB_ADMIN_PASS": "",
+        **extra_env,
     }
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_VOYAGE_API_KEY", None)  # local mode: bge loads at boot
@@ -97,14 +99,31 @@ def _spawn(state: dict, dbname: str, log_path: Path):
     ), fh
 
 
+#: (extra engine env, offsets, the log event that proves the sweep reached the path under
+#: test). The second case sets the wait bound to zero, so it expires with init in flight on
+#: every run that lands there: what a loaded host does to the default bound (nexus-y6aj0, a
+#: 6-CPU cgroup with five suites running). The expiry must halt, never ``System.exit``.
+#: Fewer offsets there: each one is an engine boot, and this is the slowest test in the suite.
+_CASES = (
+    pytest.param({}, _OFFSETS_S, "ort_init_shutdown_wait", id="init-fits-the-bound"),
+    pytest.param(
+        {"NX_ORT_INIT_SHUTDOWN_WAIT_MS": "0"}, (0.05, 0.1, 0.2, 0.3, 0.4),
+        "ort_init_shutdown_halt", id="bound-expires",
+    ),
+)
+
+
 @pytest.mark.needs_stamped_jar
-def test_sigterm_during_bge_init_exits_143_and_never_crashes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("extra_env", "offsets", "landed_event"), _CASES)
+def test_sigterm_during_bge_init_exits_143_and_never_crashes(
+    tmp_path: Path, extra_env: dict[str, str], offsets: tuple[float, ...], landed_event: str
+) -> None:
     _require_model_or_skip()
     state = ensure_engine()
     bindir = Path(state["pg_bin"])
     landed = 0
     results: list[str] = []
-    for offset in _OFFSETS_S:
+    for offset in offsets:
         db = "nx_sigterm_" + uuid.uuid4().hex[:12]
         subprocess.run(
             [str(bindir / "createdb"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
@@ -112,7 +131,7 @@ def test_sigterm_during_bge_init_exits_143_and_never_crashes(tmp_path: Path) -> 
             check=True, capture_output=True, timeout=60,
         )
         log = tmp_path / f"boot-{offset}.log"
-        proc, fh = _spawn(state, db, log)
+        proc, fh = _spawn(state, db, log, extra_env)
         try:
             deadline = time.time() + _BOOT_TIMEOUT_S
             while time.time() < deadline and "onnx_model_root" not in log.read_text(errors="replace"):
@@ -138,7 +157,7 @@ def test_sigterm_during_bge_init_exits_143_and_never_crashes(tmp_path: Path) -> 
                 capture_output=True, timeout=60,
             )
         text = log.read_text(errors="replace")
-        waited = "ort_init_shutdown_wait" in text
+        waited = landed_event in text
         landed += waited
         results.append(f"+{offset}s rc={rc} waited={waited}")
         assert "A fatal error has been detected" not in text, (
@@ -149,6 +168,6 @@ def test_sigterm_during_bge_init_exits_143_and_never_crashes(tmp_path: Path) -> 
             f"ORT logging-manager SEGV, nexus-o5xyx.1). log tail:\n{text[-2500:]}"
         )
     assert landed >= _MIN_LANDED, (
-        f"non-vacuity: SIGTERM must have landed inside model init (deferral logged) on >= {_MIN_LANDED} "
-        f"runs, got {landed}: {results}"
+        f"non-vacuity: SIGTERM must have landed inside model init ({landed_event} logged) on >= "
+        f"{_MIN_LANDED} runs, got {landed}: {results}"
     )
