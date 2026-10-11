@@ -80,6 +80,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import signal
 import socket
@@ -172,12 +173,14 @@ _LOW_PORT_ATTEMPTS = 200
 #: runner host, and two agents' suites share a laptop, so several pytest
 #: sessions run at once as one user. The worker index alone put gw0 of EVERY
 #: session on the same slice, gw1 on the next, and so on. The slice index is
-#: therefore ROTATED by a per-session offset (``_session_port_offset``); a
-#: rotation is a bijection over the slice table, so the workers of one session
-#: keep disjoint slices. What remains is a probabilistic reduction, not an
-#: exclusion: two sessions whose rotated windows overlap can still draw one port,
-#: which is why ``_boot`` also proves each listener is its own and retries a lost
-#: race (``_PORT_RACE_ATTEMPTS``).
+#: therefore ROTATED by a per-session offset (``_session_port_offset``). A
+#: rotation PERMUTES the slice table: the workers of one session keep disjoint
+#: slices, but two sessions that each use most of the slices (two ``-n auto``
+#: runs) still share exactly as many slices as before. It lowers collisions only
+#: when the sessions' combined worker count is below the slice count. What
+#: closes the hole is not the rotation: ``_boot`` proves each listener is its
+#: own (``_wait_engine_ready``) and retries a lost race
+#: (``_PORT_RACE_ATTEMPTS``).
 _WORKER_SHARD_WIDTH = 500
 _WORKER_SHARD_BASE = _LOW_PORT_RANGE.start
 _WORKER_SHARD_MAX_INDEX = (
@@ -379,11 +382,18 @@ def _ensure_onnx_models(spawn_env: dict[str, str]) -> Path | None:
 def _session_port_offset(slices: int) -> int:
     """This session's rotation of the slice table, in ``range(slices)``.
 
-    Keyed on what every xdist worker of one session shares and no two concurrent
-    sessions do: ``PYTEST_XDIST_TESTRUNUID`` (xdist sets it in each worker from
-    the controller's per-run uuid), else the controller's pid, which is the
-    worker's parent. Deterministic within a session, so a worker computes the
-    same offset on every call.
+    A rotation permutes slices; it does not make two busy sessions disjoint (see
+    the comment above ``_WORKER_SHARD_WIDTH``). Keyed on what every xdist worker of
+    one session shares and no two concurrent sessions do:
+    ``PYTEST_XDIST_TESTRUNUID`` (xdist sets it in each worker, in
+    ``xdist/remote.py``, together with ``PYTEST_XDIST_WORKER`` from the controller's
+    per-run uuid). The only caller, ``_worker_shard_range``, asks for an offset
+    only when ``PYTEST_XDIST_WORKER`` names a ``gw<N>`` worker; non-xdist runs and
+    the controller take the full range and never reach here. So the
+    ``os.getppid()`` fallback (the controller's pid, which is the worker's parent)
+    applies only to an xdist too old to set ``PYTEST_XDIST_TESTRUNUID``, or to a
+    caller that sets ``PYTEST_XDIST_WORKER`` by hand. Deterministic within a
+    session, so a worker computes the same offset on every call.
     """
     salt = os.environ.get("PYTEST_XDIST_TESTRUNUID") or f"ppid-{os.getppid()}"
     digest = hashlib.sha256(salt.encode()).digest()
@@ -505,6 +515,14 @@ _PORT_RACE_ATTEMPTS = 4
 _ENGINE_READY_TIMEOUT_S = 60.0
 _ENGINE_POLL_S = 0.1
 
+#: The fixed part of the line ``NexusService.start`` logs once ``HttpServer.start``
+#: returned: ``log.info("event=service_started port={}", getPort())``. The boot
+#: appends the port and matches to end of line, so ``port=2018`` never matches a
+#: line for ``port=20184``. ``tests/test_engine_ready_log_line_lint.py`` pins this
+#: text against the Java source; a rename there would otherwise cost every boot the
+#: full readiness timeout.
+_ENGINE_READY_PREFIX = "event=service_started port="
+
 #: Text a failed bind leaves behind: the JVM's ``BindException`` message (Windows
 #: appends ``: bind``) and Postgres's ``could not bind ... Address already in use``.
 _BIND_CONFLICT_MARKERS = ("address already in use", "only one usage of each socket address")
@@ -534,15 +552,16 @@ def _wait_engine_ready(
     A connect to the port proves only that something listens there, and a sibling
     session's postmaster or engine does (nexus-kmfz6). The engine's own log is the
     proof instead: ``NexusService.start`` logs ``event=service_started port=<N>``
-    only after ``HttpServer.create`` bound the port, and the log is the file this
-    boot's JVM writes (truncated per attempt), so no other process can put the line
-    there. A JVM that cannot bind exits, which this reads from ``proc.poll()``.
+    only after ``server.start()`` returned (the line must END at the port number,
+    see ``_ENGINE_READY_PREFIX``), and the log is the file this boot's JVM writes
+    (truncated per attempt), so no other process can put the line there. A JVM that cannot bind exits, which this reads from ``proc.poll()``.
 
     Raises :class:`_PortLost` when the process exited on a bind failure,
     ``RuntimeError`` when it exited for any other reason, and ``TimeoutError`` when
     the line never appeared.
     """
-    marker = f"event=service_started port={port}"
+    marker = f"{_ENGINE_READY_PREFIX}{port}"
+    ready_line = re.compile(rf"^.*{re.escape(marker)}\s*$", re.MULTILINE)
     deadline = time.monotonic() + timeout
     while True:
         rc = proc.poll()
@@ -558,7 +577,7 @@ def _wait_engine_ready(
                 f"T2 engine substrate: service did not bind port {port}; the engine "
                 f"exited with rc={rc}. Tail of engine log ({log_path}):\n{text[-2000:]}"
             )
-        if marker in text:
+        if ready_line.search(text):
             # Confirm it answers, then that the same process is still the one answering.
             _wait_tcp("127.0.0.1", port, timeout=max(1.0, deadline - time.monotonic()))
             if proc.poll() is None:
@@ -1199,7 +1218,7 @@ def _boot() -> dict:
             )
         except TimeoutError:
             kill_group(svc)
-            svc_log.flush()
+            svc_log.close()
             with open(svc_log_path, encoding="utf-8", errors="replace") as fh:
                 out = fh.read()[-2000:]
             _kill_pg()

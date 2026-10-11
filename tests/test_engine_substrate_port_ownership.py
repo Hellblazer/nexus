@@ -23,6 +23,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -64,14 +65,30 @@ class _ForeignListener:
         self._thread.join(timeout=5)
 
 
+#: Ports a test hands the boot. Every one is bound on port 0 by the test and the
+#: socket stays open until the test ends, so the number is never a probe-and-release
+#: guess that a sibling session (or this very process) could take in between.
+_HELD: dict[int, socket.socket] = {}
+#: Held sockets a fake engine has turned into listeners.
 _ENGINE_SOCKETS: list[socket.socket] = []
 
 
+def _reserve_port() -> int:
+    """A port bound on port 0 and held open for the test's whole life."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port: int = sock.getsockname()[1]
+    _HELD[port] = sock
+    return port
+
+
 @pytest.fixture(autouse=True)
-def _close_engine_sockets() -> Iterator[None]:
+def _close_held_sockets() -> Iterator[None]:
     yield
-    while _ENGINE_SOCKETS:
-        _ENGINE_SOCKETS.pop().close()
+    for sock in (*_ENGINE_SOCKETS, *_HELD.values()):
+        sock.close()
+    _ENGINE_SOCKETS.clear()
+    _HELD.clear()
 
 
 @pytest.fixture
@@ -94,6 +111,7 @@ class _Harness:
         self.spawned_ports: list[int] = []
         self.killed: list[int] = []
         self.pg_ctl_ports: list[int] = []
+        self.pg_stops: list[str] = []
         harness = self
 
         real_mkdtemp = tempfile.mkdtemp
@@ -109,6 +127,8 @@ class _Harness:
         monkeypatch.setattr(sub, "_read_postmaster_pid", lambda _pgdata: 313131)
 
         def _fake_run(args, **_kwargs):
+            if args and "pg_ctl" in str(args[0]) and "stop" in args:
+                harness.pg_stops.append(str(args[args.index("-D") + 1]))
             if args and "pg_ctl" in str(args[0]) and "start" in args:
                 port = int(str(args[args.index("-o") + 1]).split("-p ")[1].split()[0])
                 harness.pg_ctl_ports.append(port)
@@ -130,13 +150,17 @@ class _Harness:
                 harness.spawned_ports.append(port)
                 verdict = harness.engine_script.pop(0) if harness.engine_script else "ok"
                 self.returncode: int | None = None
-                if verdict == "ok":
-                    # A real engine that bound its port: it listens there and says so.
-                    listener = socket.socket()
-                    listener.bind(("127.0.0.1", port))
+                self._polls_before_death: int | None = None
+                if verdict in ("ok", "wrong_port", "longer_port", "dies_after_ready"):
+                    # An engine that bound its port: the held socket starts listening.
+                    listener = _HELD.pop(port)
                     listener.listen(16)
                     _ENGINE_SOCKETS.append(listener)
-                    stdout.write(f"INFO  NexusService - event=service_started port={port}\n".encode())
+                    logged = {"wrong_port": port + 1, "longer_port": f"{port}4"}.get(verdict, port)
+                    stdout.write(f"INFO  NexusService - event=service_started port={logged}\n".encode())
+                    if verdict == "dies_after_ready":
+                        # Alive for the first poll, found dead on the next.
+                        self._polls_before_death = 1
                 elif verdict == "bind_lost":
                     stdout.write(b"Exception in thread \"main\" java.net.BindException: Address already in use\n")
                     self.returncode = 1
@@ -147,6 +171,11 @@ class _Harness:
                 stdout.flush()
 
             def poll(self) -> int | None:
+                if self._polls_before_death is not None:
+                    if self._polls_before_death > 0:
+                        self._polls_before_death -= 1
+                        return None
+                    self.returncode = 1
                 return self.returncode
 
         setattr_in(monkeypatch, sub, "subprocess.Popen", _FakeEngine)
@@ -181,10 +210,11 @@ def _harness(tmp_path, monkeypatch, *, pg_ports, engine_ports, engine_script, pg
     return h
 
 
-def _free_unused_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+class _AliveProc:
+    """A process that never exits."""
+
+    def poll(self) -> int | None:
+        return None
 
 
 class TestEngineListenerIdentity:
@@ -197,7 +227,7 @@ class TestEngineListenerIdentity:
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         _harness(
             tmp_path, monkeypatch,
-            pg_ports=[_free_unused_port()],
+            pg_ports=[_reserve_port()],
             engine_ports=[foreign_listener.port],
             engine_script=["silent"],
         )
@@ -210,10 +240,10 @@ class TestEngineListenerIdentity:
         """The reported shape: the JVM dies on its bind failure while a foreign
         listener holds the port and the connect-check passes."""
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
-        second = _free_unused_port()
+        second = _reserve_port()
         h = _harness(
             tmp_path, monkeypatch,
-            pg_ports=[_free_unused_port()],
+            pg_ports=[_reserve_port()],
             engine_ports=[foreign_listener.port, second],
             engine_script=["bind_lost", "ok"],
         )
@@ -223,29 +253,110 @@ class TestEngineListenerIdentity:
         assert h.spawned_ports == [foreign_listener.port, second]
         assert h.killed, "the engine that lost the race is torn down before the retry"
 
-    def test_an_engine_crash_that_is_not_a_bind_failure_is_not_retried(
+    def test_an_engine_crash_that_is_not_a_bind_failure_is_not_retried_and_fails_fast(
         self, tmp_path, monkeypatch,
     ) -> None:
+        """A dead JVM is read from ``poll()``, not waited out: with a 30 s readiness
+        timeout in force the failure must still land in seconds, carrying the log tail."""
+        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 30.0, raising=False)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         h = _harness(
             tmp_path, monkeypatch,
-            pg_ports=[_free_unused_port()],
-            engine_ports=[_free_unused_port(), _free_unused_port()],
+            pg_ports=[_reserve_port()],
+            engine_ports=[_reserve_port(), _reserve_port()],
             engine_script=["crash", "ok"],
         )
-        with pytest.raises(RuntimeError, match="boom"):
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="boom") as err:
+            sub._boot()
+        assert time.monotonic() - started < 10.0, "a crash waited out the readiness timeout"
+        assert "Tail of engine log" in str(err.value)
+        assert "IllegalStateException" in str(err.value)
+        assert len(h.spawned_ports) == 1
+
+    @pytest.mark.parametrize("verdict", ["wrong_port", "longer_port"])
+    def test_a_ready_line_for_another_port_is_not_ready(
+        self, tmp_path, monkeypatch, verdict,
+    ) -> None:
+        """The right event for a DIFFERENT port (``port=N+1``), and a LONGER port that
+        begins with this one's digits (``port=N4``), are not this engine's ready line,
+        even though the listener answers a connect."""
+        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 0.5, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
+        _harness(
+            tmp_path, monkeypatch,
+            pg_ports=[_reserve_port()],
+            engine_ports=[_reserve_port()],
+            engine_script=[verdict],
+        )
+        with pytest.raises(RuntimeError, match="did not bind port"):
+            sub._boot()
+
+    def test_the_ready_line_ends_at_the_port_number_with_either_line_ending(
+        self, tmp_path,
+    ) -> None:
+        port = _reserve_port()
+        _HELD[port].listen(16)  # the readiness wait also connects to the port
+        log = tmp_path / "engine.log"
+        for ending in ("\n", "\r\n", ""):
+            log.write_text(f"INFO  NexusService - {sub._ENGINE_READY_PREFIX}{port}{ending}")
+            sub._wait_engine_ready(_AliveProc(), port, str(log), timeout=0.2)
+
+    def test_an_engine_that_dies_after_the_ready_line_is_not_ready(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Marker present and the port answers, then the process is found dead."""
+        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 5.0, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
+        h = _harness(
+            tmp_path, monkeypatch,
+            pg_ports=[_reserve_port()],
+            engine_ports=[_reserve_port(), _reserve_port()],
+            engine_script=["dies_after_ready", "ok"],
+        )
+        with pytest.raises(RuntimeError, match="exited with rc=1"):
             sub._boot()
         assert len(h.spawned_ports) == 1
+        assert h.killed, "the dead engine's group is torn down"
+
+    def test_an_engine_timeout_closes_the_log_handle_and_stops_postgres(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """All three failure branches end in the same state: group killed, log handle
+        closed, Postgres stopped."""
+        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 0.3, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
+        opened: list = []
+        real_open = open
+
+        def _tracking_open(file, mode="r", *a, **kw):
+            fh = real_open(file, mode, *a, **kw)
+            if str(file).endswith("engine.log") and "w" in mode:
+                opened.append(fh)
+            return fh
+
+        monkeypatch.setattr("builtins.open", _tracking_open)
+        h = _harness(
+            tmp_path, monkeypatch,
+            pg_ports=[_reserve_port()],
+            engine_ports=[_reserve_port()],
+            engine_script=["silent"],
+        )
+        with pytest.raises(RuntimeError, match="did not bind port"):
+            sub._boot()
+        assert h.killed
+        assert opened and all(fh.closed for fh in opened), "engine log handle left open"
+        assert h.pg_stops, "Postgres is stopped on the way out"
 
     def test_the_retry_is_bounded_then_names_the_port_and_a_foreign_listener(
         self, tmp_path, monkeypatch, foreign_listener,
     ) -> None:
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         attempts = sub._PORT_RACE_ATTEMPTS
-        ports = [foreign_listener.port] + [_free_unused_port() for _ in range(attempts - 1)]
+        ports = [foreign_listener.port] + [_reserve_port() for _ in range(attempts - 1)]
         h = _harness(
             tmp_path, monkeypatch,
-            pg_ports=[_free_unused_port()],
+            pg_ports=[_reserve_port()],
             engine_ports=ports,
             engine_script=["bind_lost"] * attempts,
         )
@@ -267,11 +378,11 @@ class TestPostgresPortRace:
     def test_a_postmaster_that_lost_the_bind_race_is_retried_on_a_new_port(
         self, tmp_path, monkeypatch, foreign_listener,
     ) -> None:
-        second = _free_unused_port()
+        second = _reserve_port()
         h = _harness(
             tmp_path, monkeypatch,
             pg_ports=[foreign_listener.port, second],
-            engine_ports=[_free_unused_port()],
+            engine_ports=[_reserve_port()],
             engine_script=["ok"],
             pg_ctl_script=["port_in_use", "ok"],
         )
@@ -284,11 +395,11 @@ class TestPostgresPortRace:
         self, tmp_path, monkeypatch, foreign_listener,
     ) -> None:
         attempts = sub._PORT_RACE_ATTEMPTS
-        ports = [foreign_listener.port] + [_free_unused_port() for _ in range(attempts - 1)]
+        ports = [foreign_listener.port] + [_reserve_port() for _ in range(attempts - 1)]
         _harness(
             tmp_path, monkeypatch,
             pg_ports=ports,
-            engine_ports=[_free_unused_port()],
+            engine_ports=[_reserve_port()],
             engine_script=["ok"],
             pg_ctl_script=["port_in_use"] * attempts,
         )
