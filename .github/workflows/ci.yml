@@ -459,8 +459,12 @@ jobs:
           if-no-files-found: error
 
   test:
-    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-m` is the owned lab pool (8
-    # cores, 16 GB hard cap, see AGENTS.md § Self-hosted runners and fork PRs).
+    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-6c18g` is the owned lab pool
+    # (6 cores, 18 GB hard cap, see AGENTS.md § Self-hosted runners and fork
+    # PRs). The class is shaped for this job: six of them fit on chas at once
+    # (118 GB allocatable), and the 5 xdist workers in the test step need about
+    # 15 GB at the 3 GB per worker measured on chas (95 GB at 32, 2026-10-08).
+    # A larger class runs fewer shards at a time: only two `lab-l` fit.
     # A pull request from a FORK stays on `ubuntu-latest`, so outside code
     # never reaches owned hardware even if its run is approved by mistake.
     # Repo variable NX_CI_POOL=off sends every run back to `ubuntu-latest`
@@ -468,7 +472,7 @@ jobs:
     # The pool's $HOME outlives the job and is shared with the sibling shards,
     # so the steps below skip the Actions cache for $HOME paths there.
     name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
-    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-m' }}
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-6c18g' }}
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
     # nexus-n0ful: also needs `changes` directly (not just transitively via
@@ -799,13 +803,16 @@ jobs:
         # missing from the file (new tests since the last refresh), and
         # extra ids for tests since removed are simply ignored. No CI
         # enforcement of freshness by design — this is a scheduling hint,
-        # not a correctness input. Serial execution WITHIN the shard is
-        # unchanged — this is matrix parallelism across runners, not
-        # -n/xdist in-process parallelism, so the no-parallel-tests
-        # invariant still holds.
+        # not a correctness input. On a hosted runner execution WITHIN the
+        # shard is serial (4 cores, 16 GB). On the pool each shard also runs
+        # 5 xdist workers (nexus-480wm, Sam 2026-10-10): not `-n auto`, which
+        # there means one worker per granted core, 6, about 18 GB against an
+        # 18 GB cap that kills the step (exit 137). pytest-split picks the
+        # shard's tests first and xdist spreads them, so the split is the same
+        # on both.
         run: |
           set -euo pipefail
-          uv run pytest tests/ -q --durations=25 \
+          uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 5' || '' }} \
             --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
 

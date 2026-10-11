@@ -164,9 +164,11 @@ macOS-specific runs, and the overflow when chas is busy. The T2 how-tos
 
 **The lab pool** (Sam, 2026-10-10, nexus-480wm; T2 `homelab/labrun-pool-howto`)
 is a set of single-use runners that a scheduler on chas starts per job, with
-labels `lab-s`, `lab-m`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
+labels `lab-s`, `lab-m`, `lab-6c18g`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
 (macOS on hellmini). Two jobs use it: the Service CI Java job on `lab-l` and the
-pytest shard matrix on `lab-m`. Every other job stays where it was. Three things
+pytest shard matrix on `lab-6c18g` (6 cores, 18 GB; six fit on chas at once),
+with 5 xdist workers per shard (about 3 GB a worker, measured on chas
+2026-10-08). Every other job stays where it was. Three things
 differ from a GitHub-hosted runner:
 
 - **A pull request from a fork never runs there.** Both jobs choose the runner
@@ -182,11 +184,14 @@ differ from a GitHub-hosted runner:
   then use the files on disk when their digests match and install a download by
   rename. A step that writes a fixed path under `$HOME` must be safe against a
   sibling job doing the same.
-- **No sudo, and a hard memory cap** (16 GB on `lab-m`, 48 GB on `lab-l`); a
+- **No sudo, and a hard memory cap** (18 GB on `lab-6c18g`, 48 GB on `lab-l`); a
   step over the cap is killed with exit 137. Containers started through the
   host Docker daemon are outside the cap. The host session caps how many nexus
-  jobs run at once, and a hand run as `nxtest` on chas is invisible to the
-  scheduler: while nexus CI is active, run at most 16 workers there.
+  jobs run at once. A hand run as `nxtest` on chas is invisible to the
+  scheduler unless it goes through the wrapper, so run a heavy suite there as
+  `lab-run -c <class> -- <command>`: it queues behind CI, then runs the
+  command in place with the class's cores and memory cap, and `-n auto`
+  resolves to the grant.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two persistent self-hosted registrations, `hellmini`
