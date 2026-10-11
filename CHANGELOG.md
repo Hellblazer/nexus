@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A docling that cannot be imported fails the PDF instead of quietly switching to plain PyMuPDF text, and `nx doctor` reports it.** A docling failure on one PDF still falls back to PyMuPDF. An import failure is a broken install: before, every PDF without formulas then came back as plain text (no layout-aware reading order, headings or tables) with one progress line to show for it. Indexing now stops with the missing module's name and the reinstall command, and `nx doctor` has a `PDF extraction (docling)` row that checks the modules docling's PDF pipeline imports are present.
+
 ## [7.77.1] - 2026-10-11
 
 Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` moves from 0.1.159). Fixes only. `nx daemon service stop` no longer signals unrelated processes, `nx daemon service start` reports an engine that refuses to start, and indexing many PDFs no longer grows by a model load per file. The engine carries three fixes (a stop during a slow model load, ONNX threads under a CPU limit, `Connection: close` on a large unread body) and no schema change or wire change.

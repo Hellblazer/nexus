@@ -2625,6 +2625,59 @@ def _check_orphan_pipelines() -> list[HealthResult]:
     )]
 
 
+#: What docling's PDF pipeline imports when it runs. `nx doctor` looks these up
+#: without importing them (torch alone costs seconds).
+_DOCLING_PIPELINE_MODULES: tuple[str, ...] = (
+    "docling", "docling_core", "docling_parse", "docling_ibm_models", "cv2", "torch", "torchvision",
+)
+
+
+def _check_docling_importable(
+    find_spec: Callable[[str], object | None] | None = None,
+) -> list[HealthResult]:
+    """Every PDF without formulas is extracted by docling, and a docling
+    pass that dies on an import is an error, not a fallback
+    (``PDFExtractor._docling_not_importable``). This row says so before an
+    index run does. It resolves each module with ``find_spec`` and imports
+    nothing, which is enough for the failure seen in the field shape: a
+    distribution still listed while its package directory is gone (two
+    distributions owning ``cv2/``, one uninstalled).
+
+    Always applicable: these are required dependencies, so a fresh install
+    has them and the row is a pass there. *find_spec* is the resolver, for
+    tests; the default is ``importlib.util.find_spec``.
+    """
+    if find_spec is None:
+        import importlib.util  # noqa: PLC0415 — deferred: only this check needs it
+
+        find_spec = importlib.util.find_spec
+
+    missing: list[str] = []
+    for name in _DOCLING_PIPELINE_MODULES:
+        try:
+            found = find_spec(name) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            missing.append(name)
+    if not missing:
+        return [HealthResult(
+            label="PDF extraction (docling)", ok=True,
+            detail=f"{len(_DOCLING_PIPELINE_MODULES)} pipeline modules present",
+        )]
+    from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+    reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
+    return [HealthResult(
+        label="PDF extraction (docling)", ok=False,
+        detail=f"cannot find {', '.join(missing)}: indexing a PDF without formulas will fail",
+        fix_suggestions=[
+            f"Reinstall: {reinstall}",
+            "In a source checkout: uv sync --reinstall-package opencv-python-headless (for a missing cv2)",
+        ],
+    )]
+
+
 def _check_mineru_server() -> list[HealthResult]:
     """nexus-far1c: report whether math PDFs will GET a MinerU server —
     not whether one happens to be running at this instant.
@@ -10421,6 +10474,7 @@ def run_health_checks(
     results.extend(_check_garbage())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
+    results.extend(_check_docling_importable())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())

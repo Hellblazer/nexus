@@ -1438,6 +1438,8 @@ class PDFExtractor:
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
                 return self._extract_with_docling(pdf_path, on_page=on_page)
+            except ImportError as exc:
+                raise self._docling_not_importable(pdf_path, exc) from exc
             except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
                 _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
                 _log.debug("docling_extraction_failed", error=str(exc), path=str(pdf_path))
@@ -1473,6 +1475,8 @@ class PDFExtractor:
         _progress(f"  Docling: extracting {pdf_path.name}…")
         try:
             fast_result = self._extract_with_docling(pdf_path, enriched=False)
+        except ImportError as exc:
+            raise self._docling_not_importable(pdf_path, exc) from exc
         except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
             _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
             _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
@@ -1497,6 +1501,31 @@ class PDFExtractor:
 
         return self._route_to_mineru(
             pdf_path, formula_count, on_page=on_page, on_formula_oom=on_formula_oom,
+        )
+
+    @staticmethod
+    def _docling_not_importable(pdf_path: Path, exc: ImportError) -> RuntimeError:
+        """The error for a docling pass that died on an import.
+
+        A docling failure on one PDF falls back to PyMuPDF. An ImportError is
+        not that: docling and what its PDF pipeline loads are required
+        dependencies, so a missing module means the install is broken, and
+        the fallback would then quietly give every PDF the plain extraction
+        (no layout-aware reading order, headings or tables) with one
+        progress line to show for it. Seen 2026-10-11 in a development venv
+        whose ``cv2`` package directory was gone while its distribution was
+        still listed: every non-formula PDF came back ``pymupdf_normalized``.
+        Same reasoning as the MinerU branch of auto mode (nexus-2fyb).
+        """
+        _log.error("docling_import_failed", error=str(exc), path=str(pdf_path))
+        from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+        reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
+        return RuntimeError(
+            f"PDF {pdf_path.name}: docling could not be loaded ({exc}). Docling is a "
+            f"required dependency, so the conexus install is broken; `nx doctor` names "
+            f"the missing module. Reinstall with `{reinstall}`. Nothing was extracted: "
+            f"falling back to plain PyMuPDF text here would hide the broken install."
         )
 
     def _route_to_mineru(
