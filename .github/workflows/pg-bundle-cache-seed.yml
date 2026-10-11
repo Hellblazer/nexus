@@ -21,10 +21,12 @@
 # why 14.0 is the floor that actually binds a mac-arm64 local install is
 # recorded ONCE, canonically, in service/pom.xml's native-libs-mac profile
 # comment — read it there rather than here. The <runner>
-# segment is the resolved runner LABEL (e.g. "hellmini", "macos-14"). This
-# file seeds BOTH mac-arm64 labels on push/schedule (nexus-n7q28: keeps the
-# macos-14 fallback's cache warm too, not just whichever label the release
-# workflow currently defaults to) and only the chosen one on
+# segment is the resolved runner LABEL (e.g. "lab-mac-m", "macos-14"). This
+# file seeds TWO mac-arm64 labels on push/schedule: lab-mac-m, the release
+# default since nexus-9q6ox (the lab pool's class on the hellmini Mac mini),
+# and macos-14 (nexus-n7q28: keeps the fallback's cache warm too). The
+# `hellmini` label, the machine's persistent runner, is seeded only by a
+# dispatch that names it. Only the chosen label is seeded on
 # workflow_dispatch — see the `plan` job below, which computes the seed
 # matrix per trigger. scripts/build_pg_bundle.sh's Darwin `brew install flex
 # bison` step is blocked by a Homebrew-permissions gap on hellmini as of
@@ -55,13 +57,14 @@ on:
     inputs:
       mac_runner:
         description: >-
-          Runner label for the mac-arm64 leg. Default is the hellmini
-          self-hosted Mac mini (nexus-yd9po); fall back to macos-14 when
-          hellmini is offline.
+          Runner label for the mac-arm64 leg. Default is lab-mac-m, the lab
+          pool's class on the hellmini Mac mini (nexus-9q6ox); hellmini is its
+          persistent runner; fall back to macos-14 when the machine is offline.
         required: false
-        default: hellmini
+        default: lab-mac-m
         type: choice
         options:
+          - lab-mac-m
           - hellmini
           - macos-14
 
@@ -98,13 +101,13 @@ jobs:
           linux='{"arch":"linux-amd64","runner":"ubuntu-latest","image":"quay.io/pypa/manylinux_2_28_x86_64"},{"arch":"linux-arm64","runner":"ubuntu-24.04-arm","image":"quay.io/pypa/manylinux_2_28_aarch64"}'
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Dispatch names exactly one mac runner -- seed only that key.
-            runner="${MAC_RUNNER_INPUT:-hellmini}"
+            runner="${MAC_RUNNER_INPUT:-lab-mac-m}"
             mac="{\"arch\":\"mac-arm64\",\"runner\":\"$runner\",\"image\":\"\"}"
           else
             # push / schedule (no inputs): seed BOTH mac cache keys
             # (nexus-n7q28) so the macos-14 fallback stays warm alongside
-            # hellmini, not just whichever label happens to be the default.
-            mac='{"arch":"mac-arm64","runner":"hellmini","image":""},{"arch":"mac-arm64","runner":"macos-14","image":""}'
+            # lab-mac-m, not just whichever label happens to be the default.
+            mac='{"arch":"mac-arm64","runner":"lab-mac-m","image":""},{"arch":"mac-arm64","runner":"macos-14","image":""}'
           fi
           targets="[$linux,$mac]"
           echo "$targets" | jq -e . >/dev/null  # fail loud on malformed JSON

@@ -615,7 +615,11 @@ def _promotes(switch: str, **results: str) -> bool:
     return bool(eval(expr, {"R": results, "SWITCH": switch}))  # noqa: S307 - the expression is the repo's own
 
 
-BASE = {"create-release": "success", "build-publish": "success", "build-publish-pg-bundle": "success"}
+BASE = {
+    "create-release": "success", "build-publish": "success", "build-publish-pg-bundle": "success",
+    # nexus-9q6ox: the mac-arm64 smoke is its own job (hellmini) and promotion requires it.
+    "smoke-mac-arm64": "success",
+}
 
 
 def test_promotion_with_the_switch_off_is_what_it_was_before_the_windows_legs_existed() -> None:
@@ -624,6 +628,8 @@ def test_promotion_with_the_switch_off_is_what_it_was_before_the_windows_legs_ex
     assert _promotes("off", **BASE, **skipped) is True
     assert _promotes("", **{**BASE, "build-publish": "failure"}, **skipped) is False
     assert _promotes("", **{**BASE, "build-publish-pg-bundle": "failure"}, **skipped) is False
+    for bad in ("failure", "skipped", "cancelled"):
+        assert _promotes("", **{**BASE, "smoke-mac-arm64": bad}, **skipped) is False, bad
 
 
 def test_promotion_with_the_switch_on_needs_both_windows_legs() -> None:
