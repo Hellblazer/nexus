@@ -821,6 +821,15 @@ jobs:
           if [ "${{ runner.environment }}" = "self-hosted" ]; then
             export TMPDIR="$RUNNER_TEMP/tmp"
             mkdir -p "$TMPDIR"
+            # A pool job is confined to 6 of the host's 64 CPUs. ONNX Runtime
+            # sizes its thread pool from the HOST's cores and pins each thread
+            # to one, so every engine a worker boots started about 32 threads,
+            # most with an affinity the kernel refuses (`pthread_setaffinity_np
+            # failed`). Under that load bge init outlasted the engine's 3 s
+            # shutdown wait and the JVM crashed in libonnxruntime on SIGTERM
+            # (test_main_sigterm_during_model_init, PR #1600 run on be2d7f1a2,
+            # nexus-y6aj0). The engines inherit this from the test environment.
+            export NX_ONNX_INTRA_OP_THREADS=2
           fi
           uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 5' || '' }} \
             --splits 6 --group ${{ matrix.shard }} \
