@@ -22,11 +22,22 @@ inputs:
     required: false
     default: crossencoder-onnx-msmarco-${{ runner.os }}-v1
 
+  persistent-home:
+    description: >-
+      'true' when $HOME outlives the job and is shared with jobs running at
+      the same time (the lab pool runners, nexus-480wm). The Actions cache
+      is then skipped: restoring a tarball over files a sibling job is
+      reading would corrupt its run. The files already on disk are used
+      when their digests match, and a download lands by rename.
+    required: false
+    default: 'false'
+
 runs:
   using: composite
   steps:
     - name: Restore cross-encoder ONNX cache
       id: cache
+      if: inputs.persistent-home != 'true'
       # STABLE key — the artifact is an immutable pinned-revision export;
       # bump the -v suffix only if the pinned revision changes.
       uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
@@ -47,6 +58,15 @@ runs:
         set -euo pipefail
         MODEL_DIR="$HOME/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2/onnx"
         mkdir -p "$MODEL_DIR"
+        verified() {
+          [ -f "$MODEL_DIR/model.onnx" ] && [ -f "$MODEL_DIR/tokenizer.json" ] \
+            && echo "${MODEL_SHA256}  $MODEL_DIR/model.onnx" | shasum -a 256 -c - >/dev/null 2>&1 \
+            && echo "${TOKENIZER_SHA256}  $MODEL_DIR/tokenizer.json" | shasum -a 256 -c - >/dev/null 2>&1
+        }
+        if verified; then
+          echo "cross-encoder ONNX already on disk with matching digests; nothing to fetch."
+          exit 0
+        fi
         base="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/${REVISION}"
         echo "cross-encoder ONNX cache miss; fetching pinned revision ${REVISION} from HF."
 
@@ -54,9 +74,15 @@ runs:
           curl -fL --retry 5 --retry-delay 8 --retry-all-errors -o "$1" "${base}/$2"
         }
 
-        fetch "$MODEL_DIR/model.onnx" onnx/model.onnx
-        fetch "$MODEL_DIR/tokenizer.json" tokenizer.json
+        # Download beside the target, verify, then rename: a job sharing this
+        # directory never reads a half-written model (nexus-480wm).
+        part="$MODEL_DIR/.part.$$"
+        trap 'rm -f "$part.model" "$part.tokenizer"' EXIT
+        fetch "$part.model" onnx/model.onnx
+        fetch "$part.tokenizer" tokenizer.json
 
-        echo "${MODEL_SHA256}  $MODEL_DIR/model.onnx" | shasum -a 256 -c -
-        echo "${TOKENIZER_SHA256}  $MODEL_DIR/tokenizer.json" | shasum -a 256 -c -
+        echo "${MODEL_SHA256}  $part.model" | shasum -a 256 -c -
+        echo "${TOKENIZER_SHA256}  $part.tokenizer" | shasum -a 256 -c -
+        mv -f "$part.model" "$MODEL_DIR/model.onnx"
+        mv -f "$part.tokenizer" "$MODEL_DIR/tokenizer.json"
         echo "cross-encoder ONNX provisioned + verified (pinned revision)."

@@ -146,7 +146,8 @@ PRs #1375/#1376):
 
 ## Self-hosted runners and fork PRs
 
-CI runs on GitHub-hosted runners only. The `qwen-linux` and `hellmini-ci`
+CI runs on GitHub-hosted runners, except two jobs that run on the owned lab
+pool (below). The `qwen-linux` and `hellmini-ci`
 routes, the runner isolation probes, the box lock and the qwentescence
 post-publish gate were deleted on 2026-10-03 (cleanup step 7). `hellmini` (a Mac
 mini, macOS user `ghrunner`) is a self-hosted runner for release legs only: the
@@ -154,18 +155,45 @@ engine-service release legs, the PG-bundle cache seed and the signing rehearsal
 (Sam, 2026-09-28, nexus-yd9po). `qwentescence` (WSL) is a test host reachable by
 ssh, not a runner; its native Windows side is the separate `win-release` runner
 described below. `chas` (a native Ubuntu 26.04 box, 32 cores, 123 GB, ssh
-alias `chas-test`) is a test host only, never a runner. Agents' full Python
+alias `chas-test`) is the test host for agents' hand runs and, since
+2026-10-10, the main host of the lab pool. Agents' full Python
 suites and engine suites go to chas first (2026-10-08, nexus-y10bw). hellmini takes
 macOS-specific runs, and the overflow when chas is busy. The T2 how-tos
 `nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto` and
 `nexus/qwentescence-test-host-howto` carry the recipes.
 
+**The lab pool** (Sam, 2026-10-10, nexus-480wm; T2 `homelab/labrun-pool-howto`)
+is a set of single-use runners that a scheduler on chas starts per job, with
+labels `lab-s`, `lab-m`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
+(macOS on hellmini). Two jobs use it: the Service CI Java job on `lab-l` and the
+pytest shard matrix on `lab-m`. Every other job stays where it was. Three things
+differ from a GitHub-hosted runner:
+
+- **A pull request from a fork never runs there.** Both jobs choose the runner
+  with a `runs-on` expression that gives `ubuntu-latest` when the pull request's
+  head repository is not this one. A new pool job must carry the same
+  expression. The repo variable `NX_CI_POOL=off` sends every run back to
+  `ubuntu-latest`; set it when chas is down, because both jobs feed required
+  checks and a job with no runner waits.
+- **`$HOME` and the tool cache outlive the job and are shared** with jobs
+  running at the same time (the work directory is per job and deleted). So a
+  pool job skips `actions/cache` for `$HOME` paths (`if: runner.environment ==
+  'github-hosted'`) and passes `persistent-home` to the `prime-*` actions, which
+  then use the files on disk when their digests match and install a download by
+  rename. A step that writes a fixed path under `$HOME` must be safe against a
+  sibling job doing the same.
+- **No sudo, and a hard memory cap** (16 GB on `lab-m`, 48 GB on `lab-l`); a
+  step over the cap is killed with exit 137. Containers started through the
+  host Docker daemon are outside the cap. The host session caps how many nexus
+  jobs run at once, and a hand run as `nxtest` on chas is invisible to the
+  scheduler: while nexus CI is active, run at most 16 workers there.
+
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
-job has to name it. There are two self-hosted registrations, `hellmini` and
-`win-release`: `qwen-linux` and `gtr-windows` were removed on 2026-10-03 and
-`hellmini-ci` on 2026-10-04, so a job that says `runs-on: self-hosted` (or names
-any other self-hosted label) waits with no runner rather than landing somewhere
-unexpected. A `runs-on` label is a routing rule, not a
+job has to name it. There are two persistent self-hosted registrations, `hellmini`
+and `win-release`, beside the pool's labels: `qwen-linux` and `gtr-windows` were
+removed on 2026-10-03 and `hellmini-ci` on 2026-10-04, so a job that says
+`runs-on: self-hosted` (or names any other self-hosted label) waits with no
+runner rather than landing somewhere unexpected. A `runs-on` label is a routing rule, not a
 security boundary: whoever can push a branch controls the workflow files. The
 controls are the collaborator list (owner only), the fork-PR approval policy and
 branch protection.
@@ -193,7 +221,10 @@ explicit go; any later change to either needs the same explicit go.
 
 - anything under `.github/` (a workflow or action can name any runner);
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
-  `win-release`, `hellmini-ci`, `qwen-linux` or `gtr-windows`.
+  `win-release`, a `lab-*` pool label, `hellmini-ci`, `qwen-linux` or
+  `gtr-windows`;
+- any change to a `runs-on` expression that sends fork pull requests to
+  `ubuntu-latest`.
 
 **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
 when they hold the owner's `gh` token. Report the run id and stop; the approval
@@ -301,7 +332,7 @@ Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`
 
   The suite takes a lease of its own, `suite`, under the same root (`tests/_suite_lease.py`), so two full runs on one box see each other. **It fails closed on contention**: a run that finds the lease held (or loses the race for it) exits 75, naming the holder, the lease directory and the recovery command (`rm -rf <lease dir>`, valid only when no pytest run is live). `NX_SUITE_LEASE_WAIT=<any non-zero>` queues behind a live holder for up to 30 minutes instead of refusing, and a lease directory whose pid file is missing, empty or garbage (a run killed between its `mkdir` and its pid write) is reclaimed automatically once it is 60 seconds old, so a corpse cannot wedge the queue. **A lease this user cannot READ (EACCES on the directory or the pid file) is HELD, never reclaimed**: it may be a live peer's, so the run exits 75 naming the path (`acquire` creates the directory and its files group/world-readable explicitly, whatever the umask, so peers can read each other's). Two gaps stay open: a pid write that fails after `mkdir`, and a maker stalled over 60 s between the two (`_reclaim_if_dead`'s docstring). **Fails closed is a claim about contention only**: an unwritable lease root still runs UNGUARDED, silently (`acquire` swallows it and hands back a no-op release). `NX_SUITE_LEASE_UNGUARDED=1` (exactly `1`; `true`, `off` or a typo do not count) is the explicit opt-out for a HAND run; no workflow may set it, pinned by `tests/test_suite_lease_unguarded_lint.py`.
 
-- **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). The Service CI Java job runs on GitHub-hosted runners, never on `hellmini`; the fork-PR rules are in § Self-hosted runners and fork PRs.
+- **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). The Service CI Java job runs on the lab pool (`lab-l`) or, for a fork pull request, on a GitHub-hosted runner, never on `hellmini`; the fork-PR rules are in § Self-hosted runners and fork PRs.
 - **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 3 native binaries (linux-amd64, linux-arm64, mac-arm64 — mac-arm64 now SMOKED, built on the hellmini self-hosted runner which has Docker via colima; nexus-yd9po closed the nexus-4xf5m no-Docker-on-GH-macOS gap for the default tag-push path, a `workflow_dispatch` run that falls back to `macos-14` when hellmini is offline is still unsmoked there; mac-amd64/Intel is not a supported target). It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). **The release is a DRAFT until every asset is attached** (nexus-cl14i, after v0.1.95 published PG bundles with no binary): a final `promote-release` job flips it only when both matrices succeeded and all 30 assets are present (36 with the Windows legs on; each Linux and macOS engine also ships as `nexus-service-<arch>.txz`, the asset `nx init` downloads), so a tag is consumable roughly 35 to 65 minutes (v0.1.118 took 36, a single measurement) after push, never partially; a failed leg, mac-arm64 included, leaves a draft that `gh run rerun --failed` completes and promotes. So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.
 - **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is NOT just suite-green-then-tag: the `engine-release` skill (Authority: this section) enforces a pre-tag check — full engine suite green on the tagged commit (the local-candidate shakeout, candidate-migration and published-client write legs were deleted in cleanup step 11, nexus-0r1uz) — then human pushes `engine-service-vX.Y.Z`, followed by a post-publish `--acquire` gate against the published bytes. `scripts/check_engine_release_floor.py --client-precondition engine-service-vX.Y.Z` gates the **DEPLOY, never the tag cut** (Hal directive 2026-08-02 — its pre-tag wiring forced conexus 7.1.0 to ship pinned to a pre-fence engine, its own flagship feature inert on fresh local installs; a red exit means the deploy waits for the client tag carrying the listed commits, per the paired-release choreography below). **A tag gates DELIVERY, not work**: engine changes are fully testable end-to-end on develop (`scripts/mvnw-leased.sh test` + the Python suite's engine substrate + LSG against a `build-gate-jar.sh` dev jar) — "cannot deploy yet" is never "cannot do/test/tag it" (error recurred 3x: nexus-0ehwe thread 2026-07-31 twice, the 7.1.0/v0.1.62 inversion 2026-08-02). Use the `engine-release` skill as the executable checklist, not this summary.
 - **Cut from develop tip; don't let it drift.** Cloud-relevant engine work (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints) lands on develop continuously. Cut + deploy + cloud-gate the engine on its own cadence. Rule of thumb: if `git log <last-engine-tag>..HEAD -- service/` is non-trivial AND cloud-relevant, cut a fresh engine **before** relying on cloud test results or pinning it into a PyPI release.

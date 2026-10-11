@@ -459,8 +459,16 @@ jobs:
           if-no-files-found: error
 
   test:
+    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-m` is the owned lab pool (8
+    # cores, 16 GB hard cap, see AGENTS.md § Self-hosted runners and fork PRs).
+    # A pull request from a FORK stays on `ubuntu-latest`, so outside code
+    # never reaches owned hardware even if its run is approved by mistake.
+    # Repo variable NX_CI_POOL=off sends every run back to `ubuntu-latest`
+    # (the pool host is down and this is a required check).
+    # The pool's $HOME outlives the job and is shared with the sibling shards,
+    # so the steps below skip the Actions cache for $HOME paths there.
     name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-m' }}
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
     # nexus-n0ful: also needs `changes` directly (not just transitively via
@@ -625,6 +633,7 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache MiniLM ONNX model
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/chroma
@@ -645,6 +654,7 @@ jobs:
             chromadb-onnx-${{ runner.os }}-
 
       - name: Cache HuggingFace models (cross-encoder, MinerU)
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # DOCLING NO LONGER USES THIS. Its layout/TableFormer/CodeFormula
@@ -696,6 +706,7 @@ jobs:
           distribution: 'graalvm'
 
       - name: Cache the pinned PG bundle
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # tests/db/_service_fixture.py::_self_provision_pg_bundle downloads
@@ -706,7 +717,8 @@ jobs:
           key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
+        # The pool runners have no sudo and carry ripgrep preinstalled.
+        run: command -v rg >/dev/null || sudo apt-get install -y ripgrep
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # nexus-eqxxh: the engine substrate boots the SAME jar the write-seam
@@ -731,6 +743,8 @@ jobs:
         # paths-filter, since NX_T2_SUBSTRATE_EXPECTED=1 makes the substrate
         # REQUIRED and a missing model is 73 hard errors rather than a skip.
         uses: ./.github/actions/prime-bge-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Install project + dev deps
         run: uv sync --group dev
@@ -758,6 +772,8 @@ jobs:
         # points docling at the extracted dir so it never resolves through the
         # hub at all.
         uses: ./.github/actions/prime-docling
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Verify docling extracts from the mirrored models
         # NON-VACUITY: proves docling actually performed the extraction

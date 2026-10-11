@@ -38,11 +38,22 @@ inputs:
     required: false
     default: ci-assets-docling-v1
 
+  persistent-home:
+    description: >-
+      'true' when $HOME outlives the job and is shared with jobs running at
+      the same time (the lab pool runners, nexus-480wm). The Actions cache
+      is then skipped: restoring a tarball over files a sibling job is
+      reading would corrupt its run. The files already on disk are used
+      when their digests match, and a download lands by rename.
+    required: false
+    default: 'false'
+
 runs:
   using: composite
   steps:
     - name: Restore docling artifacts cache
       id: cache
+      if: inputs.persistent-home != 'true'
       # Keyed on the ASSET TAG (nexus-tl7bu): the extracted models are an
       # immutable export of that tag, so they download once per tag and
       # restore thereafter; cutting a new asset tag invalidates the cache
@@ -58,9 +69,19 @@ runs:
       shell: bash
       env:
         ASSET_TAG: ${{ inputs.asset-tag }}
+        PERSISTENT_HOME: ${{ inputs.persistent-home }}
       run: |
         set -euo pipefail
-        mkdir -p "$HOME/.cache/nexus/docling-artifacts"
+        target="$HOME/.cache/nexus/docling-artifacts"
+        marker=".complete-${ASSET_TAG}"
+        if [ "$PERSISTENT_HOME" = "true" ] && [ -f "$target/$marker" ]; then
+          echo "docling artifacts for ${ASSET_TAG} already on disk; nothing to fetch."
+          exit 0
+        fi
+        mkdir -p "$(dirname "$target")"
+        if [ "$PERSISTENT_HOME" != "true" ]; then
+          mkdir -p "$target"
+        fi
         echo "docling artifacts cache miss; fetching from self-hosted release ${ASSET_TAG}."
         # The tarball goes in the runner's per-job temp dir, never a fixed name
         # in /tmp: on a self-hosted box that several users share (qwen-linux),
@@ -71,7 +92,26 @@ runs:
         curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
           -o "$tarball" \
           "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSET_TAG}/docling-artifacts-v1.tar.gz"
-        tar -xzf "$tarball" -C "$HOME/.cache/nexus/docling-artifacts"
+        if [ "$PERSISTENT_HOME" != "true" ]; then
+          tar -xzf "$tarball" -C "$target"
+          exit 0
+        fi
+        # Shared $HOME (nexus-480wm): extract beside the target and rename the
+        # whole directory in, so a job running at the same time sees either no
+        # directory or a complete one. `mv -T` is GNU; the pool is Linux.
+        staging="$(mktemp -d "$(dirname "$target")/docling-artifacts.staging.XXXXXX")"
+        trap 'rm -f "$tarball"; rm -rf "$staging"' EXIT
+        tar -xzf "$tarball" -C "$staging"
+        touch "$staging/$marker"
+        if [ -e "$target" ] && [ ! -f "$target/$marker" ]; then
+          # No marker: another asset tag's files, or an extract that died.
+          rm -rf "$target"
+        fi
+        if ! mv -T "$staging" "$target" 2>/dev/null; then
+          # A sibling job renamed its copy in first.
+          test -f "$target/$marker" || { echo "::error::docling artifacts at $target are incomplete and could not be replaced"; exit 1; }
+          echo "a sibling job provisioned the docling artifacts first; using them."
+        fi
 
     - name: Export NEXUS_DOCLING_ARTIFACTS_PATH
       shell: bash
