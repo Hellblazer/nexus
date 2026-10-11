@@ -657,7 +657,14 @@ from __future__ import annotations
 #: `POST /v1/taxonomy/topics/by_ids` route (nexus-w032x) and the cardinality
 #: router default 20000 (nexus-43ulx.35). No changeset. Both wire entries are
 #: [additive]; the engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 159)
+#:
+#: 7.77.1 pairs with engine-service-v0.1.160 (tagged 2026-10-11 on c0697df9a).
+#: v0.1.160 carries three fixes: a stop that arrives during a model load
+#: outlasting the stop wait leaves through libc `_exit` instead of crashing
+#: (nexus-y6aj0), ONNX intra-op threads follow a CPU limit (nexus-qe5y2), and
+#: a response sent with a large request body unread says `Connection: close`
+#: (nexus-632u4). No changeset, no wire entry, no new `/version` field.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 160)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
