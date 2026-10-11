@@ -2307,6 +2307,10 @@ def storage_service_stack_matcher(
     return _match
 
 
+#: File names of the nx entry point as a process table shows them. A set, read
+#: for membership only: this is not an argv and nothing here executes nx.
+_NX_ENTRY_POINT_NAMES: frozenset[str] = frozenset({"nx.exe", "nx"})
+
 #: Interpreters a legacy flagless unit's nx entry point can run under.
 _SUPERVISOR_HEAD_SHELLS: frozenset[str] = frozenset({"sh", "bash", "dash", "zsh"})
 
@@ -2341,7 +2345,7 @@ def _is_bare_supervisor_head(command: str) -> bool:
 
     if len(tokens) == 3:
         return base(tokens[0]).startswith("python") and tokens[1:] == ["-m", "nexus.cli"]
-    if not tokens or base(tokens[-1]) not in ("nx", "nx.exe"):
+    if not tokens or base(tokens[-1]) not in _NX_ENTRY_POINT_NAMES:
         return False
     if len(tokens) == 1:
         return True
@@ -2351,8 +2355,16 @@ def _is_bare_supervisor_head(command: str) -> bool:
     )
 
 
-def _ancestor_pids(pid: int, *, limit: int = 64) -> frozenset[int]:
-    """The pids of *pid*'s parent chain, nearest first, up to *limit* hops."""
+def ancestor_pids(pid: int, *, limit: int = 64) -> frozenset[int]:
+    """The pids of *pid*'s parent chain, up to *limit* hops (nexus-mqfu0).
+
+    A process-table sweep excludes these so it never signals the chain it
+    runs under: a shell or ssh session whose command line carries the
+    stack's own ``daemon service start ... --config-dir <dir>`` text
+    satisfies :func:`storage_service_stack_matcher`. Used by
+    :func:`sweep_matching_processes` and ``upgrade_finish.service_stack_pids``.
+    An unreadable parent ends the walk with what was found so far.
+    """
     from nexus.session import _ppid_of  # noqa: PLC0415 — deferred: session is not otherwise in the registry's import graph
 
     chain: list[int] = []
@@ -2360,7 +2372,8 @@ def _ancestor_pids(pid: int, *, limit: int = 64) -> frozenset[int]:
     while len(chain) < limit:
         try:
             parent = _ppid_of(current)
-        except Exception:  # noqa: BLE001 — an unreadable parent ends the walk; the sweep still excludes what was found
+        except Exception as exc:  # noqa: BLE001 — an unreadable parent ends the walk; the sweep still excludes what was found
+            _log.debug("ancestor_pids_walk_failed", pid=current, error=str(exc))
             break
         if parent is None or parent in chain or parent == pid:
             break
@@ -2436,7 +2449,7 @@ def sweep_matching_processes(
     # shell running `stop ... && start --config-dir X`, an ssh session) can
     # satisfy the matcher. When it is this process's ancestor, signalling it
     # kills the stop itself and whatever was to run after it.
-    ancestors = _ancestor_pids(me)
+    ancestors = ancestor_pids(me)
     found: list[tuple[int, str]] = []
     for pid, _age, command in rows:
         if pid == me or not matcher(command):

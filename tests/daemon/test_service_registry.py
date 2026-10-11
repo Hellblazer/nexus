@@ -845,6 +845,29 @@ class TestSweepMatchingProcesses:
         assert sorted(result.pids) == [196]
         assert terminated == [[196]]
 
+    def test_ancestor_walk_reads_the_real_process_table(self) -> None:
+        """The exclusion rests on the real parent lookup: this process's
+        own parent is in its chain, and a pid that does not exist has
+        none."""
+        import subprocess
+        import sys
+
+        from nexus.daemon import service_registry
+
+        chain = service_registry.ancestor_pids(os.getppid())
+        assert os.getpid() not in chain
+        # Walked from a child, so the fixture's same-process shortcut does
+        # not apply and the real lookup must report this process.
+        child = subprocess.run(  # noqa: S603 — fixed argv, this interpreter
+            [
+                sys.executable, "-c",
+                "import os; from nexus.daemon.service_registry import ancestor_pids;"
+                "print(os.getppid() in ancestor_pids(os.getpid()))",
+            ],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        assert child.stdout.strip() == "True"
+
     def test_no_matches_is_a_true_noop(self, tmp_path: Path) -> None:
         """No matching process => no terminate_pids call at all — a clean
         sweep must not narrate or signal anything (mirrors

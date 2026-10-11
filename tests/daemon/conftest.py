@@ -39,3 +39,21 @@ def _watched_tests_cannot_hang(request: pytest.FixtureRequest):
         return
     with _watchdog.watchdog(_watchdog.PER_TEST_TIMEOUT_S, request.node.nodeid):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _no_walk_of_the_test_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-mqfu0: the process-table sweeps exclude the calling process's
+    ancestors. These tests feed the sweeps fabricated rows with small pids
+    (196, 214, ...), and in a container the test process's real ancestors
+    can carry those same numbers, which would drop a row a test expects.
+    The walk is left real for any pid other than this process."""
+    import os
+
+    from nexus.daemon import service_registry
+
+    real = service_registry.ancestor_pids
+    monkeypatch.setattr(
+        service_registry, "ancestor_pids",
+        lambda pid, **kw: frozenset() if pid == os.getpid() else real(pid, **kw),
+    )

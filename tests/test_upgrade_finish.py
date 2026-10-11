@@ -39,6 +39,24 @@ _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
 _PINNED_TAG = "engine-service-v" + _REQUIRED_STR
 
 
+@pytest.fixture(autouse=True)
+def _no_walk_of_the_test_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-mqfu0: the process-table sweeps exclude the calling process's
+    ancestors. These tests feed the sweeps fabricated rows with small pids
+    (196, 214, ...), and in a container the test process's real ancestors
+    can carry those same numbers, which would drop a row a test expects.
+    The walk is left real for any pid other than this process."""
+    import os
+
+    from nexus.daemon import service_registry
+
+    real = service_registry.ancestor_pids
+    monkeypatch.setattr(
+        service_registry, "ancestor_pids",
+        lambda pid, **kw: frozenset() if pid == os.getpid() else real(pid, **kw),
+    )
+
+
 def _assert_service_cycled(sp) -> None:
     """Assert the stop AND start verbs were actually invoked, by ARGV.
 
@@ -810,6 +828,29 @@ class TestFailLoud:
             "— never Postgres, never restart-stale itself, never another "
             f"install's engine. Got: {found}"
         )
+
+    def test_service_stack_pids_never_lists_this_runs_own_ancestors(self, tmp_path):
+        """nexus-mqfu0: a shell or ssh session this run was started from can
+        carry `daemon service start ... --config-dir <dir>` in its own
+        command line. It satisfies the matcher and is not the stack; listing
+        it hands it to the sweep, which SIGTERMs it."""
+        import os  # noqa: PLC0415 — file pattern: deferred imports
+
+        cfg = tmp_path / "nexus"
+        line = f"/v/bin/nx daemon service start --foreground --config-dir {cfg}"
+        rows = [
+            (196, 60, line),
+            (300, 5, f"/bin/sh -c nx daemon restart-stale; {line}"),
+            (290, 9, f"ssh-wrapper {line}"),
+        ]
+        with patch("nexus.upgrade_finish.all_process_rows", return_value=rows), patch(
+            "nexus.daemon.service_registry.ancestor_pids",
+            side_effect=lambda pid, **_: frozenset({300, 290}) if pid == os.getpid() else frozenset(),
+        ):
+            from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — file pattern: deferred imports
+
+            found = service_stack_pids(cfg)
+        assert sorted(p for p, _ in found) == [196]
 
     def test_prefix_colliding_sibling_profile_is_never_matched(self, tmp_path):
         """Review Critical (2026-08-01): a bare `str(config_dir) in command`

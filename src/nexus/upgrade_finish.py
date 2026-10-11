@@ -1429,10 +1429,17 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     """
     matcher = storage_service_stack_matcher(config_dir)
     me = os.getpid()
+    # nexus-mqfu0: a shell or ssh session this run was started from can carry
+    # the stack's own `daemon service start ... --config-dir <dir>` text and
+    # satisfy the matcher. It is not part of the stack, and the sweep that
+    # consumes this list would signal it.
+    from nexus.daemon import service_registry as _registry  # noqa: PLC0415 — module access, so one test seam covers every sweep
+
+    ancestors = _registry.ancestor_pids(me)
     return [
         (pid, command)
         for pid, _age, command in all_process_rows()
-        if pid != me and matcher(command)
+        if pid != me and pid not in ancestors and matcher(command)
     ]
 
 
