@@ -138,6 +138,53 @@ class TestNotARepositoryBucket:
         (sub / "f").write_text("x")
         assert _classify_owner_root(str(sub)) == "healthy"
 
+    def test_the_parent_of_a_bare_repository_with_worktrees_is_healthy(self, tmp_path):
+        """An owner root is the parent of the common git dir. With a bare
+        repository and a linked worktree beside it, that parent has no .git
+        entry of its own and is still a real owner's root."""
+        import subprocess
+
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        bare = root / "proj.git"
+        env = {
+            "PATH": __import__("os").environ["PATH"], "HOME": str(tmp_path),
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        }
+
+        def git(*args, cwd):
+            subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+        git("init", "--bare", "-b", "main", str(bare), cwd=root)
+        seed = tmp_path / "seed"
+        git("clone", str(bare), str(seed), cwd=tmp_path)
+        (seed / "f").write_text("x")
+        git("add", "f", cwd=seed)
+        git("commit", "-m", "seed", cwd=seed)
+        git("push", "origin", "HEAD:main", cwd=seed)
+        git("worktree", "add", str(root / "main"), "main", cwd=bare)
+
+        assert not (root / ".git").exists()
+        assert (root / "main" / ".git").is_file()
+        assert _classify_owner_root(str(root)) == "healthy"
+
+    def test_a_symlinked_root_inside_a_repository_is_healthy(self, tmp_path):
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        repo = tmp_path / "repo"
+        sub = repo / "sub"
+        sub.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (sub / "f").write_text("x")
+        link = tmp_path / "elsewhere" / "link"
+        link.parent.mkdir()
+        link.symlink_to(sub, target_is_directory=True)
+        assert _classify_owner_root(str(link)) == "healthy"
+
     def _invoke(self, fake, writer):
         with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
              patch("nexus.commands.catalog._get_catalog_writer", return_value=writer):

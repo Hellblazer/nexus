@@ -1249,8 +1249,12 @@ class TestDoctorDeadOwnerRendering:
         assert r.ok is False and r.warn is True and r.fatal is False
         assert "is not a git repository" in r.detail
         assert "could not check" not in r.detail
-        assert any("owners --census" in s for s in r.fix_suggestions), r.fix_suggestions
-        assert any("--execute deactivate" in s for s in r.fix_suggestions), r.fix_suggestions
+        assert r.fix_suggestions[0] == (
+            "nx catalog owners --census — lists it under not_a_repository"
+        )
+        assert any(
+            "--execute deactivate --no-dry-run --confirm" in s for s in r.fix_suggestions
+        ), r.fix_suggestions
 
     def test_legacy_only_non_repository_is_not_pointed_at_census(
         self, tmp_path, monkeypatch

@@ -2158,7 +2158,10 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                             f"{repo_path} — registered owner root is not a "
                             "git repository"
                         ),
-                        fix_suggestions=_owner_census_fix(deactivate_capability),
+                        fix_suggestions=_owner_census_fix(
+                            deactivate_capability,
+                            first="nx catalog owners --census — lists it under not_a_repository",
+                        ),
                     ))
                 else:
                     results.append(HealthResult(
@@ -2178,7 +2181,11 @@ def _owner_root_is_not_a_repository(repo_path: Path) -> bool:
     return _classify_owner_root(str(repo_path)) == "not_a_repository"
 
 
-def _owner_census_fix(deactivate_capability: str) -> list[str]:
+def _owner_census_fix(
+    deactivate_capability: str,
+    *,
+    first: str = "nx catalog owners --census — inspects dead owners",
+) -> list[str]:
     """Fix lines pointing a catalog owner at ``nx catalog owners --census``.
 
     nexus-cw262 round-3 critique (T2 21467 Significant-2): the mutation
@@ -2186,7 +2193,7 @@ def _owner_census_fix(deactivate_capability: str) -> list[str]:
     connected to. Name the census unconditionally (it always works) and
     qualify the mutation arm per the capability signal.
     """
-    fix = ["nx catalog owners --census — inspects dead owners"]
+    fix = [first]
     if deactivate_capability == "available":
         fix.append(
             "--execute deactivate --no-dry-run --confirm "

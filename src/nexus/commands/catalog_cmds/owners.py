@@ -164,8 +164,9 @@ def _classify_owner_root(repo_root: str) -> str:
       even LESS evidence of death than ``path_exists_empty`` — never
       mutation-eligible.
     * ``not_a_repository``  — the root is a directory with content, but
-      neither it nor any ancestor holds a ``.git`` entry, so git would not
-      find a repository there (nexus-0rjbm). Mutation-eligible.
+      neither it nor any ancestor holds a ``.git`` entry and no immediate
+      child is a git directory, so no repository can have registered it
+      (nexus-0rjbm). Mutation-eligible.
     * ``healthy``           — the root exists, has content and is inside a
       git work tree.
     """
@@ -180,7 +181,7 @@ def _classify_owner_root(repo_root: str) -> str:
         try:
             if not any(p.iterdir()):
                 return "path_exists_empty"
-            if not _inside_git_work_tree(p):
+            if not _inside_git_work_tree(p) and not _holds_a_git_dir(p):
                 return "not_a_repository"
         except OSError:
             return "unreadable"
@@ -195,8 +196,27 @@ def _inside_git_work_tree(root: Path) -> bool:
     a place git answers for. No subprocess: the census runs this once per
     registered owner.
     """
-    absolute = root.absolute()
-    return any((d / ".git").exists() for d in (absolute, *absolute.parents))
+    physical = root.resolve()
+    return any((d / ".git").exists() for d in (physical, *physical.parents))
+
+
+def _holds_a_git_dir(root: Path) -> bool:
+    """Whether an immediate child of *root* is a git directory.
+
+    An owner's root is the PARENT of the repository's common git dir
+    (``repo_identity``), not the path that was indexed. For a bare
+    repository with linked worktrees, or one made with
+    ``--separate-git-dir``, that parent holds no ``.git`` entry: the git dir
+    is a sibling of the work tree under another name. Such a root is a real
+    owner's and must stay ``healthy``. A directory of ordinary clones that
+    also happens to hold a bare repository reads ``healthy`` too, which is
+    the direction that deactivates nothing.
+    """
+    return any(
+        (child / "HEAD").is_file() and (child / "objects").is_dir()
+        for child in root.iterdir()
+        if child.is_dir()
+    )
 
 
 def _residual_note(tumbler: str, bucket: str = "path_vanished") -> str:
@@ -207,7 +227,8 @@ def _residual_note(tumbler: str, bucket: str = "path_vanished") -> str:
         return (
             "RESIDUAL: 0 live documents + a root that is not a git repository "
             "cannot be distinguished from a repository whose .git is "
-            "temporarily absent (mid re-clone). If this was a misfire: "
+            "temporarily absent (mid re-clone), or from a mount point that "
+            "is unmounted with stray files left in it. If this was a misfire: "
             "re-index the repo (auto-reactivates, same tumbler prefix) or run "
             f"`{_REACTIVATE_COMMAND_TEMPLATE.format(tumbler=tumbler)}`."
         )
