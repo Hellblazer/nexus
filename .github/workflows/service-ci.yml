@@ -127,8 +127,12 @@ jobs:
     name: Java tests + jOOQ codegen drift guard
     needs: changes
     if: needs.changes.outputs.service == 'true'
-    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-l` is the owned lab pool (16
-    # cores, 48 GB hard cap, see AGENTS.md § Self-hosted runners and fork PRs).
+    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-16c16g` is the owned lab pool
+    # (16 cores, 16 GB hard cap, see AGENTS.md § Self-hosted runners and fork
+    # PRs). The job peaked at 10.3 GB with 4 surefire forks (measured
+    # 2026-10-11 on `lab-l`); the smaller grant leaves chas room for five
+    # pytest shards beside it. The Testcontainers Postgres containers run
+    # through the host Docker daemon and are outside the grant.
     # A pull request from a FORK stays on `ubuntu-latest`, so outside code
     # never reaches owned hardware even if its run is approved by mistake.
     # Repo variable NX_CI_POOL=off sends every run back to `ubuntu-latest`
@@ -136,7 +140,7 @@ jobs:
     # (~/.m2, the model caches) outlives the job, so the steps below skip the
     # Actions cache for $HOME paths there. The earlier self-hosted routes
     # (hellmini-ci, qwen-linux) were deleted on 2026-10-03 (cleanup step 7).
-    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-l' }}
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-16c16g' }}
     permissions:
       contents: read
     # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
@@ -256,8 +260,8 @@ jobs:
       # lever. forks=1 is pinned for CI because RAM, not core count, is the
       # limit: each fork boots its own Testcontainers Postgres, and neither CI
       # target was sized for N of them. GH-hosted ubuntu-latest is 4-core/16GB,
-      # so the serial shape is right there. The `lab-l` pool runner (16 cores,
-      # 48 GB) runs the local default of 4 forks (nexus-480wm).
+      # so the serial shape is right there. The `lab-16c16g` pool runner (16 cores,
+      # 16 GB) runs the local default of 4 forks (nexus-480wm).
       - name: Run Java test suite
         working-directory: service
         run: ./mvnw -q test -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
