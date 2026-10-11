@@ -86,13 +86,11 @@ import java.util.function.UnaryOperator;
  * in libonnxruntime). The deferred-exit thread instead logs
  * {@code event=ort_init_shutdown_halt}, runs the {@link #onBoundExpired cleanup
  * the application registered} (the parts of its shutdown hook that do not touch
- * ORT), and ends the process with {@code Runtime.halt(128+n)}. No hook runs, so
- * onnxruntime-java's closer never releases the environment under the live work,
- * and the exit status is the one a clean stop gives. Sessions are not closed; the
- * process is ending. On HotSpot {@code halt} still ends in libc {@code exit}, so the
- * library's static destructors run with the native thread alive; no crash was
- * seen there (macOS arm64 and Linux amd64 sweeps with the bound at zero, init and
- * 8-thread inference), but that is measurement, not a guarantee.
+ * ORT), and ends the process with {@link ImmediateExit libc _exit(128+n)}. No Java
+ * hook runs, so onnxruntime-java's closer never releases the environment under
+ * the live work; no static destructor runs either, which {@code Runtime.halt} does
+ * not give (measured: see {@link ImmediateExit}). The exit status is the one a
+ * clean stop gives. Sessions are not closed; the process is ending.
  *
  * <p>Not covered: a {@code System.exit} called from application code while a
  * lazy init is in flight (the only callers are boot-time failure paths, which
@@ -231,7 +229,7 @@ public final class OrtInitGate {
 
     OrtInitGate() {
         this(resolveWaitMillis(System::getenv), OrtInitGate::installJvmSignal, System::exit,
-                Runtime.getRuntime()::halt, System.getProperty("os.name"));
+                ImmediateExit::exit, System.getProperty("os.name"));
     }
 
     /** Test seam: explicit bound, signal installer and exit action, on this JVM's own OS. */
@@ -256,7 +254,7 @@ public final class OrtInitGate {
 
     /**
      * Register what the application must still do when the wait bound expires with
-     * native work in flight (nexus-y6aj0). That path ends in {@code Runtime.halt},
+     * native work in flight (nexus-y6aj0). That path ends in {@link ImmediateExit},
      * so no shutdown hook runs; this is the hook's replacement there. It must not
      * close an ORT session or the environment (the reason hooks are skipped). It
      * must be bounded: nothing else ends the process while it runs, and the stop
@@ -320,7 +318,7 @@ public final class OrtInitGate {
     /**
      * The bound expired (or the wait was interrupted) with native work still live.
      * {@code System.exit} would start onnxruntime-java's hook under it, so run the
-     * application's own cleanup and halt.
+     * application's own cleanup and leave without the hook phase.
      */
     private void haltWithNativeWorkInFlight(int exitStatus) {
         if (!halting.compareAndSet(false, true)) return;

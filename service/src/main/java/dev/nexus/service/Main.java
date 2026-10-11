@@ -456,10 +456,10 @@ public final class Main {
         Runnable stopPciReconciler = pciReconciler::stop;
 
         // Everything the shutdown hook does that does not touch ONNX Runtime. Also the whole
-        // cleanup on the gate's expired-bound path (nexus-y6aj0), which ends in Runtime.halt
+        // cleanup on the gate's expired-bound path (nexus-y6aj0), which ends in libc _exit
         // and so runs no hook: native model work is still live there, so the embedder
         // closes are skipped, and so is ds.close(), which can stall about 30 s on a dead PG
-        // (the halt closes the sockets, and the reaper has already ended the backends).
+        // (process exit closes the sockets, and the reaper has already ended the backends).
         Runnable stopAllButEmbedders = () -> {
             service.stop();
             stopPciReconciler.run();

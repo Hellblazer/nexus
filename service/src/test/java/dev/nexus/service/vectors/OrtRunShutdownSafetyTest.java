@@ -129,6 +129,9 @@ class OrtRunShutdownSafetyTest {
             assertThat(files.map(p -> p.getFileName().toString()).filter(n -> n.startsWith("hs_err")))
                     .as("no JVM crash report may be written").isEmpty();
         }
+        assertThat(outcomes.stream().filter(o -> o.output().contains("ort_init_immediate_exit_fallback")))
+                .as("on a JVM the process must leave through _exit; Runtime.halt runs libc exit handlers")
+                .isEmpty();
         long halted = outcomes.stream().filter(o -> o.output().contains("event=ort_init_shutdown_halt")).count();
         assertThat(halted)
                 .as("non-vacuity: the bound must have expired with runs in flight on at least half of "
