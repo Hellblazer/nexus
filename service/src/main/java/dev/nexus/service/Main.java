@@ -458,7 +458,8 @@ public final class Main {
         // Everything the shutdown hook does that does not touch ONNX Runtime. Also the whole
         // cleanup on the gate's expired-bound path (nexus-y6aj0), which ends in Runtime.halt
         // and so runs no hook: native model work is still live there, so the embedder
-        // closes below are skipped and the pool is closed straight after this.
+        // closes are skipped, and so is ds.close(), which can stall about 30 s on a dead PG
+        // (the halt closes the sockets, and the reaper has already ended the backends).
         Runnable stopAllButEmbedders = () -> {
             service.stop();
             stopPciReconciler.run();
@@ -487,10 +488,7 @@ public final class Main {
             // keep; closing the pool below aborts that socket.
             pciSweep.stop();
         };
-        OrtInitGate.process().onBoundExpired(() -> {
-            stopAllButEmbedders.run();
-            ds.close();
-        });
+        OrtInitGate.process().onBoundExpired(stopAllButEmbedders);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");

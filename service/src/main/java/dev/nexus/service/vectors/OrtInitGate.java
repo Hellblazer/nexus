@@ -87,9 +87,12 @@ import java.util.function.UnaryOperator;
  * {@code event=ort_init_shutdown_halt}, runs the {@link #onBoundExpired cleanup
  * the application registered} (the parts of its shutdown hook that do not touch
  * ORT), and ends the process with {@code Runtime.halt(128+n)}. No hook runs, so
- * onnxruntime-java never frees the environment, and the exit status is the one a
- * clean stop gives. Sessions and the environment are not released; the process is
- * ending and the OS reclaims them.
+ * onnxruntime-java's closer never releases the environment under the live work,
+ * and the exit status is the one a clean stop gives. Sessions are not closed; the
+ * process is ending. On HotSpot {@code halt} still ends in libc {@code exit}, so the
+ * library's static destructors run with the native thread alive; no crash was
+ * seen there (macOS arm64 and Linux amd64 sweeps with the bound at zero, init and
+ * 8-thread inference), but that is measurement, not a guarantee.
  *
  * <p>Not covered: a {@code System.exit} called from application code while a
  * lazy init is in flight (the only callers are boot-time failure paths, which
@@ -255,8 +258,9 @@ public final class OrtInitGate {
      * Register what the application must still do when the wait bound expires with
      * native work in flight (nexus-y6aj0). That path ends in {@code Runtime.halt},
      * so no shutdown hook runs; this is the hook's replacement there. It must not
-     * close an ORT session or the environment (the reason hooks are skipped), and
-     * it runs inside whatever is left of the stop grace.
+     * close an ORT session or the environment (the reason hooks are skipped). It
+     * must be bounded: nothing else ends the process while it runs, and the stop
+     * grace keeps counting, so a slow cleanup is answered by SIGKILL.
      */
     public void onBoundExpired(Runnable cleanup) {
         this.boundExpiredCleanup = cleanup;
@@ -303,7 +307,9 @@ public final class OrtInitGate {
     private void onExitSignal(int exitStatus) {
         Thread t = new Thread(() -> {
             if (quiesce(waitMillis)) {
-                exitAction.accept(exitStatus);
+                // A later signal can find the work drained while an earlier one's expired-bound
+                // cleanup still runs; starting the hook phase beside it would run it twice.
+                if (!halting.get()) exitAction.accept(exitStatus);
             } else {
                 haltWithNativeWorkInFlight(exitStatus);
             }

@@ -442,6 +442,39 @@ class OrtInitGateTest {
         assertThat(halts.get()).isEqualTo(1);
     }
 
+    /**
+     * The stuck work can return while the expired-bound cleanup is still running. A second
+     * signal then finds nothing in flight; it must not start the hook phase beside the cleanup.
+     */
+    @Test
+    void aSecondSignalThatFindsTheWorkDrainedDoesNotExitDuringTheCleanup() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        java.util.concurrent.atomic.AtomicInteger exits = new java.util.concurrent.atomic.AtomicInteger();
+        CountDownLatch cleanupStarted = new CountDownLatch(1);
+        CountDownLatch releaseCleanup = new CountDownLatch(1);
+        CountDownLatch halted = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(50, signals, status -> exits.incrementAndGet(),
+                status -> halted.countDown(), "Linux");
+        gate.onBoundExpired(() -> {
+            cleanupStarted.countDown();
+            try {
+                releaseCleanup.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        gate.installSignalHandlers();
+        OrtInitGate.Scope scope = gate.enter("slow-model");
+        signals.handlers.get("TERM").accept(143);
+        assertThat(cleanupStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        scope.close();
+        signals.handlers.get("INT").accept(130);
+        Thread.sleep(400);
+        releaseCleanup.countDown();
+        assertThat(halted.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(exits.get()).as("System.exit must not run beside the expired-bound cleanup").isZero();
+    }
+
     @Test
     void anUnavailableSignalIsSkippedNotFatal() {
         OrtInitGate gate = new OrtInitGate(5_000, (name, h) -> {
