@@ -631,6 +631,51 @@ class TestStorageServiceStackMatcher:
         matcher = storage_service_stack_matcher(default_dir)
         assert matcher("/usr/local/bin/nx daemon service start --foreground")
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "nx daemon service start --foreground",
+            "/usr/local/bin/nx daemon service start --foreground",
+            "/x/gen/bin/python /x/gen/bin/nx daemon service start --foreground",
+            "/x/gen/bin/python3.12 -m nexus.cli daemon service start --foreground",
+            "/bin/sh /home/u/.local/bin/nx daemon service start --foreground",
+        ],
+    )
+    def test_flagless_fallback_matches_a_supervisor_command_line(
+        self, monkeypatch: pytest.MonkeyPatch, command: str,
+    ) -> None:
+        """The flagless fallback matches a command line that IS the
+        supervisor: an nx entry point, optionally under one interpreter,
+        followed directly by the verb."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/home/fakehome"))
+        matcher = storage_service_stack_matcher(Path("/home/fakehome/.config/nexus"))
+        assert matcher(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/bin/sh -c nx daemon service stop && nx daemon service start",
+            "zsh -c nx daemon service stop && nx daemon service start",
+            "ssh box nx daemon service start",
+            "ssh box nx daemon service stop && nx daemon service start --foreground",
+            "watch -n 5 nx daemon service start",
+            "vim notes-on-nx daemon service start.md",
+            "grep -rn nx daemon service start docs",
+            "sudo -u svc nx daemon service start --foreground",
+        ],
+    )
+    def test_flagless_fallback_ignores_a_command_that_only_carries_the_text(
+        self, monkeypatch: pytest.MonkeyPatch, command: str,
+    ) -> None:
+        """nexus-mqfu0: a shell, ssh client, pager or editor whose command
+        line merely CONTAINS 'daemon service start' is not the supervisor.
+        `nx daemon service stop` SIGTERMed every such process on a
+        default-config-dir box, including the shell running the documented
+        `stop && start` line (7.77.0 shakeout, 2026-10-11)."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/home/fakehome"))
+        matcher = storage_service_stack_matcher(Path("/home/fakehome/.config/nexus"))
+        assert not matcher(command)
+
     def test_flagless_command_never_matches_an_explicit_other_dir(
         self, tmp_path: Path,
     ) -> None:
@@ -768,6 +813,38 @@ class TestSweepMatchingProcesses:
         assert result.stubborn == ()
         assert terminated == [[196, 214]]
 
+    def test_the_callers_own_ancestors_are_never_signalled(self, tmp_path: Path) -> None:
+        """nexus-mqfu0: `sh -c 'nx daemon service stop --config-dir X &&
+        nx daemon service start --config-dir X'` ends with the target's
+        own --config-dir token, so the matcher accepts the shell. The
+        shell is the stopping process's parent; a sweep never signals the
+        chain it runs under."""
+        cfg = tmp_path / "nexus"
+        line = f"nx daemon service start --foreground --config-dir {cfg}"
+        rows = [
+            (196, 60, line),
+            (300, 5, f"/bin/sh -c nx daemon service stop --config-dir {cfg} && {line}"),
+            (290, 9, f"ssh-wrapper {line}"),
+        ]
+        parents = {400: 300, 300: 290, 290: None}
+        terminated: list[list[int]] = []
+        with patch(
+            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
+        ), patch(
+            "nexus.daemon.service_registry.process_command",
+            side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
+        ), patch(
+            "nexus.session._ppid_of", side_effect=lambda pid, **_: parents.get(pid),
+        ), patch(
+            "nexus.daemon.service_registry.terminate_pids",
+            side_effect=lambda pids, **_: terminated.append(sorted(pids)) or [],
+        ):
+            result = sweep_matching_processes(
+                storage_service_stack_matcher(cfg), exclude_pid=400,
+            )
+        assert sorted(result.pids) == [196]
+        assert terminated == [[196]]
+
     def test_no_matches_is_a_true_noop(self, tmp_path: Path) -> None:
         """No matching process => no terminate_pids call at all — a clean
         sweep must not narrate or signal anything (mirrors
@@ -849,13 +926,14 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
     convergence path) shares ``storage_service_stack_matcher`` with
     ``stop_storage_service``'s lease-miss fallback, so fixing the matcher
     fixes both call sites at once. A real child process stands in for a
-    unit-launched (flagless) supervisor -- extra positional argv appended
-    to a bare python invocation so the REAL argv the OS reports contains
-    the exact substrings the matcher looks for, without needing an actual
-    ``nx`` binary."""
+    unit-launched (flagless) supervisor -- this interpreter running a
+    script NAMED ``nx`` with the verb as its argv, so the REAL argv the OS
+    reports has the shape the matcher requires (nexus-mqfu0: an nx entry
+    point directly before the verb), without needing an actual ``nx``
+    binary."""
 
     def test_flagless_real_process_is_discovered_at_the_default_dir(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
         import subprocess
         import sys
@@ -867,10 +945,24 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
         monkeypatch.setattr(Path, "home", lambda: fake_home)
         default_dir = fake_home / ".config" / "nexus"
 
+        fake_nx = tmp_path / "nx"
+        fake_nx.write_text("import time; time.sleep(30)\n")
         proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
             [
-                sys.executable, "-c", "import time; time.sleep(30)",
+                sys.executable, str(fake_nx),
                 "daemon", "service", "start", "--foreground",
+            ],
+        )
+        # nexus-mqfu0: a real process that only CARRIES the verb's text (the
+        # shape of a shell running `nx daemon service stop && nx daemon
+        # service start`). Read in the same poll as the supervisor stand-in,
+        # so its absence is measured on a process table that demonstrably
+        # reports the positive.
+        bystander = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [
+                sys.executable, "-c", "import time; time.sleep(30)",
+                "nx", "daemon", "service", "stop", "&&",
+                "nx", "daemon", "service", "start",
             ],
         )
         try:
@@ -882,13 +974,18 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
                     break
                 time.sleep(0.1)
         finally:
-            proc.terminate()
-            with contextlib.suppress(Exception):
-                proc.wait(timeout=5)
+            for child in (proc, bystander):
+                child.terminate()
+                with contextlib.suppress(Exception):
+                    child.wait(timeout=5)
 
         assert proc.pid in found_pids, (
             "a unit-launched (flagless) supervisor process must be visible "
             f"to service_stack_pids at the DEFAULT config dir; found={found_pids}"
+        )
+        assert bystander.pid not in found_pids, (
+            "a process that only carries the text 'daemon service start' in "
+            f"its command line is not part of the stack; found={found_pids}"
         )
 
 

@@ -2302,9 +2302,71 @@ def storage_service_stack_matcher(
             return True
         if "--config-dir" in command:
             return False  # an explicit OTHER config-dir; never match by omission
-        return is_default_target
+        return is_default_target and _is_bare_supervisor_head(command)
 
     return _match
+
+
+#: Interpreters a legacy flagless unit's nx entry point can run under.
+_SUPERVISOR_HEAD_SHELLS: frozenset[str] = frozenset({"sh", "bash", "dash", "zsh"})
+
+
+def _is_bare_supervisor_head(command: str) -> bool:
+    """True when everything before ``daemon service start`` in *command* is
+    an nx entry point and nothing else (nexus-mqfu0).
+
+    The flagless fallback in :func:`storage_service_stack_matcher` has no
+    ``--config-dir`` token to anchor on, so the verb's text alone decided
+    the match. A shell running ``nx daemon service stop && nx daemon
+    service start``, an ssh client, ``watch``, a pager or an editor carries
+    that text too, and ``nx daemon service stop`` signalled all of them.
+    The accepted heads are ``<nx>``, ``<python or shell> <nx>`` and
+    ``<python> -m nexus.cli``; ``<nx>`` is a path whose last component is
+    ``nx`` or ``nx.exe``.
+
+    This splits on whitespace, which the matcher's space-safety note
+    forbids for a config_dir. Here it fails closed: a legacy flagless unit
+    whose nx path contains a space is no longer matched from the process
+    table and is stopped through its lease alone. Every unit and spawn
+    nexus writes today passes ``--config-dir`` and never reaches this
+    function.
+    """
+    head, verb, _tail = command.partition("daemon service start")
+    if not verb or (head and not head[-1].isspace()):
+        return False
+    tokens = head.split()
+
+    def base(token: str) -> str:
+        return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+    if len(tokens) == 3:
+        return base(tokens[0]).startswith("python") and tokens[1:] == ["-m", "nexus.cli"]
+    if not tokens or base(tokens[-1]) not in ("nx", "nx.exe"):
+        return False
+    if len(tokens) == 1:
+        return True
+    interpreter = base(tokens[0])
+    return len(tokens) == 2 and (
+        interpreter.startswith("python") or interpreter in _SUPERVISOR_HEAD_SHELLS
+    )
+
+
+def _ancestor_pids(pid: int, *, limit: int = 64) -> frozenset[int]:
+    """The pids of *pid*'s parent chain, nearest first, up to *limit* hops."""
+    from nexus.session import _ppid_of  # noqa: PLC0415 — deferred: session is not otherwise in the registry's import graph
+
+    chain: list[int] = []
+    current = pid
+    while len(chain) < limit:
+        try:
+            parent = _ppid_of(current)
+        except Exception:  # noqa: BLE001 — an unreadable parent ends the walk; the sweep still excludes what was found
+            break
+        if parent is None or parent in chain or parent == pid:
+            break
+        chain.append(parent)
+        current = parent
+    return frozenset(chain)
 
 
 @dataclass(frozen=True)
@@ -2338,7 +2400,8 @@ def sweep_matching_processes(
 ) -> ProcessSweepResult:
     """Find OS processes whose command line satisfies *matcher*, terminate
     them (SIGTERM -> SIGKILL via :func:`terminate_pids`), and report what
-    was found / left stubborn.
+    was found / left stubborn. The caller (*exclude_pid*, default this
+    process) and its ancestors are never signalled.
 
     THE shared mechanism nexus-oyo2g's ``stop_storage_service`` fix needed:
     a lease MISS from ``ServiceRegistry.discover()`` is a discovery gap, not
@@ -2369,9 +2432,17 @@ def sweep_matching_processes(
     except Exception as exc:  # noqa: BLE001 — no process table: surfaced to the caller, never silently "nothing found"
         return ProcessSweepResult(available=False, error=str(exc), found=(), stubborn=())
 
+    # nexus-mqfu0: a wrapper that carries the stack's own command line (a
+    # shell running `stop ... && start --config-dir X`, an ssh session) can
+    # satisfy the matcher. When it is this process's ancestor, signalling it
+    # kills the stop itself and whatever was to run after it.
+    ancestors = _ancestor_pids(me)
     found: list[tuple[int, str]] = []
     for pid, _age, command in rows:
         if pid == me or not matcher(command):
+            continue
+        if pid in ancestors:
+            _log.info("sweep_matching_processes_ancestor_skipped", pid=pid, command=command[:120])
             continue
         current = process_command(pid)
         # An unreadable argv (permissions, zombie mid-reap) is not evidence
