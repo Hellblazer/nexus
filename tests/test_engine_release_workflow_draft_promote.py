@@ -83,3 +83,38 @@ def test_promote_script_asserts_every_asset_and_the_size_ceilings_before_publish
     assert "check_engine_cut_riders.py" in text and " sizes " in text
     assert text.index("check_engine_cut_riders.py") < text.index("--draft=false")
     assert "scripts/check_engine_cut_riders.py" in WORKFLOW.read_text().split("promote-release:")[1]
+
+
+def _mac_leg(job: str) -> dict:
+    return next(t for t in _jobs()[job]["strategy"]["matrix"]["target"] if t["arch"] == "mac-arm64")
+
+
+def test_the_mac_legs_build_on_the_pool_and_a_hellmini_job_smokes_what_they_built() -> None:
+    """nexus-9q6ox: the lab pool's mac class has no Docker, which native-smoke.sh needs. The mac
+    build legs default to lab-mac-m; the smoke runs on hellmini against the uploaded artifact
+    (on a tag, the signed bytes), and promotion requires it to have succeeded."""
+    for job in _MATRICES:
+        assert _mac_leg(job)["runner"] == "${{ inputs.mac_runner || 'lab-mac-m' }}", job
+    # The build leg smokes inline only when a dispatch names hellmini itself.
+    assert _mac_leg("build-publish")["smoke"] == "${{ (inputs.mac_runner || 'lab-mac-m') == 'hellmini' }}"
+    spec = yaml.safe_load(WORKFLOW.read_text())
+    mac_runner = spec.get("on", spec.get(True))["workflow_dispatch"]["inputs"]["mac_runner"]
+    assert mac_runner["default"] == "lab-mac-m"
+    assert mac_runner["options"] == ["lab-mac-m", "hellmini", "macos-14"]
+
+    smoke = _jobs()["smoke-mac-arm64"]
+    assert smoke["runs-on"] == "hellmini"
+    assert smoke["needs"] == "build-publish"
+    assert "needs.build-publish.result == 'success'" in smoke["if"]
+    assert "(inputs.mac_runner || 'lab-mac-m') == 'lab-mac-m'" in smoke["if"]
+    assert smoke["permissions"] == {"contents": "read"}, "the smoke publishes nothing"
+    download = next(s for s in smoke["steps"] if "download-artifact" in s.get("uses", ""))
+    assert download["with"]["name"] == "nexus-service-mac-arm64"
+    text = _step_text(smoke)
+    assert "shasum -a 256 -c nexus-service-mac-arm64.sha256" in text, "the smoked bytes are the uploaded bytes"
+    assert "./native-smoke.sh" in text
+    assert not any(v in text for v in ("gh release", "cosign", "mac-sign.sh")), "the smoke job ships nothing"
+
+    promote = _jobs()["promote-release"]
+    assert "smoke-mac-arm64" in promote["needs"]
+    assert "needs.smoke-mac-arm64.result == 'success'" in promote["if"]

@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.OptionalInt;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -68,5 +69,46 @@ class OnnxThreadPolicyTest {
         // explicit positive count or the session keeps ORT's default.
         var threads = OnnxThreadPolicy.intraOpThreads();
         assertThat(threads.isEmpty() || threads.getAsInt() > 0).isTrue();
+    }
+
+    // ── nexus-qe5y2: a CPU limit ORT does not see ────────────────────────────
+
+    @Test
+    void underACpuLimitTheCountIsWhatTheJvmMayUse() {
+        // The CI pool case: a 6-CPU cgroup on a host with 64 CPUs online.
+        assertThat(OnnxThreadPolicy.underCpuLimit(6, OptionalInt.of(64))).hasValue(6);
+        assertThat(OnnxThreadPolicy.underCpuLimit(1, OptionalInt.of(2))).hasValue(1);
+    }
+
+    @Test
+    void withNoLimitOrNoHostCountOrtsDefaultStays() {
+        assertThat(OnnxThreadPolicy.underCpuLimit(64, OptionalInt.of(64)))
+                .as("no limit: the pre-existing width, never a derived one (the v0.1.99 regression)").isEmpty();
+        assertThat(OnnxThreadPolicy.underCpuLimit(8, OptionalInt.empty()))
+                .as("macOS, Windows, or an unreadable file").isEmpty();
+        assertThat(OnnxThreadPolicy.underCpuLimit(16, OptionalInt.of(8)))
+                .as("a host count below the JVM's is not a limit").isEmpty();
+        assertThat(OnnxThreadPolicy.underCpuLimit(0, OptionalInt.of(8))).isEmpty();
+    }
+
+    @Test
+    void aKernelCpuListIsCounted() {
+        assertThat(OnnxThreadPolicy.cpuListCount("0-63\n")).hasValue(64);
+        assertThat(OnnxThreadPolicy.cpuListCount("0-3,8-11")).hasValue(8);
+        assertThat(OnnxThreadPolicy.cpuListCount("5")).hasValue(1);
+        assertThat(OnnxThreadPolicy.cpuListCount("0, 2-3")).hasValue(3);
+        for (String bad : new String[] {"", "  ", "a-b", "3-1", "0-1-2", "-1", "0-"}) {
+            assertThat(OnnxThreadPolicy.cpuListCount(bad)).as(bad).isEmpty();
+        }
+        assertThat(OnnxThreadPolicy.cpuListCount(null)).isEmpty();
+    }
+
+    @Test
+    void theHostCountComesFromTheFileAndAMissingFileIsNoCount(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        java.nio.file.Path online = dir.resolve("online");
+        java.nio.file.Files.writeString(online, "0-31\n");
+        assertThat(OnnxThreadPolicy.hostProcessors(online)).hasValue(32);
+        assertThat(OnnxThreadPolicy.hostProcessors(dir.resolve("absent"))).isEmpty();
     }
 }

@@ -485,7 +485,11 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
         click.echo(
             "\nAutostart unit installed, but the service did not become ready in "
             "time — NOT confirmed serving. The OS will keep retrying; check "
-            "`nx daemon service status` and <config_dir>/logs/storage_service.log.",
+            "`nx daemon service status`, the supervisor log "
+            f"{config_dir / 'logs' / 'storage_service.log'} and the engine's own "
+            f"log in {config_dir / 'logs'} (storage_service_native.log, or "
+            "storage_service_jar.log for a jar launch); an engine that refuses "
+            "to start says why there.",
             err=True,
         )
         raise SystemExit(1)

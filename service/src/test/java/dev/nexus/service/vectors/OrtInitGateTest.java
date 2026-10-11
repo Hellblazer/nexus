@@ -362,17 +362,117 @@ class OrtInitGateTest {
         assertThat(exited.get()).isEqualTo(130);
     }
 
+    /**
+     * nexus-y6aj0: with native work still live at the bound, the process must end WITHOUT the
+     * hook phase ({@code System.exit} there lets onnxruntime-java free the environment under
+     * the live init), after the application's registered cleanup, with the signal's status.
+     */
     @Test
-    void aStuckInitDoesNotHoldExitPastTheBound() throws Exception {
+    void aStuckInitEndsInCleanupThenHaltNeverExit() throws Exception {
         FakeSignals signals = new FakeSignals();
-        CountDownLatch exitCalled = new CountDownLatch(1);
-        OrtInitGate gate = new OrtInitGate(300, signals, status -> exitCalled.countDown());
+        List<String> order = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CountDownLatch halted = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(300, signals,
+                status -> order.add("exit:" + status),
+                status -> {
+                    order.add("halt:" + status);
+                    halted.countDown();
+                }, "Linux");
+        gate.onBoundExpired(() -> order.add("cleanup"));
         gate.installSignalHandlers();
         gate.enter("stuck-model"); // never closed
         signals.handlers.get("TERM").accept(143);
-        assertThat(exitCalled.await(5, TimeUnit.SECONDS))
-                .as("exit proceeds after the bound even if the init never returns")
+        assertThat(halted.await(5, TimeUnit.SECONDS))
+                .as("the process ends after the bound even if the init never returns")
                 .isTrue();
+        assertThat(order).containsExactly("cleanup", "halt:143");
+    }
+
+    @Test
+    void aStuckInitHaltsWithNoCleanupRegisteredAndWhenTheCleanupThrows() throws Exception {
+        for (Runnable cleanup : new Runnable[] {null, () -> { throw new IllegalStateException("pool gone"); }}) {
+            FakeSignals signals = new FakeSignals();
+            java.util.concurrent.atomic.AtomicInteger haltedWith = new java.util.concurrent.atomic.AtomicInteger(-1);
+            CountDownLatch halted = new CountDownLatch(1);
+            OrtInitGate gate = new OrtInitGate(100, signals, status -> { }, status -> {
+                haltedWith.set(status);
+                halted.countDown();
+            }, "Linux");
+            if (cleanup != null) gate.onBoundExpired(cleanup);
+            gate.installSignalHandlers();
+            gate.enter("stuck-model");
+            signals.handlers.get("TERM").accept(143);
+            assertThat(halted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(haltedWith.get()).isEqualTo(143);
+        }
+    }
+
+    /** A second signal while the first one's cleanup runs must not halt underneath it. */
+    @Test
+    void aSecondSignalDoesNotCutTheCleanupShort() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        java.util.concurrent.atomic.AtomicInteger cleanups = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger halts = new java.util.concurrent.atomic.AtomicInteger();
+        CountDownLatch cleanupStarted = new CountDownLatch(1);
+        CountDownLatch releaseCleanup = new CountDownLatch(1);
+        CountDownLatch halted = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(50, signals, status -> { }, status -> {
+            halts.incrementAndGet();
+            halted.countDown();
+        }, "Linux");
+        gate.onBoundExpired(() -> {
+            cleanups.incrementAndGet();
+            cleanupStarted.countDown();
+            try {
+                releaseCleanup.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        gate.installSignalHandlers();
+        gate.enter("stuck-model");
+        signals.handlers.get("TERM").accept(143);
+        assertThat(cleanupStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        signals.handlers.get("TERM").accept(143);
+        assertThat(halted.await(600, TimeUnit.MILLISECONDS))
+                .as("the second signal's bound has expired by now; it must not halt mid-cleanup").isFalse();
+        releaseCleanup.countDown();
+        assertThat(halted.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(cleanups.get()).isEqualTo(1);
+        assertThat(halts.get()).isEqualTo(1);
+    }
+
+    /**
+     * The stuck work can return while the expired-bound cleanup is still running. A second
+     * signal then finds nothing in flight; it must not start the hook phase beside the cleanup.
+     */
+    @Test
+    void aSecondSignalThatFindsTheWorkDrainedDoesNotExitDuringTheCleanup() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        java.util.concurrent.atomic.AtomicInteger exits = new java.util.concurrent.atomic.AtomicInteger();
+        CountDownLatch cleanupStarted = new CountDownLatch(1);
+        CountDownLatch releaseCleanup = new CountDownLatch(1);
+        CountDownLatch halted = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(50, signals, status -> exits.incrementAndGet(),
+                status -> halted.countDown(), "Linux");
+        gate.onBoundExpired(() -> {
+            cleanupStarted.countDown();
+            try {
+                releaseCleanup.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        gate.installSignalHandlers();
+        OrtInitGate.Scope scope = gate.enter("slow-model");
+        signals.handlers.get("TERM").accept(143);
+        assertThat(cleanupStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        scope.close();
+        signals.handlers.get("INT").accept(130);
+        Thread.sleep(400);
+        releaseCleanup.countDown();
+        assertThat(halted.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(exits.get()).as("System.exit must not run beside the expired-bound cleanup").isZero();
     }
 
     @Test

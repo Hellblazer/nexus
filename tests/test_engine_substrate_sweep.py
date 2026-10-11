@@ -748,6 +748,9 @@ class TestWorkerPortSharding:
         # Under a real `-n N` run xdist sets this in the test process too;
         # these tests pin the fixed-width behaviour, so clear it.
         monkeypatch.delenv("PYTEST_XDIST_WORKER_COUNT", raising=False)
+        # These tests pin the per-worker slice geometry; the per-session rotation
+        # (nexus-kmfz6) has its own tests in test_engine_substrate_port_ownership.py.
+        monkeypatch.setattr("tests._engine_substrate._session_port_offset", lambda _slices: 0)
 
     def test_nineteen_workers_each_get_a_disjoint_shard(self, monkeypatch) -> None:
         """nexus-wvyvn: -n auto on a 15-core box spawned 19 workers; with a

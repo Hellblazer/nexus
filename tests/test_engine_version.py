@@ -593,6 +593,11 @@ class TestRequiredEngineVersion:
         # (nexus-43ulx), topics/by_ids (nexus-w032x), router default
         # T=20000 (nexus-43ulx.35). Skips v0.1.157 and v0.1.158, deployed
         # to the managed service and never pinned. Tagged on abc96883c.
+        # ->(0,1,160) 2026-10-11 for 7.77.1 (no wire entry, no changeset):
+        # stop during a slow model load exits through libc _exit
+        # (nexus-y6aj0), ONNX threads follow a CPU limit (nexus-qe5y2),
+        # Connection: close on a large unread body (nexus-632u4). Tagged
+        # on c0697df9a.
         # nexus-9gggv (2026-09-08): the tuple is no longer hand-typed here.
         # Every client release records its engine pairing in CHANGELOG.md's
         # newest released section (the first engine-service-vX.Y.Z it

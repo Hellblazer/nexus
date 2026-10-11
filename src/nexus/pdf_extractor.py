@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import httpx
@@ -120,6 +121,18 @@ os._exit(0)
 '''.replace("__MINERU_OOM_EXIT__", str(_MINERU_OOM_EXIT))
 
 _log = structlog.get_logger(__name__)
+
+# One docling converter per process for each configuration (nexus-l4kbc). Each
+# DocumentConverter loads the layout and table models (about 2 GB resident), and a
+# converter that is dropped does not give that memory back: measured on Linux,
+# six extractions of one PDF ended at 4.1 GB resident and still rising about
+# 250 MB per PDF with a new converter each time, against a 3.0 GB plateau with
+# one. Callers build a PDFExtractor per PDF, so the converter is shared here,
+# not on the instance. docling documents a DocumentConverter as reusable and
+# thread-safe. Keyed on the DocumentConverter class as well, so a test that
+# swaps in a fake docling module gets its own entry and never the real one.
+_SHARED_CONVERTERS: dict[tuple[Any, bool, str], Any] = {}
+_SHARED_CONVERTERS_LOCK = threading.Lock()
 
 
 class MineruMemoryError(RuntimeError):
@@ -1556,8 +1569,10 @@ class PDFExtractor:
         """Lazily initialise the Docling DocumentConverter.
 
         *enriched* enables ``do_formula_enrichment`` for LaTeX extraction.
-        Two converters are cached independently so callers can switch modes
-        without re-creating the converter each time.
+        The fast and the enriched converter are separate, and each is built
+        once per process and shared by every extractor (see
+        ``_SHARED_CONVERTERS``); the instance keeps a reference to the one it
+        resolved.
         """
         attr = "_converter_enriched" if enriched else "_converter"
         converter = getattr(self, attr)
@@ -1599,9 +1614,14 @@ class PDFExtractor:
                         "models."
                     )
                 opts.artifacts_path = artifacts_dir
-            converter = DocumentConverter(
-                format_options={"pdf": PdfFormatOption(pipeline_options=opts)}
-            )
+            key = (DocumentConverter, enriched, artifacts)
+            with _SHARED_CONVERTERS_LOCK:
+                converter = _SHARED_CONVERTERS.get(key)
+                if converter is None:
+                    converter = DocumentConverter(
+                        format_options={"pdf": PdfFormatOption(pipeline_options=opts)}
+                    )
+                    _SHARED_CONVERTERS[key] = converter
             setattr(self, attr, converter)
         return converter
 

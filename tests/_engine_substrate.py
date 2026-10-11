@@ -75,9 +75,12 @@ not the semaphore's wait).
 from __future__ import annotations
 
 import atexit
+import contextlib
+import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import signal
 import socket
@@ -154,21 +157,30 @@ _LOW_PORT_ATTEMPTS = 200
 
 #: xdist worker sharding for the low port range (round-3 critique,
 #: Significant-2). Under ``uv run pytest -n auto`` (the documented local
-#: dev-loop invocation; CI's pytest-split matrix is cross-RUNNER, not
-#: xdist, so this does not apply there), every worker is a SEPARATE
-#: process that independently calls ``_boot()`` -> ``_free_port()`` — all
-#: drawing from the SAME 9000-port range instead of the prior effectively
-#: unbounded OS-ephemeral pool. ``_free_port``'s bind-probe-then-close is
-#: not atomic across the gap to the eventual ``pg_ctl``/``java`` bind, so
-#: two workers CAN race onto the same port; a loser doesn't get a soft
-#: retry — ``ensure_engine()`` remembers ``_boot_error`` and re-raises it
-#: for the rest of that worker's session, reading as an unrelated flaky
-#: failure. Sharding by worker index removes the collision surface for
-#: the common case (a worker never even PROBES another worker's slice);
-#: a worker index beyond the sharded capacity, or no xdist worker at all,
-#: falls back to the FULL range — narrowing the search space, never
-#: silently degrading below the existing bind-probe + loud-fallback
-#: behaviour.
+#: dev-loop invocation), every worker is a SEPARATE process that
+#: independently calls ``_boot()`` -> ``_free_port()`` — all drawing from the
+#: SAME 9000-port range instead of the prior effectively unbounded
+#: OS-ephemeral pool. ``_free_port``'s bind-probe-then-close is not atomic
+#: across the gap to the eventual ``pg_ctl``/``java`` bind, so two workers CAN
+#: race onto the same port. Sharding by worker index removes that collision
+#: surface between the workers of ONE session (a worker never even PROBES
+#: another worker's slice); a worker index beyond the sharded capacity, or no
+#: xdist worker at all, falls back to the FULL range — narrowing the search
+#: space, never silently degrading below the existing bind-probe +
+#: loud-fallback behaviour.
+#:
+#: Sessions are NOT separate runners (nexus-kmfz6). CI shard jobs share one
+#: runner host, and two agents' suites share a laptop, so several pytest
+#: sessions run at once as one user. The worker index alone put gw0 of EVERY
+#: session on the same slice, gw1 on the next, and so on. The slice index is
+#: therefore ROTATED by a per-session offset (``_session_port_offset``). A
+#: rotation PERMUTES the slice table: the workers of one session keep disjoint
+#: slices, but two sessions that each use most of the slices (two ``-n auto``
+#: runs) still share exactly as many slices as before. It lowers collisions only
+#: when the sessions' combined worker count is below the slice count. What
+#: closes the hole is not the rotation: ``_boot`` proves each listener is its
+#: own (``_wait_engine_ready``) and retries a lost race
+#: (``_PORT_RACE_ATTEMPTS``).
 _WORKER_SHARD_WIDTH = 500
 _WORKER_SHARD_BASE = _LOW_PORT_RANGE.start
 _WORKER_SHARD_MAX_INDEX = (
@@ -367,6 +379,27 @@ def _ensure_onnx_models(spawn_env: dict[str, str]) -> Path | None:
     return root
 
 
+def _session_port_offset(slices: int) -> int:
+    """This session's rotation of the slice table, in ``range(slices)``.
+
+    A rotation permutes slices; it does not make two busy sessions disjoint (see
+    the comment above ``_WORKER_SHARD_WIDTH``). Keyed on what every xdist worker of
+    one session shares and no two concurrent sessions do:
+    ``PYTEST_XDIST_TESTRUNUID`` (xdist sets it in each worker, in
+    ``xdist/remote.py``, together with ``PYTEST_XDIST_WORKER`` from the controller's
+    per-run uuid). The only caller, ``_worker_shard_range``, asks for an offset
+    only when ``PYTEST_XDIST_WORKER`` names a ``gw<N>`` worker; non-xdist runs and
+    the controller take the full range and never reach here. So the
+    ``os.getppid()`` fallback (the controller's pid, which is the worker's parent)
+    applies only to an xdist too old to set ``PYTEST_XDIST_TESTRUNUID``, or to a
+    caller that sets ``PYTEST_XDIST_WORKER`` by hand. Deterministic within a
+    session, so a worker computes the same offset on every call.
+    """
+    salt = os.environ.get("PYTEST_XDIST_TESTRUNUID") or f"ppid-{os.getppid()}"
+    digest = hashlib.sha256(salt.encode()).digest()
+    return int.from_bytes(digest[:8], "big") % slices
+
+
 def _worker_shard_range() -> range:
     """This process's slice of :data:`_LOW_PORT_RANGE`, derived from
     ``PYTEST_XDIST_WORKER`` (pytest-xdist sets this to ``"gw0"``,
@@ -375,7 +408,9 @@ def _worker_shard_range() -> range:
     the FULL range, identical to pre-sharding behaviour).
 
     The slice width comes from :func:`_worker_shard_width`, so a run's
-    workers always fit. A worker index beyond the capacity at that width
+    workers always fit. The slice INDEX is the worker index rotated by
+    :func:`_session_port_offset`, so concurrent sessions' same-index workers
+    land on different slices (nexus-kmfz6). A worker index beyond the capacity at that width
     (more than 180 workers, or a stale worker count), or a malformed
     worker id, falls back to the full range rather than computing an
     out-of-bounds or empty slice — still bind-probed, still loud on
@@ -403,7 +438,8 @@ def _worker_shard_range() -> range:
                 stacklevel=2,
             )
         return _LOW_PORT_RANGE
-    start = _WORKER_SHARD_BASE + index * width
+    slices = (_LOW_PORT_RANGE.stop - _LOW_PORT_RANGE.start) // width
+    start = _WORKER_SHARD_BASE + ((index + _session_port_offset(slices)) % slices) * width
     return range(start, start + width)
 
 
@@ -468,6 +504,90 @@ def _wait_tcp(host: str, port: int, timeout: float) -> None:
         except OSError:
             time.sleep(0.1)
     raise TimeoutError(f"engine substrate: port {port} not reachable after {timeout}s")
+
+
+#: How many ports a boot tries for each of its two listeners (Postgres, engine) before
+#: it gives up and names the port a foreign listener holds (nexus-kmfz6).
+_PORT_RACE_ATTEMPTS = 4
+
+#: How long the engine has to log that it bound its port. A cold JVM runs schema
+#: migration and model init first, so this is the old connect-wait's 60 s.
+_ENGINE_READY_TIMEOUT_S = 60.0
+_ENGINE_POLL_S = 0.1
+
+#: The fixed part of the line ``NexusService.start`` logs once ``HttpServer.start``
+#: returned: ``log.info("event=service_started port={}", getPort())``. The boot
+#: appends the port and matches to end of line, so ``port=2018`` never matches a
+#: line for ``port=20184``. ``tests/test_engine_ready_log_line_lint.py`` pins this
+#: text against the Java source; a rename there would otherwise cost every boot the
+#: full readiness timeout.
+_ENGINE_READY_PREFIX = "event=service_started port="
+
+#: Text a failed bind leaves behind: the JVM's ``BindException`` message (Windows
+#: appends ``: bind``) and Postgres's ``could not bind ... Address already in use``.
+_BIND_CONFLICT_MARKERS = ("address already in use", "only one usage of each socket address")
+
+
+def _is_bind_conflict(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _BIND_CONFLICT_MARKERS)
+
+
+class _PortLost(RuntimeError):
+    """The port this boot picked is held by someone else (nexus-kmfz6)."""
+
+    def __init__(self, port: int, what: str, detail: str) -> None:
+        self.port = port
+        super().__init__(
+            f"T2 engine substrate: {what} port {port} is held by a foreign listener "
+            f"(another pytest session on this host drew the same port). {detail}"
+        )
+
+
+def _wait_engine_ready(
+    proc: subprocess.Popen, port: int, log_path: str, timeout: float,
+) -> None:
+    """Return once THE ENGINE THIS BOOT SPAWNED is serving *port*.
+
+    A connect to the port proves only that something listens there, and a sibling
+    session's postmaster or engine does (nexus-kmfz6). The engine's own log is the
+    proof instead: ``NexusService.start`` logs ``event=service_started port=<N>``
+    only after ``server.start()`` returned (the line must END at the port number,
+    see ``_ENGINE_READY_PREFIX``), and the log is the file this boot's JVM writes
+    (truncated per attempt), so no other process can put the line there. A JVM that cannot bind exits, which this reads from ``proc.poll()``.
+
+    Raises :class:`_PortLost` when the process exited on a bind failure,
+    ``RuntimeError`` when it exited for any other reason, and ``TimeoutError`` when
+    the line never appeared.
+    """
+    marker = f"{_ENGINE_READY_PREFIX}{port}"
+    ready_line = re.compile(rf"^.*{re.escape(marker)}\s*$", re.MULTILINE)
+    deadline = time.monotonic() + timeout
+    while True:
+        rc = proc.poll()
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+        if rc is not None:
+            if _is_bind_conflict(text):
+                raise _PortLost(port, "engine", f"Engine log tail:\n{text[-2000:]}")
+            raise RuntimeError(
+                f"T2 engine substrate: service did not bind port {port}; the engine "
+                f"exited with rc={rc}. Tail of engine log ({log_path}):\n{text[-2000:]}"
+            )
+        if ready_line.search(text):
+            # Confirm it answers, then that the same process is still the one answering.
+            _wait_tcp("127.0.0.1", port, timeout=max(1.0, deadline - time.monotonic()))
+            if proc.poll() is None:
+                return
+            continue
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"engine substrate: no {marker!r} in {log_path} after {timeout}s"
+            )
+        time.sleep(_ENGINE_POLL_S)
 
 
 #: Cross-process bound on concurrent PG *boot* operations (initdb +
@@ -928,11 +1048,18 @@ def _boot() -> dict:
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-        _start = pg_ctl_start(
-            bin_dir / "pg_ctl", pgdata, os.path.join(pgdata, "pg.log"),
-            f"-p {pg_port} -k {pgdata}", check=False,
-        )
-        if _start.returncode != 0:
+        pg_log = os.path.join(pgdata, "pg.log")
+        for pg_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
+            # A lost race leaves its failure in pg.log; start each attempt on a clean log
+            # so the classification below reads only this attempt's output.
+            with contextlib.suppress(OSError):
+                os.unlink(pg_log)
+            _start = pg_ctl_start(
+                bin_dir / "pg_ctl", pgdata, pg_log,
+                f"-p {pg_port} -k {pgdata}", check=False,
+            )
+            if _start.returncode == 0:
+                break
             # Carry pg_ctl's stderr and the log tail out (rbc7k critique):
             # CalledProcessError drops stderr, which is where PG names the
             # shmget ENOSPC that the throwaway helper retries and this
@@ -944,14 +1071,42 @@ def _boot() -> dict:
                 capture_output=True, check=False,
             )
             try:
-                _log_tail = open(os.path.join(pgdata, "pg.log")).read()[-2000:]
+                _log_tail = open(pg_log).read()[-2000:]
             except OSError:
                 _log_tail = "<no pg.log>"
+            if _is_bind_conflict(_log_tail + _start.stderr):
+                # nexus-kmfz6: another session's listener took the port between the bind
+                # probe and the postmaster's own bind. pg_ctl -w waits on THIS data
+                # directory's postmaster.pid, so a foreign postmaster can never satisfy it:
+                # a nonzero exit is the whole story. Take a fresh port and go again.
+                if pg_attempt < _PORT_RACE_ATTEMPTS:
+                    lost, pg_port = pg_port, _free_port()
+                    warnings.warn(
+                        f"nexus test substrate: Postgres port {lost} is held by a foreign "
+                        f"listener (attempt {pg_attempt} of {_PORT_RACE_ATTEMPTS}, bind "
+                        f"failed); retrying on port {pg_port} (nexus-kmfz6)",
+                        stacklevel=2,
+                    )
+                    with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
+                        f.write(f"\nport = {pg_port}\n")  # last assignment wins
+                    _write_sidecar(
+                        pgdata, pg_port=pg_port, svc_port=None,
+                        postmaster_pid=None, engine_pid=None,
+                        started_at=sidecar_started_at,
+                    )
+                    continue
+                _failure: str = str(_PortLost(
+                    pg_port, "Postgres",
+                    f"Gave up after {_PORT_RACE_ATTEMPTS} ports.\n"
+                    f"{_start.stderr}\n--- pg.log tail ---\n{_log_tail}",
+                ))
+            else:
+                _failure = (
+                    f"nexus test substrate: pg_ctl start failed (rc={_start.returncode}) "
+                    f"for {pgdata}:\n{_start.stderr}\n--- pg.log tail ---\n{_log_tail}"
+                )
             shutil.rmtree(pgdata, ignore_errors=True)
-            raise RuntimeError(
-                f"nexus test substrate: pg_ctl start failed (rc={_start.returncode}) "
-                f"for {pgdata}:\n{_start.stderr}\n--- pg.log tail ---\n{_log_tail}"
-            )
+            raise RuntimeError(_failure)
     postmaster_pid = _read_postmaster_pid(pgdata)
     # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
     # sidecar (not re-create -- `started_at` stays pinned to the earliest
@@ -1000,10 +1155,8 @@ def _boot() -> dict:
         _kill_pg()
         raise
 
-    svc_port = _free_port()
     env = {
         **os.environ,
-        "NX_SERVICE_PORT": str(svc_port),
         "NX_SERVICE_TOKEN": _BEARER,
         "NX_DB_URL": f"jdbc:postgresql://127.0.0.1:{pg_port}/{_DBNAME}",
         "NX_DB_USER": "nexus_svc",
@@ -1025,33 +1178,59 @@ def _boot() -> dict:
     # from TokenStore.issueToken's log.info; draining exactly the pipe's
     # 65,702 buffered bytes instantly unwedged the next mint.
     svc_log_path = os.path.join(pgdata, "engine.log")
-    svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
-    svc = popen_in_group(
-        engine_argv(java), popen=subprocess.Popen, env=env,
-        stdout=svc_log, stderr=subprocess.STDOUT,
-    )
-    # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen
-    # returns -- no reason to defer recording it until _wait_tcp succeeds
-    # (which can legitimately take up to 60s). Update the sidecar now,
-    # before the wait, so a kill during the wait still leaves a complete,
-    # reapable sidecar (nexus-ui654 follow-up, critic Q3).
-    _write_sidecar(
-        pgdata, pg_port=pg_port, svc_port=svc_port,
-        postmaster_pid=postmaster_pid, engine_pid=svc.pid,
-        started_at=sidecar_started_at,
-    )
-    try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=60.0)
-    except TimeoutError:
-        kill_group(svc)
-        svc_log.flush()
-        with open(svc_log_path, encoding="utf-8", errors="replace") as fh:
-            out = fh.read()[-2000:]
-        _kill_pg()
-        raise RuntimeError(
-            f"T2 engine substrate: service did not bind port {svc_port}. "
-            f"Tail of engine log ({svc_log_path}):\n{out}"
-        ) from None
+    for engine_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
+        svc_port = _free_port()
+        spawn_env = {**env, "NX_SERVICE_PORT": str(svc_port)}
+        # "wb" truncates, so the log below holds only THIS attempt's JVM.
+        svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
+        svc = popen_in_group(
+            engine_argv(java), popen=subprocess.Popen, env=spawn_env,
+            stdout=svc_log, stderr=subprocess.STDOUT,
+        )
+        # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen
+        # returns -- no reason to defer recording it until the engine is ready
+        # (which can legitimately take up to 60s). Update the sidecar now,
+        # before the wait, so a kill during the wait still leaves a complete,
+        # reapable sidecar (nexus-ui654 follow-up, critic Q3).
+        _write_sidecar(
+            pgdata, pg_port=pg_port, svc_port=svc_port,
+            postmaster_pid=postmaster_pid, engine_pid=svc.pid,
+            started_at=sidecar_started_at,
+        )
+        try:
+            # Proves the listener is THIS engine, not merely that something answers
+            # (nexus-kmfz6); see _wait_engine_ready.
+            _wait_engine_ready(svc, svc_port, svc_log_path, _ENGINE_READY_TIMEOUT_S)
+            break
+        except _PortLost as lost:
+            kill_group(svc)
+            svc_log.close()
+            if engine_attempt == _PORT_RACE_ATTEMPTS:
+                _kill_pg()
+                raise RuntimeError(
+                    f"{lost} Gave up after {_PORT_RACE_ATTEMPTS} ports."
+                ) from None
+            warnings.warn(
+                f"nexus test substrate: engine port {svc_port} is held by a foreign "
+                f"listener (attempt {engine_attempt} of {_PORT_RACE_ATTEMPTS}, the JVM "
+                "failed to bind); retrying on a new port (nexus-kmfz6)",
+                stacklevel=2,
+            )
+        except TimeoutError:
+            kill_group(svc)
+            svc_log.close()
+            with open(svc_log_path, encoding="utf-8", errors="replace") as fh:
+                out = fh.read()[-2000:]
+            _kill_pg()
+            raise RuntimeError(
+                f"T2 engine substrate: service did not bind port {svc_port}. "
+                f"Tail of engine log ({svc_log_path}):\n{out}"
+            ) from None
+        except BaseException:
+            kill_group(svc)
+            svc_log.close()
+            _kill_pg()
+            raise
 
     state = {
         "base_url": f"http://127.0.0.1:{svc_port}",

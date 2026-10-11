@@ -40,6 +40,12 @@
 #     pointing at a login keychain that does not exist.
 #   * codesign gets --keychain, so identity lookup does not depend on the
 #     search list at all.
+#   * A user with NO search list (the lab pool's ghlab: no login keychain, no
+#     default keychain) cannot be restored with `security list-keychains -s`:
+#     called with no names it changes nothing, so the deleted temp keychain
+#     would stay on the list as a dangling path, one more per job. The list
+#     lives in ~/Library/Preferences/com.apple.security.plist; when that file
+#     did not exist before `sign`, `cleanup` removes it again.
 #   * A preflight `security find-identity -v` must show the identity before
 #     codesign runs. On a miss it prints the unfiltered listing, which names
 #     the reason an identity is invalid (e.g. CSSMERR_TP_NOT_TRUSTED).
@@ -58,6 +64,9 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 : "${SIGN_WORKDIR:?SIGN_WORKDIR must name a scratch directory (the workflows pass \$RUNNER_TEMP)}"
 KEYCHAIN="$SIGN_WORKDIR/sign.keychain-db"
 SAVED_LIST="$SIGN_WORKDIR/sign.searchlist.orig"
+# Present when the user had no search-list file before `sign` created one.
+NO_PLIST_MARK="$SIGN_WORKDIR/sign.searchlist.noplist"
+SEARCH_PLIST="$HOME/Library/Preferences/com.apple.security.plist"
 
 # Prints the current user-domain keychain search list, one path per line.
 user_search_list() {
@@ -105,7 +114,10 @@ cmd_sign() {
   local -a orig=()
   local kc
   while IFS= read -r kc; do orig+=("$kc"); done < <(user_search_list)
-  [ -f "$SAVED_LIST" ] || { [ "${#orig[@]}" -eq 0 ] || printf '%s\n' "${orig[@]}"; } > "$SAVED_LIST"
+  if [ ! -f "$SAVED_LIST" ]; then
+    { [ "${#orig[@]}" -eq 0 ] || printf '%s\n' "${orig[@]}"; } > "$SAVED_LIST"
+    [ -e "$SEARCH_PLIST" ] || : > "$NO_PLIST_MARK"
+  fi
   security list-keychains -d user -s "$KEYCHAIN" ${orig[@]+"${orig[@]}"} >&2
 
   local valid
@@ -178,8 +190,15 @@ cmd_cleanup() {
     local -a orig=()
     local kc
     while IFS= read -r kc; do [ -n "$kc" ] && orig+=("$kc"); done < "$SAVED_LIST"
-    security list-keychains -d user -s ${orig[@]+"${orig[@]}"} >&2 || true
-    rm -f "$SAVED_LIST"
+    if [ "${#orig[@]}" -gt 0 ]; then
+      security list-keychains -d user -s "${orig[@]}" >&2 || true
+    elif [ -f "$NO_PLIST_MARK" ]; then
+      rm -f "$SEARCH_PLIST"
+    else
+      echo "WARN: the user search list was empty before signing but its file already existed;" \
+        "left as is, it may still name the deleted temp keychain" >&2
+    fi
+    rm -f "$SAVED_LIST" "$NO_PLIST_MARK"
   fi
 }
 

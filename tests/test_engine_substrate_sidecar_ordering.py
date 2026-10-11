@@ -97,14 +97,14 @@ class TestSidecarWrittenBeforeTcpWait:
 
         observed: list[dict | None] = []
 
-        def _fake_wait_tcp(_host, _port, timeout):
-            assert created, "cluster dir must exist by the time _wait_tcp is called"
+        def _fake_wait_tcp(_proc, _port, _log_path, _timeout):
+            assert created, "cluster dir must exist by the time _wait_engine_ready is called"
             sidecar_path = created[0] / sub._SIDECAR_FILENAME
             observed.append(
                 json.loads(sidecar_path.read_text()) if sidecar_path.exists() else None,
             )
 
-        monkeypatch.setattr(sub, "_wait_tcp", _fake_wait_tcp)
+        monkeypatch.setattr(sub, "_wait_engine_ready", _fake_wait_tcp)
 
         sub._boot()
 
@@ -162,11 +162,11 @@ class TestSidecarWrittenBeforeTcpWait:
 
         sidecar_at_wait_tcp: list[dict] = []
 
-        def _fake_wait_tcp(_host, _port, timeout):
+        def _fake_wait_tcp(_proc, _port, _log_path, _timeout):
             sidecar_path = created[0] / sub._SIDECAR_FILENAME
             sidecar_at_wait_tcp.append(json.loads(sidecar_path.read_text()))
 
-        monkeypatch.setattr(sub, "_wait_tcp", _fake_wait_tcp)
+        monkeypatch.setattr(sub, "_wait_engine_ready", _fake_wait_tcp)
 
         sub._boot()
 
@@ -233,7 +233,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
 
         setattr_in(monkeypatch, sub, "subprocess.Popen", _FakePopen)
         monkeypatch.setattr(sub, "_read_postmaster_pid", lambda _pgdata: 313131)
-        monkeypatch.setattr(sub, "_wait_tcp", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sub, "_wait_engine_ready", lambda *_a, **_kw: None)
 
     def test_no_directory_exists_while_queued_for_the_semaphore(
         self, tmp_path, monkeypatch,

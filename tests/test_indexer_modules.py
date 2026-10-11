@@ -942,3 +942,67 @@ def _legacy_vector_backend(monkeypatch):
     chroma/local embed pipeline, which is exactly the chroma-injected
     configuration the opt-out exists for."""
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+
+# ── A file that vanished after the walk listed it is a deletion ─────────────
+
+
+@pytest.mark.parametrize(
+    ("module", "func", "name", "ctx_kwargs"),
+    [
+        ("nexus.code_indexer", "index_code_file", "gone.py", {}),
+        ("nexus.prose_indexer", "index_prose_file", "gone.md",
+         {"corpus": "docs__test", "embedding_model": "model-ctx"}),
+    ],
+)
+def test_index_file_that_vanished_after_the_walk_is_a_plain_zero(
+    tmp_path, make_ctx, module, func, name, ctx_kwargs,
+):
+    """A file the walk listed and a later step deleted or renamed (a
+    commit landing mid-run) is not unextractable content. It must return
+    0 with no fence-fail and no UnextractableContentError, so it leaves no
+    index_failures row for `nx doctor` to fail on; housekeeping reaps its
+    catalog document like any other deleted file. Measured 2026-10-10:
+    five nexus files removed during a 2026-09-19 run were recorded as
+    "cannot decode as UTF-8 text (FileNotFoundError)" and failed doctor
+    for three weeks."""
+    import importlib
+    from unittest.mock import patch
+
+    index_file = getattr(importlib.import_module(module), func)
+    ctx = make_ctx(
+        col=_real_col("t__" + uuid.uuid4().hex[:12]),
+        doc_id_resolver=lambda p: "1.1.7", **ctx_kwargs,
+    )
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail:
+        assert index_file(ctx, tmp_path / name) == 0
+
+    fence_fail.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("module", "func", "name", "ctx_kwargs"),
+    [
+        ("nexus.code_indexer", "index_code_file", "adir.py", {}),
+        ("nexus.prose_indexer", "index_prose_file", "adir.md",
+         {"corpus": "docs__test", "embedding_model": "model-ctx"}),
+    ],
+)
+def test_index_file_unreadable_for_another_os_reason_says_read_not_decode(
+    tmp_path, make_ctx, module, func, name, ctx_kwargs,
+):
+    """An OSError other than a missing file (here IsADirectoryError) is
+    still a recorded failure, and its reason names the read failure
+    instead of claiming a UTF-8 decode problem."""
+    import importlib
+
+    from nexus.errors import UnextractableContentError
+
+    index_file = getattr(importlib.import_module(module), func)
+    target = tmp_path / name
+    target.mkdir()
+    ctx = make_ctx(col=_real_col("t__" + uuid.uuid4().hex[:12]), **ctx_kwargs)
+
+    with pytest.raises(UnextractableContentError, match=r"cannot read file \(IsADirectoryError\)"):
+        index_file(ctx, target)

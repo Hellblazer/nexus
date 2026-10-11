@@ -62,6 +62,7 @@ class TestClassifyOwnerRoot:
 
         repo = tmp_path / "repo"
         repo.mkdir()
+        (repo / ".git").mkdir()
         (repo / "README.md").write_text("hi")
         assert _classify_owner_root(str(repo)) == "healthy"
 
@@ -97,6 +98,7 @@ class TestClassifyOwnerRoot:
 
         repo = tmp_path / "repo"
         repo.mkdir()
+        (repo / ".git").mkdir()
         (repo / "f").write_text("x")
         assert _classify_owner_root(str(repo)) == "healthy"
 
@@ -104,6 +106,153 @@ class TestClassifyOwnerRoot:
 
         shutil.rmtree(repo)
         assert _classify_owner_root(str(repo)) == "path_vanished"
+
+
+class TestNotARepositoryBucket:
+    """nexus-0rjbm: a root that exists and has content but is not inside a
+    git work tree (an index run pointed at a directory of repositories)."""
+
+    def test_directory_with_content_and_no_git_is_not_a_repository(self, tmp_path):
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        parent = tmp_path / "git"
+        (parent / "some-repo").mkdir(parents=True)
+        assert _classify_owner_root(str(parent)) == "not_a_repository"
+
+    def test_a_git_file_counts_as_a_repository(self, tmp_path):
+        """A linked worktree's root holds a .git FILE, not a directory."""
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text("gitdir: /elsewhere\n")
+        assert _classify_owner_root(str(wt)) == "healthy"
+
+    def test_a_root_below_a_repository_top_level_is_healthy(self, tmp_path):
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        repo = tmp_path / "repo"
+        sub = repo / "packages" / "a"
+        sub.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (sub / "f").write_text("x")
+        assert _classify_owner_root(str(sub)) == "healthy"
+
+    def test_the_parent_of_a_bare_repository_with_worktrees_is_healthy(self, tmp_path):
+        """An owner root is the parent of the common git dir. With a bare
+        repository and a linked worktree beside it, that parent has no .git
+        entry of its own and is still a real owner's root."""
+        import subprocess
+
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        bare = root / "proj.git"
+        env = {
+            "PATH": __import__("os").environ["PATH"], "HOME": str(tmp_path),
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        }
+
+        def git(*args, cwd):
+            subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+        git("init", "--bare", "-b", "main", str(bare), cwd=root)
+        seed = tmp_path / "seed"
+        git("clone", str(bare), str(seed), cwd=tmp_path)
+        (seed / "f").write_text("x")
+        git("add", "f", cwd=seed)
+        git("commit", "-m", "seed", cwd=seed)
+        git("push", "origin", "HEAD:main", cwd=seed)
+        git("worktree", "add", str(root / "main"), "main", cwd=bare)
+
+        assert not (root / ".git").exists()
+        assert (root / "main" / ".git").is_file()
+        assert _classify_owner_root(str(root)) == "healthy"
+
+    def test_a_symlinked_root_inside_a_repository_is_healthy(self, tmp_path):
+        from nexus.commands.catalog_cmds.owners import _classify_owner_root
+
+        repo = tmp_path / "repo"
+        sub = repo / "sub"
+        sub.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (sub / "f").write_text("x")
+        link = tmp_path / "elsewhere" / "link"
+        link.parent.mkdir()
+        link.symlink_to(sub, target_is_directory=True)
+        assert _classify_owner_root(str(link)) == "healthy"
+
+    def _invoke(self, fake, writer):
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake), \
+             patch("nexus.commands.catalog._get_catalog_writer", return_value=writer):
+            return CliRunner().invoke(
+                main,
+                ["catalog", "owners", "--census", "--execute", "deactivate",
+                 "--no-dry-run", "--confirm"],
+            )
+
+    def _fake_with_one_non_repo(self, tmp_path):
+        parent = tmp_path / "git"
+        (parent / "some-repo").mkdir(parents=True)
+        fake = MagicMock(spec=HttpCatalogClient)
+        fake.list_owners_by_type.return_value = [_owner("1.32", "git", str(parent))]
+        fake.by_owner.return_value = []
+        return fake, parent
+
+    def test_census_lists_it_and_names_its_own_residual(self, tmp_path):
+        fake, parent = self._fake_with_one_non_repo(tmp_path)
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(main, ["catalog", "owners", "--census", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert [r["tumbler"] for r in data["not_a_repository"]] == ["1.32"]
+        assert data["healthy"] == []
+        (row,) = data["mutation_eligible"]
+        assert row["bucket"] == "not_a_repository"
+        assert "not a git repository" in row["residual_note"]
+        assert "--owner 1.32" in row["residual_note"]
+
+    def test_zero_document_owner_is_deactivated(self, tmp_path):
+        fake, _ = self._fake_with_one_non_repo(tmp_path)
+        writer = MagicMock()
+        writer.deactivate_owner.return_value = True
+        result = self._invoke(fake, writer)
+        assert result.exit_code == 0, result.output
+        writer.deactivate_owner.assert_called_once_with("1.32")
+        assert "[not_a_repository, doc_count=0" in result.output
+
+    def test_owner_with_live_documents_is_never_deactivated(self, tmp_path):
+        """A directory indexed on purpose still owns its documents."""
+        fake, _ = self._fake_with_one_non_repo(tmp_path)
+
+        class _Doc:
+            chunk_count = 3
+
+        fake.by_owner.return_value = [_Doc()]
+        writer = MagicMock()
+        result = self._invoke(fake, writer)
+        assert result.exit_code == 0, result.output
+        writer.deactivate_owner.assert_not_called()
+        assert "not_a_repository: 1 live document(s)" in result.output
+
+    def test_recheck_skips_a_root_that_became_a_repository(self, tmp_path):
+        """The pre-write re-check compares against the bucket the candidate
+        was classified in, so a root that gained a .git in between is kept."""
+        fake, parent = self._fake_with_one_non_repo(tmp_path)
+
+        def _by_owner(_tumbler):
+            (parent / ".git").mkdir(exist_ok=True)
+            return []
+
+        fake.by_owner.side_effect = _by_owner
+        writer = MagicMock()
+        result = self._invoke(fake, writer)
+        assert result.exit_code == 0, result.output
+        writer.deactivate_owner.assert_not_called()
+        assert "now classified healthy, not not_a_repository" in result.output
 
 
 class TestOwnersCensusCommand:

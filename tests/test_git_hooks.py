@@ -1221,6 +1221,50 @@ class TestDoctorDeadOwnerRendering:
         assert "could not check" in r.detail
         assert "simulated non-path probe failure" in r.detail
 
+    def _non_repo_owner(self, monkeypatch, tmp_path, *, in_catalog: bool):
+        parent = tmp_path / "git"
+        (parent / "some-repo").mkdir(parents=True)
+        self._seed_registry(monkeypatch, tmp_path, parent)
+        if in_catalog:
+            class _FakeCatalogReader:
+                def list_owners_by_type(self, owner_type):
+                    return [{
+                        "tumbler_prefix": "1.32", "repo_root": str(parent),
+                        "deactivated_at": None,
+                    }]
+
+            monkeypatch.setattr(
+                "nexus.catalog.factory.make_catalog_reader",
+                lambda: _FakeCatalogReader(),
+            )
+        from nexus.health import _check_git_hooks
+        return next(x for x in _check_git_hooks() if x.label == "git hooks")
+
+    def test_catalog_owner_that_is_not_a_repository_points_at_census(
+        self, tmp_path, monkeypatch
+    ):
+        """nexus-0rjbm: a catalog owner whose root is a directory of
+        repositories used to read 'could not check' with no remedy."""
+        r = self._non_repo_owner(monkeypatch, tmp_path, in_catalog=True)
+        assert r.ok is False and r.warn is True and r.fatal is False
+        assert "is not a git repository" in r.detail
+        assert "could not check" not in r.detail
+        assert r.fix_suggestions[0] == (
+            "nx catalog owners --census — lists it under not_a_repository"
+        )
+        assert any(
+            "--execute deactivate --no-dry-run --confirm" in s for s in r.fix_suggestions
+        ), r.fix_suggestions
+
+    def test_legacy_only_non_repository_is_not_pointed_at_census(
+        self, tmp_path, monkeypatch
+    ):
+        """The census classifies catalog owners only, so a repos.json-only
+        entry keeps the generic wording and gets no census suggestion."""
+        r = self._non_repo_owner(monkeypatch, tmp_path, in_catalog=False)
+        assert "could not check" in r.detail
+        assert not any("census" in s for s in (r.fix_suggestions or [])), r.fix_suggestions
+
     def test_healthy_owner_still_renders_ok(self, runner, fake_repo, monkeypatch, tmp_path):
         """Kill control: a real, still-installed repo must be untouched by
         this fix — the honest-rendering change must not regress the happy

@@ -455,8 +455,12 @@ public final class Main {
         // CREATE INDEX CONCURRENTLY is ended by the builder reaper below, not waited for).
         Runnable stopPciReconciler = pciReconciler::stop;
 
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            log.info("event=shutdown_signal");
+        // Everything the shutdown hook does that does not touch ONNX Runtime. Also the whole
+        // cleanup on the gate's expired-bound path (nexus-y6aj0), which ends in libc _exit
+        // and so runs no hook: native model work is still live there, so the embedder
+        // closes are skipped, and so is ds.close(), which can stall about 30 s on a dead PG
+        // (process exit closes the sockets, and the reaper has already ended the backends).
+        Runnable stopAllButEmbedders = () -> {
             service.stop();
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
@@ -483,6 +487,12 @@ public final class Main {
             // never waiting: a read on a silent socket ignores the interrupt, and the reaper has a 10 s grace to
             // keep; closing the pool below aborts that socket.
             pciSweep.stop();
+        };
+        OrtInitGate.process().onBoundExpired(stopAllButEmbedders);
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            log.info("event=shutdown_signal");
+            stopAllButEmbedders.run();
             // doc and qry routers each hold their OWN AdmissionControlledEmbedder
             // (different acquisition policy — see LocalOnnxAdmission), but both
             // wrap the SAME underlying "bge" delegate, so closing either

@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -101,17 +102,60 @@ class OrtRunShutdownSafetyTest {
                 .isGreaterThanOrEqualTo(MIN_CANCELLED);
     }
 
+    /**
+     * nexus-y6aj0 — with the bound at zero the gate cancels the runs and expires at once, so
+     * the process halts with inference still inside native code on every landing. That must
+     * exit 143 with no crash report, exactly like the drained path.
+     */
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.MINUTES)
+    void sigtermWithInferenceOutlastingTheBound_haltsCleanlyNeverCrashes(@TempDir Path work) throws Exception {
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"),
+                "SIGTERM semantics are POSIX-only");
+        OrtTestModel.requireBgeOrSkip();
+
+        int iterations = 12;
+        List<Outcome> outcomes = new ArrayList<>();
+        for (int i = 0; i < iterations; i++) {
+            outcomes.add(runOnce(work, 200 + 60 * i, Map.of(OrtInitGate.WAIT_ENV, "0")));
+        }
+        for (Outcome o : outcomes) {
+            assertThat(o.exitCode())
+                    .as("SIGTERM %d ms into sustained inference with a zero bound: exit must be 143. "
+                            + "child output:%n%s", o.delayMs(), o.output())
+                    .isEqualTo(143);
+        }
+        try (Stream<Path> files = Files.list(work)) {
+            assertThat(files.map(p -> p.getFileName().toString()).filter(n -> n.startsWith("hs_err")))
+                    .as("no JVM crash report may be written").isEmpty();
+        }
+        assertThat(outcomes.stream().filter(o -> o.output().contains("ort_init_immediate_exit_fallback")))
+                .as("on a JVM the process must leave through _exit; Runtime.halt runs libc exit handlers")
+                .isEmpty();
+        long halted = outcomes.stream().filter(o -> o.output().contains("event=ort_init_shutdown_halt")).count();
+        assertThat(halted)
+                .as("non-vacuity: the bound must have expired with runs in flight on at least half of "
+                        + iterations + " iterations (outcomes: %s)", outcomes)
+                .isGreaterThanOrEqualTo(iterations / 2);
+    }
+
     private static Outcome runOnce(Path work, int delayMs) throws IOException, InterruptedException {
+        return runOnce(work, delayMs, Map.of());
+    }
+
+    private static Outcome runOnce(Path work, int delayMs, Map<String, String> env)
+            throws IOException, InterruptedException {
         Path java = Path.of(System.getProperty("java.home"), "bin", "java");
-        Process p = new ProcessBuilder(
+        ProcessBuilder pb = new ProcessBuilder(
                 java.toString(),
                 "-XX:ErrorFile=" + work.resolve("hs_err_%p.log"),
                 "-cp", System.getProperty("java.class.path"),
                 OrtRunShutdownProbe.class.getName(),
                 Integer.toString(THREADS))
                 .directory(work.toFile())
-                .redirectErrorStream(true)
-                .start();
+                .redirectErrorStream(true);
+        pb.environment().putAll(env);
+        Process p = pb.start();
 
         List<String> lines = new CopyOnWriteArrayList<>();
         CountDownLatch hot = new CountDownLatch(1);

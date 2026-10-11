@@ -941,6 +941,125 @@ class _LogTailer:
         ]
 
 
+# ── Engine exit reason (nexus-qk6p6) ────────────────────────────────────────
+
+#: Engine child-log stems by launch kind, production artifact first. The
+#: supervisor writes one of them (``StorageServiceSupervisor._svc_log_name``).
+ENGINE_LOG_STEMS: tuple[str, ...] = ("storage_service_native", "storage_service_jar")
+
+#: A logback line (``%d{ISO8601, UTC} %-5level [%thread] ...``), and one at ERROR.
+_ENGINE_LOGBACK_LINE = re.compile(r"^\d{4}-\d\d-\d\d[ T]\S+\s+[A-Z]+\s")
+_ENGINE_ERROR_LINE = re.compile(r"^\d{4}-\d\d-\d\d[ T]\S+\s+ERROR\s")
+#: Stack frames: never the reason. ``Caused by:`` is kept, it names the root cause.
+_ENGINE_FRAME_LINE = re.compile(r"^(at |\.\.\. \d+ (more|common frames omitted))")
+_REASON_TAIL_BYTES: int = 256 * 1024
+_REASON_MAX_CHARS: int = 600
+
+
+def _log_lines_since(log_path: Path, start_offset: int) -> list[str]:
+    """Non-blank, stripped lines *log_path* gained at or after *start_offset*
+    (at most its last ``_REASON_TAIL_BYTES``); ``[]`` when it cannot be read.
+
+    The child logs are O_APPEND and never truncated, so the size before a spawn
+    separates this boot's output from an earlier one's. They are size-rotated
+    at open, so a file now smaller than the offset is a fresh one and is read
+    from its start.
+    """
+    try:
+        size = log_path.stat().st_size
+        if size < start_offset:
+            start_offset = 0
+        with open(log_path, "rb") as fh:
+            fh.seek(max(start_offset, size - _REASON_TAIL_BYTES))
+            data = fh.read()
+    except OSError:
+        return []
+    lines = [ln.strip() for ln in data.decode("utf-8", errors="replace").splitlines()]
+    return [ln for ln in lines if ln]
+
+
+def _reason_text(line: str) -> str:
+    from nexus.redact import redact_credentials  # noqa: PLC0415 — deferred import — failure path only
+
+    return redact_credentials(line)[:_REASON_MAX_CHARS]
+
+
+def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
+    """The engine's own reason for exiting, from what it wrote at or after
+    *start_offset*: its last ERROR-level line, joined with its last line of
+    output when that is a later line outside the logback format (a root
+    ``Caused by:``, a JVM or native fatal banner), which an earlier ERROR
+    would otherwise hide. With no ERROR line, the last line that is not a
+    stack frame. ``None`` when the engine wrote nothing readable. Credential
+    values are redacted (the line is printed to terminals and CI logs).
+    """
+    lines = _log_lines_since(log_path, start_offset)
+    last_error: int | None = next(
+        (i for i in range(len(lines) - 1, -1, -1) if _ENGINE_ERROR_LINE.match(lines[i])),
+        None,
+    )
+    last_output: int | None = next(
+        (i for i in range(len(lines) - 1, -1, -1) if not _ENGINE_FRAME_LINE.match(lines[i])),
+        None,
+    )
+    if last_error is None:
+        return None if last_output is None else _reason_text(lines[last_output])
+    reason = _reason_text(lines[last_error])
+    if (
+        last_output is not None
+        and last_output > last_error
+        and not _ENGINE_LOGBACK_LINE.match(lines[last_output])
+    ):
+        tail = lines[last_output]
+        # The ERROR line's own trace usually ends in a ``Caused by:`` that
+        # repeats its message: that adds nothing, a different message does.
+        tail_message = tail.removeprefix("Caused by: ").split(": ", 1)[-1]
+        if tail_message not in lines[last_error]:
+            reason = f"{reason} | last output: {_reason_text(tail)}"
+    return reason
+
+
+def last_supervisor_error_line(crash_log: Path, start_offset: int) -> str | None:
+    """The supervisor's own start failure: the last ``Error: ...`` line the
+    ``--foreground`` command wrote to its crash-channel log at or after
+    *start_offset* (the launcher points the supervisor's stderr there), without
+    the prefix. It covers every start failure the supervisor reports, an engine
+    that was never launched included. ``None`` when there is none.
+    """
+    for line in reversed(_log_lines_since(crash_log, start_offset)):
+        if line.startswith("Error: "):
+            return _reason_text(line.removeprefix("Error: "))
+    return None
+
+
+def engine_log_marks(config_dir: Path) -> dict[Path, int]:
+    """Each engine log's size now (0 when absent): the offsets a caller that
+    spawns the supervisor from outside passes to :func:`engine_exit_reason`."""
+    marks: dict[Path, int] = {}
+    for stem in ENGINE_LOG_STEMS:
+        path = config_dir / "logs" / f"{stem}.log"
+        try:
+            marks[path] = path.stat().st_size
+        except OSError:
+            marks[path] = 0
+    return marks
+
+
+def engine_exit_reason(marks: dict[Path, int]) -> tuple[Path, str] | None:
+    """``(log path, reason line)`` from the first engine log that changed since
+    *marks* was taken and holds a reason, else ``None``."""
+    for path, mark in marks.items():
+        try:
+            if path.stat().st_size == mark:
+                continue
+        except OSError:
+            continue
+        reason = last_engine_error_line(path, mark)
+        if reason is not None:
+            return path, reason
+    return None
+
+
 def _default_engine_liveness_scan(
     config_dir: Path, binary_path: Path
 ) -> list[tuple[int, str]]:
@@ -2085,10 +2204,14 @@ class StorageServiceSupervisor:
             # (already dead) but the cleanup still runs, so the NEXT spawn's
             # Step 1.5 pre-spawn cleanup is not the only chance to clear it.
             self._release_stale_changelog_lock(reason="process_exited")
+            # nexus-qk6p6: the engine says why in its own log (an env value it
+            # refuses to start on, for one); carry that line and name the file.
+            reason = last_engine_error_line(self._log_path, self._log_offset_at_spawn)
             raise StorageServiceStartError(
                 f"Storage service process (pid={proc.pid}) exited with code "
                 f"{exc.returncode} before /health became ready on port {port}. "
-                "Check service logs for details."
+                + (f"The engine reported: {reason} " if reason else "")
+                + f"Engine log: {self._log_path}"
             ) from exc
         except readiness.ReadinessMigrationFailedError as exc:
             _log.warning(
@@ -2101,7 +2224,7 @@ class StorageServiceSupervisor:
             self._release_stale_changelog_lock(reason="migration_failed")
             raise StorageServiceStartError(
                 f"Schema migration failed on port {port}: {exc.raw_line}. "
-                "Check service logs for details."
+                f"Engine log: {self._log_path}"
             ) from exc
         except readiness.ReadinessStalledError as exc:
             _log.warning(
@@ -2121,7 +2244,7 @@ class StorageServiceSupervisor:
                     f"Storage service migration stalled on port {port}: no progress "
                     f"for {exc.elapsed:.0f}s (timeout={exc.timeout:.0f}s); "
                     f"changeset={exc.changeset!r}, pending={exc.pending!r}. "
-                    "Check service logs for details."
+                    f"Engine log: {self._log_path}"
                 ) from exc
             # Plain (non-migration) timeout: keep the historical message —
             # tests and operators alike key on this exact wording.

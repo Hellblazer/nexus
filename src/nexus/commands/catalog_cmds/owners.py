@@ -20,7 +20,7 @@ Shared helpers stay in ``commands.catalog``; ``owners_cmd`` reaches
 
 ``--census`` (nexus-7kl32) is a read-only diagnostic arm: it classifies every
 registered repo owner's on-disk root as ``healthy`` / ``path_vanished`` /
-``path_exists_empty`` / ``unreadable``, surfacing the dead-owner debris
+``path_exists_empty`` / ``not_a_repository`` / ``unreadable``, surfacing the dead-owner debris
 population (bench-index sandboxes, throwaway probe checkouts, stale
 worktrees) that ``nx doctor``'s git-hooks check used to render as a
 signal-free green (nexus-9t86i).
@@ -41,12 +41,22 @@ preamble). ``--execute reactivate`` instead requires ``--owner <prefix>`` — a
 single targeted undo needs no census pass (see UNDO AFFORDANCE below).
 
 ELIGIBILITY (critic design note, T2 21455, binding): only ``path_vanished``
-rows are ever deactivate-eligible. ``path_exists_empty`` and ``unreadable``
+and ``not_a_repository`` rows are ever deactivate-eligible.
+``path_exists_empty`` and ``unreadable``
 are excluded from every population this arm ever acts on — an
 emptied-but-present directory is not proof of a dead owner, and an unreadable
 one is actively LESS evidence than "vanished" (a permission error says
 nothing about whether the path still holds real content). Widening either
 population needs its own design decision, not a flag on this one.
+
+``not_a_repository`` (nexus-0rjbm, Sam 2026-10-10) is that decision for one
+population: a root that exists and has content but is not inside a git work
+tree, the residue of an index run pointed at a directory of repositories
+instead of one of them. ``nx doctor``'s git-hooks check warns on such a root
+on every run and nothing else could remove it, because the directory is
+there and so read ``healthy``. It is eligible under the same gates as
+``path_vanished``: zero live documents, and the per-owner re-check
+immediately before the write.
 
 CORROBORATING SIGNAL (critic design note, T2 21455, binding): each
 ``path_vanished`` candidate is enriched with root path, its classification
@@ -107,7 +117,12 @@ _log = structlog.get_logger(__name__)
 
 #: Classification buckets a repo owner's root path can land in
 #: (nexus-7kl32). Order matches the human-report presentation order.
-_CENSUS_CLASSES = ("healthy", "path_vanished", "path_exists_empty", "unreadable")
+_CENSUS_CLASSES = (
+    "healthy", "path_vanished", "path_exists_empty", "not_a_repository", "unreadable",
+)
+
+#: The buckets the deactivate arm may act on (module docstring ELIGIBILITY).
+_ELIGIBLE_CLASSES = ("path_vanished", "not_a_repository")
 
 #: Itemized-row cap per bucket in the human report (mirrors the
 #: reconcile-stale precedent's ``_CAP_ACTION``/``_CAP_INFO`` convention).
@@ -133,13 +148,13 @@ _REACTIVATE_COMMAND_TEMPLATE = (
 def _classify_owner_root(repo_root: str) -> str:
     """Classify a registered owner's on-disk root path (nexus-7kl32).
 
-    Four states — a check that cannot confidently establish "healthy" must
+    Five states — a check that cannot confidently establish "healthy" must
     never silently default to it (the same honesty principle nexus-9t86i
     forced onto doctor's git-hooks rendering):
 
     * ``path_vanished``     — the root does not exist at all. The dead-owner
       debris population: bench-index sandboxes, throwaway probe checkouts,
-      stale worktrees. The ONLY bucket the mutation arm ever acts on.
+      stale worktrees. Mutation-eligible.
     * ``path_exists_empty`` — the root is still there but has been emptied
       out (contents removed, directory left behind). NOT mutation-eligible:
       an empty directory is not proof the owner is dead (nexus-cw262).
@@ -148,7 +163,12 @@ def _classify_owner_root(repo_root: str) -> str:
       purpose: an unreadable directory is not evidence of health, and is
       even LESS evidence of death than ``path_exists_empty`` — never
       mutation-eligible.
-    * ``healthy``           — the root exists and has content.
+    * ``not_a_repository``  — the root is a directory with content, but
+      neither it nor any ancestor holds a ``.git`` entry and no immediate
+      child is a git directory, so no repository can have registered it
+      (nexus-0rjbm). Mutation-eligible.
+    * ``healthy``           — the root exists, has content and is inside a
+      git work tree.
     """
     p = Path(repo_root)
     try:
@@ -161,15 +181,57 @@ def _classify_owner_root(repo_root: str) -> str:
         try:
             if not any(p.iterdir()):
                 return "path_exists_empty"
+            if not _inside_git_work_tree(p) and not _holds_a_git_dir(p):
+                return "not_a_repository"
         except OSError:
             return "unreadable"
     return "healthy"
 
 
-def _residual_note(tumbler: str) -> str:
+def _inside_git_work_tree(root: Path) -> bool:
+    """Whether *root* or an ancestor holds a ``.git`` entry.
+
+    A ``.git`` FILE counts (a linked worktree or a submodule), and so does an
+    ancestor's, because an owner root below a repository's top level is still
+    a place git answers for. No subprocess: the census runs this once per
+    registered owner.
+    """
+    physical = root.resolve()
+    return any((d / ".git").exists() for d in (physical, *physical.parents))
+
+
+def _holds_a_git_dir(root: Path) -> bool:
+    """Whether an immediate child of *root* is a git directory.
+
+    An owner's root is the PARENT of the repository's common git dir
+    (``repo_identity``), not the path that was indexed. For a bare
+    repository with linked worktrees, or one made with
+    ``--separate-git-dir``, that parent holds no ``.git`` entry: the git dir
+    is a sibling of the work tree under another name. Such a root is a real
+    owner's and must stay ``healthy``. A directory of ordinary clones that
+    also happens to hold a bare repository reads ``healthy`` too, which is
+    the direction that deactivates nothing.
+    """
+    return any(
+        (child / "HEAD").is_file() and (child / "objects").is_dir()
+        for child in root.iterdir()
+        if child.is_dir()
+    )
+
+
+def _residual_note(tumbler: str, bucket: str = "path_vanished") -> str:
     """The THE RESIDUAL disclosure (module docstring), rendered per-candidate
     row so it is impossible to miss in either the human report or JSON.
     Names the exact undo command for THIS owner."""
+    if bucket == "not_a_repository":
+        return (
+            "RESIDUAL: 0 live documents + a root that is not a git repository "
+            "cannot be distinguished from a repository whose .git is "
+            "temporarily absent (mid re-clone), or from a mount point that "
+            "is unmounted with stray files left in it. If this was a misfire: "
+            "re-index the repo (auto-reactivates, same tumbler prefix) or run "
+            f"`{_REACTIVATE_COMMAND_TEMPLATE.format(tumbler=tumbler)}`."
+        )
     return (
         "RESIDUAL: 0 live documents + vanished path cannot be distinguished "
         "from a transiently-unmounted volume (catalog_owners has no "
@@ -180,7 +242,7 @@ def _residual_note(tumbler: str) -> str:
 
 
 def _corroborate(cat: "CatalogReader", rows: list[dict]) -> list[dict]:
-    """Attach doc/chunk-count evidence to each ``path_vanished`` candidate.
+    """Attach doc/chunk-count evidence to each mutation candidate.
 
     nexus-cw262 critic design note (T2 21455): a candidate row must carry
     corroborating signal before the mutation arm ships, so a transiently-
@@ -213,7 +275,7 @@ def _corroborate(cat: "CatalogReader", rows: list[dict]) -> list[dict]:
 
 
 def _eligible_and_excluded(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Split corroborated ``path_vanished`` rows into (eligible, excluded).
+    """Split corroborated candidate rows into (eligible, excluded).
 
     nexus-cw262 critic design note (T2 21455), binding: a candidate with >0
     live documents (or whose corroborating read itself failed) is EXCLUDED
@@ -239,7 +301,12 @@ def _eligible_and_excluded(rows: list[dict]) -> tuple[list[dict], list[dict]]:
                                      f"{row.get('chunk_count')})",
             })
         else:
-            eligible.append({**row, "residual_note": _residual_note(str(row.get("tumbler") or ""))})
+            eligible.append({
+                **row,
+                "residual_note": _residual_note(
+                    str(row.get("tumbler") or ""), row.get("bucket", "path_vanished"),
+                ),
+            })
     return eligible, excluded
 
 
@@ -293,9 +360,13 @@ def _run_census(
 
     dead_count = len(buckets["path_vanished"]) + len(buckets["path_exists_empty"])
 
-    # nexus-cw262: corroborate + split ONLY the path_vanished bucket — the
-    # sole mutation-eligible classification (module docstring ELIGIBILITY).
-    corroborated = _corroborate(cat, buckets["path_vanished"])
+    # nexus-cw262: corroborate + split ONLY the mutation-eligible buckets
+    # (module docstring ELIGIBILITY). Each candidate carries its bucket so
+    # the pre-write re-check compares against the classification it had.
+    corroborated = _corroborate(
+        cat,
+        [{**row, "bucket": cls} for cls in _ELIGIBLE_CLASSES for row in buckets[cls]],
+    )
     eligible, excluded = _eligible_and_excluded(corroborated)
 
     if as_json:
@@ -324,7 +395,7 @@ def _run_census(
         for cls in _CENSUS_CLASSES:
             click.echo(f"  {cls:<18} {len(buckets[cls])}")
 
-        for cls in ("path_vanished", "path_exists_empty", "unreadable"):
+        for cls in _CENSUS_CLASSES[1:]:
             rows = buckets[cls]
             if not rows:
                 continue
@@ -375,12 +446,14 @@ def _echo_mutation_report(eligible: list[dict], excluded: list[dict], capability
     even when ``--execute`` is not given, so ``nx catalog owners --census``
     alone shows exactly what the mutation arm would target."""
     click.echo(
-        f"\nDeactivate-eligible (path_vanished, 0 live documents): {len(eligible)}"
+        f"\nDeactivate-eligible ({' or '.join(_ELIGIBLE_CLASSES)}, "
+        f"0 live documents): {len(eligible)}"
     )
     for row in eligible[:_CENSUS_ROW_CAP]:
         click.echo(
             f"    {row['tumbler'] or '':<10} {row['repo_root']}  "
-            f"[path_vanished, doc_count={row['doc_count']}, chunk_count={row['chunk_count']}]"
+            f"[{row.get('bucket', 'path_vanished')}, doc_count={row['doc_count']}, "
+            f"chunk_count={row['chunk_count']}]"
         )
         click.echo(f"        {row['residual_note']}")
     if len(eligible) > _CENSUS_ROW_CAP:
@@ -388,12 +461,13 @@ def _echo_mutation_report(eligible: list[dict], excluded: list[dict], capability
 
     if excluded:
         click.echo(
-            f"\nExcluded from deactivation despite path_vanished ({len(excluded)}):"
+            f"\nExcluded from deactivation despite {' or '.join(_ELIGIBLE_CLASSES)} "
+            f"({len(excluded)}):"
         )
         for row in excluded[:_CENSUS_ROW_CAP]:
             click.echo(
                 f"    {row['tumbler'] or '':<10} {row['repo_root']}  "
-                f"[{row['exclusion_reason']}]"
+                f"[{row.get('bucket', 'path_vanished')}: {row['exclusion_reason']}]"
             )
         if len(excluded) > _CENSUS_ROW_CAP:
             click.echo(f"    ... and {len(excluded) - _CENSUS_ROW_CAP} more")
@@ -459,11 +533,12 @@ def _run_deactivate(cat: "CatalogReader", eligible: list[dict], *, will_act: boo
             # (built once, up front) while THIS loop runs; a path that
             # remounted or a document that got registered in the interim
             # must not be silently deactivated on stale evidence.
+            expected_bucket = row.get("bucket", "path_vanished")
             current_bucket = _classify_owner_root(root)
-            if current_bucket != "path_vanished":
+            if current_bucket != expected_bucket:
                 skipped.append({
                     "tumbler": tumbler,
-                    "reason": f"re-check: now classified {current_bucket}, not path_vanished",
+                    "reason": f"re-check: now classified {current_bucket}, not {expected_bucket}",
                 })
                 continue
             try:
@@ -559,7 +634,7 @@ def _run_reactivate(cat: "CatalogReader", owner_prefix: str, *, will_act: bool, 
     "--census", "do_census", is_flag=True,
     help=(
         "Classify repo-owner root paths as healthy / path_vanished / "
-        "path_exists_empty / unreadable (nexus-7kl32), with corroborating "
+        "path_exists_empty / not_a_repository / unreadable (nexus-7kl32), with corroborating "
         "doc/chunk-count evidence for the deactivate-eligible population."
     ),
 )
@@ -578,7 +653,7 @@ def _run_reactivate(cat: "CatalogReader", owner_prefix: str, *, will_act: bool, 
     default=None,
     help=(
         "Mutation arm (nexus-cw262). 'deactivate' requires --census (acts on "
-        "path_vanished owners with 0 live documents). 'reactivate' requires "
+        "path_vanished and not_a_repository owners with 0 live documents). 'reactivate' requires "
         "--owner <tumbler_prefix> (the undo affordance for a deactivate "
         "misfire, or any manual reversal)."
     ),
@@ -604,7 +679,7 @@ def owners_cmd(
     \\b
     Mutation arms (nexus-cw262):
       --execute deactivate --no-dry-run --confirm
-          Requires --census. Soft-deletes path_vanished owners with 0 live
+          Requires --census. Soft-deletes path_vanished and not_a_repository owners with 0 live
           documents. THE RESIDUAL (see module docstring): a doc_count==0
           owner cannot be told apart from a transiently-unmounted volume --
           catalog_owners carries no created_at/updated_at to age-gate this.

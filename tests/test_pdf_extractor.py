@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-021 + RDR-044: PDFExtractor — extraction backends and auto-detect routing."""
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -110,6 +111,48 @@ def docling_sys_modules():
         "docling.datamodel.pipeline_options": mock_pipeline,
     }
     return modules, mock_opts, mock_docling
+
+
+# ── one converter per process (nexus-l4kbc) ─────────────────────────────────
+
+
+def test_extractors_share_one_converter_per_configuration(docling_sys_modules, tmp_path, monkeypatch):
+    """Callers build a PDFExtractor per PDF. Each DocumentConverter loads about 2 GB of models
+    that a dropped converter does not return, so the converter is built once per process for
+    each (fast or enriched, artifacts path) and every extractor gets that one."""
+    modules, _opts, mock_docling = docling_sys_modules
+    mock_docling.DocumentConverter.side_effect = lambda **_kw: object()
+    monkeypatch.delenv("NEXUS_DOCLING_ARTIFACTS_PATH", raising=False)
+    with patch.dict(sys.modules, modules):
+        first = PDFExtractor()._get_converter()
+        second = PDFExtractor()._get_converter()
+        assert second is first
+        assert mock_docling.DocumentConverter.call_count == 1
+
+        enriched = PDFExtractor()._get_converter(enriched=True)
+        assert enriched is not first
+        assert PDFExtractor()._get_converter(enriched=True) is enriched
+        assert mock_docling.DocumentConverter.call_count == 2
+
+        monkeypatch.setenv("NEXUS_DOCLING_ARTIFACTS_PATH", str(tmp_path))
+        elsewhere = PDFExtractor()._get_converter()
+        assert elsewhere is not first, "a different artifacts directory is a different converter"
+        assert mock_docling.DocumentConverter.call_count == 3
+
+
+def test_a_fake_docling_module_never_receives_or_replaces_the_real_converter(docling_sys_modules, monkeypatch):
+    """The shared table is keyed on the DocumentConverter class, so two different docling modules
+    (a test double and the real one, or two doubles) cannot hand each other their converter."""
+    monkeypatch.delenv("NEXUS_DOCLING_ARTIFACTS_PATH", raising=False)
+    modules, _opts, mock_docling = docling_sys_modules
+    with patch.dict(sys.modules, modules):
+        from_first_module = PDFExtractor()._get_converter()
+    other = MagicMock()
+    other.PdfFormatOption = MagicMock()
+    with patch.dict(sys.modules, {**modules, "docling.document_converter": other}):
+        from_second_module = PDFExtractor()._get_converter()
+    assert from_second_module is not from_first_module
+    assert other.DocumentConverter.call_count == 1 and mock_docling.DocumentConverter.call_count == 1
 
 
 # ── extract() primary path ──────────────────────────────────────────────────

@@ -86,6 +86,8 @@ def test_the_ort_init_wait_events_are_the_ones_the_probe_and_the_signal_tests_re
     assert "in_flight={}" in waits[0], "OrtInitGateSignalTest asserts 'ort_init_shutdown_wait in_flight=1'"
     assert any(lit.startswith("event=ort_init_shutdown_wait_done") for lit in lits)
     assert any(lit.startswith("event=ort_init_shutdown_wait_timeout") for lit in lits)
+    # nexus-y6aj0: tests/test_main_sigterm_during_model_init.py and OrtShutdownSafetyTest read this one.
+    assert any(lit.startswith("event=ort_init_shutdown_halt ") for lit in lits)
     assert any(lit.startswith("event=ort_init_signal_gate_unavailable") for lit in lits)
 
 

@@ -182,7 +182,10 @@ def test_rehearsal_workflow_shape() -> None:
         step = next(s for s in spec["jobs"]["rehearse"]["steps"] if s.get("name") == name)
         assert "github.event_name == 'push'" in step["if"], f"{name} must run on push, where inputs.notarize is empty"
     job = spec["jobs"]["rehearse"]
-    assert job["runs-on"] == "hellmini"
+    # Both mac runners that sign: hellmini's persistent one and the pool's single-use one.
+    assert job["runs-on"] == "${{ matrix.runner }}"
+    assert job["strategy"]["matrix"]["runner"] == ["hellmini", "lab-mac-s"]
+    assert job["strategy"]["fail-fast"] is False
     assert job["environment"] == "apple-signing"
     assert "github.actor == 'Hellblazer'" in job["if"]
     code = _code(text)
@@ -192,6 +195,64 @@ def test_rehearsal_workflow_shape() -> None:
     assert "source=Notarized Developer ID" in code
     cleanup = next(s for s in job["steps"] if s.get("name") == "Clean up signing keychain")
     assert cleanup.get("if") == "always()"
+    names = [s.get("name") for s in job["steps"]]
+    check = "The search list no longer names the temp keychain"
+    assert names.index(check) == names.index("Clean up signing keychain") + 1
+    assert job["steps"][names.index(check)].get("if") == "always()"
+
+
+def _run_cleanup(tmp_path: Path, saved: str | None, plist_before: bool) -> tuple[Path, str, str]:
+    """Run mac-sign.sh's `sign` bookkeeping by hand, then the real `cleanup`, with `security` stubbed.
+    Returns (the search-list file, the stub's call log, stderr)."""
+    home = tmp_path / "home"
+    plist = home / "Library" / "Preferences" / "com.apple.security.plist"
+    plist.parent.mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    if saved is not None:
+        (work / "sign.searchlist.orig").write_text(saved)
+        if not plist_before:
+            (work / "sign.searchlist.noplist").write_text("")
+    plist.write_text("names the temp keychain")  # what `sign` leaves behind
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "security.log"
+    stub = bindir / "security"
+    stub.write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{log}"\n')
+    stub.chmod(0o755)
+    proc = subprocess.run(
+        ["bash", str(SIGN_SCRIPT), "cleanup"],
+        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(home), "SIGN_WORKDIR": str(work)},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not list(work.iterdir()), "cleanup leaves nothing in the work directory"
+    return plist, log.read_text() if log.exists() else "", proc.stderr
+
+
+def test_cleanup_restores_a_search_list_that_had_entries(tmp_path: Path) -> None:
+    plist, calls, _ = _run_cleanup(tmp_path, "/Users/x/a.keychain-db\n/Users/x/b.keychain-db\n", plist_before=True)
+    assert "list-keychains -d user -s /Users/x/a.keychain-db /Users/x/b.keychain-db" in calls
+    assert plist.exists()
+
+
+def test_cleanup_removes_the_search_list_file_it_created_for_a_user_with_no_keychains(tmp_path: Path) -> None:
+    """The pool's ghlab has no keychain: `list-keychains -s` with no names changes nothing, so the
+    deleted temp keychain would stay on the list. The file did not exist before `sign`; remove it."""
+    plist, calls, _ = _run_cleanup(tmp_path, "", plist_before=False)
+    assert not plist.exists()
+    assert "list-keychains -d user -s" not in calls, "the no-names call is the no-op this replaces"
+
+
+def test_cleanup_leaves_a_pre_existing_empty_search_list_file_and_says_so(tmp_path: Path) -> None:
+    plist, calls, err = _run_cleanup(tmp_path, "", plist_before=True)
+    assert plist.exists(), "a file this script did not create is not its to delete"
+    assert "WARN" in err and "list-keychains -d user -s" not in calls
+
+
+def test_cleanup_without_a_sign_touches_no_search_list(tmp_path: Path) -> None:
+    plist, calls, _ = _run_cleanup(tmp_path, None, plist_before=True)
+    assert plist.exists() and "list-keychains" not in calls
 
 
 def test_mac_abi_floor_arm_is_enforced_not_informational() -> None:
