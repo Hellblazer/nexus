@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A file deleted or renamed during an index run is no longer recorded as an extraction failure** (nexus-233d3). The code and prose indexers reported a file that the walk listed and a commit then removed as `cannot decode as UTF-8 text (FileNotFoundError)`: they fence-failed its document and wrote an `index_failures` row, and `nx doctor` failed on that row until it aged out or was cleared. Such a file is now skipped, and catalog housekeeping removes its document like any deleted file. A file that exists and cannot be read for another reason is still a recorded failure, and its reason now reads `cannot read file (<error>)`. Rows already recorded stay until `nx index failures --clear --run-id <id>`.
+
 ## [7.77.0] - 2026-10-10
 
 Pairs with engine-service-v0.1.159 (`REQUIRED_ENGINE_VERSION` moves from 0.1.156; v0.1.157 and v0.1.158 were deployed to the managed service and never pinned). Search recall and latency on large collections (RDR-227). A collection of 20,000 rows or more gets a partial HNSW index of its own, the engine searches it through that index, and `nx doctor` reports the indexes. A cold cloud search makes 9 requests where it made 66. The engine carries no schema change.

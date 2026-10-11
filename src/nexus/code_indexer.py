@@ -487,9 +487,19 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     try:
         content = file_path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError) as exc:
+    except FileNotFoundError:
+        # The walk listed this file and it was deleted or renamed before
+        # this read (a commit landing mid-run). That is a deletion, not
+        # unextractable content: no fence-fail and no failure record, and
+        # housekeeping reaps the catalog document like any deleted file.
+        _log.info("index_file_vanished_before_read", path=str(file_path))
+        return 0
+    except UnicodeDecodeError as exc:
         _log.debug("skipped non-text file", path=str(file_path), error=type(exc).__name__)
         _fence_fail_and_raise(f"cannot decode as UTF-8 text ({type(exc).__name__})")
+    except OSError as exc:
+        _log.debug("index_file_skipped_unreadable", path=str(file_path), error=type(exc).__name__)
+        _fence_fail_and_raise(f"cannot read file ({type(exc).__name__})")
 
     source_bytes = content.encode("utf-8")
     content_hash = _hl.sha256(source_bytes).hexdigest()
