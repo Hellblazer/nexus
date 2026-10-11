@@ -169,8 +169,8 @@ is a set of single-use runners that a scheduler on chas starts per job, with
 labels `lab-s`, `lab-m`, `lab-6c18g`, `lab-16c16g`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
 (macOS on hellmini). Two CI jobs use it: the Service CI Java job on `lab-16c16g` (16 cores, 16 GB) and the
 pytest shard matrix on `lab-6c18g` (6 cores, 18 GB; six fit on chas at once),
-serial inside each shard (xdist there came off before nexus-y6aj0 and
-nexus-kmfz6 were fixed, and returns through a PR with several green runs).
+with 4 xdist workers inside each shard (not `-n auto`: each worker also runs
+an engine JVM and a Postgres).
 The mac-arm64 release legs use the macOS classes (below, § Engine-service
 release). Every other job stays where it was. Three things
 differ from a GitHub-hosted runner:
