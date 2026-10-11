@@ -22,11 +22,22 @@ inputs:
     required: false
     default: ci-assets-bge-768-v1
 
+  persistent-home:
+    description: >-
+      'true' when $HOME outlives the job and is shared with jobs running at
+      the same time (the lab pool runners, nexus-480wm). The Actions cache
+      is then skipped: restoring a tarball over files a sibling job is
+      reading would corrupt its run. The files already on disk are used
+      when their digests match, and a download lands by rename.
+    required: false
+    default: 'false'
+
 runs:
   using: composite
   steps:
     - name: Restore bge-768 ONNX cache
       id: cache
+      if: inputs.persistent-home != 'true'
       # STABLE key — the model is an immutable upstream export, so it
       # downloads ONCE on a cold cache and restores thereafter; bump the
       # -v suffix in the key only if the model SOURCE changes.
@@ -47,6 +58,15 @@ runs:
         set -euo pipefail
         MODEL_DIR="$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx"
         mkdir -p "$MODEL_DIR"
+        verified() {
+          [ -f "$MODEL_DIR/model.onnx" ] && [ -f "$MODEL_DIR/tokenizer.json" ] \
+            && echo "${MODEL_SHA256}  $MODEL_DIR/model.onnx" | shasum -a 256 -c - >/dev/null 2>&1 \
+            && echo "${TOKENIZER_SHA256}  $MODEL_DIR/tokenizer.json" | shasum -a 256 -c - >/dev/null 2>&1
+        }
+        if verified; then
+          echo "bge ONNX already on disk with matching digests; nothing to fetch."
+          exit 0
+        fi
         base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSET_TAG}"
         echo "bge ONNX cache miss; fetching from self-hosted release ${ASSET_TAG} (no HuggingFace dependency)."
 
@@ -60,9 +80,15 @@ runs:
             -o "$1" "${base}/$2"
         }
 
-        fetch "$MODEL_DIR/model.onnx" model.onnx
-        fetch "$MODEL_DIR/tokenizer.json" tokenizer.json
+        # Download beside the target, verify, then rename: a job sharing this
+        # directory never reads a half-written model (nexus-480wm).
+        part="$MODEL_DIR/.part.$$"
+        trap 'rm -f "$part.model" "$part.tokenizer"' EXIT
+        fetch "$part.model" model.onnx
+        fetch "$part.tokenizer" tokenizer.json
 
-        echo "${MODEL_SHA256}  $MODEL_DIR/model.onnx" | shasum -a 256 -c -
-        echo "${TOKENIZER_SHA256}  $MODEL_DIR/tokenizer.json" | shasum -a 256 -c -
+        echo "${MODEL_SHA256}  $part.model" | shasum -a 256 -c -
+        echo "${TOKENIZER_SHA256}  $part.tokenizer" | shasum -a 256 -c -
+        mv -f "$part.model" "$MODEL_DIR/model.onnx"
+        mv -f "$part.tokenizer" "$MODEL_DIR/tokenizer.json"
         echo "bge ONNX provisioned + verified from self-hosted asset."

@@ -127,10 +127,20 @@ jobs:
     name: Java tests + jOOQ codegen drift guard
     needs: changes
     if: needs.changes.outputs.service == 'true'
-    # Runs on GitHub-hosted `ubuntu-latest`, like every other job in CI. The
-    # self-hosted routes (hellmini-ci, qwen-linux) were deleted on 2026-10-03
-    # (cleanup step 7).
-    runs-on: ubuntu-latest
+    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-16c16g` is the owned lab pool
+    # (16 cores, 16 GB hard cap, see AGENTS.md § Self-hosted runners and fork
+    # PRs). The job peaked at 10.3 GB with 4 surefire forks (measured
+    # 2026-10-11 on `lab-l`); the smaller grant leaves chas room for five
+    # pytest shards beside it. The Testcontainers Postgres containers run
+    # through the host Docker daemon and are outside the grant.
+    # A pull request from a FORK stays on `ubuntu-latest`, so outside code
+    # never reaches owned hardware even if its run is approved by mistake.
+    # Repo variable NX_CI_POOL=off sends every run back to `ubuntu-latest`
+    # (the pool host is down and this is a required check). The pool's $HOME
+    # (~/.m2, the model caches) outlives the job, so the steps below skip the
+    # Actions cache for $HOME paths there. The earlier self-hosted routes
+    # (hellmini-ci, qwen-linux) were deleted on 2026-10-03 (cleanup step 7).
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-16c16g' }}
     permissions:
       contents: read
     # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
@@ -160,6 +170,13 @@ jobs:
     # exists to replace it with one once a few runs of per-class data are in.
     # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
     timeout-minutes: 60
+    env:
+      # The pool job is confined to 16 of the host's 64 CPUs, and ONNX Runtime
+      # sizes its thread pool from the HOST's cores unless told otherwise.
+      # Under that load OrtShutdownSafetyTest saw the SIGSEGV on SIGTERM
+      # during session creation (nexus-y6aj0, PR #1600 run on ed01cd01c).
+      # Unset on a hosted runner, where ORT's default matches the VM.
+      NX_ONNX_INTRA_OP_THREADS: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '' || '4' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
@@ -182,9 +199,11 @@ jobs:
           java-version: '25'
           distribution: 'graalvm'
           # Cache Maven local repo across runs; bust when pom.xml changes.
-          cache: maven
+          # Not on the pool: its ~/.m2 is already warm and persistent.
+          cache: ${{ runner.environment == 'github-hosted' && 'maven' || '' }}
 
       - name: Cache MiniLM ONNX model
+        if: runner.environment == 'github-hosted'
         # EmbedParityTest constructs OnnxEmbedder, which loads the
         # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
         # cache key as ci.yml (the Python suite) so this Java-only runner
@@ -220,6 +239,8 @@ jobs:
         # skipping. Centralised in .github/actions/prime-bge-onnx (self-hosted
         # release asset, no HuggingFace 429 dependency).
         uses: ./.github/actions/prime-bge-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Prime ms-marco cross-encoder ONNX (cache or pinned HF revision)
         # RDR-188 P1: CrossEncoderRerankerInferenceTest + the integration
@@ -228,6 +249,8 @@ jobs:
         # bge/RDR-160 CA-1 export-compat risk class must be CI-caught).
         # Non-vacuity enforced by assert_rerank_inference_ran.py below.
         uses: ./.github/actions/prime-crossencoder-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
       # testcontainers-jooq-codegen-maven-plugin generates into
@@ -244,11 +267,11 @@ jobs:
       # lever. forks=1 is pinned for CI because RAM, not core count, is the
       # limit: each fork boots its own Testcontainers Postgres, and neither CI
       # target was sized for N of them. GH-hosted ubuntu-latest is 4-core/16GB,
-      # so the serial shape is right. Revisit deliberately if CI itself
-      # is ever parallelized.
+      # so the serial shape is right there. The `lab-16c16g` pool runner (16 cores,
+      # 16 GB) runs the local default of 4 forks (nexus-480wm).
       - name: Run Java test suite
         working-directory: service
-        run: ./mvnw -q test -Dnexus.test.forks=1
+        run: ./mvnw -q test -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
       # RDR-224 review (nexus-f9bgu.29/.32): tests/fixtures/native_jar_listings.txt is the
       # evidence the native-resource tests and OrtTempSweep's LOADED_LIBS pin are built on.
@@ -273,7 +296,7 @@ jobs:
       # wrong for the CI runner), across the 9 classes carrying the tag.
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
-        run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=1
+        run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
 
       # Non-vacuity for the step above: it fails loud on a red test, but a
       # selector that stops matching exits 0 having run NOTHING, which is the

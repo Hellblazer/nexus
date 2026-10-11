@@ -459,8 +459,22 @@ jobs:
           if-no-files-found: error
 
   test:
+    # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-6c18g` is the owned lab pool
+    # (6 cores, 18 GB hard cap, see AGENTS.md § Self-hosted runners and fork
+    # PRs). The class is shaped for this job: six of them fit on chas at once
+    # (118 GB allocatable). The test step runs 4 xdist workers: five fit in
+    # memory (peaks of 12 to 16 GB, 2026-10-11) but each worker also drives an
+    # engine JVM and a Postgres, and at five on six CPUs a different
+    # timing-sensitive test failed on each of three runs.
+    # A larger class runs fewer shards at a time: only two `lab-l` fit.
+    # A pull request from a FORK stays on `ubuntu-latest`, so outside code
+    # never reaches owned hardware even if its run is approved by mistake.
+    # Repo variable NX_CI_POOL=off sends every run back to `ubuntu-latest`
+    # (the pool host is down and this is a required check).
+    # The pool's $HOME outlives the job and is shared with the sibling shards,
+    # so the steps below skip the Actions cache for $HOME paths there.
     name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-6c18g' }}
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
     # nexus-n0ful: also needs `changes` directly (not just transitively via
@@ -625,6 +639,7 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache MiniLM ONNX model
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/chroma
@@ -645,6 +660,7 @@ jobs:
             chromadb-onnx-${{ runner.os }}-
 
       - name: Cache HuggingFace models (cross-encoder, MinerU)
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # DOCLING NO LONGER USES THIS. Its layout/TableFormer/CodeFormula
@@ -696,6 +712,7 @@ jobs:
           distribution: 'graalvm'
 
       - name: Cache the pinned PG bundle
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # tests/db/_service_fixture.py::_self_provision_pg_bundle downloads
@@ -706,7 +723,8 @@ jobs:
           key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
+        # The pool runners have no sudo and carry ripgrep preinstalled.
+        run: command -v rg >/dev/null || sudo apt-get install -y ripgrep
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # nexus-eqxxh: the engine substrate boots the SAME jar the write-seam
@@ -731,6 +749,8 @@ jobs:
         # paths-filter, since NX_T2_SUBSTRATE_EXPECTED=1 makes the substrate
         # REQUIRED and a missing model is 73 hard errors rather than a skip.
         uses: ./.github/actions/prime-bge-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Install project + dev deps
         run: uv sync --group dev
@@ -758,6 +778,8 @@ jobs:
         # points docling at the extracted dir so it never resolves through the
         # hub at all.
         uses: ./.github/actions/prime-docling
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Verify docling extracts from the mirrored models
         # NON-VACUITY: proves docling actually performed the extraction
@@ -783,13 +805,35 @@ jobs:
         # missing from the file (new tests since the last refresh), and
         # extra ids for tests since removed are simply ignored. No CI
         # enforcement of freshness by design — this is a scheduling hint,
-        # not a correctness input. Serial execution WITHIN the shard is
-        # unchanged — this is matrix parallelism across runners, not
-        # -n/xdist in-process parallelism, so the no-parallel-tests
-        # invariant still holds.
+        # not a correctness input. On a hosted runner execution WITHIN the
+        # shard is serial (4 cores, 16 GB). On the pool each shard also runs
+        # 4 xdist workers (nexus-480wm, Sam 2026-10-10): not `-n auto`, which
+        # there means one worker per granted core, 6, with no CPU left for
+        # the engine and Postgres each worker boots. pytest-split picks the
+        # shard's tests first and xdist spreads them, so the split is the same
+        # on both.
+        #
+        # TMPDIR on the pool: /tmp there is tmpfs, so every worker's Postgres
+        # data directory and every tmp_path lived in memory and was charged to
+        # the job's 18 GB cap. Measured on the first -n 5 run (2026-10-11): 3.3
+        # to 4.0 GB of shmem per shard, with one shard pinned at the cap.
+        # $RUNNER_TEMP is on disk and is deleted with the job.
         run: |
           set -euo pipefail
-          uv run pytest tests/ -q --durations=25 \
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            export TMPDIR="$RUNNER_TEMP/tmp"
+            mkdir -p "$TMPDIR"
+            # A pool job is confined to 6 of the host's 64 CPUs. ONNX Runtime
+            # sizes its thread pool from the HOST's cores and pins each thread
+            # to one, so every engine a worker boots started about 32 threads,
+            # most with an affinity the kernel refuses (`pthread_setaffinity_np
+            # failed`). Under that load bge init outlasted the engine's 3 s
+            # shutdown wait and the JVM crashed in libonnxruntime on SIGTERM
+            # (test_main_sigterm_during_model_init, PR #1600 run on be2d7f1a2,
+            # nexus-y6aj0). The engines inherit this from the test environment.
+            export NX_ONNX_INTRA_OP_THREADS=2
+          fi
+          uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 4' || '' }} \
             --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
 
