@@ -2112,32 +2112,13 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         # floor or not) but qualify the mutation arm honestly
                         # per the capability signal computed above, rather
                         # than claiming it unconditionally.
-                        fix = ["nx catalog owners --census — inspects dead owners"]
-                        if deactivate_capability == "available":
-                            fix.append(
-                                "--execute deactivate --no-dry-run --confirm "
-                                "deregisters eligible ones (nexus-cw262)"
-                            )
-                        elif deactivate_capability == "unavailable":
-                            fix.append(
-                                "the --execute deactivate mutation arm requires "
-                                "an engine build carrying the nexus-cw262 "
-                                "owner-deactivate route (not yet deployed here); "
-                                "re-run after the connected engine is upgraded"
-                            )
-                        else:  # "unknown" — no owners response to read the signal from
-                            fix.append(
-                                "whether --execute deactivate is available on the "
-                                "connected engine could not be confirmed this run "
-                                "(nexus-cw262)"
-                            )
                         results.append(HealthResult(
                             label="git hooks", ok=False, warn=True,
                             detail=(
                                 f"{repo_path} — owner root no longer exists "
                                 "on disk (dead owner)"
                             ),
-                            fix_suggestions=fix,
+                            fix_suggestions=_owner_census_fix(deactivate_capability),
                         ))
                     else:
                         # code-review SIGNIFICANT (nexus-7kl32, critic
@@ -2161,6 +2142,24 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                                 f"remove the stale entry from {registry_path}"
                             ],
                         ))
+                elif (
+                    str(repo_path) in catalog_repo_roots
+                    and _owner_root_is_not_a_repository(repo_path)
+                ):
+                    # nexus-0rjbm: a catalog owner whose root is a directory
+                    # of repositories rather than one (an index run pointed
+                    # one level too high). The census classes it
+                    # not_a_repository and its deactivate arm covers it; a
+                    # legacy repos.json-only entry is not a census row, so
+                    # that case stays on the generic branch below.
+                    results.append(HealthResult(
+                        label="git hooks", ok=False, warn=True,
+                        detail=(
+                            f"{repo_path} — registered owner root is not a "
+                            "git repository"
+                        ),
+                        fix_suggestions=_owner_census_fix(deactivate_capability),
+                    ))
                 else:
                     results.append(HealthResult(
                         label="git hooks", ok=False, warn=True,
@@ -2168,6 +2167,45 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                     ))
 
     return results
+
+
+def _owner_root_is_not_a_repository(repo_path: Path) -> bool:
+    """Whether the owner census classes *repo_path* ``not_a_repository``."""
+    from nexus.commands.catalog_cmds.owners import (  # noqa: PLC0415 — keeps the click command module off health's import path
+        _classify_owner_root,
+    )
+
+    return _classify_owner_root(str(repo_path)) == "not_a_repository"
+
+
+def _owner_census_fix(deactivate_capability: str) -> list[str]:
+    """Fix lines pointing a catalog owner at ``nx catalog owners --census``.
+
+    nexus-cw262 round-3 critique (T2 21467 Significant-2): the mutation
+    arm's availability depends on which engine build this tenant is
+    connected to. Name the census unconditionally (it always works) and
+    qualify the mutation arm per the capability signal.
+    """
+    fix = ["nx catalog owners --census — inspects dead owners"]
+    if deactivate_capability == "available":
+        fix.append(
+            "--execute deactivate --no-dry-run --confirm "
+            "deregisters eligible ones (nexus-cw262)"
+        )
+    elif deactivate_capability == "unavailable":
+        fix.append(
+            "the --execute deactivate mutation arm requires "
+            "an engine build carrying the nexus-cw262 "
+            "owner-deactivate route (not yet deployed here); "
+            "re-run after the connected engine is upgraded"
+        )
+    else:  # "unknown" — no owners response to read the signal from
+        fix.append(
+            "whether --execute deactivate is available on the "
+            "connected engine could not be confirmed this run "
+            "(nexus-cw262)"
+        )
+    return fix
 
 
 def _check_index_log() -> list[HealthResult]:
