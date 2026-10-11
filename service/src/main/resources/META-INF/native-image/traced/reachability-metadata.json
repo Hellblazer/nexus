@@ -1,4 +1,14 @@
 {
+  "foreign": {
+    "downcalls": [
+      {
+        "returnType": "void",
+        "parameterTypes": [
+          "jint"
+        ]
+      }
+    ]
+  },
   "reflection": [
     {
       "type": "ai.djl.huggingface.tokenizers.jni.CharSpan",

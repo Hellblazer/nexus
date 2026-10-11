@@ -34,6 +34,13 @@ descriptor's `name`.
   (`GatedRun`); without the entry the native binary could not raise the
   exception the gate maps to a 503.
 
+- **`foreign.downcalls`: `void (jint)`** (hand-added, nexus-y6aj0)
+  The downcall `ImmediateExit` makes to libc `_exit(int)` through
+  `java.lang.foreign` when a stop's wait bound expires with ONNX Runtime work
+  still in flight. A trace never takes that path. Without the entry the native
+  binary logs `event=ort_init_immediate_exit_fallback` and leaves through
+  `Runtime.halt`. A re-trace drops this section; add it again.
+
 ## reflect-config.json
 
 - **`ch.qos.logback.classic.spi.LogbackServiceProvider`**
