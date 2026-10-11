@@ -207,7 +207,7 @@ class TestNotARepositoryBucket:
         with patch("nexus.commands.catalog._get_catalog", return_value=fake):
             result = CliRunner().invoke(main, ["catalog", "owners", "--census", "--json"])
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert [r["tumbler"] for r in data["not_a_repository"]] == ["1.32"]
         assert data["healthy"] == []
         (row,) = data["mutation_eligible"]
