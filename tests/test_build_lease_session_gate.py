@@ -65,7 +65,10 @@ def test_a_dead_holder_does_not_gate(tmp_path: Path) -> None:
 
 
 def test_waiting_starts_the_session_once_the_holder_exits(tmp_path: Path) -> None:
-    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+    # The holder must still be alive when the child reaches its gate. On a loaded CI box the
+    # child (a whole pytest start) took longer than the 3 s this slept, found no holder and
+    # never printed the waiting line (PR #1600, pool shard 3, 2026-10-11).
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
     # Reap concurrently: an unreaped child is a zombie, and a zombie still
     # answers kill(pid, 0), so the gate would keep seeing a live holder.
     reaper = threading.Thread(target=holder.wait, daemon=True)

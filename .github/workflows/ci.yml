@@ -462,8 +462,10 @@ jobs:
     # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-6c18g` is the owned lab pool
     # (6 cores, 18 GB hard cap, see AGENTS.md § Self-hosted runners and fork
     # PRs). The class is shaped for this job: six of them fit on chas at once
-    # (118 GB allocatable), and the 5 xdist workers in the test step need about
-    # 15 GB at the 3 GB per worker measured on chas (95 GB at 32, 2026-10-08).
+    # (118 GB allocatable). The test step runs 4 xdist workers: five fit in
+    # memory (peaks of 12 to 16 GB, 2026-10-11) but each worker also drives an
+    # engine JVM and a Postgres, and at five on six CPUs a different
+    # timing-sensitive test failed on each of three runs.
     # A larger class runs fewer shards at a time: only two `lab-l` fit.
     # A pull request from a FORK stays on `ubuntu-latest`, so outside code
     # never reaches owned hardware even if its run is approved by mistake.
@@ -805,9 +807,9 @@ jobs:
         # enforcement of freshness by design — this is a scheduling hint,
         # not a correctness input. On a hosted runner execution WITHIN the
         # shard is serial (4 cores, 16 GB). On the pool each shard also runs
-        # 5 xdist workers (nexus-480wm, Sam 2026-10-10): not `-n auto`, which
-        # there means one worker per granted core, 6, about 18 GB against an
-        # 18 GB cap that kills the step (exit 137). pytest-split picks the
+        # 4 xdist workers (nexus-480wm, Sam 2026-10-10): not `-n auto`, which
+        # there means one worker per granted core, 6, with no CPU left for
+        # the engine and Postgres each worker boots. pytest-split picks the
         # shard's tests first and xdist spreads them, so the split is the same
         # on both.
         #
@@ -831,7 +833,7 @@ jobs:
             # nexus-y6aj0). The engines inherit this from the test environment.
             export NX_ONNX_INTRA_OP_THREADS=2
           fi
-          uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 5' || '' }} \
+          uv run pytest tests/ -q --durations=25 ${{ runner.environment == 'self-hosted' && '-n 4' || '' }} \
             --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
 

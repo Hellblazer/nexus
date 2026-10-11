@@ -170,6 +170,13 @@ jobs:
     # exists to replace it with one once a few runs of per-class data are in.
     # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
     timeout-minutes: 60
+    env:
+      # The pool job is confined to 16 of the host's 64 CPUs, and ONNX Runtime
+      # sizes its thread pool from the HOST's cores unless told otherwise.
+      # Under that load OrtShutdownSafetyTest saw the SIGSEGV on SIGTERM
+      # during session creation (nexus-y6aj0, PR #1600 run on ed01cd01c).
+      # Unset on a hosted runner, where ORT's default matches the VM.
+      NX_ONNX_INTRA_OP_THREADS: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '' || '4' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
