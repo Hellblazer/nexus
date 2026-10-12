@@ -1174,3 +1174,4 @@ is flagged for trimming before then.
   defaults to false and is honoured on the provisioned path; the setup
   process has one home in the plugin; the lock uses a heartbeat; the page's
   address goes through an owner-only opener file; no fallback build.
+- 2026-10-12: Gate round 2: PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `fe8179c0f`; critique `nexus_rdr/228-gate-critique-2026-10-12-r2`.
