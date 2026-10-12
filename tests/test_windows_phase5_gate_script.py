@@ -13,8 +13,11 @@ runs on the guest are recorded in T2 nexus_rdr/224-gate-red-runs-2026-10-06.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+
+import pytest
 
 GATE: Path = Path(__file__).resolve().parent / "e2e" / "windows-phase5-gate.ps1"
 LAUNCHER: Path = Path(__file__).resolve().parent / "e2e" / "windows-guest" / "host-recv.ps1"
@@ -197,3 +200,263 @@ def test_aspect_worker_survivors_are_observed_with_the_rdr_citation_not_asserted
     assert not re.search(r"Assert-Absent\s+@\([^)]*'aspect'", text)
     assert not re.search(r"Wait-Gone\s+@\([^)]*'aspect'", text)
     assert not re.search(r"\$k\.aspect\.Count[^\n]*\bFail\b|\bFail\b[^\n]*\$k\.aspect", a4)
+
+
+# ---------------------------------------------------------------------------
+# Review round (nexus-f9bgu.40, nexus-ijue9.16): hook coupling, stop quality,
+# presence of the clauses a mutant used to delete silently.
+# ---------------------------------------------------------------------------
+
+REPO: Path = Path(__file__).resolve().parent.parent
+HOOKS_JSON: Path = REPO / "conexus" / "hooks" / "hooks.json"
+SRC_NEXUS: Path = REPO / "src" / "nexus"
+
+
+def _ps_literal(text: str, name: str) -> str:
+    """The body of a top-level `$NAME = '...'` single-quoted PowerShell literal.
+
+    PowerShell single quotes have no escapes but the doubled quote. The gate
+    keeps its hook and stop regexes in such literals so this file can read the
+    SAME text the guest runs. The patterns are written in the subset .NET and
+    Python share (alternation, anchors, character classes, an escaped dot);
+    PowerShell's -match is case-insensitive, so Python compiles with re.I.
+    """
+    m = re.search(r"^\$" + name + r"\s*=\s*'((?:[^']|'')*)'\s*$", text, re.M)
+    assert m, f"the gate must define ${name} as a single-quoted literal on one line"
+    return m.group(1).replace("''", "'")
+
+
+def _hook_commands(hooks_text: str) -> list[str]:
+    """Each hook entry as Claude Code records it in a hook attachment's
+    `command`: the command and its args joined by spaces, ${CLAUDE_PLUGIN_ROOT}
+    left unexpanded; an mcp_tool hook is `<server>/<tool>`."""
+    out: list[str] = []
+    for groups in json.loads(hooks_text)["hooks"].values():
+        for group in groups:
+            for hook in group["hooks"]:
+                if hook["type"] == "command":
+                    out.append(" ".join([hook["command"], *hook.get("args", [])]))
+                elif hook["type"] == "mcp_tool":
+                    out.append(f'{hook["server"]}/{hook["tool"]}')
+                else:
+                    raise AssertionError(f"unknown hook type {hook['type']!r}: teach the gate pin about it")
+    return out
+
+
+def _check_hook_coverage(hooks_text: str, gate_text: str) -> None:
+    ours_src = _ps_literal(gate_text, "HOOK_OURS_RE")
+    shim_src = _ps_literal(gate_text, "HOOK_SHIM_RE")
+    # The filters name what a hook launches, never how the launcher is spelled.
+    for label, src in (("HOOK_OURS_RE", ours_src), ("HOOK_SHIM_RE", shim_src)):
+        assert not re.search(r"\buv\b", src), f"${label} must not depend on the uv launcher spelling: {src!r}"
+    ours, shim = re.compile(ours_src, re.I), re.compile(shim_src, re.I)
+    cmds = _hook_commands(hooks_text)
+    assert cmds, "hooks.json lists no hook entries"
+    unmatched = [c for c in cmds if not ours.search(c)]
+    assert not unmatched, f"conexus hook entries the gate's HOOK_OURS_RE does not cover: {unmatched}"
+    shim_cmds = [c for c in cmds if "nx_hook_shim.py" in c]
+    assert shim_cmds, "hooks.json has no nx_hook_shim.py entry: assertion 3 would have nothing to see"
+    assert all(shim.search(c) for c in shim_cmds), f"HOOK_SHIM_RE misses shim entries: {shim_cmds}"
+    plain = [c for c in cmds if "hooks/scripts/" in c and "nx_hook_shim.py" not in c]
+    assert plain, "hooks.json has no plain-script entry"
+    assert all(ours.search(c) for c in plain)
+
+
+def test_every_conexus_hook_entry_is_covered_by_the_gates_filters() -> None:
+    _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), _text())
+
+
+def _rewrite_launcher(hooks_text: str, launcher: list[str]) -> str:
+    data = json.loads(hooks_text)
+    for groups in data["hooks"].values():
+        for group in groups:
+            for hook in group["hooks"]:
+                if hook["type"] == "command" and hook["command"] == "uv":
+                    script_and_rest = hook["args"][hook["args"].index("python") + 1:]
+                    hook["args"] = [*launcher, *script_and_rest]
+    return json.dumps(data)
+
+
+def test_hook_pin_accepts_either_launcher_spelling() -> None:
+    """Positive control: the old `uv run` form and the current `uv tool run` form
+    both pass, because the filters match what is launched."""
+    base = HOOKS_JSON.read_text(encoding="utf-8")
+    old = _rewrite_launcher(base, ["run", "--no-project", "--no-config", "--quiet"])
+    assert old != base
+    _check_hook_coverage(old, _text())
+    _check_hook_coverage(base, _text())
+
+
+def test_hook_pin_fails_when_the_gate_filters_are_reverted_to_the_old_launcher_form() -> None:
+    """Mutant: the pre-7.74.0 filters (nexus-f9bgu.40 C1) against today's hooks.json."""
+    text = _text()
+    reverted = re.sub(
+        r"^\$HOOK_OURS_RE\s*=.*$",
+        lambda _m: "$HOOK_OURS_RE = '^nx-hook |^uv run .*CLAUDE_PLUGIN_ROOT|nx_hook_shim\\.py|nx-session-end-launcher'",
+        text,
+        flags=re.M,
+    )
+    assert reverted != text
+    with pytest.raises(AssertionError):
+        _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), reverted)
+    reverted_shim = re.sub(
+        r"^\$HOOK_SHIM_RE\s*=.*$", lambda _m: "$HOOK_SHIM_RE = '^uv run .*nx_hook_shim\\.py'", text, flags=re.M
+    )
+    assert reverted_shim != text
+    with pytest.raises(AssertionError):
+        _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), reverted_shim)
+
+
+def test_hook_pin_fails_when_a_hook_script_moves_out_from_under_hooks_scripts() -> None:
+    """Mutant on a scratch copy of hooks.json: a launched script the gate no
+    longer recognises must fail the pin, not shrink A3's coverage silently."""
+    base = HOOKS_JSON.read_text(encoding="utf-8")
+    moved = base.replace("/hooks/scripts/nx_hook_shim.py", "/hooks/nx_hook_shim.py")
+    assert moved != base
+    with pytest.raises(AssertionError):
+        _check_hook_coverage(moved, _text())
+    renamed = base.replace('"command": "nx-session-end-launcher"', '"command": "nx-session-end"')
+    assert renamed != base
+    with pytest.raises(AssertionError):
+        _check_hook_coverage(renamed, _text())
+
+
+def test_assertion_3_uses_the_named_filters_and_does_not_name_the_launcher() -> None:
+    text = _text()
+    a3 = text[text.index("Run-Assertion 3 "):text.index("function Invoke-ClaudeP")]
+    assert "-match $HOOK_OURS_RE" in a3 and "-match $HOOK_SHIM_RE" in a3
+    assert "uv run" not in a3 and "uv tool run" not in a3, "A3 must not name the launcher"
+
+
+# ---- stop quality (S2) ------------------------------------------------------
+
+_DEGRADED_STRINGS = {"unclean_stop", "hard-killing", "win_console_helper_failed", "bounded_subprocess_timeout"}
+
+
+def test_stop_degraded_strings_are_what_the_code_logs() -> None:
+    lit = _ps_literal(_text(), "STOP_DEGRADED_RE")
+    assert set(lit.split("|")) == _DEGRADED_STRINGS
+    corpus = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in SRC_NEXUS.rglob("*.py"))
+    for s in _DEGRADED_STRINGS:
+        assert s in corpus, f"src/nexus no longer contains {s!r}: the gate's degraded-stop filter is stale"
+
+
+def test_stop_is_timed_bounded_and_fails_on_the_degraded_path() -> None:
+    text = _text()
+    m = re.search(r"^\$STOP_MAX_SECONDS\s*=\s*(\d+)\s*$", text, re.M)
+    assert m and int(m.group(1)) <= 15, "measured graceful stops are 2.2 to 3.2 s; the broken path was 41 s"
+    invoke = text[text.index("function Invoke-Nx"):text.index("function Stop-Problem")]
+    assert "Stopwatch" in invoke and "secs =" in invoke
+    fn = text[text.index("function Stop-Problem"):text.index("function Get-Status")]
+    assert "-match $STOP_DEGRADED_RE" in fn and "-gt $STOP_MAX_SECONDS" in fn
+    a1 = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
+    a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
+    # leg B's stop (assertion 1) and both of assertion 4's stops
+    _live_statement(a1, "Stop-Problem $stop 'leg B stop --with-pg'")
+    _live_statement(a1, "if ($legBStop) { Fail")
+    _live_statement(a4, "Stop-Problem $r 'stop --with-pg'")
+    _live_statement(a4, "Stop-Problem $r 'plain stop'")
+    _live_statement(a4, "if ($stopProblems.Count -gt 0) { Fail")
+    # the seconds reach the assertion detail
+    assert "$($stop.secs)s" in a1 and "$($r.secs)s" in a4
+
+
+# ---- clauses a mutant used to delete without any pin noticing (S5) ----------
+
+_DEAD = re.compile(r"\$false|\bif\s*\(\s*0\s*\)|\bwhile\s*\(\s*0\s*\)", re.I)
+
+
+def _live_statement(block: str, needle: str) -> str:
+    """The line of `block` holding `needle`, asserted present, not a comment and
+    not switched off by `$false` on it or on the line above (`if ($false) {`)."""
+    lines = block.splitlines()
+    hits = [i for i, ln in enumerate(lines) if needle in ln]
+    assert hits, f"missing statement: {needle!r}"
+    for i in hits:
+        line = lines[i]
+        if line.strip().startswith("#") or _DEAD.search(line):
+            continue
+        prev = next((lines[j] for j in range(i - 1, -1, -1) if lines[j].strip()), "")
+        if _DEAD.search(prev):
+            continue
+        return line
+    raise AssertionError(f"statement is commented out or switched off: {needle!r}")
+
+
+def test_the_gate_uses_no_block_comments() -> None:
+    # a `<# ... #>` block would hide a deleted-by-comment clause from _live_statement
+    assert "<#" not in _text()
+
+
+def test_assertion_4_keeps_its_post_stop_and_pg_log_checks_live() -> None:
+    text = _text()
+    a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
+    _live_statement(a4, """Assert-Absent @('supervisor', 'engine', 'postgres') "${RECHECK_SECONDS}s after stop --with-pg""")
+    _live_statement(a4, """Assert-Absent @('supervisor', 'engine') "${RECHECK_SECONDS}s after plain stop\"""")
+    _live_statement(
+        a4,
+        """if ($new -match 'was interrupted|not properly shut down|redo starts|automatic recovery') { Fail "next start's pg.log shows crash recovery" }""",
+    )
+    _live_statement(a4, """if ($new -notmatch 'database system was shut down at') { Fail""")
+
+
+def test_assertion_2_keeps_its_outside_session_check_live() -> None:
+    text = _text()
+    a2 = text[text.index("Run-Assertion 2 "):text.index("Run-Assertion 3 ")]
+    _live_statement(a2, """if ($cli.out -notlike "*$nonce*") { Fail "nx search outside the session does not find the nonce""")
+    _live_statement(a2, "$cli = Invoke-Nx 'nx-search-nonce'")
+
+
+def test_assertion_3_keeps_its_failed_hook_check_live() -> None:
+    text = _text()
+    a3 = text[text.index("Run-Assertion 3 "):text.index("function Invoke-ClaudeP")]
+    _live_statement(a3, """$bad = @($ours | Where-Object { "$(K $_ 'type')" -ne 'hook_success'""")
+    _live_statement(a3, "if ($bad.Count -gt 0) { Fail")
+    _live_statement(a3, "if ($start.Count -eq 0) { Fail")
+    _live_statement(a3, "if ($shim.Count -eq 0) { Fail")
+
+
+# ---- verdict record (S4, Observation 3) and the printed instruction (Obs 4) -
+
+
+def test_verdict_records_the_script_hash_before_the_verdict_line() -> None:
+    text = _text()
+    assert "Get-FileHash -Algorithm SHA256" in text
+    assert "script_sha256" in text, "setup stores the staged script's hash so verify can compare"
+    block = _verdict_block()
+    sha_at = block.index("gate script sha256")
+    assert sha_at < block.index('"WINDOWS PHASE 5 GATE FAILED (') and sha_at < block.index('"WINDOWS PHASE 5 GATE PASSED (')
+    _live_statement(block, "Add-Content -Path (Join-Path $RunDir 'verdict.txt') -Value $shaLine")
+    assert block.rstrip().endswith("exit 0"), "the verdict stays the last line"
+
+
+def test_session_id_and_endpoint_are_recorded_in_full() -> None:
+    text = _text()
+    v0 = text[text.index("# V0:"):text.index("Run-Assertion 2 ")]
+    assert "live session $($script:sid)" in v0, "the full session id, not a prefix"
+    assert "$($s['host']):$($s['port'])" in v0 and "$script:endpoint" in v0
+    a2 = text[text.index("Run-Assertion 2 "):text.index("Run-Assertion 3 ")]
+    assert "$($script:sid)" in a2 and "$script:endpoint" in a2
+
+
+def test_verify_instruction_says_background_in_the_header_and_in_the_printed_text() -> None:
+    text = _text()
+    printed = text[text.index("SETUP DONE."):text.index("exit 0", text.index("SETUP DONE."))]
+    assert "in the background" in printed and "600000" not in printed
+    header = text[:text.index("param(")]
+    assert "in the background" in header and "600000" not in header
+
+
+def test_header_not_covered_list_names_the_known_residuals() -> None:
+    text = _text()
+    header = text[:text.index("param(")]
+    block = header[header.index("WHAT A GREEN RUN DOES NOT COVER"):header.index("# Exit:")]
+    for needle in (
+        "install-binary", "retail", "Credential Manager", "sleep", "Git, uv", "Windows on ARM",
+        "Smart App Control", "SessionEnd",
+    ):
+        assert needle in block, f"the not-covered list must name {needle!r}"
+    items = re.split(r"\n#   - ", block)[1:]
+    assert len(items) >= 10
+    for item in items:
+        assert re.search(r"nexus-[a-z0-9.]+|no bead yet", item), f"no bead named and not 'no bead yet': {item}"
