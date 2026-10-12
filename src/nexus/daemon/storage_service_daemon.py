@@ -947,6 +947,15 @@ class _LogTailer:
 #: supervisor writes one of them (``StorageServiceSupervisor._svc_log_name``).
 ENGINE_LOG_STEMS: tuple[str, ...] = ("storage_service_native", "storage_service_jar")
 
+
+def engine_log_stem(launch_kind: str | None) -> str:
+    """The engine child-log stem for *launch_kind* (``"jar"`` or ``"native"``).
+
+    Anything else, including ``None`` (a lease published before the
+    ``launch_kind`` key existed), is the production artifact's stem.
+    """
+    return ENGINE_LOG_STEMS[1] if launch_kind == "jar" else ENGINE_LOG_STEMS[0]
+
 #: A logback line (``%d{ISO8601, UTC} %-5level [%thread] ...``), and one at ERROR.
 _ENGINE_LOGBACK_LINE = re.compile(r"^\d{4}-\d\d-\d\d[ T]\S+\s+[A-Z]+\s")
 _ENGINE_ERROR_LINE = re.compile(r"^\d{4}-\d\d-\d\d[ T]\S+\s+ERROR\s")
@@ -1270,9 +1279,7 @@ class StorageServiceSupervisor:
         self._config_dir = config_dir
         self._binary_path = binary_path
         self._launch_kind = launch_kind
-        self._svc_log_name = (
-            "storage_service_jar" if launch_kind == "jar" else "storage_service_native"
-        )
+        self._svc_log_name = engine_log_stem(launch_kind)
         self._pg_port = pg_port
         self._service_port = service_port
         self._creds = creds
