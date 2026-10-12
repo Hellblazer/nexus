@@ -8,9 +8,7 @@ the batch flush wrote those chunks anyway, through the legacy upsert, and
 * Stage 1: WHY a file ends up with no document. ``_catalog_hook`` reports a
   cause per unregistered file through its ``unregistered`` out-parameter; each
   shape the bead named (main checkout, worktree, warm re-run, register failure,
-  catalog hook failure) is driven against the real engine catalog. The
-  batch-priority fairness yield is NOT among them: the service catalog writer's
-  ``is_interactive_write_pending`` is always False, so no production run yields.
+  catalog hook failure) is driven against the real engine catalog.
 * Stage 1: the flush event names the files, their chunk counts and causes.
 * Stage 2: the flush writes no chunk of an identity-less file.
 * Stage 3: the run refuses such a file before chunking it.

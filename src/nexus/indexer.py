@@ -341,9 +341,8 @@ def _repo_lock_path(repo: Path) -> Path:
 
 _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: Page size for the batched catalog register_many pass (nexus-9dvqy). Matches
-#: the server's MAX_BATCH_DOC_IDS cap. Also the granularity of the RDR-146
-#: fairness yield in _catalog_hook. Module-level so tests can shrink it to force
-#: multi-page behaviour without a 1000+ file corpus.
+#: the server's MAX_BATCH_DOC_IDS cap. Module-level so tests can shrink it to
+#: force multi-page behaviour without a 1000+ file corpus.
 _CATALOG_REGISTER_PAGE = 1000
 
 #: nexus-mr89x: minimum orphan count before the safety floor on the MOVE into
@@ -1147,7 +1146,6 @@ def _catalog_hook(
     repo_hash: str,
     head_hash: str,
     indexed_files: list[tuple[Path, str, str]],
-    on_locked: str = "wait",
     skip_housekeeping: bool = False,
     stale_fence_doc_ids: set[str] | None = None,
     on_phase: Callable[[str], None] | None = None,
@@ -1164,9 +1162,6 @@ def _catalog_hook(
     the worktree/tempdir guard), ``register_failed`` (the per-file register
     raised), ``catalog_hook_failed`` (the whole hook raised). A file in none
     of these states that still has no id reads ``unexplained`` downstream.
-    (A batch-priority fairness yield would leave the unreached tail unnamed
-    too, but ``_ServiceCatalogWriter.is_interactive_write_pending`` is always
-    False, so ``await_fair_window`` never yields in production.)
     Purely additive: nothing else in this function reads it.
 
     ``complete_doc_hashes`` (nexus-vayt7) is the sibling OUT-param of
@@ -1208,18 +1203,6 @@ def _catalog_hook(
     floor-tolerant stance ``doc_indexer._index_run_fresh`` /
     ``indexer_utils.non_complete_documents`` already use elsewhere.
 
-    RDR-146 P2 (nexus-5p2ci.12): this is the background batch producer that
-    GH #1046 showed starving a foreground ``nx dt index``. The writer is
-    constructed with the resolved write priority (the hook-spawned indexer
-    is non-tty -> batch); a batch writer polls the daemon's interactive
-    window before each file's catalog write and yields. ``on_locked``
-    retargets (PC-5 collapse) from the per-repo advisory file lock to the
-    catalog-contention signal: ``"skip"`` defers the remaining catalog
-    writes to the next idempotent index pass once the bounded yield budget
-    is exhausted; ``"wait"`` proceeds after the budget (never permanently
-    starve the batch). The per-repo advisory lock keeps its orthogonal job
-    (two ``nx index repo`` on the same repo) up in ``index_repository``.
-
     ``needs_fence`` (nexus-hg2dw) is an optional OUT-param:
     ``doc_id -> (file_hash, physical_collection)`` for every document THIS
     call determines needs real indexing work this run — a brand-new
@@ -1249,7 +1232,6 @@ def _catalog_hook(
     reconciliation clobber a correct 'complete' stamp for a file this run
     never touches.
     """
-    from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     file_to_doc_id: dict[Path, str] = {}
     reader = None
     writer = None
@@ -1266,12 +1248,8 @@ def _catalog_hook(
             make_catalog_writer,
         )
         reader = make_catalog_reader()
-        # RDR-146 P2: resolve priority (non-tty hook spawn -> batch). Only a
-        # batch writer yields to interactive writes; an interactive/foreground
-        # ``nx index repo`` is itself latency-sensitive and does not throttle.
         writer = make_catalog_writer()
         cat = reader
-        _batch_producer = writer.priority == "batch"
 
         # ``_catalog_hook`` accepts an explicit ``repo_hash`` (and
         # ``repo_name``) so callers and tests can override the
@@ -1330,8 +1308,7 @@ def _catalog_hook(
         # The snapshot is taken once: a file registered by a CONCURRENT
         # writer after this point is misclassified as new, takes the
         # register-branch, and register()'s own idempotency check returns
-        # the existing tumbler (fields refresh on the next pass) — same
-        # class the fairness/yield machinery below already acknowledges.
+        # the existing tumbler (fields refresh on the next pass).
         # A fetch failure must NOT no-op the whole hook (the nexus-o6aa.10.4
         # ghost class): fall back to the per-file lookups, loudly.
         path_to_entry: dict[str, object] | None
@@ -1360,7 +1337,6 @@ def _catalog_hook(
         # ghost-chunk class on 2026-05-02.
         skipped_files: list[tuple[Path, str]] = []
         reconciled: list[tuple[Path, str]] = []  # nexus-53cae: registered onto a live row outside this owner
-        fairness_yielded = 0  # RDR-146 P2: files deferred to the next pass.
         ephemeral_skipped = 0  # nexus-u8n4r: worktree/tempdir registrations refused.
         import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -1370,13 +1346,6 @@ def _catalog_hook(
         # was the 333s serial-WAN registration sink. The per-file try/except keeps
         # the ghost-class isolation intact: one bad file must never strip doc_ids
         # from the rest of the repo.
-        #
-        # RDR-146 P2 fairness: the yield stays PER-FILE here (it guards the inline
-        # writer.update() calls, which on a warm re-run fire for the whole existing
-        # population — a HEAD bump flips every doc's stored head_hash to changed —
-        # so this is a large serial write burst, not a rare one). ``skip`` defers
-        # the remaining files to the next idempotent pass. Pass 2 adds a second,
-        # per-page yield for the new-doc batch.
         # nexus-oub13: per-stage wall timing. The live "Catalog registration
         # done (115.5s)" phase wraps FIVE stages (resolve/update, update_many,
         # register_many pages, link generation, housekeeping) with no way to
@@ -1398,22 +1367,6 @@ def _catalog_hook(
         # dependency generator as if new; head-hash-only bumps are not.
         relink_rdr_tumblers: list = []
         for abs_path, content_type, collection_name in indexed_files:
-            if _batch_producer and await_fair_window(
-                writer.is_interactive_write_pending, on_locked,
-            ) == "skip":
-                # Deferred = files not yet resolved this pass. new_batch entries
-                # already collected are still registered in pass 2; the broken-off
-                # tail (neither accumulated nor updated) is picked up next pass.
-                fairness_yielded = (
-                    len(indexed_files) - len(file_to_doc_id)
-                    - len(skipped_files) - len(new_batch)
-                )
-                _log.info(
-                    "catalog_write_yielded_skipped",
-                    repo=repo_name, deferred=fairness_yielded,
-                    reason="interactive_write_pending",
-                )
-                break
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
@@ -1636,16 +1589,6 @@ def _catalog_hook(
             _update_many = getattr(writer, "update_many", None)
             if callable(_update_many):
                 for _start in range(0, len(changed_batch), _CATALOG_REGISTER_PAGE):
-                    if _batch_producer and await_fair_window(
-                        writer.is_interactive_write_pending, on_locked,
-                    ) == "skip":
-                        _log.info(
-                            "catalog_write_yielded_skipped",
-                            repo=repo_name,
-                            deferred=len(changed_batch) - _start,
-                            reason="interactive_write_pending",
-                        )
-                        break
                     page = changed_batch[_start : _start + _CATALOG_REGISTER_PAGE]
                     page_docs = [doc for _, doc in page]
                     try:
@@ -1699,7 +1642,7 @@ def _catalog_hook(
         # this run's own just-minted rows and misreport an uncontested path
         # as conflicting with itself. Per page rather than once per batch
         # (critique round, nexus-1vc0n): a cold index spans many pages,
-        # each paying a round trip plus the fairness backoff, and a
+        # each paying a round trip, and a
         # batch-wide snapshot went stale across them, missing a conflict
         # a concurrent indexer minted meanwhile or naming a tumbler since
         # tombstoned. The per-doc ``find_cross_owner_conflict`` cost that
@@ -1722,12 +1665,9 @@ def _catalog_hook(
                 for fp, entries in existing.items()
             }
 
-        # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
-        # from per-file to a per-PAGE check — a page is ONE register_many round-
-        # trip (one multi-row INSERT server-side), not 1000 serial writes, so the
-        # foreground-starvation window is bounded to a single batch. ``skip``
-        # defers the remaining pages to the next idempotent pass. register_many
-        # is 1:1-or-raise; the client already degrades a failed batch to per-doc
+        # Pass 2: batch-register the NEW docs, one page per register_many round-
+        # trip (one multi-row INSERT server-side), not 1000 serial writes.
+        # register_many is 1:1-or-raise; the client already degrades a failed batch to per-doc
         # register() internally, and if even that raises we fall back here to a
         # per-file register with the same ghost-class isolation as pass 1.
         #
@@ -1749,16 +1689,6 @@ def _catalog_hook(
         # so it never reintroduces the N+1 that ruled out the per-doc
         # conflict check above.
         for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
-            if _batch_producer and await_fair_window(
-                writer.is_interactive_write_pending, on_locked,
-            ) == "skip":
-                fairness_yielded = len(new_batch) - _start
-                _log.info(
-                    "catalog_write_yielded_skipped",
-                    repo=repo_name, deferred=fairness_yielded,
-                    reason="interactive_write_pending",
-                )
-                break
             page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
             page_docs = [doc for _, doc in page]
             _conflicts_by_path = _page_conflicts(page_docs)
@@ -2520,7 +2450,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
                 # nexus-6m9zy.6 (#12): owners.head_hash is the BASE the
                 # NEXT --since-head run diffs from. Advancing it past a
                 # commit that changed a file this run deferred (transient
@@ -4880,7 +4810,6 @@ def _run_index(
     force: bool = False,
     force_re_embed: bool = False,
     since_head: bool = False,
-    on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_rdr_start: Callable[[int], None] | None = None,
     on_refused: Callable[[int], None] | None = None,
@@ -5638,7 +5567,6 @@ def _run_index(
         repo_hash=_repo_hash,
         head_hash=_current_head(repo),
         indexed_files=indexed_for_catalog,
-        on_locked=on_locked,
         # nexus-fltb4: miss-counting against a delta-filtered walk would mark
         # every unvisited doc as missing and mass-delete after two runs.
         skip_housekeeping=delta_changed is not None,
@@ -6872,25 +6800,8 @@ def _run_index(
                 _, _heal_repo_hash = _repo_identity(repo)
                 _heal_owner = _cat.owner_for_repo(_heal_repo_hash)
                 if _heal_owner is not None:
-                    from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deferred import
-                    _heal_writer_box: list = []
-
-                    def _tracked_writer():
-                        _heal_writer_box.append(_mk_writer())
-                        return _heal_writer_box[0]
-
-                    def _yield_fair():
-                        # RDR-146 P2: yield to a foreground interactive
-                        # writer before every heal write (GH #1046 class).
-                        if _heal_writer_box:
-                            await_fair_window(
-                                _heal_writer_box[0].is_interactive_write_pending,
-                                on_locked,
-                            )
-
                     heal = heal_manifest_gaps(
-                        _cat.by_owner(_heal_owner), _cat, _mk_t3,
-                        _tracked_writer, yield_before_write=_yield_fair,
+                        _cat.by_owner(_heal_owner), _cat, _mk_t3, _mk_writer,
                     )
                     if heal.reconciled or heal.lost or heal.write_failed:
                         _phase(

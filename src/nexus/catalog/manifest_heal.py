@@ -94,7 +94,6 @@ def heal_manifest_gaps(
     *,
     dry_run: bool = False,
     echo: Callable[[str], None] | None = None,
-    yield_before_write: Callable[[], None] | None = None,
 ) -> ManifestHealResult:
     """Detect and rebuild manifest gaps for *entries*.
 
@@ -116,11 +115,6 @@ def heal_manifest_gaps(
         echo: Optional line sink for progress output (the observability
             half of nexus-8g0ch: a silent long walk reads as a hang).
             ``None`` degrades to structlog-only.
-        yield_before_write: Optional fairness hook invoked before EVERY
-            manifest write (review 4711f521: the indexer threads the
-            RDR-146 P2 ``await_fair_window`` through here so a large heal
-            backlog cannot starve a foreground interactive writer — the
-            GH #1046 class).
     """
     say = echo or (lambda _s: None)
     result = ManifestHealResult()
@@ -174,7 +168,7 @@ def heal_manifest_gaps(
     try:
         _heal_collections(
             by_coll, t3, writer, result, say,
-            dry_run=dry_run, yield_before_write=yield_before_write,
+            dry_run=dry_run,
             classify_unmatched=_classify_unmatched,
             paginated_get=_paginated_get,
             manifest_chunk_rows=_manifest_chunk_rows,
@@ -199,7 +193,6 @@ def _heal_collections(
     say: Callable[[str], None],
     *,
     dry_run: bool,
-    yield_before_write: Callable[[], None] | None,
     classify_unmatched: Callable[[Any], None],
     paginated_get: Any,
     manifest_chunk_rows: Any,
@@ -310,10 +303,6 @@ def _heal_collections(
                 result.dup_new_total += len(chunks)
             if not dry_run:
                 try:
-                    # RDR-146 P2 fairness: a large heal backlog must yield to
-                    # a foreground interactive writer (GH #1046 class).
-                    if yield_before_write is not None:
-                        yield_before_write()
                     writer.atomic_manifest_replace(
                         str(entry.tumbler), chunks, collection=coll_name)
                     # atomic_manifest_replace's local-SQLite path re-derives

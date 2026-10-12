@@ -50,7 +50,7 @@ from tests._module_seam import module_time
 # NOT scope reduction — the indexer->catalog journey on the LIVE substrate is
 # covered where it can actually run: tests/test_catalog_indexer_hook.py
 # drives ``_catalog_hook`` through tests/_catalog_fixture_ops.ActiveCatalog
-# (owner create/reuse, register/update, batching, fairness yields, per-file
+# (owner create/reuse, register/update, batching, per-file
 # fallbacks), and the catalog->GC round trip is exercised against the ACTIVE
 # catalog by test_prune_deleted_files_round_trip_with_real_catalog below.
 #
