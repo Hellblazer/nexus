@@ -358,7 +358,7 @@ def test_a_pidless_lease_older_than_the_grace_is_reclaimed(lease_root: Path, how
     assert release is not None, f"a {how} lease wedged the resource past its grace"
     try:
         assert (lease / "pid").read_text().strip() == str(os.getpid())
-        assert [p.name for p in lease_root.iterdir() if ".stale." in p.name], "the old directory is set aside, not deleted"
+        assert not [p.name for p in lease_root.iterdir() if ".stale." in p.name], "the set-aside directory is removed (nexus-3tx9c)"
     finally:
         release()
 
@@ -620,3 +620,126 @@ def test_a_non_one_value_does_not_lift_the_refusal(monkeypatch: pytest.MonkeyPat
         gate._take_suite_lease()
     assert err.value.returncode == 75
     assert re.search(r"suite lease: refusing", err.value.msg)
+
+
+# nexus-3tx9c: a reclaimed lease was renamed to suite.stale.<pid>.<ns> and never
+# removed (17 on one box), and a corpse made by one user could not be deleted by
+# the other. The rename stays the atomic step that picks the winner; the removal
+# after it is best-effort, a sweep at acquire catches what an interrupted removal
+# left, and the lease is group-writable so either user in the shared group can clear
+# the other's corpse.
+
+_HOUR = _suite_lease.STALE_SWEEP_AGE_SECONDS
+
+
+def _dead_lease(lease_root: Path) -> Path:
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text("4194304\n")  # above pid_max, see test_a_dead_holder_does_not_wedge_the_box
+    (lease / "label").write_text("a run that died\n")
+    return lease
+
+
+def _stale_dirs(lease_root: Path) -> list[str]:
+    return sorted(p.name for p in lease_root.iterdir() if p.name.startswith(f"{_suite_lease.RESOURCE}.stale."))
+
+
+def _leftover(lease_root: Path, name: str, mtime: float) -> Path:
+    old = lease_root / name
+    old.mkdir(parents=True, exist_ok=True)
+    (old / "pid").write_text("4194304\n")
+    os.utime(old, (mtime, mtime))
+    return old
+
+
+def test_the_set_aside_directory_is_gone_after_a_reclaim(lease_root: Path) -> None:
+    _dead_lease(lease_root)
+    release = _suite_lease.acquire("after-reclaim", lease_root=lease_root)
+    assert release is not None
+    try:
+        assert _stale_dirs(lease_root) == [], "the reclaimed lease was renamed aside and left behind"
+        assert (lease_root / _suite_lease.RESOURCE / "pid").read_text().strip() == str(os.getpid())
+    finally:
+        release()
+
+
+def test_a_removal_failure_neither_raises_nor_blocks_the_acquire(
+        lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _dead_lease(lease_root)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise PermissionError("owned by the other user")
+
+    monkeypatch.setattr(_suite_lease.shutil, "rmtree", boom)
+    release = _suite_lease.acquire("removal-fails", lease_root=lease_root)
+    assert release is not None, "a failed cleanup of the corpse must not cost the run its lease"
+    try:
+        assert len(_stale_dirs(lease_root)) == 1, "the rename is the step that decides the winner and it still happened"
+    finally:
+        release()
+
+
+def test_an_old_stale_directory_is_swept_and_a_young_one_kept(lease_root: Path) -> None:
+    old = _leftover(lease_root, "suite.stale.111.1", _T0)
+    young = _leftover(lease_root, "suite.stale.222.2", _T0 + _HOUR - 1)
+    release = _suite_lease.acquire("sweeper", lease_root=lease_root, now=_clock(_T0 + _HOUR))
+    assert release is not None
+    try:
+        assert not old.exists(), "a leftover at least an hour old is removed"
+        assert young.exists(), "a leftover younger than the age cutoff may still be mid-removal by its owner"
+    finally:
+        release()
+
+
+def test_the_sweep_leaves_the_live_lease_and_unrelated_siblings_alone(lease_root: Path) -> None:
+    live = lease_root / _suite_lease.RESOURCE
+    live.mkdir(parents=True)
+    (live / "pid").write_text(f"{os.getpid()}\n")
+    os.utime(live, (_T0, _T0))
+    other = lease_root / "service"
+    other.mkdir()
+    os.utime(other, (_T0, _T0))
+    _leftover(lease_root, "suite.stale.333.3", _T0)
+    # held by this live process, so acquire refuses; the sweep still ran first.
+    assert _suite_lease.acquire("held", lease_root=lease_root, now=_clock(_T0 + 10 * _HOUR)) is None
+    assert (live / "pid").read_text().strip() == str(os.getpid()), "the live lease was touched"
+    assert other.is_dir(), "a sibling that is not a suite.stale.* directory was touched"
+    assert _stale_dirs(lease_root) == []
+
+
+def test_the_sweep_does_not_follow_a_symlink_out_of_the_lease_root(lease_root: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    precious = outside / "precious"
+    precious.write_text("keep\n")
+    lease_root.mkdir()
+    link = lease_root / "suite.stale.444.4"
+    link.symlink_to(outside, target_is_directory=True)
+    release = _suite_lease.acquire("symlink", lease_root=lease_root, now=_clock(_T0 + 1000 * _HOUR))
+    assert release is not None
+    try:
+        assert precious.read_text() == "keep\n", "the sweep followed a symlink and deleted its target's contents"
+        assert outside.is_dir()
+        assert link.is_symlink(), "the sweep touched the link itself"
+    finally:
+        release()
+
+
+def test_a_new_lease_is_group_writable_and_never_world_writable_whatever_the_umask(lease_root: Path) -> None:
+    """Either user in the shared group must be able to clear the other's corpse, so the group bit is set explicitly."""
+    old = os.umask(0o077)
+    try:
+        release = _suite_lease.acquire("group-writable", lease_root=lease_root)
+    finally:
+        os.umask(old)
+    assert release is not None
+    try:
+        lease = lease_root / _suite_lease.RESOURCE
+        assert lease.stat().st_mode & 0o775 == 0o775, oct(lease.stat().st_mode)
+        assert lease.stat().st_mode & 0o002 == 0, "the lease directory is world-writable"
+        for name in ("pid", "label"):
+            mode = (lease / name).stat().st_mode
+            assert mode & 0o664 == 0o664, (name, oct(mode))
+            assert mode & 0o002 == 0, (name, "world-writable", oct(mode))
+    finally:
+        release()

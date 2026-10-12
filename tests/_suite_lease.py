@@ -33,6 +33,7 @@ ran three engine suites at once (nexus-g6xpa).
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -75,8 +76,19 @@ PIDLESS_GRACE_SECONDS = 60.0
 
 #: Modes the lease directory and its files are given, chmod-ed after creation
 #: so a peer's umask 077 cannot make a live holder unreadable to the next run.
-LEASE_DIR_MODE = 0o755
-LEASE_FILE_MODE = 0o644
+#: Group-WRITABLE as well as readable (nexus-3tx9c): the lease root is shared by
+#: the users of one group, and a corpse left by one user could not be cleared
+#: by the other when it was 0755. This is explicit, whatever the umask, and
+#: never world-writable. It does not touch the held-when-unreadable rule above.
+LEASE_DIR_MODE = 0o775
+LEASE_FILE_MODE = 0o664
+
+#: A leftover ``suite.stale.*`` directory (a reclaimed lease whose removal was
+#: interrupted or refused) older than this is removed by the sweep at acquire.
+#: Younger than this, its reclaimer may still be removing it.
+STALE_SWEEP_AGE_SECONDS = 3600.0
+
+_STALE_PREFIX = f"{RESOURCE}.stale."
 
 
 def _lease_root() -> Path:
@@ -167,9 +179,51 @@ def holder(lease_root: Path | None = None) -> str | None:
 _UNREADABLE_HOLDER = "a holder whose lease files this user cannot read (permission denied)"
 
 
+def _remove_best_effort(path: Path) -> None:
+    """Delete a set-aside directory. A failure (the other user owns it) is ignored: the sweep retries."""
+    try:
+        shutil.rmtree(path)
+    except Exception:  # noqa: BLE001 — cleanup must never raise into, or change the outcome of, an acquire
+        pass
+
+
 def _set_aside(lease: Path) -> None:
-    """Rename a lease to a unique name. Atomic, so of two reclaimers exactly one succeeds."""
-    lease.rename(lease.with_name(f"{RESOURCE}.stale.{os.getpid()}.{time.time_ns()}"))
+    """Rename a lease to a unique name, then remove it best-effort.
+
+    The rename is atomic, so of two reclaimers exactly one succeeds, and it is
+    the step that decides the winner; the removal after it is housekeeping and
+    never raises (nexus-3tx9c). The renamed path is unique to this call, so no
+    other process looks at it, and a removal that fails leaves it for the sweep.
+    """
+    aside = lease.with_name(f"{_STALE_PREFIX}{os.getpid()}.{time.time_ns()}")
+    lease.rename(aside)
+    _remove_best_effort(aside)
+
+
+def _sweep_stale(root: Path, now: Callable[[], float]) -> None:
+    """Remove leftover ``suite.stale.*`` directories at least ``STALE_SWEEP_AGE_SECONDS`` old.
+
+    Best-effort and bounded to *root*: only direct children whose name starts
+    with ``suite.stale.`` are considered, so the live ``suite`` lease and the
+    build lease's ``service`` resource are never candidates. A symlink is
+    skipped, not followed or removed, so a link planted in the lease root
+    cannot make the sweep delete anything outside it.
+    """
+    try:
+        cutoff = now() - STALE_SWEEP_AGE_SECONDS
+        for entry in os.scandir(root):
+            try:
+                if not entry.name.startswith(_STALE_PREFIX) or entry.is_symlink():
+                    continue
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if entry.stat(follow_symlinks=False).st_mtime > cutoff:
+                    continue
+                _remove_best_effort(Path(entry.path))
+            except Exception:  # noqa: BLE001 — one unreadable entry must not stop the rest
+                continue
+    except Exception:  # noqa: BLE001 — an unreadable or missing root is not this sweep's problem
+        return
 
 
 def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
@@ -250,12 +304,14 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
     ``os.mkdir`` is the whole mutual exclusion: it is atomic, so of N racing
     acquirers exactly one creates the directory and the rest see EEXIST.
 
-    *now* is the clock the pid-less-lease grace is read against; only tests pass it.
+    *now* is the clock the pid-less-lease grace and the stale-directory sweep
+    are read against; only tests pass it.
     """
     root = lease_root or _lease_root()
     lease = root / RESOURCE
     deadline = time.monotonic() + max(0, wait_seconds)
 
+    _sweep_stale(root, now)
     while True:
         try:
             root.mkdir(parents=True, exist_ok=True)
