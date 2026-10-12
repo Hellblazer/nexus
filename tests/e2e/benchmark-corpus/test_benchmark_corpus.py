@@ -128,7 +128,11 @@ def test_filter_keeps_source_and_docs(path: str) -> None:
     ["tests/test_cli.py", "tests/e2e/benchmark-corpus.sh", "docs/rdr/rdr-001-x.md", "docs/rdr/AGENTS.md",
      "docs/rdr/sub/deep.md", "service/pom.xml", "scripts/x.sh", "conexus/skills/x/SKILL.md", "README.md",
      "src/nexus/__pycache__/a.cpython-312.pyc", "docs/architecture-diagram.png", "docs/tuple-row-life.svg",
-     "src/other/cli.py", "docsx/a.md"],
+     "src/other/cli.py", "docsx/a.md",
+     # the trim that took the snapshot from 15,623 chunks to the target range
+     "src/nexus/commands/index.py", "src/nexus/plans/builtin/a.yml", "src/nexus/_install/x.sh",
+     "src/nexus/hooks/h.py", "src/nexus/console/app.js", "docs/cli-reference.md",
+     "docs/wire-contract-pending.md", "docs/postmortem/2026-06-06-idle-peg.txt"],
 )
 def test_filter_leaves_out_tests_rdr_archive_and_binaries(path: str) -> None:
     assert not bc.in_snapshot(path)
@@ -460,26 +464,54 @@ def test_help_and_unknown_command() -> None:
     assert bad.returncode == 2 and "unknown command" in bad.stderr
 
 
-@pytest.mark.parametrize("shape", ["not_a_sandbox", "marker_but_wrong_name", "right_name_no_state"])
-def test_down_refuses_a_directory_that_is_not_a_sandbox_and_deletes_nothing(tmp_path: Path, shape: str) -> None:
-    if shape == "not_a_sandbox":
-        victim = tmp_path / "nxbc-looks-right"
-    elif shape == "marker_but_wrong_name":
-        victim = tmp_path / "important-data"
-        victim.mkdir()
-        (victim / ".nx-benchmark-corpus-sandbox").write_text("")
-    else:
-        victim = tmp_path / "nxbc-halfmade"
-        victim.mkdir()
-        (victim / ".nx-benchmark-corpus-sandbox").write_text("")
-    if not victim.exists():
-        victim.mkdir()
-    keep = victim / "precious.txt"
-    keep.write_text("do not delete")
-    result = _run("down", str(victim))
+def _fake_sandbox(parent: Path, name: str, *, marker: bool) -> Path:
+    """A directory shaped like a sandbox in every respect but the ones a test removes.
+
+    ``bin/nx`` is a stub that exits 0, so a ``down`` that gets past its guards
+    reaches ``rm -rf`` and the test sees the loss, rather than dying earlier on
+    a missing binary and passing for the wrong reason.
+    """
+    box = parent / name
+    (box / "bin").mkdir(parents=True)
+    nx = box / "bin" / "nx"
+    nx.write_text("#!/bin/sh\nexit 0\n")
+    nx.chmod(0o755)
+    (box / "state.txt").write_text(f"BIN_DIR={box / 'bin'}\nPROBE_PYTHON=/nonexistent\nCONEXUS_INSTALLED=0\n")
+    if marker:
+        (box / ".nx-benchmark-corpus-sandbox").write_text("")
+    (box / "precious.txt").write_text("do not delete")
+    return box
+
+
+def test_down_removes_a_well_formed_sandbox(tmp_path: Path) -> None:
+    """Positive control: the refusals below mean something only if this deletes."""
+    box = _fake_sandbox(tmp_path, "nxbc-good", marker=True)
+    result = _run("down", str(box))
+    assert result.returncode == 0, result.stderr
+    assert "BENCHMARK CORPUS SANDBOX REMOVED" in result.stdout
+    assert not box.exists()
+
+
+@pytest.mark.parametrize("name,marker", [
+    ("nxbc-no-marker", False),     # right name, no marker file
+    ("important-data", True),      # marker file, wrong name
+])
+def test_down_refuses_a_directory_that_is_not_a_sandbox_and_deletes_nothing(
+    tmp_path: Path, name: str, marker: bool,
+) -> None:
+    box = _fake_sandbox(tmp_path, name, marker=marker)
+    result = _run("down", str(box))
     assert result.returncode != 0
-    assert keep.read_text() == "do not delete"
+    assert (box / "precious.txt").read_text() == "do not delete"
     assert "BENCHMARK CORPUS SANDBOX REMOVED" not in result.stdout
+
+
+def test_down_refuses_a_sandbox_whose_install_never_finished(tmp_path: Path) -> None:
+    box = _fake_sandbox(tmp_path, "nxbc-halfmade", marker=True)
+    (box / "state.txt").unlink()
+    result = _run("down", str(box))
+    assert result.returncode != 0 and "no state.txt" in result.stderr
+    assert (box / "precious.txt").exists()
 
 
 def test_down_and_env_need_a_sandbox_argument() -> None:

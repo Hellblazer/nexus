@@ -64,6 +64,42 @@ the token/RLS model. Prereqs (dev box): a JDK/GraalVM and pg17 binaries. When th
 prereqs are absent the suites self-skip and the gate reports **inconclusive**
 (non-zero exit), never a false green.
 
+### Benchmark corpus for local-mode measurements
+
+Indexing the whole repository takes hours in local mode, which is too slow to
+repeat for a search-latency survey, a rerank page-quality check or an
+index-throughput run. `tests/e2e/benchmark-corpus.sh` builds a small, fixed
+corpus in a sandbox instead: a snapshot of `src/nexus` and `docs/` (no
+`tests/`, no `docs/rdr/`) at the `v7.77.1` release commit, plus 30 notes in
+two subject collections (`distributed-systems`, `vector-search`). The sandbox
+has its own HOME, installs the published conexus from PyPI with `uv tool
+install` and runs `nx` in local mode under an `env -i` allowlist, the same
+way `fresh-install-mvv.sh --published` does.
+
+```bash
+tests/e2e/benchmark-corpus.sh run                 # build, assert, print the numbers, tear down
+tests/e2e/benchmark-corpus.sh up                  # same, then leave the engine and Postgres up
+tests/e2e/benchmark-corpus.sh env  <sandbox>      # the sandbox environment as KEY=VALUE lines
+tests/e2e/benchmark-corpus.sh exec <sandbox> -- <command>
+tests/e2e/benchmark-corpus.sh down <sandbox>      # stop, assert no process names it, delete
+tests/e2e/benchmark-corpus.sh run --exec '<command>'   # measure inside a run
+```
+
+A follow-on command sees `HOME`, `PATH` (the sandbox's `nx` first),
+`NX_LOCAL=1`, `NX_BENCH_SANDBOX`, `NX_BENCH_SNAPSHOT` (the indexed
+repository) and `NX_BENCH_PYTHON`, and nothing else. The run fails, and cannot
+skip, when the chunk counts leave the pinned ranges, the fixture is not
+exactly 30 notes in 2 subjects, a phrase from the snapshot or from a note does
+not come back from a search, or a process still names the sandbox after
+teardown. It prints the chunk count per collection, the wall time of the
+first index and the chunks per second.
+
+The pins (commit, conexus version, chunk ranges, the snapshot's file count and
+digest) live in `tests/e2e/benchmark-corpus/benchmark_corpus.py`, and
+`test_benchmark_corpus.py` beside it checks them. Moving to a later release
+means changing the pins together and re-measuring the ranges; run it on a
+test host (on chas, through `lab-run`), not on a busy laptop.
+
 ## Code Conventions
 
 - **Python 3.12–3.13**: use `match/case`, `tomllib`, `typing.Protocol`, walrus operator

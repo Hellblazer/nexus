@@ -197,9 +197,9 @@ _sandbox_processes() {
 
 # Stop the sandbox's service and prove nothing of it is left running.
 _stop_and_verify_no_processes() {
-    local left i
+    local left
     _stop_service
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
         left="$(_sandbox_processes)"
         [ -z "$left" ] && return 0
         sleep 1
