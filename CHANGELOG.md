@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.78.0] - 2026-10-12
+
+Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). Fixes, most of them for Windows. `nx daemon service stop` no longer also stops a PostgreSQL the supervisor started, and `nx`, the hooks, the indexer and the daemons no longer run a `git.exe`, `bd.exe` or `claude.exe` planted in the working directory. A docling that cannot be imported now fails the PDF and has an `nx doctor` row. No engine change, no schema change and no wire change.
+
 ### Fixed
 
 - **A docling that cannot be imported fails the PDF instead of quietly switching to plain PyMuPDF text, and `nx doctor` reports it.** A docling failure on one PDF still falls back to PyMuPDF. An import failure is a broken install: before, every PDF without formulas then came back as plain text (no layout-aware reading order, headings or tables) with one progress line to show for it. Indexing now stops with the missing module's name and the reinstall command, and `nx doctor` has a `PDF extraction (docling)` row that checks the modules docling's PDF pipeline imports are present.
