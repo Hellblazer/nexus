@@ -96,6 +96,17 @@ def _skip_in_a_shallow_checkout() -> None:
         pytest.skip(f"shallow checkout without {bc.PIN_TAG} ({bc.PIN_SHA[:9]}); needs full history and tags")
 
 
+def test_ci_fetches_the_pinned_commit_by_asking_the_helper_for_the_tag() -> None:
+    """The affected-integration job checks out at depth 1. Without this step the
+    three tests below skip there and the job's all-skipped guard fails it. The
+    step must read the tag from the helper, never spell it, so a new pin cannot
+    leave the workflow fetching the old release."""
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    assert "benchmark_corpus.py pin PIN_TAG" in ci
+    assert 'git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"' in ci
+    assert bc.PIN_TAG not in ci, "the workflow spells the pinned tag; it must ask the helper"
+
+
 @pytest.mark.integration
 def test_pin_sha_is_the_commit_of_the_tag_it_claims() -> None:
     """Needs the tag: skipped in a shallow checkout, a loud failure in a full one."""
