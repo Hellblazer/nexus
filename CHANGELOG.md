@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **A docling that cannot be imported fails the PDF instead of quietly switching to plain PyMuPDF text, and `nx doctor` reports it.** A docling failure on one PDF still falls back to PyMuPDF. An import failure is a broken install: before, every PDF without formulas then came back as plain text (no layout-aware reading order, headings or tables) with one progress line to show for it. Indexing now stops with the missing module's name and the reinstall command, and `nx doctor` has a `PDF extraction (docling)` row that checks the modules docling's PDF pipeline imports are present.
+- **`nx daemon service status` names the log the engine actually writes.** It named `storage_service_native.log` for every launch; an engine started from a jar (development and tests) writes `storage_service_jar.log`. (nexus-gu3ma)
+- **`nx agents install --help` no longer recommends allowing `mcp__serena-wt__*` wholesale.** That wildcard also allows the IDE debugger tool and every writer with no prompt. The help now says to name the tools, as `docs/cli-reference.md` already did. (nexus-r2e6t)
+
+### Changed
+
+- **`nx t3 gc` leaves the fraction floor to the engine.** The verb used to check the floor itself against its advisory listing before asking the engine, because an older engine moved without judging it. Every supported engine now judges the floor under its own lock, so the client copy is gone. A refusal still exits 1, moves nothing, and names `NX_GC_FLOOR_FRACTION` and `NX_GC_FORCE=1`. It now arrives only with the move, so `--dry-run` no longer predicts it. (nexus-teduy)
+
+### Removed
+
+- **`NX_WRITE_PRIORITY` and the catalog write-fairness code behind it.** Nothing has yielded on it since the catalog moved to the engine: the writer always reported no interactive write pending. Setting the variable has no effect and it is no longer documented. (nexus-yp99m)
 
 ## [7.77.1] - 2026-10-11
 
