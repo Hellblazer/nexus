@@ -258,6 +258,9 @@ _cmd_run() {
     _set_paths
     mkdir -p "$HOME_DIR" "$LOGS" "$WORK/corpus"
     trap cleanup EXIT
+    # An interrupted run still stops its engine: the EXIT trap does not fire on a bare signal.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     echo "  sandbox: $WORK"
 
     echo "-- 1/8 install conexus==$conexus_version from PyPI into the sandbox HOME --"
