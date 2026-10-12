@@ -545,4 +545,4 @@ class TestStatusLogPaths:
             main, ["daemon", "service", "status", "--json", "--config-dir", str(config_dir)],
         )
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output)["service_log"] == str(config_dir / "logs" / f"{stem}.log")
+        assert json.loads(result.stdout)["service_log"] == str(config_dir / "logs" / f"{stem}.log")
