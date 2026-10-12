@@ -205,6 +205,14 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "path...\"` line is an error-message string literal naming the "
            "failed step, never itself executed as a command.",
     ),
+    "tests/e2e/benchmark-corpus.sh": (
+        4, "NX_LOCAL+SANDBOX: every call goes through `_nx`, an `env -i` wrapper with "
+           "HOME=\"$HOME_DIR\" under a mktemp sandbox and NX_LOCAL=1, against the bundled "
+           "engine that `_nx init` provisions inside it. The four sites are `_nx store put` "
+           "(30 fixture notes), `_nx index repo` (the pinned snapshot), `_nx collection list` "
+           "and `_nx store list` (read-only listings). Teardown stops that engine and "
+           "deletes the sandbox.",
+    ),
     "tests/e2e/cloud-client-path-gate.sh": (
         1, "READ-ONLY: every leg in this gate is a read (per its own header, "
            "it asserts the engine's read-path contracts survive the public "
