@@ -2,7 +2,8 @@
 title: "Per-Collection HNSW Indexes Above the Router Threshold"
 id: RDR-227
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-12
 priority: high
 author: Sam
 reviewed-by: self
@@ -1282,3 +1283,4 @@ Phase 2a's measured default search shows those exact arms still set the floor
   Contradiction Check, A6, the API table, References); two unchecked boxes
   resolved. No change to the frontmatter; the lifecycle move is separate.
 - 2026-10-12: Close critique round 2 (T2 `nexus_rdr/227-close-critique-2026-10-12-r2`: partial, 0 critical, 1 significant). The prose exception is corrected: it holds only while no prose collection is at or above B, and a prose collection reaching B is the trigger for the Gap 1 recall check. Three stale pointers and one unstruck sentence fixed.
+- 2026-10-12: Closed as Implemented on Sam's decision, with the round-2 close critique at partial and its one finding corrected (T2 `nexus_rdr/227-close-override-2026-10-12`). Gap 3 stays open under the deferred bead nexus-43ulx.26; the prose threshold watch is bead nexus-qqoak. Post-mortem: `docs/rdr/post-mortem/rdr-227-per-collection-hnsw-above-the-router-threshold.md`.
