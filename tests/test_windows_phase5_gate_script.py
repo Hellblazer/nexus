@@ -459,4 +459,4 @@ def test_header_not_covered_list_names_the_known_residuals() -> None:
     items = re.split(r"\n#   - ", block)[1:]
     assert len(items) >= 10
     for item in items:
-        assert re.search(r"nexus-[a-z0-9.]+|no bead yet", item), f"no bead named and not 'no bead yet': {item}"
+        assert re.search(r"nexus-[a-z0-9.]+", item), f"no bead named: {item}"

@@ -111,39 +111,39 @@
 #   verdict is FAILED whenever executed != DECLARED, any assertion failed, or a
 #   precondition failed. Off Windows the script refuses with exit 2.
 #
-# WHAT A GREEN RUN DOES NOT COVER (each item names its bead, or says no bead yet;
+# WHAT A GREEN RUN DOES NOT COVER (each item names its bead;
 #   RDR and T2 references are where the item is recorded)
 #   - nx daemon service install-binary <tag>, the Minimum Viable Validation's
 #     second install path (default PG bundle, and --no-pg-bundle). The gate runs
 #     only nx init --service; both share install_binary() and install_pg_bundle(),
 #     so the library path runs, but the CLI wrapper, its default and its flag
 #     do not. RDR-224 Minimum Viable Validation; T2 nexus_rdr/224-review-p5-critique S3;
-#     no bead yet.
+#     nexus-f9bgu.53.
 #   - A stock retail Windows 11 standard-user box. The guest is Windows 11
 #     Enterprise Evaluation (build 26300) with a filtered administrator token
 #     (P0 records the token). T2 nexus_rdr/224-gate-run-7.72.1-2026-10-07
-#     "Not covered"; no bead yet.
+#     "Not covered"; nexus-f9bgu.53.
 #   - A box with no developer tools. The guest has Git, uv, a uv-managed Python
 #     and Claude Code installed before the run (procedure step 1); P0 guards
 #     only the VC++ runtime. RDR-224 Minimum Viable Validation says "no
-#     developer tools"; no bead yet.
+#     developer tools"; nexus-f9bgu.53.
 #   - Host sleep. Unmeasured; the RDR assumption stays unchecked. RDR-224
 #     Critical Assumptions (host shutdown, logoff or sleep), T2
 #     nexus_rdr/224-research-32; nexus-f9bgu.46 measured sign-out and restart
-#     only; no bead yet for sleep.
+#     only; sleep is nexus-f9bgu.53.
 #   - Autostart at the next logon and the sign-out/restart path: measured by
 #     nexus-f9bgu.46, fixed by nexus-f9bgu.51, not re-asserted here.
 #   - Windows Credential Manager. Assertion 5's credential check lists file
 #     names at depth 1 under %USERPROFILE%\.claude and never reads the
-#     Credential Manager store. RDR-219 inventory; no bead yet.
+#     Credential Manager store. RDR-219 inventory; nexus-f9bgu.53.
 #   - Windows on ARM. Out of scope by decision (no GraalVM windows-aarch64
 #     target, no onnxruntime Windows-ARM64 library). RDR-224 Technical
-#     Environment and Briefly Rejected; no bead yet.
+#     Environment and Briefly Rejected; nexus-f9bgu.53.
 #   - Smart App Control in enforcing mode. RDR-224 Test Plan (the Smart App
-#     Control scenario) and Critical Assumptions; no bead yet.
+#     Control scenario) and Critical Assumptions; nexus-f9bgu.53.
 #   - The desktop bundle: nexus-ijue9.21.
 #   - SessionEnd (nx-session-end-launcher) fires after the session and is not
-#     observable here; no bead yet.
+#     observable here; nexus-f9bgu.53.
 #   - The aspect-worker daemon, which is only observed (process count, CPU
 #     seconds and command lines after the --with-pg stop). It outlives
 #     `service stop` by design: RDR-224's recorded decision (Revision History,
