@@ -18,7 +18,9 @@ from click.testing import CliRunner
 
 from nexus import plugin_lockstep as pl
 from nexus.cli import main
-from tests._module_seam import setattr_in
+from tests._windows_box import CWD as WIN_CWD
+from tests._windows_box import TOOLS as WIN_TOOLS
+from tests._windows_box import install_windows
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -257,12 +259,34 @@ def test_a_claude_planted_in_the_working_directory_is_never_the_one_that_runs_on
 
     registry({"conexus@nexus-plugins": "7.34.1"})
     monkeypatch.setattr(nx_argv, "_platform", lambda: "win32")
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.getcwd", lambda: r"C:\work\clone")
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda name, *, path=None: rf".\{name}.exe")
+    install_windows(monkeypatch, "nexus.util.nx_argv", {rf"{WIN_CWD}\claude.exe"})
     ran: list[object] = []
     r = pl.converge_plugins(run=lambda cmd, **kw: ran.append(cmd))
     assert r.status == "claude_missing"
     assert ran == [], "nothing may be spawned from a planted claude.exe"
+
+
+def test_a_claude_cmd_shim_on_path_is_the_one_that_runs_on_windows(
+        registry, wheel, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``claude`` installed through npm is ``claude.cmd``, and this lookup has always
+    answered with it (``shutil.which`` honours PATHEXT). ``which_off_cwd`` refuses a batch
+    hit by default (a bare spawn never found one), so this one site opts in
+    (nexus-f9bgu.37 review I1). Its arguments are the plugin id and scope from the
+    local plugin registry, never text from a repository."""
+
+    from nexus.util import nx_argv
+
+    registry({"conexus@nexus-plugins": "7.34.1"})
+    monkeypatch.setattr(nx_argv, "_platform", lambda: "win32")
+    install_windows(monkeypatch, "nexus.util.nx_argv", {rf"{WIN_TOOLS}\claude.cmd"})
+    ran: list[list[str]] = []
+
+    def run(cmd, **kw):  # noqa: ANN001, ANN003, ANN202
+        ran.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    pl.converge_plugins(dry_run=False, run=run)
+    assert ran and ran[0][0] == rf"{WIN_TOOLS}\claude.cmd", ran
 
 
 def test_dry_run_runs_nothing(registry, fake_claude: Path, wheel) -> None:

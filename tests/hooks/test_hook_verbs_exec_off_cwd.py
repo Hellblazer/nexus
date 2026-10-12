@@ -22,7 +22,6 @@ only as a planted copy spawns nothing and degrades exactly as "not found" did.
 from __future__ import annotations
 
 import types
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -30,40 +29,19 @@ import pytest
 from nexus import bounded_subprocess
 from nexus.hooks import _infer_repo, preflight_verb, rdr_verb, session_context, subagent_start
 from nexus.util import nx_argv as nx_argv_mod
-from tests._module_seam import setattr_in
-
-CWD = r"C:\work\clone"
-TOOLS = r"C:\tools\bin"
-
-
-def _which_standin(installed: set[str], planted: set[str]) -> Callable[..., str | None]:
-    """``shutil.which`` as Windows answers it: the cwd first, then PATH."""
-
-    def which(name: str, *, path: str | None = None) -> str | None:
-        if "\\" in name:  # already a path: which() hands an existing file back
-            return name
-        if path is None:
-            if name in planted:
-                return rf".\{name}.exe"
-            return rf"{TOOLS}\{name}.exe" if name in installed else None
-        searched = path.split(";")
-        return rf"{TOOLS}\{name}.exe" if name in installed and TOOLS in searched else None
-
-    return which
+from tests._windows_box import CWD, TOOLS, install_windows
 
 
 @pytest.fixture()
 def windows_box(monkeypatch: pytest.MonkeyPatch):
     """Windows semantics for ``nx_argv``; returns ``configure(installed, planted)``."""
     monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "win32")
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.getcwd", lambda: CWD)
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.pathsep", ";")
-    # nx_argv's private view of the environment: the real PATH stays the host's,
-    # so a verb's own lookups outside nx_argv still work.
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.environ", {"PATH": f"{CWD};{TOOLS}"})
 
     def configure(installed: set[str], planted: set[str]) -> None:
-        setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which_standin(installed, planted))
+        files = {rf"{TOOLS}\{n}.exe" for n in installed} | {rf"{CWD}\{n}.exe" for n in planted}
+        # nx_argv's private view of the environment: the real PATH stays the host's,
+        # so a verb's own lookups outside nx_argv still work.
+        install_windows(monkeypatch, "nexus.util.nx_argv", files)
 
     configure({"git", "bd"}, {"git", "bd"})
     return configure

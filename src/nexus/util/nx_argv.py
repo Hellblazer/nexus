@@ -20,6 +20,7 @@ Stdlib only: the hooks import this on every tool call
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import sys
@@ -62,56 +63,96 @@ def nx_argv_for(resolved: str, *args: str) -> list[str]:
     return [resolved, *args]
 
 
-def _in_cwd(found: str) -> bool:
-    """True when *found* sits in the current directory: a relative ``.\\x.exe``
-    (what ``shutil.which`` returns for a current-directory hit) or an absolute
-    path whose directory is the working directory. Windows path rules, no I/O."""
-    path = PureWindowsPath(found)
-    if not path.is_absolute():
-        return True
-    return path.parent == PureWindowsPath(os.getcwd())
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
 
 
-def which_off_cwd(name: str) -> str | None:
-    """``shutil.which(name)`` that never answers with a current-directory hit on
-    Windows, where ``which`` (and ``CreateProcess``) search the working directory
-    before ``PATH``. A hit there is retried against ``PATH`` with the working
-    directory's own entry removed, and still refused if ``which`` hands back the
-    planted file again. POSIX is ``shutil.which`` unchanged: its search is
-    ``PATH`` only. Use it whenever the result reaches an argv (RDR-224 test review
-    S3, nexus-f9bgu.35); a bare existence probe may keep ``shutil.which``."""
-    found = shutil.which(name)
-    if found is None or _platform() != "win32" or not _in_cwd(found):
-        return found
+def _has_location(name: str) -> bool:
+    """True when *name* carries a directory part or a drive (``.\\x``, ``tools/x``,
+    ``C:\\x\\y.exe``, ``C:x``, a UNC path). ``CreateProcess`` takes such a name as
+    written and does not search ``PATH`` for it. Windows path rules, no I/O."""
+    drive, tail = ntpath.splitdrive(name)
+    return bool(drive) or "\\" in tail or "/" in tail
+
+
+def _candidates(name: str, allow_batch: bool) -> list[str]:
+    """The file names to try for *name*, in ``PATHEXT`` order: *name* as written
+    when it already ends in a listed extension, else *name* plus each extension. An
+    unset or empty ``PATHEXT`` is the default list (``shutil.which`` does the same).
+    A ``.cmd`` or ``.bat`` candidate is dropped unless *allow_batch*."""
+    listed = [e for e in (os.environ.get("PATHEXT") or _DEFAULT_PATHEXT).split(";") if e]
+    if ntpath.splitext(name)[1].upper() in {e.upper() for e in listed}:
+        names = [name]
+    else:
+        names = [name + e for e in listed]
+    if allow_batch:
+        return names
+    return [n for n in names if ntpath.splitext(n)[1].lower() not in _BATCH_SUFFIXES]
+
+
+def _search_dirs() -> list[str]:
+    """The ``PATH`` entries a bare name may honestly be looked up in: absolute ones
+    (drive and root, so not ``tools``, ``.``, ``C:x`` or ``\\x``, which resolve
+    against the working directory), minus the working directory's own."""
     cwd = PureWindowsPath(os.getcwd())
-    others = [
+    return [
         entry
         for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry and PureWindowsPath(entry) != cwd
+        if entry and PureWindowsPath(entry).is_absolute() and PureWindowsPath(entry) != cwd
     ]
-    retry = shutil.which(name, path=os.pathsep.join(others))
-    return None if retry is None or _in_cwd(retry) else retry
 
 
-def argv_off_cwd(argv: Sequence[str]) -> list[str]:
+def which_off_cwd(name: str, *, allow_batch: bool = False) -> str | None:
+    """``shutil.which(name)`` that never answers with a current-directory hit on
+    Windows, where ``which`` (and ``CreateProcess``) search the working directory
+    before ``PATH``. POSIX is ``shutil.which`` unchanged: its search is ``PATH``
+    only. Use it whenever the result reaches an argv (RDR-224 test review S3,
+    nexus-f9bgu.35); a bare existence probe may keep ``shutil.which``.
+
+    On Windows the lookup is this module's own ``PATH`` walk: ``shutil.which``
+    searches the working directory first even when given ``path=``, so a planted
+    copy would hide the installed one. ``PATHEXT`` is honoured, but a ``.cmd`` or
+    ``.bat`` hit is not returned unless *allow_batch*: a bare ``git`` or ``bd``
+    spawn only ever found an ``.exe``, and a batch file runs through ``cmd.exe``
+    with quoting CPython does not escape for it (the BatBadBut class). The one
+    caller that runs a ``.cmd`` shim on purpose, ``plugin_lockstep``'s ``claude``,
+    passes ``allow_batch=True``. A *name* with a directory part or a drive is a path
+    the caller chose: it is returned when it exists, and never searched for.
+    """
+    if _platform() != "win32":
+        return shutil.which(name)
+    names = _candidates(name, allow_batch)
+    if _has_location(name):
+        return next((c for c in names if os.path.isfile(c)), None)
+    for entry in _search_dirs():
+        for candidate in names:
+            full = ntpath.join(entry, candidate)
+            if os.path.isfile(full):
+                return full
+    return None
+
+
+def argv_off_cwd(argv: Sequence[str], *, allow_batch: bool = False) -> list[str]:
     """*argv* with a bare ``argv[0]`` resolved by :func:`which_off_cwd` on Windows.
 
     The spelling for a hook verb that spawns ``git``, ``bd`` or any other tool by
     name: ``CreateProcess`` would take a ``git.exe`` planted in the project (the
     hook's cwd) before ``PATH``, so the child gets the ``PATH`` hit as an absolute
-    path (RDR-224 Phase 4 critique S1, nexus-f9bgu.37). A head that is already an
-    absolute path is left alone, and POSIX is returned unchanged (``execvp``
-    searches ``PATH`` only).
+    path (RDR-224 Phase 4 critique S1, nexus-f9bgu.37). A head with a directory part
+    or a drive (an absolute path, ``.\\x``, ``tools/x``) is an explicit path the
+    caller chose, which ``CreateProcess`` does not search for; it is left alone.
+    POSIX is returned unchanged in value (``execvp`` searches ``PATH`` only).
 
-    Raises ``FileNotFoundError`` when Windows has no ``PATH`` hit, which is what
-    the spawn itself raised for a missing tool, so a caller's existing
-    not-found handling is the one that runs. It never falls back to the bare name:
-    that is the planted file.
+    Raises ``FileNotFoundError`` when Windows has no ``PATH`` hit for a bare name,
+    which is what the spawn itself raised for a missing tool, so a caller's existing
+    not-found handling is the one that runs. A tool found only as a ``.cmd`` or
+    ``.bat`` counts as not found unless *allow_batch*. It never falls back to the
+    bare name: that is the planted file.
     """
     out = list(argv)
-    if not out or _platform() != "win32" or PureWindowsPath(out[0]).is_absolute():
+    if not out or _platform() != "win32" or _has_location(out[0]):
         return out
-    found = which_off_cwd(out[0])
+    found = which_off_cwd(out[0], allow_batch=allow_batch)
     if found is None:
         raise FileNotFoundError(f"{out[0]}: not found on PATH outside the working directory")
     out[0] = found

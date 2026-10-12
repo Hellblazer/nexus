@@ -21,6 +21,7 @@ from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer
 from nexus.util import nx_argv as nx_argv_mod
 from tests._module_seam import setattr_in
+from tests._windows_box import CWD, TOOLS, install_windows
 
 SYSTEM32_SCHTASKS = ntpath.join(r"C:\Windows", "System32", "schtasks.exe")
 
@@ -157,44 +158,36 @@ class TestWhichOffCwd:
     """``shutil.which`` on Windows answers with a current-directory hit first; a
     result that reaches an argv must not be one (RDR-224 test review S3)."""
 
-    CWD = r"C:\work\clone"
-    TOOLS = r"C:\tools\bin"
+    CWD = CWD
+    TOOLS = TOOLS
 
     @pytest.fixture(autouse=True)
-    def _where(self, windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        setattr_in(monkeypatch, "nexus.util.nx_argv", "os.getcwd", lambda: self.CWD)
-        setattr_in(monkeypatch, "nexus.util.nx_argv", "os.pathsep", ";")  # the Windows separator, on every host
-        monkeypatch.setenv("PATH", f"{self.CWD};{self.TOOLS}")
+    def _win(self, windows: None) -> None:
+        """Windows semantics for ``nx_argv``."""
 
-    def test_a_relative_cwd_hit_is_retried_against_path_without_the_cwd(
+    def _files(self, monkeypatch: pytest.MonkeyPatch, *files: str) -> None:
+        install_windows(monkeypatch, "nexus.util.nx_argv", files)
+
+    def test_a_planted_copy_in_the_cwd_does_not_hide_the_one_on_path(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        calls: list[object] = []
-
-        def which(name: str, *, path: str | None = None) -> str | None:
-            calls.append(path)
-            return rf".\{name}.exe" if path is None else rf"{self.TOOLS}\{name}.exe"
-
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", which)
+        self._files(monkeypatch, rf"{self.CWD}\claude.exe", rf"{self.TOOLS}\claude.exe")
         assert nx_argv_mod.which_off_cwd("claude") == rf"{self.TOOLS}\claude.exe"
-        assert calls == [None, self.TOOLS], "the retry must drop the working directory's own entry"
 
     def test_an_absolute_hit_inside_the_cwd_is_a_cwd_hit_too(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        planted = rf"{self.CWD}\claude.exe"
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", lambda name, *, path=None: planted)
-        assert nx_argv_mod.which_off_cwd("claude") is None  # the retry hands the same file back
+        self._files(monkeypatch, rf"{self.CWD}\claude.exe")
+        assert nx_argv_mod.which_off_cwd("claude") is None
 
     def test_a_lookup_that_finds_nothing_off_the_cwd_is_none(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", lambda name, *, path=None: rf".\{name}.exe" if path is None else None,
-        )
+        self._files(monkeypatch, rf"{self.CWD}\bd.exe")
         assert nx_argv_mod.which_off_cwd("bd") is None
 
     def test_a_hit_on_path_is_returned_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", lambda name, *, path=None: rf"{self.TOOLS}\{name}.exe")
+        self._files(monkeypatch, rf"{self.TOOLS}\git.exe")
         assert nx_argv_mod.which_off_cwd("git") == rf"{self.TOOLS}\git.exe"
 
     def test_posix_is_shutil_which_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,14 +213,13 @@ class TestWindowsSpawnSitesNeverSpawnALookup:
 
     @pytest.fixture(autouse=True)
     def _windows(self, windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        setattr_in(monkeypatch, "nexus.util.nx_argv", "os.getcwd", lambda: r"C:\work\clone")
         setattr_in(monkeypatch, ("nexus.util.nx_argv", "nexus.commands.daemon", "nexus.daemon.installer"), "sys.executable", r"C:\tools\conexus\Scripts\python.exe")
 
     def test_self_gc_spawns_the_interpreter_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
 
         from nexus.hooks import self_gc
 
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", lambda name, *, path=None: r"C:\tools\bin\nx.exe")
+        install_windows(monkeypatch, "nexus.util.nx_argv", {rf"{TOOLS}\nx.exe"})
         argvs: list[list[str]] = []
         setattr_in(monkeypatch, "nexus.hooks.self_gc", "subprocess.run", lambda argv, **k: argvs.append(list(argv)))
         self_gc.run(None)
@@ -239,7 +231,7 @@ class TestWindowsSpawnSitesNeverSpawnALookup:
 
         from nexus.hooks import self_gc
 
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", lambda name, *, path=None: r".\nx.exe")
+        install_windows(monkeypatch, "nexus.util.nx_argv", {rf"{CWD}\nx.exe"})
         argvs: list[list[str]] = []
         setattr_in(monkeypatch, "nexus.hooks.self_gc", "subprocess.run", lambda argv, **k: argvs.append(list(argv)))
         self_gc.run(None)
@@ -248,7 +240,7 @@ class TestWindowsSpawnSitesNeverSpawnALookup:
     def test_upgrade_auto_spawns_the_interpreter_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nexus.hooks import upgrade_auto
 
-        setattr_in(monkeypatch, ("nexus.daemon.installer", "nexus.util.nx_argv", "nexus.commands.daemon"), "shutil.which", lambda name, *, path=None: r"C:\tools\bin\nx.exe")
+        install_windows(monkeypatch, "nexus.util.nx_argv", {rf"{TOOLS}\nx.exe"})
         spawned: list[list[str]] = []
 
         def spawn(argv: list[str], *a: object, **k: object) -> object:

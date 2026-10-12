@@ -315,7 +315,10 @@ def converge_plugins(
     at_wheel = {k: v for k, v in installed.items() if parse_version(v.version) == wheel_v}
     if not behind and not at_wheel:
         return LockstepReport(status="in_lockstep", wheel=wheel)
-    claude = claude_path or which_off_cwd("claude")
+    # allow_batch: an npm-installed ``claude`` is ``claude.cmd``, which this lookup has
+    # always returned. The arguments are the plugin id and scope from the local plugin
+    # registry (nexus-f9bgu.37 review I1).
+    claude = claude_path or which_off_cwd("claude", allow_batch=True)
     if claude is None:
         return LockstepReport(status="claude_missing", wheel=wheel,
                               outcomes=[PluginOutcome(k, v.version, "failed", "claude CLI not on PATH", scope=v.scope)

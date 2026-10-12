@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import ntpath
 import types
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -43,6 +42,7 @@ from nexus import (
     indexer,
     indexer_utils,
     repo_identity,
+    session,
 )
 from nexus._git_hooks_meta import git_common_dir
 from nexus._install import generation_core
@@ -52,42 +52,24 @@ from nexus.doc.resolvers import BeadResolver, ResolutionError
 from nexus.operators import dispatch
 from nexus.util import nx_argv as nx_argv_mod
 from tests._module_seam import setattr_in
-
-CWD = r"C:\work\clone"
-TOOLS = r"C:\tools\bin"
+from tests._windows_box import CWD, TOOLS, install_windows
 
 
-def _which_standin(
-    installed: set[str], planted: set[str], *, cwd_even_with_path: bool = False,
-) -> Callable[..., str | None]:
-    """``shutil.which`` as Windows answers it: the cwd first, then PATH. With
-    ``cwd_even_with_path`` it also answers with the cwd hit when ``path=`` is given
-    (the CPython 3.12 behaviour ``nexus.health`` documents)."""
-
-    def which(name: str, *, path: str | None = None) -> str | None:
-        if "\\" in name:
-            return name
-        if name in planted and (path is None or cwd_even_with_path):
-            return rf".\{name}.exe"
-        if path is None:
-            return rf"{TOOLS}\{name}.exe" if name in installed else None
-        return rf"{path}\{name}.exe" if name in installed and path == TOOLS else None
-
-    return which
+def _files(installed: set[str], planted: set[str]) -> set[str]:
+    """The ``.exe`` files that exist: *installed* in ``TOOLS``, *planted* in the cwd."""
+    return {rf"{TOOLS}\{n}.exe" for n in installed} | {rf"{CWD}\{n}.exe" for n in planted}
 
 
 @pytest.fixture()
 def windows_box(monkeypatch: pytest.MonkeyPatch):
     """Windows semantics for ``nx_argv``; returns ``configure(installed, planted)``."""
     monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "win32")
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.getcwd", lambda: CWD)
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.pathsep", ";")
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "os.environ", {"PATH": f"{CWD};{TOOLS}"})
 
     def configure(installed: set[str], planted: set[str]) -> None:
-        setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which_standin(installed, planted))
+        install_windows(monkeypatch, "nexus.util.nx_argv", _files(installed, planted))
 
-    configure({"git", "bd", "claude", "bash", "java", "ss", "mineru-api"}, {"git", "bd", "claude", "bash", "java", "ss", "mineru-api"})
+    everything = {"git", "bd", "claude", "bash", "java", "ss", "mineru-api"}
+    configure(everything, everything)
     return configure
 
 
@@ -95,7 +77,10 @@ class _FakeProc:
     def __init__(self, args, **_kw):  # noqa: ANN001, ANN003
         self.args = args
         self.returncode = 0
-        self.pid = 4242
+        # Not a real pid: on a native Windows host ``contain()`` assigns a spawned pid
+        # to a kill-on-close job object, and a made-up pid could name a live process.
+        # ``contain`` ignores a pid that is not positive.
+        self.pid = 0
 
     def communicate(self, input=None, timeout=None):  # noqa: A002, ANN001
         return ("", "")
@@ -140,6 +125,9 @@ def test_run_bounded_with_only_a_planted_copy_spawns_nothing(windows_box, popen_
 
 
 def test_run_bounded_leaves_an_absolute_head_and_posix_alone(monkeypatch, popen_seen) -> None:
+    # The platform is pinned through the module's own seam: the suite also runs on a
+    # native Windows host, where the real platform would resolve (or refuse) bare ``git``.
+    monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "linux")
     bounded_subprocess.run_bounded(["git", "status"], timeout=1)  # POSIX: bare name, PATH search only
     bounded_subprocess.run_bounded(["/usr/bin/git", "log"], timeout=1)
     assert popen_seen == [["git", "status"], ["/usr/bin/git", "log"]]
@@ -313,6 +301,44 @@ def test_java_for_the_jar_launch_ignores_a_planted_copy(windows_box, monkeypatch
     windows_box(set(), {"java"})
     with pytest.raises(storage_service_daemon.StorageServiceStartError):
         storage_service_daemon._resolve_java_executable()
+
+
+def test_ss_for_the_port_holder_ignores_a_planted_copy(windows_box, monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake(argv, **_kw):  # noqa: ANN001, ANN003
+        seen.append(list(argv))
+        return types.SimpleNamespace(stdout='LISTEN 0 4096 *:8080 users:(("java",pid=7,fd=9))\n')
+
+    monkeypatch.setattr(bounded_subprocess, "run_bounded", fake)
+    assert storage_service_daemon._port_holder(8080) == '"java",pid=7,fd=9'
+    assert seen == [[rf"{TOOLS}\ss.exe", "-ltnp", "sport = :8080"]]
+    windows_box(set(), {"ss"})
+    assert storage_service_daemon._port_holder(8080) is None  # nothing named, nothing spawned
+    assert len(seen) == 1
+
+
+# -- the ps probes in session.py: behind a win32 early return, so defensive only -----
+
+
+def test_ps_for_the_parent_pid_walk_resolves_off_the_cwd(windows_box, monkeypatch) -> None:
+    """``_ppid_of`` and the orphan sweep return before ``ps`` on a Windows host, so
+    ``platform="linux"`` here reaches the ``ps`` branch to prove the argv it builds is
+    resolved (the conversion is defence in depth, should the early return ever go)."""
+    seen: list[list[str]] = []
+
+    def fake(argv, **_kw):  # noqa: ANN001, ANN003
+        seen.append(list(argv))
+        return "4321\n"
+
+    setattr_in(monkeypatch, session, "subprocess.check_output", fake)
+    windows_box({"ps"}, {"ps"})
+    no_proc = 4_000_000_000  # no /proc/<pid>/status on any host: the ps fallback runs
+    assert session._ppid_of(no_proc, platform="linux") == 4321
+    assert seen == [[rf"{TOOLS}\ps.exe", "-o", "ppid=", "-p", str(no_proc)]]
+    windows_box(set(), {"ps"})
+    assert session._ppid_of(no_proc, platform="linux") is None  # "ps unavailable", as before
+    assert len(seen) == 1
 
 
 # -- the bootstrap-safe installer core: its own stdlib-only copy of the helper -------
