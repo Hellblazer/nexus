@@ -1446,6 +1446,15 @@ def _pg_ctl_start_detached(
       CTRL_BREAK as SIGINT, a fast shutdown. Left in the supervisor's group, a
       CTRL_BREAK sent to the supervisor for a plain ``nx daemon service stop``
       would take PostgreSQL down with it (nexus-f9bgu.24 carries the proof).
+    * pg_ctl is also spawned with ``CREATE_NO_WINDOW``: a hidden console of its
+      own, which the postmaster inherits. The group alone is not enough. The
+      stop's break is addressed to the lease's ``supervisor_pid``, and behind
+      the venv trampoline that pid is not a group root; Windows then delivers
+      the break to every process on the supervisor's console, whatever group
+      each is in. On published 7.77.1 a plain stop shut down a PostgreSQL the
+      supervisor had started (Phase 5 gate assertion 4, nexus-f9bgu.54). Off
+      the supervisor's console, no event sent there can reach it. ``pg_ctl
+      stop`` does not use console events, so ``--with-pg`` is unaffected.
 
     The root refusal that :func:`_run` gives every PostgreSQL subprocess is
     repeated here, since leaving :func:`run_bounded` would otherwise drop it.
@@ -1459,7 +1468,7 @@ def _pg_ctl_start_detached(
     without killing pg_ctl.
     """
     refuse_root()
-    from nexus.util.win_job import CREATE_NEW_PROCESS_GROUP  # noqa: PLC0415 — deferred: Windows spawn path only
+    from nexus.util.win_job import CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW  # noqa: PLC0415 — deferred: Windows spawn path only
 
     pg_ctl = os.path.abspath(str(bins.pg_ctl))
     pglog = pgdata / "pg.log"
@@ -1474,7 +1483,7 @@ def _pg_ctl_start_detached(
             stdout=out,
             stderr=subprocess.STDOUT,
             env=env,
-            creationflags=CREATE_NEW_PROCESS_GROUP,
+            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
         )
         deadline = time.monotonic() + _PG_CTL_WAIT_TIMEOUT_S
         while True:
