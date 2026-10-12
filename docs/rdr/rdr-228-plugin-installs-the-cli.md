@@ -201,7 +201,7 @@ assumed (`-13`, replaced by the Windows run in `-14`).
 - **CA-1 (Refuted for the conversation measured).** The draft assumed a
   Desktop session runs the plugin's hooks. In the live conversation of
   Discovery 7 no hook ran, because the loop was not on the laptop. The design
-  now treats the stand-in server as the only channel that reaches every
+  now treats the plugin's server as the only channel that reaches every
   surface; see "How the question reaches the user".
 - **CA-2 (Not applicable to that path).** With no hooks, the 15 second
   `mcp-connect-wait` did not run. It remains measured only for the
@@ -619,8 +619,9 @@ step is removed.
 - A user installs `uv`, adds the plugin and answers one question. Five to
   nine terminal steps go away. A terminal user can run one command instead.
 - The first session has no Nexus tools until setup ends, from under two
-  minutes on a fast connection to about seven on a slow one for local mode, and needs a reconnect at the end. The Desktop application
-  has no progress display; the status tool is the only view.
+  minutes on a fast connection to about seven on a slow one for local mode,
+  and needs a reconnect once the CLI is built. The Desktop application has no
+  progress display; the status tool is the only view.
 - A user who says no keeps a plugin whose only tools are the two setup
   tools, with one line per session naming `/conexus:setup`.
 - The real `nx-mcp` gains two tools that appear only when no usable service
