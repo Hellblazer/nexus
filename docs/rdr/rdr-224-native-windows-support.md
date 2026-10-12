@@ -141,6 +141,12 @@ Three existing problems, each already filed, block a native Windows install:
 - the desktop bundle's `mcpb/manifest.json` lists only darwin and linux in
   `compatibility.platforms`.
 
+Amendment 2026-10-12: all three are fixed in code and shipped (Phase 4,
+"How Phase 4 ended"). The third bullet's fix does not give a Windows user a
+working Desktop install: the bundle cannot be installed on the Claude Desktop
+build measured on 2026-10-11, and chat and Cowork get conexus from the account
+marketplace instead.
+
 #### Gap 6: Everything we would ship for Windows is unsigned
 
 Everything nexus would ship for Windows is unsigned today: the engine, the
@@ -597,6 +603,15 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   launcher both produced output (T2 `224-gate-run-7.72.1-2026-10-07`). On
   7.72.0 the cold session had `nx-hook preflight` cancelled at 6.0 s against
   its 5 s budget; fixed in 7.72.1 (nexus-3cydr).
+  Amendment 2026-10-12: the launcher quoted above is the 7.72.1 form and no
+  longer ships. Since 7.74.0 (`856223b3f`, 2026-10-07, after that gate run)
+  every uv hook entry is `uv tool run --directory ${CLAUDE_PLUGIN_ROOT}
+  --no-config --quiet --python >=3.12 python <script>`. Evidence for the shipped
+  form: a real Claude Code 2.1.292 session on the clean guest, all hooks
+  succeeded and a planted `.venv` ran 0 times (T2 `224-phase4-fix-C-windows`);
+  and `tests/hooks/test_hook_launcher_uv.py` runs natively in the Windows
+  rehearsal job. The Phase 5 gate has not been run on the shipped form
+  (nexus-f9bgu.26).
 - [x] The packaged engine archive and PG bundle run on a clean Windows machine
   with no VC++ redistributable — **Status**: Verified (2026-10-06/07) —
   **Method**: the clean guest `nx-clean-win11` (Phase 0 Step 0.5): the
@@ -1431,6 +1446,59 @@ Close nexus-efk2h (hook launcher), ijue9.20 (manifest platform gate and
 `mcpb/manifest.json` stays out of develop until the Windows client release
 (nexus-f9bgu.43; T2 `224-decisions-amendments`).
 
+#### How Phase 4 ended (amendment 2026-10-12)
+
+Source: the Phase 4 critique (T2 `224-review-p4-critique`, finding S3). Text and
+evidence only; no status change.
+
+- **Hook launcher (nexus-efk2h, closed).** Three forms were written and two shipped. `uv run
+  --no-project` with a PEP 723 block (`dfa8ad852`, shipped in 7.72.0) ran a
+  `.venv` planted in the project. `uv run --directory ${CLAUDE_PLUGIN_ROOT}
+  --no-project` (`daa6ae73c`, never released alone) stopped that but ran a
+  `.venv` in any ancestor of the plugin cache, the home folder and `C:\`
+  included. The shipped form, since 7.74.0
+  (`856223b3f`), is `uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config
+  --quiet --python >=3.12 python <script>`; a tool environment never reads a
+  `.venv`. The efk2h close reason still describes the first form.
+- **Desktop bundle launch (nexus-ijue9.20, closed).** `os.execvp` is replaced on
+  Windows by a child that inherits the stdio handles, inside a kill-on-close Job
+  Object (`4aa3eb754`). The bundle launches as `uv tool run ... python
+  src/bootstrap.py` and is its own uv workspace root (`fc66a9ea2`, 7.74.0).
+- **Platform token.** `win32` entered `mcpb/manifest.json` with the Windows
+  client release, 7.72.0 (nexus-f9bgu.43), as planned above.
+- **Desktop install path (nexus-ijue9.21, closed).** `docs/windows-install.md`
+  (`753079a3b`). The route changed from the plan: on Claude Desktop
+  1.24012.9.0 (MSIX), measured 2026-10-11, a double-click on `conexus.mcpb` does
+  nothing, because the package registers no `.mcpb` file type, and the Plugins
+  upload dialog hides `.mcpb` files. Chat and Cowork get conexus from the
+  claude.ai account marketplace, and the nexus servers connected that way with 44
+  tools (T2 `nexus/desktop-install-friction-qwent-2026-10-11`; `bf3f12180`). So
+  the Windows bundle code is correct and tested, and no Windows user reaches it
+  through Desktop today. A Windows run of the shipped bundle form is not
+  recorded; the headless walk used the earlier `uv run` manifest (T2
+  `224-windows-install-guide-walk`).
+
+The code review (nexus-f9bgu.36; T2 `224-review-phase4-5-beads`) raised seven
+findings:
+
+| Finding | Disposition |
+| --- | --- |
+| A: a bare program name is resolved from the working directory on Windows | Fixed in the plugin scripts in 7.74.0 (`_exec_path.which_off_cwd`, lint `tests/test_hooks_bare_exec_lint.py`), and on 2026-10-12 in all of `src/nexus` (`7581cc834`, `7f77f6436`, `5508b2f71`, `464e848af`, `bf1293bd7`; lint `tests/test_nx_bare_exec_lint.py`). The Windows search order is simulated in those tests, not run on Windows |
+| B: uv exits 2 when no interpreter is found, which blocks five hook entries | Kept as a loud block (Sam, on nexus-f9bgu.36). `conexus/README.md` names the remedy, `uv python install 3.12` |
+| C: Phase 4 code ran in no Windows job, and the launcher read a planted `.venv` | Fixed: the Windows rehearsal job runs `tests/test_mcpb_bootstrap.py` and `tests/hooks/test_hook_launcher_uv.py` (`e741a577a`); the launcher form above |
+| D: documents and this record claimed more than was measured | Partly fixed. The hooks assumption is marked Verified and `docs/windows-install.md` exists. Open: the Desktop wording in `web/index.html` and `docs/desktop-deployment.md` |
+| E: the aspect-worker daemon died with the bootstrap's job | Fixed in code (`e741a577a`: breakaway allowed on the job, a breakaway-first spawn with a fallback). Tested with a fake `Popen` only; not measured on Windows |
+| F1: `uv sync` inherited the host's stdin and decoded with the locale codec | Fixed: stdin is `DEVNULL`, output is decoded as UTF-8 with replacement |
+| G: the stdio handoff test could hang | Fixed: the exchange has a deadline |
+
+Not measured, as of 2026-10-12: whether Claude Code and Claude Desktop resolve
+the bare `uv`, `nx-hook` and `nx-session-end-launcher` names in `hooks.json` and
+the manifest from the project directory on Windows; that closing the Job Object
+kills a real child, and that a child spawned with breakaway survives it (a hand
+run on qwentescence at `4aa3eb754` covered the kill once, and CI asserts only
+that the job is created); the time a first hook run takes on a box with no
+Python, against the 5 s hook timeout (nexus-f9bgu.37 carries these).
+
 ### Phase 5: Gate (Gap 7)
 
 A hand-run, release-time gate on a real Windows box, outside CI, modelled on
@@ -1548,6 +1616,18 @@ skipped assertion fails; it does not pass.
 - **Scenario**: Windows smoke in the release leg — **Verify**: the exe boots
   against the Windows PG bundle built in the same workflow run and handed over as
   an artifact. Status: passed by hand; the workflow has not run.
+- **Scenario**: Phase 4, the hook launcher and the desktop bundle's launch on
+  Windows (row added 2026-10-12) — **Verify**: in the rehearsal workflow's
+  conformance job, `tests/hooks/test_hook_launcher_uv.py` passes (every uv hook
+  entry launches its script, and the credential guard still denies through the
+  launcher) and `tests/test_mcpb_bootstrap.py` passes (stdio and the exit code
+  survive the handoff on real handles; `TestRealWindows` creates the Job Object).
+  The junit floor requires `tests.test_mcpb_bootstrap.TestRealWindows` and
+  `test_the_credential_guard_still_denies_through_the_launcher` to have passed.
+  Status: green on real Windows, run 38194840901 on `2ea176075` (2026-10-12),
+  1560 passed. Not in that job: `tests/hooks/test_hook_launcher_cwd.py` (the
+  planted `.venv` cases; its module skips on Windows), a real job kill and a real
+  breakaway.
 - **Scenario**: the Phase 5 gate on a real Windows box — **Verify**: its five
   assertions pass and its executed-assertion count equals the declared count.
 - **Scenario**: Windows 11 machine with Smart App Control enforcing, fresh
@@ -1769,3 +1849,10 @@ Right-sized for an Architecture record that replaces an accepted direction.
   open for sleep. 7.72.1 carries the Windows fixes the gate needed: the MCP stdio
   protocol off fd 0 (nexus-jg99b), the preflight budget (nexus-3cydr) and
   `tuf>=7.0.1` (nexus-zw44w). Text and evidence only; no status change.
+- 2026-10-12: Phase 4 record (source: the Phase 4 critique, S3, T2
+  `224-review-p4-critique`). Added "How Phase 4 ended" under Phase 4: the
+  shipped launcher form, the bundle's launch, the Desktop route that changed to
+  the account marketplace, the dispositions of code-review findings A to G, and
+  what is not measured. Added a dated note to Gap 5, the shipped launcher and
+  its evidence to the hooks assumption, and a Phase 4 Test Plan row. Text and
+  evidence only; no status change.
