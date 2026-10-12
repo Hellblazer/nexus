@@ -817,3 +817,4 @@ is flagged for trimming before then.
 - 2026-10-12: CA-5 run on native Windows: the `uv` launch form, a prototype
   launcher relaying to the real `nx-mcp.exe`, and the fall-through to the
   stand-in all work.
+- 2026-10-12: Gate round 1: BLOCKED (1 Critical, 9 Significant, 1 ship-blocker(s)); commit `2a630e7c5`; critique `nexus_rdr/228-gate-critique-2026-10-12-r1`.
