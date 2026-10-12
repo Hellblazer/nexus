@@ -736,10 +736,14 @@ WINDOWS_TEST_SET = (
     "tests/test_os_trust_store.py", "tests/hooks/test_endpoint_resolve_lease_retry.py",
     # Phase 4 (nexus-f9bgu.38 finding C): the desktop bootstrap and the uv hook launcher.
     "tests/test_mcpb_bootstrap.py", "tests/hooks/test_hook_launcher_uv.py",
+    # Phase 4 (nexus-f9bgu.37 critique S4): the bundle launcher's planted-venv cases, the plugin
+    # scripts' off-cwd resolution and the nx-hook shim.
+    "tests/test_mcpb_launcher_venv.py", "tests/hooks/test_exec_off_cwd.py", "tests/hooks/test_nx_hook_shim.py",
 )
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
 PHASE4_WINDOWS_PATHS = (
     "mcpb/src/bootstrap.py", "conexus/hooks/**", "tests/_hook_wiring.py",
+    "mcpb/manifest.json", "mcpb/pyproject.toml",
 )
 
 
@@ -792,6 +796,7 @@ REAL_KERNEL_PATTERNS = (
     "test_hard_killing_the_supervisor_takes_its_job_engine_with_it",
     "tests.test_mcpb_bootstrap.TestRealWindows",
     "test_the_credential_guard_still_denies_through_the_launcher",
+    "test_auto_approve_allows_through_uv_and_the_shim",
 )
 
 

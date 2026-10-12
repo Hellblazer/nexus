@@ -144,6 +144,14 @@ on:
       - conexus/hooks/**
       - tests/hooks/test_hook_launcher_uv.py
       - tests/_hook_wiring.py
+      # The rest of the Phase 4 Windows legs (nexus-f9bgu.37, critique S4): the bundle's
+      # launch argv lives in the manifest and its workspace root in the bundle's pyproject,
+      # so an edit to either changes what a Windows host runs.
+      - mcpb/manifest.json
+      - mcpb/pyproject.toml
+      - tests/test_mcpb_launcher_venv.py
+      - tests/hooks/test_exec_off_cwd.py
+      - tests/hooks/test_nx_hook_shim.py
       - tests/_engine_substrate.py
       - tests/conftest.py
       # Dependency changes reach Windows too (nexus-6046d): tuf 7.0.0 in uv.lock
@@ -353,7 +361,7 @@ jobs:
       # that quietly stopped running.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/hooks/test_endpoint_resolve_lease_retry.py tests/test_mcpb_bootstrap.py tests/hooks/test_hook_launcher_uv.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/hooks/test_endpoint_resolve_lease_retry.py tests/test_mcpb_bootstrap.py tests/hooks/test_hook_launcher_uv.py tests/test_mcpb_launcher_venv.py tests/hooks/test_exec_off_cwd.py tests/hooks/test_nx_hook_shim.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -366,10 +374,16 @@ jobs:
       # The ceiling went from 52 to 55 with the desktop bootstrap and the uv hook launcher
       # joining the set (nexus-f9bgu.38): they add three POSIX-only skips by construction (the
       # exec-branch stdio leg, the off-Windows Job Object degrade, POSIX PATH resolution) and
-      # up to two more where nx-hook is not installed. That is an estimate, not a measurement:
-      # the first run on win-release reads the real count, and the ceiling is the 5% cap that
-      # tests/test_windows_release_legs_workflow.py holds against the 1100 pass floor.
+      # up to two more where nx-hook is not installed. Measured on win-release, run 38194840901
+      # on 2ea176075 (2026-10-12): 1560 passed, 53 skipped, 2 xfailed, so 55 against a ceiling
+      # of 55, and any new skip turned the job red on an unrelated change.
+      # Since nexus-f9bgu.37 (critique S4) the floor is about 90% of that measured pass count
+      # and the ceiling is the 5% cap tests/test_windows_release_legs_workflow.py holds against
+      # it (1400 // 20 = 70). The three files added with that change bring two POSIX-only skips
+      # by construction (the signalled-shim test and the POSIX resolution test), so the expected
+      # count is 57 and the margin is 13. The shim-through-launcher test skips itself where
+      # nx-hook is not installed, so it is named below and must have passed.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 1100 --max-skipped 55 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 1400 --max-skipped 70 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim
