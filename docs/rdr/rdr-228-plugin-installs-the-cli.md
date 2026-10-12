@@ -41,8 +41,9 @@ and most of its hooks are programs from the CLI, and nothing installs the CLI.
 A new user on macOS or Linux runs five terminal commands before the two plugin
 commands (`uv`, `git`, `uv tool install conexus --python 3.12`,
 `nx self install`, `nx init`), and a Windows user runs about nine. A Desktop
-user who never opens a terminal cannot get there at all. RDR-218 records the
-requirement that a CLI must not be an installation prerequisite. No platform
+user who never opens a terminal cannot get there at all. Sam's standing
+requirement, first recorded in RDR-218, is that a CLI must not be an
+installation prerequisite. No platform
 meets it today.
 
 ### Enumerated gaps to close
@@ -60,29 +61,33 @@ reports "Executable not found in $PATH" (measured, Research Findings item 3).
 
 In that state `version_lockstep_hook.py` tells the model that "an
 extras-preserving upgrade has been dispatched in the background" and that no
-action is needed. The upgrade it dispatches is `uv tool upgrade conexus`, which
-does nothing when no install exists. The `uv` tool directory was empty
-afterwards (measured). The one hook that warns "nx is missing" is itself an
+action is needed. The detached action it starts returns before it runs any
+upgrade command, because it finds neither a generation nor a `uv tool`
+install (`version_lockstep_action.py:428-431`). The `uv` tool directory was
+empty afterwards (measured). The one hook that warns "nx is missing" is itself an
 `nx-hook` verb, so it cannot run in the case it exists for.
 
 #### Gap 3: Nothing provisions the local service
 
 A CLI on disk is still not a working Nexus. `nx init` downloads the engine (the
 Java service that stores and searches), its Postgres bundle and two embedding
-models, about 0.7 GB over two to five minutes, and starts the service. The
+models, about 0.6 GB over two to five minutes, and starts the service. The
 plugin does none of this, and the MCP server deliberately starts nothing
 (`src/nexus/mcp/core.py`, the "NO first-run daemon install here" note).
 `docs/desktop-deployment.md` says the Claude surfaces "auto-start what they
 need on first launch", which is false.
 
-#### Gap 4: Cowork starts each session with a 15 second wait
+#### Gap 4: A local Desktop session waits 15 seconds (recorded, not closed here)
 
-Cowork runs the Claude Code program bundled with the Desktop application and
-passes it each plugin with server discovery turned off, because the Desktop
-application starts the servers itself. Under that launch the plugin's
-`mcp-connect-wait` hook waited its full 15 seconds and reported that `nx-mcp`
-did not connect (reproduced with Desktop's own binary; not yet seen in a live
-Cowork session).
+Desktop sessions recorded up to 2026-07-13 ran the Claude Code program bundled
+with the Desktop application and passed it each plugin with server discovery
+turned off, because the application started the servers itself. Reproducing
+that launch with Desktop's own binary, the plugin's `mcp-connect-wait` hook
+waited its full 15 seconds and reported that `nx-mcp` did not connect. The
+one live conversation measured on today's Desktop build ran no local session
+and no hook (Discovery 7), so no user is known to pay this wait now. This
+record does not change the hook for that launch. It does make sure its own
+design never causes the same wait; see "The connect wait".
 
 ## Relationship to Prior RDRs
 
@@ -96,7 +101,11 @@ Cowork session).
 - **RDR-174** (unified `nx init`) ruled that no autostart unit (the launchd or
   systemd entry that restarts the service at login) is written without the
   user's explicit yes. This record keeps that rule.
-- **RDR-218** states the requirement this record implements.
+- **RDR-218** (Windows through a WSL2 appliance) is where the requirement was
+  written down. Sam's words there, about the CLI: "Updating, yes. but not a
+  hard req on installation." RDR-218 is superseded by RDR-224, which carries
+  over its Gaps 4 to 6 and does not restate this ruling. The ruling is still
+  Sam's (restated 2026-10-11) and this record is now its home.
 - **RDR-126** rejected a hosted remote MCP endpoint and a bundled Python
   runtime. Both stay rejected here; see Alternatives.
 - **RDR-224** (native Windows) supplies the Python statement of the generation
@@ -195,9 +204,8 @@ assumed (`-13`, replaced by the Windows run in `-14`).
   now treats the stand-in server as the only channel that reaches every
   surface; see "How the question reaches the user".
 - **CA-2 (Not applicable to that path).** With no hooks, the 15 second
-  `mcp-connect-wait` did not run. It remains measured for the
-  `--plugin-dir-no-mcp` launch of Gap 4, and the fix stays in scope for any
-  local session that uses it.
+  `mcp-connect-wait` did not run. It remains measured only for the
+  reproduced launch of Gap 4, which this record does not change.
 - **CA-3 (Refuted, 2026-10-12).** The draft assumed `nx self install` could
   run from a throwaway `uv` environment
   (`uv tool run --from conexus==7.77.1 nx self install`). It refuses: "this nx
@@ -239,6 +247,18 @@ assumed (`-13`, replaced by the Windows run in `-14`).
   cannot install the CLI there (Discovery 7). A plugin server does run on the
   machine.
 
+- **CA-8 (Assumed).** Each Claude application asks the user before it runs a
+  plugin's tool. Consent in this design rests on the question being asked;
+  the application's prompt is a second check, and it is verified on no
+  surface. A Claude Code user who has allowed all of the plugin's tools has
+  turned it off for themselves. *Verify:* the Minimum Viable Validation notes
+  on each surface whether a prompt appears for `setup`.
+- **CA-9 (Assumed).** A setup process started detached from a server on
+  Windows outlives that server. The repository's existing Windows server
+  launcher ties its children to a job that kills them when it closes
+  (`mcpb/src/bootstrap.py`), so this may be false for a process started the
+  plain way. *Verify:* in Phase 2, before the setup process ships on Windows.
+
 ## Proposed Solution
 
 ### Approach
@@ -246,10 +266,11 @@ assumed (`-13`, replaced by the Windows run in `-14`).
 The plugin stops naming CLI programs directly. Every server and hook entry that
 needs the CLI goes through one small launcher script that ships in the plugin
 and runs under `uv`, as seven hooks already do. When the CLI is present the
-launcher runs the real program. When it is absent, the first session says so
-and asks one question that carries every choice: install with a local
-service, install for the managed cloud, install the CLI only, or not now. One
-answer starts one background process that does all of it. Nothing is installed
+launcher runs the real program, always. When it is absent, the first session
+says so and asks one question that carries every choice: install with a local
+service, install for the managed cloud, install the CLI only, or not now, and
+for a local service whether it starts at login. One answer starts one
+background process that does all of it. Nothing is installed
 that the user did not agree to (Sam, 2026-10-12). A one-command installer script
 ships with the same work for terminal users, and it is the one path that also
 installs `uv`. For everyone else `uv` and the plugin are the only two things a
@@ -269,29 +290,53 @@ replaces itself with it (`os.execv`; on Windows it spawns the program and
 relays its exit code), so a running server has no wrapper between it and the
 application.
 
-**When setup is not complete.** Setup is complete when the CLI resolves and
-either no setup status file exists (the user installed by hand) or the status
-file says complete. Until then the launcher's behaviour depends on what was
-asked for:
+**What is served, decided from facts.** The launcher decides from one fact:
+does the CLI program resolve. No file the plugin writes takes part in that
+decision, so an install done by hand at any time is used at the next launch.
 
-- *A hook verb.* With no CLI, exit 0 with one line on standard error. A
-  missing CLI never blocks a prompt or a tool call. This absorbs the "no
-  `nx-hook`" branch of `nx_hook_shim.py`. With a CLI, run the verb.
-- *An MCP server.* Serve a stand-in server: answer the handshake, set the
-  server instructions to one sentence saying Nexus is not set up yet, and
-  offer two tools. `setup` takes `mode` and starts the work. `setup_status`
-  reports the current stage, the log path and the next step. The stand-in does
-  not try to swap itself for the real server inside one connection; when setup
-  is done its status says to reconnect the server or start a new session.
+- *The program resolves.* Run it. This holds whatever the user answered
+  earlier and whatever state a setup run was left in.
+- *It does not resolve, and a hook verb was asked for.* Exit 0 with one line
+  on standard error. A missing CLI never blocks a prompt or a tool call. This
+  absorbs the "no `nx-hook`" branch of `nx_hook_shim.py`.
+- *It does not resolve, and `nx-mcp` was asked for.* Serve the stand-in
+  server: answer the handshake, set the server instructions to one sentence
+  saying Nexus is not installed, and offer the two setup tools below.
+- *It does not resolve, and `nx-mcp-catalog` was asked for.* Serve a stand-in
+  with no tools, so the application shows a connected server and the question
+  is not offered twice.
 
-The setup tools are on the stand-in server, not in a script the model runs
-through its shell tool, for two reasons. A server runs on the user's machine on
-every surface, where Cowork's shell tool runs in a sandbox (CA-7). And each
-Claude application shows its own permission prompt before a plugin tool runs,
-so the user sees and approves the install in the application's own interface
-as well as in the conversation.
+The stand-in exists only while there is no CLI. It does not try to swap itself
+for the real server inside one connection; when the build is done its status
+says to reconnect the server or start a new session.
 
-**The one question.** The four choices, as the user is shown them:
+**The setup tools.** Two tools, `setup` and `setup_status`, with the same
+names, arguments and descriptions in two places:
+
+- on the stand-in server, while there is no CLI;
+- on the real `nx-mcp`, registered at start only when the server finds no
+  usable service: no service address is configured, or a local service is
+  provisioned and does not answer. The real server also states this through
+  its instructions text, the channel it already uses for another notice
+  (`apply_stranded_notice`, `src/nexus/mcp/_first_run.py`). A real server
+  with a working service registers neither tool.
+
+So "CLI only" is an ordinary state: the real server runs, offers the setup
+tools and says no service is configured. A reboot that leaves the local
+service down is the same state with a different sentence.
+
+`setup` takes `mode` (`local`, `cloud` or `cli-only`) and, for `local`,
+`autostart` (true or false). `setup_status` takes nothing and reports the
+stage, the log path and the next step.
+
+The setup tools are on a server, not in a script the model runs through its
+shell tool, because a server runs on the user's machine on every surface and
+the shell tool in a Desktop conversation does not (CA-7). Each Claude
+application is also expected to ask the user before a plugin tool runs
+(CA-8). Neither tool is ever added to the plugin's own auto-approve list
+(`_ALLOWED_TOOLS` in `src/nexus/hooks/auto_approve.py`); a test pins that.
+
+**The one question.** The choices, as the user is shown them:
 
 | Choice | What happens | Download |
 |---|---|---|
@@ -299,6 +344,11 @@ as well as in the conversation.
 | Cloud | Install the CLI and connect it to a managed service you have an address and token for | about 0.7 GB down, 1.6 GB on disk |
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
+
+With Local, the same question asks one more thing: start the service when you
+log in, yes or no. A yes is the explicit consent RDR-174 requires for the
+login unit. A no means the service must be started again after each reboot,
+and the question says so.
 
 The CLI is the larger part: 216 Python packages, 1.6 GB installed (measured
 2026-10-12). The local service adds about 0.8 GB on disk. Earlier drafts of
@@ -309,117 +359,160 @@ the same table, because no one channel reaches every surface. In Claude Code
 and the Code tab a session-start hook tells the model at the start of the
 session. In a Desktop conversation no hook runs (Discovery 7), and the only
 part of the plugin on the user's machine that the model can see is the
-server. So the stand-in server also states it, twice. Its `instructions` text
-says Nexus is not set up and that `/conexus:setup` or the `setup` tool starts
-it; Claude Code delivers that text to the model (CA-4). Both tools'
-descriptions say the same, and the descriptions are the part that reaches a
-Desktop conversation, because Desktop's bridge passes tools and not
-`instructions` (CA-4). There the question is asked when
-the user first asks for something Nexus would do, not at the start.
+server. So the server that is running, stand-in or real, also states it,
+twice. Its `instructions` text says what is missing and that `/conexus:setup`
+or the `setup` tool fixes it; Claude Code delivers that text to the model
+(CA-4). Both tools' descriptions say the same, and the descriptions are the
+part that reaches a Desktop conversation, because Desktop's bridge passes
+tools and not `instructions` (CA-4). There the question is asked when the user
+first asks for something Nexus would do, not at the start.
 
 **The setup hook.** A new session-start hook, `nx_setup_notice.py`, first in
 the list, runs the same way as the launcher. It starts nothing. It returns in
-milliseconds and tells the model the state, which is one of:
+milliseconds and tells the model the state. The state is read from facts
+first and from the setup directory second:
 
-1. Setup is complete: say nothing.
-2. Nothing started: tell the model that Nexus is not set up, give it the table
-   above, and ask it to put the one question to the user. The model calls
-   `setup` with the answer, or records "not now".
-3. Setup is running (a lock file with a live process id under
-   `${CLAUDE_PLUGIN_DATA}`, falling back to `~/.config/nexus`): report its
-   stage.
-4. A step failed: report the failure line and the log path. `setup` called
-   again resumes from the failed step.
-5. The user chose CLI only, or said not now: a marker records it, and later
-   sessions say one line ("Nexus is not fully set up; run `/conexus:setup`")
-   without asking again.
+1. The CLI resolves and a service is configured and answers: say nothing.
+2. A setup run is live (the lock is held by a live process): report its stage.
+3. A setup run was interrupted (the lock names a dead process and the status
+   is not terminal): say so, name the log, and say that `setup` called again
+   resumes. The dead lock is removed by the next `setup`.
+4. A step failed (the status records a failure): report the failure line and
+   the log path. `setup` called again resumes from the failed step.
+5. No CLI: tell the model Nexus is not installed, give it the table, and ask
+   it to put the one question to the user. The model calls `setup` with the
+   answer, or records "not now".
+6. The CLI resolves and no service is configured: one line saying so and
+   naming `/conexus:setup`.
+7. The CLI resolves and a local service is provisioned but does not answer:
+   one line saying the service is down and that `/conexus:setup` starts it.
+
+"Not now" writes a marker in the setup directory. The marker does one thing:
+in states 5 and 6 the hook says one line naming `/conexus:setup` and does not
+ask again. It never changes what the launcher serves or which state the hook
+reports. A user who declines and later installs by hand is in state 1.
 
 The model is asked to put the question once and to take no setup action
 without an answer. That instruction is a request to a model, so it is not the
-control. The control is that only a tool call starts anything, and the
-application prompts for the tool call.
+control. The control is that only a tool call starts anything.
+
+**The setup directory.** One fixed place for all of it, `~/.config/nexus/setup/`,
+beside the lockstep marker the plugin already keeps in that directory. It
+holds the status file (JSON, owner-only), the log, the "not now" marker and
+the lock. The plugin, the installer script and `nx doctor` all read the same
+path, with or without a Claude application. The lock is a directory made
+with an atomic create that holds a process id file, the mechanism the
+generation builder uses; a lock whose process is dead is a stale lock
+(state 3). `${CLAUDE_PLUGIN_DATA}` is not used.
 
 **The `/conexus:setup` command.** The way back after "not now" or "CLI only",
-and the way to see progress. It reads the status, shows the same table with
-the choices still open, and calls `setup` with the answer. When setup is
-complete it says so and shows the `nx doctor` result.
+the way to start a service that is down, and the way to see progress. It
+calls `setup_status`, shows the table with the choices still open, and calls
+`setup` with the answer. When nothing is missing it says so. Its body uses
+the setup tools only; unlike the 17 existing commands it has no `nx` shell
+line, because it must work when `nx` does not exist.
 
 **The setup process** (`setup`). One detached process per call, logging to one
-file and writing its stage to a small JSON status file. The tool returns at
-once with the stage; `setup_status` follows it. The steps, each skipped when
-already done:
+file and writing its stage to the status file after each step. The tool
+returns at once with the stage; `setup_status` follows it. A `setup` call
+while a run is live starts nothing and returns that run's stage. The steps,
+each skipped when already done:
 
-1. *Build.* `nx self install` gains a third starting point. Today it builds
-   from a running generation or converts a `uv tool` install, and refuses
-   anything else (CA-3). The new branch accepts a throwaway `uv` environment,
-   so the build is one command and one copy on disk:
-   `uv tool run --python 3.12 --from conexus==<plugin version> nx self install`.
+1. *Build.* `nx self install` gains an explicit flag, `--bootstrap`, for a
+   first install. Today the command builds from a running generation or
+   converts a `uv tool` install, and refuses anything else, which is what
+   protects a developer's checkout (CA-3; `self_cmd.py:237-242`). The flag is
+   the only way into the new path; nothing is inferred from where the process
+   runs. With it, the build is one command and one copy on disk:
+   `uv tool run --python 3.12 --from conexus==<plugin version> nx self install --bootstrap`.
    It builds `gen-<stamp>`, points `current` at it and writes the command
-   shims. The version is the plugin's own, read from its `plugin.json`, so
-   the first CLI matches the plugin by construction. A CLI release older
-   than the one that carries the new branch refuses the one-command form, so
-   the setup process falls back to the two documented commands when it does.
-   Mode `cli-only` stops here.
-
-   `nx self install` ends by pruning `uv`'s shared package cache. On a
-   developer's machine that removed 23.4 GiB in the test for CA-3. For a new
-   user the cache holds only what this install fetched, and the prune is the
-   existing behaviour of every install, so it stays.
-2. *Service, mode `local`.* `nx init --yes --no-autostart` through the new
-   generation. It never writes an autostart unit. The final status says how to
-   add one (`nx daemon service install --autostart`) and that without it the
-   service must be started again after a reboot.
+   shims into the user's bin directory. It writes a receipt with no extras,
+   which is what the documented first install records
+   (`uv tool install conexus --python 3.12`, `README.md`); local mode's
+   embedding model belongs to the service and is fetched in step 2. It does
+   not prune `uv`'s shared package cache, which a plain `nx self install`
+   does at its end (Sam, 2026-10-12: the prune removed 23.4 GiB from a
+   developer's cache in the test for CA-3, and setup must not delete what it
+   did not create). The version is the plugin's own, read from its
+   `plugin.json`, so the first CLI matches the plugin by construction. A CLI
+   release older than the one that carries the flag refuses it, and the setup
+   process then falls back to the two documented commands. Mode `cli-only`
+   stops here.
+2. *Service, mode `local`.* When nothing is provisioned: `nx init --yes` if
+   the user chose start at login, which registers the login unit
+   (`_decide_autostart` in `src/nexus/commands/init.py`), and
+   `nx init --yes --no-autostart` if not. When a service is provisioned but
+   down: `nx daemon service start`.
 3. *Service, mode `cloud`.* The credentials page, below. No service download.
-4. *Verify.* `nx doctor`; record pass or the failing rows, and mark complete.
+4. *Verify.* `nx doctor`; record pass or the failing rows, and write a
+   terminal status.
 
 **The credentials page.** A cloud token must reach the config file without
 passing through the model, the conversation or a tool argument, and a Desktop
 user has no terminal (Sam, 2026-10-12). So in mode `cloud` the setup process
 serves one small web page and opens it in the user's browser at the start of
 the run, while the build proceeds, so the user is not asked for anything
-later.
+later. Its requirements:
 
 - The process listens on the loopback address `127.0.0.1` only, on a port the
   operating system picks, and the page's address carries a random one-time
   path. A request without that path gets nothing.
-- The page has two fields, service address and token, and one button. On
-  submit the process checks the pair against the service's `/health` and
-  `/version` routes, writes them to the Nexus config file with owner-only
-  permissions, shows the result on the page and stops listening.
-- It stops listening after ten minutes with nothing submitted, and `setup`
-  called again opens a new page.
+- The page's address stays inside the setup process. It is handed to the
+  browser and written nowhere: not to the status file, not to the log, not to
+  a tool result. When no browser can be opened the page is not served at all,
+  and the status says to run `nx config init` in a terminal.
+- The page has two fields, service address and token, and one button. The
+  token field is a password field with autocomplete off.
+- On submit the process checks the pair against the service's `/health` and
+  `/version` routes at the address given. An `http` address is accepted as
+  well as `https` (Sam, 2026-10-12: no https requirement).
+- A pair that passes is written through `set_credential`, the function the
+  existing `nx config init` wizard uses. The page shows the result and the
+  process stops listening. A pair that fails is not written; the page says
+  why and stays open for another try.
+- When `NX_SERVICE_URL` or `NX_SERVICE_TOKEN` is set in the setup process's
+  environment, the page says that those take precedence over what it saves,
+  as `nx config init` does.
+- It stops listening after ten minutes with nothing accepted. A later `setup`
+  call opens a new page; a `setup` call while the page is still open reports
+  "waiting for credentials" and opens nothing.
 - The token is never written to the log or the status file. The status says
-  only "waiting for credentials", "credentials saved" or "credentials
-  rejected".
-- When no browser can be opened, the status gives the page's address for the
-  user to open by hand.
+  only "waiting for credentials", "credentials saved", "credentials rejected"
+  or "no browser".
 
 **The installer script.** `install.sh` and `install.ps1`, published on the
 site, for a user who starts in a terminal. Typing the command is the consent
 for the CLI, so it does not ask about that. It installs `uv` when `uv` is
-absent, runs the same setup process as the plugin, and adds the plugin to
-Claude Code when `claude` is on `PATH`. For the service it asks the same
-question once on the terminal, before any download, or takes `--local`,
-`--cloud` or `--cli-only`; with no terminal attached and no flag it builds the
-CLI only and says so. `--cloud` reads the address and token on the terminal
-with echo off. The script cannot reach the claude.ai account plugin store, so
-a Desktop user still adds the plugin in the application.
+absent, runs the same setup process as the plugin against the same setup
+directory, and adds the plugin to Claude Code when `claude` is on `PATH`. For
+the service it asks the same question once on the terminal, before any
+download, or takes `--local`, `--cloud` or `--cli-only`, and `--autostart` or
+`--no-autostart`; with no terminal attached and no flag it builds the CLI
+only and says so. `--cloud` reads the address and token on the terminal with
+echo off. The script cannot reach the claude.ai account plugin store, so a
+Desktop user still adds the plugin in the application.
+
+**The connect wait.** `nx-hook mcp-connect-wait` waits up to 15 seconds for a
+marker that only the real `nx-mcp` publishes
+(`src/nexus/hooks/mcp_connect_wait.py`). This design cannot make it wait in
+vain. With no CLI there is no `nx-hook`, so the launcher exits 0 and nothing
+waits. With a CLI the real server runs and publishes the marker.
 
 **Entries that change.** `.mcp.json`: `nexus` and `nexus-catalog` become the
 `uv tool run ... python ${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py nx-mcp` form.
 `hooks.json`: the six `nx-hook` entries and the session-end entry go through
-the launcher. The 17 commands keep their `nx` lines; a command typed before the
-install finishes fails with the shell's own "command not found", and the
-session-start message has already said why.
+the launcher. The three entries that run `nx_hook_shim.py` (`auto-approve`
+twice and `mcp-connect-wait`) keep the shim, and the shim takes the launcher's
+lookup order so both find a fresh install the same way. The 17 commands keep
+their `nx` lines; a command typed before the install finishes fails with the
+shell's own "command not found", and the session-start message has already
+said why.
 
 **Defects fixed in the same change.**
 
 - `version_lockstep_hook.py` checks for the CLI before it claims an upgrade is
   in flight. With no CLI it says nothing and leaves the message to the
   setup hook.
-- `mcp-connect-wait` returns at once when the session was started with server
-  discovery off for this plugin, if CA-2 confirms the wait. The signal to key
-  on is decided by the Phase 0 measurement.
 - `docs/desktop-deployment.md` loses the "auto-start what they need" sentence
   and gains the real first-run sequence.
 
@@ -434,20 +527,32 @@ session-start message has already said why.
 | `PATH` lookup that skips the current directory | yes | `conexus/hooks/scripts/_exec_path.py` |
 | Unattended provisioning | yes, unverified detached (CA-6) | `nx init --yes --no-autostart` |
 | Keep plugin and CLI versions together afterwards | yes | RDR-143 lockstep action |
-| Stand-in server with setup tools, setup hook, launcher, credentials page, `/conexus:setup`, installer script | no | this record |
+| A notice through the real server's instructions text | yes | `apply_stranded_notice`, `src/nexus/mcp/_first_run.py` |
+| A per-user marker directory that outlives plugin updates | yes | `~/.config/nexus`, where `cli_lockstep_marker` lives |
+| Writing cloud credentials | yes | `set_credential`, used by `nx config init` |
+| Stand-in server, setup tools on both servers, setup hook, launcher, `nx self install --bootstrap`, credentials page, `/conexus:setup`, installer script | no | this record |
 
 ### Decision Rationale
 
 RDR-143's three objections, against this design:
 
 - *It removed the `[local]` extra.* That hazard was an upgrade replacing an
-  install that had the extra. A first install has nothing to lose, and the
-  build step is `nx self install`, the same code every documented install
-  uses. Upgrades still go through RDR-143's extras-preserving action.
+  install that had the extra. The first build here records no extras, exactly
+  as the documented first install does, so nothing is removed. This is a
+  choice with a consequence: later upgrades reproduce the receipt, so a user
+  who wants the extra adds it once with `nx self install --extras local`, as
+  today. Upgrades still go through RDR-143's extras-preserving action.
 - *It blocked session start.* The hook starts nothing, and the build is a
   detached process started by a tool call.
-- *It overwrote a developer's install.* Setup is offered only when no CLI
-  resolves at all, and a generation build never writes into an existing tree.
+- *It overwrote a developer's install.* A generation build never writes into
+  an existing tree, and the new path is behind an explicit `--bootstrap`
+  flag, so `nx self install` run from a checkout still refuses. One case is
+  not prevented by a check: a developer whose editable `nx` is not on the
+  application's `PATH` looks the same as a machine with no CLI, because
+  RDR-143's own test (no generation and no `uv tool` receipt) is true for
+  both. That developer is asked the question like anyone else. A yes builds
+  a generation and writes shims into the user's bin directory; a no changes
+  nothing. The question, not a detector, is the guard.
 
 The first draft of this record installed on the first session by default
 with an opt-out. Sam ruled that out on 2026-10-12: the plugin asks first. A
@@ -458,7 +563,9 @@ away, where two questions leave the session waiting on a second answer a
 minute in. The single question still separates the 0.6 GB local service from
 the CLI, and still gives a managed-cloud user the choice before a local
 service is downloaded. The part RDR-174 treats as needing consent, a unit that
-runs at every login, stays behind its own explicit command.
+runs at every login, is its own yes or no inside that question. An earlier
+draft left it behind a separate terminal command, which meant a user with no
+terminal had a dead service after the first reboot and nothing to tell them.
 
 ## Alternatives Considered
 
@@ -514,8 +621,11 @@ step is removed.
 - The first session has no Nexus tools until setup ends, from under two
   minutes on a fast connection to about seven on a slow one for local mode, and needs a reconnect at the end. The Desktop application
   has no progress display; the status tool is the only view.
-- A user who says no keeps a plugin whose tools do nothing, with one line per
-  session naming `/conexus:setup`.
+- A user who says no keeps a plugin whose only tools are the two setup
+  tools, with one line per session naming `/conexus:setup`.
+- The real `nx-mcp` gains two tools that appear only when no usable service
+  is found. That is a change to the server's tool list, so the committed
+  wire snapshot gains a second expected shape.
 - The plugin now opens a listening port on the loopback address for up to ten
   minutes during cloud setup.
 - Every server start and seven hook entries gain one `uv` launch, about 20 ms
@@ -528,9 +638,18 @@ step is removed.
 
 - **The download fails or the disk is full.** The status file records the
   failing step and the log path; the next session reports it and does not loop.
-- **Two sessions start at once.** One lock, taken with an atomic directory
-  create, as the generation builder does. The second session reports the
-  first's progress.
+- **Two sessions start at once.** One lock in the setup directory. The second
+  session's `setup` starts nothing and reports the first's stage.
+- **A second session starts while setup is running.** Its hooks find a CLI
+  that is built but not yet provisioned, and the real verbs run against it,
+  `nx upgrade --auto` among them. Whether that interferes with a running
+  `nx init` is not tested; Phase 2 tests it, and the remedy if it does is for
+  those verbs to exit early while the setup lock is held.
+- **The setup process dies with its server on Windows** (CA-9). Phase 2
+  measures it before the Windows setup path ships.
+- **A reboot leaves the local service down.** With start at login declined,
+  this is expected: the server and the hook say the service is down, and
+  `/conexus:setup` starts it (hook state 7).
 - **The account copy of the plugin is old** (Discovery 6). On a machine with no
   CLI the build installs the old plugin's version, which is consistent but
   stale. On a machine with a newer CLI the launcher uses the newer CLI. The
@@ -546,13 +665,17 @@ step is removed.
   session says the same thing; if it calls a setup tool unasked, the
   application's permission prompt is what the user sees. A user who has set
   the plugin's tools to always-allow has removed that prompt for themselves.
-- **Another local program reads the credentials page.** Loopback only, a
-  random one-time path, one submit, ten minutes. A program already running as
-  the user can read the config file anyway, so the page adds no exposure
-  beyond the file it writes.
-- **The browser does not open** (a headless box, a remote session). The status
-  carries the address; the installer script's terminal prompt is the other
-  route.
+- **Another local user or program reaches the credentials page.** Loopback is
+  reachable by every user on a shared machine, so the one-time path is the
+  only protection, which is why the address is written nowhere. The page
+  lives ten minutes at most.
+- **The token is sent in the clear.** The page accepts an `http` service
+  address (Sam, 2026-10-12), and the check sends the token to whatever
+  address the user typed. A wrong or hostile address receives it. This is
+  the same exposure as typing the pair into `nx config init`.
+- **The browser does not open** (a headless box, a remote session). No page
+  is served; the status says to run `nx config init` in a terminal, and the
+  installer script's terminal prompt is the other route.
 
 ### Failure Modes
 
@@ -560,8 +683,10 @@ step is removed.
   server as failed. Documentation is the only remedy.
 - Build killed midway: the generation has no receipt, so nothing treats it as
   an install, and the next `setup` builds a new one.
-- Stand-in server still running after the install: its status tool says to
-  reconnect. It never serves a Nexus tool.
+- Stand-in server still running after the build: its status tool says to
+  reconnect. It never serves a Nexus tool. The next launch runs the real
+  server, because the CLI now resolves.
+- Setup process killed midway: hook state 3 reports it, and `setup` resumes.
 
 ## Implementation Plan
 
@@ -572,48 +697,117 @@ step is removed.
 
 ### Minimum Viable Validation
 
-On a machine image with `uv` and nothing else: add the plugin, start one Claude
-Code session, answer "local", wait, reconnect, and run one search that
-returns a result. No terminal command other than adding the plugin. Separately,
-on an image with nothing at all: run the installer script and get the same
-result. The same on Windows, and from
-the Desktop application with the account copy of the plugin.
+Run before the first release that carries Phase 2, on macOS and Windows, in
+Claude Code and from the Desktop application with the account copy of the
+plugin. Each row starts from an image with `uv` and nothing else, and uses no
+terminal command other than adding the plugin:
+
+1. Answer "local, start at login". Reconnect. One search returns a result.
+   Reboot; the search still works.
+2. Answer "local, no". Reboot. The session says the service is down;
+   `/conexus:setup` starts it.
+3. Answer "CLI only". The real server runs and offers the setup tools; no
+   15 second wait at the next Claude Code start.
+4. Answer "not now". Install by hand with the two documented commands and
+   `nx init`. The next session runs the real server and says nothing.
+5. Answer "cloud". The page opens; a wrong token is rejected and can be
+   retried; a right one is saved.
+6. Kill the setup process during the build. The next session reports an
+   interrupted run and `setup` resumes it.
+
+On each surface, note whether the application asked before `setup` ran
+(CA-8), and on Windows whether the setup process outlived a closed session
+(CA-9). Separately, on an image with nothing at all: run the installer script
+and get the result of row 1.
 
 ### Phase 0: Measure
 
-Done 2026-10-12, on the laptop. Results are in Critical Assumptions and
-Discovery 7.
+Done 2026-10-12, on the laptop and the Windows box. Results are in Critical
+Assumptions and Discovery 7.
 
 1. A live Desktop conversation: the loop is off the machine, no hook runs,
    plugin tools are bridged.
 2. `nx self install` from a throwaway `uv` environment: refused. The design
-   adds that branch.
+   adds the `--bootstrap` flag.
 3. A stand-in server in Claude Code: accepted, `instructions` delivered.
 4. `nx init --yes --no-autostart` with no terminal: works, 46 seconds.
+5. The launcher form on native Windows: works.
 
 Still open, none of it blocking Phase 1: a reconnect swapping the stand-in
 for the real server; plugin commands in a Desktop conversation; when Desktop
 starts a local agent session; `nx self install` and `nx init` from nothing
-on Windows. The launcher form itself was run on Windows (CA-5).
+on Windows; the first launch on a machine with no Python 3.12, where `uv`
+fetches an interpreter inside a hook's 5 second limit or does not; peak disk
+use during the build.
 
-### Phase 1: Launcher and honest failure
+### Phase 1: Launcher, stand-in and an honest message
 
-The launcher, the entry changes in `.mcp.json` and `hooks.json`, the lockstep
-message fix and the doc fix. No install yet. After this phase a user without
-the CLI gets one true message and no errors.
+After this phase a user without the CLI gets one true message and no errors,
+and nothing is installed by the plugin yet.
 
-### Phase 2: Setup in the plugin
+#### Step 1: The launcher
 
-The setup hook with its five states, the stand-in server's two tools, the
-detached setup process with its status file, the credentials page and the
-`/conexus:setup` command. The Cowork wait fix if CA-2 holds.
+`conexus/launch/nx_launch.py` with its lookup order, the hook-verb exit and
+the hand-off to the real program. `nx_hook_shim.py` takes the same lookup
+order. The bare-name spawn lint (`tests/test_hooks_bare_exec_lint.py`) is
+extended to cover `conexus/launch/`.
 
-### Phase 3: Installer script
+#### Step 2: The stand-in, notice only
 
-`install.sh` and `install.ps1`, sharing the build command and the status file
-with Phase 2, tested in a container and on the Windows box.
+The stand-in for `nx-mcp` with its instructions text and both tools. In this
+phase `setup` starts nothing: it answers with the two manual commands and the
+install page, and `setup_status` reports "not installed". The stand-in for
+`nx-mcp-catalog` with no tools.
 
-### Phase 4: Install pages
+#### Step 3: The setup hook, states 1 and 5
+
+The hook says nothing when the CLI resolves and, with no CLI, says Nexus is
+not installed and names the manual commands. No question yet.
+
+#### Step 4: Entries and defects
+
+The `.mcp.json` and `hooks.json` entry changes, the lockstep message fix and
+the `docs/desktop-deployment.md` fix.
+
+### Phase 2: Setup
+
+Needs a client release, because `--bootstrap` and the real server's setup
+tools ship in the CLI package.
+
+#### Step 1: `nx self install --bootstrap`
+
+The flag, the receipt with no extras, no cache prune.
+
+#### Step 2: The setup process and directory
+
+The detached process, the status file, the lock, resume after a failure or
+an interruption, and the fallback to the two documented commands. The
+Windows detach measurement (CA-9) and the second-session interaction test
+come first in this step.
+
+#### Step 3: The setup tools, live
+
+`setup` and `setup_status` do their work on the stand-in and are registered
+on the real `nx-mcp` when no usable service is found, with the instructions
+notice. The wire snapshot gains its second shape. A test pins both tools out
+of the auto-approve list.
+
+#### Step 4: The question, the hook's remaining states and `/conexus:setup`
+
+Hook states 2 to 4, 6 and 7, the "not now" marker, the start-at-login choice
+and the command.
+
+### Phase 3: Credentials page
+
+The loopback page for mode `cloud`, with every requirement in "The
+credentials page" as a test.
+
+### Phase 4: Installer script
+
+`install.sh` and `install.ps1`, sharing the setup process and the setup
+directory with Phase 2, tested in a container and on the Windows box.
+
+### Phase 5: Install pages
 
 Rewrite the install steps on the site and in `README.md`,
 `docs/getting-started.md`, `docs/desktop-deployment.md` and
@@ -623,7 +817,7 @@ to a troubleshooting section.
 
 ### Day 2 Operations
 
-- The status file and log live under `${CLAUDE_PLUGIN_DATA}`. `nx doctor` gains
+- The status file and log live in `~/.config/nexus/setup/`. `nx doctor` gains
   a row that reads them and is not applicable when no setup has run.
 - Upgrades are unchanged: RDR-143's action for the terminal plugin, remove and
   add for the account store.
@@ -636,29 +830,50 @@ None. The launcher, the hook and the stand-in server are standard library.
 ## Test Plan
 
 - The launcher imports and runs with `nexus` unimportable.
-- Resolution order: layout before `PATH`; current directory never searched.
-- Absent CLI, hook verb: exit 0, one line, for every verb in `hooks.json`.
-- Setup not complete, server: the stand-in answers a real MCP handshake from
-  the SDK client and lists exactly the two setup tools.
-- A hand install (CLI present, no status file) always gets the real server.
-- Setup hook: each of its five states, with the lock held by a live and by a
-  dead process id. In no state does the hook start a process.
-- Nothing is downloaded or written outside the status directory until `setup`
-  is called; pinned by running a session start in an isolated home and listing
-  what changed.
+- Resolution order: layout before `PATH`; current directory never searched;
+  the shim and the launcher agree.
+- No CLI, hook verb: exit 0, one line, for every verb in `hooks.json`.
+- No CLI, `nx-mcp`: the stand-in answers a real MCP handshake from the SDK
+  client and lists exactly the two setup tools. No CLI, `nx-mcp-catalog`:
+  a stand-in with no tools.
+- The CLI resolves: the launcher runs the real program in every state of the
+  setup directory, including a "not now" marker, a failed status, a stale
+  lock and no directory at all.
+- The real `nx-mcp` registers the setup tools when no service address is
+  configured and when a provisioned local service does not answer, and
+  registers neither when a service answers.
+- `setup` and `setup_status` are not in `_ALLOWED_TOOLS`.
+- Setup hook: each of its seven states. In no state does the hook start a
+  process. A "not now" marker changes only whether states 5 and 6 ask.
+- Nothing is downloaded or written outside the setup directory until `setup`
+  is called; pinned by running a session start in an isolated home and
+  listing what changed.
 - Each mode runs exactly its steps: `cli-only` downloads no service files,
   `cloud` downloads no service files and serves the page, `local` serves no
-  page.
-- Credentials page: a request without the one-time path gets nothing; the
-  listener binds loopback only; it closes after one submit and after the
-  timeout; the token appears in neither the log nor the status file; a
-  rejected pair is not written.
-- `setup` after a failure resumes at the failed step.
-- Installer script: with a terminal it asks once before any download; with
-  none and no flag it builds the CLI only.
+  page; `local` with start at login registers the unit and without it does
+  not; `local` on a provisioned, stopped service starts it and downloads
+  nothing.
+- `nx self install --bootstrap` from a throwaway environment builds one
+  generation, writes a receipt with no extras and does not run the cache
+  prune. Without the flag the same call still refuses, and so does a call
+  from a checkout.
+- A `setup` call during a live run starts no second process. `setup` after a
+  failure resumes at the failed step, and after a killed run removes the
+  stale lock and resumes.
+- Credentials page, one test per requirement: a request without the one-time
+  path gets nothing; the listener binds loopback only; the address appears in
+  no file and no tool result; the token appears in neither the log nor the
+  status file; a rejected pair is not written and the page stays open; an
+  accepted pair is written through `set_credential` and the listener closes;
+  it closes after the timeout; with no browser no listener starts; the
+  environment-override notice appears when either variable is set.
 - A journey test in an isolated home with a local package index: session
   start, `setup` with `local`, the real server answers after reconnect.
-- The existing wire snapshot and hook floor tests still pass.
+- Installer script: with a terminal it asks once before any download; with
+  none and no flag it builds the CLI only; it reads and writes the same setup
+  directory as the plugin.
+- `/conexus:setup` contains no `nx` shell line.
+- The existing hook floor tests still pass.
 
 ## Validation
 
@@ -689,6 +904,13 @@ Sam, 2026-10-12:
 4. `/conexus:setup` is the way back after "not now".
 5. The one-command installer script ships with this work.
 
+Sam, 2026-10-12, after gate round 1:
+
+6. Start at login is a yes or no inside the one question.
+7. The credentials page has no https requirement. It and the installer
+   scripts stay in this record.
+8. The setup path does not prune `uv`'s package cache.
+
 ## Open Questions for Sam
 
 None open.
@@ -699,11 +921,13 @@ None open.
 
 Two research findings contradicted earlier drafts and the design was changed
 to match each. The live Desktop conversation ran no hook (Discovery 7), so the
-setup notice is carried by the stand-in server as well as by the hook.
+setup notice is carried by the server as well as by the hook.
 `nx self install` refuses a throwaway `uv` environment (CA-3), so the build
-step adds that starting point and keeps the two documented commands as the
-fallback. No contradiction between the findings and the design as it now
-stands is known to the author.
+step adds `--bootstrap` and keeps the two documented commands as the
+fallback. Gate round 1 found a third: "setup complete" was decided from a
+file the plugin wrote, which contradicted the record's own cases of a hand
+install and "CLI only". What is served is now decided from whether the CLI
+resolves, and the real server carries the setup tools.
 
 One tension is accepted, not resolved: on Desktop the notice reaches the model
 only through tool descriptions, so a Desktop user may not be told until they
@@ -719,15 +943,17 @@ ask for something Nexus does. The install page carries the instruction.
 | CA-4 stand-in server accepted | verified in Claude Code; read from code for Desktop | spike, source |
 | CA-5 `uv` launch form on Windows | verified on native Windows; Desktop by log | spike, log |
 | CA-6 unattended `nx init` | verified | spike |
-| CA-7 Desktop shell is not on the machine | verified, one observation | live conversation |
+| CA-7 Desktop shell is not on the machine | verified, one conversation | live conversation |
+| CA-8 applications ask before a plugin tool runs | assumed | noted per surface in the Minimum Viable Validation |
+| CA-9 a detached setup process outlives its server on Windows | assumed | measured first in Phase 2 Step 2 |
 
 Not verified before implementation, each named in Phase 0's "still open"
 list: a reconnect replacing the stand-in with the real server; the stand-in
 and the launcher under Desktop itself, which need a released plugin; plugin
 commands in a Desktop conversation; `nx self install` and `nx init` from
-nothing on Windows. The first is checked in Phase 2 before the stand-in ships.
-The Desktop items are checked by the Minimum Viable Validation on the first
-release that carries the launcher.
+nothing on Windows. The first is checked in Phase 1 Step 2, when the stand-in is built. The
+Desktop items are checked by the Minimum Viable Validation, which runs before
+the first release that carries Phase 2.
 
 #### API Verification
 
@@ -742,33 +968,35 @@ release that carries the launcher.
 
 ### Scope Verification
 
-The Minimum Viable Validation is in scope and runs before the release that
-carries Phase 2: on an image with `uv` and nothing else, add the plugin,
-answer "local", reconnect, and get a search result with no other terminal
-command. It runs on macOS and Windows and from the Desktop application. The
-journey test in the Test Plan covers the same path without a network.
+The Minimum Viable Validation is in scope and runs before the first release
+that carries Phase 2. Its six rows cover each answer to the question, a hand
+install after declining, a reboot and an interrupted run, on macOS and
+Windows, in Claude Code and from the Desktop application. The journey test in
+the Test Plan covers the "local" path without a network.
 
 ### Cross-Cutting Concerns
 
 - **Versioning**: the first CLI is built at the plugin's own version. After
-  that RDR-143's lockstep action keeps them together. The launcher must work
-  against every CLI version in the field; a test pins it against the oldest
-  supported release.
+  that RDR-143's lockstep action keeps them together. The launcher has no
+  version-specific code: it finds a program by name and passes its arguments
+  through, so it works against any CLI version that has that program.
 - **Build tool compatibility**: `uv` is the only tool. Measured on 0.8.0 and
   0.12.23.
 - **Licensing**: N/A. No new dependency.
 - **Deployment model**: the launcher, hook, stand-in and command ship in the
-  plugin, through a client release or a plugin-only cut (RDR-197). The new
-  `nx self install` branch ships in the CLI package, so it needs a client
-  release. The installer scripts are published on the site.
+  plugin, through a client release or a plugin-only cut (RDR-197). The
+  `--bootstrap` flag and the real server's setup tools ship in the CLI
+  package, so Phase 2 needs a client release. The installer scripts are published on the site.
 - **IDE compatibility**: N/A.
-- **Incremental adoption**: Phase 1 alone is shippable and changes nothing for
-  a machine that already has the CLI except one extra `uv` launch per server
-  start and hook.
+- **Incremental adoption**: Phase 1 alone is shippable: a machine with the CLI
+  gains one extra `uv` launch per server start and hook, and a machine
+  without it gets a stand-in and one true message in place of errors.
 - **Secret/credential lifecycle**: the cloud token is typed into a loopback
-  page or a terminal prompt with echo off, written to the Nexus config file
-  with owner-only permissions, and never logged, never placed in the status
-  file and never passed through the model. Rotation and override are the
+  page or a terminal prompt with echo off, written through `set_credential`
+  as `nx config init` writes it, and never logged, never placed in the status
+  file and never passed through the model. The page's address is written
+  nowhere. An `http` service address is accepted, so the token can travel in
+  the clear to the address the user typed. Rotation and override are the
   existing `nx config` verbs.
 - **Memory management**: N/A. The launcher replaces itself with the real
   program on POSIX and holds one idle parent process on Windows.
@@ -818,3 +1046,9 @@ is flagged for trimming before then.
   launcher relaying to the real `nx-mcp.exe`, and the fall-through to the
   stand-in all work.
 - 2026-10-12: Gate round 1: BLOCKED (1 Critical, 9 Significant, 1 ship-blocker(s)); commit `2a630e7c5`; critique `nexus_rdr/228-gate-critique-2026-10-12-r1`.
+- 2026-10-12: Fixes for gate round 1, from `nexus_rdr/228-research-15`. What
+  is served is decided from whether the CLI resolves, not from a status
+  file; the real server carries the setup tools when no usable service is
+  found; one setup directory; start at login joins the question; Phase 1
+  carries the stand-in; `--bootstrap` flag with no extras and no cache
+  prune; credentials page requirements; CA-8 and CA-9 added.
