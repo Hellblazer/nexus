@@ -55,13 +55,24 @@ On first session start, the plugin's SessionStart hook runs `nx upgrade --auto` 
 
 Tool names: `mcp__plugin_conexus_nexus__*` and `mcp__plugin_conexus_nexus-catalog__*`. Slash-command prefix: `/conexus:*`.
 
-## Surface 2: Claude Cowork (cloud agents)
+## Surface 2: Claude Desktop chat and Cowork (account plugin)
 
-**Audience**: Claude Code users who open Cowork sessions for cloud-driven tasks.
+**Audience**: Claude Desktop users who open chat or Cowork sessions.
 
-No separate install. Once the conexus plugin is installed in Claude Code on the host, Claude Desktop passes the configured MCP servers into the Cowork VM via the Anthropic SDK transport (`--mcp-config` with `"type": "sdk"`). The MCP server stays running on the host; the VM agent's tool calls are bridged back through the SDK channel.
+Claude Desktop keeps two plugin stores. Claude Code and the Desktop Code tab read `~/.claude`, which is where `claude plugin install` writes. Chat and Cowork read the plugins enabled on your claude.ai account, which Desktop downloads itself. A plugin installed only from the command line is not visible to chat or Cowork: on a clean Windows 11 machine with only the CLI plugin installed, the Code tab found the plugin and chat and Cowork found none (measured 2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0).
 
-State is shared with the host CLI Claude and any other Cowork sessions or dev containers running against the same host daemons. Verified by a bidirectional T2 sentinel test (see `tests/test_cowork_sdk_bridge.py`).
+Install:
+
+1. Install the `nx` CLI and provision the service first (`nx init`). The plugin launches `nx-mcp` from the CLI install, so the account plugin alone is not enough.
+2. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it).
+
+To upgrade after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 while 7.77.1 was current), and conexus could not be enabled from it until the marketplace was removed and added again. Why it does not follow new release tags is not yet understood.
+
+Having both the account plugin and the CLI plugin is fine. The Code tab logged that the plugin exists in both places and used the account copy, so there is one set of tools.
+
+Not yet confirmed: that the `nexus` and `nexus-catalog` MCP servers connect in a chat or Cowork session after the account install. An earlier install on the same machine connected `sequential-thinking` and failed the two `nx-mcp` servers with `MCP error -32000: Connection closed`, while `nx-mcp` run by hand on that machine started cleanly (nexus-qkb9v).
+
+State is shared with the host CLI Claude and any other session running against the same service. `tests/test_cowork_sdk_bridge.py` covers the host-side round trip through T2.
 
 ## Surface 3: Claude Desktop chat (Desktop Extension)
 
@@ -76,13 +87,13 @@ Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 Install:
 
 1. Download `conexus.mcpb` from the [latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest).
-2. Double-click the file. Claude Desktop registers it under Settings → Connectors → Desktop as "Conexus".
+2. Double-click the file. Claude Desktop registers it under Settings → Connectors → Desktop as "Conexus". On Windows the double-click does nothing: the Claude Desktop package registers only the `claude:` protocol and no `.mcpb` file type, and the Customize → Plugins upload dialog accepts zips and hides `.mcpb` files (measured 2026-10-11, Claude Desktop 1.24012.9.0). No working way to install the bundle on Windows has been found, so use the account plugin (Surface 2) there.
 3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, torch, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s. If the install lands inside PyPI's post-release propagation window (~10-25 min where the download index does not yet serve a just-published version — nexus-r433b), the bundle's bootstrap retries the resolution with backoff for ~15 min, logging `[conexus-mcpb] PyPI has not finished propagating…` to the extension's log each attempt, before giving up with a try-again-shortly message. `NX_MCPB_SKIP_RESOLVE_RETRY=1` disables the retry.
 4. **First launch installs and starts nothing else.** `nx-mcp` used to auto-install the T2 daemon here; that path retired with the daemon (`nexus-i711w`). The extension expects the storage service to already exist on the host — provision it once with `nx init`. Without it, tools that reach T2 or T3 fail with an unresolvable-endpoint error rather than silently starting anything.
 
 Tool names: `mcp__conexus__*` (no `plugin_` infix — this is the .mcpb namespace, distinct from the Claude Code plugin's).
 
-Note: Claude Code users who ALREADY have the conexus plugin should NOT also install the .mcpb. Their Claude Desktop chat already exposes Nexus tools through the plugin's local-agent-mode path. Installing the .mcpb adds a second copy under a different namespace; the model can target either but the duplication is confusing.
+Note: if you have the conexus account plugin (Surface 2), do not also install the `.mcpb`. The bundle adds a second copy of the tools under a different namespace. That combination has not been tested. The Claude Code plugin by itself does not give chat or Cowork any tools; see Surface 2.
 
 ## CLI coexistence
 
@@ -168,7 +179,7 @@ The MCPB spec has no manifest-level uninstall hook, so this cascade limitation i
 
 ### Cowork
 
-Nothing to uninstall on the Cowork side — sessions inherit whatever Claude Desktop has configured.
+Remove `conexus` (and the `Hellblazer/nexus` marketplace, if you want it gone) in Claude Desktop under Customize → Plugins. This is separate from the Claude Code plugin; uninstalling one leaves the other.
 
 ### Daemon + data (full nuke)
 
