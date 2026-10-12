@@ -1248,6 +1248,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
+      # nexus-2rs76: tests/e2e/benchmark-corpus reads the release commit its
+      # corpus is pinned to. The checkout above is depth 1 and holds neither
+      # that commit nor its tag, so every test in the file would skip and the
+      # all-skipped guard below would fail the job. One commit, read from the
+      # helper so the tag here cannot drift from the pin.
+      - name: Fetch the benchmark corpus's pinned release commit
+        run: |
+          tag="$(python3 tests/e2e/benchmark-corpus/benchmark_corpus.py pin PIN_TAG)"
+          git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
