@@ -76,10 +76,15 @@ SNAPSHOT_DIGEST = "29f5e117f4dabdca8106840652a026544431c17f7d7684e9f76f0c0c62120
 
 #: Chunk-count ranges the first index must land in (inclusive). Measured on the
 #: pinned conexus; see ``CHUNK_RANGE_NOTE``.
-CHUNK_RANGE_TOTAL: tuple[int, int] = (8000, 12500)
-CHUNK_RANGE_CODE: tuple[int, int] = (1000, 12000)
-CHUNK_RANGE_DOCS: tuple[int, int] = (200, 4000)
-CHUNK_RANGE_NOTE = ""
+CHUNK_RANGE_TOTAL: tuple[int, int] = (10000, 11800)
+CHUNK_RANGE_CODE: tuple[int, int] = (8500, 10000)
+CHUNK_RANGE_DOCS: tuple[int, int] = (1500, 1750)
+CHUNK_RANGE_NOTE = (
+    "Measured 2026-10-12 on chas (lab-m grant, 8 CPUs, 2 index workers, conexus 7.77.1, bge-base-en-v15-768): "
+    "code 9,263 + docs 1,620 = 10,883 chunks, first index 1,557 s (6.99 chunks/s, box shared with CI). "
+    "Ranges are measured -8%/+8%, rounded: a chunker change inside a conexus release moves the count a little, "
+    "a changed snapshot moves it a lot."
+)
 
 #: The commit made inside the sandbox is reproducible: fixed identity and date.
 COMMIT_IDENTITY = ("nexus-benchmark-corpus", "benchmark-corpus@example.invalid")

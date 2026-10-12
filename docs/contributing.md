@@ -92,7 +92,9 @@ skip, when the chunk counts leave the pinned ranges, the fixture is not
 exactly 30 notes in 2 subjects, a phrase from the snapshot or from a note does
 not come back from a search, or a process still names the sandbox after
 teardown. It prints the chunk count per collection, the wall time of the
-first index and the chunks per second.
+first index and the chunks per second. Measured on chas (8 CPUs, shared with
+CI, conexus 7.77.1): 10,883 chunks (code 9,263, docs 1,620), first index 1,557 s,
+about 7 chunks per second, 27 minutes for the whole run.
 
 The pins (commit, conexus version, chunk ranges, the snapshot's file count and
 digest) live in `tests/e2e/benchmark-corpus/benchmark_corpus.py`, and

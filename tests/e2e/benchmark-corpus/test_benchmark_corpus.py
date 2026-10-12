@@ -63,6 +63,10 @@ def test_ranges_are_ordered_and_consistent() -> None:
     # The total range can hold the sum of the per-collection ranges' midpoints.
     mid = lambda r: (r[0] + r[1]) // 2  # noqa: E731
     assert bc.CHUNK_RANGE_TOTAL[0] <= mid(bc.CHUNK_RANGE_CODE) + mid(bc.CHUNK_RANGE_DOCS) <= bc.CHUNK_RANGE_TOTAL[1]
+    # The numbers the ranges were pinned around (chas, 2026-10-12, see CHUNK_RANGE_NOTE).
+    for rng, measured in ((bc.CHUNK_RANGE_CODE, 9_263), (bc.CHUNK_RANGE_DOCS, 1_620), (bc.CHUNK_RANGE_TOTAL, 10_883)):
+        assert rng[0] <= measured <= rng[1]
+    assert "10,883" in bc.CHUNK_RANGE_NOTE
     # Sam's target: about 8,000 to 12,000 chunks.
     assert 8_000 <= bc.CHUNK_RANGE_TOTAL[0] and bc.CHUNK_RANGE_TOTAL[1] <= 12_500
 
