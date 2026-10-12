@@ -11,6 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A docling that cannot be imported fails the PDF instead of quietly switching to plain PyMuPDF text, and `nx doctor` reports it.** A docling failure on one PDF still falls back to PyMuPDF. An import failure is a broken install: before, every PDF without formulas then came back as plain text (no layout-aware reading order, headings or tables) with one progress line to show for it. Indexing now stops with the missing module's name and the reinstall command, and `nx doctor` has a `PDF extraction (docling)` row that checks the modules docling's PDF pipeline imports are present.
 - **`nx daemon service status` names the log the engine actually writes.** It named `storage_service_native.log` for every launch; an engine started from a jar (development and tests) writes `storage_service_jar.log`. (nexus-gu3ma)
 - **`nx agents install --help` no longer recommends allowing `mcp__serena-wt__*` wholesale.** That wildcard also allows the IDE debugger tool and every writer with no prompt. The help now says to name the tools, as `docs/cli-reference.md` already did. (nexus-r2e6t)
+- **`nx index pdf --dry-run` no longer fails at random with `dictionary changed size during iteration`.** A dry run buffers pages in memory, and its extractor thread wrote that buffer while its chunker thread read it with no lock. The buffer now serves one request at a time.
 
 ### Changed
 
