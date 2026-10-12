@@ -517,6 +517,8 @@ def _hook_scope_hits(source: str, rel: str = "") -> list[tuple[str, str, int]]:
             for alias in node.names:
                 if alias.asname and alias.name in (_SUBPROCESS_SPAWNS | _BOUNDED_SPAWNS):
                     hits.add((scope_of(node), "aliased-spawner", node.lineno))
+                elif node.module == "subprocess" and alias.name in _SUBPROCESS_SPAWNS:
+                    hits.add((scope_of(node), "imported-spawner", node.lineno))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "subprocess" and alias.asname:
@@ -609,6 +611,10 @@ def test_the_hook_scope_detector_sees_every_shape_it_claims_to_police() -> None:
     assert kinds('import subprocess\ndef _spawn_detached(a):\n    subprocess.Popen(a)\n', "nexus/hooks/upgrade_auto.py") == []
     # R3: an alias hides the callee from R2, so the alias itself is the finding.
     assert kinds('from subprocess import run as r\n') == ["aliased-spawner"]
+    # ... and so does importing a spawner by name, aliased or not.
+    assert kinds('from subprocess import Popen, check_output, run, call, check_call\n') == ["imported-spawner"]
+    assert kinds('from subprocess import PIPE, TimeoutExpired\n') == []
+    assert kinds('from nexus.bounded_subprocess import run_bounded\n') == []
     assert kinds('import subprocess as sp\n') == ["aliased-spawner"]
     assert kinds('def f():\n    from nexus.bounded_subprocess import run_bounded as rb\n') == ["aliased-spawner"]
     assert kinds('def f():\n    runner = run_bounded\n    return runner\n') == ["aliased-spawner"]
@@ -749,10 +755,22 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
         "(name, path) pairs for a presence check, not an argv",
     ("nexus/util/nx_argv.py", "nx_argv", "bare-argv0"):
         "the POSIX arm of the sanctioned builder; the Windows arm returns the interpreter form first",
-    ("nexus/daemon/installer.py", "*", "bare-argv0"):
-        "manager command builders (launchctl, systemctl, schtasks): spawned only through "
-        "_run_manager -> run_bounded (pinned by test_installer_resolves_schtasks_through_the_"
-        "windows_path_and_spawns_in_one_place), and a Windows manager resolves to System32 first",
+    # The manager command builders in installer.py (launchctl, systemctl, schtasks) are
+    # cleared one by one: each builds an argv that reaches a spawn only through
+    # _run_manager -> run_bounded (pinned by test_installer_resolves_schtasks_through_the_
+    # windows_path_and_spawns_in_one_place), and a Windows manager resolves to System32
+    # first. A new bare spawn elsewhere in the file is a finding.
+    **{
+        (_INSTALLER, builder, "bare-argv0"): (
+            "manager command builder: spawned only through _run_manager -> run_bounded, "
+            "and a Windows manager resolves to System32 first"
+        )
+        for builder in (
+            "_task_run_cmd", "_task_end_cmd", "_activate_cmd", "_deactivate_cmd",
+            "_activation_query_cmd", "_windows_task_activation", "_windows_task_registered",
+            "_launchd_loaded_now",
+        )
+    },
     ("nexus/bounded_subprocess.py", "run_bounded", "unresolved-spawn-argv"):
         "the wrapper itself: argv = argv_off_cwd(argv) before the Popen (pinned by test)",
     # -- detached daemon spawns: the head is an installed binary or this interpreter ---
@@ -774,8 +792,7 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
 
 
 def _tree_allowed(key: tuple[str, str, str]) -> bool:
-    rel, scope, kind = key
-    return key in _TREE_ALLOWED or (rel, "*", kind) in _TREE_ALLOWED
+    return key in _TREE_ALLOWED
 
 
 def _is_raw_spawn(node: ast.Call) -> bool:
@@ -880,9 +897,12 @@ def _tree_hits(source: str, rel: str = "") -> list[tuple[str, str, int]]:
             if not resolved:
                 hits.add((scope_of(node), "unresolved-spawn-argv", node.lineno))
         elif isinstance(node, ast.ImportFrom) and node.module in {"subprocess", "asyncio"}:
+            # A spawner imported by name hides the callee as well as an alias does:
+            # ``run(argv)`` carries no ``subprocess.`` for R2 to match. Aliased or not.
             for alias in node.names:
-                if alias.asname and alias.name in (_SUBPROCESS_SPAWNS | _ASYNCIO_SPAWNS):
-                    hits.add((scope_of(node), "aliased-spawner", node.lineno))
+                if alias.name in (_SUBPROCESS_SPAWNS | _ASYNCIO_SPAWNS):
+                    kind = "aliased-spawner" if alias.asname else "imported-spawner"
+                    hits.add((scope_of(node), kind, node.lineno))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name in {"subprocess", "asyncio"} and alias.asname:
@@ -950,8 +970,7 @@ def test_no_spawn_in_the_tree_can_run_a_tool_the_cwd_supplies() -> None:
 def test_every_tree_allowance_still_matches_a_site() -> None:
     """An allow-list entry for a site that moved is a hole the scan no longer sees."""
     found = set(_tree_scan())
-    wildcard_hit = {(rel, "*", kind) for rel, _scope, kind in found}
-    stale = sorted(k for k in _TREE_ALLOWED if k not in found and k not in wildcard_hit)
+    stale = sorted(k for k in _TREE_ALLOWED if k not in found)
     assert not stale, f"_TREE_ALLOWED entries that match no site (fix or delete them): {stale}"
     assert all(reason.strip() for reason in _TREE_ALLOWED.values())
 
@@ -1026,6 +1045,28 @@ def test_the_stdlib_only_installer_core_resolves_its_argv_before_spawning() -> N
     assert off and spawn and min(off) < min(spawn)
 
 
+def test_the_installer_allowance_names_its_builders_and_covers_nothing_else() -> None:
+    """The manager command builders are cleared one by one: a new bare ``["git", ...]``
+    or ``["launchctl", ...]`` in another function of ``installer.py`` is a finding, not
+    something a file-wide wildcard waves through."""
+    assert not [k for k in _TREE_ALLOWED if k[1] == "*"], "a wildcard allowance hides every new site in its file"
+    named = {scope for rel, scope, kind in _TREE_ALLOWED if rel == _INSTALLER and kind == "bare-argv0"}
+    assert named == {
+        "_task_run_cmd", "_task_end_cmd", "_activate_cmd", "_deactivate_cmd",
+        "_activation_query_cmd", "_windows_task_activation", "_windows_task_registered",
+        "_launchd_loaded_now",
+    }
+    assert not _tree_allowed((_INSTALLER, "_a_new_function", "bare-argv0"))
+    assert not _tree_allowed(("nexus/daemon/other.py", "_task_run_cmd", "bare-argv0"))
+    new_site = (
+        'import subprocess\n'
+        'def _task_run_cmd():\n    return ["schtasks", "/Run"]\n'
+        'def _brand_new():\n    return ["git", "log"]\n'
+    )
+    found = {(scope, kind) for scope, kind, _line in _tree_hits(new_site, _INSTALLER)}
+    assert {(s, k) for s, k in found if not _tree_allowed((_INSTALLER, s, k))} == {("_brand_new", "bare-argv0")}
+
+
 def test_the_tree_detector_sees_every_shape_it_claims_to_police() -> None:
     def kinds(src: str, rel: str = "nexus/x.py") -> list[str]:
         return [k for _s, k, _l in _tree_hits(src, rel)]
@@ -1058,6 +1099,14 @@ def test_the_tree_detector_sees_every_shape_it_claims_to_police() -> None:
     assert kinds('def f(a):\n    a.run(b)\n') == []
     # R3: an alias hides the callee, so the alias itself is the finding.
     assert kinds('from subprocess import run as r\n') == ["aliased-spawner"]
+    # R3b: importing a spawner by name hides the callee as well as an alias does
+    # (``run(argv)`` carries no ``subprocess.`` for R2 to see), aliased or not.
+    assert kinds('from subprocess import Popen, check_output, run, call, check_call\n') == ["imported-spawner"]
+    assert kinds('from asyncio import create_subprocess_exec, create_subprocess_shell\n') == ["imported-spawner"]
+    assert kinds('def f():\n    from subprocess import run\n    return run(["python"])\n') == ["imported-spawner"]
+    assert kinds('from subprocess import run as r, Popen\n') == ["aliased-spawner", "imported-spawner"]
+    assert kinds('from subprocess import PIPE, TimeoutExpired, CompletedProcess\n') == []
+    assert kinds('from asyncio import sleep, gather\n') == []
     assert kinds('import subprocess as sp\n') == ["aliased-spawner"]
     assert kinds('import asyncio as aio\n') == ["aliased-spawner"]
     assert kinds('import subprocess\n_popen = subprocess.Popen\n') == ["aliased-spawner"]
