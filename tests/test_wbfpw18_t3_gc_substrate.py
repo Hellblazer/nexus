@@ -272,7 +272,8 @@ def test_a_pass_over_the_floor_is_refused_and_nx_gc_force_overrides_it(env, monk
     assert result.exit_code != 0
     assert "NX_GC_FLOOR_FRACTION" in result.output and "NX_GC_FORCE=1" in result.output
     assert _origin_ids(client, fx.name) == fx.everything, "nothing may move"
-    assert _audit_rows(fx.name) == []
+    # The engine judged the floor and wrote its one refusal row; no move row exists.
+    assert {r["operation"] for r in _audit_rows(fx.name)} == {"gc_quarantine_orphans_refused"}
 
     monkeypatch.setenv("NX_GC_FORCE", "1")
     forced = _gc(runner, fx.name, "--no-dry-run", "--yes")
