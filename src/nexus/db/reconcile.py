@@ -8,8 +8,7 @@ What lives here:
   pgvector-table-dimension routing table (nexus-h1zu0), consumed by
   ``nexus.health`` and the substrate test helpers.
 * :func:`iter_collection_chunks` / :func:`list_collection_names` — the
-  pagers over any Chroma-SHAPED client, including the surviving
-  :class:`~nexus.migration.pg_read.PgReadClient`.
+  pagers over any Chroma-SHAPED client.
 
 The verify-fill (delta reconcile) machinery that used to live here
 (``verify_fill_collections``, ``verify_fill_pg_source`` and their worker,
@@ -42,8 +41,7 @@ def iter_collection_chunks(
     """Yield every chunk of *collection_name* as ``{id, document, metadata}``.
 
     Substrate-neutral: pages any Chroma-SHAPED client (``get_collection``
-    + ``col.get(include=..., limit=..., offset=...)``), which
-    :class:`~nexus.migration.pg_read.PgReadClient` implements too. Pages
+    + ``col.get(include=..., limit=..., offset=...)``). Pages
     at ``QUOTAS.MAX_QUERY_RESULTS`` (300) per call.
 
     By default the embedding vectors are NOT fetched: the pgvector side

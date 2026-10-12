@@ -73,6 +73,9 @@ DELETED_SRC = [
     "migration/wire_reid.py",
     "migration/remap_cascade.py",
     "migration/chash_disposition.py",
+    # nexus-nhym2: the PG-source read adapter lost its last caller when the
+    # verify-fill tooling went (nexus-z0o2p.25).
+    "migration/pg_read.py",
     # whole-file after the P0e rehomes (reconcile / provisioning / rekey split)
     "migration/vector_etl.py",
     "migration/detection.py",
@@ -113,6 +116,7 @@ DELETED_MODULE_IMPORTS = [
     "nexus.migration.wire_reid",
     "nexus.migration.remap_cascade",
     "nexus.migration.chash_disposition",
+    "nexus.migration.pg_read",
     "nexus.migration.vector_etl",
     "nexus.migration.detection",
     "nexus.migration.guided_upgrade",
@@ -154,6 +158,7 @@ DELETED_TESTS = [
     "migration/test_migration_contract.py",
     "migration/test_migration_report.py",
     "migration/test_orchestrator.py",
+    "migration/test_pg_read.py",
     "migration/test_pending_migration_notice.py",
     "migration/test_pregate.py",
     "migration/test_quiesce.py",
@@ -423,9 +428,10 @@ def test_survivor_symbols_present() -> None:
 
 def test_surviving_migration_modules_present() -> None:
     # The migration PACKAGE survives the wave (state sentinel, banner,
-    # pg-source read leg, hidden state verbs). Deleting the package
-    # wholesale per the STALE 2026-06 bead text must fail here.
-    for rel in ("state.py", "banner.py", "pg_read.py", "__init__.py"):
+    # hidden state verbs). Deleting the package wholesale per the STALE
+    # 2026-06 bead text must fail here. (pg_read.py left this list when it
+    # was deleted, nexus-nhym2; DELETED_SRC now pins its absence.)
+    for rel in ("state.py", "banner.py", "__init__.py"):
         assert (SRC / "migration" / rel).exists(), f"migration/{rel} must survive P2"
     for rel in ("migration_cmd.py",):
         assert (SRC / "commands" / rel).exists(), f"commands/{rel} must survive P2"

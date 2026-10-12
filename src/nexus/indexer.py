@@ -4191,10 +4191,8 @@ def _prune_deleted_files(
     re-index, therefore moves nothing for those chunks; a smaller ``moved``
     than the number of orphans is the expected answer, not a failure.
 
-    Pre-D1 [:16] cleanup (RDR-108 re-gate O1 mixed-state) was delegated
-    to ``nx t3 reidentify``, which RDR-223 P3.3 deleted; a pgvector chunk
-    id is its chash by schema, so no such id exists to clean up. GC's job
-    is doc-level orphan removal.
+    A pgvector chunk id is its chash by schema, so there is no legacy
+    [:16] id to clean up. GC's job is doc-level orphan removal.
 
     Catalog-absent is a safe no-op: GC requires the manifest as the
     source of truth and cannot infer orphans without it.

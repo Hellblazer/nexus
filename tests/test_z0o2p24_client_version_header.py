@@ -197,7 +197,6 @@ _NOT_SENDERS: dict[str, str] = {
     "nexus/db/pooled_http.py": "connection-pool transport of http_vector_client; the sender is that module's _request_once",
     "nexus/health.py": "probes: PyPI, GET /v1/_whoami, health",
     "nexus/mcp/channel.py": "engine probe: GET /version",
-    "nexus/migration/pg_read.py": "migration read of the engine's own tables",
     "nexus/upgrade_ladder/provisioning.py": "engine probes: GET /version, /health",
     # test seams over an in-process fake: no engine
     "nexus/db/inmemory_pipeline.py": "MockTransport over an in-process engine",

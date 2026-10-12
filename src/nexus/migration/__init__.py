@@ -11,6 +11,7 @@ What remains:
 - ``state``  — the cross-process migration sentinel (RDR-159); the
   hidden ``nx migration`` verb reads/clears it.
 - ``banner`` — the read-surface warning while a sentinel is present.
-- ``pg_read`` — the PG-source read leg (reconcile/verify tooling reads
-  the pgvector store through it).
+
+(``pg_read``, the PG-source read adapter for the verify-fill tooling, was
+deleted with that tooling's last caller, nexus-nhym2.)
 """
