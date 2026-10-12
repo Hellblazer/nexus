@@ -283,7 +283,7 @@ _cmd_run() {
     version_out="$(_nx --version)"
     echo "  $version_out"
     [[ "$version_out" == *"$conexus_version"* ]] \
-        || _fail "installed nx reports '$version_out', expected conexus $conexus_version"
+        || _fail "the installed client reports '$version_out', expected conexus $conexus_version"
 
     echo "-- 2/8 nx init (local mode) --"
     SERVICE_UP=1

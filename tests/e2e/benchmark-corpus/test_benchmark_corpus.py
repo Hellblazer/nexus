@@ -78,9 +78,28 @@ def test_the_script_takes_its_pins_from_the_helper_only() -> None:
         assert f'corpus_py pin {key}' in text
 
 
+def _skip_in_a_shallow_checkout() -> None:
+    """The three tests below read the pinned commit's tree and its tag. A shallow
+    checkout (CI's affected-integration job) holds neither, so they skip there
+    and say why. A full clone that lacks the pin does not skip: it fails."""
+    shallow = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True,
+    )
+    if shallow.stdout.strip() != "true":
+        return
+    have = subprocess.run(
+        ["git", "-C", str(REPO), "cat-file", "-e", bc.PIN_SHA + "^{commit}"],
+        capture_output=True, text=True,
+    )
+    if have.returncode != 0:
+        pytest.skip(f"shallow checkout without {bc.PIN_TAG} ({bc.PIN_SHA[:9]}); needs full history and tags")
+
+
 @pytest.mark.integration
 def test_pin_sha_is_the_commit_of_the_tag_it_claims() -> None:
-    """Needs the tag, so it is integration: a shallow checkout fails it loudly."""
+    """Needs the tag: skipped in a shallow checkout, a loud failure in a full one."""
+    _skip_in_a_shallow_checkout()
     tag = subprocess.run(
         ["git", "-C", str(REPO), "rev-list", "-n1", bc.PIN_TAG],
         capture_output=True, text=True,
@@ -93,6 +112,7 @@ def test_pin_sha_is_the_commit_of_the_tag_it_claims() -> None:
 
 @pytest.mark.integration
 def test_snapshot_at_the_pin_matches_the_pinned_count_and_digest() -> None:
+    _skip_in_a_shallow_checkout()
     entries = bc.snapshot_entries(REPO, bc.PIN_SHA)
     assert len(entries) == bc.SNAPSHOT_FILE_COUNT
     assert bc.snapshot_digest(entries) == bc.SNAPSHOT_DIGEST
@@ -106,6 +126,7 @@ def test_snapshot_at_the_pin_matches_the_pinned_count_and_digest() -> None:
     [("repo-code", "src/nexus/engine_version.py"), ("repo-docs", "docs/collections.md")],
 )
 def test_repo_probe_phrases_are_in_the_pinned_snapshot(probe: str, path: str) -> None:
+    _skip_in_a_shallow_checkout()
     shown = subprocess.run(
         ["git", "-C", str(REPO), "show", f"{bc.PIN_SHA}:{path}"],
         capture_output=True, text=True, check=True,
