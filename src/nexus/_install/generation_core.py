@@ -339,6 +339,38 @@ def register_legacy(
 # ---------------------------------------------------------------------------
 
 
+def _off_cwd(argv: list[str], platform: str | None = None) -> list[str]:
+    """*argv* with a bare ``argv[0]`` resolved off the working directory on Windows.
+
+    RDR-224 critique S1 (nexus-f9bgu.37). ``CreateProcess`` searches the current
+    directory before ``PATH``, and ``nx self install`` runs wherever the user is,
+    often a cloned repository, so a bare ``uv`` would run a planted ``uv.exe``.
+    This module runs with nexus absent and cannot import ``nexus.util.nx_argv``,
+    so this is the same guarantee, stdlib-only: walk ``PATH`` entry by entry,
+    skipping the working directory's own, and look for the file in each directory
+    itself (``PATHEXT`` applied) rather than asking ``shutil.which``, which
+    searches the working directory first even when ``path=`` is given. Raises
+    ``FileNotFoundError`` when nothing qualifies, and never falls back to the bare
+    name. POSIX, and a head with a directory part, are returned unchanged.
+    """
+    if (platform if platform is not None else sys.platform) != "win32":
+        return argv
+    if not argv or "\\" in argv[0] or "/" in argv[0] or ntpath.isabs(argv[0]):
+        return argv
+    cwd = ntpath.normcase(ntpath.abspath(os.getcwd()))
+    exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    has_ext = ntpath.splitext(argv[0])[1].upper() in [e.upper() for e in exts]
+    names = [argv[0]] if has_ext else [argv[0] + e for e in exts]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or ntpath.normcase(ntpath.abspath(entry)) == cwd:
+            continue
+        for name in names:
+            candidate = ntpath.join(entry, name)
+            if os.path.isfile(candidate):
+                return [candidate, *argv[1:]]
+    raise FileNotFoundError(f"{argv[0]}: not found on PATH outside the working directory")
+
+
 def _run(argv: list[str], run, what: str) -> str:
     """Run one command; return its stdout, or raise with what it said."""
     # utf-8 with replacement, not ``text=True``: that decodes with the console
@@ -346,6 +378,7 @@ def _run(argv: list[str], run, what: str) -> str:
     # UnicodeDecodeError out of the reader thread would replace the build's own
     # diagnostic with a decoding traceback.
     try:
+        argv = _off_cwd(argv)
         # ``run`` is the test seam. subprocess.run is NOT bound to a name here
         # and its keywords are spelt out, not unpacked: an alias or a ``**``
         # hides the call from the bounded-subprocess lint's AST scan.

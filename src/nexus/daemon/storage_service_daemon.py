@@ -67,7 +67,6 @@ import contextlib
 import errno
 import os
 import re
-import shutil
 import signal
 import socket
 import subprocess
@@ -98,6 +97,7 @@ from nexus.db.onnx_model_root import ENV_MODEL_DIR, apply_djl_cache_env, service
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util import win_job as _win_job
+from nexus.util.nx_argv import which_off_cwd
 from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -611,7 +611,9 @@ def _resolve_java_executable() -> str:
         cand = Path(java_home) / "bin" / "java"
         if cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
-    found = shutil.which("java")
+    # Off the working directory: this result is the Popen head, and on Windows
+    # ``shutil.which`` answers with a ``java.exe`` in the cwd first (nexus-f9bgu.37).
+    found = which_off_cwd("java")
     if found:
         return found
     raise StorageServiceStartError(
@@ -818,7 +820,7 @@ def _port_holder(port: int) -> str | None:
     ``ss`` is resolved to an absolute path first (a bare name makes CPython fork
     instead of posix_spawn); absent (macOS), there is simply no holder to name.
     """
-    ss = shutil.which("ss")
+    ss = which_off_cwd("ss")
     if ss is None:
         return None
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — collision path only

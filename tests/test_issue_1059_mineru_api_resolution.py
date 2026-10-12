@@ -5,12 +5,12 @@ The `_resolve_mineru_api_bin()` helper must:
   (a) Return the sys.executable-sibling candidate when it exists and is executable.
   (b) Walk up from __file__ and return the first executable bin/mineru-api found
       (covers MCP/daemon restart where the running interpreter differs).
-  (c) Fall back to shutil.which() when (a) and (b) both miss.
+  (c) Fall back to which_off_cwd() when (a) and (b) both miss.
   (d) Return None when all three miss.
 
 Additional guards:
   - Non-executable files are REJECTED even when they exist as regular files.
-  - Candidate (a) takes precedence over shutil.which() when both resolve.
+  - Candidate (a) takes precedence over which_off_cwd() when both resolve.
 
 The two call sites (commands/mineru.py start + pdf_extractor.py restart)
 must route through the shared helper so argv[0] is the absolute resolved path.
@@ -88,7 +88,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(fake_python),
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
-        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: None)
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: None)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result is None, (
@@ -96,7 +96,7 @@ class TestResolveMineruApiBin:
         )
 
     def test_venv_first_over_which(self, tmp_path: Path, monkeypatch) -> None:
-        """Candidate (a) takes precedence over shutil.which when both resolve."""
+        """Candidate (a) takes precedence over which_off_cwd when both resolve."""
         bin_dir = tmp_path / "venv" / "bin"
         bin_dir.mkdir(parents=True)
         venv_exe = _make_executable(bin_dir / "mineru-api")
@@ -108,7 +108,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(fake_python),
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
-        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: "/usr/local/bin/mineru-api")
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: "/usr/local/bin/mineru-api")
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result == str(venv_exe), (
@@ -148,7 +148,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(other_python),
             file_anchor=str(fake_file),
         )
-        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: None)
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: None)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result == str(expected), (
@@ -156,7 +156,7 @@ class TestResolveMineruApiBin:
         )
 
     def test_which_fallback_when_venv_absent(self, tmp_path: Path, monkeypatch) -> None:
-        """Candidates (a) and (b) miss -> falls back to shutil.which()."""
+        """Candidates (a) and (b) miss -> falls back to which_off_cwd()."""
 
         other_bin = tmp_path / "other" / "bin"
         other_bin.mkdir(parents=True)
@@ -169,7 +169,7 @@ class TestResolveMineruApiBin:
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
         sentinel = "/usr/local/bin/mineru-api"
-        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: sentinel)
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: sentinel)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result == sentinel
@@ -187,7 +187,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(fake_python),
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
-        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: None)
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: None)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result is None

@@ -64,6 +64,7 @@ from pathlib import Path
 import click
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.nx_argv import argv_off_cwd
 
 __all__ = ["self_group", "perform_self_install", "packaged_install_dir", "index_failure_hint"]
 
@@ -536,7 +537,7 @@ def _build_flip_shims(build, *, install_dir: Path, tools: Path, bin_dir: Path) -
     if isinstance(build, _WindowsBuild):
         return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir)
     built = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        build, capture_output=True, text=True, check=False, env=_script_env(),
+        argv_off_cwd(build), capture_output=True, text=True, check=False, env=_script_env(),
     )
     if built.returncode != 0:
         detail = built.stderr.strip()
@@ -845,7 +846,7 @@ def _converge_legacy_install(
 
     tools.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        build, capture_output=True, text=True, check=False, env=_script_env(),
+        argv_off_cwd(build), capture_output=True, text=True, check=False, env=_script_env(),
     )
     if r.returncode != 0:
         raise click.ClickException(
@@ -941,13 +942,13 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
     """Source the install library and run one statement against it.
     Returns the statement's stdout."""
     r = subprocess.run(  # noqa: S603 — fixed argv, no shell interpolation of user input
-        ["bash", "-c",
+        argv_off_cwd(["bash", "-c",
          # layout.sh dispatches to layout_core.py beside it and cannot find its
          # own directory when sourced; the sourcing script names it.
          f'NX_LAYOUT_HOME="{install_dir}"; '
          f'. "{install_dir}/layout.sh"; . "{install_dir}/flip.sh"; '
          f'. "{install_dir}/shims.sh"; . "{install_dir}/census.sh"; '
-         f'. "{install_dir}/gc.sh"; . "{install_dir}/legacy.sh"; {snippet}'],
+         f'. "{install_dir}/gc.sh"; . "{install_dir}/legacy.sh"; {snippet}']),
         capture_output=True, text=True, check=False, env=_script_env(),
     )
     if check and r.returncode != 0:

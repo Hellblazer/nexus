@@ -17,6 +17,7 @@ import structlog
 from nexus._install import winproc_core
 from nexus.bounded_subprocess import run_bounded
 from nexus._winsec import make_user_dir
+from nexus.util.nx_argv import argv_off_cwd
 
 _log = structlog.get_logger()
 
@@ -244,7 +245,7 @@ def _ppid_of(
     # Fallback: ps (macOS + Linux with procps)
     try:
         out = subprocess.check_output(
-            ["ps", "-o", "ppid=", "-p", str(pid)],
+            argv_off_cwd(["ps", "-o", "ppid=", "-p", str(pid)]),
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
@@ -395,7 +396,7 @@ def sweep_orphan_resource_trackers(
         return 0
     try:
         ps_output = subprocess.check_output(
-            ["ps", "-ww", "-eo", "pid,ppid,etime,command"],
+            argv_off_cwd(["ps", "-ww", "-eo", "pid,ppid,etime,command"]),
             text=True,
             stderr=subprocess.DEVNULL,
         )
@@ -416,7 +417,7 @@ def sweep_orphan_resource_trackers(
         for pid in candidates:
             try:
                 cmd = subprocess.check_output(
-                    ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+                    argv_off_cwd(["ps", "-ww", "-o", "command=", "-p", str(pid)]),
                     text=True,
                     stderr=subprocess.DEVNULL,
                 ).strip()

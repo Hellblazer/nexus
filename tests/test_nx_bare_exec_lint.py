@@ -186,13 +186,13 @@ _DISPLAY_SINKS = frozenset({
 })
 
 
-def _is_which_call(node: ast.AST) -> bool:
+def _is_which_call(node: ast.AST, names: object = _WHICH_NAMES) -> bool:
     return (
         isinstance(node, ast.Call)
         and _callee_name(node) == "which"
         and bool(node.args)
         and isinstance(node.args[0], ast.Constant)
-        and node.args[0].value in _WHICH_NAMES
+        and node.args[0].value in names  # type: ignore[operator]
     )
 
 
@@ -201,7 +201,7 @@ def _which_name(node: ast.AST) -> str:
     return str(node.args[0].value)
 
 
-def _which_reaching_argv(source: str) -> list[tuple[str, str, int]]:
+def _which_reaching_argv(source: str, names: object = _WHICH_NAMES) -> list[tuple[str, str, int]]:
     """``(scope, tool, line)`` for each ``which("<tool>")`` result that reaches an argv:
     as a list or tuple element, or as an argument of a call that is not a display sink,
     either directly or through a name assigned from it in the same scope."""
@@ -237,13 +237,13 @@ def _which_reaching_argv(source: str) -> list[tuple[str, str, int]]:
     tainted: dict[tuple[int, str], str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            tools = sorted(_which_name(n) for n in ast.walk(node.value) if _is_which_call(n))
+            tools = sorted(_which_name(n) for n in ast.walk(node.value) if _is_which_call(n, names))
             if tools:
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         tainted[(id(scope_node(node)), target.id)] = tools[0]
     for node in ast.walk(tree):
-        if _is_which_call(node) and reaches_argv(node):
+        if _is_which_call(node, names) and reaches_argv(node):
             hits.add((scope_of(node), _which_name(node), node.lineno))
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             tool = tainted.get((id(scope_node(node)), node.id))
@@ -344,9 +344,9 @@ def test_the_detector_sees_every_list_shape_it_claims_to_police() -> None:
     assert _hits_in('def f():\n    return ["python", "-m", "nx"]\n') == []
 
 
-def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
+def _function(tree: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     raise AssertionError(f"{name} not found")
 
@@ -398,11 +398,10 @@ def test_installer_resolves_schtasks_through_the_windows_path_and_spawns_in_one_
 # The scans above police nx and schtasks across src/nexus. The verbs under
 # ``nexus/hooks`` run with the PROJECT as cwd, so for them the hole is wider: any
 # tool spawned by bare name (git, bd, uv, claude) runs a planted .exe on Windows.
-# Widening the name set across all of src/nexus was measured and is not done here:
-# it finds 49 more list literals in 15 modules outside the hook scope (CLI commands
-# and the indexer, whose cwd is the user's choice; 4 are in
-# ``_install/generation_core.py``, which runs with nexus absent and cannot import
-# the helper). They are debt for a separate change, not hook-reachable.
+# They get the strictest form of the rules below. The rest of ``src/nexus`` has the
+# same hole (a CLI command or the indexer runs in whatever directory the user is
+# in, normally a clone); it is policed by the tree-wide section at the end of this
+# file, whose rules are the same three with ``run_bounded`` trusted as a resolver.
 #
 # What this scan sees: in ``nexus/hooks`` and ``nexus/_hook_runtime``,
 #   R1  a list/tuple literal (or a module constant standing in for the head) whose
@@ -616,9 +615,503 @@ def test_the_hook_scope_detector_sees_every_shape_it_claims_to_police() -> None:
     assert kinds('def f():\n    from nexus.bounded_subprocess import run_bounded\n    run_bounded(argv_off_cwd(a))\n') == []
 
 
-def test_the_hook_scope_is_a_scope_not_the_whole_tree() -> None:
-    """The deliberate scoping: a bare ``git`` outside the hook verbs is not this
-    test's finding (see the comment above ``_HOOK_SCOPE`` for the count)."""
+def test_the_hook_scope_is_a_scope_and_the_rest_of_the_tree_has_its_own_section() -> None:
+    """The hook scan is the strict one (``run_bounded`` callers must name the
+    resolver); everything else under ``src/nexus`` is covered by the tree-wide
+    section below, which trusts the pinned ``run_bounded``."""
     inside = {p.relative_to(SRC_ROOT.parent).as_posix() for p in _hook_scope_files()}
     assert "nexus/indexer.py" not in inside
     assert "nexus/hooks/rdr_verb.py" in inside
+    assert "nexus/indexer.py" in {p.relative_to(SRC_ROOT.parent).as_posix() for p in _tree_scope_files()}
+    assert not (inside & {p.relative_to(SRC_ROOT.parent).as_posix() for p in _tree_scope_files()})
+
+
+# -- the rest of src/nexus: every tool, every spawn (nexus-f9bgu.37 sibling sweep) --
+#
+# An ``nx`` command or the indexer runs in the directory the user chose, normally a
+# clone, so every bare tool name has the hook verbs' hole: on Windows
+# ``CreateProcess`` takes a planted ``git.exe`` / ``bd.exe`` / ``ps.exe`` from the
+# working directory before ``PATH``. Measured on 7581cc834's parent: 49 list
+# literals with a bare head in 15 modules outside the hook scope, and the spawns
+# that carry them are the same three shapes the hook scan already names. The fix is
+# in two layers, and this section pins both:
+#
+#   * ``nexus.bounded_subprocess.run_bounded`` resolves its own argv head through
+#     ``argv_off_cwd``, so every caller (about 60 call sites, plus the injected
+#     ``run=run_bounded`` defaults in ``plugin_lockstep`` and ``win_console``) is
+#     covered once, and a new caller is covered without remembering anything.
+#     ``test_run_bounded_resolves_its_argv_through_argv_off_cwd`` pins it.
+#   * a spawn that does not go through ``run_bounded`` (``subprocess.run``,
+#     ``Popen``, ``check_output``, ``asyncio.create_subprocess_exec``, ``os.exec*``)
+#     must name ``argv_off_cwd`` / ``nx_argv`` / ``nx_argv_for`` on its argv, or sit
+#     in ``_TREE_ALLOWED`` with a reason.
+#
+# What the scan sees, in every file under ``src/nexus`` except the hook scope (which
+# has the stricter scan above):
+#   R1  a list/tuple literal (or a module constant standing in for the head) whose
+#       first element is a bare name from ``_TREE_TOOLS``, unless it is a direct
+#       argument of a resolving call (the hook resolvers plus ``run_bounded``) or is
+#       bound to a local name every use of which is such an argument (or a list
+#       mutator call on the name);
+#   R2  a raw spawn whose argv argument is not itself a call to a resolver;
+#   R3  an aliased spawner: ``from subprocess import run as r``, ``import
+#       subprocess as sp``, ``subprocess.Popen`` (or ``run``, ...) used as a value
+#       rather than called, or ``run_bounded`` used as a value;
+#   R4  ``shutil.which("<constant>")`` whose result reaches an argv, for every
+#       constant name (the which-scan above polices only nx, git, bd and claude);
+#       use ``which_off_cwd``.
+# What it cannot see: argv built in one function and spawned in another by a caller
+# that is not itself a spawn (an allowed spawn site is the place a reviewer checks the
+# head); a head that is a variable holding a bare name; a lookup through an alias
+# (``which = shutil.which`` and a call to ``which``, or a non-constant name); a
+# tool named outside ``_TREE_TOOLS``; a spawn through ``getattr`` or an injected
+# callable that is not one of the aliases R3 names; ``shell=True`` strings other
+# than the ones the older scan reads; the Windows search order itself. The
+# behavioural tests in ``tests/test_exec_off_cwd_outside_hooks.py`` exercise the
+# wrapper and one site per module, which is what covers those shapes.
+
+#: Every program name a spawn in ``src/nexus`` uses, plus the ones a reviewer would
+#: expect (database and process tools, shells). A name not listed here is not seen
+#: by R1.
+_TREE_TOOLS = frozenset({
+    "git", "bd", "gh", "uv", "claude", "nx", "ps", "osascript", "open", "bash", "sh",
+    "bat", "ss", "java", "psql", "pg_ctl", "initdb", "pg_dump", "pg_restore", "docker",
+    "launchctl", "systemctl", "schtasks", "powershell", "pwsh", "taskkill", "tasklist",
+    "wmic", "cmd", "mineru-api", "pip", "pgrep", "pkill", "kill", "lsof",
+    "curl", "tar", "unzip", "security", "pdftotext", "tesseract", "rg",
+})
+_TREE_BARE_NAMES = _HOOK_BARE_NAMES | _TREE_TOOLS | frozenset(f"{t}.exe" for t in _TREE_TOOLS)
+
+#: Callees that resolve the head of the argv they are handed. ``run_bounded`` is one
+#: because it calls ``argv_off_cwd`` itself (pinned below).
+_TREE_RESOLVERS = _ARGV_RESOLVERS | _BOUNDED_SPAWNS
+
+#: (file relative to src/, function name): a local helper that hands its first
+#: argument to a resolver, so a literal passed to it is resolved.
+#: ``test_every_tree_wrapper_hands_its_argv_to_a_resolver`` pins each one.
+_TREE_WRAPPERS: frozenset[tuple[str, str]] = frozenset({
+    ("nexus/commands/command_context.py", "_check_output"),
+    ("nexus/indexer.py", "run"),
+    ("nexus/indexer_utils.py", "_run"),
+    ("nexus/operators/dispatch.py", "_spawn_with_prompt_file"),
+    ("nexus/_install/generation_core.py", "_run"),
+})
+
+_ASYNCIO_SPAWNS = frozenset({"create_subprocess_exec", "create_subprocess_shell"})
+_OS_SPAWN_PREFIXES = ("exec", "spawn")
+_OS_SPAWN_NAMES = frozenset({"system", "popen", "startfile"})
+_LIST_MUTATORS = frozenset({"append", "extend", "insert"})
+
+#: (path relative to src/, enclosing function, kind) -> why it is safe. Every entry
+#: is a place the scan found and a reviewer cleared; there is no silent skip.
+_TREE_ALLOWED: dict[tuple[str, str, str], str] = {
+    # -- the argv is an absolute path to an interpreter or an installed binary ------
+    ("nexus/_install/layout_core.py", "declared_console_scripts_detail", "unresolved-spawn-argv"):
+        "head is the generation's own venv interpreter, an absolute path (bootstrap-safe module)",
+    ("nexus/_session_end_launcher.py", "_spawn_detached_cleanup", "unresolved-spawn-argv"):
+        "head is sys.executable, absolute (module runs before nexus imports; see its docstring)",
+    ("nexus/commands/index.py", "_spawn_deferred_labeling", "unresolved-spawn-argv"):
+        "head is sys.executable, absolute",
+    ("nexus/pdf_extractor.py", "_mineru_run_subprocess", "unresolved-spawn-argv"):
+        "head is sys.executable, absolute",
+    ("nexus/health.py", "_probe_mcp_server", "unresolved-spawn-argv"):
+        "head is _resolve_mcp_binary's result: a hit accepted only from the PATH directory "
+        "being scanned (nexus-f9bgu.35), so never the working directory",
+    ("nexus/_mineru_spawn.py", "spawn_server_process", "unresolved-spawn-argv"):
+        "head is _resolve_mineru_api_bin: an interpreter or source-tree sibling, or which_off_cwd",
+    # -- POSIX-only branches: the program does not exist on Windows -------------------
+    ("nexus/_install/census_core.py", "ps_snapshot", "unresolved-spawn-argv"):
+        "ps runs on the non-win32 arm only (the win32 arm returns first); bootstrap-safe module",
+    ("nexus/commands/dt.py", "open_cmd", "unresolved-spawn-argv"):
+        "macOS `open`, behind the _is_darwin() gate at the top of the command",
+    # -- the argv is resolved on the line above, or in the caller, by a name the scan --
+    # -- does not recognise ----------------------------------------------------------
+    ("nexus/_install/generation_core.py", "_run", "unresolved-spawn-argv"):
+        "argv = _off_cwd(argv) one line above (the module's stdlib-only copy of argv_off_cwd)",
+    ("nexus/_install/generation_core.py", "build_generation", "bare-argv0"):
+        "install is spliced into the argv of the _run call that follows (_run resolves it)",
+    ("nexus/_install/census_core.py", "<module>", "bare-argv0"):
+        "PS_COMMAND, spawned only by ps_snapshot's non-win32 arm (see below)",
+    ("nexus/commands/dt.py", "open_cmd", "bare-argv0"):
+        "macOS `open`, behind the _is_darwin() gate",
+    ("nexus/aspect_extractor.py", "_run_claude_isolated", "bare-argv0"):
+        "argv = _argv or [claude ...]; the Popen takes argv_off_cwd(argv) in the same function",
+    ("nexus/commands/self_cmd.py", "_build_argv", "bare-argv0"):
+        "returns the install_generation.sh argv; _build_flip_shims spawns it via argv_off_cwd(build)",
+    ("nexus/commands/self_cmd.py", "_converge_legacy_install", "bare-argv0"):
+        "build is spawned via argv_off_cwd(build) in the same function (it is also echoed on --dry-run)",
+    ("nexus/devonthink.py", "_run_osascript", "bare-argv0"):
+        "the CalledProcessError cmd= field, a display value; the spawn above it is run_bounded",
+    ("nexus/plugin_lockstep.py", "_resolve_ref_sha", "bare-argv0"):
+        "handed to the injected Runner, whose default is run_bounded; a caller that injects "
+        "another runner owns its head",
+    ("nexus/db/pg_provision.py", "missing_names", "bare-argv0"):
+        "(name, path) pairs for a presence check, not an argv",
+    ("nexus/util/nx_argv.py", "nx_argv", "bare-argv0"):
+        "the POSIX arm of the sanctioned builder; the Windows arm returns the interpreter form first",
+    ("nexus/daemon/installer.py", "*", "bare-argv0"):
+        "manager command builders (launchctl, systemctl, schtasks): spawned only through "
+        "_run_manager -> run_bounded (pinned by test_installer_resolves_schtasks_through_the_"
+        "windows_path_and_spawns_in_one_place), and a Windows manager resolves to System32 first",
+    ("nexus/bounded_subprocess.py", "run_bounded", "unresolved-spawn-argv"):
+        "the wrapper itself: argv = argv_off_cwd(argv) before the Popen (pinned by test)",
+    # -- detached daemon spawns: the head is an installed binary or this interpreter ---
+    ("nexus/commands/daemon.py", "<module>", "aliased-spawner"):
+        "_popen = subprocess.Popen, the test seam for the supervisor spawn whose head is "
+        "_resolve_nx_bin's absolute result",
+    ("nexus/daemon/storage_service_daemon.py", "<module>", "aliased-spawner"):
+        "_popen = subprocess.Popen, the test seam for the engine spawn: the installed "
+        "native binary or the java found by which_off_cwd",
+    ("nexus/daemon/aspect_worker_daemon.py", "ensure_aspect_worker_daemon", "aliased-spawner"):
+        "popen default; the argv head is _resolve_nx_bin's absolute result",
+    ("nexus/daemon/windows_autostart.py", "_supervise_once", "aliased-spawner"):
+        "popen default; the argv head is the console interpreter, absolute",
+    ("nexus/db/pg_provision.py", "_pg_ctl_start_detached", "aliased-spawner"):
+        "popen default; the head is the bundle's own pg_ctl, an absolute path",
+    ("nexus/db/pg_provision.py", "_start_cluster", "aliased-spawner"):
+        "popen default passed through to _pg_ctl_start_detached; same absolute pg_ctl",
+}
+
+
+def _tree_allowed(key: tuple[str, str, str]) -> bool:
+    rel, scope, kind = key
+    return key in _TREE_ALLOWED or (rel, "*", kind) in _TREE_ALLOWED
+
+
+def _is_raw_spawn(node: ast.Call) -> bool:
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
+        return False
+    owner, attr = func.value.id, func.attr
+    return (
+        (owner == "subprocess" and attr in _SUBPROCESS_SPAWNS)
+        or (owner == "asyncio" and attr in _ASYNCIO_SPAWNS)
+        or (owner == "os" and (attr.startswith(_OS_SPAWN_PREFIXES) or attr in _OS_SPAWN_NAMES))
+    )
+
+
+def _tree_scope_files() -> list[pathlib.Path]:
+    return [
+        p for p in sorted(SRC_ROOT.rglob("*.py"))
+        if not p.relative_to(SRC_ROOT.parent).as_posix().startswith(_HOOK_SCOPE)
+    ]
+
+
+def _tree_hits(source: str, rel: str = "") -> list[tuple[str, str, int]]:
+    """``(scope, kind, line)`` for each R1/R2/R3 violation in *source*."""
+    tree = ast.parse(source)
+    constants = _module_constants_for(tree, _TREE_BARE_NAMES)
+    resolving = _TREE_RESOLVERS | {n for f, n in _TREE_WRAPPERS if f == rel}
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def enclosing_function(node: ast.AST) -> ast.AST | None:
+        cur: ast.AST | None = node
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur
+            cur = parents.get(id(cur))
+        return None
+
+    def scope_of(node: ast.AST) -> str:
+        fn = enclosing_function(node)
+        return fn.name if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) else "<module>"
+
+    def resolved_call_arg(node: ast.AST) -> bool:
+        """*node* is handed straight to a resolving call as its argv, directly or as
+        the left side of a ``+`` that extends it (``["bd", "list"] + args``)."""
+        parent = parents.get(id(node))
+        while isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Add) and parent.left is node:
+            node, parent = parent, parents.get(id(parent))
+        if isinstance(parent, ast.keyword):
+            parent = parents.get(id(parent))
+        return (
+            isinstance(parent, ast.Call)
+            and node is not parent.func
+            and _callee_name(parent) in resolving
+        )
+
+    def only_resolved_uses(assign: ast.Assign | ast.AnnAssign) -> bool:
+        """A literal bound to one local name whose every use is an argv handed to a
+        resolver (or a list mutator call, which does not move the head)."""
+        targets = assign.targets if isinstance(assign, ast.Assign) else [assign.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            return False
+        name, fn = targets[0].id, enclosing_function(assign)
+        scope = fn if fn is not None else tree
+        uses = [
+            n for n in ast.walk(scope)
+            if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)
+        ]
+        if not uses:
+            return False
+        for use in uses:
+            parent = parents.get(id(use))
+            if isinstance(parent, ast.Attribute) and parent.attr in _LIST_MUTATORS:
+                continue
+            if not resolved_call_arg(use):
+                return False
+        return True
+
+    hits: set[tuple[str, str, int]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+            first = node.elts[0]
+            bare = (
+                isinstance(first, ast.Constant) and first.value in _TREE_BARE_NAMES
+            ) or (isinstance(first, ast.Name) and first.id in constants)
+            if not bare:
+                continue
+            parent = parents.get(id(node))
+            if resolved_call_arg(node):
+                continue
+            if isinstance(parent, (ast.Assign, ast.AnnAssign)) and parent.value is node and only_resolved_uses(parent):
+                continue
+            hits.add((scope_of(node), "bare-argv0", node.lineno))
+        elif isinstance(node, ast.Call) and _is_raw_spawn(node):
+            argv = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "args"), None
+            )
+            if isinstance(argv, ast.Starred):
+                argv = argv.value
+            resolved = isinstance(argv, ast.Call) and _callee_name(argv) in _ARGV_RESOLVERS
+            if not resolved:
+                hits.add((scope_of(node), "unresolved-spawn-argv", node.lineno))
+        elif isinstance(node, ast.ImportFrom) and node.module in {"subprocess", "asyncio"}:
+            for alias in node.names:
+                if alias.asname and alias.name in (_SUBPROCESS_SPAWNS | _ASYNCIO_SPAWNS):
+                    hits.add((scope_of(node), "aliased-spawner", node.lineno))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in {"subprocess", "asyncio"} and alias.asname:
+                    hits.add((scope_of(node), "aliased-spawner", node.lineno))
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            # subprocess.Popen / subprocess.run used as a VALUE (a default argument,
+            # an assignment), not called: the spawn happens elsewhere under another
+            # name. An annotation or an isinstance() test names the type, not a spawn.
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "subprocess"
+                and node.attr in _SUBPROCESS_SPAWNS
+            ):
+                parent = parents.get(id(node))
+                if isinstance(parent, ast.Call) and parent.func is node:
+                    continue
+                if _names_a_type(node, parents):
+                    continue
+                hits.add((scope_of(node), "aliased-spawner", node.lineno))
+    return sorted(hits, key=lambda h: (h[2], h[1]))
+
+
+def _names_a_type(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """*node* sits in an annotation, a subscript (``Popen[bytes]``) or an
+    ``isinstance`` / ``issubclass`` test, where it names a type rather than spawns."""
+    cur: ast.AST | None = node
+    while cur is not None:
+        parent = parents.get(id(cur))
+        if isinstance(parent, ast.Subscript) and parent.value is cur:
+            return True
+        if isinstance(parent, ast.arg) and parent.annotation is cur:
+            return True
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and parent.returns is cur:
+            return True
+        if isinstance(parent, ast.AnnAssign) and parent.annotation is cur:
+            return True
+        if isinstance(parent, ast.Call) and _callee_name(parent) in {"isinstance", "issubclass"}:
+            return True
+        cur = parent if isinstance(parent, (ast.BinOp, ast.Tuple, ast.Subscript)) else None
+    return False
+
+
+def _tree_scan() -> dict[tuple[str, str, str], list[int]]:
+    found: dict[tuple[str, str, str], list[int]] = {}
+    for path in _tree_scope_files():
+        rel = path.relative_to(SRC_ROOT.parent).as_posix()
+        for scope, kind, line in _tree_hits(path.read_text(encoding="utf-8"), rel):
+            found.setdefault((rel, scope, kind), []).append(line)
+    return found
+
+
+def test_no_spawn_in_the_tree_can_run_a_tool_the_cwd_supplies() -> None:
+    found = _tree_scan()
+    stray = {k: v for k, v in found.items() if not _tree_allowed(k)}
+    assert not stray, (
+        "on Windows CreateProcess takes a planted git.exe / bd.exe / ps.exe from the "
+        "working directory before PATH, and an nx command runs in the user's clone. "
+        "Spawn through nexus.bounded_subprocess.run_bounded (which resolves its head), or "
+        "wrap the argv in nexus.util.nx_argv.argv_off_cwd, or look the tool up with "
+        "which_off_cwd; an unavoidable exception goes in _TREE_ALLOWED with its reason: "
+        + "; ".join(f"{p}:{lines} in {s} ({k})" for (p, s, k), lines in sorted(stray.items()))
+    )
+
+
+def test_every_tree_allowance_still_matches_a_site() -> None:
+    """An allow-list entry for a site that moved is a hole the scan no longer sees."""
+    found = set(_tree_scan())
+    wildcard_hit = {(rel, "*", kind) for rel, _scope, kind in found}
+    stale = sorted(k for k in _TREE_ALLOWED if k not in found and k not in wildcard_hit)
+    assert not stale, f"_TREE_ALLOWED entries that match no site (fix or delete them): {stale}"
+    assert all(reason.strip() for reason in _TREE_ALLOWED.values())
+
+
+def test_the_tree_scan_is_not_vacuous() -> None:
+    files = _tree_scope_files()
+    assert len(files) >= 300, f"the tree scope matched {len(files)} files; the glob is wrong"
+    run_bounded_calls = 0
+    bare_literals_handed_to_run_bounded = 0
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _callee_name(node) in _BOUNDED_SPAWNS:
+                run_bounded_calls += 1
+                bare_literals_handed_to_run_bounded += sum(
+                    1 for a in node.args
+                    if isinstance(a, (ast.List, ast.Tuple)) and a.elts
+                    and isinstance(a.elts[0], ast.Constant) and a.elts[0].value in _TREE_BARE_NAMES
+                )
+    assert run_bounded_calls >= 40, run_bounded_calls
+    assert bare_literals_handed_to_run_bounded >= 20, bare_literals_handed_to_run_bounded
+    # The allowed raw spawns are real: at least the ones whose reason names a bare head.
+    assert len(_tree_scan()) >= len(_TREE_ALLOWED)
+
+
+def test_run_bounded_resolves_its_argv_through_argv_off_cwd() -> None:
+    """``run_bounded`` is trusted as a resolver by the tree scan, so it must be one:
+    the call comes before the Popen, on every path."""
+    tree = ast.parse((SRC_ROOT / "bounded_subprocess.py").read_text(encoding="utf-8"))
+    fn = _function(tree, "run_bounded")
+    resolve_lines = [
+        n.lineno for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and _callee_name(n) == "argv_off_cwd"
+    ]
+    popen_lines = [
+        n.lineno for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and _callee_name(n) == "Popen"
+    ]
+    assert resolve_lines, "run_bounded no longer calls argv_off_cwd"
+    assert popen_lines and min(resolve_lines) < min(popen_lines)
+    # ... and the Popen is handed the resolved name, not a parameter that was shadowed away.
+    popen = next(n for n in ast.walk(fn) if isinstance(n, ast.Call) and _callee_name(n) == "Popen")
+    assert isinstance(popen.args[0], ast.Name) and popen.args[0].id == "argv"
+    assigned = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "argv" for t in n.targets)
+        and isinstance(n.value, ast.Call) and _callee_name(n.value) == "argv_off_cwd"
+    ]
+    assert assigned
+
+
+def test_every_tree_wrapper_hands_its_argv_to_a_resolver() -> None:
+    """A helper in ``_TREE_WRAPPERS`` is trusted because its body spawns through a
+    resolver; if it stops, a literal passed to it is no longer resolved."""
+    resolvers = _TREE_RESOLVERS | {"_off_cwd"}
+    for rel, name in sorted(_TREE_WRAPPERS):
+        tree = ast.parse((SRC_ROOT.parent / rel).read_text(encoding="utf-8"))
+        fn = _function(tree, name)
+        calls = {_callee_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        assert calls & resolvers, f"{rel}:{name} is trusted as a resolver but calls none"
+
+
+def test_the_stdlib_only_installer_core_resolves_its_argv_before_spawning() -> None:
+    """``generation_core`` cannot import ``nx_argv`` (it runs with nexus absent), so
+    its ``_run`` is trusted on the strength of its own ``_off_cwd`` call."""
+    tree = ast.parse((SRC_ROOT / "_install" / "generation_core.py").read_text(encoding="utf-8"))
+    fn = _function(tree, "_run")
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    off = [n.lineno for n in calls if _callee_name(n) == "_off_cwd"]
+    spawn = [n.lineno for n in calls if _is_raw_spawn(n)]
+    assert off and spawn and min(off) < min(spawn)
+
+
+def test_the_tree_detector_sees_every_shape_it_claims_to_police() -> None:
+    def kinds(src: str, rel: str = "nexus/x.py") -> list[str]:
+        return [k for _s, k, _l in _tree_hits(src, rel)]
+
+    # R1: any tool in the set, bare, in a list or tuple, via a module constant.
+    assert kinds('def f(run):\n    run(["ps", "-ww"])\n') == ["bare-argv0"]
+    assert kinds('X = ("osascript", "-e")\n') == ["bare-argv0"]
+    assert kinds('_P = "psql"\ndef f():\n    return [_P, "-c"]\n') == ["bare-argv0"]
+    assert kinds('def f():\n    return ["ss.exe", "-l"]\n') == ["bare-argv0"]
+    assert kinds('def f():\n    return ["python", "-m", "x"]\n') == []
+    # ... but not handed to a resolver, directly or through a local name, including run_bounded.
+    assert kinds('def f():\n    return run_bounded(["git", "log"], timeout=1)\n') == []
+    assert kinds('def f():\n    return argv_off_cwd(["git", "log"])\n') == []
+    assert kinds('def f():\n    cmd = ["git", "log"]\n    cmd.append("-1")\n    return run_bounded(cmd, timeout=1)\n') == []
+    assert kinds('def f():\n    cmd = ["git", "log"]\n    return run_bounded(cmd, timeout=1), cmd\n') == ["bare-argv0"]
+    assert kinds('def f():\n    cmd = ["git", "log"]\n    return other(cmd)\n') == ["bare-argv0"]
+    assert kinds('def f(args):\n    return run_bounded(["git", "log"] + args, timeout=1)\n') == []
+    assert kinds('def f():\n    cmd: list[str] = ["git", "log"]\n    return run_bounded(cmd, timeout=1)\n') == []
+    assert kinds('def f():\n    return other(["git", "log"])\n') == ["bare-argv0"]
+    # R2: a raw spawn whose argv is not itself resolved, in every spawner family.
+    assert kinds('import subprocess\ndef f(a):\n    subprocess.run(a)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import subprocess\ndef f(a):\n    subprocess.check_output(a, text=True)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import asyncio\nasync def f(a):\n    await asyncio.create_subprocess_exec(*a)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import os\ndef f(a):\n    os.execvp(a[0], a)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import os\ndef f(a):\n    os.system(a)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import subprocess\ndef f():\n    subprocess.run("git log", shell=True)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import subprocess\ndef f(a):\n    subprocess.run(argv_off_cwd(a))\n') == []
+    assert kinds('import asyncio\nasync def f(a):\n    await asyncio.create_subprocess_exec(*argv_off_cwd(a))\n') == []
+    assert kinds('def f(a):\n    run_bounded(a, timeout=1)\n') == []  # trusted: pinned separately
+    assert kinds('def f(a):\n    a.run(b)\n') == []
+    # R3: an alias hides the callee, so the alias itself is the finding.
+    assert kinds('from subprocess import run as r\n') == ["aliased-spawner"]
+    assert kinds('import subprocess as sp\n') == ["aliased-spawner"]
+    assert kinds('import asyncio as aio\n') == ["aliased-spawner"]
+    assert kinds('import subprocess\n_popen = subprocess.Popen\n') == ["aliased-spawner"]
+    assert kinds('import subprocess\ndef f(popen=subprocess.Popen):\n    return popen\n') == ["aliased-spawner"]
+    assert kinds('def f():\n    runner = run_bounded\n    return runner\n') == []  # an alias of the resolver is the resolver
+    assert kinds('import subprocess\ndef f(p: subprocess.Popen[bytes], q: "subprocess.Popen"):\n    return isinstance(p, subprocess.Popen)\n') == []
+    assert kinds('import subprocess\ndef f():\n    return subprocess.PIPE, subprocess.TimeoutExpired\n') == []
+
+
+# -- R4: lookups whose result reaches an argv, every constant name -------------------
+
+
+class _AnyName:
+    """Membership test that accepts every string constant."""
+
+    def __contains__(self, item: object) -> bool:
+        return isinstance(item, str)
+
+
+def _which_reaching_argv_any(source: str) -> list[tuple[str, str, int]]:
+    """``_which_reaching_argv`` with the name filter lifted to any constant."""
+    return _which_reaching_argv(source, _AnyName())
+
+
+def _scan_which_any() -> dict[tuple[str, str, str], list[int]]:
+    found: dict[tuple[str, str, str], list[int]] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        rel = path.relative_to(SRC_ROOT.parent).as_posix()
+        for scope, tool, line in _which_reaching_argv_any(path.read_text(encoding="utf-8")):
+            found.setdefault((rel, scope, tool), []).append(line)
+    return found
+
+
+#: Lookups whose result is spawned. The older scan polices nx/git/bd/claude with its
+#: own allow list; this one covers every constant name, and the three it found
+#: (mineru-api, java, ss) were converted to ``which_off_cwd``.
+_WHICH_ANY_ALLOWED: frozenset[tuple[str, str, str]] = frozenset({
+    ("nexus/commands/daemon.py", "_resolve_nx_bin", "nx"),
+})
+
+
+def test_no_lookup_of_any_tool_reaches_an_argv_outside_the_sanctioned_resolvers() -> None:
+    found = _scan_which_any()
+    stray = {k: v for k, v in found.items() if k not in _WHICH_ANY_ALLOWED}
+    assert not stray, (
+        "a shutil.which result is spawned; on Windows which() answers with the current "
+        "directory's hit first. Use nexus.util.nx_argv.which_off_cwd: "
+        + ", ".join(f"{p}:{lines} in {s} ({n!r})" for (p, s, n), lines in sorted(stray.items()))
+    )
+    assert set(_WHICH_ANY_ALLOWED) <= set(found), "the sanctioned lookup moved; the detector may be blind"
+
+
+def test_the_any_name_which_detector_sees_a_name_the_narrow_one_ignores() -> None:
+    src = 'import shutil\ndef f():\n    j = shutil.which("java")\n    return [j, "-jar"]\n'
+    assert _which_reaching_argv(src) == []
+    assert _which_reaching_argv_any(src) == [("f", "java", 4)]
+    assert _which_reaching_argv_any('import shutil\ndef f():\n    return shutil.which("java") is None\n') == []
