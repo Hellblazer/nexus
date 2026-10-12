@@ -218,8 +218,12 @@ def install_cmd(name: str, check: bool, dry_run: bool, sn_dir: Path | None, cone
 
     The worktree-developer is the conexus developer agent with a private
     Serena MCP server rooted at its own worktree (sn examples/). Dispatch it
-    with subagent_type "worktree-developer" and isolation "worktree"; allow
-    mcp__serena-wt__* in ~/.claude/settings.json permissions.
+    with subagent_type "worktree-developer" and isolation "worktree". Then
+    allow the tools the agent needs in ~/.claude/settings.json permissions
+    (the sn auto-approve covers only the plugin's own server). Name the
+    mcp__serena-wt__ tools the agent needs individually: the wildcard also
+    allows jet_brains_debug (arbitrary Groovy/Java in the IDE's JVM),
+    query_project and every writer, with no prompt.
     """
     if check and dry_run:
         raise click.UsageError("--check and --dry-run are mutually exclusive")
