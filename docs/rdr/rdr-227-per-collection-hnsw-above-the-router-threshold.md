@@ -502,7 +502,8 @@ walk at `ef_search = 1000`.
   peer can route on a stale answer.
 - **Plan mode.** The plain-search arm reaches a per-collection index through
   `runPlainSearchStatement`'s GUC batch, which sets
-  `plan_cache_mode = force_custom_plan` (`PgVectorRepository.java:1458-1461`;
+  `plan_cache_mode = force_custom_plan` (`PgSession.setSearchPlanCacheMode`, called
+  from `runPlainSearchStatement` in `PgVectorRepository.java`;
   `HnswServingGucParityTest` pins that every site setting `hnsw.iterative_scan`
   also sets the plan mode); a generic plan skips the partial index and walks
   every tenant leaf (A1). The sampled check below binds `p_collections` the way
@@ -726,10 +727,11 @@ A4 above records 0.975 at k 40 and 0.983 at k 120, and research-12 records
 the 0.99 target. It is a worst case over
 three collections that were measured, not a bound: `code__1-1` and `code__1-2`
 reached the target at `ef_search = 1000` (mean 0.998 to 0.999), `code__1-20` read 1.0
-on 20 own-topic queries (research-12), and a collection of another shape crossing
+on 20 own-topic queries (T2 `conexus/rdr227-step3b-fork-2026-10-10`, M4(b)), and a collection of another shape crossing
 20000 has not been measured. Prose collections at `ef_search = 1000` without an
 index read 0.9833 (`docs__1-2`) and 0.975 (`rdr__1-79`), but both sit below 20000
-and are routed exact.
+and are routed exact as of 2026-10-10. A prose collection that grows past 20000
+leaves that exception (Phase 2b, Prose, correction of 2026-10-12).
 
 *Remedy for an operator who wants such collections exact.* Set
 `NX_SEARCH_EXACT_MAX_ROWS=30000`, which restores the v0.1.158 routing (release note;
@@ -862,6 +864,16 @@ later on the cloud (bead nexus-43ulx.33).
     exact scan, so they are outside (B, T]. Both records warn that they matter only
     if B and T are ever lowered to 10000, and bead nexus-43ulx.34 comment of
     2026-10-10 09:09 says not to lower T below 20000 on this evidence.
+    **Correction, 2026-10-12 (close critique round 2).** That inference covers
+    the thresholds, not growth. The exception holds only while no prose
+    collection is at or above B. The row counts above are a dated reading and
+    nothing checks them. When a prose collection passes 20000 rows it is built
+    and routed to its own index, and is then served at about the recall
+    measured here, or by the `ef_search = 1000` walk (0.975 on `rdr__1-79`)
+    until its build finishes. `rdr__1-79` at 14,300 rows is the nearest case.
+    Prose index recall at 20000 rows or more was not measured: the 0.9833 was
+    read at 10,308 and 14,300 rows. A prose collection reaching B is the
+    trigger to run the Gap 1 recall check on it.
   - *Second tenant.* The run was `gate-xr789` `code__1-20`, 20 queries sampled from
     its own stored embeddings, recall 1.0 at every k. The record states this is
     document-to-document, so 1.0 is expected, and calls it weak evidence. A
@@ -1078,6 +1090,8 @@ Warm large arm under 50 ms, against 1.1 to 2.0 s exact under load (Phase 0 at
 statement total 2.5 to 3.2 s against 4.8 to 5.9 s). The default-search figure
 is not derived yet: Phase 0 measured statement time, not a client search, and
 measures it after T is lowered in Phase 2b.
+**Correction, 2026-10-12.** It is derived in the next paragraph. The warm large
+arm's measured maximum there is 50 ms, which is at this bound, not under it.
 
 **Measured after T = 20000 (2026-10-10, `nexus_rdr/227-research-13`).** Default
 search, client wall time: mean 1.88 s, median 1.95, range 1.51 to 2.30 (16 timed
@@ -1145,7 +1159,8 @@ adds the `code__1-20` own-topic, prose and second-tenant recall runs that Phase
 nexus-43ulx.34, not under these three runs as written. `code__1-20` own-topic ran
 and passed (1.0 at every k). The prose run ran at B = T = 10000 and read a
 minimum of 0.9833 at the tail, under 0.99; it was set aside because prose
-collections sit below B and are routed exact. The second-tenant run was 20
+collections sat below B and were routed exact on that date. That holds only
+until a prose collection reaches B (Phase 2b, Prose). The second-tenant run was 20
 self-queries from stored embeddings, which the record calls weak evidence. The
 applied gate, the collections it covered and Sam's go are under Phase 2b
 (`nexus_rdr/227-research-12`, `nexus_rdr/227-research-13`).
@@ -1158,7 +1173,7 @@ applied gate, the collections it covered and Sam's go are under Phase 2b
   dev posture without admin credentials it is (Builder, No admin credentials).
   The admin session's row counts are tenant-scoped by `SET LOCAL nexus.tenant`.
 - **Local mode**: the same code path applies. The local daemon passes
-  `NX_DB_ADMIN_*` to the engine (`storage_service_daemon.py:1292-1294`), so the
+  `NX_DB_ADMIN_*` to the engine (`storage_service_daemon.py`, the `NX_DB_ADMIN_*` keys of the engine environment), so the
   builder can run. Local build time at the local bundle's
   `maintenance_work_mem` is a Phase 1 Step 3 measurement; a build that does not
   fit in it is much slower.
@@ -1266,3 +1281,4 @@ Phase 2a's measured default search shows those exact arms still set the floor
   answered; stale sites corrected (line 21, insert cost, default-search figure,
   Contradiction Check, A6, the API table, References); two unchecked boxes
   resolved. No change to the frontmatter; the lifecycle move is separate.
+- 2026-10-12: Close critique round 2 (T2 `nexus_rdr/227-close-critique-2026-10-12-r2`: partial, 0 critical, 1 significant). The prose exception is corrected: it holds only while no prose collection is at or above B, and a prose collection reaching B is the trigger for the Gap 1 recall check. Three stale pointers and one unstruck sentence fixed.
