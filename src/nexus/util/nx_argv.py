@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import PureWindowsPath
 
 
@@ -92,4 +93,29 @@ def which_off_cwd(name: str) -> str | None:
     return None if retry is None or _in_cwd(retry) else retry
 
 
-__all__ = ["console_python", "nx_argv", "nx_argv_for", "which_off_cwd"]
+def argv_off_cwd(argv: Sequence[str]) -> list[str]:
+    """*argv* with a bare ``argv[0]`` resolved by :func:`which_off_cwd` on Windows.
+
+    The spelling for a hook verb that spawns ``git``, ``bd`` or any other tool by
+    name: ``CreateProcess`` would take a ``git.exe`` planted in the project (the
+    hook's cwd) before ``PATH``, so the child gets the ``PATH`` hit as an absolute
+    path (RDR-224 Phase 4 critique S1, nexus-f9bgu.37). A head that is already an
+    absolute path is left alone, and POSIX is returned unchanged (``execvp``
+    searches ``PATH`` only).
+
+    Raises ``FileNotFoundError`` when Windows has no ``PATH`` hit, which is what
+    the spawn itself raised for a missing tool, so a caller's existing
+    not-found handling is the one that runs. It never falls back to the bare name:
+    that is the planted file.
+    """
+    out = list(argv)
+    if not out or _platform() != "win32" or PureWindowsPath(out[0]).is_absolute():
+        return out
+    found = which_off_cwd(out[0])
+    if found is None:
+        raise FileNotFoundError(f"{out[0]}: not found on PATH outside the working directory")
+    out[0] = found
+    return out
+
+
+__all__ = ["argv_off_cwd", "console_python", "nx_argv", "nx_argv_for", "which_off_cwd"]

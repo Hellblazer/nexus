@@ -13,6 +13,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nx agents install --help` no longer recommends allowing `mcp__serena-wt__*` wholesale.** That wildcard also allows the IDE debugger tool and every writer with no prompt. The help now says to name the tools, as `docs/cli-reference.md` already did. (nexus-r2e6t)
 - **`nx index pdf --dry-run` no longer fails at random with `dictionary changed size during iteration`.** A dry run buffers pages in memory, and its extractor thread wrote that buffer while its chunker thread read it with no lock. The buffer now serves one request at a time.
 
+- **The `nx-hook` verbs no longer run a `git.exe` or `bd.exe` planted in the project on Windows** (nexus-f9bgu.37). Hooks run with the project as their working directory, and on Windows `CreateProcess` searches that directory before `PATH`, so the session-context, rdr, subagent-start and preflight verbs ran a planted `git.exe` or `bd.exe` as the user. They now spawn the `PATH` hit as an absolute path (`nexus.util.nx_argv.argv_off_cwd`) and treat a tool found only in the project as not installed. POSIX is unchanged. A lint now covers every tool and every spawn under `src/nexus/hooks`. Not verified on a Windows host.
+
 ### Changed
 
 - **`nx t3 gc` leaves the fraction floor to the engine.** The verb used to check the floor itself against its advisory listing before asking the engine, because an older engine moved without judging it. Every supported engine now judges the floor under its own lock, so the client copy is gone. A refusal still exits 1, moves nothing, and names `NX_GC_FLOOR_FRACTION` and `NX_GC_FORCE=1`. It now arrives only with the move, so `--dry-run` no longer predicts it. (nexus-teduy)

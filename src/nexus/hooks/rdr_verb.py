@@ -167,9 +167,11 @@ _RDR_STEM_RE = re.compile(r"(?:rdr-?)?(\d+)", re.IGNORECASE)
 def _repo_root() -> Path | None:
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
+
     try:
         result = run_bounded(
-            ["git", "rev-parse", "--show-toplevel"],
+            argv_off_cwd(["git", "rev-parse", "--show-toplevel"]),
             timeout=_remaining(5),
         )
         if result.returncode == 0:
@@ -186,9 +188,11 @@ def _repo_name(root: Path) -> str:
     the worktree directory (nexus-u1jxt.7). Falls back to *root*'s name."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
+
     try:
         result = run_bounded(
-            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            argv_off_cwd(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"]),
             timeout=_remaining(5),
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -565,6 +569,8 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
     """Lines naming draft RDRs whose file tip is past the gated commit."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
+
     lines: list[str] = []
     cut_short = False
     for path in rdr_files:
@@ -590,7 +596,7 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
             break  # nexus-wozn6: out of budget; a pointer missed this session beats a cancelled hook
         try:
             tip = run_bounded(
-                ["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)],
+                argv_off_cwd(["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)]),
                 timeout=left,
             ).stdout.strip()
         except subprocess.TimeoutExpired:

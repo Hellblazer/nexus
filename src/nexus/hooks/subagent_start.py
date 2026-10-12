@@ -320,9 +320,12 @@ def _run_captured(argv: list[str], *, env: dict[str, str], timeout: float) -> st
     """
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by this directory's convention only: the module runs inside nx-mcp as an mcp_tool hook, which has already imported structlog, so the deferral saves nothing here (nexus-rcoze review)
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only; kept off the hook's import path
+
     try:
+        # Windows: resolved off the cwd (the project), never a planted git.exe.
         proc = run_bounded(
-            argv, timeout=timeout, env=env
+            argv_off_cwd(argv), timeout=timeout, env=env
         )
     except Exception:  # noqa: BLE001 — carried: a missing/hanging tool is "no output"
         return ""
@@ -343,7 +346,9 @@ def _repo_root(env: dict[str, str]) -> str:
     same git state either way, so sharing the one call is a legitimate
     simplification, not a behaviour change).
     """
-    if shutil.which("git") is None:
+    from nexus.util.nx_argv import which_off_cwd  # noqa: PLC0415 - stdlib-only; kept off the hook's import path
+
+    if which_off_cwd("git") is None:
         return ""
     common_git_dir = _run_captured(
         ["git", "rev-parse", "--git-common-dir"], env=env, timeout=10

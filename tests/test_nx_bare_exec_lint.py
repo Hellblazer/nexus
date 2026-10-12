@@ -23,7 +23,8 @@ the same hole by another road, because on Windows ``which`` returns the current
 directory's hit first. The sanctioned spelling is ``nexus.util.nx_argv.which_off_cwd``
 (or ``nx_argv``); a result used only to test existence or to print is not an argv and
 is not flagged. ``_WHICH_ALLOWED`` carries each justified exception.
-Non-vacuity: it must find both sanctioned spellings, and the installer
+The nx-hook verbs under ``nexus/hooks`` get a wider scan (every tool, every spawn);
+see the section at the end of this file. Non-vacuity: it must find both sanctioned spellings, and the installer
 resolver must still route ``schtasks`` through the Windows path helper with
 ``_run_manager`` the only function there that spawns.
 """
@@ -390,3 +391,234 @@ def test_installer_resolves_schtasks_through_the_windows_path_and_spawns_in_one_
         "a manager command is spawned outside _run_manager, so it skips "
         f"_manager_executable: {sorted(spawners)}"
     )
+
+
+# -- the nx-hook verbs: every tool, every spawn (RDR-224 Phase 4 critique S1) -------
+#
+# The scans above police nx and schtasks across src/nexus. The verbs under
+# ``nexus/hooks`` run with the PROJECT as cwd, so for them the hole is wider: any
+# tool spawned by bare name (git, bd, uv, claude) runs a planted .exe on Windows.
+# Widening the name set across all of src/nexus was measured and is not done here:
+# it finds 49 more list literals in 15 modules outside the hook scope (CLI commands
+# and the indexer, whose cwd is the user's choice; 4 are in
+# ``_install/generation_core.py``, which runs with nexus absent and cannot import
+# the helper). They are debt for a separate change, not hook-reachable.
+#
+# What this scan sees: in ``nexus/hooks`` and ``nexus/_hook_runtime``,
+#   R1  a list/tuple literal (or a module constant standing in for the head) whose
+#       first element is a bare tool name, unless it is a direct argument of a
+#       resolving call (``argv_off_cwd`` or a per-file wrapper that calls it);
+#   R2  a spawn (``run_bounded``, ``subprocess.run/Popen/check_output/...``) whose
+#       argv argument is not itself a call to ``argv_off_cwd`` / ``nx_argv`` /
+#       ``nx_argv_for``, which covers run_bounded callers whose argv is built
+#       elsewhere and passed as a name;
+#   R3  an aliased spawner: ``from subprocess import run as r``, ``import subprocess
+#       as sp``, or ``run_bounded`` used as a value rather than called.
+# What it cannot see: argv assembled in another module and handed to a wrapper
+# declared in ``_HOOK_SPAWN_ALLOWED``; a spawner reached through ``getattr`` or an
+# injected callable parameter; ``os.execv*``; a head that is a variable holding a
+# bare name; and a lookup through an alias such as preflight's ``_which`` (the
+# which-scan above matches the callee name ``which`` only). The behavioural tests in
+# ``tests/hooks/test_hook_verbs_exec_off_cwd.py`` exercise every current site, which
+# is what covers those shapes.
+
+_HOOK_SCOPE = ("nexus/hooks/", "nexus/_hook_runtime/")
+_HOOK_BARE_NAMES = _BARE_NAMES | frozenset({
+    "git", "git.exe", "bd", "bd.exe", "uv", "uv.exe", "claude", "claude.exe",
+})
+_ARGV_RESOLVERS = frozenset({"argv_off_cwd", "nx_argv", "nx_argv_for"})
+
+#: wrapper name -> the one file whose argv it resolves through ``argv_off_cwd``
+#: itself. A literal handed to one of these is resolved;
+#: ``test_every_hook_wrapper_resolves_its_argv_through_argv_off_cwd`` pins that
+#: each really does.
+_HOOK_WRAPPERS: dict[str, str] = {
+    "run_command": "nexus/hooks/session_context.py",
+    "_run_captured": "nexus/hooks/subagent_start.py",
+    "_probe": "nexus/hooks/preflight_verb.py",
+}
+
+_SUBPROCESS_SPAWNS = frozenset({"run", "Popen", "check_output", "check_call", "call"})
+_BOUNDED_SPAWNS = frozenset({"run_bounded", "_REAL_RUN_BOUNDED"})
+
+#: (path relative to src/, enclosing function): spawns whose argv is a parameter.
+_HOOK_SPAWN_ALLOWED: frozenset[tuple[str, str]] = frozenset({
+    # ``_spawn_detached(argv)`` is called once, from ``run``, with the list
+    # ``nx_argv_for(which_off_cwd("nx"), ...)`` builds (absolute on both platforms).
+    ("nexus/hooks/upgrade_auto.py", "_spawn_detached"),
+})
+
+
+def _is_hook_spawn(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in _BOUNDED_SPAWNS
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr in _SUBPROCESS_SPAWNS
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "subprocess"
+    )
+
+
+def _module_constants_for(tree: ast.Module, names: frozenset[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for node in tree.body:
+        value = getattr(node, "value", None)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(value, ast.Constant) and value.value in names:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    out[target.id] = str(value.value)
+    return out
+
+
+def _hook_scope_hits(source: str, rel: str = "") -> list[tuple[str, str, int]]:
+    """``(scope, kind, line)`` for each R1/R2/R3 violation in *source*."""
+    tree = ast.parse(source)
+    constants = _module_constants_for(tree, _HOOK_BARE_NAMES)
+    resolving = _ARGV_RESOLVERS | {n for n, f in _HOOK_WRAPPERS.items() if f == rel}
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def scope_of(node: ast.AST) -> str:
+        cur: ast.AST | None = node
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur.name
+            cur = parents.get(id(cur))
+        return "<module>"
+
+    hits: set[tuple[str, str, int]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+            first = node.elts[0]
+            bare = (
+                isinstance(first, ast.Constant) and first.value in _HOOK_BARE_NAMES
+            ) or (isinstance(first, ast.Name) and first.id in constants)
+            if bare:
+                parent = parents.get(id(node))
+                handed_to_resolver = (
+                    isinstance(parent, ast.Call)
+                    and node in parent.args
+                    and _callee_name(parent) in resolving
+                )
+                if not handed_to_resolver:
+                    hits.add((scope_of(node), "bare-argv0", node.lineno))
+        elif isinstance(node, ast.Call) and _is_hook_spawn(node):
+            argv = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "args"), None
+            )
+            resolved = isinstance(argv, ast.Call) and _callee_name(argv) in _ARGV_RESOLVERS
+            if not resolved and (rel, scope_of(node)) not in _HOOK_SPAWN_ALLOWED:
+                hits.add((scope_of(node), "unresolved-spawn-argv", node.lineno))
+        elif isinstance(node, ast.ImportFrom) and node.module in {"subprocess", "nexus.bounded_subprocess"}:
+            for alias in node.names:
+                if alias.asname and alias.name in (_SUBPROCESS_SPAWNS | _BOUNDED_SPAWNS):
+                    hits.add((scope_of(node), "aliased-spawner", node.lineno))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess" and alias.asname:
+                    hits.add((scope_of(node), "aliased-spawner", node.lineno))
+        elif isinstance(node, ast.Name) and node.id in _BOUNDED_SPAWNS and isinstance(node.ctx, ast.Load):
+            parent = parents.get(id(node))
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                hits.add((scope_of(node), "aliased-spawner", node.lineno))
+    return sorted(hits, key=lambda h: (h[2], h[1]))
+
+
+def _hook_scope_files() -> list[pathlib.Path]:
+    return [
+        p for p in sorted(SRC_ROOT.rglob("*.py"))
+        if p.relative_to(SRC_ROOT.parent).as_posix().startswith(_HOOK_SCOPE)
+    ]
+
+
+def _wrapped_hook_literals() -> int:
+    """How many bare-name literals sit correctly inside a resolving call: the
+    non-vacuity count, so a detector gone blind cannot pass by finding nothing."""
+    count = 0
+    for path in _hook_scope_files():
+        rel = path.relative_to(SRC_ROOT.parent).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        resolving = _ARGV_RESOLVERS | {n for n, f in _HOOK_WRAPPERS.items() if f == rel}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _callee_name(node) in resolving:
+                count += sum(
+                    1 for a in node.args
+                    if isinstance(a, (ast.List, ast.Tuple)) and a.elts
+                    and isinstance(a.elts[0], ast.Constant) and a.elts[0].value in _HOOK_BARE_NAMES
+                )
+    return count
+
+
+def test_no_hook_verb_spawns_a_tool_the_cwd_can_supply() -> None:
+    files = _hook_scope_files()
+    assert len(files) >= 10, f"the hook scope matched {len(files)} files; the glob is wrong"
+    stray = []
+    for path in files:
+        rel = path.relative_to(SRC_ROOT.parent).as_posix()
+        for scope, kind, line in _hook_scope_hits(path.read_text(encoding="utf-8"), rel):
+            stray.append(f"{rel}:{line} in {scope} ({kind})")
+    assert not stray, (
+        "a hook verb runs with the project as its cwd, and on Windows CreateProcess "
+        "takes a planted git.exe / bd.exe / uv.exe before PATH. Spawn through "
+        "nexus.util.nx_argv.argv_off_cwd (or nx_argv / nx_argv_for for nx): "
+        + "; ".join(stray)
+    )
+
+
+def test_the_hook_scope_scan_finds_the_sites_it_polices() -> None:
+    # git x1 (hooks/__init__), git x3 (rdr_verb), git+bd (session_context), git
+    # (subagent_start), bd (preflight_verb): eight literals, each inside a resolver.
+    assert _wrapped_hook_literals() >= 8
+
+
+def test_every_hook_wrapper_resolves_its_argv_through_argv_off_cwd() -> None:
+    for name, rel in _HOOK_WRAPPERS.items():
+        tree = ast.parse((SRC_ROOT.parent / rel).read_text(encoding="utf-8"))
+        fn = _function(tree, name)
+        calls = {_callee_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        assert "argv_off_cwd" in calls, f"{rel}:{name} is trusted as a resolver but does not call argv_off_cwd"
+
+
+def test_the_hook_scope_detector_sees_every_shape_it_claims_to_police() -> None:
+    def kinds(src: str, rel: str = "nexus/hooks/x.py") -> list[str]:
+        return [k for _s, k, _l in _hook_scope_hits(src, rel)]
+
+    # R1: a bare head, in a list or a tuple, for each tool and via a module constant.
+    assert kinds('def f(run):\n    run(["git", "log"])\n') == ["bare-argv0"]
+    assert kinds('X = ("bd", "ready")\n') == ["bare-argv0"]
+    assert kinds('_G = "uv"\ndef f():\n    return [_G, "run"]\n') == ["bare-argv0"]
+    assert kinds('def f():\n    return ["claude.exe", "-p"]\n') == ["bare-argv0"]
+    assert kinds('def f():\n    return ["python", "-m", "x"]\n') == []
+    # ... but not when handed straight to a resolver or a per-file wrapper.
+    assert kinds('def f():\n    return argv_off_cwd(["git", "log"])\n') == []
+    assert kinds('def f():\n    return run_command(["git", "log"], 5)\n') == ["bare-argv0"]
+    assert kinds('def f():\n    return run_command(["git", "log"], 5)\n', "nexus/hooks/session_context.py") == []
+    assert kinds('def f(x):\n    return other(["git", "log"])\n') == ["bare-argv0"]
+    # R2: a spawn whose argv is not itself resolved, including a name and a keyword.
+    assert kinds('def f(a):\n    run_bounded(a, timeout=1)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import subprocess\ndef f(a):\n    subprocess.run(args=a)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import subprocess\ndef f(a):\n    subprocess.Popen(a, text=True)\n') == ["unresolved-spawn-argv"]
+    assert kinds('import subprocess\ndef f():\n    subprocess.run("git log", shell=True)\n') == ["unresolved-spawn-argv"]
+    assert kinds('def f():\n    run_bounded(argv_off_cwd(a), timeout=1)\n') == []
+    assert kinds('import subprocess\ndef f():\n    subprocess.run(nx_argv_for(p, "x"))\n') == []
+    assert kinds('def f(a):\n    a.run(b)\n') == []  # not the subprocess module
+    assert kinds('import subprocess\ndef _spawn_detached(a):\n    subprocess.Popen(a)\n', "nexus/hooks/upgrade_auto.py") == []
+    # R3: an alias hides the callee from R2, so the alias itself is the finding.
+    assert kinds('from subprocess import run as r\n') == ["aliased-spawner"]
+    assert kinds('import subprocess as sp\n') == ["aliased-spawner"]
+    assert kinds('def f():\n    from nexus.bounded_subprocess import run_bounded as rb\n') == ["aliased-spawner"]
+    assert kinds('def f():\n    runner = run_bounded\n    return runner\n') == ["aliased-spawner"]
+    assert kinds('def f():\n    from nexus.bounded_subprocess import run_bounded\n    run_bounded(argv_off_cwd(a))\n') == []
+
+
+def test_the_hook_scope_is_a_scope_not_the_whole_tree() -> None:
+    """The deliberate scoping: a bare ``git`` outside the hook verbs is not this
+    test's finding (see the comment above ``_HOOK_SCOPE`` for the count)."""
+    inside = {p.relative_to(SRC_ROOT.parent).as_posix() for p in _hook_scope_files()}
+    assert "nexus/indexer.py" not in inside
+    assert "nexus/hooks/rdr_verb.py" in inside

@@ -138,9 +138,11 @@ def _infer_repo() -> str:
     """Detect current repo name from git, or fall back to cwd name."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
+
     try:
         result = run_bounded(
-            ["git", "rev-parse", "--show-toplevel"],
+            argv_off_cwd(["git", "rev-parse", "--show-toplevel"]),
             check=True, timeout=10,
         )
         return Path(result.stdout.strip()).name
