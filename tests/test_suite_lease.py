@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests import _suite_lease
-from tests._module_seam import module_time
+from tests._module_seam import module_time, setattr_in
 
 
 @pytest.fixture
@@ -670,7 +670,7 @@ def test_a_removal_failure_neither_raises_nor_blocks_the_acquire(
     def boom(*_a: object, **_k: object) -> None:
         raise PermissionError("owned by the other user")
 
-    monkeypatch.setattr(_suite_lease.shutil, "rmtree", boom)
+    setattr_in(monkeypatch, _suite_lease, "shutil.rmtree", boom)
     release = _suite_lease.acquire("removal-fails", lease_root=lease_root)
     assert release is not None, "a failed cleanup of the corpse must not cost the run its lease"
     try:
