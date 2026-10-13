@@ -293,7 +293,7 @@ jobs:
       # suite that never runs is worse than none, because its existence gets
       # cited as coverage. Cost on CI: 5.5 to 11.5 min over 14 runs on
       # 2026-09-29/30 (an earlier local figure of ~3 min for 25 tests was
-      # wrong for the CI runner), across the 9 classes carrying the tag.
+      # wrong for the CI runner), across the classes carrying the tag (15 at 2026-10-12).
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
         run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=${{ runner.environment == 'github-hosted' && '1' || '4' }}
