@@ -41,8 +41,8 @@ return ``None`` from ``extract_aspects``; the calling hook should
 no-op on ``None``.
 
 Invocation: ``["claude", "-p", "--output-format", "json",
-"--strict-mcp-config"]`` (default argv, see ``_run_claude_isolated``),
-prompt fed via stdin, ``timeout=180``. ``--strict-mcp-config`` (RDR-196
+"--strict-mcp-config", "--tools", "", "--setting-sources", ""]`` (default
+argv, see ``_run_claude_isolated``), prompt fed via stdin, ``timeout=180``. ``--strict-mcp-config`` (RDR-196
 Gap 4, nexus-nyry9.6) keeps this tool-free dispatch from loading the
 user's ambient MCP server set. The Claude CLI is expected to be on
 PATH; if it is not, subprocess creation raises ``FileNotFoundError``
@@ -1941,6 +1941,17 @@ def _run_claude_isolated(
         # Bash run; its children would inherit NX_HARNESS_CLAUDE_OAUTH_TOKEN,
         # which the grant keeps in this child's env.
         "--tools", "",
+        # No settings file, so none of the user's hooks or plugins (the same
+        # flag ``claude_dispatch`` passes by default, nexus-11nm2).
+        # ``--strict-mcp-config`` stops MCP servers only: without this the
+        # child still ran every SessionStart hook, and the conexus plugin's
+        # own ``mcp-connect-wait`` then waited its full 15 s for an ``nx-mcp``
+        # this child never starts. Measured 2026-10-13 on a one-line prompt:
+        # 19 s and 12.3k context tokens without the flag, 2 s and 6.7k with
+        # it; one hook log held 48 such timeouts in ten days. Like
+        # ``claude_dispatch``, this drops auth supplied by a settings file
+        # (an ``apiKeyHelper``); environment and keychain auth are unaffected.
+        "--setting-sources", "",
     ]
     if _argv is None and model:
         # nexus-oc98c: the config's model_version is what the row will be
