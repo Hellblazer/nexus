@@ -458,23 +458,27 @@ def test_with_a_cli_every_hook_entry_reaches_its_program_and_verb(tmp_path: Path
     assert seen["args"] == list(invocation[1:])
 
 
-def _session_start_entries() -> list[dict]:
+def _entries(event: str) -> list[dict]:
     data = json.loads(_HOOKS_JSON.read_text(encoding="utf-8"))
-    return [hook for group in data["hooks"]["SessionStart"] for hook in group["hooks"]]
+    return [hook for group in data["hooks"][event] for hook in group["hooks"]]
 
 
 @posix_only("builds a PATH that holds uv alone by symlink; the Windows first session is in the Phase 1 gate")
-def test_a_session_start_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path) -> None:
-    """Every SessionStart entry, run in order exactly as hooks.json writes it,
-    through the real ``uv``, on a machine with no CLI: no error, one message for
-    the model, and nothing written under the Nexus config directory or the tools
-    directory. (uv keeps its own cache; that is outside this pin.)"""
+def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path) -> None:
+    """Every SessionStart entry and then the SessionEnd entry, run in order exactly
+    as hooks.json writes them, through the real ``uv``, on a machine with no CLI:
+    no error, at most one line on standard error each, one message for the model,
+    and nothing written under the Nexus config directory or the tools directory.
+    (uv keeps its own cache; that is outside this pin.)"""
     import shutil
 
     uv = shutil.which("uv")
     assert uv, "uv is not on PATH; it starts every entry, so this is a failure, not a skip"
-    entries = _session_start_entries()
+    entries = _entries("SessionStart")
     assert len(entries) == 9, [e["args"][-2:] for e in entries]
+    session_end = _entries("SessionEnd")
+    assert len(session_end) == 1 and session_end[0]["args"][-1] == "nx-session-end-launcher", session_end
+    entries = entries + session_end
     assert entries[0]["args"][-1].endswith("/hooks/scripts/nx_setup_notice.py"), "the setup notice is the first entry"
 
     def uv_says(*args: str) -> str:
@@ -505,6 +509,9 @@ def test_a_session_start_with_no_cli_says_one_thing_and_writes_nothing(tmp_path:
         what = " ".join(entry["args"][-2:])
         assert r.returncode == 0, (what, r.stderr)
         assert "Traceback" not in r.stderr and "not found in" not in r.stderr, (what, r.stderr)
+        assert len(r.stderr.splitlines()) <= 1, (what, r.stderr)
+        if any(a.endswith("/launch/nx_launch.py") for a in entry["args"]):
+            assert "is not installed" in r.stderr and not r.stdout, (what, r.stdout, r.stderr)
         if r.stdout.strip():
             spoke.append(what)
             assert "Nexus is not installed" in json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]

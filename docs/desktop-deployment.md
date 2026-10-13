@@ -51,7 +51,7 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 /plugin install conexus@nexus-plugins
 ```
 
-On first session start, the plugin's SessionStart hook runs `nx upgrade --auto` (converging any pending migration) plus a preflight check. **It installs no daemon** — the T2 daemon it used to auto-install is retired (`nexus-i711w`). The storage service is provisioned by `nx init` and managed with `nx daemon service start|status|stop`.
+On first session start with the CLI installed, the plugin's SessionStart hook runs `nx upgrade --auto` (converging any pending migration) plus a preflight check. **It installs no daemon** — the T2 daemon it used to auto-install is retired (`nexus-i711w`). The storage service is provisioned by `nx init` and managed with `nx daemon service start|status|stop`.
 
 Tool names: `mcp__plugin_conexus_nexus__*` and `mcp__plugin_conexus_nexus-catalog__*`. Slash-command prefix: `/conexus:*`.
 
@@ -71,7 +71,9 @@ nx self install
 nx init
 ```
 
-Every server and hook entry runs through `uv`, so `uv` must be on the `PATH` the application starts with. Without `uv` nothing in the plugin runs and the application shows the servers as failed.
+The commands are the same on Windows; [Installing nexus on Windows](windows-install.md) has that platform's prerequisites.
+
+The plugin's three local servers and all of its command hooks start through `uv`, so `uv` must be on the `PATH` the application starts with. Without `uv` none of them runs and the application shows the servers as failed. Skills, commands and the `sn` plugin's hosted server do not need it.
 
 ## Surface 2: Claude Desktop chat and Cowork (account plugin)
 
@@ -81,7 +83,7 @@ Claude Desktop keeps two plugin stores. Claude Code and the Desktop Code tab rea
 
 Install:
 
-1. Install the `nx` CLI and provision the service first (`nx init`). The plugin launches `nx-mcp` from the CLI install, so the account plugin alone is not enough.
+1. Install the `nx` CLI and provision the service first (`nx init`). The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has no Nexus tools (see "First run" under Surface 1).
 2. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it).
 
 To upgrade after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 while 7.77.1 was current), and conexus could not be enabled from it until the marketplace was removed and added again. Why it does not follow new release tags is not yet understood.

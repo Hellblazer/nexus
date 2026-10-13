@@ -222,9 +222,11 @@ def install_stale_host_hook(server: object) -> bool:
 
             The note DOES promise convergence, which ``spawn_tripwire``
             deliberately does not, and the difference is real rather than
-            sloppiness: an MCP host is long-lived and launched by BARE
-            COMMAND NAME (``conexus/.mcp.json`` runs ``nx-mcp`` /
-            ``nx-mcp-catalog``), so it resolves through the shim and its skew
+            sloppiness: an MCP host is long-lived and launched BY NAME
+            (``conexus/.mcp.json`` asks the plugin's launcher for ``nx-mcp``
+            / ``nx-mcp-catalog``, which it resolves to the current generation
+            at each start; before RDR-228 the entry named the program and the
+            shim resolved it), so its skew
             comes from a flip landing after startup — which the next respawn
             does clear. A hand-configured client pointing at an absolute
             generation path would not converge; that is outside how this
