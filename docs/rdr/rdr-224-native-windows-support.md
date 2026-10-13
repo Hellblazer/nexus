@@ -1935,3 +1935,27 @@ Right-sized for an Architecture record that replaces an accepted direction.
   user's settings and so ran every SessionStart hook, and the plugin's connection
   wait timed out at its bound for an `nx-mcp` that child never starts. The child
   now passes `--setting-sources ""` (nexus-n6eaj).
+- 2026-10-13, evening: two more results from the clean guest, text and evidence
+  only. (a) Host resolution of bare `uv` and `nx-hook` with the installed
+  programs NOT beside `claude.exe`: they were moved to a directory that is only
+  on the user PATH, and copies of `whoami.exe` were planted under their names in
+  the session's working directory. A plain `CreateProcess` and `cmd /c` both ran
+  the plant; Claude Code 2.1.296 ran the installed programs for all four
+  recorded SessionStart hooks and for the `uv`-launched MCP server (T2
+  `224-hook-resolution-off-app-dir-2026-10-13`). This closes the limit recorded
+  in the earlier 2026-10-13 entry, for one host version; `nx-session-end-launcher`
+  stays unobserved because SessionEnd did not fire. (b) Application control:
+  with AppLocker's default rules enforced by the administrator
+  (`run-gate.sh --standard-user --no-admin-git --applocker`), the standard
+  account's install failed at its first step and nothing from
+  `docs/windows-install.md` worked. PowerShell ran in ConstrainedLanguage, so the
+  uv installer script failed; the Claude Code installer's executable and the
+  PortableGit archive were refused by policy (T2
+  `224-gate-run-applocker-7.78.0-2026-10-13`). A first run showed that the policy
+  reads as effective about 75 s before anything is blocked, and in that window
+  the account installed uv and conexus; once enforcement began, `nx.exe`,
+  `uv.exe` and the tool environment's `python.exe` were refused by path. The
+  driver now waits for a start in the account's profile to be recorded as
+  blocked before the account does anything. Not measured: which allow rules make
+  the install and the gate pass, WDAC, and Smart App Control. The install guide
+  now states the standard-account passes and the AppLocker result.

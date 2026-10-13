@@ -12,10 +12,17 @@ was not measured, it says so.
 - **Windows 11 on x64.** Windows on ARM is not supported: there is no engine
   build for it.
 - **No administrator rights are needed.** Every step installs per user. The
-  gate ran as a member of Administrators without elevation (a filtered token);
-  a standard, non-administrator account has not been measured. Git is the one
-  place to take care: the Git for Windows installer always asks for elevation,
-  so step 2 uses PortableGit instead.
+  gate passed as a member of Administrators without elevation (a filtered
+  token) and as a standard account in Users only, on a machine with no Git
+  (conexus 7.78.0, 2026-10-13). Git is the one place to take care: the Git for
+  Windows installer always asks for elevation, so step 2 uses PortableGit
+  instead.
+- **Application control blocks this install.** On a machine where an
+  administrator enforces AppLocker's default rules, a standard account can
+  complete none of the steps below: the uv and Claude Code installers, the
+  PortableGit archive and every program installed under your profile are
+  refused (measured 2026-10-13). An administrator has to allow them first;
+  which rules are enough has not been measured.
 - **No Visual C++ redistributable install is needed.** The engine and the
   PostgreSQL bundle carry the runtime DLLs beside their executables, and nx
   points its own Python modules (PDF extraction, local embedding) at those
@@ -339,11 +346,14 @@ The Windows binaries are not Authenticode-signed. What that means in practice:
   extension is opened by Claude Desktop rather than run by Windows; what
   SmartScreen shows on that path has not been observed.
 - Smart App Control in enforcing mode blocks unsigned code, and that
-  configuration has not been tested. An enterprise application-control policy
-  (WDAC, AppLocker) may also block the engine.
+  configuration has not been tested.
+- AppLocker with its default rules blocks the whole install for a standard
+  account, signed or not, because everything installs under the user profile
+  (see "Before you start"). WDAC has not been tested.
 
 ## What is not supported or not measured
 
 - Windows on ARM: not supported.
-- A standard (non-administrator) account, Smart App Control in enforcing mode,
-  host sleep, and the Claude Desktop install dialog: not measured.
+- Smart App Control in enforcing mode, WDAC, the allow rules an AppLocker
+  machine needs, a Home or Pro edition, a Microsoft or domain account, host
+  sleep, and the Claude Desktop install dialog: not measured.
