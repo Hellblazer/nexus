@@ -22,7 +22,7 @@ was not measured, it says so.
   complete none of the steps below: the uv and Claude Code installers, the
   PortableGit archive and every program installed under your profile are
   refused (measured 2026-10-13). An administrator has to allow them first;
-  which rules are enough has not been measured.
+  [Application control](#application-control) lists the rules that were enough.
 - **No Visual C++ redistributable install is needed.** The engine and the
   PostgreSQL bundle carry the runtime DLLs beside their executables, and nx
   points its own Python modules (PDF extraction, local embedding) at those
@@ -348,12 +348,40 @@ The Windows binaries are not Authenticode-signed. What that means in practice:
 - Smart App Control in enforcing mode blocks unsigned code, and that
   configuration has not been tested.
 - AppLocker with its default rules blocks the whole install for a standard
-  account, signed or not, because everything installs under the user profile
-  (see "Before you start"). WDAC has not been tested.
+  account, signed or not, because everything installs under the user profile.
+  WDAC has not been tested.
+
+### Application control
+
+With AppLocker's default executable rules enforced, the install and the gate
+passed for a standard account once an administrator added these path rules to
+the executable collection (conexus 7.78.0, 2026-10-13):
+
+```text
+%OSDRIVE%\Users\*\.local\bin\*
+%OSDRIVE%\Users\*\AppData\Roaming\uv\*
+%OSDRIVE%\Users\*\AppData\Local\uv\cache\*
+%OSDRIVE%\Users\*\AppData\Local\Programs\Git\*
+%OSDRIVE%\Users\*\.config\nexus\*
+%OSDRIVE%\Users\*\.claude\downloads\*
+%OSDRIVE%\Users\*\AppData\Local\Temp\PortableGit.exe
+```
+
+They cover uv and the `nx` programs, the Python that uv downloads, PortableGit,
+the engine and PostgreSQL, and the two installers. Three limits:
+
+- These rules let any program in those folders run, and the user can write to
+  those folders. Publisher rules cannot replace them today, because the engine
+  and the PostgreSQL bundle are not signed.
+- The script rules were in audit mode for that run. Enforced, they put
+  PowerShell in ConstrainedLanguage mode, where the uv installer in step 1
+  fails whatever the executable rules say. Installing uv another way on such a
+  machine has not been measured.
+- DLL rules, updating and removing under the policy were not measured.
 
 ## What is not supported or not measured
 
 - Windows on ARM: not supported.
-- Smart App Control in enforcing mode, WDAC, the allow rules an AppLocker
-  machine needs, a Home or Pro edition, a Microsoft or domain account, host
+- Smart App Control in enforcing mode, WDAC, AppLocker with enforced script
+  or DLL rules, a Home or Pro edition, a Microsoft or domain account, host
   sleep, and the Claude Desktop install dialog: not measured.

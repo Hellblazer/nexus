@@ -1959,3 +1959,17 @@ Right-sized for an Architecture record that replaces an accepted direction.
   blocked before the account does anything. Not measured: which allow rules make
   the install and the gate pass, WDAC, and Smart App Control. The install guide
   now states the standard-account passes and the AppLocker result.
+- 2026-10-13, night: the allow rules an AppLocker machine needs, text and
+  evidence only. An audit-only run (`--applocker-audit`) passed the gate 5 of 5
+  and its log named every program the enforced rules would refuse: all sit in
+  `.local\bin`, `AppData\Roaming\uv`, `AppData\Local\uv\cache`,
+  `AppData\Local\Programs\Git` and `.config\nexus` under the profile. With the
+  executable rules enforced and seven path rules for those folders and the two
+  installer locations (`--applocker-allow`), the standard account installed from
+  the guide and the gate PASSED 5 of 5 (T2
+  `224-gate-run-applocker-allow-rules-7.78.0-2026-10-13`). The script rules were
+  audit only in that run: enforced, they put PowerShell in ConstrainedLanguage,
+  where the uv installer script fails and no path rule helps. Publisher rules
+  cannot replace the path rules while the engine and the PostgreSQL bundle are
+  unsigned (P0.2). Not measured: DLL rules, WDAC, Smart App Control, update and
+  removal under the policy. `docs/windows-install.md` lists the rules.
