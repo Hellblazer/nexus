@@ -5,7 +5,11 @@
 # other, and take none), make sure it has a network adapter, start it, wait for
 # the network, copy the gate script (and a candidate wheel) in, and parse the
 # gate script under PowerShell 5.1 on the guest. Exit 3 guest not Off, 4 no
-# network, 5 the gate script does not parse on the guest.
+# network, 5 the gate script does not parse on the guest; over ssh these reach
+# the Mac only as non-zero, so the NXG-RESULT line says which.
+# "NXG-RESTORED: ok" is printed the moment the restore has succeeded and
+# not before: run-gate.sh powers the guest off at the end only when it sees it,
+# so a refusal above it never leaves this run owning a guest it did not restore.
 param(
     [Parameter(Mandatory = $true)][string]$VMName,
     [Parameter(Mandatory = $true)][string]$GuestUser,
@@ -17,7 +21,10 @@ if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { thr
 if ($Wheel -and $Wheel -notmatch '^[A-Za-z0-9._+-]+\.whl$') { throw 'Wheel is not a wheel file name' }
 $pw = [Console]::In.ReadLine()
 if (-not $pw) { throw 'nothing on stdin' }
-$cred = New-Object PSCredential($GuestUser, (ConvertTo-SecureString $pw -AsPlainText -Force)); $pw = $null
+# The characters go into the SecureString one by one: ConvertTo-SecureString -AsPlainText would put the
+# plain text in a cmdlet parameter binding, which PowerShell module logging records when it is on.
+$sec = New-Object System.Security.SecureString; foreach ($c in $pw.ToCharArray()) { $sec.AppendChar($c) }; $sec.MakeReadOnly(); $pw = $null; $c = $null
+$cred = New-Object PSCredential($GuestUser, $sec)
 $vm = $VMName; $cp = $Checkpoint; $t0 = Get-Date
 function Nics { @(Get-VMNetworkAdapter -VMName $vm).Count }
 function EnsureNic($when) {
@@ -29,6 +36,7 @@ $v = Get-VM -Name $vm
 "before: state=$($v.State) parent=$($v.ParentCheckpointName) nics=$(Nics)"
 if ($v.State -ne 'Off') { "NXG-RESULT: FAIL REFUSED: guest is not Off (as found it was Off); not touching it"; exit 3 }
 Restore-VMSnapshot -VMName $vm -Name $cp -Confirm:$false -ErrorAction Stop
+'NXG-RESTORED: ok'
 "restored to $cp at $((Get-Date).ToUniversalTime().ToString('o'))"
 # The restored configuration (no NIC in the checkpoint) can become visible late: sample it for 15 s first.
 for ($i = 0; $i -lt 5; $i++) { "nic count ${i}x3s after the restore = $(Nics)"; Start-Sleep 3 }

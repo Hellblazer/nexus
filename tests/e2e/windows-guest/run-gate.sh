@@ -4,7 +4,10 @@
 # Run the RDR-224 Phase 5 gate (tests/e2e/windows-phase5-gate.ps1) unattended in
 # the Windows gate guest, from the Mac, and print the verdict line. Exits 0 only
 # when the collected verdict line is "WINDOWS PHASE 5 GATE PASSED
-# (executed=N declared=N)" with N equal; every other outcome exits non-zero.
+# (executed=N declared=N)" with N equal, N above zero, and the gate's own line
+# "gate script sha256 <sha> (...; the setup phase ran the same file)" in the same
+# verdict.txt carries the sha256 of the gate script this run staged; every other
+# outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
 #       [--wheel PATH] [--out DIR] [--keep-guest]
@@ -26,7 +29,10 @@
 #   1 restore    restore ONLY to the named checkpoint (none is taken), add the
 #                Default Switch adapter when the restored configuration has none,
 #                start, wait for the network, copy the gate script in, parse it
-#                again on the guest
+#                again on the guest. It prints "NXG-RESTORED: ok" the moment the
+#                restore succeeds; this script treats the guest as its own (and
+#                collects from it and powers it off at the end) only when that
+#                line is in the step's output.
 #   2 install    uv, conexus, Claude Code, Git, the plugin
 #   3 setup      the gate's setup phase, a one-shot Interactive scheduled task
 #   4 gaterun    write GATERUN.txt
@@ -44,7 +50,24 @@
 #
 # Environment overrides (the names launch.sh reads, plus the checkpoint):
 #   NX_GUEST_HOST, NX_GUEST_VM, NX_GUEST_USER, NX_GUEST_KEYCHAIN_SERVICE,
-#   NX_GUEST_CHECKPOINT.
+#   NX_GUEST_CHECKPOINT. NX_GUEST_TIMEOUT_<STEP> (seconds) changes a step's bound;
+#   see "Bounds" below.
+#
+# Result channel: the remote login shell is PowerShell, so a non-zero exit of a
+# host script reaches this side as 1 whatever it was. Only zero versus non-zero
+# survives ssh; the "NXG-RESULT:" lines in each step's log are the channel that
+# says what happened, and run_step stops on a missing "NXG-RESULT: ok".
+#
+# Bounds: every step is cut off after a fixed number of seconds (the install,
+# setup and verdict steps get the most), and so are the collection and the end
+# step. A bound that fires kills the local ssh and fails the run. A dropped ssh
+# during the 27-minute verdict wait fails the run the same way, and the end step
+# then powers the guest off mid-verify (the run's state stays on the guest disk;
+# --keep-guest keeps it up).
+#
+# Signals: INT, TERM and HUP run the cleanup (collect, end step) once, then exit
+# 130, 143 or 129. A signal that arrives during the cleanup itself aborts only the
+# stage it hit; the end step still runs, once.
 #
 # Not run on Windows from CI: the PowerShell is carried over from the scripts
 # that passed on 2026-10-12 (T2 nexus_rdr/224-gate-run-7.78.0-2026-10-12);
@@ -100,6 +123,19 @@ for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_G
 done
 [[ -f "$gate" ]] || die 2 "no gate script at $gate"
 
+# sha256_of <file> <variable>: the file's sha256 into the variable, or stop. An empty
+# or malformed hash would make the greps below match any hash line at all.
+sha256_of() {
+    local s=''
+    if command -v shasum >/dev/null 2>&1; then
+        s="$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        s="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
+    fi
+    [[ "$s" =~ ^[0-9a-f]{64}$ ]] || die 2 "cannot compute a 64-hex sha256 of $1 (needs shasum or sha256sum)"
+    printf -v "$2" '%s' "$s"
+}
+
 wheel_name=''
 wheel_sha=''
 if [[ -n "$wheel" ]]; then
@@ -107,9 +143,10 @@ if [[ -n "$wheel" ]]; then
     wheel_name="$(basename "$wheel")"
     [[ "$wheel_name" =~ ^[A-Za-z0-9._+-]+\.whl$ ]] || die 2 "the wheel's file name has a character outside A-Za-z0-9._+-"
     [[ "$wheel_name" == "conexus-${version}-"* ]] || die 2 "the wheel is $wheel_name, not a conexus-${version}- wheel"
-    wheel_sha="$(shasum -a 256 "$wheel" | awk '{print $1}')"
+    sha256_of "$wheel" wheel_sha
 fi
-gate_sha="$(shasum -a 256 "$gate" | awk '{print $1}')"
+gate_sha=''
+sha256_of "$gate" gate_sha
 
 RUN="nxg-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 HOST_WIN_DIR="C:\\build\\guest\\$RUN"
@@ -121,19 +158,80 @@ mkdir -p "$out" || die 2 "cannot create $out"
 say() { echo "run-gate.sh: $(date -u +%H:%M:%S) $*"; }
 quiet() { grep -v -i -E 'post-quantum|store now, decrypt later|pq\.html' || true; }
 
-SSH_OPTS=(-o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+# BatchMode: a key or host-key prompt would read the terminal and hang an unattended run.
+SSH_OPTS=(-o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
 
-# A host script that needs no guest credential.
+# Per-step bounds in seconds, each overridable as NX_GUEST_TIMEOUT_<STEP>.
+bound() {
+    local v="${!1:-$2}"
+    [[ "$v" =~ ^[0-9]+$ && "$v" -gt 0 ]] || die 2 "$1 must be a positive number of seconds"
+    printf -v "$3" '%s' "$v"
+}
+bound NX_GUEST_TIMEOUT_HOSTCHECK 300 T_HOSTCHECK
+bound NX_GUEST_TIMEOUT_RESTORE 900 T_RESTORE
+bound NX_GUEST_TIMEOUT_INSTALL 1800 T_INSTALL
+bound NX_GUEST_TIMEOUT_SETUP 1800 T_SETUP
+bound NX_GUEST_TIMEOUT_GATERUN 300 T_GATERUN
+bound NX_GUEST_TIMEOUT_LAUNCH 600 T_LAUNCH
+bound NX_GUEST_TIMEOUT_VERDICT 1800 T_VERDICT
+bound NX_GUEST_TIMEOUT_COLLECT 600 T_COLLECT
+bound NX_GUEST_TIMEOUT_END 300 T_END
+
+# descendants <pid>: the pids below it, deepest first.
+descendants() {
+    local c
+    for c in $(ps -A -o pid= -o ppid= 2>/dev/null | awk -v p="$1" '$2 == p {print $1}'); do
+        descendants "$c"
+        echo "$c"
+    done
+}
+
+# run_bounded <seconds> <command...>: runs the command in the foreground (so a
+# terminal signal reaches it) with a watchdog that, after <seconds>, kills what the
+# command started. Returns the command's status, or 124 when the bound fired.
+run_bounded() {
+    local secs="$1" me wd rc flag
+    shift
+    me="$(exec sh -c 'echo $PPID')"
+    flag="${TMPDIR:-/tmp}/nxgate-timeout.$$.$me.$RANDOM"
+    rm -f "$flag"
+    (
+        self="$(exec sh -c 'echo $PPID')"
+        n=0
+        while [[ $n -lt $secs ]]; do
+            sleep 1
+            kill -0 "$me" 2>/dev/null || exit 0
+            n=$((n + 1))
+        done
+        : >"$flag"
+        # shellcheck disable=SC2046
+        kill -TERM $(descendants "$me" | grep -v -x -e "$self") 2>/dev/null
+    ) >/dev/null 2>&1 &
+    wd=$!
+    "$@"
+    rc=$?
+    kill "$wd" 2>/dev/null
+    wait "$wd" 2>/dev/null
+    if [[ -e "$flag" ]]; then
+        rm -f "$flag"
+        echo "run-gate.sh: timed out after $secs s: $1" >&2
+        return 124
+    fi
+    return "$rc"
+}
+
+# A host script that needs no guest credential. stdin is /dev/null so that ssh
+# cannot swallow the caller's.
 host_ps() {
     local script="$1"; shift
-    ssh "${SSH_OPTS[@]}" "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File $HOST_WIN_DIR\\$script $*" </dev/null
+    ssh "${SSH_OPTS[@]}" "$HOST" "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $HOST_WIN_DIR\\$script $*" </dev/null
 }
 # A host script that opens the guest: the password goes on stdin, line 1, and
 # nowhere else.
 host_ps_pw() {
     local script="$1"; shift
     security find-generic-password -a "$GUSER" -s "$KEYCHAIN_SERVICE" -w \
-        | ssh "${SSH_OPTS[@]}" "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File $HOST_WIN_DIR\\$script $*"
+        | ssh "${SSH_OPTS[@]}" "$HOST" "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $HOST_WIN_DIR\\$script $*"
 }
 launch_guest() {
     "$here/launch.sh" --stage "$gate" --permission-mode auto \
@@ -141,20 +239,23 @@ launch_guest() {
 }
 
 host_dir_made=0
-guest_touched=0
 collected=0
-finished=0
+collect_started=0
+end_started=0
+end_warning=''
+end_warned=0
 
-# run_step <nn> <label> <require-ok-marker 0|1> <command...>: runs the command,
-# logs its output to $out/<nn>-<label>.txt, and stops the run on a non-zero
-# exit or, when asked, on a missing "NXG-RESULT: ok" line.
+# run_step <nn> <label> <seconds> <require-ok-marker 0|1> <command...>: runs the
+# command for at most <seconds>, logs its output to $out/<nn>-<label>.txt, and
+# stops the run on a non-zero exit (124: the bound fired) or, when asked, on a
+# missing "NXG-RESULT: ok" line.
 run_step() {
-    local n="$1" label="$2" marker="$3" log rc
-    shift 3
+    local n="$1" label="$2" secs="$3" marker="$4" log rc
+    shift 4
     log="$out/$n-$label.txt"
     say "step $n $label"
     echo "$label start $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee "$log"
-    "$@" 2>&1 | quiet | tee -a "$log"
+    run_bounded "$secs" "$@" 2>&1 | quiet | tee -a "$log"
     rc=${PIPESTATUS[0]}
     echo "$label end $(date -u +%Y-%m-%dT%H:%M:%SZ) exit=$rc" | tee -a "$log"
     [[ $rc -eq 0 ]] || die 1 "step $label failed (exit $rc); log: $log"
@@ -166,39 +267,62 @@ run_step() {
 # Copy the guest's run directory, collected on the host, back to $out/run.
 fetch_collected() {
     [[ ! -e "$out/run" ]] || return 0
-    scp -q -r "$HOST:$HOST_DIR/out" "$out/" 2>&1 | quiet
+    run_bounded "$T_COLLECT" scp "${SSH_OPTS[@]}" -q -r "$HOST:$HOST_DIR/out" "$out/" 2>&1 | quiet
     if [[ -d "$out/out" ]]; then mv "$out/out" "$out/run"; collected=1; fi
 }
 
-# Always runs: a best-effort collection when the guest was touched and nothing
-# was collected yet, then the shutdown and the removal of the staged host files.
+# Always runs: a best-effort collection when this run restored the guest and
+# nothing was collected yet, then the shutdown and the removal of the staged host
+# files. Each stage runs at most once, so a second call (a signal during the first)
+# resumes with what has not been tried. While it runs, INT, TERM and HUP only abort
+# the stage they hit (the stage's child gets the same signal from the terminal):
+# exiting here would skip the end step.
 finish() {
-    [[ $finished -eq 0 ]] || return 0
-    finished=1
+    trap ':' INT TERM HUP
     [[ $host_dir_made -eq 1 ]] || return 0
-    local keep=''
-    if [[ $guest_touched -eq 1 && $collected -eq 0 ]]; then
+    # "Restored" is evidence, not intent: the restore step's own marker line, printed
+    # right after Restore-VMSnapshot succeeded. A restore that refused or failed
+    # before that (the guest is another run's, say) leaves a guest this run must
+    # neither read from nor power off.
+    local touched=0 keep=''
+    if [[ -f "$out/01-restore.txt" ]] && grep -q '^NXG-RESTORED: ok' "$out/01-restore.txt"; then touched=1; fi
+    if [[ $touched -eq 1 && $collected -eq 0 && $collect_started -eq 0 ]]; then
+        collect_started=1
         say "collecting what the guest holds"
-        { host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Collect yes 2>&1 | quiet; } >"$out/90-collect-on-exit.txt" 2>&1 || true
+        { run_bounded "$T_COLLECT" host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Collect yes 2>&1 | quiet; } >"$out/90-collect-on-exit.txt" 2>&1 || true
         fetch_collected || true
     fi
+    [[ $end_started -eq 0 ]] || return 0
+    end_started=1
     # Never shut down a guest this run did not restore, and not when asked to keep it.
-    if [[ $keep_guest -eq 1 || $guest_touched -eq 0 ]]; then keep='-KeepGuest'; fi
+    if [[ $keep_guest -eq 1 || $touched -eq 0 ]]; then keep='-KeepGuest'; fi
     say "cleaning up the host"
-    local wheel_arg=''
+    local wheel_arg='' end_rc
     if [[ -n "$wheel_name" ]]; then wheel_arg="-Wheel $wheel_name"; fi
     # shellcheck disable=SC2086
-    host_ps end.ps1 -VMName "$VM" -RunDir "$HOST_WIN_DIR" $wheel_arg $keep 2>&1 | quiet | tee "$out/99-end.txt" || true
+    run_bounded "$T_END" host_ps end.ps1 -VMName "$VM" -RunDir "$HOST_WIN_DIR" $wheel_arg $keep 2>&1 | quiet | tee "$out/99-end.txt"
+    end_rc=${PIPESTATUS[0]}
+    if [[ $end_rc -ne 0 ]] || ! grep -q '^NXG-RESULT: ok' "$out/99-end.txt"; then
+        end_warning="the end step did not report NXG-RESULT: ok (exit $end_rc); the guest may still be running and files may be left in $HOST_DIR on $HOST; see $out/99-end.txt"
+    fi
+}
+# Printed last, once, so that it is the line the reader ends on.
+warn_end() {
+    [[ -n "$end_warning" && $end_warned -eq 0 ]] || return 0
+    end_warned=1
+    echo "run-gate.sh: WARNING: $end_warning" >&2
 }
 on_exit() {
     local rc=$?
     trap - EXIT
     finish
+    warn_end
     exit "$rc"
 }
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 if [[ -n "$wheel_name" ]]; then
     say "candidate wheel $wheel_name sha256 $wheel_sha (not a published build)"
@@ -209,43 +333,42 @@ say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 
 # --- stage ------------------------------------------------------------------
 # mkdir fails when the directory exists, so a collision stops here.
-ssh "${SSH_OPTS[@]}" "$HOST" "cmd /c \"mkdir $HOST_WIN_DIR\\stage\"" </dev/null 2>&1 | quiet
+run_bounded 120 ssh "${SSH_OPTS[@]}" "$HOST" "cmd /c \"mkdir $HOST_WIN_DIR\\stage\"" </dev/null 2>&1 | quiet
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die 1 "cannot create $HOST_DIR on $HOST"
 host_dir_made=1
-scp -q "$driver"/*.ps1 "$HOST:$HOST_DIR/" 2>&1 | quiet
+scp "${SSH_OPTS[@]}" -q "$driver"/*.ps1 "$HOST:$HOST_DIR/" 2>&1 | quiet
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die 1 "cannot copy the driver scripts to $HOST:$HOST_DIR"
 if [[ -n "$wheel_name" ]]; then
-    scp -q "$gate" "$wheel" "$HOST:$HOST_DIR/stage/" 2>&1 | quiet
+    scp "${SSH_OPTS[@]}" -q "$gate" "$wheel" "$HOST:$HOST_DIR/stage/" 2>&1 | quiet
 else
-    scp -q "$gate" "$HOST:$HOST_DIR/stage/" 2>&1 | quiet
+    scp "${SSH_OPTS[@]}" -q "$gate" "$HOST:$HOST_DIR/stage/" 2>&1 | quiet
 fi
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die 1 "cannot copy the gate script to $HOST:$HOST_DIR/stage"
 
 # --- run --------------------------------------------------------------------
-run_step 00 hostcheck 1 host_ps hostcheck.ps1 -VMName "$VM" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
+run_step 00 hostcheck "$T_HOSTCHECK" 1 host_ps hostcheck.ps1 -VMName "$VM" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
 
-guest_touched=1
 if [[ -n "$wheel_name" ]]; then
-    run_step 01 restore 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Wheel "$wheel_name"
+    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Wheel "$wheel_name"
     grep -qF "wheel sha256=$wheel_sha" "$out/01-restore.txt" || die 1 "the wheel in the guest does not have sha256 $wheel_sha"
 else
-    run_step 01 restore 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
+    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
 fi
 grep -qF "gate sha256=$gate_sha" "$out/01-restore.txt" || die 1 "the gate script in the guest does not have sha256 $gate_sha"
 
 if [[ -n "$wheel_name" ]]; then
-    run_step 02 install 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version" -Arg2 "$wheel_name"
+    run_step 02 install "$T_INSTALL" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version" -Arg2 "$wheel_name"
 else
-    run_step 02 install 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version"
+    run_step 02 install "$T_INSTALL" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version"
 fi
-run_step 03 setup 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner setup-run.ps1 -Arg1 "$version" -Arg2 "$engine"
+run_step 03 setup "$T_SETUP" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner setup-run.ps1 -Arg1 "$version" -Arg2 "$engine"
 if [[ -n "$wheel_name" ]]; then
-    run_step 04 gaterun 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine" -Arg3 candidate
+    run_step 04 gaterun "$T_GATERUN" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine" -Arg3 candidate
 else
-    run_step 04 gaterun 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine"
+    run_step 04 gaterun "$T_GATERUN" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine"
 fi
-run_step 05 launch 0 launch_guest
-run_step 06 verdict 0 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner waitv.ps1 -Collect yes
+run_step 05 launch "$T_LAUNCH" 0 launch_guest
+run_step 06 verdict "$T_VERDICT" 0 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner waitv.ps1 -Collect yes
 
 fetch_collected
 [[ $collected -eq 1 ]] || die 1 "the guest's run directory was not collected"
@@ -253,14 +376,22 @@ fetch_collected
 # --- verdict ----------------------------------------------------------------
 verdict_file="$out/run/verdict.txt"
 [[ -f "$verdict_file" ]] || die 1 "no verdict.txt was collected: the run has no verdict, which is a FAILED run"
-verdict="$(grep -v '^[[:space:]]*$' "$verdict_file" | tail -n 1 | tr -d '\r' | LC_ALL=C sed $'s/^\xef\xbb\xbf//')"
+# The file the gate writes on Windows is UTF-8 with a BOM on line 1 and CRLF line ends.
+norm="$(LC_ALL=C sed $'s/^\xef\xbb\xbf//' "$verdict_file" | tr -d '\r')"
+verdict="$(printf '%s\n' "$norm" | grep -v '^[[:space:]]*$' | tail -n 1)"
 passed_re='^WINDOWS PHASE 5 GATE PASSED \(executed=([0-9]+) declared=([0-9]+)\)$'
+sha_re="^gate script sha256 ${gate_sha} \\(.*; the setup phase ran the same file\\)\$"
 rc=1
+provenance_ok=1
 if [[ "$verdict" =~ $passed_re ]] && [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]] && [[ "${BASH_REMATCH[1]}" -gt 0 ]]; then
-    rc=0
+    # A PASSED line from some other file (a verify run of a different script) is not this run's verdict.
+    if grep -qE "$sha_re" <<<"$norm"; then rc=0; else provenance_ok=0; fi
 fi
 finish
 echo "$verdict"
+if [[ $provenance_ok -eq 0 ]]; then
+    echo "run-gate.sh: the verdict is PASSED but verdict.txt does not carry the gate script line for this run's gate script (gate script sha256 $gate_sha (...; the setup phase ran the same file)); not accepted" >&2
+fi
 if [[ -n "$wheel_name" ]]; then
     echo "run-gate.sh: candidate wheel $wheel_name (sha256 $wheel_sha), not a published build; gate script sha256 $gate_sha; logs in $out"
 else

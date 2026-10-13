@@ -20,7 +20,10 @@ if ($Inner -and $Inner -notmatch '^[a-z0-9-]+\.ps1$') { throw 'Inner must be a s
 foreach ($a in @($Arg1, $Arg2, $Arg3)) { if ($a -notmatch '^[A-Za-z0-9._+-]*$') { throw 'an inner argument has a character outside A-Za-z0-9._+-' } }
 $pw = [Console]::In.ReadLine()
 if (-not $pw) { throw 'nothing on stdin' }
-$cred = New-Object PSCredential($GuestUser, (ConvertTo-SecureString $pw -AsPlainText -Force)); $pw = $null
+# The characters go into the SecureString one by one: ConvertTo-SecureString -AsPlainText would put the
+# plain text in a cmdlet parameter binding, which PowerShell module logging records when it is on.
+$sec = New-Object System.Security.SecureString; foreach ($c in $pw.ToCharArray()) { $sec.AppendChar($c) }; $sec.MakeReadOnly(); $pw = $null; $c = $null
+$cred = New-Object PSCredential($GuestUser, $sec)
 $s = New-PSSession -VMName $VMName -Credential $cred -ErrorAction Stop
 try {
     if ($Inner) {

@@ -4,7 +4,8 @@
 # the host and the guest's state, parses every staged script under Windows
 # PowerShell 5.1, and refuses before anything is touched. Exit 0 and a final
 # "NXG-RESULT: ok" line, or a refusal: 3 guest not Off, 5 a parse error,
-# 6 the named checkpoint does not exist.
+# 6 the named checkpoint does not exist. Over ssh the exit code reaches the Mac
+# only as non-zero; the NXG-RESULT line says which.
 param(
     [Parameter(Mandatory = $true)][string]$VMName,
     [Parameter(Mandatory = $true)][string]$Checkpoint,

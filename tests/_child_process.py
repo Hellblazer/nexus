@@ -82,6 +82,16 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
         pass
 
 
+def signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Send *sig* to *proc*'s whole group, as a terminal does for Ctrl-C (INT) or a closed window (HUP).
+
+    POSIX only: Windows has no process-group signals, so a caller skips there.
+    """
+    if not _POSIX:
+        raise NotImplementedError("process-group signals do not exist on Windows")
+    _signal_group(proc, sig)
+
+
 def kill_group(proc: subprocess.Popen) -> None:
     """Kill *proc* and everything in its group now. Does not wait.
 

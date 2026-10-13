@@ -15,14 +15,19 @@ runs the script.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
+
+from tests._child_process import kill_group, popen_in_group, signal_group
 
 REPO: Path = Path(__file__).resolve().parent.parent
 GUEST_DIR: Path = REPO / "tests" / "e2e" / "windows-guest"
@@ -67,7 +72,7 @@ def test_the_password_travels_only_in_the_keychain_to_ssh_pipe() -> None:
     assert len(re.findall(r"\bsecurity\b", code)) == 1
     assert re.search(
         r'security find-generic-password -a "\$GUSER" -s "\$KEYCHAIN_SERVICE" -w \\\n'
-        r'\s*\| ssh "\$\{SSH_OPTS\[@\]\}" "\$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File ',
+        r'\s*\| ssh "\$\{SSH_OPTS\[@\]\}" "\$HOST" "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ',
         code,
     ), "the keychain read must be piped directly into ssh powershell -File"
     # never captured: no command substitution or assignment around security, no read -s
@@ -83,8 +88,11 @@ def test_the_password_travels_only_in_the_keychain_to_ssh_pipe() -> None:
 _PW_LINE_SHAPES = (
     re.compile(r"^\$pw = \[Console\]::In\.ReadLine\(\)$"),
     re.compile(r"^if \(-not \$pw\) \{ throw 'nothing on stdin' \}$"),
+    # the only other use of the value: its characters, one by one, into a SecureString
+    # (ConvertTo-SecureString -AsPlainText would put the plain text in the cmdlet's parameter binding)
     re.compile(
-        r"^\$cred = New-Object PSCredential\(\$GuestUser, \(ConvertTo-SecureString \$pw -AsPlainText -Force\)\); \$pw = \$null$"
+        r"^\$sec = New-Object System\.Security\.SecureString; "
+        r"foreach \(\$c in \$pw\.ToCharArray\(\)\) \{ \$sec\.AppendChar\(\$c\) \}; \$sec\.MakeReadOnly\(\); \$pw = \$null; \$c = \$null$"
     ),
 )
 
@@ -97,12 +105,15 @@ def test_a_password_reading_script_reads_line_one_and_does_nothing_else_with_it(
     for ln in pw_lines:
         assert any(shape.match(ln) for shape in _PW_LINE_SHAPES), f"$pw used in an unexpected way: {ln!r}"
     assert sum("ReadLine" in ln for ln in code) == 1
-    # the credential object is only handed to the guest connection
+    # the SecureString is only wrapped in the credential, which is only handed to the guest connection
+    for ln in (ln.strip() for ln in code if re.search(r"\$sec\b", ln) and not ln.strip().startswith("$sec = New-Object")):
+        assert ln == "$cred = New-Object PSCredential($GuestUser, $sec)", f"$sec used in an unexpected way: {ln!r}"
     for ln in (ln.strip() for ln in code if "$cred" in ln):
         assert (
-            ln.startswith("$cred = New-Object PSCredential(")
+            ln == "$cred = New-Object PSCredential($GuestUser, $sec)"
             or re.search(r"-Credential \$cred\b", ln)
         ), f"$cred used in an unexpected way: {ln!r}"
+    assert "ConvertTo-SecureString" not in "\n".join(code) and "-AsPlainText" not in "\n".join(code)
     # nothing writes anything out of those variables
     text = _read(name)
     assert not re.search(r"(Out-File|Set-Content|Add-Content|Export-|Write-Host|Write-Output)[^\n]*\$(pw|cred)\b", text)
@@ -112,7 +123,7 @@ def test_a_password_reading_script_reads_line_one_and_does_nothing_else_with_it(
 @pytest.mark.parametrize("name", NO_PW_SCRIPTS + INNER_SCRIPTS)
 def test_scripts_that_need_no_password_never_read_stdin_or_build_a_credential(name: str) -> None:
     text = _read(name)
-    assert not re.search(r"Console\]::In|ReadLine|PSCredential|ConvertTo-SecureString|-Credential\b|\$pw\b", text)
+    assert not re.search(r"Console\]::In|ReadLine|PSCredential|SecureString|-Credential\b|\$pw\b|\$sec\b", text)
 
 
 def test_the_guest_is_reached_only_by_the_two_password_scripts() -> None:
@@ -151,6 +162,15 @@ def test_the_restore_refuses_a_guest_that_is_not_off_before_it_restores() -> Non
     refuse = restore.index("if ($v.State -ne 'Off')")
     assert refuse < restore.index("Restore-VMSnapshot")
     assert "exit 3" in restore[refuse:restore.index("Restore-VMSnapshot")]
+
+
+def test_the_restore_prints_one_fixed_marker_right_after_the_restore_succeeds() -> None:
+    lines = [ln.strip() for ln in _code_lines(_read("restore.ps1"))]
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("Restore-VMSnapshot"))
+    # run-gate.sh treats the guest as this run's only when this line is in the restore step's output
+    assert lines[at + 1] == "'NXG-RESTORED: ok'"
+    assert sum("NXG-RESTORED" in ln for ln in lines) == 1
+    assert "NXG-RESTORED" not in "".join(_read(n) for n in ALL_PS if n != "restore.ps1")
 
 
 def test_the_network_adapter_is_sampled_after_the_restore_and_added_when_missing() -> None:
@@ -328,7 +348,10 @@ def test_cleanup_removes_by_exact_name_inside_the_run_directory() -> None:
     sh = _sh()
     assert not re.search(r"Remove-Item|\brm\s+-rf?\s+[\"']?\$HOST|\bdel\b|\brmdir\b", "\n".join(_code_lines(sh)))
     # only the guest this run restored is shut down, and only unless asked to keep it
-    assert "if [[ $keep_guest -eq 1 || $guest_touched -eq 0 ]]; then keep='-KeepGuest'; fi" in sh
+    assert "if [[ $keep_guest -eq 1 || $touched -eq 0 ]]; then keep='-KeepGuest'; fi" in sh
+    # "restored" is evidence (the restore step's marker line), never a flag set before the step runs
+    assert "grep -q '^NXG-RESTORED: ok' \"$out/01-restore.txt\"" in sh
+    assert "guest_touched=1" not in sh
 
 
 # ---- the verdict decides the exit code ---------------------------------------
@@ -341,8 +364,10 @@ def test_the_exit_code_is_zero_only_for_the_passed_line() -> None:
     assert tail.count("rc=0") == 1 and 'exit "$rc"' in tail
     assert '[[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]]' in tail and '-gt 0 ]]' in tail
     # the verdict is the LAST non-blank line of the collected verdict.txt
-    assert "grep -v '^[[:space:]]*$' \"$verdict_file\" | tail -n 1" in sh
+    assert "grep -v '^[[:space:]]*$' | tail -n 1" in sh
     assert "no verdict.txt was collected" in sh
+    # and only when the gate's own sha line names the script this run staged
+    assert "gate script sha256 ${gate_sha} " in sh and "the setup phase ran the same file" in sh
 
 
 def test_the_gate_script_header_names_the_driver() -> None:
@@ -356,9 +381,29 @@ def test_the_gate_script_header_names_the_driver() -> None:
 # ---- run-gate.sh as behaviour, against stand-ins -----------------------------
 
 PASSED = "WINDOWS PHASE 5 GATE PASSED (executed=5 declared=5)"
+GATE_SHA = hashlib.sha256(GATE.read_bytes()).hexdigest()
+OTHER_SHA = "0" * 64
+
+
+def _sha_line(sha: str = GATE_SHA, same: bool = True) -> str:
+    """The gate's own provenance line, as the gate writes it (its Windows path included)."""
+    ran = "the setup phase ran the same file" if same else f"the setup phase ran sha256 {OTHER_SHA}, a DIFFERENT file"
+    return f"gate script sha256 {sha} (C:\\Users\\nxguest\\nx-gate\\windows-phase5-gate.ps1; {ran})"
+
+
+def _verdict(last: str, *, sha: str | None = GATE_SHA, same: bool = True, bom: bool = False, crlf: bool = False, bom_on_sha_line: bool = False) -> bytes:
+    """A collected verdict.txt. The real file (gate3 run, 2026-10-12) is UTF-8 with a BOM on line 1 and CRLF
+    throughout: its first line is the JSON of the results, then the sha line, then the verdict line."""
+    nl = "\r\n" if crlf else "\n"
+    lines = [] if bom_on_sha_line else ['{"P0":{"detail":"nx, version 9.8.7","status":"PASS"}}']
+    if sha is not None:
+        lines.append(_sha_line(sha, same))
+    lines.append(last)
+    return (b"\xef\xbb\xbf" if bom else b"") + (nl.join(lines) + nl).encode("utf-8")
+
 
 _FAKE_SSH = r"""#!/bin/bash
-# stand-in for ssh: no network. Logs the command and whether stdin carried a line.
+# stand-in for ssh: no network. Logs the command and how many bytes arrived on stdin.
 while [[ "${1:-}" == -o ]]; do shift 2; done
 cmd="$2"
 bytes=$(wc -c | tr -d ' ')
@@ -374,9 +419,13 @@ case "$cmd" in
     rundir="$(winpath "${script%\\*}")"
     case "$base" in
       hostcheck.ps1)
-        if [[ -n "${FAKE_FAIL_STEP:-}" && "$FAKE_FAIL_STEP" == hostcheck ]]; then echo "NXG-RESULT: FAIL REFUSED: the guest is not Off"; exit 3; fi
+        if [[ "${FAKE_FAIL_STEP:-}" == hostcheck ]]; then echo "NXG-RESULT: FAIL REFUSED: the guest is not Off"; exit 3; fi
         echo "NXG-RESULT: ok" ;;
       restore.ps1)
+        # the real script refuses before it restores anything when the guest is not Off
+        if [[ "${FAKE_FAIL_STEP:-}" == restore ]]; then echo "NXG-RESULT: FAIL REFUSED: guest is not Off"; exit 3; fi
+        echo "NXG-RESTORED: ok"
+        if [[ "${FAKE_FAIL_STEP:-}" == restore-late ]]; then echo "NXG-RESULT: FAIL the guest has no network"; exit 4; fi
         echo "gate sha256=$(shasum -a 256 "$rundir/stage/windows-phase5-gate.ps1" | cut -d' ' -f1)"
         if [[ "$cmd" == *" -Wheel "* ]]; then
           w="${cmd#* -Wheel }"; w="${w%% *}"
@@ -387,16 +436,19 @@ case "$cmd" in
         if [[ "$cmd" == *" -Inner "* ]]; then
           i="${cmd#* -Inner }"; i="${i%% *}"
           echo "$i" >> "$FAKE_ROOT/inner.log"
+          if [[ "${FAKE_SLOW_INNER:-}" == "$i" ]]; then touch "$FAKE_ROOT/slow-started"; sleep "${FAKE_SLEEP:-60}"; fi
           if [[ "${FAKE_FAIL_STEP:-}" == "$i" ]]; then echo "NXG-RESULT: FAIL $i broke"; else echo "NXG-RESULT: ok"; fi
         fi
         if [[ "$cmd" == *" -Collect yes"* ]]; then
+          if [[ "$cmd" != *" -Inner "* && -n "${FAKE_COLLECT_SLEEP:-}" ]]; then touch "$FAKE_ROOT/collecting"; sleep "$FAKE_COLLECT_SLEEP"; fi
           mkdir -p "$rundir/out"
           if [[ -n "${FAKE_VERDICT_FILE:-}" ]]; then cp "$FAKE_VERDICT_FILE" "$rundir/out/verdict.txt"; fi
           echo "collected verdict.txt"
         fi ;;
       end.ps1)
         echo "$cmd" >> "$FAKE_ROOT/end.log"
-        rm -rf "$rundir"; echo "NXG-RESULT: ok" ;;
+        rm -rf "$rundir"
+        if [[ -z "${FAKE_END_BAD:-}" ]]; then echo "NXG-RESULT: ok"; else echo "NXG-RESULT: FAIL the run directory was not emptied"; fi ;;
       *) echo "unexpected script $base" >&2; exit 9 ;;
     esac ;;
   *) echo "unexpected ssh command: $cmd" >&2; exit 9 ;;
@@ -406,7 +458,13 @@ esac
 _FAKE_SCP = r"""#!/bin/bash
 # stand-in for scp: maps host:C:/build/guest/<x> onto $FAKE_ROOT/host/<x>.
 args=()
-for a in "$@"; do [[ "$a" == -* ]] || args+=("$a"); done
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -*) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
 n=${#args[@]}
 dest="${args[$((n-1))]}"
 map() { echo "$FAKE_ROOT/host/${1#*:C:/build/guest/}"; }
@@ -422,14 +480,23 @@ fi
 
 _FAKE_SECURITY = """#!/bin/bash
 # stand-in for security: prints a placeholder, never a credential.
+echo "call" >> "$FAKE_ROOT/security.log"
+[[ -n "${FAKE_SECURITY_FAIL:-}" ]] && exit 44
 echo "placeholder-not-a-secret"
 """
 
 _FAKE_LAUNCH = """#!/bin/bash
-echo "$*" >> "$FAKE_ROOT/launch.log"
+echo "bytes_on_stdin=$(wc -c | tr -d ' ') :: $*" >> "$FAKE_ROOT/launch.log"
 [[ "${FAKE_FAIL_STEP:-}" == launch ]] && { echo "launch.sh: FAILED"; exit 1; }
 echo "launch.sh: Claude Code is open in the guest's console session"
 """
+
+_FAKE_BAD_SHASUM = """#!/bin/bash
+# stand-in for a shasum that fails and prints nothing
+exit 1
+"""
+
+_STDIN_CANARY = "STDIN-CANARY-must-not-be-read\n"
 
 
 def _bash() -> str:
@@ -462,17 +529,18 @@ class Harness:
         path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
 
-    def run(self, *args: str, verdict: str | None = None, fail_step: str = "") -> subprocess.CompletedProcess[str]:
+    def _env(self, verdict: bytes | str | None, fail_step: str, extra: dict[str, str] | None) -> dict[str, str]:
         env = {
             "PATH": f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
             "HOME": str(self.root),
             "TMPDIR": str(self.root),
             "FAKE_ROOT": str(self.root),
             "FAKE_FAIL_STEP": fail_step,
+            **(extra or {}),
         }
         if verdict is not None:
             vf = self.root / "verdict.in"
-            vf.write_text(verdict, encoding="utf-8")
+            vf.write_bytes(verdict if isinstance(verdict, bytes) else verdict.encode("utf-8"))
             env["FAKE_VERDICT_FILE"] = str(vf)
         # the stand-ins must be what the script finds, or this test would reach a real host
         probe = subprocess.run(
@@ -480,9 +548,33 @@ class Harness:
             env=env, capture_output=True, text=True, check=True,
         )
         assert probe.stdout.split() == [str(self.bin / n) for n in ("ssh", "scp", "security")]
+        return env
+
+    def run(
+        self, *args: str, verdict: bytes | str | None = None, fail_step: str = "", env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        # the canary is what a non-password ssh would swallow if it lacked </dev/null
         return subprocess.run(
-            [_bash(), str(self.script), *args], env=env, capture_output=True, text=True, timeout=120, cwd=self.root,
+            [_bash(), str(self.script), *args], env=self._env(verdict, fail_step, env),
+            capture_output=True, text=True, timeout=120, cwd=self.root, input=_STDIN_CANARY,
         )
+
+    def start(
+        self, *args: str, verdict: bytes | str | None = None, fail_step: str = "", env: dict[str, str] | None = None
+    ) -> subprocess.Popen[str]:
+        """The script in a session of its own, so a signal to its process group is a terminal Ctrl-C or hangup."""
+        return popen_in_group(
+            [_bash(), str(self.script), *args], env=self._env(verdict, fail_step, env),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=self.root,
+        )
+
+    def end_calls(self) -> list[str]:
+        path = self.root / "end.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def ssh_lines(self) -> list[str]:
+        return (self.root / "ssh.log").read_text().splitlines()
 
 
 @pytest.fixture()
@@ -493,94 +585,270 @@ def harness(tmp_path: Path) -> Harness:
 _BASE = ("--version", "9.8.7", "--engine", "6.5.4")
 
 
+def _assert_cleaned_up_once(h: Harness) -> None:
+    """end.ps1 ran exactly once. (The stand-in end.ps1 removes the host directory, so an empty host proves
+    only that it was called; what the real one removes is pinned by the text tests above.)"""
+    assert len(h.end_calls()) == 1, h.end_calls()
+    assert list((h.root / "host").iterdir()) == []
+
+
 def test_a_passed_verdict_exits_zero_and_everything_staged_is_removed(harness: Harness) -> None:
-    res = harness.run(*_BASE, "--out", str(harness.out), verdict=f"P0 PASS: ok\ngate script sha256 abc\n{PASSED}\n")
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED))
     assert res.returncode == 0, res.stderr + res.stdout
     assert res.stdout.rstrip().splitlines()[-2] == PASSED
     assert "conexus==9.8.7 from PyPI" in res.stdout
-    ssh_log = (harness.root / "ssh.log").read_text()
+    ssh_log = harness.ssh_lines()
     # the guest steps ran in order, with the password on stdin for exactly the password scripts
+    # and the caller's stdin (the canary) read by none of the others
     assert (harness.root / "inner.log").read_text().split() == ["inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1"]
-    for line in ssh_log.splitlines():
+    for line in ssh_log:
         reads_pw = "restore.ps1" in line or "guest-run.ps1" in line
         assert line.startswith("bytes_on_stdin=0 ::") != reads_pw, line
         assert "placeholder-not-a-secret" not in line
-    assert "-Checkpoint clean-baseline-2026-10-06" in ssh_log and "-Arg1 9.8.7" in ssh_log and "-Arg2 6.5.4" in ssh_log
-    # launch.sh: the gate script staged, the unattended prompt
+    assert "-Checkpoint clean-baseline-2026-10-06" in "\n".join(ssh_log) and "-Arg1 9.8.7" in "\n".join(ssh_log)
+    assert "-Arg2 6.5.4" in "\n".join(ssh_log)
+    # launch.sh: the gate script staged, the unattended prompt, and it did not take the caller's stdin
     launch = (harness.root / "launch.log").read_text()
+    assert launch.startswith("bytes_on_stdin=0 ::")
     assert "--permission-mode auto" in launch and "GATERUN.txt" in launch and "--stage" in launch
-    # cleanup ran, shut the guest down, and left no host directory behind
-    end = (harness.root / "end.log").read_text()
-    assert "end.ps1" in end and "-KeepGuest" not in end
-    assert list((harness.root / "host").iterdir()) == []
-    assert (harness.out / "run" / "verdict.txt").read_text().rstrip().endswith(PASSED)
+    # cleanup ran once, shut the guest down (no -KeepGuest), and left no host directory behind
+    _assert_cleaned_up_once(harness)
+    assert "-KeepGuest" not in harness.end_calls()[0]
+    assert (harness.out / "run" / "verdict.txt").read_bytes().rstrip().endswith(PASSED.encode())
     assert (harness.out / "00-hostcheck.txt").exists() and (harness.out / "99-end.txt").exists()
 
 
 @pytest.mark.parametrize(
     "verdict",
     [
-        "WINDOWS PHASE 5 GATE FAILED (executed=5 declared=5; not passing: A4)\n",
-        f"{PASSED}\nWINDOWS PHASE 5 GATE FAILED (executed=5 declared=5; not passing: A4)\n",
-        "WINDOWS PHASE 5 GATE PASSED (executed=4 declared=5)\n",
-        "WINDOWS PHASE 5 GATE PASSED (executed=0 declared=0)\n",
-        "WINDOWS PHASE 5 GATE PASSED (executed=5 declared=5) and more\n",
-        "P0 PASS: ok\n",
-        "",
+        # the real shape: BOM on line 1, CRLF throughout
+        _verdict(PASSED, bom=True, crlf=True),
+        # BOM on the line the sha is on, so the BOM strip is what lets the provenance line match
+        _verdict(PASSED, bom=True, crlf=True, bom_on_sha_line=True),
+        _verdict(PASSED, crlf=True),
+        _verdict(PASSED, bom=True),
     ],
+    ids=["real-shape", "bom-on-sha-line", "crlf-only", "bom-only"],
 )
-def test_anything_but_the_passed_line_exits_non_zero(harness: Harness, verdict: str) -> None:
+def test_the_real_verdict_file_shape_exits_zero(harness: Harness, verdict: bytes) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=verdict)
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "\r" not in res.stdout and "\ufeff" not in res.stdout
+    assert res.stdout.rstrip().splitlines()[-2] == PASSED
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        _verdict("WINDOWS PHASE 5 GATE FAILED (executed=5 declared=5; not passing: A4)"),
+        _verdict("WINDOWS PHASE 5 GATE FAILED (executed=5 declared=5; not passing: A4)", bom=True, crlf=True),
+        _verdict(PASSED) + b"WINDOWS PHASE 5 GATE FAILED (executed=5 declared=5; not passing: A4)\n",
+        _verdict("WINDOWS PHASE 5 GATE PASSED (executed=4 declared=5)"),
+        _verdict("WINDOWS PHASE 5 GATE PASSED (executed=0 declared=0)"),
+        _verdict("WINDOWS PHASE 5 GATE PASSED (executed=5 declared=5) and more"),
+        _verdict("P0 PASS: ok"),
+        b"",
+    ],
+    ids=["failed", "failed-real-shape", "failed-after-passed", "executed-lt-declared", "zero-zero", "trailing-text", "no-verdict-line", "empty"],
+)
+def test_anything_but_the_passed_line_exits_non_zero(harness: Harness, verdict: bytes) -> None:
+    # every one of these carries a valid sha line, so it is the verdict line itself that fails them
     res = harness.run(*_BASE, "--out", str(harness.out), verdict=verdict)
     assert res.returncode != 0, res.stdout
-    assert "GATE PASSED (executed=5 declared=5)\n" not in res.stdout.replace(verdict, "") or verdict.endswith("more\n")
-    # the host is cleaned up whatever the verdict
-    assert list((harness.root / "host").iterdir()) == []
+    assert PASSED not in res.stdout.splitlines()
+    _assert_cleaned_up_once(harness)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "why"),
+    [
+        (_verdict(PASSED, sha=OTHER_SHA), "a different gate script sha256"),
+        (_verdict(PASSED, sha=None), "no sha line"),
+        (_verdict(PASSED, same=False), "setup ran a different file"),
+        (_verdict(PASSED, sha=GATE_SHA[:-1]), "a truncated sha"),
+        (_verdict(PASSED, sha=None, bom=True, crlf=True), "no sha line, real shape"),
+    ],
+    ids=["other-sha", "no-sha-line", "setup-differs", "truncated-sha", "no-sha-line-real-shape"],
+)
+def test_a_passed_verdict_from_another_gate_script_is_refused(harness: Harness, verdict: bytes, why: str) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=verdict)
+    assert res.returncode != 0, why
+    assert "does not carry the gate script line for this run's gate script" in res.stderr, res.stderr
+    assert GATE_SHA in res.stderr
+    _assert_cleaned_up_once(harness)
 
 
 def test_a_run_with_no_verdict_file_is_a_failed_run(harness: Harness) -> None:
     res = harness.run(*_BASE, "--out", str(harness.out))
     assert res.returncode == 1
     assert "no verdict.txt was collected" in res.stderr
-    assert list((harness.root / "host").iterdir()) == []
+    _assert_cleaned_up_once(harness)
 
 
 @pytest.mark.parametrize("step", ["inst.ps1", "setup-run.ps1", "gaterun.ps1", "launch"])
 def test_a_failed_step_stops_the_run_but_still_collects_and_cleans_up(harness: Harness, step: str) -> None:
-    res = harness.run(*_BASE, "--out", str(harness.out), verdict=f"{PASSED}\n", fail_step=step)
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED), fail_step=step)
     assert res.returncode != 0
     assert PASSED not in res.stdout, "a run that stopped early must not print a verdict"
     inner = (harness.root / "inner.log").read_text().split() if (harness.root / "inner.log").exists() else []
     assert "waitv.ps1" not in inner
     assert (harness.out / "run" / "verdict.txt").exists(), "the guest's run directory is collected on the way out"
-    assert (harness.root / "end.log").exists()
-    assert list((harness.root / "host").iterdir()) == []
+    _assert_cleaned_up_once(harness)
+    assert "-KeepGuest" not in harness.end_calls()[0], "a guest this run restored is shut down"
 
 
 def test_a_refusal_before_the_restore_never_shuts_the_guest_down(harness: Harness) -> None:
     res = harness.run(*_BASE, "--out", str(harness.out), fail_step="hostcheck")
     assert res.returncode != 0
-    assert "restore.ps1" not in (harness.root / "ssh.log").read_text()
-    assert "-KeepGuest" in (harness.root / "end.log").read_text(), "a guest this run did not restore is left as it is"
-    assert list((harness.root / "host").iterdir()) == []
+    assert "restore.ps1" not in "\n".join(harness.ssh_lines())
+    _assert_cleaned_up_once(harness)
+    assert "-KeepGuest" in harness.end_calls()[0], "a guest this run did not restore is left as it is"
+
+
+def test_a_refusal_by_the_restore_step_leaves_the_guest_alone_and_touches_it_no_more(harness: Harness) -> None:
+    """restore.ps1 refuses (the guest is not Off, e.g. another run's): this run restored nothing, so it must
+    neither collect from that guest nor power it off."""
+    res = harness.run(*_BASE, "--out", str(harness.out), fail_step="restore", verdict=_verdict(PASSED))
+    assert res.returncode != 0
+    lines = harness.ssh_lines()
+    password_calls = [ln for ln in lines if "restore.ps1" in ln or "guest-run.ps1" in ln]
+    assert len(password_calls) == 1 and "restore.ps1" in password_calls[0], password_calls
+    assert len((harness.root / "security.log").read_text().splitlines()) == 1, "the keychain was read after the refusal"
+    assert not any("-Collect" in ln for ln in lines)
+    assert not (harness.out / "run").exists() and not (harness.out / "90-collect-on-exit.txt").exists()
+    _assert_cleaned_up_once(harness)
+    assert "-KeepGuest" in harness.end_calls()[0]
+
+
+def test_a_failure_after_the_restore_marker_collects_and_powers_the_guest_off(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), fail_step="restore-late", verdict=_verdict(PASSED))
+    assert res.returncode != 0
+    assert any("-Collect yes" in ln for ln in harness.ssh_lines()), "the restored guest's run directory is collected"
+    assert (harness.out / "run" / "verdict.txt").exists()
+    _assert_cleaned_up_once(harness)
+    assert "-KeepGuest" not in harness.end_calls()[0], "a guest this run restored is shut down"
 
 
 def test_keep_guest_is_passed_through(harness: Harness) -> None:
-    res = harness.run(*_BASE, "--out", str(harness.out), "--keep-guest", verdict=f"{PASSED}\n")
+    res = harness.run(*_BASE, "--out", str(harness.out), "--keep-guest", verdict=_verdict(PASSED))
     assert res.returncode == 0
-    assert "-KeepGuest" in (harness.root / "end.log").read_text()
+    assert "-KeepGuest" in harness.end_calls()[0]
 
 
 def test_a_candidate_wheel_is_installed_hashed_and_named_in_the_output(harness: Harness, tmp_path: Path) -> None:
     wheel = tmp_path / "conexus-9.8.7-py3-none-any.whl"
     wheel.write_bytes(b"not a real wheel")
-    res = harness.run(*_BASE, "--wheel", str(wheel), "--out", str(harness.out), verdict=f"{PASSED}\n")
+    res = harness.run(*_BASE, "--wheel", str(wheel), "--out", str(harness.out), verdict=_verdict(PASSED))
     assert res.returncode == 0, res.stderr + res.stdout
     assert "candidate wheel conexus-9.8.7-py3-none-any.whl" in res.stdout and "not a published build" in res.stdout
-    ssh_log = (harness.root / "ssh.log").read_text()
+    ssh_log = "\n".join(harness.ssh_lines())
     assert "-Wheel conexus-9.8.7-py3-none-any.whl" in ssh_log and "-Arg2 conexus-9.8.7-py3-none-any.whl" in ssh_log
     assert "-Arg3 candidate" in ssh_log
-    assert "-Wheel conexus-9.8.7-py3-none-any.whl" in (harness.root / "end.log").read_text()
-    assert list((harness.root / "host").iterdir()) == []
+    assert "-Wheel conexus-9.8.7-py3-none-any.whl" in harness.end_calls()[0]
+    _assert_cleaned_up_once(harness)
+
+
+def test_a_failed_cleanup_is_warned_about_last_and_does_not_change_a_passed_exit(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED), env={"FAKE_END_BAD": "1"})
+    assert res.returncode == 0, "a failed cleanup must not turn a PASSED run into a failure"
+    err = res.stderr.rstrip().splitlines()
+    assert err and "did not report NXG-RESULT: ok" in err[-1], res.stderr
+    assert "99-end.txt" in err[-1]
+
+
+def test_a_clean_run_prints_no_cleanup_warning(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0
+    assert "did not report NXG-RESULT: ok" not in res.stderr
+
+
+def test_a_failing_keychain_read_fails_the_step_not_just_the_pipe(harness: Harness) -> None:
+    """pipefail by behaviour: security | ssh must report security's failure even though ssh succeeds."""
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED), env={"FAKE_SECURITY_FAIL": "1"})
+    assert res.returncode != 0
+    assert not (harness.root / "inner.log").exists(), "the run went on to the guest steps after a failed keychain read"
+    assert "step restore failed" in res.stderr
+
+
+def test_an_unusable_sha256_stops_the_run_before_any_remote_call(harness: Harness) -> None:
+    Harness._exe(harness.bin / "shasum", _FAKE_BAD_SHASUM)
+    Harness._exe(harness.bin / "sha256sum", _FAKE_BAD_SHASUM)
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 2
+    assert "sha256" in res.stderr
+    assert not (harness.root / "ssh.log").exists() and not (harness.root / "scp.log").exists()
+
+
+def test_a_step_that_outlives_its_bound_is_killed_and_fails_the_run(harness: Harness) -> None:
+    t0 = time.monotonic()
+    res = harness.run(
+        *_BASE, "--out", str(harness.out), verdict=_verdict(PASSED),
+        env={"NX_GUEST_TIMEOUT_INSTALL": "2", "FAKE_SLOW_INNER": "inst.ps1", "FAKE_SLEEP": "40"},
+    )
+    assert time.monotonic() - t0 < 25, "the install step was not cut off at its bound"
+    assert res.returncode != 0
+    assert "timed out after 2 s" in res.stderr + res.stdout
+    assert "setup-run.ps1" not in (harness.root / "inner.log").read_text()
+    _assert_cleaned_up_once(harness)
+
+
+def _wait_for(path: Path, seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path.name} never appeared"
+        time.sleep(0.05)
+
+
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="process-group signals do not exist on Windows")
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    ("sig", "code"),
+    [(signal.SIGINT, 130), (signal.SIGHUP, 129), (signal.SIGTERM, 143)],
+    ids=["INT", "HUP", "TERM"],
+)
+def test_a_terminal_signal_during_a_step_collects_cleans_up_once_and_exits_with_the_signal_code(
+    harness: Harness, sig: signal.Signals, code: int
+) -> None:
+    proc = harness.start(
+        *_BASE, "--out", str(harness.out), verdict=_verdict(PASSED),
+        env={"FAKE_SLOW_INNER": "setup-run.ps1", "FAKE_SLEEP": "60"},
+    )
+    try:
+        _wait_for(harness.root / "slow-started")
+        signal_group(proc, sig)
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            kill_group(proc)
+    assert proc.returncode == code, stderr
+    _assert_cleaned_up_once(harness)
+    assert (harness.out / "run" / "verdict.txt").exists(), "the guest's run directory is collected on the way out"
+    assert "-KeepGuest" not in harness.end_calls()[0]
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGHUP], ids=["INT", "HUP"])
+def test_a_signal_during_the_collection_on_exit_still_runs_the_end_step_exactly_once(
+    harness: Harness, sig: signal.Signals
+) -> None:
+    proc = harness.start(
+        *_BASE, "--out", str(harness.out), verdict=_verdict(PASSED), fail_step="inst.ps1",
+        env={"FAKE_COLLECT_SLEEP": "60"},
+    )
+    t0 = time.monotonic()
+    try:
+        _wait_for(harness.root / "collecting")
+        signal_group(proc, sig)
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            kill_group(proc)
+    assert time.monotonic() - t0 < 45, "the interrupted collection was waited out"
+    assert proc.returncode == 1, stderr  # the failed step's own exit, not the signal's
+    _assert_cleaned_up_once(harness)
+    assert "-KeepGuest" not in harness.end_calls()[0]
 
 
 @pytest.mark.parametrize(
@@ -607,3 +875,20 @@ def test_a_wheel_for_another_version_is_refused(harness: Harness, tmp_path: Path
     res = harness.run(*_BASE, "--wheel", str(wheel))
     assert res.returncode == 2
     assert not (harness.root / "ssh.log").exists()
+
+
+# ---- text pins for what the stand-ins cannot show ---------------------------
+
+
+def test_every_ssh_and_scp_call_is_batch_mode_and_the_non_password_ones_read_no_stdin() -> None:
+    sh = _sh()
+    assert "SSH_OPTS=(-o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6)" in sh
+    code = _code_lines(sh)
+    for ln in code:
+        if re.search(r"^\s*(\|\s*)?(ssh|scp)\b", ln) or re.search(r"\bssh \"", ln):
+            assert "SSH_OPTS" in ln, f"ssh/scp without the shared options: {ln.strip()!r}"
+    assert not re.search(r"\bscp -q\b", "\n".join(code)), "scp must take the shared options, not a bare -q"
+    # powershell is never interactive, whichever way it is started from the Mac
+    assert len(re.findall(r"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File", sh)) == 2
+    assert "powershell -NoProfile -ExecutionPolicy" not in sh
+    assert "set -uo pipefail" in sh
