@@ -63,5 +63,27 @@ try {
             @("$b\setup.log", "$b\nxgate-claude.log", "$b\GATERUN.txt", "$b\inst-versions.txt", "$b\asuser.log" | Where-Object { Test-Path $_ })
         }
         foreach ($f in $files) { Copy-Item -FromSession $s -Path $f -Destination $out -Force; "collected " + (Split-Path $f -Leaf) }
+        # Every Claude Code session's hook records, read from the transcripts: one line per session and one per
+        # record that is not a success (nexus-498xj: an intermittent exit 10 from `nx-hook rdr` that only a
+        # session shows). The guest only reads; the text comes back as output and is written here, on the host.
+        try {
+            $records = Invoke-Command -Session $s {
+                Add-Type -AssemblyName System.Web.Extensions; $J = New-Object System.Web.Script.Serialization.JavaScriptSerializer; $J.MaxJsonLength = [int]::MaxValue
+                foreach ($t in @(Get-ChildItem "$env:USERPROFILE\.claude\projects" -Recurse -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object CreationTimeUtc)) {
+                    $total = 0; $bad = @()
+                    foreach ($line in [System.IO.File]::ReadAllLines($t.FullName)) {
+                        if ($line -notlike '*"hook_*') { continue }
+                        try { $a = $J.DeserializeObject($line)['attachment'] } catch { continue }
+                        if (-not $a -or "$($a['type'])" -notlike 'hook_*') { continue }
+                        $total++
+                        if ("$($a['type'])" -notin 'hook_success', 'hook_additional_context') { $bad += "  $($a['type']) event=$($a['hookEvent']) exit=$($a['exitCode']) ms=$($a['durationMs']) command=[$($a['command'])] stderr=[" + (("$($a['stderr'])" -replace '\s+', ' ').Trim()) + ']' }
+                    }
+                    "session $($t.BaseName) created=$($t.CreationTimeUtc.ToString('o')) hook records=$total not-success=$($bad.Count)"
+                    $bad
+                }
+            }
+            [System.IO.File]::WriteAllLines((Join-Path $out 'hook-records.txt'), [string[]]@($records))
+            "collected hook-records.txt (" + @($records | Where-Object { $_ -like '  hook_*' }).Count + " not-success)"
+        } catch { "hook records not collected: $($_.Exception.Message)" }
     }
 } finally { Remove-PSSession $s }

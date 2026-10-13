@@ -269,6 +269,12 @@ def test_the_verdict_wait_is_a_bounded_poll_and_the_collection_is_read_only() ->
     assert not re.search(r"Remove-Item|Set-Content|Add-Content|Out-File|Invoke-Command[^\n]*\{[^\n]*(Copy-Item|Move-Item|New-Item)", collect)
     # the guest-side listing reads only
     assert not re.search(r"Remove-|Stop-|Set-|Move-", collect[collect.index("$files = Invoke-Command"):collect.index("foreach ($f in $files)")])
+    # the hook records are read in the guest and written on the host; a failure there cannot fail the collection
+    records = collect[collect.index("$records = Invoke-Command"):collect.index("[System.IO.File]::WriteAllLines(")]
+    assert "ReadAllLines($t.FullName)" in records and not re.search(r"Remove-|Stop-|Set-|Move-|Copy-|New-Item|WriteAll", records)
+    # a context record is a hook's normal output, not a failure (the first real run counted one as not-success)
+    assert "-notin 'hook_success', 'hook_additional_context'" in records
+    assert "(Join-Path $out 'hook-records.txt')" in collect and "} catch { \"hook records not collected:" in collect
 
 
 def test_gaterun_names_the_source_and_takes_the_version_from_its_parameters() -> None:
