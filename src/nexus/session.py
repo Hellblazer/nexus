@@ -584,6 +584,10 @@ _MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
 _LAUNCH_WRAPPER_COMMANDS = ("uv",)
 _LAUNCHER_SCRIPT = "/launch/nx_launch.py"
 
+#: Substrings that make a row worth a second look when its first token names
+#: nothing known (a path with a space in it): see :func:`_mcp_process_kind`.
+_NAMES_OF_INTEREST = ("nx-mcp", "nx_launch.py", "uv")
+
 #: How many wrapper levels may sit between claude and a server. The longest
 #: chain the plugin produces is three, on Windows: ``uv.exe``, uv's
 #: ``python.exe`` stub, the interpreter running the launcher.
@@ -747,27 +751,70 @@ def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
                 if pid in seen:
                     continue
                 seen.add(pid)
-                tokens = command_line.split()
-                if not tokens:
-                    continue
-                # ``executable_stem``: either separator, no ``.exe`` -- a Windows
-                # ``nx-mcp.exe`` launcher and ``python.exe`` match the same names
-                # (RDR-224, nexus-f9bgu.21); the identity of a POSIX name.
-                executable = winproc_core.executable_stem(tokens[0])
-                is_python = bool(_PYTHON_EXECUTABLE_RE.match(executable))
-                if executable in _MCP_SIBLING_COMMANDS or (
-                    is_python and len(tokens) > 1
-                    and winproc_core.executable_stem(tokens[1]) in _MCP_SIBLING_COMMANDS
-                ):
+                kind = _mcp_process_kind(pid, command_line)
+                if kind == "server":
                     matches.append(pid)
-                elif executable in _LAUNCH_WRAPPER_COMMANDS or (
-                    is_python and any(token.replace("\\", "/").endswith(_LAUNCHER_SCRIPT) for token in tokens[1:])
-                ):
+                    # Windows: ``nx-mcp.exe`` is a launcher stub and the server
+                    # is the python under it, which is the pid that claims the
+                    # marker. Both are returned; a marker nobody claims is inert.
+                    for child, child_line in children(pid):
+                        if child not in seen and _mcp_process_kind(child, child_line) == "server":
+                            seen.add(child)
+                            matches.append(child)
+                elif kind == "wrapper":
                     wrappers.append(pid)
         frontier = wrappers
         if not frontier:
             break
     return matches
+
+
+def _mcp_process_kind(pid: int, command_line: str) -> str:
+    """``"server"``, ``"wrapper"`` or ``""`` for one process row.
+
+    A server is ``nx-mcp`` / ``nx-mcp-catalog`` run directly, or a python whose
+    script is one of them. A wrapper is ``uv``, or a python running the plugin's
+    ``nx_launch.py`` (see :func:`find_mcp_sibling_pids`).
+
+    The executable is read from the first token of the command line. That token
+    is wrong when the executable's path holds a space: the listing is the argv
+    joined with spaces, so ``C:\\Users\\John Smith\\.local\\bin\\uv.exe`` arrives
+    as ``C:\\Users\\John`` and the row matched nothing, for every Windows user
+    whose profile name has a space. When the first token names nothing known,
+    looks cut short (a path that does not end in ``.exe``) and the line mentions
+    a name of interest, the process's own image name is asked
+    for (:func:`_command_name_of`), and the script is then looked for in any
+    later token that is a path, since the argument positions are unknown too.
+    """
+    tokens = command_line.split()
+    if not tokens:
+        return ""
+    # ``executable_stem``: either separator, no ``.exe`` -- a Windows
+    # ``nx-mcp.exe`` launcher and ``python.exe`` match the same names
+    # (RDR-224, nexus-f9bgu.21); the identity of a POSIX name.
+    executable = winproc_core.executable_stem(tokens[0])
+    script_tokens = tokens[1:2]
+    known = executable in _MCP_SIBLING_COMMANDS or executable in _LAUNCH_WRAPPER_COMMANDS \
+        or bool(_PYTHON_EXECUTABLE_RE.match(executable))
+    if not known:
+        first = tokens[0]
+        cut_short = ("/" in first or "\\" in first) and not first.lower().endswith(".exe")
+        if not cut_short or len(tokens) < 2 \
+                or not any(name in command_line for name in _NAMES_OF_INTEREST):
+            return ""
+        executable = winproc_core.executable_stem(_command_name_of(pid))
+        script_tokens = [t for t in tokens[1:] if "/" in t or "\\" in t]
+    if executable in _MCP_SIBLING_COMMANDS:
+        return "server"
+    if executable in _LAUNCH_WRAPPER_COMMANDS:
+        return "wrapper"
+    if not _PYTHON_EXECUTABLE_RE.match(executable):
+        return ""
+    if any(winproc_core.executable_stem(t) in _MCP_SIBLING_COMMANDS for t in script_tokens):
+        return "server"
+    if any(t.replace("\\", "/").endswith(_LAUNCHER_SCRIPT) for t in tokens[1:]):
+        return "wrapper"
+    return ""
 
 
 

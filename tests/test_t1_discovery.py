@@ -318,7 +318,7 @@ class TestFindMcpSiblingPids:
 
     def test_finds_a_server_under_the_windows_chain(self):
         """uv.exe -> python.exe (stub) -> python.exe running the launcher ->
-        nx-mcp.exe. The launcher stub under nx-mcp.exe is not listed twice."""
+        nx-mcp.exe -> python.exe, the server itself."""
         from nexus.session import find_mcp_sibling_pids
 
         launch = r"C:\p\launch\nx_launch.py nx-mcp"
@@ -331,7 +331,9 @@ class TestFindMcpSiblingPids:
             (1310, 1300, r"C:\t\gen-1\Scripts\python.exe C:\t\gen-1\Scripts\nx-mcp.exe"),
         ]
         with patch("nexus.session._list_processes", return_value=table):
-            assert find_mcp_sibling_pids(1200) == [1300]
+            # The launcher stub and the python under it, which is the pid the
+            # server claims its marker by.
+            assert find_mcp_sibling_pids(1200) == [1300, 1310]
 
     def test_does_not_look_under_anything_but_the_launch_wrappers(self):
         """A server under a shell, a test runner or an editor is not this
@@ -366,24 +368,46 @@ class TestFindMcpSiblingPids:
             assert find_mcp_sibling_pids(1200) == []
             assert find_mcp_sibling_pids(2200) == [2300]
 
-    def test_a_wrapper_chain_is_followed_only_so_far(self):
+    @pytest.mark.parametrize(("wrappers", "found"), [(4, [1300]), (5, [])])
+    def test_a_wrapper_chain_is_followed_four_levels_and_no_further(self, wrappers, found):
         from nexus.session import find_mcp_sibling_pids
 
         table = [(1200, 1, "claude")]
         parent = 1200
-        for i in range(8):
+        for i in range(wrappers):
             table.append((1250 + i, parent, f"{self._UV} nx-mcp"))
             parent = 1250 + i
         table.append((1300, parent, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp"))
         with patch("nexus.session._list_processes", return_value=table):
-            assert find_mcp_sibling_pids(1200) == []
+            assert find_mcp_sibling_pids(1200) == found
 
-    def test_a_cycle_in_the_table_terminates(self):
+    def test_a_row_listed_twice_is_matched_once(self):
         from nexus.session import find_mcp_sibling_pids
 
-        table = [(1200, 1250, "claude"), (1250, 1200, f"{self._UV} nx-mcp")]
+        row = (1300, 1250, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp")
+        table = [(1200, 1, "claude"), (1250, 1200, f"{self._UV} nx-mcp"), row, row]
         with patch("nexus.session._list_processes", return_value=table):
-            assert find_mcp_sibling_pids(1200) == []
+            assert find_mcp_sibling_pids(1200) == [1300]
+
+    def test_a_space_in_the_path_of_uv_and_python_does_not_hide_the_server(self):
+        """A Windows profile named ``John Smith``: the listing is the argv joined
+        with spaces, so the first token is ``C:\\Users\\John``. The image name
+        is asked for instead (code review of 0eb55a713)."""
+        from nexus.session import find_mcp_sibling_pids
+
+        launch = r"C:\Users\John Smith\p\launch\nx_launch.py nx-mcp"
+        table = [
+            (1200, 1, "claude.exe"),
+            (1250, 1200, r"C:\Users\John Smith\.local\bin\uv.exe tool run python " + launch),
+            (1260, 1250, r"C:\Users\John Smith\uv\python.exe " + launch),
+            (1300, 1260, r"C:\Users\John Smith\t\current\bin\nx-mcp.exe"),
+            (1310, 1300, r"C:\Users\John Smith\t\gen-1\Scripts\python.exe C:\Users\John Smith\t\gen-1\Scripts\nx-mcp.exe"),
+            (1400, 1200, r"C:\Users\John Smith\vim.exe C:\Users\John Smith\nx-mcp.exe"),
+        ]
+        images = {1250: "uv", 1260: "python", 1300: "nx-mcp", 1310: "python", 1400: "vim"}
+        with patch("nexus.session._list_processes", return_value=table), \
+                patch("nexus.session._command_name_of", side_effect=lambda pid, **_k: images.get(pid, "")):
+            assert find_mcp_sibling_pids(1200) == [1300, 1310]
 
     def test_through_uv_against_the_REAL_process_table(self, tmp_path):
         """The chain the plugin produces, from real processes: this test process
