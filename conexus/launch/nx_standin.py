@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# /// script
+# requires-python = ">=3.12"
+# ///
 """The servers ``nx_launch.py`` serves when there is no Nexus CLI.
 
 RDR-228 Phase 1 Step 2 (nexus-sv2wx.6). The plugin's ``nexus`` and

@@ -443,3 +443,71 @@ def test_the_tools_root_agrees_with_layout_core(
     except install_layout.InstallLayoutError:
         expected = None
     assert _lookup().tools_dir() == expected
+
+
+# -- the entries as hooks.json writes them (RDR-228 Phase 1 Step 4, nexus-sv2wx.8) --
+
+
+@pytest.mark.parametrize("invocation", _hook_invocations(), ids=" ".join)
+def test_with_a_cli_every_hook_entry_reaches_its_program_and_verb(tmp_path: Path, invocation: tuple[str, ...]) -> None:
+    tools, _gen = _layout(tmp_path, invocation[0])
+    r = _run(list(invocation), tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert r.returncode == 0, r.stderr
+    seen = _report(r)
+    assert seen["marker"] == "layout"
+    assert seen["args"] == list(invocation[1:])
+
+
+def _session_start_entries() -> list[dict]:
+    data = json.loads(_HOOKS_JSON.read_text(encoding="utf-8"))
+    return [hook for group in data["hooks"]["SessionStart"] for hook in group["hooks"]]
+
+
+@posix_only("builds a PATH that holds uv alone by symlink; the Windows first session is in the Phase 1 gate")
+def test_a_session_start_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path) -> None:
+    """Every SessionStart entry, run in order exactly as hooks.json writes it,
+    through the real ``uv``, on a machine with no CLI: no error, one message for
+    the model, and nothing written under the Nexus config directory or the tools
+    directory. (uv keeps its own cache; that is outside this pin.)"""
+    import shutil
+
+    uv = shutil.which("uv")
+    assert uv, "uv is not on PATH; it starts every entry, so this is a failure, not a skip"
+    entries = _session_start_entries()
+    assert len(entries) == 9, [e["args"][-2:] for e in entries]
+    assert entries[0]["args"][-1].endswith("/hooks/scripts/nx_setup_notice.py"), "the setup notice is the first entry"
+
+    def uv_says(*args: str) -> str:
+        return subprocess.run([uv, *args], capture_output=True, text=True, check=True, timeout=60).stdout.strip()
+
+    home, config, tools, project = (_empty(tmp_path, n) for n in ("home", "config", "tools", "project"))
+    only_uv = _empty(tmp_path, "only-uv")
+    os.symlink(uv, only_uv / "uv")
+    plugin = tmp_path / "plugin"
+    for sub in ("hooks", "launch", ".claude-plugin"):
+        shutil.copytree(_ROOT / "conexus" / sub, plugin / sub, ignore=shutil.ignore_patterns("__pycache__"))
+    env = {
+        "PATH": os.pathsep.join([str(only_uv), "/usr/bin", "/bin"]),
+        "HOME": str(home),
+        "NEXUS_CONFIG_DIR": str(config),
+        "NX_TOOLS_DIR": str(tools),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(plugin),
+        # uv's own interpreters and cache stay where this machine keeps them.
+        "UV_PYTHON_INSTALL_DIR": uv_says("python", "dir"),
+        "UV_CACHE_DIR": uv_says("cache", "dir"),
+    }
+    payload = json.dumps({"hook_event_name": "SessionStart", "source": "startup", "cwd": str(project), "session_id": "no-cli"})
+    spoke: list[str] = []
+    for entry in entries:
+        argv = [entry["command"], *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in entry["args"])]
+        r = subprocess.run(argv, input=payload, capture_output=True, text=True, env=env, timeout=120, check=False, cwd=str(project))
+        what = " ".join(entry["args"][-2:])
+        assert r.returncode == 0, (what, r.stderr)
+        assert "Traceback" not in r.stderr and "not found in" not in r.stderr, (what, r.stderr)
+        if r.stdout.strip():
+            spoke.append(what)
+            assert "Nexus is not installed" in json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert len(spoke) == 1 and spoke[0].endswith("nx_setup_notice.py"), spoke
+    written = sorted(str(p.relative_to(tmp_path)) for base in (config, tools) for p in base.rglob("*"))
+    assert written == [], written

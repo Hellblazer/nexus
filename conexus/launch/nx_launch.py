@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# /// script
+# requires-python = ">=3.12"
+# ///
 """Start a Nexus CLI program, or handle its absence without an error.
 
 RDR-228 Phase 1 Step 1 (nexus-sv2wx.5). The plugin's servers and most of its

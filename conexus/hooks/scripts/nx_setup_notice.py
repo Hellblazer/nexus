@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# /// script
+# requires-python = ">=3.12"
+# ///
 """Tell the model at session start that Nexus is not installed, when it is not.
 
 RDR-228 Phase 1 Step 3 (nexus-sv2wx.7). The plugin's servers and most of its

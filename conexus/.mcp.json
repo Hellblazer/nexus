@@ -16,13 +16,37 @@
     "alwaysLoad": true
   },
   "nexus": {
-    "command": "nx-mcp",
-    "args": [],
+    "command": "uv",
+    "args": [
+      "tool",
+      "run",
+      "--directory",
+      "${CLAUDE_PLUGIN_ROOT}",
+      "--no-config",
+      "--quiet",
+      "--python",
+      ">=3.12",
+      "python",
+      "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py",
+      "nx-mcp"
+    ],
     "alwaysLoad": true
   },
   "nexus-catalog": {
-    "command": "nx-mcp-catalog",
-    "args": [],
+    "command": "uv",
+    "args": [
+      "tool",
+      "run",
+      "--directory",
+      "${CLAUDE_PLUGIN_ROOT}",
+      "--no-config",
+      "--quiet",
+      "--python",
+      ">=3.12",
+      "python",
+      "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py",
+      "nx-mcp-catalog"
+    ],
     "alwaysLoad": false
   }
 }

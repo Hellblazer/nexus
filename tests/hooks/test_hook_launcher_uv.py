@@ -99,10 +99,14 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_launcher_entries() -> None:
-    """Non-vacuity: seven entries launch through uv (four scripts, three shim)."""
+    """Non-vacuity: fifteen entries launch through uv: five scripts, three through
+    the shim and seven through the launcher (RDR-228, nexus-sv2wx.8)."""
     entries = _launcher_entries()
-    assert len(entries) == 7, [(e, _script(h)) for e, h in entries]
+    assert len(entries) == 15, [(e, _script(h)) for e, h in entries]
+    assert sum(1 for _, h in entries if _script(h) == "nx_launch.py") == 7
     assert {_script(h) for _, h in entries} == {
+        "nx_launch.py",
+        "nx_setup_notice.py",
         "version_lockstep_hook.py",
         "nx_hook_shim.py",
         "subagent_git_write_requires_orchestrator.py",

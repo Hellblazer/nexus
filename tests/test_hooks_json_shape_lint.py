@@ -112,7 +112,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 21 -> 15 at cleanup steps A2 and A3 (nexus-0r1uz): the bd-close gate, the
 #: phase-review close gate, and the Stop, StopFailure, PostCompact and
 #: divergence-language `mcp_tool` entries are deleted.
-EXPECTED_CONEXUS_ENTRIES = 15
+#: 15 -> 16 at nexus-sv2wx.8 (RDR-228 Phase 1): the setup notice hook,
+#: `nx_setup_notice.py`, is the first SessionStart entry.
+EXPECTED_CONEXUS_ENTRIES = 16
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -123,7 +125,17 @@ FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 #: `python3` is NOT here. It is not on PATH on stock Windows, so an entry
 #: launched through it never fires there (nexus-efk2h). The plugin-resident
 #: scripts and the shim go through `uv` instead, with sn's argv.
-CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "uv"})
+#: Since RDR-228 (nexus-sv2wx.8) `uv` is the only command. `nx-hook` and
+#: `nx-session-end-launcher` are programs of the CLI package, and an entry that
+#: names one directly fails with "Executable not found" on a machine that has
+#: the plugin and no CLI. They are reached through the launcher
+#: (:data:`NX_LAUNCH`), which exits 0 with one line when the program is absent.
+CONEXUS_COMMANDS = frozenset({"uv"})
+
+#: The script every CLI hook program is started through, and the programs a
+#: hook entry may ask it for.
+NX_LAUNCH = "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py"
+LAUNCHED_HOOK_PROGRAMS = frozenset({"nx-hook", "nx-session-end-launcher"})
 
 #: Everything before the script path, in order: sn's argv (:data:`SN_UV_ARGV`).
 #: The interpreter floor IS in the argv (``--python >=3.12``). The conexus scripts
@@ -151,6 +163,7 @@ NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",
@@ -250,17 +263,6 @@ def reject_conexus(event: str, entry: dict) -> str | None:
     if command not in CONEXUS_COMMANDS:
         return f"runs command {command!r}, which is not one of {sorted(CONEXUS_COMMANDS)}"
     args = entry.get("args", [])
-    if command == "nx-hook" and len(args) != 1:
-        return (
-            f"runs `nx-hook` with {len(args)} args; exactly one verb is "
-            f"permitted. An empty `args` spawns the entry point with no verb, "
-            f"which is a live hook that does nothing."
-        )
-    if command == "nx-session-end-launcher" and args:
-        return (
-            f"runs `nx-session-end-launcher` with {len(args)} args; it takes "
-            f"none, and its empty `args` is what makes the entry exec form."
-        )
     if command == "uv":
         if tuple(args[: len(CONEXUS_UV_ARGV)]) != CONEXUS_UV_ARGV:
             return (
@@ -268,6 +270,25 @@ def reject_conexus(event: str, entry: dict) -> str | None:
                 f"{list(CONEXUS_UV_ARGV)} (nexus-efk2h)"
             )
         rest = args[len(CONEXUS_UV_ARGV):]
+        if rest and rest[0] == NX_LAUNCH:
+            if len(rest) < 2 or rest[1] not in LAUNCHED_HOOK_PROGRAMS:
+                return (
+                    f"runs the launcher on {rest[1:2]!r}; a hook entry may ask it for "
+                    f"exactly one of {sorted(LAUNCHED_HOOK_PROGRAMS)}"
+                )
+            program, verbs = rest[1], rest[2:]
+            if program == "nx-hook":
+                if len(verbs) != 1:
+                    return (
+                        f"runs `nx-hook` through the launcher with {len(verbs)} args; "
+                        f"exactly one verb is permitted. None spawns the entry point "
+                        f"with no verb, which is a live hook that does nothing."
+                    )
+                if verbs[0] not in VERB_TABLE:
+                    return f"runs `nx-hook` on {verbs[0]!r}, which this wheel does not register"
+            elif verbs:
+                return f"runs `{program}` through the launcher with {len(verbs)} args; it takes none"
+            return None
         if rest and rest[0] == NX_HOOK_SHIM:
             if len(rest) != 2:
                 return f"runs the nx-hook shim with {len(rest) - 1} verbs; exactly one is permitted"
@@ -346,7 +367,8 @@ def test_every_launched_script_declares_the_interpreter_floor() -> None:
         for rest in [entry["args"][len(CONEXUS_UV_ARGV):]]
         if rest and rest[0] != NX_HOOK_SHIM
     }
-    assert scripts == PLUGIN_RESIDENT_SCRIPTS, scripts
+    assert NX_LAUNCH in scripts, "no entry goes through the launcher; the walk lost it"
+    assert scripts == PLUGIN_RESIDENT_SCRIPTS | {NX_LAUNCH}, scripts
     for script in sorted(scripts):
         text = (REPO_ROOT / "conexus" / script.removeprefix("${CLAUDE_PLUGIN_ROOT}/")).read_text()
         match = re.search(r"(?m)^# /// script$\n((?:^#(?: .*)?$\n)+?)^# ///$", text)
@@ -602,6 +624,27 @@ CONEXUS_REJECTS = [
         {"type": "command", "command": "nx-session-end-launcher", "args": ["x"]},
         id="launcher-with-an-argument",
     ),
+    # RDR-228 (nexus-sv2wx.8): a CLI program named directly fails on a machine
+    # with no CLI. Each well-formed bare entry is rejected for being bare.
+    pytest.param(
+        "SessionStart",
+        {"type": "command", "command": "nx-hook", "args": ["preflight"]},
+        id="bare-nx-hook-with-a-registered-verb",
+    ),
+    pytest.param(
+        "SessionEnd",
+        {"type": "command", "command": "nx-session-end-launcher", "args": []},
+        id="bare-session-end-launcher",
+    ),
+    # The launcher form, one clause each.
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH]}, id="launcher-with-no-program"),
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, "nx-mcp"]}, id="launcher-on-a-server-program"),
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, "nx", "upgrade"]}, id="launcher-on-nx"),
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, "nx-hook"]}, id="launcher-nx-hook-with-no-verb"),
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, "nx-hook", "rdr", "extra"]}, id="launcher-nx-hook-with-two-verbs"),
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, "nx-hook", "no-such-verb"]}, id="launcher-nx-hook-on-an-unregistered-verb"),
+    pytest.param("SessionEnd", {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, "nx-session-end-launcher", "x"]}, id="launcher-session-end-with-an-argument"),
+    pytest.param("SessionStart", {"type": "command", "command": "uv", "args": ["tool", "run", "--no-config", "--quiet", "--python", ">=3.12", "python", NX_LAUNCH, "nx-hook", "rdr"]}, id="launcher-without-the-plugin-root-directory"),
     # A command that is neither permitted nor a forbidden token. Without
     # this the CONEXUS_COMMANDS membership check had no case of its own:
     # every command-tier fixture above was rejected by the token ban or
@@ -753,25 +796,15 @@ def test_the_sn_fixture_builder_is_itself_permitted() -> None:
     assert reject_sn("SessionStart", _sn("session_start.py")) is None
 
 
-def test_the_permitted_commands_are_not_rejected_as_substrings() -> None:
+def test_the_permitted_programs_are_not_rejected_as_substrings() -> None:
     """`nx-hook` is not `nx`, and `nx-session-end-launcher` is not `nx` either.
 
     This is the fixture for the gate residual raised during planning: read
-    the `nx` clause as a substring and both permitted commands disappear,
+    the `nx` clause as a substring and both permitted programs disappear,
     taking seven live entries with them. It fails the moment someone
-    rewrites the token comparison as `in`.
+    rewrites the token comparison as `in`. Since RDR-228 the programs are
+    named as the launcher's arguments, where the same token rule reads them.
     """
-    assert (
-        reject_conexus(
-            "SessionStart",
-            {"type": "command", "command": "nx-hook", "args": ["session-start"]},
-        )
-        is None
-    )
-    assert (
-        reject_conexus(
-            "SessionEnd",
-            {"type": "command", "command": "nx-session-end-launcher", "args": []},
-        )
-        is None
-    )
+    for event, tail in (("SessionStart", ["nx-hook", "session-start"]), ("SessionEnd", ["nx-session-end-launcher"])):
+        entry = {"type": "command", "command": "uv", "args": [*CONEXUS_UV_ARGV, NX_LAUNCH, *tail]}
+        assert reject_conexus(event, entry) is None, tail

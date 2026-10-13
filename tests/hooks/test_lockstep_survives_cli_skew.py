@@ -32,9 +32,9 @@ _SCRIPTS = _ROOT / "conexus" / "hooks" / "scripts"
 _HOOK = "version_lockstep_hook.py"
 _CHAIN = (
     _HOOK, "version_lockstep_action.py", "_interpreter.py", "_exec_path.py",
-    "_endpoint_resolve.py",
+    "_endpoint_resolve.py", "_cli_lookup.py",
 )
-_PLUGIN_LOCAL = {"_interpreter", "_exec_path", "_endpoint_resolve"}
+_PLUGIN_LOCAL = {"_interpreter", "_exec_path", "_endpoint_resolve", "_cli_lookup"}
 
 
 def _session_start_entries() -> list[dict]:

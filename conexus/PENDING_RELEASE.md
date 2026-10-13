@@ -56,3 +56,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 
 ## Deferred to the next client release
+
+ONE PATH PER BULLET, on the bullet's FIRST line. These wait for the client release that carries nexus-sv2wx.8's fix to `src/nexus/session.py`: the server entries below put `uv` between Claude and `nx-mcp`, and a CLI without that fix no longer finds the server for the `/clear` and `/resume` session handoff.
+
+- server entries through the launcher (nexus-sv2wx.8): `conexus/.mcp.json` starts `nexus` and `nexus-catalog` as `uv tool run ... python launch/nx_launch.py nx-mcp` (and `nx-mcp-catalog`), where it named the two programs directly (RDR-228 Phase 1 Step 4). With no CLI the launcher serves a stand-in and the application shows a connected server; before, the servers failed to start.
+- hook entries through the launcher (nexus-sv2wx.8): `conexus/hooks/hooks.json` runs the six `nx-hook` session-start entries and the session-end entry through `launch/nx_launch.py`, and adds `nx_setup_notice.py` as the first session-start entry. With no CLI each entry is one line and exit 0, where it was "Executable not found". The three `nx_hook_shim.py` entries and the `SubagentStart` `mcp_tool` entry are unchanged; against the stand-in that tool is absent and Claude Code records a non-blocking error the user does not see (T2 `nexus_rdr/228-research-20`).
+- lockstep hook with no CLI (nexus-sv2wx.8): `conexus/hooks/scripts/version_lockstep_hook.py` does nothing when `nx` does not resolve: no message, no action, no marker, on the version path and on the ref-drift path. Before, it told the model an upgrade had been dispatched and the action it started did nothing.

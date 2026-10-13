@@ -90,6 +90,9 @@ def _layout(plugin: str, tmp_path: Path) -> tuple[Path, Path, Path]:
     home = tmp_path / "home"
     root = home / ".claude" / "plugins" / "cache" / "nexus-plugins" / plugin / "0.0.0"
     shutil.copytree(REPO_ROOT / plugin / "hooks", root / "hooks")
+    if (REPO_ROOT / plugin / "launch").is_dir():
+        # RDR-228: seven conexus entries start `launch/nx_launch.py`.
+        shutil.copytree(REPO_ROOT / plugin / "launch", root / "launch")
     _plant(home, marker)
     outer = tmp_path / "outer"
     project = outer / "project"
@@ -116,6 +119,17 @@ def _run(args: list[str], root: Path, project: Path) -> subprocess.CompletedProc
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(root),
     }
+    if any(a.endswith("/launch/nx_launch.py") for a in args):
+        # A launcher entry would find this machine's own install and run its real
+        # hook verbs (an upgrade, a generation sweep). This file is about which
+        # interpreter uv picks, so the launcher gets a PATH that holds uv alone and
+        # no generation layout: it starts, finds no CLI and exits 0.
+        only_uv = root.parent / "only-uv"
+        only_uv.mkdir(exist_ok=True)
+        if not (only_uv / "uv").exists():
+            os.symlink(shutil.which("uv"), only_uv / "uv")
+        env["PATH"] = os.pathsep.join([str(only_uv), "/usr/bin", "/bin"])
+        env["NX_TOOLS_DIR"] = str(root.parent / "no-tools")
     payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": str(project), "session_id": "cwd-test"})
     argv = ["uv", *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in args)]
     return subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=120, env=env, cwd=str(project))
@@ -127,9 +141,21 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_uv_entries() -> None:
-    """Non-vacuity: seven conexus entries and four sn entries launch through uv."""
+    """Non-vacuity: fifteen conexus entries and four sn entries launch through uv
+    (7 until RDR-228, nexus-sv2wx.8, which put the six ``nx-hook`` entries and the
+    session-end entry behind the launcher and added the setup notice hook)."""
     counts = {p: sum(1 for plugin, _, _ in _uv_entries() if plugin == p) for p in _PLUGINS}
-    assert counts == {"conexus": 7, "sn": 4}, counts
+    assert counts == {"conexus": 15, "sn": 4}, counts
+
+
+def test_a_launcher_entry_really_starts_the_launcher(tmp_path: Path) -> None:
+    """The never-runs cases below prove nothing about an entry whose script did not
+    start. With no CLI the launcher writes its one line, which shows uv ran it."""
+    hook = next(h for p, _, h in _uv_entries() if p == "conexus" and "nx-hook" in h["args"])
+    root, project, marker = _layout("conexus", tmp_path)
+    proc = _run(hook["args"], root, project)
+    assert proc.returncode == 0 and "`nx-hook` is not installed" in proc.stderr, proc
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(
