@@ -211,6 +211,8 @@ def _argv0_is(seen: list[list[str]], expected: Path) -> None:
 def test_the_shim_spawns_the_path_nx_hook_not_the_planted_one(
     windows_box, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The shim looks in the generation layout before PATH (RDR-228); none here.
+    monkeypatch.setenv("NX_TOOLS_DIR", str(windows_box["uv.exe"].parent / "no-tools"))
     shim = _load(_SCRIPTS / "nx_hook_shim.py", "nx_hook_shim_offcwd")
     seen: list[list[str]] = []
 
@@ -241,6 +243,7 @@ def test_the_shim_skips_with_a_note_when_only_a_planted_nx_hook_exists(
     (tmp_path / "bin").mkdir()
     monkeypatch.chdir(tmp_path / "cloned-repo")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tmp_path / "no-tools"))
     monkeypatch.setattr(sys, "platform", "win32")
     shim = _load(_SCRIPTS / "nx_hook_shim.py", "nx_hook_shim_offcwd_absent")
     spawned: list[object] = []

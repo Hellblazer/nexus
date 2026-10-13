@@ -38,6 +38,7 @@ on:
       - 'conexus/agents/**'
       - 'conexus/resources/**'
       - 'conexus/mcp/**'
+      - 'conexus/launch/**'
       - 'conexus/PENDING_RELEASE.md'
       - 'sn/hooks/**'
       - 'sn/.mcp.json'

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""No bare-name spawn and no ``shutil.which`` under ``conexus/hooks`` (RDR-224
-review finding A, nexus-f9bgu.36).
+"""No bare-name spawn and no ``shutil.which`` under ``conexus/hooks`` or
+``conexus/launch`` (RDR-224 review finding A, nexus-f9bgu.36; RDR-228 added
+``conexus/launch``, whose launcher starts every server and hook program).
 
 ``tests/test_nx_bare_exec_lint.py`` polices ``src/nexus``. The plugin's hook
 scripts are a different tree with a worse exposure: Claude Code runs a hook with
@@ -10,8 +11,9 @@ the PROJECT as its working directory, and on Windows ``CreateProcess`` (and
 hook, and the shim relays what ``nx-hook`` prints as the hook's own verdict.
 
 The sanctioned spelling is ``_exec_path.which_off_cwd(name)`` (stdlib only, PATH
-alone, returns an absolute path), passed as argv[0]. This scan flags, in every
-``conexus/hooks/**/*.py`` except the helper itself:
+alone, returns an absolute path), passed as argv[0], or ``_cli_lookup.resolve``,
+which tries the generation layout and then calls it. This scan flags, in every
+``conexus/hooks/**/*.py`` and ``conexus/launch/**/*.py`` except the helper itself:
 
 * a call to ``shutil.which`` or any ``which(...)``;
 * a subprocess or ``os`` spawn whose argv starts with a bare string literal, or a
@@ -29,13 +31,16 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import shutil
 
 import pytest
 
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-HOOKS_ROOT = REPO_ROOT / "conexus" / "hooks"
+#: The plugin trees whose scripts a Claude application starts with the project,
+#: or the plugin root, as the working directory.
+SCANNED = ("conexus/hooks", "conexus/launch")
 HELPER = "conexus/hooks/scripts/_exec_path.py"
 
 _LAUNCHERS = frozenset({
@@ -171,12 +176,20 @@ def _hits_in(source: str) -> list[tuple[str, str, int]]:
     return finder.hits
 
 
-def _scan() -> dict[tuple[str, str, str], list[int]]:
+def _sources(repo_root: pathlib.Path = REPO_ROOT) -> list[tuple[str, pathlib.Path]]:
+    """Every scanned script under *repo_root*, as (repo-relative path, file)."""
+    out: list[tuple[str, pathlib.Path]] = []
+    for sub in SCANNED:
+        for path in sorted((repo_root / sub).rglob("*.py")):
+            rel = path.relative_to(repo_root).as_posix()
+            if rel != HELPER:
+                out.append((rel, path))
+    return out
+
+
+def _scan(repo_root: pathlib.Path = REPO_ROOT) -> dict[tuple[str, str, str], list[int]]:
     found: dict[tuple[str, str, str], list[int]] = {}
-    for path in sorted(HOOKS_ROOT.rglob("*.py")):
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel == HELPER:
-            continue
+    for rel, path in _sources(repo_root):
         for scope, name, line in _hits_in(path.read_text(encoding="utf-8")):
             found.setdefault((rel, scope, name), []).append(line)
     return found
@@ -201,10 +214,7 @@ def _spawning_files() -> set[str]:
     """Files that import ``subprocess`` (or use an ``os`` exec/spawn) AND call a
     spawn-shaped function with an argument."""
     out: set[str] = set()
-    for path in sorted(HOOKS_ROOT.rglob("*.py")):
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel == HELPER:
-            continue
+    for rel, path in _sources():
         src = path.read_text(encoding="utf-8")
         if not ("import subprocess" in src or "os.exec" in src or "os.spawn" in src):
             continue
@@ -224,11 +234,37 @@ def test_every_file_that_spawns_resolves_through_the_helper() -> None:
         _VLS,
         "conexus/hooks/scripts/version_lockstep_hook.py",
         "conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
+        "conexus/launch/nx_launch.py",
     }
     assert expected <= spawners, f"the spawner census lost a known spawner: {sorted(expected - spawners)}"
     for rel in sorted(spawners):
         src = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "which_off_cwd" in src, f"{rel} spawns a process but never resolves through _exec_path.which_off_cwd"
+        assert "which_off_cwd" in src or "_cli_lookup.resolve" in src, (
+            f"{rel} spawns a process but never resolves through _exec_path.which_off_cwd "
+            "or _cli_lookup.resolve"
+        )
+
+
+def test_every_scanned_tree_holds_a_script() -> None:
+    for sub in SCANNED:
+        assert any(rel.startswith(sub + "/") for rel, _ in _sources()), f"{sub} holds no script; the scan examined nothing there"
+
+
+def test_a_bare_spawn_planted_under_conexus_launch_is_caught(tmp_path: pathlib.Path) -> None:
+    """The scan reaches ``conexus/launch``: a copy of the tree with one bare-name
+    spawn added to the launcher is reported, and the untouched copy is not."""
+    copy = tmp_path / "conexus" / "launch"
+    shutil.copytree(REPO_ROOT / "conexus" / "launch", copy, ignore=shutil.ignore_patterns("__pycache__"))
+    (tmp_path / "conexus" / "hooks").mkdir()
+    assert not _scan(tmp_path), "the unmodified launcher tree already trips the scan"
+    launcher = copy / "nx_launch.py"
+    launcher.write_text(
+        launcher.read_text(encoding="utf-8")
+        + '\n\ndef _planted():\n    import subprocess\n    subprocess.run(["nx-hook", "preflight"])\n',
+        encoding="utf-8",
+    )
+    found = _scan(tmp_path)
+    assert list(found) == [("conexus/launch/nx_launch.py", "_planted", "nx-hook")], found
 
 
 def test_run_cmd_resolves_argv0_before_it_spawns() -> None:
