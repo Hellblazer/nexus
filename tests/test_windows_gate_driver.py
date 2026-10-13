@@ -1016,3 +1016,46 @@ def test_the_no_git_run_keeps_its_guarantees_in_the_scripts() -> None:
     assert 'powershell -NoProfile -ExecutionPolicy Bypass -File "$b\\portable-git.ps1"' in inst
     assert "$env:LOCALAPPDATA\\Programs\\Git\\cmd" in inst and "if (-not (GitDir)) { $bad += 'git.exe is missing' }" in inst
     assert "$mine += Join-Path $RunDir 'portable-git.ps1'" in _read("end.ps1")
+
+
+# ---- --applocker -------------------------------------------------------------
+
+
+def test_applocker_is_passed_to_the_stduser_step_and_needs_standard_user(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--applocker")
+    assert res.returncode == 2 and "--applocker needs --standard-user" in res.stderr
+    assert not (harness.root / "ssh.log").exists()
+    res = harness.run(*_BASE, "--standard-user", "--applocker", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-AppLocker yes" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert "AppLocker default rules enforced" in res.stdout
+
+
+def test_a_run_without_the_flag_sets_no_applocker_policy(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-AppLocker no" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert "AppLocker" not in res.stdout
+    std = _read("stduser.ps1")
+    assert "[string]$AppLocker = 'no'" in std
+    # every policy statement sits behind the flag
+    assert std.count("if ($appLocker -eq 'yes') {") == 2
+    assert std.index("if ($appLocker -eq 'yes') {") < std.index("Set-AppLockerPolicy")
+
+
+def test_the_applocker_run_cannot_pass_under_a_policy_that_is_not_in_effect() -> None:
+    std = _read("stduser.ps1")
+    # all four collections enforced, with the default rules' three audiences
+    for kind in ("Exe", "Msi", "Script", "Appx"):
+        assert f'<RuleCollection Type="{kind}" EnforcementMode="Enabled">' in std
+    assert "%PROGRAMFILES%\\*" in std and "%WINDIR%\\*" in std and 'UserOrGroupSid="S-1-5-32-544"' in std
+    assert "sc.exe config AppIDSvc start= auto" in std
+    # the control file is started AS the account until the AppLocker log records the block (event 8004);
+    # the policy reading alone said Denied 75 s before anything was blocked (2026-10-13)
+    assert "New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited" in std
+    assert "Id = 8004" in std and "'*APPLOCKER-CONTROL.EXE*'" in std
+    fail = next(ln for ln in std.splitlines() if "NXG-RESULT: FAIL AppLocker is not in effect" in ln)
+    for needed in ("applocker AppIDSvc=Running", "applocker control for the account: Denied", "applocker System32 for the account: Allowed", "applocker control start as the account: blocked=True"):
+        assert f"$text -notmatch '{needed}'" in fail
+    inst = _read("inst.ps1")
+    assert 'if (Test-Path "$b\\applocker-control.exe") {' in inst and "applocker language mode:" in inst

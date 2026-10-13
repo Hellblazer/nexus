@@ -18,6 +18,12 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $b = "$env:USERPROFILE\nx-gate"
+# run-gate.sh --applocker: the stduser step left a copy of whoami.exe here and saw a start of it blocked.
+# Start it again as this account, so this log shows the policy acting, and name this script's language mode.
+if (Test-Path "$b\applocker-control.exe") {
+    try { $o = & "$b\applocker-control.exe" 2>&1 | Out-String; "applocker control run: started, exit=$LASTEXITCODE out=$($o.Trim())" } catch { "applocker control run: blocked: $($_.Exception.Message)" }
+    "applocker language mode: $($ExecutionContext.SessionState.LanguageMode)"
+}
 function Step($n, [scriptblock]$sb) { $t0 = Get-Date; "=== $n"; & $sb 2>&1 | Out-String -Width 200 | % { $_.TrimEnd() } | Select-Object -Last 12; "--- $n took $([int]((Get-Date)-$t0).TotalSeconds)s" }
 Step 'uv' { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://astral.sh/uv/install.ps1 | iex' }
 $env:PATH = "$env:USERPROFILE\.local\bin;" + $env:PATH
