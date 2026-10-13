@@ -36,6 +36,8 @@ param(
     # portable-git.ps1, which this step copies into its nx-gate folder.
     [string]$AdminGit = 'yes',
     # 'yes' (run-gate.sh --applocker): the administrator enforces AppLocker's default rules.
+    # 'audit' (--applocker-audit): the same rules in audit only; the logs record what they would refuse.
+    # 'allow' (--applocker-allow): enforced, plus path rules for this install's folders; script rules audit only.
     [string]$AppLocker = 'no'
 )
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
@@ -62,7 +64,7 @@ try {
         New-Item -Force -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' | Out-Null
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience -Value 1 -Type DWord
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableFirstLogonAnimation -Value 0 -Type DWord
-        if ($appLocker -eq 'yes') {
+        if ($appLocker -ne 'no') {
             # AppLocker's own default rules (the ones "Create Default Rules" makes), all four collections enforced.
             $everyone = 'UserOrGroupSid="S-1-1-0" Action="Allow"'; $admins = 'UserOrGroupSid="S-1-5-32-544" Action="Allow"'
             $path = { param($id, $name, $who, $p) "<FilePathRule Id=`"$id`" Name=`"$name`" Description=`"`" $who><Conditions><FilePathCondition Path=`"$p`" /></Conditions></FilePathRule>" }
@@ -71,7 +73,7 @@ try {
                 '<RuleCollection Type="Exe" EnforcementMode="Enabled">' +
                 (& $path '921cc481-6e17-4653-8f75-050b80acca20' 'Program Files' $everyone '%PROGRAMFILES%\*') +
                 (& $path 'a61c8b2c-a319-4cd0-9690-d2177cad7b51' 'Windows' $everyone '%WINDIR%\*') +
-                (& $path 'fd686d83-a829-4351-8ff4-27c7de5755d2' 'Administrators, all files' $admins '*') + '</RuleCollection>' +
+                (& $path 'fd686d83-a829-4351-8ff4-27c7de5755d2' 'Administrators, all files' $admins '*') + '@ALLOW@</RuleCollection>' +
                 '<RuleCollection Type="Msi" EnforcementMode="Enabled">' +
                 (& $signed 'b7af7102-efde-4369-8a89-7a6a392d1473' 'Signed installers') +
                 (& $path '5b290184-345a-4453-b184-45305f6d9a54' 'Windows Installer folder' $everyone '%WINDIR%\Installer\*') +
@@ -83,12 +85,23 @@ try {
                 '<RuleCollection Type="Appx" EnforcementMode="Enabled">' +
                 (& $signed 'a9e18c21-ff8f-43cf-b9fc-db40eed693ba' 'Signed packaged apps') + '</RuleCollection>' +
                 '</AppLockerPolicy>'
+            # -AppLocker allow: every folder under a profile from which this install starts a program, as the
+            # audit run recorded them (8003), plus the two places an installer is downloaded to and started.
+            $allow = ''
+            if ($appLocker -eq 'allow') {
+                foreach ($p in '.local\bin\*', 'AppData\Roaming\uv\*', 'AppData\Local\uv\cache\*', 'AppData\Local\Programs\Git\*', '.config\nexus\*', '.claude\downloads\*', 'AppData\Local\Temp\PortableGit.exe') {
+                    $allow += (& $path ([guid]::NewGuid().ToString()) "nexus install: $p" $everyone "%OSDRIVE%\Users\*\$p")
+                }
+                $xml = $xml.Replace('<RuleCollection Type="Script" EnforcementMode="Enabled">', '<RuleCollection Type="Script" EnforcementMode="AuditOnly">')
+            }
+            $xml = $xml.Replace('@ALLOW@', $allow)
+            if ($appLocker -eq 'audit') { $xml = $xml.Replace('EnforcementMode="Enabled"', 'EnforcementMode="AuditOnly"') }
             $pf = "$env:TEMP\nxgate-applocker.xml"
             Set-Content -LiteralPath $pf -Value $xml -Encoding UTF8
             Set-AppLockerPolicy -XmlPolicy $pf -ErrorAction Stop
             Remove-Item -LiteralPath $pf -Force
             sc.exe config AppIDSvc start= auto | Out-Null
-            "applocker: default rules set, enforced; AppIDSvc start=auto exit=$LASTEXITCODE"
+            "applocker: default rules set, mode=$appLocker; AppIDSvc start=auto exit=$LASTEXITCODE"
         }
         if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) { "NXG-RESULT: FAIL the account $u already exists: this is not the clean baseline"; return }
         $bytes = New-Object byte[] 24; (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
@@ -148,7 +161,7 @@ try {
             "std wheel sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath "$b\$Wheel").Hash.ToLowerInvariant()
         }
         "gitexe=" + (Test-Path 'C:\Program Files\Git\cmd\git.exe')
-        if ($appLocker -eq 'yes') {
+        if ($appLocker -ne 'no') {
             Start-Service AppIDSvc -ErrorAction SilentlyContinue
             "applocker AppIDSvc=" + (Get-Service AppIDSvc).Status
             $eff = Get-AppLockerPolicy -Effective
@@ -161,13 +174,15 @@ try {
             # file as the account until the AppLocker log records that start as blocked (event 8004).
             $act = New-ScheduledTaskAction -Execute "$b\applocker-control.exe"
             Register-ScheduledTask -TaskName 'nxgate-applocker-control' -Action $act -Principal (New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited) -Force | Out-Null
+            # Enforced rules record a refused start as 8004; audit-only rules record the same start as 8003.
+            $want = if ($appLocker -eq 'audit') { 8003 } else { 8004 }
             $t1 = Get-Date; $hit = 0
             do {
                 Start-ScheduledTask -TaskName 'nxgate-applocker-control'; Start-Sleep 10
-                $hit = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppLocker/EXE and DLL'; Id = 8004 } -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*APPLOCKER-CONTROL.EXE*' }).Count
+                $hit = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppLocker/EXE and DLL'; Id = 8004, 8003 } -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $want -and $_.Message -like '*APPLOCKER-CONTROL.EXE*' }).Count
             } while ($hit -eq 0 -and ((Get-Date) - $t1).TotalSeconds -lt 600)
             Unregister-ScheduledTask -TaskName 'nxgate-applocker-control' -Confirm:$false
-            "applocker control start as the account: blocked=$($hit -gt 0) after $([int]((Get-Date)-$t1).TotalSeconds)s"
+            "applocker control start as the account: event $want recorded=$($hit -gt 0) after $([int]((Get-Date)-$t1).TotalSeconds)s"
         }
     }
     $info
@@ -180,7 +195,7 @@ try {
     if ($text -notmatch 'profile=True desktop shell processes=[1-9]') { "NXG-RESULT: FAIL $StdUser has no profile or no desktop"; $rc = 7 }
     elseif ($text -notmatch 'in Administrators=False') { "NXG-RESULT: FAIL $StdUser is an administrator"; $rc = 8 }
     elseif ($AdminGit -ne 'no' -and $text -notmatch 'gitexe=True') { 'NXG-RESULT: FAIL Git is not installed'; $rc = 9 }
-    elseif ($AppLocker -eq 'yes' -and ($text -notmatch 'applocker AppIDSvc=Running' -or $text -notmatch 'applocker control for the account: Denied' -or $text -notmatch 'applocker System32 for the account: Allowed' -or $text -notmatch 'applocker control start as the account: blocked=True')) { 'NXG-RESULT: FAIL AppLocker is not in effect for the account (service, control file or System32 reading above)'; $rc = 10 }
+    elseif ($AppLocker -ne 'no' -and ($text -notmatch 'applocker AppIDSvc=Running' -or $text -notmatch 'applocker control for the account: Denied' -or $text -notmatch 'applocker System32 for the account: Allowed' -or $text -notmatch ('applocker control start as the account: event ' + $(if ($AppLocker -eq 'audit') { '8003' } else { '8004' }) + ' recorded=True'))) { 'NXG-RESULT: FAIL AppLocker is not in effect for the account (service, control file or System32 reading above)'; $rc = 10 }
     elseif ($AdminGit -eq 'no' -and $text -notmatch 'gitexe=False') { 'NXG-RESULT: FAIL Git is already installed for all users, so this is not a no-Git run'; $rc = 9 }
 } finally { Remove-PSSession $s }
 if ($rc -ne 0) { exit $rc }

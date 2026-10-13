@@ -10,7 +10,7 @@
 # outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker]]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow]]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -38,6 +38,16 @@
 # stduser step stops the run unless a program in the account's own profile is
 # then denied for it, so a pass cannot come from a policy that never took
 # effect. The run is a standard user on a machine with application control.
+# --applocker-audit sets the same rules to audit only: nothing is blocked, and
+# the AppLocker logs name every program (event 8003) and script (8006) the
+# enforced rules would have refused, which is the list an administrator's allow
+# rules have to cover. The step waits for the first such record instead.
+# --applocker-allow enforces the executable, installer and packaged-app rules
+# and adds path rules that let every user run programs from the folders this
+# install uses under the profile (driver/stduser.ps1 lists them; they come from
+# the audit run of 2026-10-13). The script rules are audit only in this mode:
+# enforced, they put PowerShell in ConstrainedLanguage, where the uv installer
+# script cannot run whatever the executable rules say.
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -112,7 +122,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker]]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow]]" >&2
 }
 die() {
     local code="$1"; shift
@@ -138,6 +148,8 @@ while [[ $# -gt 0 ]]; do
         --standard-user) standard_user=1; shift ;;
         --no-admin-git) admin_git=no; shift ;;
         --applocker) applocker=yes; shift ;;
+        --applocker-audit) applocker=audit; shift ;;
+        --applocker-allow) applocker=allow; shift ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -149,7 +161,7 @@ for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_G
     [[ "${pair#*:}" =~ ^[A-Za-z0-9._-]+$ ]] || die 2 "${pair%%:*} must be plain letters, digits, dot, dash or underscore"
 done
 [[ "$admin_git" == yes || $standard_user -eq 1 ]] || { usage; die 2 "--no-admin-git needs --standard-user"; }
-[[ "$applocker" == no || $standard_user -eq 1 ]] || { usage; die 2 "--applocker needs --standard-user"; }
+[[ "$applocker" == no || $standard_user -eq 1 ]] || { usage; die 2 "the --applocker modes need --standard-user"; }
 install_doc="$repo/docs/windows-install.md"
 [[ "$STD_USER" != "$GUSER" ]] || die 2 "NX_GUEST_STD_USER must not be the administrator account"
 [[ -f "$gate" ]] || die 2 "no gate script at $gate"
@@ -383,6 +395,8 @@ fi
 git_note="Git is installed for all users by $GUSER"
 if [[ "$admin_git" == no ]]; then git_note="no Git from $GUSER: the account installs PortableGit with the block in docs/windows-install.md"; fi
 if [[ "$applocker" == yes ]]; then git_note="$git_note; AppLocker default rules enforced"; fi
+if [[ "$applocker" == allow ]]; then git_note="$git_note; AppLocker default rules enforced for programs, with allow rules for this install's folders; script rules audit only"; fi
+if [[ "$applocker" == audit ]]; then git_note="$git_note; AppLocker default rules in audit only (nothing is blocked)"; fi
 if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); $git_note"; fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 

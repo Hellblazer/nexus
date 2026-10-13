@@ -1023,7 +1023,7 @@ def test_the_no_git_run_keeps_its_guarantees_in_the_scripts() -> None:
 
 def test_applocker_is_passed_to_the_stduser_step_and_needs_standard_user(harness: Harness) -> None:
     res = harness.run(*_BASE, "--applocker")
-    assert res.returncode == 2 and "--applocker needs --standard-user" in res.stderr
+    assert res.returncode == 2 and "the --applocker modes need --standard-user" in res.stderr
     assert not (harness.root / "ssh.log").exists()
     res = harness.run(*_BASE, "--standard-user", "--applocker", "--out", str(harness.out), verdict=_verdict(PASSED))
     assert res.returncode == 0, res.stderr + res.stdout
@@ -1039,23 +1039,52 @@ def test_a_run_without_the_flag_sets_no_applocker_policy(harness: Harness) -> No
     std = _read("stduser.ps1")
     assert "[string]$AppLocker = 'no'" in std
     # every policy statement sits behind the flag
-    assert std.count("if ($appLocker -eq 'yes') {") == 2
-    assert std.index("if ($appLocker -eq 'yes') {") < std.index("Set-AppLockerPolicy")
+    assert std.count("if ($appLocker -ne 'no') {") == 2
+    assert std.index("if ($appLocker -ne 'no') {") < std.index("Set-AppLockerPolicy")
 
 
 def test_the_applocker_run_cannot_pass_under_a_policy_that_is_not_in_effect() -> None:
     std = _read("stduser.ps1")
     # all four collections enforced, with the default rules' three audiences
     for kind in ("Exe", "Msi", "Script", "Appx"):
-        assert f'<RuleCollection Type="{kind}" EnforcementMode="Enabled">' in std
+        assert f"<RuleCollection Type=\"{kind}\" EnforcementMode=\"Enabled\">' +" in std, "the base policy enforces every collection"
     assert "%PROGRAMFILES%\\*" in std and "%WINDIR%\\*" in std and 'UserOrGroupSid="S-1-5-32-544"' in std
     assert "sc.exe config AppIDSvc start= auto" in std
     # the control file is started AS the account until the AppLocker log records the block (event 8004);
     # the policy reading alone said Denied 75 s before anything was blocked (2026-10-13)
     assert "New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited" in std
-    assert "Id = 8004" in std and "'*APPLOCKER-CONTROL.EXE*'" in std
+    assert "$want = if ($appLocker -eq 'audit') { 8003 } else { 8004 }" in std
+    assert "$_.Id -eq $want -and $_.Message -like '*APPLOCKER-CONTROL.EXE*'" in std
     fail = next(ln for ln in std.splitlines() if "NXG-RESULT: FAIL AppLocker is not in effect" in ln)
-    for needed in ("applocker AppIDSvc=Running", "applocker control for the account: Denied", "applocker System32 for the account: Allowed", "applocker control start as the account: blocked=True"):
+    for needed in ("applocker AppIDSvc=Running", "applocker control for the account: Denied", "applocker System32 for the account: Allowed"):
         assert f"$text -notmatch '{needed}'" in fail
+    # an enforced run needs the refused start (8004); only the audit run accepts the audit record (8003)
+    assert "'applocker control start as the account: event ' + $(if ($AppLocker -eq 'audit') { '8003' } else { '8004' }) + ' recorded=True'" in fail
+    assert "$xml.Replace('EnforcementMode=\"Enabled\"', 'EnforcementMode=\"AuditOnly\"')" in std
+
+
+def test_applocker_audit_is_its_own_mode(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--applocker-audit")
+    assert res.returncode == 2 and not (harness.root / "ssh.log").exists()
+    res = harness.run(*_BASE, "--standard-user", "--applocker-audit", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-AppLocker audit" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert "audit only (nothing is blocked)" in res.stdout and "default rules enforced" not in res.stdout
     inst = _read("inst.ps1")
     assert 'if (Test-Path "$b\\applocker-control.exe") {' in inst and "applocker language mode:" in inst
+
+
+def test_applocker_allow_enforces_programs_and_names_the_installs_folders(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--applocker-allow")
+    assert res.returncode == 2 and not (harness.root / "ssh.log").exists()
+    res = harness.run(*_BASE, "--standard-user", "--applocker-allow", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-AppLocker allow" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert "script rules audit only" in res.stdout
+    std = _read("stduser.ps1")
+    # the allow rules exist only in this mode; any other mode replaces the marker with nothing
+    assert std.index("$allow = ''") < std.index("if ($appLocker -eq 'allow') {") < std.index("$xml = $xml.Replace('@ALLOW@', $allow)")
+    for folder in (".local\\bin\\*", "AppData\\Roaming\\uv\\*", "AppData\\Local\\uv\\cache\\*", "AppData\\Local\\Programs\\Git\\*", ".config\\nexus\\*"):
+        assert f"'{folder}'" in std
+    # the control file's folder is not among them, so the enforcement wait still sees a refused start
+    assert "'nx-gate" not in std
