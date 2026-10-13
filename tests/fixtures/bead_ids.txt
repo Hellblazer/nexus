@@ -672,6 +672,7 @@ nexus-3f0o
 nexus-3f95
 nexus-3fab5
 nexus-3fab5.1
+nexus-3fme8
 nexus-3foc9
 nexus-3fsyx
 nexus-3g05n
@@ -905,6 +906,7 @@ nexus-4901f
 nexus-4922x
 nexus-4922x.1
 nexus-492qf
+nexus-498xj
 nexus-49bw
 nexus-49cw
 nexus-49dj2
@@ -6002,6 +6004,7 @@ nexus-rw6
 nexus-rw6.1
 nexus-rwlt
 nexus-rwnjs
+nexus-rwv5i
 nexus-rwxxt
 nexus-rx92s
 nexus-rxh1o
