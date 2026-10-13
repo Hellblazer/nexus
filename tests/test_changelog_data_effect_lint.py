@@ -68,6 +68,8 @@ def test_has_data_effect_line_detects_marker():
         ("TRUNCATE nexus.widgets;", {"truncate"}),
         ("DROP TABLE nexus.widgets;", {"drop_table"}),
         ("ALTER TABLE nexus.widgets DROP COLUMN stale;", {"drop_column"}),
+        ("DROP SCHEMA scratch;", {"drop_schema"}),
+        ("DROP SCHEMA IF EXISTS scratch CASCADE;", {"drop_schema"}),
         (
             "ALTER TABLE nexus.widgets ALTER COLUMN created_at TYPE timestamptz "
             "USING NULLIF(created_at, '')::timestamptz;",
@@ -88,6 +90,9 @@ def test_classify_sql_text_detects_each_data_effecting_shape(sql, expected_kinds
         "ALTER TABLE nexus.widgets ADD CONSTRAINT widgets_pk PRIMARY KEY (id);",
         "CREATE INDEX idx_widgets_id ON nexus.widgets (id);",
         "GRANT SELECT ON nexus.widgets TO PUBLIC;",
+        "CREATE SCHEMA IF NOT EXISTS scratch;",
+        "ALTER EXTENSION vector SET SCHEMA nexus;",
+        "COMMENT ON SCHEMA scratch IS 'DROP SCHEMA scratch';",
         "ALTER TABLE nexus.widgets VALIDATE CONSTRAINT widgets_chk;",
         # Upsert of NEW/backfill rows -- deliberately NOT flagged (see module
         # docstring): statement-initial keyword is INSERT, not UPDATE.
@@ -177,6 +182,12 @@ END $$;
         ),
         # case-insensitive
         ("DO $$ BEGIN execute 'drop table nexus.widgets'; END $$;", {("drop_table", "nexus.widgets")}),
+        # DROP SCHEMA, as a literal and with the name known only at run time
+        ("DO $$ BEGIN EXECUTE 'DROP SCHEMA scratch'; END $$;", {("drop_schema", "scratch")}),
+        # a wholly run-time name behind IF EXISTS is no name, never the word IF
+        ("DO $$ BEGIN EXECUTE format('DROP TABLE IF EXISTS %I', t); END $$;", {("drop_table", "")}),
+        ("DO $$ BEGIN EXECUTE format('ALTER TABLE IF EXISTS %I DROP COLUMN c', t); END $$;", {("drop_column", "")}),
+        ("DO $$ BEGIN EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', s); END $$;", {("drop_schema", "")}),
     ],
 )
 def test_classify_detects_destructive_dynamic_sql_in_a_do_block(sql, expected):
@@ -214,8 +225,9 @@ def test_staging_6_drop_landing_schema_is_classified_from_its_real_body():
         if c.changeset_id == "staging-6-drop-landing-schema"
     ]
     reasons = classify_changeset(cs.sql_text, cs.structured_tags)
-    assert [r.kind for r in reasons] == ["drop_table"], reasons
+    assert [r.kind for r in reasons] == ["drop_table", "drop_schema"], reasons
     assert "staging.%I" in reasons[0].statement
+    assert reasons[1].table == "staging" and "only on an empty schema" in reasons[1].detail
     assert has_data_effect_line(cs.comment_text)
     assert check_data_effect_structure(cs.comment_text, reasons) == []
 
@@ -626,3 +638,17 @@ def test_real_changelog_every_data_effect_line_is_structurally_valid():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_drop_schema_names_the_schema_and_says_whether_it_cascades():
+    (plain,) = classify_changeset("DROP SCHEMA scratch;", structured_tags=[])
+    assert (plain.kind, plain.table) == ("drop_schema", "scratch")
+    assert "only on an empty schema" in plain.detail
+    (cascade,) = classify_changeset('DROP SCHEMA IF EXISTS "Scratch" CASCADE;', structured_tags=[])
+    assert (cascade.kind, cascade.table) == ("drop_schema", "Scratch")
+    assert "takes every object in the schema" in cascade.detail
+    # the DATA EFFECT sentence must name the schema and state reversibility
+    assert check_data_effect_structure("DATA EFFECT: drops leftovers; irreversible.", [cascade]) == [
+        "does not name table 'Scratch'"
+    ]
+    assert check_data_effect_structure("DATA EFFECT: drops schema Scratch; irreversible.", [cascade]) == []

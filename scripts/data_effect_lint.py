@@ -41,7 +41,13 @@ invisible to anything that isn't scanning raw file text.
 WHAT COUNTS AS DATA-EFFECTING. Scoped to the bead's explicit list:
 DELETE, UPDATE, TRUNCATE, DROP TABLE, DROP COLUMN, and
 ``ALTER ... TYPE ... USING`` (a column rewrite touching every existing
-row). Detected two ways:
+row), plus DROP SCHEMA (added 2026-10-13: with ``CASCADE`` it takes every
+table in the schema with it, named nowhere in the statement; without it
+PostgreSQL refuses a schema that still holds anything, so the statement
+removes no rows, but it is classified all the same so that a deployer sees
+every schema removal and one rule covers both spellings). The schema's
+name goes in the reason's ``table`` field, so the DATA EFFECT sentence must
+name it. Detected two ways:
 
   1. Raw SQL in forward ``<sql>`` elements (see _classify_sql_text).
   2. Structured Liquibase change-type elements ``<delete>``, ``<update>``,
@@ -65,9 +71,8 @@ opaque ``__dyn__`` word, so a table named only at run time is reported with no
 resolvable table name, or only its static schema qualifier (``staging.%I``
 reports ``staging``); the structural check then requires the prose and
 reversibility, not a table it cannot know. A bare ``GRANT EXECUTE`` /
-``REVOKE EXECUTE`` is not dynamic SQL and is not touched. SCOPE: DROP SCHEMA is
-not one of the six kinds above, so a dynamic ``DROP SCHEMA`` alone does not
-classify; the tables it takes with it are what the convention names.
+``REVOKE EXECUTE`` is not dynamic SQL and is not touched. A dynamic ``DROP
+SCHEMA`` classifies like a top-level one.
 
 KNOWN LIMIT, DELIBERATELY NOT BUILT (code-review pass, 2026-09-13):
 
@@ -308,6 +313,8 @@ _UPDATE_RE = re.compile(r"^UPDATE\s+\S+.*?\bSET\b", re.IGNORECASE | re.DOTALL)
 _TRUNCATE_RE = re.compile(r"^TRUNCATE\b", re.IGNORECASE)
 _DROP_TABLE_RE = re.compile(r"\bDROP\s+TABLE\b", re.IGNORECASE)
 _DROP_COLUMN_RE = re.compile(r"\bDROP\s+COLUMN\b", re.IGNORECASE)
+_DROP_SCHEMA_RE = re.compile(r"\bDROP\s+SCHEMA\b", re.IGNORECASE)
+_CASCADE_RE = re.compile(r"\bCASCADE\b", re.IGNORECASE)
 # ALTER COLUMN ... TYPE ... USING <expr> — a table rewrite of every existing
 # row's value in that column. Bounded to one statement (already split on
 # ';'), DOTALL because the TYPE/USING pair can span a formatted multi-line
@@ -354,13 +361,19 @@ _TRUNCATE_TABLE_RE = re.compile(
     rf"^TRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
 )
 _DROP_TABLE_TABLE_RE = re.compile(
-    rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+    rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?!IF\b)({_TABLE_TOKEN})", re.IGNORECASE
+)
+# ``(?!IF\b)``: when the name is a run-time placeholder (``DROP TABLE IF EXISTS %I``)
+# the optional ``IF EXISTS`` must not be skipped and ``IF`` read as the name.
+# The schema's own name, carried in DataEffectReason.table like a table's.
+_DROP_SCHEMA_NAME_RE = re.compile(
+    rf"\bDROP\s+SCHEMA\s+(?:IF\s+EXISTS\s+)?(?!IF\b)({_IDENT_SEGMENT})", re.IGNORECASE
 )
 # Covers both DROP COLUMN and ALTER COLUMN ... TYPE ... USING -- both are
 # clauses of an ALTER TABLE statement, so the table name comes from the
 # same place either way.
 _ALTER_TABLE_TABLE_RE = re.compile(
-    rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+    rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?!IF\b|ONLY\b)({_TABLE_TOKEN})", re.IGNORECASE
 )
 
 _TABLE_EXTRACTORS: dict[str, tuple[re.Pattern[str], str]] = {
@@ -370,6 +383,7 @@ _TABLE_EXTRACTORS: dict[str, tuple[re.Pattern[str], str]] = {
     "truncate": (_TRUNCATE_TABLE_RE, "match"),
     "drop_table": (_DROP_TABLE_TABLE_RE, "search"),
     "drop_column": (_ALTER_TABLE_TABLE_RE, "search"),
+    "drop_schema": (_DROP_SCHEMA_NAME_RE, "search"),
     "alter_type_using": (_ALTER_TABLE_TABLE_RE, "search"),
 }
 
@@ -393,7 +407,7 @@ def _extract_table(kind: str, stmt_text: str) -> str:
 
 @dataclass(frozen=True)
 class DataEffectReason:
-    kind: str  # "delete" | "update" | "truncate" | "drop_table" | "drop_column" | "alter_type_using" | "structured:<tag>"
+    kind: str  # "delete" | "update" | "truncate" | "drop_table" | "drop_column" | "drop_schema" | "alter_type_using" | "structured:<tag>"
     detail: str
     # The exact matched SQL statement, comment-stripped, string literals
     # INTACT (see _split_statements) -- empty for a structured-tag reason
@@ -455,6 +469,14 @@ def _classify_sql_text(sql_text: str) -> list[DataEffectReason]:
 
         if _DROP_COLUMN_RE.search(stmt_for_leading):
             _add("drop_column", "DROP COLUMN clause", orig, table_of("drop_column"))
+
+        if _DROP_SCHEMA_RE.search(stmt_for_leading):
+            detail = (
+                "DROP SCHEMA ... CASCADE statement (takes every object in the schema)"
+                if _CASCADE_RE.search(stmt_for_leading)
+                else "DROP SCHEMA statement (succeeds only on an empty schema)"
+            )
+            _add("drop_schema", detail, orig, table_of("drop_schema"))
 
         if _ALTER_TYPE_USING_RE.search(stmt_for_leading):
             _add(
