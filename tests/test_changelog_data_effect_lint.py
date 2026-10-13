@@ -35,12 +35,14 @@ from pathlib import Path
 import pytest
 
 from data_effect_lint import (
+    CHANGELOG_DIR,
     DATA_EFFECT_MARKER,
     analyze_changelog,
     check_data_effect_structure,
     classify_changeset,
     extract_data_effect_text,
     has_data_effect_line,
+    iter_changesets,
 )
 
 pytestmark = pytest.mark.lint
@@ -129,6 +131,98 @@ END $$;
 """
     reasons = classify_changeset(sql, structured_tags=[])
     assert {r.kind for r in reasons} == {"delete"}
+
+
+# --- nexus-679v1: destructive DDL/DML issued as dynamic SQL inside a DO block --
+
+
+@pytest.mark.parametrize(
+    "sql,expected",
+    [
+        # EXECUTE <literal>
+        ("DO $$ BEGIN EXECUTE 'DELETE FROM nexus.widgets WHERE stale'; END $$;", {("delete", "nexus.widgets")}),
+        ("DO $$ BEGIN EXECUTE 'UPDATE nexus.widgets SET n = 1'; END $$;", {("update", "nexus.widgets")}),
+        ("DO $$ BEGIN EXECUTE 'TRUNCATE nexus.widgets'; END $$;", {("truncate", "nexus.widgets")}),
+        ("DO $$ BEGIN EXECUTE 'DROP TABLE nexus.widgets'; END $$;", {("drop_table", "nexus.widgets")}),
+        (
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE nexus.widgets DROP COLUMN stale'; END $$;",
+            {("drop_column", "nexus.widgets")},
+        ),
+        # EXECUTE format(<literal>, ...): a table named at run time keeps only
+        # its static schema qualifier, never the placeholder
+        (
+            "DO $$ BEGIN EXECUTE format('DROP TABLE IF EXISTS nexus.%I', t); END $$;",
+            {("drop_table", "nexus")},
+        ),
+        (
+            "DO $$ BEGIN EXECUTE format('DELETE FROM %I.%I WHERE k = %L', s, t, 'x'); END $$;",
+            {("delete", "")},
+        ),
+        # a command concatenated from literals and run-time operands
+        (
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE ' || quote_ident(t) || ' DROP COLUMN stale'; END $$;",
+            {("drop_column", "")},
+        ),
+        # inside a loop, inside a nested BEGIN ... EXCEPTION block, with USING
+        (
+            "DO $$ DECLARE t text; BEGIN FOREACH t IN ARRAY ARRAY['a','b'] LOOP BEGIN "
+            "EXECUTE format('TRUNCATE nexus.%I', t) USING 1; "
+            "EXCEPTION WHEN insufficient_privilege THEN RAISE NOTICE 'skip'; END; END LOOP; END $$;",
+            {("truncate", "nexus")},
+        ),
+        # an escaped quote inside the dynamic text
+        (
+            "DO $$ BEGIN EXECUTE 'DELETE FROM nexus.widgets WHERE k = ''x'''; END $$;",
+            {("delete", "nexus.widgets")},
+        ),
+        # case-insensitive
+        ("DO $$ BEGIN execute 'drop table nexus.widgets'; END $$;", {("drop_table", "nexus.widgets")}),
+    ],
+)
+def test_classify_detects_destructive_dynamic_sql_in_a_do_block(sql, expected):
+    reasons = classify_changeset(sql, structured_tags=[])
+    assert {(r.kind, r.table) for r in reasons} == expected, reasons
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "GRANT EXECUTE ON FUNCTION nexus.f() TO nexus_svc;",
+        "REVOKE EXECUTE ON FUNCTION nexus.f() FROM PUBLIC;",
+        "CREATE TRIGGER t AFTER INSERT ON nexus.widgets FOR EACH ROW EXECUTE FUNCTION nexus.f();",
+        "DO $$ BEGIN EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; END $$;",
+        "DO $$ BEGIN EXECUTE 'ALTER TABLE nexus.widgets NO FORCE ROW LEVEL SECURITY'; END $$;",
+        "DO $$ BEGIN EXECUTE 'SELECT count(*) FROM nexus.widgets' INTO n; END $$;",
+        "DO $$ BEGIN EXECUTE format('CREATE INDEX i ON nexus.%I (id)', t); END $$;",
+        # the destructive words are DATA, not a command: a notice and a
+        # non-EXECUTE statement's literal
+        "DO $$ BEGIN RAISE NOTICE 'DROP TABLE nexus.widgets'; END $$;",
+        "INSERT INTO nexus.notes (body) VALUES ('EXECUTE ''DELETE FROM nexus.widgets''');",
+    ],
+)
+def test_classify_ignores_non_destructive_or_non_dynamic_execute(sql):
+    assert classify_changeset(sql, structured_tags=[]) == []
+
+
+def test_staging_6_drop_landing_schema_is_classified_from_its_real_body():
+    """The changeset that exposed the gap: it DROPs seven tables through
+    EXECUTE format('DROP TABLE IF EXISTS staging.%I', t) in a DO block and the
+    classifier used to report no data effect at all."""
+    (cs,) = [
+        c
+        for c in iter_changesets(CHANGELOG_DIR, "staging-003-drop-landing-schema.xml")
+        if c.changeset_id == "staging-6-drop-landing-schema"
+    ]
+    reasons = classify_changeset(cs.sql_text, cs.structured_tags)
+    assert [r.kind for r in reasons] == ["drop_table"], reasons
+    assert "staging.%I" in reasons[0].statement
+    assert has_data_effect_line(cs.comment_text)
+    assert check_data_effect_structure(cs.comment_text, reasons) == []
+
+
+def test_real_changelog_lists_staging_6_as_data_effecting():
+    result = analyze_changelog()
+    assert "staging-6-drop-landing-schema" in {f.changeset.changeset_id for f in result.data_effecting}
 
 
 def test_structured_change_tags_are_detected():
