@@ -288,7 +288,12 @@ checked first because an application started before the install does not see a
 `PATH` change until it restarts. When the program is found the launcher
 replaces itself with it (`os.execv`; on Windows it spawns the program and
 relays its exit code), so a running server has no wrapper between it and the
-application.
+application. Before the hand-off the launcher changes directory to the
+project, because the entries start it with the plugin root as its working
+directory and the programs read the project from theirs: for a hook program
+the payload's `cwd`, else `CLAUDE_PROJECT_DIR` (the rule `nx_hook_shim.py`
+uses), and for a server `CLAUDE_PROJECT_DIR`, which Claude Code sets for a
+plugin's server (measured, `nexus_rdr/228-research-17`).
 
 **What is served, decided from facts.** The launcher decides from one fact:
 does the CLI program resolve. No file the plugin writes takes part in that
@@ -1176,4 +1181,14 @@ is flagged for trimming before then.
   address goes through an owner-only opener file; no fallback build.
 - 2026-10-12: Gate round 2: PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `840f6b8a6`; critique `nexus_rdr/228-gate-critique-2026-10-12-r2`.
 - 2026-10-13: Accepted. Residual dispositions: the Phase 1 release gate (BLOCKS-PLANNING) is carried by nexus-217c3 on Sam's choice; the 18 DISCOVER-AT-IMPLEMENTATION residuals are carried by nexus-j8ebc (4, Phase 1), nexus-9i4d4 (13, Phase 2) and nexus-omlpd (1, Phase 3). No change to the design, so no fix check.
+- 2026-10-13: Implementation, Phase 1 Step 1 and 2. Added one sentence to
+  "The launcher": it changes directory to the project before the hand-off.
+  The record was silent, and with the entries' `--directory` form the
+  programs would have taken the plugin root as the project. Sam accepted the
+  reading and authorised the edit; the server half is measured in
+  `nexus_rdr/228-research-17`. Sam also decided: a throwaway second
+  marketplace repository carries a candidate to Desktop for both gates
+  (nexus-sv2wx.1); each phase stays on its branch until its release bead,
+  with a draft pull request for CI (nexus-sv2wx.2); the layout before `PATH`
+  holds on every machine, with no override.
 - 2026-10-13: Rebased onto develop for the push. The two gated commits were renumbered with the file unchanged, and the gate lines above now cite the new numbers; the T2 gate and fix-check records name both the old and the new.

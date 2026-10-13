@@ -132,7 +132,7 @@ def test_it_imports_only_the_standard_library_and_its_siblings(script: Path) -> 
             assert node.level == 0, f"{script.name} has a relative import"
             found.add((node.module or "").split(".")[0])
     assert found, "no imports found; the scan examined nothing"
-    assert found <= set(sys.stdlib_module_names) | {"__future__", "_exec_path", "_cli_lookup"}, found
+    assert found <= set(sys.stdlib_module_names) | {"__future__", "_exec_path", "_cli_lookup", "nx_standin"}, found
 
 
 def test_it_runs_with_nexus_unimportable(tmp_path: Path) -> None:
@@ -358,12 +358,14 @@ def test_no_cli_and_a_hook_program_is_exit_0_with_one_line(tmp_path: Path, invoc
 
 @pytest.mark.parametrize("name", _SERVER_PROGRAMS)
 def test_no_cli_and_a_server_program_goes_to_the_stand_in(tmp_path: Path, name: str) -> None:
-    """P1.2 (nexus-sv2wx.6) fills ``serve_stand_in``. Until then it writes one
-    line and exits 1, and no entry reaches it."""
-    r = _run([name], tools=_empty(tmp_path, "tools"), path=_empty(tmp_path, "bin"))
-    assert r.returncode == 1
-    assert r.stdout == b""
-    assert len(r.stderr.decode().splitlines()) == 1, r.stderr
+    """The stand-in serves until its input closes, then exits 0, and writes
+    nothing to standard error. tests/hooks/test_nx_standin.py drives it with a
+    real client."""
+    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
+    r = _run([name], tools=_empty(tmp_path, "tools"), path=_empty(tmp_path, "bin"), payload=request)
+    assert r.returncode == 0
+    assert json.loads(r.stdout) == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert r.stderr == b""
 
 
 def test_no_cli_and_any_other_program_is_exit_127(tmp_path: Path) -> None:

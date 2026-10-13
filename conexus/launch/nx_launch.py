@@ -21,7 +21,8 @@ hand at any time is used at the next launch.
   output and exits with the program's exit code.
 * It does not resolve and a hook program was asked for: exit 0 with one line on
   standard error. A missing CLI never blocks a prompt or a tool call.
-* It does not resolve and a server was asked for: :func:`serve_stand_in`.
+* It does not resolve and a server was asked for: :func:`serve_stand_in`, a
+  server that says Nexus is not installed (``nx_standin.py``).
 
 The entries start this script with ``--directory ${CLAUDE_PLUGIN_ROOT}``, so its
 working directory is the plugin root, and the programs read the project from
@@ -63,11 +64,15 @@ SERVER_PROGRAMS = frozenset({"nx-mcp", "nx-mcp-catalog"})
 def serve_stand_in(name: str) -> int:
     """Serve in place of the server *name* when there is no CLI.
 
-    Phase 1 Step 2 (nexus-sv2wx.6) puts the stand-in server here. Until then no
-    entry reaches this, and it says so and fails.
+    The stand-in (``nx_standin.py``, beside this file) answers the handshake and
+    says Nexus is not installed. Nothing is written to standard error: for a
+    stdio server Claude Code records each such line as an error. The import is
+    here, not at module scope, so a hook launch does not pay for it.
     """
-    sys.stderr.write(f"conexus: `{name}` is not installed (no Nexus CLI in the generation layout or on PATH).\n")
-    return 1
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import nx_standin  # noqa: PLC0415 -- see the docstring
+
+    return nx_standin.main(name)
 
 
 def _skipped(name: str, args: list[str]) -> str:
