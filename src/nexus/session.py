@@ -581,7 +581,7 @@ _MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
 #: RDR-228: what the plugin's server entries put between claude and the server,
 #: and the only processes :func:`find_mcp_sibling_pids` looks through. ``uv`` is
 #: the command the entry names; the script is the launcher it runs.
-_LAUNCH_WRAPPER_COMMANDS = ("uv",)
+_LAUNCH_WRAPPER_COMMANDS = frozenset({"uv"})  # a set: this names a process to recognise, never an argv to spawn
 _LAUNCHER_SCRIPT = "/launch/nx_launch.py"
 
 #: Substrings that make a row worth a second look when its first token names

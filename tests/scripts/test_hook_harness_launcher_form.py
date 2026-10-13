@@ -24,6 +24,7 @@ import stat
 import sys
 
 import pytest
+from tests._module_seam import setattr_in
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests"))
@@ -93,7 +94,9 @@ def test_a_path_without_uv_fails_the_gate_instead_of_passing_it(drive, tmp_path,
 def test_an_entry_whose_command_cannot_start_is_a_failure(drive, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "real", "exit 0").parent))
     real_symlink = os.symlink
-    monkeypatch.setattr(os, "symlink", lambda _src, dst: real_symlink("/nonexistent/uv", dst))
+    # The driver's own `os` binding only (tests/_module_seam.py): patching the one
+    # `os` module would move every symlink in the worker for the test's duration.
+    setattr_in(monkeypatch, drive, "os.symlink", lambda _src, dst: real_symlink("/nonexistent/uv", dst))
     assert _drive(drive, tmp_path, monkeypatch, _hooks(tmp_path, 3), "none", "3") == 1
     out = capsys.readouterr().out
     assert out.count("did not start") == 3
