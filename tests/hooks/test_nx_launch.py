@@ -190,6 +190,23 @@ def test_the_current_directory_is_never_searched(tmp_path: Path) -> None:
     assert b"`nx-hook` is not installed" in r.stderr
 
 
+@posix_only("shutil.which returns a relative hit for a relative PATH entry; the Windows walk already skips such an entry")
+def test_a_relative_path_entry_is_never_used(tmp_path: Path) -> None:
+    """The launcher changes directory to the project before it starts the program.
+    A relative hit found from the plugin root would then name the project's file."""
+    plugin_root, project = _empty(tmp_path, "plugin"), _empty(tmp_path, "project")
+    _install_fake(plugin_root / "rel", "nx-hook", "plugin-root")
+    _install_fake(project / "rel", "nx-hook", "planted")
+    env = scrubbed_env(PATH="rel", NX_TOOLS_DIR=str(_empty(tmp_path, "tools")), CLAUDE_PROJECT_DIR=str(project))
+    r = subprocess.run(
+        [sys.executable, str(_LAUNCH), "nx-hook", "preflight"],
+        input=b"{}", capture_output=True, env=env, timeout=30, check=False, cwd=str(plugin_root),
+    )
+    assert r.returncode == 0
+    assert r.stdout == b"", "a program reached through a relative PATH entry was run"
+    assert b"`nx-hook` is not installed" in r.stderr
+
+
 def test_a_name_with_a_directory_part_is_refused(tmp_path: Path) -> None:
     planted = _install_fake(tmp_path / "elsewhere", "nx-hook", "planted")
     r = _run([str(planted), "preflight"], tools=_empty(tmp_path, "tools"), path=_empty(tmp_path, "bin"))
@@ -221,7 +238,10 @@ def test_the_program_is_started_by_its_generation_path_not_through_current(tmp_p
 def test_a_program_started_by_the_launcher_has_no_current_in_sys_prefix(tmp_path: Path) -> None:
     """The measured fact behind the test above, with its control. An interpreter
     started THROUGH ``current`` takes ``current`` into ``sys.prefix``; a console
-    script started by the launcher does not."""
+    script does not, because its shebang names the generation's interpreter.
+
+    This records the mechanism. It does NOT pin the launcher: it passes with the
+    launcher starting programs through ``current``. The test above is the pin."""
     tools = tmp_path / "tools"
     gen = tools / "gen-20260101T000000Z"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(gen)], check=True, timeout=120)
@@ -357,6 +377,23 @@ def test_no_argument_is_a_usage_line_and_exit_1(tmp_path: Path) -> None:
     assert r.returncode == 1
     assert r.stdout == b""
     assert len(r.stderr.decode().splitlines()) == 1, r.stderr
+
+
+@posix_only("a file with the exec bit and no program in it; Windows decides by extension")
+@pytest.mark.parametrize(("name", "expected"), [("nx-hook", 0), ("nx-mcp", 1)])
+def test_a_program_that_is_found_and_cannot_start_is_treated_as_absent(
+    tmp_path: Path, name: str, expected: int,
+) -> None:
+    tools, gen = _layout(tmp_path)
+    broken = gen / "bin" / name
+    broken.parent.mkdir()
+    broken.write_bytes(b"")
+    broken.chmod(0o755)
+    r = _run([name, "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert r.returncode == expected
+    assert r.stdout == b""
+    lines = r.stderr.decode().splitlines()
+    assert len(lines) == 1 and "could not start" in lines[0], lines
 
 
 def test_a_dangling_current_falls_through_to_path(tmp_path: Path) -> None:

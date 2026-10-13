@@ -31,6 +31,11 @@ that is the payload's ``cwd``, else ``CLAUDE_PROJECT_DIR``, the rule
 For a server it is ``CLAUDE_PROJECT_DIR``, and standard input, which is the
 protocol stream, is not read.
 
+On Windows the program is a child of the launcher, and nothing ties its life to
+the launcher's: when the application ends the launcher at a hook's timeout, the
+program runs on until it finishes. A server ends when the application closes its
+standard input. ``nx_hook_shim.py`` has the same limit there.
+
 Standard library only, and no ``nexus`` import: it has to run with no CLI
 installed. It is under ``launch/`` because Cowork refuses a plugin that has a
 top-level ``bin/``.
@@ -85,9 +90,12 @@ def _hook_stdin() -> tuple[BinaryIO | None, str | None]:
         payload = sys.stdin.buffer.read()
     except (AttributeError, OSError, ValueError):  # no stdin, or a closed one
         return None, _cli_lookup.project_dir(b"")
-    handoff = tempfile.TemporaryFile()  # noqa: SIM115 -- outlives this function by design
-    handoff.write(payload)
-    handoff.seek(0)
+    try:
+        handoff = tempfile.TemporaryFile()  # noqa: SIM115 -- outlives this function by design
+        handoff.write(payload)
+        handoff.seek(0)
+    except OSError as exc:
+        raise OSError(f"the hook payload could not be handed on: {exc}") from exc
     return handoff, _cli_lookup.project_dir(payload)
 
 

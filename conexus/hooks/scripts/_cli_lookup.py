@@ -14,11 +14,13 @@ The pointer is resolved BEFORE the program is named: the path returned is under
 ``<tools>/gen-<stamp>``, never under ``<tools>/current``. ``layout_core`` (WHY
 THE SHIM READS THE POINTER BEFORE IT EXECS) gives the reason: an interpreter
 started through ``current`` carries that component into ``sys.prefix``, and the
-next flip retargets modules inside the running process. A console script's
-shebang names its generation's own interpreter, so on POSIX a start through
-``current`` was measured not to leak (macOS and Linux, 2026-10-13); the pointer
-is resolved anyway, because it is one ``readlink`` and it also holds a server to
-the generation it started from across a flip.
+next flip retargets modules inside the running process. Measured 2026-10-13 on
+macOS (uv 0.8.0) and Linux (uv 0.12.24): a console script uv built has a shebang
+that names its generation's own interpreter, so started through ``current`` it
+shows no ``current`` in ``sys.prefix`` or ``sys.path``; the interpreter itself
+started through ``current`` shows it in both. The pointer is resolved anyway. It
+is one ``readlink``, and the rule then does not depend on how a generation's
+scripts happen to be written.
 
 On Windows the layout's programs are ``<gen>\\bin\\<name>.exe``, copies of the
 generation's own launchers (``generation_core.populate_launchers``). On POSIX
@@ -60,7 +62,9 @@ def tools_dir() -> str | None:
     home = os.path.expanduser("~")
     raw = (os.environ.get(TOOLS_DIR_ENV) or "").strip()
     if not raw:
-        return os.path.join(home, ".local", "share", "nexus", "tools")
+        # No home directory known: ``expanduser`` hands "~" back, and a relative
+        # root would be read against the working directory.
+        return os.path.join(home, ".local", "share", "nexus", "tools") if os.path.isabs(home) else None
     if raw == "~":
         raw = home
     elif raw.startswith("~/"):
@@ -92,6 +96,12 @@ def resolve(name: str) -> str | None:
     """The absolute path of the CLI program *name*, or ``None``.
 
     *name* is a bare program name. Anything with a directory part is refused.
+
+    The path returned is absolute. On POSIX ``shutil.which`` returns a relative
+    hit for a relative ``PATH`` entry, and the callers change directory to the
+    project before they start the program, so a relative hit would name whatever
+    the project holds at that path. Relative entries are therefore dropped first,
+    as ``which_off_cwd`` already drops them on Windows.
     """
     if not PROGRAM_NAME.match(name):
         return None
@@ -100,7 +110,10 @@ def resolve(name: str) -> str | None:
         hit = _exec_path.which_off_cwd(name, path=os.path.join(generation, "bin"))
         if hit is not None:
             return hit
-    return _exec_path.which_off_cwd(name)
+    if sys.platform == "win32":
+        return _exec_path.which_off_cwd(name)
+    entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(e)]
+    return _exec_path.which_off_cwd(name, path=os.pathsep.join(entries))
 
 
 def missing_note(program: str, what: str) -> str:
