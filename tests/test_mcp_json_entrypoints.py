@@ -20,6 +20,8 @@ import json
 import pathlib
 import tomllib
 
+from tests._hook_wiring import NX_LAUNCH, launched_program
+
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _MCP_JSON = _REPO_ROOT / "conexus" / ".mcp.json"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
@@ -56,22 +58,47 @@ def test_mcp_json_exists() -> None:
     assert _MCP_JSON.is_file(), f"expected {_MCP_JSON}"
 
 
+def _launched_console_script(server_cfg: dict) -> str | None:
+    """The console script a server entry ends up running.
+
+    Since RDR-228 a local server is ``uv tool run ... python
+    ${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py <console-script>``, so the program
+    is the launcher's argument, not the entry's ``command``. ``None`` for any
+    entry that is not in the launcher form.
+    """
+    program = launched_program({"command": server_cfg.get("command"), "args": server_cfg.get("args")})
+    return program[0] if len(program) == 1 else None
+
+
 def test_every_local_server_command_is_a_declared_console_script() -> None:
     mcp_json = _load_mcp_json()
     scripts = _load_console_scripts()
     for server_name, expected_command in _LOCAL_SERVERS.items():
         assert server_name in mcp_json, f"{server_name!r} missing from {_MCP_JSON.relative_to(_REPO_ROOT)}"
-        actual_command = mcp_json[server_name]["command"]
+        actual_command = _launched_console_script(mcp_json[server_name])
         assert actual_command == expected_command, (
-            f"{server_name!r}'s command in .mcp.json is {actual_command!r}, "
-            f"expected {expected_command!r} (this test's own fixture is stale, "
-            "or .mcp.json drifted)"
+            f"{server_name!r} in .mcp.json launches {actual_command!r} through "
+            f"{NX_LAUNCH}, expected {expected_command!r} (this test's own fixture "
+            "is stale, .mcp.json drifted, or the entry left the launcher form)"
         )
         assert actual_command in scripts, (
             f".mcp.json declares command {actual_command!r} for server "
             f"{server_name!r}, but pyproject.toml [project.scripts] has no "
             f"such entry point -- the plugin would fail to spawn this server"
         )
+
+
+def test_a_server_entry_outside_the_launcher_form_reads_as_no_console_script() -> None:
+    """Non-vacuity: the reader above returns nothing for a bare command, a
+    launcher with the wrong head, and a launcher with extra arguments, so a
+    server that drifts out of the form fails the test above rather than
+    passing on a default."""
+    good = _load_mcp_json()["nexus"]
+    assert _launched_console_script(good) == "nx-mcp"
+    assert _launched_console_script({"command": "nx-mcp", "args": []}) is None
+    assert _launched_console_script({**good, "command": "python3"}) is None
+    assert _launched_console_script({**good, "args": [*good["args"], "--extra"]}) is None
+    assert _launched_console_script({**good, "args": [*good["args"][:-2], "x.py", "nx-mcp"]}) is None
 
 
 def test_console_script_target_resolves_to_the_intended_module_and_callable() -> None:

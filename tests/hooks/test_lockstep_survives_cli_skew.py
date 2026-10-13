@@ -25,7 +25,7 @@ import json
 import sys
 from pathlib import Path
 
-from tests._hook_wiring import launcher_script_args
+from tests._hook_wiring import NX_HOOK_SHIM, NX_LAUNCH, UV_LAUNCHER_ARGV, command_verb, launcher_script_args
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "conexus" / "hooks" / "scripts"
@@ -46,9 +46,29 @@ def _session_start_entries() -> list[dict]:
     ]
 
 
+def _lockstep_as_nx_hook_verb(entries: list[dict]) -> list[dict]:
+    """Entries that run version lockstep as an ``nx-hook`` verb, bare or through
+    the launcher (RDR-228). The shim form is not one: the shim is what turns an
+    older ``nx-hook``'s exit 2 into a skip."""
+    return [
+        e for e in entries
+        if command_verb(e) == "version-lockstep" and NX_HOOK_SHIM not in launcher_script_args(e)
+    ]
+
+
+def test_the_lockstep_verb_check_sees_every_form_but_the_shim() -> None:
+    """Non-vacuity: a lockstep verb in either unguarded form is found, so the
+    check below cannot pass because the manifest moved to a form it ignores."""
+    launched = {"type": "command", "command": "uv", "args": [*UV_LAUNCHER_ARGV, NX_LAUNCH, "nx-hook", "version-lockstep"]}
+    bare = {"type": "command", "command": "nx-hook", "args": ["version-lockstep"]}
+    shimmed = {"type": "command", "command": "uv", "args": [*UV_LAUNCHER_ARGV, NX_HOOK_SHIM, "version-lockstep"]}
+    other = {"type": "command", "command": "uv", "args": [*UV_LAUNCHER_ARGV, NX_LAUNCH, "nx-hook", "rdr"]}
+    assert _lockstep_as_nx_hook_verb([launched, bare, shimmed, other]) == [launched, bare]
+
+
 def test_lockstep_is_a_plugin_script_not_an_nx_hook_verb() -> None:
     entries = _session_start_entries()
-    verbs = [e for e in entries if e.get("command") == "nx-hook" and (e.get("args") or [""])[0] == "version-lockstep"]
+    verbs = _lockstep_as_nx_hook_verb(entries)
     assert not verbs, (
         "hooks.json runs version lockstep as `nx-hook version-lockstep`; an "
         "older nx-hook exits 2 on that verb, so plugin-ahead skew can never "

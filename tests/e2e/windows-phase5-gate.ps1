@@ -203,7 +203,9 @@ $STOP_DEGRADED_RE = 'unclean_stop|hard-killing|win_console_helper_failed|bounded
 # plugin's hooks/scripts matches too (the recorded command keeps
 # ${CLAUDE_PLUGIN_ROOT} unexpanded, so the plugin cannot be told apart); the
 # guest has only the conexus plugin installed.
-$HOOK_OURS_RE = '^nx-hook |nx-session-end-launcher|^plugin:conexus:nexus/|hooks/scripts/[^ ]+\.py'
+# RDR-228: the nx-hook entries run as `uv ... launch/nx_launch.py nx-hook <verb>`,
+# so the clause names the launcher and the program, not the start of the command.
+$HOOK_OURS_RE = 'nx_launch\.py nx-hook |nx-session-end-launcher|^plugin:conexus:nexus/|hooks/scripts/[^ ]+\.py'
 $HOOK_SHIM_RE = 'nx_hook_shim\.py'
 if (-not $RunDir) { $RunDir = Join-Path $env:USERPROFILE 'nx-gate\run' }
 

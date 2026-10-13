@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tests._hook_wiring import command_verb, runs_cli_program
+
 
 def _invocations(sessionstart: list[dict]) -> list[str]:
     """Each SessionStart hook as one string, whatever form it is declared in.
@@ -35,13 +37,16 @@ def _invocations(sessionstart: list[dict]) -> list[str]:
 
 
 class TestHookConfigWiresPreflightEarly:
-    """Preflight must run AFTER the ``nx upgrade --auto`` self-
+    """Preflight must run right AFTER the ``nx-hook upgrade-auto`` self-
     upgrade (test_phase5_integration.TestHooksJson asserts that
-    upgrade is the first hook, since stale-conexus version
-    handling is a hard prereq for everything else) but BEFORE the
-    cat-of-using-nx-skills step. Position 2 keeps the FAILED
-    marker (if any) above the 600-line capability dump and the
-    routing skill so the model sees the counter-signal first.
+    upgrade is the first hook that runs a CLI program, since stale-conexus
+    version handling is a hard prereq for everything else) but BEFORE the
+    guidance emission. Keeping it second among the CLI hooks keeps the FAILED
+    marker (if any) above the 600-line capability dump and the routing skill
+    so the model sees the counter-signal first.
+
+    "Second" counts hooks that run a CLI program: the setup notice ahead of
+    both (RDR-228) starts none and is silent when the CLI is installed.
     """
 
     def test_hook_config_references_preflight_second(self) -> None:
@@ -51,21 +56,21 @@ class TestHookConfigWiresPreflightEarly:
         )
         data = json.loads(cfg.read_text())
         sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
-        # Position 0 is `nx upgrade --auto` (existing contract per
+        cli_hooks = [h for h in sessionstart if runs_cli_program(h)]
+        verbs = [command_verb(h) for h in cli_hooks]
+        # Position 0 is the self-upgrade (existing contract per
         # tests/test_phase5_integration.py::TestHooksJson::
-        # test_upgrade_auto_is_first_session_start_hook).
-        cmds = _invocations(sessionstart)
-        # nexus-q02nx.22 moved this one too: `nx upgrade --auto 2>/dev/null
-        # || echo ... >&2` is now `nx-hook upgrade-auto`, with the redirect
-        # and the fallback inside the verb. The ORDER contract is unchanged.
-        assert "nx-hook upgrade-auto" == cmds[0]
+        # test_upgrade_auto_is_first_cli_session_start_hook).
+        assert verbs[:1] == ["upgrade-auto"], f"first CLI hook is {verbs[:1]!r}"
         # Position 1 must be the preflight so the FAILED marker
         # lands above the capability dump and the using-nx-skills
         # routing.
-        assert "nx-hook preflight" == cmds[1], (
-            f"preflight must be the SECOND SessionStart hook (right "
-            f"after `nx upgrade --auto`). Got hook[1]: {cmds[1]!r}"
+        assert verbs[1:2] == ["preflight"], (
+            f"preflight must be the SECOND CLI SessionStart hook (right "
+            f"after `nx-hook upgrade-auto`). Got hook[1]: {verbs[1:2]!r}"
         )
+        # Right after, with nothing between them: the entries are adjacent.
+        assert sessionstart.index(cli_hooks[1]) == sessionstart.index(cli_hooks[0]) + 1
 
     def test_hook_config_preflight_runs_before_guidance_emission(self) -> None:
         """The guidance emission (`nx-hook session-start`, the

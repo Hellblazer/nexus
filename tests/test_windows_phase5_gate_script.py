@@ -334,7 +334,9 @@ def test_hook_pin_fails_when_a_hook_script_moves_out_from_under_hooks_scripts() 
     assert moved != base
     with pytest.raises(AssertionError):
         _check_hook_coverage(moved, _text())
-    renamed = base.replace('"command": "nx-session-end-launcher"', '"command": "nx-session-end"')
+    # The session-end entry runs through the launcher (RDR-228), so its program
+    # is the launcher's last argument, not its `command`.
+    renamed = base.replace('"nx-session-end-launcher"', '"nx-session-end"')
     assert renamed != base
     with pytest.raises(AssertionError):
         _check_hook_coverage(renamed, _text())

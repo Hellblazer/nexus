@@ -84,6 +84,31 @@ def launcher_script_args(entry: dict) -> list[str]:
     return []
 
 
+#: The plugin script that tells the model Nexus is not installed (RDR-228 P1).
+#: It starts no CLI program and prints nothing when the CLI is there, which is
+#: why the design record puts it ahead of every entry that does run one.
+NX_SETUP_NOTICE = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py"
+
+
+def runs_cli_program(entry: dict) -> bool:
+    """Does this hook entry run a program of the Nexus CLI package?
+
+    True for a verb of ``nx-hook`` in any of its three forms (bare, shim,
+    launcher), for any other launcher entry (``nx-session-end-launcher``), for
+    a bare ``nx*`` console script, and for an ``mcp_tool`` entry (a tool of the
+    nexus MCP server). False for a plugin-resident script that only runs under
+    ``uv`` (the setup notice, the lockstep hook, the routing guards).
+    """
+    if entry.get("type") == "mcp_tool":
+        return True
+    command = entry.get("command")
+    return (
+        command_verb(entry) is not None
+        or bool(launched_program(entry))
+        or (isinstance(command, str) and (command == "nx" or command.startswith("nx-")))
+    )
+
+
 def is_plugin_launcher(entry: dict) -> bool:
     """Is *entry* a plugin-resident script or shim launched through ``uv``?"""
     return bool(launcher_script_args(entry))

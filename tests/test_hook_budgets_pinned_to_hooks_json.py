@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from nexus.hooks import rdr_verb, upgrade_auto
+from tests._hook_wiring import command_verb
 
 pytestmark = pytest.mark.lint
 
@@ -36,14 +37,19 @@ HOOKS_JSON = Path(__file__).resolve().parents[1] / "conexus" / "hooks" / "hooks.
 _START_MARGIN_S = 2.0
 
 
-def _session_start_timeout(verb: str) -> float:
-    """The ``timeout`` of the one SessionStart ``nx-hook <verb>`` entry."""
-    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+def _session_start_timeout(verb: str, hooks_json: Path = HOOKS_JSON) -> float:
+    """The ``timeout`` of the one SessionStart ``nx-hook <verb>`` entry.
+
+    The entry is found by the verb it runs, in whichever form it is declared
+    (bare, shim, or the RDR-228 launcher), so a move between forms does not
+    leave this reading no entry at all.
+    """
+    data = json.loads(hooks_json.read_text(encoding="utf-8"))
     found = [
         h["timeout"]
         for entry in data["hooks"]["SessionStart"]
         for h in entry["hooks"]
-        if h.get("command") == "nx-hook" and h.get("args") == [verb]
+        if command_verb(h) == verb
     ]
     assert len(found) == 1, (
         f"expected exactly one SessionStart `nx-hook {verb}` entry in hooks.json, "
@@ -74,3 +80,32 @@ def test_upgrade_auto_skew_wait_is_under_the_upgrade_auto_timeout() -> None:
         f"upgrade_auto._SKEW_WAIT_S={upgrade_auto._SKEW_WAIT_S} + start margin "
         f"{_START_MARGIN_S} must be under the hooks.json upgrade-auto timeout {timeout}"
     )
+
+
+def test_the_timeout_reader_finds_the_launcher_form_and_counts_duplicates(tmp_path: Path) -> None:
+    """Non-vacuity: the reader returns the timeout of a launcher-form entry
+    (the form hooks.json ships), and refuses a manifest where the verb is
+    absent or wired twice, so an entry that left the recognised forms fails
+    the two budget pins instead of leaving them comparing against nothing."""
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    entries = data["hooks"]["SessionStart"][0]["hooks"]
+    target = next(h for h in entries if command_verb(h) == "rdr")
+    assert target["command"] == "uv", "hooks.json no longer declares rdr through the launcher"
+
+    def write(mutated: dict) -> Path:
+        path = tmp_path / "hooks.json"
+        path.write_text(json.dumps(mutated), encoding="utf-8")
+        return path
+
+    assert _session_start_timeout("rdr", write(data)) == float(target["timeout"])
+
+    # the verb moved out of every recognised form
+    target["args"] = [*target["args"][:-1], "rdr-renamed"]
+    with pytest.raises(AssertionError, match="exactly one"):
+        _session_start_timeout("rdr", write(data))
+
+    # the verb wired twice
+    target["args"][-1] = "rdr"
+    entries.append(dict(target))
+    with pytest.raises(AssertionError, match="exactly one"):
+        _session_start_timeout("rdr", write(data))

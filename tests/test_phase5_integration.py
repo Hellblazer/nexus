@@ -14,6 +14,7 @@ from click.testing import CliRunner
 from structlog.testing import capture_logs
 
 from nexus.cli import main
+from tests._hook_wiring import NX_SETUP_NOTICE, command_verb, launcher_script_args, runs_cli_program
 
 
 def _warnings(logs: list[dict]) -> list[dict]:
@@ -39,7 +40,7 @@ class TestHooksJson:
         data = json.loads(hooks_path.read_text())
         assert "hooks" in data
 
-    def test_upgrade_auto_is_first_session_start_hook(self) -> None:
+    def test_upgrade_auto_is_first_cli_session_start_hook(self) -> None:
         hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         startup_hooks = next(
@@ -47,17 +48,22 @@ class TestHooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        # The first hook must be the self-upgrade. RDR-215 bead
-        # nexus-q02nx.22 moved it from the shell string
-        # `nx upgrade --auto 2>/dev/null || echo <skew guidance> >&2` to
-        # exec form, which puts the verb in `args` and leaves `command`
-        # as the bare console-script name -- so a `.startswith()` on the
-        # old spelling stopped describing anything. Assert the DECLARATION
-        # instead of a rendering of it: there is exactly one shape now and
-        # naming it is more precise than a prefix match ever was.
-        assert startup_hooks[0]["command"] == "nx-hook"
-        assert startup_hooks[0]["args"] == ["upgrade-auto"]
-        assert startup_hooks[0]["timeout"] == 30
+        # Ahead of it, and only it: the setup notice (RDR-228), which starts no
+        # CLI program and is silent when the CLI is installed. The self-upgrade
+        # must come before every entry that does run one, so a stale CLI is
+        # upgraded before anything depends on it.
+        #
+        # The verb is read by identity (`command_verb`), not by the spelling of
+        # `command`/`args`: RDR-215 moved it from a shell string to exec form
+        # and RDR-228 moved it behind the launcher, and each move broke an
+        # assertion on the spelling that was never about the spelling.
+        assert launcher_script_args(startup_hooks[0])[:1] == [NX_SETUP_NOTICE]
+        assert not runs_cli_program(startup_hooks[0])
+        cli_hooks = [h for h in startup_hooks if runs_cli_program(h)]
+        assert cli_hooks, "no SessionStart hook runs a CLI program: the order below would be vacuous"
+        assert command_verb(cli_hooks[0]) == "upgrade-auto"
+        assert cli_hooks[0]["timeout"] == 30
+        assert startup_hooks.index(cli_hooks[0]) == 1
 
 
 # ── MCP version check tests ────────────────────────────────────────────────
