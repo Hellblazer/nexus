@@ -1891,3 +1891,33 @@ Right-sized for an Architecture record that replaces an accepted direction.
   2.1 s with `--with-pg` and 1.9 s plain, against the 15 s bound; T2
   `224-gate-run-7.78.0-2026-10-12`). The aspect-worker daemon, host sleep and the
   Desktop bundle stay outside what a green gate covers.
+- 2026-10-13: measurements on the clean guest, text and evidence only; no status
+  change. (a) The Phase 5 gate PASSED 5 of 5 on published conexus 7.78.0 run as a
+  standard user: a local account in Users only, created after the restore by
+  `tests/e2e/windows-guest/run-gate.sh --standard-user`, which then runs the
+  install, the setup phase (with `nx init` and the `NexusStorageService` task),
+  the Claude Code session and the verify phase as that account. The gate's
+  precondition recorded "Administrators not a member, integrity Medium" (T2
+  `224-gate-run-standard-user-7.78.0-2026-10-13`). This closes the Phase 3 "not
+  run" item for a standard account as far as the gate reaches. The administrator
+  still installed Git for all users, since winget's package needs elevation, so a
+  standard user with no Git is not covered; neither is a Home or Pro edition, a
+  Microsoft or domain account, or a managed machine's application policy. (b)
+  `nx daemon service install-binary` with the published `windows-x64` assets: exit
+  0 in 12.8 s with the PostgreSQL bundle and 6.7 s with `--no-pg-bundle`, a
+  same-version reinstall with the service stopped (T2
+  `224-guest-batch-2026-10-12`). (c) Host resolution of bare `uv` and `nx-hook`:
+  with `uv.exe` and `nx-hook.exe` planted in the session's working directory, all
+  four recorded SessionStart hooks ran the installed programs. On the guest
+  `claude.exe` shares a directory with the installed ones, so this does not
+  separate "the host never searches the working directory" from "the
+  application's directory wins first". (d) Not measurable on this guest: sleep (the
+  VM's firmware offers no sleep state) and a first hook run with no Python (the
+  only Python is the one `uv tool install` brings; with it present the cold first
+  session's hooks took 3.4 s against the 5 s timeout). Both stay open. (e) Three
+  real-Windows tests joined the rehearsal's required floor: the PostgreSQL start
+  flags under a console-wide CTRL_BREAK, with an unflagged control that dies; the
+  off-cwd resolver against real planted files; and a planted `.venv` against the
+  eleven uv hook entries (T2 `224-win-run-ffea86080`). The hand runs were in a
+  desktop session; the rehearsal job on the runner's service account is the console
+  test's first run in session 0.
