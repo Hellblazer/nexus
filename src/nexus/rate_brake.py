@@ -54,7 +54,7 @@ SCOPE, disclosed honestly:
   the brake floors each attempt's sleep, it never adds attempts on its
   own. Worst-case per-call bounds are documented on each wrapper
   function's docstring in ``nexus.retry`` (``_vector_with_retry``,
-  ``_etl_with_retry``, ``_manifest_write_with_retry``).
+  ``_manifest_write_with_retry``).
 - DELIBERATELY COUPLED, disclosed (nexus-gvuv0, nexus-cy9u7 round-3):
   ``_manifest_write_with_retry`` trips this SAME brake on a plain
   connectivity error (a bare ``httpx.TransportError``/``ConnectionError``/

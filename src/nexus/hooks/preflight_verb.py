@@ -48,7 +48,7 @@ that a stdlib-only verb pays the ~20 ms dispatch floor, not the ~75 ms a
 ``read_payload`` (or passes ``None`` for a ledger verb) before dispatching
 to ``run`` -- this verb ignores the payload entirely, exactly as the
 original script never read stdin at all (its only external inputs are
-``PATH`` lookups via ``shutil.which`` and the two version-probe
+``PATH`` lookups via ``which_off_cwd`` and the two version-probe
 subprocesses).
 
 **Wired since bead ``nexus-q02nx.21``** -- ``conexus/hooks/hooks.json``
@@ -77,15 +77,21 @@ from __future__ import annotations
 
 import ntpath
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 
 from nexus._hook_runtime._io import HookResult
 
-#: Injectable seams so the Windows arm runs under test on any host.
-_which = shutil.which
+def _which(name: str) -> str | None:
+    """A PATH lookup that never answers with a current-directory hit on Windows
+    (``nexus.util.nx_argv.which_off_cwd``). An injectable seam, so the Windows arm
+    runs under test on any host. The import is function-level: stdlib-only, and
+    it keeps the hook's own import path as small as it was with a bare
+    ``shutil.which``."""
+    from nexus.util.nx_argv import which_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds
+
+    return which_off_cwd(name)
 
 
 def _platform() -> str:
@@ -128,6 +134,8 @@ def _probe(name: str, args: list[str], timeout: float = 3.0) -> _ToolStatus:
     """
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds
+
     path = _which(args[0])
     if not path:
         return _ToolStatus(
@@ -135,8 +143,9 @@ def _probe(name: str, args: list[str], timeout: float = 3.0) -> _ToolStatus:
             detail="not on PATH", install_hint="",
         )
     try:
+        # Windows: the child is the PATH hit (absolute), never a planted bd.exe.
         result = run_bounded(
-            args, timeout=timeout,
+            argv_off_cwd(args), timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return _ToolStatus(

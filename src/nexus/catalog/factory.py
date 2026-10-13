@@ -445,13 +445,6 @@ class _ServiceCatalogWriter:
     def routed(self) -> bool:
         return True
 
-    @property
-    def priority(self) -> str:
-        return "batch"
-
-    def is_interactive_write_pending(self) -> bool:
-        return False
-
     def close(self) -> None:
         self._client.close()
 

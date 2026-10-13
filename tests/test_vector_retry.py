@@ -1037,3 +1037,22 @@ def test_upsert_chunks_concurrent_second_call_waits_for_shared_pause(
     assert handler.call_count == 3
     assert test_brake.trips == 1
     assert test_brake.last_retry_after == 2.0
+
+
+def test_direct_connection_reset_while_handling_a_401_is_retryable() -> None:
+    """http_vector_client's post-401 re-resolve retry runs inside the except
+    block, so a ConnectionResetError raised there chains the 401 in
+    __context__; the chained-status walk classed it non-retryable on the
+    first attempt. The direct exception's own type decides first
+    (nexus-cd1k0.10)."""
+    request = httpx.Request("POST", "https://engine.internal/v1/vectors/upsert-chunks")
+    response = httpx.Response(401, request=request)
+    try:
+        try:
+            raise httpx.HTTPStatusError("401", request=request, response=response)
+        except httpx.HTTPStatusError:
+            raise ConnectionResetError("connection reset by peer")
+    except ConnectionResetError as exc:
+        chained = exc
+    assert isinstance(chained.__context__, httpx.HTTPStatusError)
+    assert _is_retryable_vector_error(chained) is True

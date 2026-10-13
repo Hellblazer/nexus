@@ -2,9 +2,9 @@
 """GH #1371: transient-connection retry for the catalog manifest write.
 
 ``_manifest_write_with_retry`` is scoped to CONNECTION-class failures only
-(no HTTP-status classification, unlike the migration-scoped
-``_etl_with_retry``) — a real 4xx from the catalog service must fail on the
-first attempt so a genuine data problem surfaces immediately.
+(no HTTP-status classification, unlike the since-deleted migration ETL
+retry) — a real 4xx from the catalog service must fail on the first attempt so a genuine data problem
+surfaces immediately.
 
 nexus-cy9u7 addendum: a rate-limit signal IS now retried too (routed
 through the shared ``RateLimitBrake``) — see the "shared brake wiring"

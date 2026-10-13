@@ -197,3 +197,15 @@ class TestDoctorDrift:
         assert results[0].fix_suggestions == ["nx agents install worktree-developer"]
         monkeypatch.setattr(agents_cmd, "worktree_developer_drift", lambda **_: None)
         assert health._check_worktree_developer_agent() == []
+
+
+class TestInstallHelp:
+    def test_help_says_to_name_the_serena_wt_tools_and_never_to_allow_the_wildcard(self) -> None:
+        """nexus-r2e6t: the wildcard also allows jet_brains_debug (arbitrary Groovy/Java in the IDE's JVM),
+        query_project and every writer with no prompt, so the help tells the user to name the tools."""
+        result = CliRunner().invoke(agents_group, ["install", "--help"])
+        text = " ".join(result.output.split())
+        assert result.exit_code == 0
+        assert "allow mcp__serena-wt__*" not in text
+        assert "Name the mcp__serena-wt__ tools the agent needs individually" in text
+        assert "jet_brains_debug" in text

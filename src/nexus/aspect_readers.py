@@ -1517,7 +1517,7 @@ HTTPS_STAT_TIMEOUT_S: float = 10.0
 #: Bounded local retry count for a HEAD stat call: 1 initial attempt + 2
 #: retries.  This is deliberately NOT routed through one of
 #: ``nexus.retry``'s wrappers (``_vector_with_retry`` / ``_voyage_with_retry``
-#: / ``_etl_with_retry`` / ``_manifest_write_with_retry``): every one of
+#: / ``_manifest_write_with_retry``): every one of
 #: those trips the shared process-wide ``RateLimitBrake``
 #: (``nexus.rate_brake``), which paces nexus's OWN external service quotas
 #: (Voyage, the T3 vector service, the catalog manifest write path).  An

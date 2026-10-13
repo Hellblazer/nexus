@@ -656,16 +656,42 @@ class ReadPathLeafPruningIntegrationTest {
      * Each figure, at 2 tenants and at 300, is the best (lowest) p95 of this many sets, so both phases are read
      * with the same statistic. A box that is also running a build or another suite inflates single sets by 5x and
      * more in either phase; a planning cost that GROWS with the tenant count shows in every set, so the minimum
-     * keeps the signal and drops the load. The bound itself is the RDR's, unchanged: p95 at 300 tenants at most
-     * 2x the 2-tenant p95 and at most 25 ms, no floor.
+     * keeps the signal and drops the load. The bound is the RDR's: p95 at 300 tenants at most 2x the 2-tenant p95
+     * (see {@link #TS2_RATIO_MIN_DIFF_MS}) and at most 25 ms.
      */
     private static final int TS2_ATTEMPTS = 5;
+    /**
+     * The 2x rule fails a family only when the 300-tenant p95 is also more than this many ms above the 2-tenant
+     * p95 (RDR-225 amendment of 2026-10-12). A family that plans in 0.6 ms moves by 0.6 ms from one phase to the
+     * next on a shared box, in either direction, and that alone is 2x: on develop aa226556f assign_from_chashes
+     * 1024 read 1.232 ms against 0.600 ms (2.05x) while text_gate_probe 768 went from 1.326 ms DOWN to 0.669 ms.
+     * A planning cost that grows with the tenant count is far above this: the control, plain_search_1024 with its
+     * tenant predicate removed, reads 15.4 ms against 0.9 ms. The 25 ms cap has no such allowance.
+     */
+    private static final double TS2_RATIO_MIN_DIFF_MS = 2.0;
 
     /** Families whose body is not inlined into the caller's statement: the call is timed, with its inner planning. */
     private static final Set<String> TS2_OPAQUE = Set.of("text_gate_probe", "assign_from_chashes", "cross_preview");
 
     /** The pool TS2 times on: its sessions were opened with auto_explain off (see the test). */
     private TenantScope ts2Scope;
+
+    /** The TS2 rule on one family's two figures, in ms. */
+    static boolean ts2Violates(double p2, double p300) {
+        boolean overRatio = p300 > 2 * p2 && p300 - p2 > TS2_RATIO_MIN_DIFF_MS;
+        return overRatio || p300 > 25.0;
+    }
+
+    /** The rule on recorded figures: the row that failed on noise passes, and the pruning control still fails. */
+    @Test
+    void ts2Rule_passesSubMillisecondNoise_andFailsThePruningControlAndTheCap() {
+        assertThat(ts2Violates(0.600, 1.232)).as("assign_from_chashes 1024 on develop aa226556f, 2.05x").isFalse();
+        assertThat(ts2Violates(0.9, 15.4)).as("plain_search_1024 with its tenant predicate removed").isTrue();
+        assertThat(ts2Violates(0.9, 3.0)).as("over 2x and 2.1 ms apart").isTrue();
+        assertThat(ts2Violates(0.9, 2.8)).as("over 2x but 1.9 ms apart").isFalse();
+        assertThat(ts2Violates(5.0, 9.0)).as("4 ms apart but under 2x").isFalse();
+        assertThat(ts2Violates(24.0, 25.5)).as("over the 25 ms cap, which has no allowance").isTrue();
+    }
 
     /** Best p95 of {@link #TS2_ATTEMPTS} sets of {@link #TS2_SAMPLES} timings of one family at one dimension, in ms. */
     private double ts2P95(String family, String coll) {
@@ -702,7 +728,8 @@ class ReadPathLeafPruningIntegrationTest {
 
     /**
      * TS2, as the RDR writes it: every search family planned 200 times per set at 2 tenants and at 300, p95 at 300 at most
-     * twice the 2-tenant p95 and at most 25 ms. A family is timed as EXPLAIN of its call (parse and plan, no
+     * twice the 2-tenant p95 (counted only when the two differ by more than {@link #TS2_RATIO_MIN_DIFF_MS} ms) and
+     * at most 25 ms. A family is timed as EXPLAIN of its call (parse and plan, no
      * execution) when it is inlined into the caller's statement, and as the call itself when it is not (a
      * plpgsql function plans its own statements at call time: the probe, assign_from_chashes, cross_preview;
      * their inputs are four rows, so the call is dominated by planning). The numbers are printed for the record.
@@ -767,14 +794,15 @@ class ReadPathLeafPruningIntegrationTest {
                 double p2 = at2.get(key);
                 double p300 = ts2P95(family, coll);
                 table.append(String.format("  %-34s  2 tenants %7.3f   300 tenants %7.3f%n", key, p2, p300));
-                if (p300 > 2 * p2 || p300 > 25.0) failures.add(String.format("%s: p95 %.3f ms at 300 vs %.3f ms at 2", key, p300, p2));
+                if (ts2Violates(p2, p300)) failures.add(String.format("%s: p95 %.3f ms at 300 vs %.3f ms at 2", key, p300, p2));
             }
         }
         long end = System.nanoTime();
         table.append(String.format("  wall: warm pass %.1f s, 2-tenant pass %.1f s, 298 tenants created %.1f s, 300-tenant pass %.1f s%n",
             (warmDone - started) / 1e9, (at2Done - warmDone) / 1e9, (tenantsDone - at2Done) / 1e9, (end - tenantsDone) / 1e9));
         System.out.println(table);
-        assertThat(failures).as("TS2 (p95 at 300 tenants <= 2x the 2-tenant p95 and <= 25 ms):%n%s", table).isEmpty();
+        assertThat(failures).as("TS2 (p95 at 300 tenants <= 2x the 2-tenant p95, or within "
+            + TS2_RATIO_MIN_DIFF_MS + " ms of it, and <= 25 ms):%n%s", table).isEmpty();
     }
 
     /**

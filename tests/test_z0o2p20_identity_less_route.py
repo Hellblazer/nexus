@@ -11,7 +11,7 @@ These tests pin the route that replaced it:
   names it;
 * the run refuses such a file BEFORE chunking it, and says so in its summary;
 * a file that has a document is dispatched exactly as before;
-* a refused worktree file and a fairness-deferred file are not chunked either.
+* a refused worktree file is not chunked either.
 """
 from __future__ import annotations
 

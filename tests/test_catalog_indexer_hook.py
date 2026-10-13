@@ -505,69 +505,6 @@ class TestCatalogHookBatchedLookups:
         assert writers[0].calls.get("register", 0) == 0
         assert set(result) == set(files)
 
-    def test_fairness_yield_pass1_defers_update_burst(self, tmp_path, monkeypatch):
-        # nexus-9dvqy (stacked-review CRITICAL): the RDR-146 per-file yield must
-        # still guard the pass-1 inline writer.update() burst. On a warm re-run a
-        # HEAD bump flips every existing doc to changed => a large serial update
-        # burst; a pending interactive write on the 2nd file must defer the rest.
-        catalog_dir, cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        monkeypatch.setenv("NX_WRITE_PRIORITY", "batch")
-        files = []
-        for i in range(3):
-            f = tmp_path / f"u{i}.py"
-            f.write_text(f"code {i}")
-            files.append(f)
-        # First index registers all three (head v1).
-        self._index(tmp_path, files, head_hash="v1")
-
-        # Re-index with a new HEAD => every doc is "changed" => update() path.
-        seen = {"n": 0}
-
-        def fake_await(pending_fn, on_locked):
-            seen["n"] += 1
-            return "skip" if seen["n"] == 2 else "wait"
-
-        monkeypatch.setattr(
-            "nexus.catalog.write_priority.await_fair_window", fake_await
-        )
-        result = self._index(tmp_path, files, head_hash="v2")
-
-        # Only the first file was resolved before the yield deferred the rest.
-        assert len(result) == 1
-        assert files[1] not in result and files[2] not in result
-
-    def test_fairness_yield_pass2_defers_between_pages(self, tmp_path, monkeypatch):
-        # nexus-9dvqy (audit HIGH): pass 2 adds a SECOND per-page yield for the
-        # new-doc batch. Let pass 1 complete (all "wait"), then skip on the 2nd
-        # page so page-1 registers and the rest defer. Page shrunk to 2.
-        catalog_dir, cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        monkeypatch.setenv("NX_WRITE_PRIORITY", "batch")
-        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 2)
-
-        files = []
-        for i in range(3):
-            f = tmp_path / f"y{i}.py"
-            f.write_text(f"code {i}")
-            files.append(f)
-
-        # Calls: pass1 resolves 3 files (n=1,2,3 -> wait), pass2 page@0 (n=4 ->
-        # wait, registers files 0,1), page@2 (n=5 -> skip, defers file 2).
-        seen = {"n": 0}
-
-        def fake_await(pending_fn, on_locked):
-            seen["n"] += 1
-            return "skip" if seen["n"] == 5 else "wait"
-
-        monkeypatch.setattr(
-            "nexus.catalog.write_priority.await_fair_window", fake_await
-        )
-        result = self._index(tmp_path, files)
-
-        assert set(result) == {files[0], files[1]}
-        assert files[2] not in result
-
     def test_register_many_failure_falls_back_per_file(self, tmp_path, monkeypatch):
         # nexus-9dvqy: if register_many raises unrecoverably, the hook falls
         # back to per-file register() with ghost-class isolation — every file
@@ -761,12 +698,6 @@ class TestCatalogHookBatchedServiceMode:
                 raise RuntimeError("simulated update_many transport failure")
             return [1 for _ in docs]
 
-        def is_interactive_write_pending(self) -> bool:
-            # Property-style counter: Pass 1b's per-page fairness yield
-            # (await_fair_window) probes this before each update_many page.
-            self.fairness_probes = getattr(self, "fairness_probes", 0) + 1
-            return False
-
         def close(self) -> None:
             pass
 
@@ -910,19 +841,14 @@ class TestCatalogHookBatchedServiceMode:
         assert writer.update_many_calls[0][0]["tumbler"] == "1.1.1"
         assert writer.update_calls == [], "per-file update() must NOT fire when update_many succeeds"
 
-    def test_update_many_pages_at_boundary_with_fairness_per_page(
+    def test_update_many_pages_at_boundary(
         self, tmp_path, monkeypatch,
     ):
         # nexus-vxgnh critique: Pass 1b genuinely pages changed_batch at
-        # _CATALOG_REGISTER_PAGE and consults the fairness window PER PAGE
-        # (indexer.py Pass 1b loop) — load-bearing behavior that no test
-        # drove past a single page. Shrink the page size and prove both.
+        # _CATALOG_REGISTER_PAGE (indexer.py Pass 1b loop) — behavior that no
+        # test drove past a single page. Shrink the page size and prove it.
         monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 2)
         writer = self._StubWriter()
-        # The per-page fairness yield only arms for BATCH-priority writers
-        # (interactive writers ARE the interactive party — indexer.py
-        # `_batch_producer = writer.priority == "batch"`).
-        writer.priority = "batch"
         files, docs = [], []
         for i in range(5):
             f = tmp_path / f"f{i}.py"
@@ -938,10 +864,6 @@ class TestCatalogHookBatchedServiceMode:
         assert [len(c) for c in writer.update_many_calls] == [2, 2, 1], \
             "5 changed docs at page=2 must batch as 2+2+1"
         assert writer.update_calls == []
-        # await_fair_window probes is_interactive_write_pending at least
-        # once per page (3 pages) — the RDR-146 fairness contract.
-        assert getattr(writer, "fairness_probes", 0) >= 3, \
-            f"fairness window must be consulted per page, got {getattr(writer, 'fairness_probes', 0)}"
 
     def test_update_many_failure_falls_back_to_per_file_update(
         self, tmp_path, monkeypatch,

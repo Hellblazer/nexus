@@ -23,9 +23,12 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -691,6 +694,25 @@ def test_job_constants_and_layout_match_nexus_win_job(bootstrap):
     assert flat(ours) == flat(theirs)
 
 
+#: Runs as a member of a job: waits for the go file, spawns a long-lived child
+#: through the aspect-worker daemon's spawn helper, reports the child's pid.
+_JOB_MEMBER = """\
+import os, subprocess, sys, time
+go, pidfile = sys.argv[1], sys.argv[2]
+while not os.path.exists(go):
+    time.sleep(0.05)
+from nexus.daemon.aspect_worker_daemon import _popen_outliving_host_job
+child = _popen_outliving_host_job(
+    subprocess.Popen, [sys.executable, "-c", "import time; time.sleep(120)"],
+    creationflags=0, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+with open(pidfile + ".tmp", "w") as fh:
+    fh.write(str(child.pid))
+os.replace(pidfile + ".tmp", pidfile)
+time.sleep(120)
+"""
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="real Job Object needs Windows")
 class TestRealWindows:
     """The kernel32 leg only a real Windows run exercises. The class is a
@@ -701,6 +723,93 @@ class TestRealWindows:
     def test_real_job_object_is_created_on_windows(self, bootstrap):
         job = bootstrap._make_job()
         assert job is not None, "Job Object creation failed on a real Windows host"
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k.OpenProcess.restype = ctypes.c_void_p
+        k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k.WaitForSingleObject.restype = ctypes.c_uint32
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return False
+        try:
+            return k.WaitForSingleObject(handle, 0) == 0x00000102  # WAIT_TIMEOUT: still running
+        finally:
+            k.CloseHandle(handle)
+
+    def _child_outlives_the_job(self, tmp_path, assign, close) -> bool:
+        """Put a real process in a job, have it spawn a child through the
+        aspect-worker daemon's own spawn helper, close the job, and report
+        whether the child is still running once the member is gone.
+
+        The member is the base interpreter, not the venv's ``python.exe``: that
+        one is a launcher which starts the interpreter as a child of its own,
+        so its pid is not the process that spawns."""
+        go, pidfile, err_path = tmp_path / "go", tmp_path / "child.pid", tmp_path / "member.err"
+        base = getattr(sys, "_base_executable", None) or sys.executable
+        src = str(Path(win_job.__file__).resolve().parents[2])
+        env = os.environ | {"PYTHONPATH": os.pathsep.join([src, *[p for p in sys.path if p]])}
+        with open(err_path, "wb") as err:
+            member = subprocess.Popen(
+                [base, "-c", _JOB_MEMBER, str(go), str(pidfile)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, env=env,
+            )
+        child = None
+        try:
+            assert assign(member.pid), "the member could not be put in the job"
+            go.write_text("go")
+            deadline = time.monotonic() + 90
+            while not pidfile.exists():
+                assert member.poll() is None and time.monotonic() < deadline, (
+                    "the member never spawned its child: " + err_path.read_text(errors="replace")
+                )
+                time.sleep(0.1)
+            child = int(pidfile.read_text())
+            assert self._alive(child), "the member's child was not running before the job closed"
+            assert close(), "the job handle did not close"
+            # Kill-on-close: the member dies with the job's last handle.
+            member.wait(timeout=30)
+            deadline = time.monotonic() + 5
+            while self._alive(child) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            return self._alive(child)
+        finally:
+            if member.poll() is None:
+                member.kill()
+                member.wait(timeout=30)
+            if child is not None and self._alive(child):
+                os.kill(child, signal.SIGTERM)
+
+    def test_closing_the_bootstrap_job_kills_its_member_and_spares_a_child_that_broke_away(
+        self, bootstrap, tmp_path,
+    ):
+        """Review finding E, on a real kernel: the bootstrap's job kills the
+        MCP server tree when it closes, and the aspect-worker daemon, spawned
+        with ``CREATE_BREAKAWAY_FROM_JOB``, is not in that tree."""
+        job = bootstrap._make_job()
+        assert job is not None
+        survived = self._child_outlives_the_job(
+            tmp_path, job.assign_pid, lambda: bool(job._k.CloseHandle(job.handle)),
+        )
+        assert survived, "the daemon spawn did not leave the bootstrap's job: it died when the job closed"
+
+    def test_a_job_that_forbids_breakaway_refuses_it_and_the_retry_keeps_the_child_in_the_job(
+        self, tmp_path,
+    ):
+        """The other branch of the same helper: ``win_job.create_job`` does not
+        allow breakaway, so the first spawn is refused, the retry without the
+        flag succeeds (the child's pid is reported), and the child dies with
+        the job. Also the control for the test above: a child that did not
+        break away is seen to die."""
+        handle = win_job.create_job()
+        assert handle is not None
+        survived = self._child_outlives_the_job(
+            tmp_path, lambda pid: win_job.assign_process(handle, pid), lambda: win_job.close_job(handle),
+        )
+        assert not survived, "a child spawned inside a job that forbids breakaway outlived that job"
 
 
 # ── manifest platform gate ──────────────────────────────────────────────────

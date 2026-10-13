@@ -37,6 +37,7 @@ from nexus.db.pg_provision import (
 from tests._module_seam import setattr_in
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
 SID_A = "S-1-5-21-3623811015-3361044348-30300820-1013"
 SID_B = "S-1-5-21-3623811015-3361044348-30300820-1014"
 
@@ -211,7 +212,10 @@ def test_windows_start_spawns_pg_ctl_with_a_new_process_group_and_a_file_not_a_p
     _start_cluster(bins, pgdata, 5433, platform="win32", popen=spawn)
 
     (cmd, kw), = spawn.calls  # exactly one detached spawn: the start
-    assert kw["creationflags"] & CREATE_NEW_PROCESS_GROUP
+    # A console of its own as well as a group of its own (nexus-f9bgu.54): a break
+    # addressed to a pid that is not a group root goes to every process on that
+    # console, whatever group each is in.
+    assert kw["creationflags"] == CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     assert kw["stdout"] is not subprocess.PIPE and kw["stderr"] is subprocess.STDOUT
     assert kw["stdin"] is subprocess.DEVNULL
     assert hasattr(kw["stdout"], "write")  # a real file object, the one pg_ctl.out is written through

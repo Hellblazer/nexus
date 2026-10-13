@@ -95,6 +95,7 @@ from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
+from nexus.util.nx_argv import argv_off_cwd
 
 # Re-exported for ergonomic ``from nexus.aspect_extractor import
 # AspectRecord``. Phase 2 hook authors land here first; the
@@ -1970,7 +1971,9 @@ def _run_claude_isolated(
         job: int | None = None
         with open(prompt_path, "rb") as prompt_file:
             proc = subprocess.Popen(
-                argv,
+                # Windows: ``claude`` resolves off the working directory, never to
+                # a planted ``claude.exe`` (nexus-f9bgu.37).
+                argv_off_cwd(argv),
                 stdin=prompt_file,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

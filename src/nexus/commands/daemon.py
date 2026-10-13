@@ -1515,7 +1515,12 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # stack writes a log file; an operator triaging a death should not have
     # to know the layout by heart.
     data["supervisor_log"] = str(config_dir / "logs" / "storage_service.log")
-    data["service_log"] = str(config_dir / "logs" / "storage_service_native.log")
+    # nexus-gu3ma: the engine child log is named by the launch kind the lease records (a
+    # NEXUS_SERVICE_JAR dev/test launch writes storage_service_jar.log); a lease that predates the key
+    # reads as the production (native) artifact.
+    from nexus.daemon.storage_service_daemon import engine_log_stem  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    data["service_log"] = str(config_dir / "logs" / f"{engine_log_stem(ep.get('launch_kind'))}.log")
     data["crash_log"] = str(config_dir / "logs" / "storage_service.crash.log")
     if pg_info.get("pg_data"):
         data["pg_log"] = str(Path(pg_info["pg_data"]) / "pg.log")

@@ -487,19 +487,15 @@ def gc_cmd(
         ``NX_GC_FLOOR_FRACTION`` (default 0.25) of the collection's chunks is the
         manifest-gap misclassification shape (the engine's own reading: the 100
         minimum counts the reapable set, the fraction divides by every stored
-        chunk). Override: ``NX_GC_FORCE=1``. The route this verb moves with
-        carries the same floor (nexus-wbfpw.52; ``indexer._prune_deleted_files``
-        sends it too): the verb passes ``NX_GC_FLOOR_FRACTION``, the 100-chunk
-        minimum and ``NX_GC_FORCE`` on the first batch, and the ENGINE judges it
-        under its sweep gate on the whole reapable set, so a pass that grew past
-        the floor after the listing is refused by the engine (exit 1, the same
-        message shape, nothing moved, a ``gc_quarantine_orphans_refused``
-        ``gc_audit`` row). The check above is made first on the advisory listing
-        because the engine's answer comes only with the move, and an engine that
-        predates the floor ignores the fields and would move unguarded: the verb
-        reads the engine's echo of the floor, and when it is absent says the
-        move was not judged by the engine and that the listing check was the
-        only floor.
+        chunk). Override: ``NX_GC_FORCE=1``. The ENGINE judges it (nexus-wbfpw.52;
+        ``indexer._prune_deleted_files`` sends it too): the verb passes
+        ``NX_GC_FLOOR_FRACTION``, the 100-chunk minimum and ``NX_GC_FORCE`` on
+        the first batch, and the engine judges the floor under its sweep gate on
+        the whole reapable set. A pass over the floor is refused by the engine
+        (exit 1, nothing moved, a ``gc_quarantine_orphans_refused`` ``gc_audit``
+        row) with a message naming the floor and ``NX_GC_FORCE=1``. The answer
+        comes only with the move, so a ``--dry-run`` does not foresee this
+        refusal.
       - Empty manifest set (nexus-jqrtp): the collection holds chunks but none
         has a manifest row in it (read off the census: stored chunks minus the
         manifest-less buckets is 0), the shape of a fresh or mis-scoped tenant
@@ -665,38 +661,17 @@ def gc_cmd(
             f"with 'nx t3 backfill-manifest -c {collection}' or 'nx catalog reconcile', or, if "
             f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
         )
-    # THE FLOOR, in two places (nexus-wbfpw.52). The engine's move route judges it under its sweep gate
-    # on the whole reapable set when the request carries it (the move below sends it on its first batch,
-    # as indexer._prune_deleted_files does). This block is the ADVISORY copy, judged on the listing
-    # BEFORE the move: the engine's answer arrives only with the move, and an engine that predates the
-    # fields ignores them and moves unguarded, so the verb cannot hand a would-be refusal to an engine
-    # it has not yet heard from. It stays until the verb can know the engine honours the floor before it
-    # moves (a client whose engine floor guarantees it, REQUIRED_ENGINE_VERSION). The variable is
-    # NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), parsed by the indexer's fail-safe parser with the 0.25
-    # default and the 100-chunk minimum. It governs this move and nothing else: the client's expiry of
+    # THE FLOOR is judged by the engine alone (nexus-wbfpw.52, nexus-teduy). Its move route judges it
+    # under its sweep gate on the whole reapable set when the request carries it, and REQUIRED_ENGINE_VERSION
+    # names an engine that always honours the fields, so there is no advisory copy of the check here: a dry
+    # run does not foresee the floor, and a refusal arrives with the move (GcFloorRefused below). The
+    # variable is NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), parsed by the indexer's fail-safe parser with the
+    # 0.25 default and the 100-chunk minimum. It governs this move and nothing else: the client's expiry of
     # quarantined rows has no floor (nexus-wbfpw.74), the engine keeps what the manifest references.
     # NX_REAPER_FLOOR_FRACTION is NOT reused: it configures the engine-side reaper, a different process whose environment a CLI invocation
     # does not set, so honouring it here would make the floor follow a variable nobody exports.
     floor_fraction = _gc_floor_fraction()
     force = os.environ.get("NX_GC_FORCE", "") == "1"
-    # The engine's reading (reaper_quarantine_chunks, gc_expire_quarantine): the 100-chunk minimum
-    # counts the REAPABLE set, the fraction is reapable / every stored chunk, compared strictly by
-    # division (never `n > f * total`, whose float product misjudges an exact boundary such as
-    # 0.57 * 100 = 56.99999999999999).
-    if (
-        scope_chunk_total > 0
-        and len(candidates) >= _GC_FLOOR_MIN_CHUNKS
-        and len(candidates) / scope_chunk_total > floor_fraction
-        and not force
-    ):
-        reasons.append(
-            f"{len(candidates)} of {scope_chunk_total} chunk(s) "
-            f"({len(candidates) / scope_chunk_total:.0%}) in '{collection}' are reapable, over "
-            f"the NX_GC_FLOOR_FRACTION floor of {floor_fraction:.0%} (applies from "
-            f"{_GC_FLOOR_MIN_CHUNKS} reapable chunks up). A verdict this large is the manifest-gap "
-            f"misclassification shape, not routine churn. If the collection really is mostly "
-            f"garbage, re-run with NX_GC_FORCE=1 (the chunks go to quarantine, not away)."
-        )
 
     if not will_act:
         for reason in reasons:
@@ -765,8 +740,8 @@ def gc_cmd(
 
     qname = quarantine_collection_name(collection)
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # nexus-wbfpw.52: the same floor and override the advisory check above used, handed to the engine
-    # on the first batch; the engine judges it under its sweep gate on the whole reapable set.
+    # nexus-wbfpw.52: the floor and override, handed to the engine on the first batch; the engine judges
+    # it under its sweep gate on the whole reapable set.
     engine_floor = GcFloor(fraction=floor_fraction, min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force)
     try:
         moved_result = quarantine_orphans_bounded_serverside(
@@ -778,9 +753,8 @@ def gc_cmd(
                 t3_db, collection, qname, stamp, sample_limit=GC_AUDIT_MAX_CHASHES, floor=engine_floor,
             )
     except GcFloorRefused as exc:
-        # The engine's own refusal, judged under its lock: the reapable set grew past the floor between
-        # the listing above and this call. Nothing moved in the refused call; earlier batches of this
-        # drain (normally none) are moved, audited and in quarantine.
+        # The engine's own refusal, judged under its lock on the whole reapable set. Nothing moved in the
+        # refused call; earlier batches of this drain (normally none) are moved, audited and in quarantine.
         before = (
             f" {exc.moved} chunk(s) had already moved in earlier batch(es) and stay in {qname}."
             if exc.moved else ""
@@ -790,8 +764,8 @@ def gc_cmd(
             f"in '{collection}' reapable "
             f"({(exc.reapable / exc.total) if exc.reapable is not None and exc.total else 0:.0%}), over the "
             f"NX_GC_FLOOR_FRACTION floor of {floor_fraction:.0%} (applies from {_GC_FLOOR_MIN_CHUNKS} "
-            f"reapable chunks up), under its own lock. The listing this verb checked first read "
-            f"{len(candidates)}; the set grew after it. A verdict this large is the manifest-gap "
+            f"reapable chunks up), under its own lock. The advisory listing read {len(candidates)} "
+            f"before the move. A verdict this large is the manifest-gap "
             f"misclassification shape, not routine churn. If the collection really is mostly "
             f"garbage, re-run with NX_GC_FORCE=1 (the chunks go to quarantine, not away). The engine "
             f"recorded the refusal in gc_audit (nx catalog gc-audit list).{before}"
@@ -847,23 +821,11 @@ def gc_cmd(
             f"predicate under its own lock, so a chunk a client re-wrote since the listing stays."
         )
     elif moved > len(candidates):
-        judged = (
-            "The engine judged the floor under its own lock on the whole reapable set before the "
-            "first batch, so the extra count passed the floor too; "
-            if engine_floor.engine_applied
-            else "The floor was judged on the listing, "
-        )
         click.echo(
             f"  The listing named {len(candidates)}; the engine moved {moved}, MORE than listed: "
-            f"chunks aged past the grace while the drain ran. {judged}"
-            f"so check {qname} (nx catalog gc-audit list) if the extra count matters."
-        )
-    if engine_floor.engine_applied is False:
-        click.echo(
-            f"  NOTE: the engine did not echo the fraction floor, so it predates it and moved without "
-            f"judging it. The only floor this run had was the listing check above (NX_GC_FLOOR_FRACTION "
-            f"{floor_fraction:.0%} from {_GC_FLOOR_MIN_CHUNKS} reapable chunks up). Upgrade the engine "
-            f"(nx upgrade) for the engine to hold it under its own lock."
+            f"chunks aged past the grace while the drain ran. The engine judged the floor under its own "
+            f"lock on the whole reapable set before the first batch, so the extra count passed the floor "
+            f"too; check {qname} (nx catalog gc-audit list) if the extra count matters."
         )
 
     _expire_client_quarantine(t3_db, collection, qname, moved=moved)

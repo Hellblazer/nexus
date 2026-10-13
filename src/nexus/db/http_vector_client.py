@@ -2769,7 +2769,6 @@ class HttpVectorClient:
         force_re_embed: bool | None = None,
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
-        retry: bool = True,
         delete_keys: list[str] | None = None,
     ) -> None:
         """Embed + write via the Java service.
@@ -2814,24 +2813,6 @@ class HttpVectorClient:
         batch — the whole batch is always sent — and only triggers a
         one-time deprecation log line (see
         :func:`_warn_skip_existing_deprecated`).
-
-        ``retry`` (nexus-cy9u7 round-3 CRITICAL C2): defaults True — every
-        page's POST is wrapped in :func:`nexus.retry._vector_with_retry`,
-        the client-boundary retry every OTHER caller of this method relies
-        on (indexers: code/prose/doc indexers, pipeline_stages, the
-        ChunkBatcher). Pass ``retry=False`` for a caller that ALREADY owns
-        its own retry/backoff stack and would otherwise get THREE nested
-        retry layers on the same failure: the verify-fill path (deleted by
-        nexus-z0o2p.25) wrapped this call in ``_etl_batch_with_breaker`` ->
-        ``_etl_with_retry``, which — stacked on this method's own
-        ``_vector_with_retry`` PLUS ``_request``'s inner gateway retry — put
-        worst-case latency far beyond any documented ceiling and tripped/
-        escalated the shared rate-limit brake independently at two layers
-        for one failure. ``retry=False`` skips ONLY this method's own
-        wrapper (single-attempt POST per page); the caller's own retry
-        stack still runs, and ``_request``'s inner gateway retry is
-        untouched either way (it lives below both layers). This keeps
-        exactly ONE retry owner per call site.
 
         ``force_re_embed`` (RDR-181, bead nexus-f0r8p.3; or the deprecated
         env escape ``NX_UPSERT_SKIP_EXISTING=0``): tells the SERVER to bypass
@@ -3000,40 +2981,28 @@ class HttpVectorClient:
             # the shared rate-limit brake), which is the 2026-08-15
             # incident's literal failure mode on this path.
             #
-            # nexus-cy9u7 round-3 CRITICAL C2: this wrap is skipped when
-            # ``retry=False`` (see the method docstring's ``retry`` param) —
-            # the (since deleted) verify-fill path opted out because it already
-            # owned its own retry/breaker stack; wrapping here TOO gave that
-            # call site three nested retry layers on one failure.
-            if retry:
-                from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
+            from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
 
-                def _do_upsert_page() -> Any:
-                    return _vector_with_retry(
-                        _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
-                        timeout=_UPSERT_CHUNKS_TIMEOUT_S,
-                        # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
-                        # refused rather than retried. _request_once uses ONE
-                        # socket timeout for connect AND read, so this fires for
-                        # either phase -- most often read (the request was
-                        # already sent and the engine may still be embedding
-                        # this exact batch server-side, where re-POSTing it
-                        # would stack a second embed pass), but a genuine
-                        # connect-phase stall is refused the same way; the
-                        # transport cannot tell them apart (see
-                        # VectorUpsertTimeoutError's docstring). Contained per
-                        # file by the indexer (_contain_transient_upsert), not a
-                        # whole-run abort. A connection-level error (dead/
-                        # refused peer -- ConnectionError/URLError) is a
-                        # different exception family and still retries normally.
-                        retry_on_timeout=False,
-                    )
-            else:
-                def _do_upsert_page() -> Any:
-                    return _post(
-                        "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
-                        timeout=_UPSERT_CHUNKS_TIMEOUT_S,
-                    )
+            def _do_upsert_page() -> Any:
+                return _vector_with_retry(
+                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
+                    # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
+                    # refused rather than retried. _request_once uses ONE
+                    # socket timeout for connect AND read, so this fires for
+                    # either phase -- most often read (the request was
+                    # already sent and the engine may still be embedding
+                    # this exact batch server-side, where re-POSTing it
+                    # would stack a second embed pass), but a genuine
+                    # connect-phase stall is refused the same way; the
+                    # transport cannot tell them apart (see
+                    # VectorUpsertTimeoutError's docstring). Contained per
+                    # file by the indexer (_contain_transient_upsert), not a
+                    # whole-run abort. A connection-level error (dead/
+                    # refused peer -- ConnectionError/URLError) is a
+                    # different exception family and still retries normally.
+                    retry_on_timeout=False,
+                )
             result = write_with_registration_retry(
                 collection, _do_upsert_page, registrar=self._collection_registrar,
             )

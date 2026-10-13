@@ -11,7 +11,10 @@ OLD per-collection fan-out returns (loaded standalone from
 ``git show ab837d219:src/nexus/search_engine.py`` -- the exact pre-fix
 commit, the same falsification technique the reviewer used to confirm
 the original request-count tests) against the NEW batched fan-out,
-asserting Jaccard overlap >= 0.9 per query.
+scored against five runs of the old fan-out (``_reference_score``), floor
+0.9 per query. Five old runs cost one search per collection each, about
+five times the old-path load of a single comparison: tell the cloud's
+operator the UTC window before a run.
 
 Marked ``@pytest.mark.integration``: skipped by default, and further
 self-skips if this tenant's real collections don't cover all five corpus
@@ -246,99 +249,87 @@ def _corpus_collections(_live_client: HttpVectorClient) -> dict[str, list[str]]:
     return specs
 
 
-def _one_comparison(old_search_cross_corpus, client, query, cols):
-    kwargs = {"cluster_by": None, "threshold_override": float("inf")}
-    old_results = old_search_cross_corpus(query, cols, _LIMIT, client, **kwargs)
-    new_results = new_search_cross_corpus(query, cols, _LIMIT, client, **kwargs)
-    old_ids = _top_ids(old_results, _LIMIT)
-    new_ids = _top_ids(new_results, _LIMIT)
-    return _jaccard(old_ids, new_ids), old_ids, new_ids
+#: How many times the OLD fan-out runs per query to make the reference
+#: (nexus-ys8a4 item 8, Sam's decision 2026-10-12). The old path does not
+#: agree with itself: run twice, two of the ten queries score Jaccard 0.818
+#: against each other (one swap at the tail of the top 10; T2
+#: nexus/measurements-abdp2-floor-sweep-2026-10-04). A single old run as the
+#: reference therefore fails the new path for the old path's own jitter.
+_REFERENCE_RUNS = 5
 
 
-def _is_confirmed_regression(
-    first_overlap: float, retry_overlap: float | None, floor: float = _JACCARD_FLOOR,
-) -> bool:
-    """Decide whether a below-floor measurement is a REAL regression that
-    must fail this test, or unreproduced jitter (nexus-d9xt2 critique
-    round 2 Significant).
+def _reference_score(old_runs: list[set[str]], new_ids: set[str]) -> tuple[float, float, float]:
+    """Score the new path's top-10 against several runs of the old path.
 
-    ``first_overlap >= _JACCARD_FLOOR`` -- the common case -- is never a
-    failure, and ``retry_overlap`` is irrelevant (no retry is run at all
-    in that case; the live test's own call site only invokes this after
-    conditionally retrying). When the first measurement IS below floor:
-    OLD and NEW each embed the same query text via two separate live
-    calls and query the ANN (HNSW) index independently, and both
-    embedding generation and approximate-nearest-neighbor traversal
-    carry known run-to-run floating-point/ordering jitter for candidates
-    near the rank-10 boundary -- measured directly during this bead's
-    work: a query that scored 0.818 on one run scored a PERFECT 1.0
-    (byte-identical top-10 ids) on an immediate rerun of the exact same
-    comparison. One bounded retry distinguishes that from a real
-    regression:
+    Returns ``(score, in_union, core_kept)``; ``score`` is the smaller of the
+    other two, and is what the floor is applied to.
 
-    - ``retry_overlap is None`` -- the caller recorded a below-floor
-      first measurement but never actually retried. That is a caller
-      bug, not evidence of jitter: treated as a confirmed failure rather
-      than silently passed.
-    - ``retry_overlap >= _JACCARD_FLOOR`` -- the dip did NOT reproduce;
-      jitter, not a regression. Not a failure.
-    - ``retry_overlap < _JACCARD_FLOOR`` -- the dip DID reproduce on an
-      independent second measurement. A confirmed failure (the critique's
-      "a second failure fails": retrying and then silently accepting
-      whichever value came back, win or lose, is what previously let a
-      genuinely intermittent regression report green most of the time).
+    - ``in_union``: the share of the new ids the old path returned in at
+      least one run. An id below this line is one the old path never
+      produced.
+    - ``core_kept``: the share of the ids the old path returned in EVERY run
+      that the new path also returned. An id below this line is one the old
+      path always produced and the new path lost. With no id common to every
+      run there is nothing stable to lose and this is 1.0.
+
+    Against a 10-id page the strict 0.9 floor admits one id on either side.
+    The single-run Jaccard it replaces admitted none (one swap is 9 shared of
+    an 11-id union, 0.818).
     """
-    if first_overlap >= floor:
-        return False
-    if retry_overlap is None:
-        return True
-    return retry_overlap < floor
+    if not old_runs:
+        raise ValueError("the reference needs at least one run of the old path")
+    union = set().union(*old_runs)
+    core = set.intersection(*old_runs)
+    if new_ids:
+        in_union = len(new_ids & union) / len(new_ids)
+    else:
+        in_union = 0.0 if union else 1.0
+    core_kept = len(core & new_ids) / len(core) if core else 1.0
+    return min(in_union, core_kept), in_union, core_kept
 
 
 def test_recall_parity_old_vs_batched_fan_out(
     _live_client: HttpVectorClient, _corpus_collections: dict[str, list[str]],
 ):
     old_search_cross_corpus = _load_old_search_cross_corpus()
+    kwargs = {"cluster_by": None, "threshold_override": float("inf")}
 
     rows = []
+    old_searches = 0
     for query, corpus_name in _QUERIES:
         cols = _corpus_collections[corpus_name]
         floor = _floor_for(cols)
-        overlap, old_ids, new_ids = _one_comparison(
-            old_search_cross_corpus, _live_client, query, cols,
-        )
-        retried = False
-        retry_overlap = None
-        if overlap < floor:
-            retry_overlap, old_ids, new_ids = _one_comparison(
-                old_search_cross_corpus, _live_client, query, cols,
-            )
-            retried = True
-        confirmed_regression = _is_confirmed_regression(overlap, retry_overlap, floor)
-        reported_overlap = retry_overlap if retried else overlap
-        rows.append((
-            query, corpus_name, len(cols), reported_overlap, retried,
-            confirmed_regression, old_ids, new_ids, floor,
-        ))
+        old_runs = [
+            _top_ids(old_search_cross_corpus(query, cols, _LIMIT, _live_client, **kwargs), _LIMIT)
+            for _ in range(_REFERENCE_RUNS)
+        ]
+        old_searches += _REFERENCE_RUNS * len(cols)  # the old path is one search per collection
+        new_ids = _top_ids(new_search_cross_corpus(query, cols, _LIMIT, _live_client, **kwargs), _LIMIT)
+        score, in_union, core_kept = _reference_score(old_runs, new_ids)
+        union = set().union(*old_runs)
+        core = set.intersection(*old_runs)
+        rows.append((query, corpus_name, len(cols), score, in_union, core_kept, len(union), len(core), floor))
 
     report_lines = [
-        "\nnexus-d9xt2 recall parity (old fan-out vs batched fan-out):",
-        f"{'corpus':<10} {'#cols':>5} {'jaccard':>8} {'floor':>6}  {'retried':>7}  query",
+        f"\nnexus-d9xt2 recall parity (batched fan-out against {_REFERENCE_RUNS} runs of the old fan-out; "
+        f"{old_searches} old-path searches):",
+        f"{'corpus':<10} {'#cols':>5} {'score':>6} {'in_union':>8} {'core_kept':>9} {'union':>5} {'core':>4} {'floor':>6}  query",
     ]
-    for query, corpus_name, n_cols, overlap, retried, _confirmed, _old_ids, _new_ids, floor in rows:
+    for query, corpus_name, n_cols, score, in_union, core_kept, n_union, n_core, floor in rows:
         report_lines.append(
-            f"{corpus_name:<10} {n_cols:>5} {overlap:>8.3f} {floor:>6.2f}  {str(retried):>7}  {query!r}",
+            f"{corpus_name:<10} {n_cols:>5} {score:>6.3f} {in_union:>8.3f} {core_kept:>9.3f} "
+            f"{n_union:>5} {n_core:>4} {floor:>6.2f}  {query!r}",
         )
     report = "\n".join(report_lines)
     print(report)  # noqa: T201 — explicit ask: "print the per-query numbers"
 
-    failures = [
-        (query, corpus_name, overlap, floor)
-        for query, corpus_name, _n_cols, overlap, _retried, confirmed_regression, _old_ids, _new_ids, floor in rows
-        if confirmed_regression
-    ]
+    # A reference whose runs share no id for any query would make core_kept
+    # vacuous everywhere; the old path's jitter is one tail swap, not that.
+    assert any(r[7] > 0 for r in rows), f"no query had an id common to every old run\n{report}"
+
+    failures = [(r[0], r[1], r[3], r[8]) for r in rows if r[3] < r[8]]
     assert not failures, (
-        f"{len(failures)}/{len(rows)} queries fell below their Jaccard floor "
+        f"{len(failures)}/{len(rows)} queries fell below their floor "
         f"({_JACCARD_FLOOR} unsplit, {_JACCARD_FLOOR_SPLIT} split, nexus-atylb): "
         f"{failures}\n{report}"
     )
@@ -349,25 +340,16 @@ def test_recall_parity_old_vs_batched_fan_out(
     # split (13+ collections exceeded the cap), so the per-query split floor
     # alone held nothing to 0.9.
     #
-    # The strict floor is exposed to the OLD fan-out's own run-to-run jitter:
-    # OLD against OLD measured 0.818 on two of these queries (T2
-    # nexus/measurements-abdp2-floor-sweep-2026-10-04), so one reference-side
-    # swap can fail a run no batching change caused. The retry above absorbs
-    # most of it; the rest is nexus-e9sux (the gate is flaky against its own
-    # baseline).
-    #
     # This gate also scores only the raw top-10 by distance at n=10, with no
     # rerank and no boosts. The page a user reads is measured by
     # test_final_order_parity_old_vs_new_floor below.
     #
-    # The strict floor is also kept in AGGREGATE: one accepted tail swap
-    # (measured 2026-09-07: nine queries at 1.000, rdr at 0.667, mean 0.967)
-    # passes; a batching regression that drags several queries into the
-    # 0.6-0.9 band fails here even though no single query breaches its own
-    # floor.
-    mean_overlap = sum(r[3] for r in rows) / len(rows)
-    assert mean_overlap >= _JACCARD_FLOOR, (
-        f"mean Jaccard {mean_overlap:.3f} across {len(rows)} queries fell below "
+    # The strict floor is also kept in AGGREGATE: a batching regression that
+    # drags several queries into the 0.6-0.9 band fails here even though no
+    # single query breaches its own floor.
+    mean_score = sum(r[3] for r in rows) / len(rows)
+    assert mean_score >= _JACCARD_FLOOR, (
+        f"mean score {mean_score:.3f} across {len(rows)} queries fell below "
         f"{_JACCARD_FLOOR} (nexus-atylb accepts isolated tail swaps, not a broad "
         f"drift)\n{report}"
     )

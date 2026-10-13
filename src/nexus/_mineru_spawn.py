@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -23,6 +22,7 @@ from pathlib import Path
 
 import structlog
 from nexus._winsec import make_user_dir
+from nexus.util.nx_argv import which_off_cwd
 
 _log = structlog.get_logger(__name__)
 
@@ -138,12 +138,12 @@ def _resolve_mineru_api_bin() -> str | None:
         still installed inside the conexus venv.  Both nexus and mineru are in
         the same venv (``conexus[local]``), so walking up from this file's
         site-packages location eventually reaches the venv root and its bin/.
-    (c) ``shutil.which("mineru-api")`` — standard PATH lookup, covers manual
+    (c) ``which_off_cwd("mineru-api")`` — standard PATH lookup, covers manual
         installs and developer environments where the script IS on PATH.
     (d) None — caller emits the existing not-found error/log (unchanged).
 
     Every candidate in (a) and (b) is validated with ``is_file()`` AND
-    ``os.access(X_OK)``; shutil.which already checks X_OK internally.
+    ``os.access(X_OK)``; ``which`` already checks X_OK internally.
     """
     # (a) interpreter-sibling candidate
     candidate_a = Path(sys.executable).parent / "mineru-api"
@@ -157,8 +157,10 @@ def _resolve_mineru_api_bin() -> str | None:
         if candidate_b.is_file() and os.access(str(candidate_b), os.X_OK):
             return str(candidate_b)
 
-    # (c) PATH fallback
-    return shutil.which("mineru-api")
+    # (c) PATH fallback. Off the working directory: on Windows ``shutil.which``
+    # answers with a ``mineru-api.exe`` in the cwd first, and this result is spawned
+    # (RDR-224 critique S1, nexus-f9bgu.37).
+    return which_off_cwd("mineru-api")
 
 
 def spawn_server_process(port: int) -> subprocess.Popen | None:

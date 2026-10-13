@@ -361,8 +361,8 @@ def test_the_indexer_prune_is_refused_over_the_floor_and_forced_through_by_nx_gc
     assert _ids(client, _qname(fx.name)) == fx.reapable
 
 
-def test_nx_t3_gc_reports_the_engines_refusal_when_the_set_grew_after_its_listing(env, monkeypatch) -> None:
-    """The verb's listing check passes (it is shown one reapable chunk, under the minimum of 2); the engine,
+def test_nx_t3_gc_reports_the_engines_refusal_when_the_set_is_over_the_floor(env, monkeypatch) -> None:
+    """The verb keeps no floor check of its own (nexus-teduy); it is shown one reapable chunk, and the engine,
     reading the whole reapable set under its gate, finds 2 of 6 over the floor and refuses."""
     import nexus.db.http_vector_client as hvc
     import nexus.indexer as indexer
@@ -381,7 +381,7 @@ def test_nx_t3_gc_reports_the_engines_refusal_when_the_set_grew_after_its_listin
 
     assert result.exit_code == 1, result.output
     assert "REFUSING to move: the engine judged 2 of 6 chunk(s)" in result.output
-    assert "The listing this verb checked first read 1" in result.output
+    assert "The advisory listing read 1 before the move" in result.output
     assert _ids(client, fx.name) == fx.everything
     assert len(_audit(fx.name, "gc_quarantine_orphans_refused")) == 1
 

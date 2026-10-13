@@ -25,6 +25,8 @@ from uuid import uuid4
 
 import structlog
 
+from nexus.util.nx_argv import argv_off_cwd
+
 _log = structlog.get_logger()
 
 #: nexus-l1qpj: fail-open BATCH callers (taxonomy discover/review) roll
@@ -939,8 +941,10 @@ async def _spawn_with_prompt_file(
     child's ability to read the file.
     """
     with open(prompt_path, "rb") as prompt_file:
+        # Windows: ``claude`` resolves off the working directory, never to a
+        # planted ``claude.exe`` (nexus-f9bgu.37).
         return await asyncio.create_subprocess_exec(
-            *argv, stdin=prompt_file, **popen_kwargs,
+            *argv_off_cwd(argv), stdin=prompt_file, **popen_kwargs,
         )
 
 

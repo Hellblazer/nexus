@@ -184,19 +184,32 @@ You can add the plugin from inside a session instead, then restart Claude Code:
 /plugin install conexus@nexus-plugins
 ```
 
-## 5. Claude Desktop (the Desktop Extension)
+## 5. Claude Desktop (chat and Cowork)
 
-Download `conexus.mcpb` from the
-[latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest) and
-double-click it; Claude Desktop registers it under Settings → Connectors →
-Desktop as "Conexus" ([Desktop deployment](desktop-deployment.md)). The extension talks to the stack step 3 started; it does not start
-the service itself, so do step 3 first.
+In Claude Desktop, open Customize → Plugins, add the marketplace
+`Hellblazer/nexus`, and install `conexus`
+([Desktop deployment](desktop-deployment.md)). Chat and Cowork read the plugins
+on your claude.ai account, not the ones step 4 installed, so step 4 does not
+cover them. The plugin launches `nx-mcp` from the CLI install and talks to the
+stack step 3 started, so do steps 1 to 3 first.
 
-What was measured: the extension's launch command, run headless on the clean
-machine exactly as Claude Desktop runs it, built its environment, served 44
-tools, stored and searched, and on quit left no process of its own while the
-stack kept running (nexus-ijue9.21). The Claude Desktop install dialog itself
-has not been walked on Windows.
+If the marketplace is already on your account from an earlier release, remove it
+and add it again; an existing one stayed at the release it was added at.
+
+What was measured (2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0, a
+clean Windows 11 machine): with only step 4 done, the Code tab found the plugin
+and chat and Cowork found none. After the marketplace was removed and added
+again, Desktop installed conexus 7.77.1 and sn 7.77.1. Not yet confirmed: that
+the `nexus` and `nexus-catalog` MCP servers connect in a chat or Cowork session
+after that install (nexus-qkb9v).
+
+The `conexus.mcpb` Desktop Extension is not a working route on Windows.
+Double-clicking the file does nothing, because the Claude Desktop package
+registers no `.mcpb` file type, and the Customize → Plugins upload dialog hides
+`.mcpb` files. The extension's launch command itself works: run headless on the
+clean machine exactly as Claude Desktop runs it, it built its environment,
+served 44 tools, stored and searched, and on quit left no process of its own
+while the stack kept running (nexus-ijue9.21).
 
 ## Stopping, starting and upgrading
 

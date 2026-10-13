@@ -2,7 +2,8 @@
 title: "Per-Collection HNSW Indexes Above the Router Threshold"
 id: RDR-227
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-12
 priority: high
 author: Sam
 reviewed-by: self
@@ -18,7 +19,17 @@ related_rdrs: [RDR-225, RDR-226]
 > If wrong, abandon code and iterate RDR.
 > Prose: see REGISTER.md beside this template.
 
-Drafted 2026-10-09 against develop `ebd9c4deb`. No product code has changed.
+Drafted 2026-10-09 against develop `ebd9c4deb`. When drafted, no product code had
+changed.
+
+**Status at close (2026-10-12).** Product code has since shipped: Phase 2a in
+engine-service-v0.1.157, Phase 2b in engine-service-v0.1.158, and the router
+default of 20000 in engine-service-v0.1.159 (Revision History). What each gap
+reads now is under "Enumerated gaps to close". In short: Gap 1 and Gap 2 are
+closed by measurement for a collection that holds a valid per-collection index;
+Gap 3 is not closed; and the end state, T = B = 20000 with no margin, serves a
+collection above 20000 rows from the `ef_search = 1000` leaf walk on every path
+that lacks its index (Failure Modes).
 
 **Terms used here.** A *leaf* is one partition of `nexus.chunks` holding every
 collection of one (embedding model, tenant) pair, with one HNSW graph over all
@@ -37,6 +48,11 @@ costs too much for the largest collections. Today neither path gives a large
 collection both correct results and HNSW speed.
 
 ### Enumerated gaps to close
+
+*Closing note (2026-10-12): these are the gaps as drafted. Gap 1 and Gap 2 are
+closed where a valid per-collection index exists (Gap 1: T2
+`nexus_rdr/227-research-12` and `-13`; Gap 2: `-13`). **Gap 3 is not closed** (see
+its status below). The text of each gap is left as drafted.*
 
 #### Gap 1: A filtered leaf walk loses a large collection's nearest rows
 
@@ -81,6 +97,28 @@ that leans on HNSW for large collections must state its cold cost. Phase 0
 measured a per-collection index's first touch after a database restart at 86 to
 189 ms (OS page cache intact, so a lower bound); a first touch read from disk
 should be of the same order as the leaf index's 2 to 7 s.
+
+**Status, 2026-10-12: Gap 3 is NOT closed. It is a residual.**
+
+- **No mitigation shipped.** Sam deferred `pg_prewarm` on 2026-10-09
+  (`nexus_rdr/227-prewarm-decision`; A6 below). The bead that would carry it,
+  nexus-43ulx.26, is in state deferred and stays deferred as the carrier of the
+  design. No changeset, no bundle change and no prewarm statement exist.
+- **Reopen trigger, as recorded** (`nexus_rdr/227-prewarm-decision`, bead
+  nexus-43ulx.26 comment of 2026-10-09 22:02): after the Phase 2b deploy, the
+  cloud's `top_statements` show a material first-search penalty on a `pci_` index
+  after an engine or database restart. The record says to carry that number.
+- **The trigger has not been exercised.** The only post-deploy measurement,
+  `nexus_rdr/227-research-13`, ran 4 min 53 s after `service_started` on an engine
+  redeploy (`max_hnsw_statement` 25, 40 and 50 ms, minimum, median, maximum).
+  The record describes an engine restart and records no restart of the database,
+  so it says nothing about the cost after a database restart or a failover. The
+  from-disk first touch of a partial index is unmeasured (Phase 0 measured 86 to
+  189 ms with the OS page cache intact; `nexus_rdr/227-research-9` did not measure
+  a cold-cache first search).
+- **What is and is not covered.** A search warms only its own walk. A database
+  failover without an engine restart is outside the design, as the deferred bead
+  states.
 
 ## Relationship to Prior RDRs
 
@@ -216,7 +254,7 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
   Design, Builder). Leaf ownership checked in Phase 1 Step 2
   (`nexus_rdr/227-research-10`, 2026-10-09): `nexus_admin` owns all 24 chunks
   leaves on the managed instance. **Method**: Source read plus deployment check.
-- [ ] **A6.** `pg_prewarm` is available on the managed instance and in the local
+- [deferred: nexus-43ulx.26] **A6.** `pg_prewarm` is available on the managed instance and in the local
   PG bundle, and prewarming a per-collection index makes its first search warm.
   **Status**: ❌ Not held as stated (Phase 1 spike, `nexus_rdr/227-research-9`,
   2026-10-09): on the managed instance `pg_prewarm` 1.2 is available but not
@@ -226,7 +264,9 @@ v0.1.155 arm-phase read (conexus scratchpad `l155.out`).
   `shared_buffers` (512 MB), and by about 4 ms at the local default of 128 MB; a
   cold-cache first search was not measured. Sam, 2026-10-09: prewarm deferred
   (`nexus_rdr/227-prewarm-decision`): no `CREATE EXTENSION` changeset and no
-  bundle change in this RDR. **Method**: Spike (Phase 1).
+  bundle change in this RDR. **Closing state (2026-10-12)**: not verified as
+  stated and not pursued; bead nexus-43ulx.26 stays deferred as the carrier, with
+  the reopen trigger recorded under Gap 3. **Method**: Spike (Phase 1).
 
 ## Proposed Solution
 
@@ -285,6 +325,39 @@ walk at `ef_search = 1000`.
   `builder_state = auth_failed` in the status object (Day 2 Operations) and logs
   `event=pci_builder_auth_failed` on every pass until it clears, so a stale
   credential is visible, never silent.
+  **Update, 2026-10-12.** The prerequisite was asked and answered.
+  - *Answer* (`nexus_rdr/227-research-10`, conexus-7a, 2026-10-09): the all-in-one
+    rotation (`deploy/migrate/bootstrap-engine-db.sh`, which covers `nexus_admin`,
+    `nexus_svc` and `NX_SERVICE_TOKEN`) restarts the engine. The targeted
+    single-role `nexus_admin` rotation (conexus-cdli, last used 2026-08-25) does
+    not: it writes the secret, runs `ALTER ROLE` and re-renders the engine's env
+    file. With credentials read once at boot, a targeted rotation would leave
+    builds failing authentication until the next restart.
+  - *Fix, in the conexus repository.* conexus filed conexus-jmxp (P1) for a
+    mandatory engine recreate. As reported by conexus-01 on 2026-10-12, it is done
+    and closed (2026-10-09). The targeted `nexus_admin` path of conexus's
+    `engine-credential-rotation` skill (`.claude/skills/engine-credential-rotation/SKILL.md`
+    in that repository) has a mandatory step 5: a same-tag engine recreate through
+    the engine-redeploy document, not a `docker restart` (the TLS sidecar is
+    included), then a `builder_state` check. It merged as conexus PR 500; conexus
+    PR 507 then recorded engine-service-v0.1.158 as the first builder-carrying tag
+    and the shipped status field names. This is a runbook step in a skill. No
+    script enforces it.
+  - *Never exercised against a live builder.* conexus-01 reports that no targeted
+    `nexus_admin` rotation has happened since the builder went live on 2026-10-10;
+    the engine's database secret was last changed on 2026-09-05 (Secrets Manager
+    metadata, read 2026-10-12, no value read). Not checked: the role's password
+    change time on the database itself.
+  - *If the step is skipped*, builds and drops stop. Three places show it,
+    each read in the code on 2026-10-12: the `builder_state` field of the status
+    object reads `auth_failed` (set at `PciBuilderSession.java:205`; the status reads the
+    builder's live state, `PciReconciler.java:130`);
+    the "Per-collection indexes" row of `nx doctor` fails hard on `auth_failed`
+    (`src/nexus/health.py:4474`); and the engine logs
+    `event=pci_builder_auth_failed` at WARN on every pass, carrying the SQLSTATE and
+    a hint to restart (`PciBuilderSession.java:206`). Existing valid indexes keep
+    routing, because the read half runs as `nexus_svc`, but a collection that
+    crosses B meanwhile takes the `ef_search = 1000` walk (Failure Modes).
 - **No admin credentials.** `Main` falls back to the app credentials for
   migration when `NX_DB_ADMIN_*` are absent; the builder does the same. If that
   role cannot create an index on the leaf (`insufficient_privilege`), the builder
@@ -403,6 +476,11 @@ walk at `ef_search = 1000`.
   | > T | yes | HNSW, serving `ef_search`; the planner walks the partial index |
   | > T | no (below B, none yet, building, failed, capped, or no privilege) | HNSW leaf walk at `ef_search = 1000` (Alternative 4 as the fallback; single-collection arms only) |
 
+  *As shipped (2026-10-12):* T = B = 20000 (engine-service-v0.1.159), so the
+  "below B" case cannot occur at the default and the third row is the walk for a
+  collection that crossed 20000 and has no valid index yet. Failure Modes lists
+  every path into that row and what the walk recalls.
+
   A statement over several collections cannot use a partial index (its
   predicate does not imply one collection) and keeps today's leaf walk.
 
@@ -425,7 +503,8 @@ walk at `ef_search = 1000`.
   peer can route on a stale answer.
 - **Plan mode.** The plain-search arm reaches a per-collection index through
   `runPlainSearchStatement`'s GUC batch, which sets
-  `plan_cache_mode = force_custom_plan` (`PgVectorRepository.java:1458-1461`;
+  `plan_cache_mode = force_custom_plan` (`PgSession.setSearchPlanCacheMode`, called
+  from `runPlainSearchStatement` in `PgVectorRepository.java`;
   `HnswServingGucParityTest` pins that every site setting `hnsw.iterative_scan`
   also sets the plan mode); a generic plan skips the partial index and walks
   every tenant leaf (A1). The sampled check below binds `p_collections` the way
@@ -446,7 +525,8 @@ walk at `ef_search = 1000`.
   only on a cloud number: after the Phase 2b deploy, a material first-search
   penalty on a `pci_` index after a restart, read from `top_statements`. One
   search warms only its own walk, not the graph, and a database failover without
-  an engine restart is not covered; both stay Gap 3 residuals.
+  an engine restart is not covered; both stay Gap 3 residuals. (2026-10-12: the
+  deferral stands and the reopen trigger has not been exercised; see Gap 3.)
 - **Schema.** No Liquibase changeset creates these indexes; they are runtime
   objects keyed on data. The reconciler needs no registry table: the `pci_`
   prefix and each index's predicate let `pg_class` and `pg_index` answer which
@@ -544,8 +624,37 @@ without a valid index (Routing) and ships it first (Phase 2a).
 - A background index build after a collection reaches B. While B < T the
   collection keeps routing exact during the build; above T it takes the
   `ef_search = 1000` leaf walk until its index is valid.
+  **Correction, 2026-10-12.** The B < T case above is the configuration this RDR
+  planned through Phase 2b (B 20000, T 30000). It is no longer the configuration:
+  since engine-service-v0.1.159 the code default is T = B = 20000 (cloud since
+  2026-10-10, first through a runtime setting). With T = B there is no exact window:
+  a collection takes the `ef_search = 1000` walk from the moment its probed count
+  passes 20000 until its index is valid. Failure Modes lists the paths and the
+  measured recall.
 - Insert cost into an indexed collection (a second HNSW insert per row) was not
   measured; Phase 1 measures it on the substrate, bulk load included.
+  **Measured since (2026-10-12), by two methods that disagree in size and have
+  not been reconciled.**
+  - *Substrate, chas, through the engine's write path*
+    (`nexus_rdr/227-research-11`, bead nexus-43ulx.30): `POST
+    /v1/catalog/manifest/write_many`, client wall time per request, JSON encoding
+    included, one collection alternated between indexed and unindexed rounds as it
+    grew from 25,000 to about 33,000 rows. Single-row p50 rose from 6.8 to 7.1 ms
+    to 9.7 to 10.3 ms (+43%); a 128-chunk batch took 1.8 to 1.9 times as long, and
+    bulk throughput fell from about 350 to about 185 rows per second.
+  - *Fork, production-shaped data* (`nexus_rdr/227-research-12`, bead
+    nexus-43ulx.31): server-side statement time, one row every 0.2 s, from an
+    engine about 90 ms from the database. p50 1.76 and 0.86 ms on indexed
+    `code__1-72` against 1.21 and 1.02 ms on unindexed `code__1-3` in the same leaf;
+    p95 3.7 to 4.6 against 3.4 to 3.6 ms; the record calls it inside run-to-run
+    noise. 128-chunk batches were not measured on the fork.
+  - *Reading.* The two measure different things (request wall time against
+    statement time) at different batch sizes, so the single-row +43% and "inside
+    noise" do not directly contradict each other, and neither run explains the
+    other. The bulk figure
+    (roughly half the throughput) comes from the first run alone and bears on the
+    indexing path of every large indexed collection; no real indexing run was
+    timed with and without an index.
 - The long-lived engine process now keeps the admin credentials it read at boot
   and opens an admin session, where before it closed the admin pool after
   migration. That session runs a fixed statement set and nothing else: its own
@@ -570,7 +679,7 @@ without a valid index (Routing) and ships it first (Phase 2a).
   `NX_SEARCH_PCI=0` and restart without it at a chosen time.
 - **Cold first touch** (Gap 3). Not mitigated in this RDR: `pg_prewarm` is
   deferred (A6, `nexus_rdr/227-prewarm-decision`), with a stated trigger to
-  reopen it.
+  reopen it. The trigger has not been exercised (Gap 3, status).
 
 ### Failure Modes
 
@@ -579,6 +688,63 @@ never to an error. A failed build leaves an invalid index that the builder holdi
 the lock drops by name; the next pass rebuilds it. A stale admin password stops builds and
 drops, visibly (`builder_state`), until the engine restarts.
 
+**The fallback walk against the Gap 1 target, as shipped (2026-10-12).** The
+paragraph above says the walk is not an error. It is also below the Gap 1 target
+of 0.99. Since engine-service-v0.1.159 the router default T equals B (both 20000,
+`PgSession.java:771`, whose javadoc says "There is no margin between the two
+thresholds"), so a collection above 20000 rows without a valid index of its own
+is served by the shared index at `ef_search = 1000`, not by an exact scan.
+Single-collection arms reach that walk on these paths:
+
+- A collection crosses 20000 and its index is not yet built: until the next DDL
+  pass, up to 600 s at the default `NX_SEARCH_PCI_SWEEP_SECONDS` (the first pass
+  after a boot starts within 60 s), plus the build itself (9 to 21 s per index on
+  the fork, `nexus_rdr/227-research-12`; about 13 s for 30,000 rows and 44 s for
+  60,000 locally, `nexus_rdr/227-research-11`).
+- A boot, between startup and the first sweep read, while the router's set is empty.
+  Measured once: about 10 ms at the 2026-10-10 14:54 boot (`nexus_rdr/227-research-13`).
+- The router's set has expired: no successful read for `3 * NX_SEARCH_PCI_SWEEP_SECONDS
+  + 30 s`, so it answers empty (Lifecycle, sweep read half).
+- A build in flight, or a failed build: the index is invalid until it finishes, and
+  a failed one is retried no sooner than 10 minutes later, doubling to 24 hours.
+- The leaf is at `NX_SEARCH_PCI_MAX_PER_LEAF`, or `NX_SEARCH_PCI=0`.
+- An install whose builder cannot run: no admin credentials and an app role
+  without the privilege (`builder_state = no_privilege`), or a stale admin
+  password (`auth_failed`). This path is permanent until fixed, and it is the
+  one where the default change matters: under v0.1.158 with T = 30000 a
+  collection of 20,000 to 30,000 rows was served by an exact scan (the reference
+  that recall is measured against), and under v0.1.159 it is served by the walk.
+  The release note (`nexus_rdr/227-v0159-release-note`) and `docs/configuration.md`
+  (`NX_SEARCH_EXACT_MAX_ROWS`) say so. Local installs are not in this class: the
+  local daemon passes `NX_DB_ADMIN_*` and local builds finish (60,000 rows in
+  44 s at 64 MB `maintenance_work_mem`, `nexus_rdr/227-research-11`).
+
+*Recall of that walk.* The measured worst case is 0.975 on `code__1-72` (27,893
+rows) for the nqsa7 query, with no top-1 miss (`nexus_rdr/227-research-12`, comparison
+arm "no index, ef_search 1000"; the Phase 0 A4 run, `nexus_rdr/227-research-2`).
+The records disagree on the k: the release note places 0.975 at k 120, while
+A4 above records 0.975 at k 40 and 0.983 at k 120, and research-12 records
+0.975 as the minimum with nqsa7 below 0.99 at every k. All three put it under
+the 0.99 target. It is a worst case over
+three collections that were measured, not a bound: `code__1-1` and `code__1-2`
+reached the target at `ef_search = 1000` (mean 0.998 to 0.999), `code__1-20` read 1.0
+on 20 own-topic queries (T2 `conexus/rdr227-step3b-fork-2026-10-10`, M4(b)), and a collection of another shape crossing
+20000 has not been measured. Prose collections at `ef_search = 1000` without an
+index read 0.9833 (`docs__1-2`) and 0.975 (`rdr__1-79`), but both sit below 20000
+and are routed exact as of 2026-10-10. A prose collection that grows past 20000
+leaves that exception (Phase 2b, Prose, correction of 2026-10-12).
+
+*Remedy for an operator who wants such collections exact.* Set
+`NX_SEARCH_EXACT_MAX_ROWS=30000`, which restores the v0.1.158 routing (release note;
+`docs/configuration.md`). A collection between B and T then keeps routing exact
+while its index builds (the B < T case in Consequences). The cloud has an
+external constraint on that value: conexus's STEP-6 recall leg goes red if the
+cloud's T rises above 28595, the row count of `gate-xr789` `code__1-20`, which
+the router would then send exact and leave the gate without HNSW coverage
+(`nexus_rdr/227-continuation`, `nexus_rdr/227-v0159-release-note`, bead
+nexus-43ulx.35 comment of 2026-10-10 15:57). conexus-7a is told before any change
+to the cloud's T, a rollback to 30000 included.
+
 ## Implementation Plan
 
 ### Prerequisites
@@ -586,8 +752,11 @@ drops, visibly (`builder_state`), until the engine restarts.
 - [x] A1 to A4 measured (Phase 0, 2026-10-09).
 - [x] A5: the cloud engine's admin credentials confirmed present after boot
   (conexus-1c, 2026-10-09).
-- [ ] conexus's `nexus_admin` rotation procedure restarts the engine
-  (offered by conexus-1c, 2026-10-09; confirmation pending).
+- [x] conexus's `nexus_admin` rotation procedure restarts the engine
+  (offered by conexus-1c, 2026-10-09; confirmation pending). Done 2026-10-09 as a
+  mandatory runbook step in conexus's skill, reported by conexus-01 on 2026-10-12;
+  no script enforces it and it has not yet been used against a live builder
+  (Credentials are restart-bound, update).
 - [x] Sam's decision on the stop rule: continue to per-collection indexes
   (2026-10-09).
 
@@ -639,12 +808,24 @@ bundle's `maintenance_work_mem`, and recall at the Gap 1 target on own-topic
 queries for `code__1-20`, on a prose collection and on a second tenant. Tests: the planner's choice (EXPLAIN pin), recall
 against exact on a seeded leaf with a large collection beside larger siblings,
 and the degraded paths (no index, invalid index).
+*Done (2026-10-09 to 2026-10-10).* Step 3a, substrate measurements on chas: insert
+and bulk-load cost, local build time, counting cost (`nexus_rdr/227-research-11`,
+bead nexus-43ulx.30). Step 3b, a production fork run by conexus-7a: recall with the
+index, build time, counting cost, prose and second tenant (`nexus_rdr/227-research-12`,
+bead nexus-43ulx.31); two items were not measured there (live `pci_plan_check`,
+anything under concurrent fan-out load), and in-region counting time was measured
+later on the cloud (bead nexus-43ulx.33).
 
 ### Phase 2: Release
 
 - **Phase 2a.** One engine cut with Step 1 only (`ef_search = 1000` above T, T
   stays 30000). Measure a warm default search live on it, the same way the
   v0.1.154 to v0.1.156 numbers were taken.
+  *Done (2026-10-09).* Shipped as engine-service-v0.1.157, live 19:41:29Z; 16 warm
+  default searches measured 19:51:03 to 19:51:40Z with published client 7.76.0
+  (`nexus_rdr/227-research-8`, bead nexus-43ulx.6). The criterion held in 14 of 16
+  searches, and Sam decided GO for Step 2 (`nexus_rdr/227-phase2b-decision`, bead
+  nexus-43ulx.7).
 - **Phase 2b.** Only if Phase 2a's measured default search shows the mid-size
   exact arms still setting the floor (that is, still the largest arm statements
   under concurrency): one engine cut with Step 2, gated on Step 3. T stays 30000
@@ -656,6 +837,61 @@ and the degraded paths (no index, invalid index).
   the code default follows in a later cut. Lowering T only after their indexes
   are valid keeps them off the `ef_search = 1000` walk, which misses on
   `code__1-72` (A4).
+
+  **Gate as planned, above, versus gate as applied (2026-10-12).** The text above
+  is kept as what was planned: Step 3's recall runs on `code__1-20` own-topic, a
+  prose collection and a second tenant must each pass the Gap 1 target. That is
+  not the gate that was applied. Bead nexus-43ulx.34, written at planning, carries a
+  different gate (every collection in (B, T], whatever its kind, but no prose or second-tenant run), and the pre-change check and Sam's go were made
+  against the bead's gate. The T2 records and bead comments reviewed for this
+  fold show no separate decision to set the RDR's three runs aside; this section
+  is where the substitution is recorded.
+
+  - *Gate applied* (bead nexus-43ulx.34 description and comments of 2026-10-10):
+    every live collection with a count in (B, T] holds a valid `pci_` index and met
+    recall >= 0.99 at k 40 to 120 with that index, in Step 3b or a follow-up fork
+    run; if any fails, T stays 30000.
+  - *Collections it covered* (conexus-7a, production, physical row counts,
+    2026-10-10): exactly three in (20000, 30000], each with a valid index: nexus
+    `code__1-20` (29,355 rows; fork recall 1.0 at every k on 20 own-topic queries),
+    nexus `code__1-72` (27,893; minimum 0.9917, the nqsa7 query at k 120 only, no
+    top-1 miss) and `gate-xr789` `code__1-20` (28,595). Above 30000 were only nexus
+    `code__1-1` and `code__1-2`, both indexed (`nexus_rdr/227-research-12`, `-13`).
+  - *Prose.* No prose collection reaches 20000 (`docs__1-2` 10,308 rows,
+    `rdr__1-79` 14,300). The prose run was made on a second fork boot at B = T =
+    10000. With the index, `docs__1-2` and `rdr__1-79` both read a minimum of
+    0.9833 at the tail (means 0.9992), under 0.99. The applied gate did not
+    require them to pass: they sit below B, where the router sends them to an
+    exact scan, so they are outside (B, T]. Both records warn that they matter only
+    if B and T are ever lowered to 10000, and bead nexus-43ulx.34 comment of
+    2026-10-10 09:09 says not to lower T below 20000 on this evidence.
+    **Correction, 2026-10-12 (close critique round 2).** That inference covers
+    the thresholds, not growth. The exception holds only while no prose
+    collection is at or above B. The row counts above are a dated reading and
+    nothing checks them. When a prose collection passes 20000 rows it is built
+    and routed to its own index, and is then served at about the recall
+    measured here, or by the `ef_search = 1000` walk (0.975 on `rdr__1-79`)
+    until its build finishes. `rdr__1-79` at 14,300 rows is the nearest case.
+    Prose index recall at 20000 rows or more was not measured: the 0.9833 was
+    read at 10,308 and 14,300 rows. A prose collection reaching B is the
+    trigger to run the Gap 1 recall check on it.
+  - *Second tenant.* The run was `gate-xr789` `code__1-20`, 20 queries sampled from
+    its own stored embeddings, recall 1.0 at every k. The record states this is
+    document-to-document, so 1.0 is expected, and calls it weak evidence. A
+    second-tenant own-topic run with real query vectors was not made.
+  - *Margin.* With T = B there is no margin. The trade was stated to Sam (Batch C
+    critique S7, bead nexus-43ulx.34 comment of 2026-10-10 04:03) and he said to
+    proceed ("go on the lowering of the threshold", about 12:50Z; then "proceed"
+    on the no-margin trade, recorded 13:06). The bead reads that as "accept and
+    record"; this section is the record.
+  - *Result.* The cloud's T went from 30000 to 20000 on 2026-10-10: boot with
+    `search_exact_router max_rows=20000` at 14:54:40Z on engine-service-v0.1.158,
+    through a runtime setting conexus added (`NX_SEARCH_EXACT_MAX_ROWS`; conexus PR
+    513). The measurement is `nexus_rdr/227-research-13`; its figures are under
+    Performance Expectations. The code default followed in engine-service-v0.1.159
+    (bead nexus-43ulx.35; Sam's go on that was given about 16 minutes after T = 20000
+    went live, so the soak period the bead named as a precondition was waived by
+    that go).
 
 ### Day 2 Operations
 
@@ -855,6 +1091,32 @@ Warm large arm under 50 ms, against 1.1 to 2.0 s exact under load (Phase 0 at
 statement total 2.5 to 3.2 s against 4.8 to 5.9 s). The default-search figure
 is not derived yet: Phase 0 measured statement time, not a client search, and
 measures it after T is lowered in Phase 2b.
+**Correction, 2026-10-12.** It is derived in the next paragraph. The warm large
+arm's measured maximum there is 50 ms, which is at this bound, not under it.
+
+**Measured after T = 20000 (2026-10-10, `nexus_rdr/227-research-13`).** Default
+search, client wall time: mean 1.88 s, median 1.95, range 1.51 to 2.30 (16 timed
+searches after one discarded warm-up, 8 fixed queries in 2 passes; recorded 4 min
+53 s after `service_started`). The code request's slowest statement
+(`max_statement`) had minimum, median and maximum of 263, 325.5 and 425 ms, against
+a median of about 800 ms at T = 30000. Indexed HNSW arms (4 on every search,
+`ef1000_arms` 0): `max_hnsw_statement` 25, 40 and 50 ms. The first entry of
+`top_statements` became an exact arm below B, `code__1-3` (16,088 rows, no index),
+at about 330 ms.
+
+*The like-for-like pair* is Phase 2a at T = 30000 (engine-service-v0.1.157,
+`nexus_rdr/227-research-8`: mean 2.33 s, median 2.38, range 1.87 to 2.74) against
+this run (mean 1.88 s, median 1.95): the same published client 7.76.0, the same 8
+queries, one process, sequential, warm. The mean differs by 0.45 s, and the two
+ranges overlap between 1.87 and 2.30 s. The earlier figures are not comparable:
+engine-service-v0.1.156 read 3.67 s on client 7.75.0, so the client changed with
+the engine, and the draft's 2.64 to 3.31 s baseline was also taken on 7.75.0.
+*Limits, as the record states them:* 35 searches in total, one sequential client,
+no concurrent load from other clients, and a recall check on live of one query
+(nqsa7 on `code__1-72`, which returned its true nearest row at distance
+0.3054208805 through the index). Fork recall is `nexus_rdr/227-research-12`.
+Run 1 of the session (mean 1.83 s) ran 53 s after boot, before the window was
+announced to conexus, and is not the recorded result.
 
 ## Finalization Gate
 
@@ -864,6 +1126,9 @@ Gap 2's cost and Gap 3's cold cost pull in opposite directions. Phase 0
 measured cold first touch after a restart (a lower bound); the from-disk cost of
 a partial index stays unmeasured and is Gap 3's residual, with `pg_prewarm` (A6)
 as the mitigation.
+**Correction, 2026-10-12.** The clause naming `pg_prewarm` as the mitigation is no
+longer true: Sam deferred it on 2026-10-09 (`nexus_rdr/227-prewarm-decision`), so
+Gap 3 has no mitigation in the shipped system and stays a residual (Gap 3, status).
 
 ### Assumption Verification
 
@@ -871,6 +1136,11 @@ A1 to A4 were verified by the Phase 0 fork spikes on 2026-10-09
 (`nexus_rdr/227-research-2`, `-3`); A5 by a source read and a deployment check
 the same day (`-4`), with leaf ownership left to Phase 1 Step 2. A6 is open and
 is a Phase 1 spike.
+**Correction, 2026-10-12.** Leaf ownership was confirmed in Phase 1 Step 2 (all 24
+leaves owned by `nexus_admin`, `nexus_rdr/227-research-10`). A6 ran as the Phase 1
+spike on 2026-10-09 (`nexus_rdr/227-research-9`, bead nexus-43ulx.9), did not hold
+as stated (`pg_prewarm` is available but not installed on the managed instance and
+is absent from the local bundle) and is deferred, not open: bead nexus-43ulx.26.
 
 #### API Verification
 
@@ -878,7 +1148,7 @@ is a Phase 1 spike.
 | --- | --- | --- |
 | Partial HNSW index (`USING hnsw ... WHERE`) | pgvector 0.8.2 / PG 17 | Docs |
 | Partial-index use through `= ANY(one-element array)` | PostgreSQL 17 planner | Spike (A1, Phase 0): used under `force_custom_plan`, not under a generic plan |
-| `pg_prewarm` | PostgreSQL 17 contrib | Assumed (A6), Spike in Phase 1 |
+| `pg_prewarm` | PostgreSQL 17 contrib | Spike (A6, Phase 1, 2026-10-09, `nexus_rdr/227-research-9`): available, not installed on the managed instance, not in the local bundle; not used (deferred, nexus-43ulx.26). Was "Assumed (A6), Spike in Phase 1" |
 | `CREATE INDEX CONCURRENTLY` on a partition | PostgreSQL 17 | Docs |
 
 ### Scope Verification
@@ -886,6 +1156,15 @@ is a Phase 1 spike.
 The Minimum Viable Validation ran in Phase 0 and passed (A1, A2). Phase 1 Step 3
 adds the `code__1-20` own-topic, prose and second-tenant recall runs that Phase
 2b's lower T depends on.
+**Correction, 2026-10-12.** Phase 2b's lower T was applied under the gate in bead
+nexus-43ulx.34, not under these three runs as written. `code__1-20` own-topic ran
+and passed (1.0 at every k). The prose run ran at B = T = 10000 and read a
+minimum of 0.9833 at the tail, under 0.99; it was set aside because prose
+collections sat below B and were routed exact on that date. That holds only
+until a prose collection reaches B (Phase 2b, Prose). The second-tenant run was 20
+self-queries from stored embeddings, which the record calls weak evidence. The
+applied gate, the collections it covered and Sam's go are under Phase 2b
+(`nexus_rdr/227-research-12`, `nexus_rdr/227-research-13`).
 
 ### Cross-Cutting Concerns
 
@@ -895,7 +1174,7 @@ adds the `code__1-20` own-topic, prose and second-tenant recall runs that Phase
   dev posture without admin credentials it is (Builder, No admin credentials).
   The admin session's row counts are tenant-scoped by `SET LOCAL nexus.tenant`.
 - **Local mode**: the same code path applies. The local daemon passes
-  `NX_DB_ADMIN_*` to the engine (`storage_service_daemon.py:1292-1294`), so the
+  `NX_DB_ADMIN_*` to the engine (`storage_service_daemon.py`, the `NX_DB_ADMIN_*` keys of the engine environment), so the
   builder can run. Local build time at the local bundle's
   `maintenance_work_mem` is a Phase 1 Step 3 measurement; a build that does not
   fit in it is much slower.
@@ -922,7 +1201,21 @@ Phase 2a's measured default search shows those exact arms still set the floor
 - T2 `nexus_rdr/227-research-1` to `-7`,
   `nexus/engine-credential-model-admin-startup-only` [23506],
   `conexus/rdr227-phase0-fork-2026-10-09`
-- Beads nexus-43ulx, nexus-nqsa7
+- T2 `nexus_rdr/227-research-8` (Phase 2a live measurement),
+  `-9` (A6, `pg_prewarm`), `-10` (leaf owners, credential rotation),
+  `-11` (substrate: insert, build and counting cost), `-12` (production fork:
+  recall with the index, prose, second tenant), `-13` (Phase 2b live
+  measurement at T = 20000)
+- T2 `nexus_rdr/227-phase2b-decision` (Phase 2a GO, 2026-10-09),
+  `nexus_rdr/227-prewarm-decision` (deferral, 2026-10-09),
+  `nexus_rdr/227-planner-decisions-confirmed`,
+  `nexus_rdr/227-phase2b-release-note` (engine-service-v0.1.158),
+  `nexus_rdr/227-v0159-release-note` (engine-service-v0.1.159),
+  `nexus_rdr/227-continuation`, `nexus_rdr/227-close-critique-2026-10-12`
+- Beads nexus-43ulx (epic, open), nexus-nqsa7; nexus-43ulx.6, .7 (Phase 2a and
+  its GO), .8 (credential prerequisites), .26 (`pg_prewarm`, deferred), .33, .34
+  (Phase 2b gate and T = 20000), .35 (code default); conexus-jmxp (conexus
+  repository, closed 2026-10-09 per conexus-01)
 
 ## Revision History
 
@@ -952,6 +1245,14 @@ Phase 2a's measured default search shows those exact arms still set the floor
   threshold in the Approach and Consequences; terminate, not cancel, in Step 2;
   B/2 in the hysteresis test; probe wording). Remaining counted items carried to
   Phase 1 planning (`nexus_rdr/227-fix-check-ca4ca8962`).
+- 2026-10-09: Phase 2a shipped: engine-service-v0.1.157 (tag created 19:07Z on
+  `cf0e09582`, live 19:41:29Z) carried Step 1, `ef_search = 1000` above T with T
+  at 30000. Measured 19:51Z with client 7.76.0 (`nexus_rdr/227-research-8`):
+  criterion met in 14 of 16 searches.
+- 2026-10-09: Phase 2b GO from Sam (`nexus_rdr/227-phase2b-decision`). `pg_prewarm`
+  spike (`nexus_rdr/227-research-9`) and `nexus_admin` prerequisites
+  (`nexus_rdr/227-research-10`); `pg_prewarm` deferred by Sam
+  (`nexus_rdr/227-prewarm-decision`), so Gap 3 stays open.
 - 2026-10-10: Status-object amendments (nexus-43ulx.23): opclass is
   `nexus.vector_cosine_ops`; the Schema rule for `pci_` names narrowed to
   `^pci_[0-9a-f]{24}$` on an `hnsw` index with everything else unparsed (extends
@@ -962,3 +1263,24 @@ Phase 2a's measured default search shows those exact arms still set the floor
   (`nexus_rdr/227-prewarm-decision`); Day 2 Operations rewritten to the served
   object (building from the lock holder only, `standby` added, `expired` added;
   `nexus_rdr/227-fix-check-ca4ca8962`).
+- 2026-10-10: Step 3a and 3b measurements (`nexus_rdr/227-research-11`, `-12`).
+- 2026-10-10: Phase 2b shipped: engine-service-v0.1.158 (tag created 10:50Z on
+  `243e6851e`, live 11:16:44Z) carried Step 2, the reconciler and builder. The first
+  DDL pass built 5 indexes with no failures (bead nexus-43ulx.33). T stayed 30000.
+- 2026-10-10: the cloud's T moved from 30000 to 20000 on engine-service-v0.1.158
+  (Sam's go about 12:50Z; boot at 14:54:40Z through a runtime setting conexus
+  added), measured in `nexus_rdr/227-research-13`. The gate applied differs from
+  the Phase 2b text (Phase 2b, "Gate as planned versus gate as applied").
+- 2026-10-10: the code default `DEFAULT_SEARCH_EXACT_MAX_ROWS` moved from 30000 to
+  20000, equal to B, in engine-service-v0.1.159 (tagged 17:00Z on `abc96883c`,
+  published 17:17:53Z, live in the cloud 17:34:46Z; pinned by conexus 7.77.0;
+  bead nexus-43ulx.35). Rollback is a setting.
+- 2026-10-12: Close-time fold (answers `nexus_rdr/227-close-critique-2026-10-12`).
+  Gap 3 recorded as not closed; Phase 2b's applied gate recorded beside the
+  planned one; the shipped end state (T = B = 20000) and its fallback paths and
+  recall recorded under Failure Modes; the credential-rotation prerequisite
+  answered; stale sites corrected (line 21, insert cost, default-search figure,
+  Contradiction Check, A6, the API table, References); two unchecked boxes
+  resolved. No change to the frontmatter; the lifecycle move is separate.
+- 2026-10-12: Close critique round 2 (T2 `nexus_rdr/227-close-critique-2026-10-12-r2`: partial, 0 critical, 1 significant). The prose exception is corrected: it holds only while no prose collection is at or above B, and a prose collection reaching B is the trigger for the Gap 1 recall check. Three stale pointers and one unstruck sentence fixed.
+- 2026-10-12: Closed as Implemented on Sam's decision, with the round-2 close critique at partial and its one finding corrected (T2 `nexus_rdr/227-close-override-2026-10-12`). Gap 3 stays open under the deferred bead nexus-43ulx.26; the prose threshold watch is bead nexus-qqoak. Post-mortem: `docs/rdr/post-mortem/rdr-227-per-collection-hnsw-above-the-router-threshold.md`.

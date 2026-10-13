@@ -1201,14 +1201,11 @@ is locked` daemon incidents):
   catalog through `make_catalog_reader` / `make_catalog_writer`
   (`HttpCatalogClient` under both), still enforced by
   the same boundary lint (`CATALOG_CONSTRUCTION_BASELINE = 0`). The
-  daemon-era fairness protocol described next is retained as history: an
-  interactive write
-  tags its RPC frame (`NX_WRITE_PRIORITY` / `isatty` / per-command intent),
-  opening a short in-memory window the background indexer polls
-  (`catalog.is_interactive_write_pending`) and yields to over a bounded
-  budget. `nx index --on-locked=skip` defers a yielded catalog write to the
-  next idempotent pass; the per-repo advisory lock keeps its orthogonal
-  two-same-repo job.
+  daemon-era fairness protocol (an interactive-write window the background
+  indexer polled and yielded to, tagged by `NX_WRITE_PRIORITY`) is deleted
+  (nexus-yp99m): the service writer never reported a pending interactive
+  write, so it never yielded. `nx index --on-locked` now governs only the
+  per-repo advisory lock.
 
 **Migration Registry — DELETED** ([RDR-076](rdr/rdr-076-idempotent-upgrade-mechanism.md) → RDR-158 P4 Stage 4, nexus-i711w):
 the client-side T2 migration chain (`src/nexus/db/migrations.py`: the

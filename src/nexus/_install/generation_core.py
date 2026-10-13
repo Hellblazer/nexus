@@ -53,7 +53,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 #: The attempts at claiming a stamp: the bare stamp, then ``a`` .. ``h``. The
 #: shell half's own list.
@@ -339,6 +339,58 @@ def register_legacy(
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+
+def _off_cwd(argv: list[str], platform: str | None = None) -> list[str]:
+    """*argv* with a bare ``argv[0]`` resolved off the working directory on Windows.
+
+    RDR-224 critique S1 (nexus-f9bgu.37). ``CreateProcess`` searches the current
+    directory before ``PATH``, and ``nx self install`` runs wherever the user is,
+    often a cloned repository, so a bare ``uv`` would run a planted ``uv.exe``.
+    This module runs with nexus absent and cannot import ``nexus.util.nx_argv``,
+    so this is the same guarantee, stdlib-only, and the same rules as
+    ``nx_argv.argv_off_cwd`` (``tests/test_off_cwd_resolver_parity.py`` runs both
+    over the same cases, so the two cannot drift silently):
+
+    * walk ``PATH`` entry by entry and look for the file in each directory itself
+      (``PATHEXT`` applied; unset or empty means the default list) rather than asking
+      ``shutil.which``, which searches the working directory first even when
+      ``path=`` is given;
+    * skip a ``PATH`` entry that is the working directory or is not absolute
+      (``tools``, ``.``, ``C:x``): a relative entry resolves against the working
+      directory, the same hole;
+    * a ``.cmd`` or ``.bat`` hit is not a hit (a bare ``uv`` spawn only ever found an
+      ``.exe``; a batch file runs through ``cmd.exe`` with quoting CPython does not
+      escape for it);
+    * a head with a directory part or a drive is the caller's explicit path, which
+      ``CreateProcess`` does not search for: left as it is.
+
+    Raises ``FileNotFoundError`` when nothing qualifies, and never falls back to the
+    bare name. POSIX is returned unchanged.
+    """
+    if (platform if platform is not None else sys.platform) != "win32":
+        return argv
+    if not argv:
+        return argv
+    drive, tail = ntpath.splitdrive(argv[0])
+    if drive or "\\" in tail or "/" in tail:
+        return argv
+    cwd = PureWindowsPath(os.getcwd())
+    exts = [e for e in (os.environ.get("PATHEXT") or _DEFAULT_PATHEXT).split(";") if e]
+    has_ext = ntpath.splitext(argv[0])[1].upper() in [e.upper() for e in exts]
+    names = [argv[0]] if has_ext else [argv[0] + e for e in exts]
+    names = [n for n in names if ntpath.splitext(n)[1].lower() not in (".bat", ".cmd")]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not PureWindowsPath(entry).is_absolute() or PureWindowsPath(entry) == cwd:
+            continue
+        for name in names:
+            candidate = ntpath.join(entry, name)
+            if os.path.isfile(candidate):
+                return [candidate, *argv[1:]]
+    raise FileNotFoundError(f"{argv[0]}: not found on PATH outside the working directory")
+
+
 def _run(argv: list[str], run, what: str) -> str:
     """Run one command; return its stdout, or raise with what it said."""
     # utf-8 with replacement, not ``text=True``: that decodes with the console
@@ -346,6 +398,7 @@ def _run(argv: list[str], run, what: str) -> str:
     # UnicodeDecodeError out of the reader thread would replace the build's own
     # diagnostic with a decoding traceback.
     try:
+        argv = _off_cwd(argv)
         # ``run`` is the test seam. subprocess.run is NOT bound to a name here
         # and its keywords are spelt out, not unpacked: an alias or a ``**``
         # hides the call from the bounded-subprocess lint's AST scan.

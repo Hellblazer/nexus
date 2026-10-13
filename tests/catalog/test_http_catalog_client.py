@@ -2231,24 +2231,6 @@ class TestFactorySeam:
             assert attr is not None, f"write op {op!r} missing from _ServiceCatalogWriter"
         writer.close()
 
-    def test_is_interactive_write_pending_false_in_service_mode(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """_ServiceCatalogWriter.is_interactive_write_pending() returns False.
-
-        Correct in service mode: the write-pending state is maintained server-side,
-        not in the Python process.  The Python writer is a stateless RPC proxy.
-        """
-        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-        monkeypatch.setenv("NX_SERVICE_PORT", "9999")
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        from nexus.catalog.factory import make_catalog_writer
-
-        writer = make_catalog_writer()
-        assert writer.is_interactive_write_pending() is False
-        writer.close()
-
     def test_mcp_path_routes_to_http_catalog_client_in_service_mode(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

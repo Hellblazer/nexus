@@ -67,7 +67,6 @@ import contextlib
 import errno
 import os
 import re
-import shutil
 import signal
 import socket
 import subprocess
@@ -98,6 +97,7 @@ from nexus.db.onnx_model_root import ENV_MODEL_DIR, apply_djl_cache_env, service
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util import win_job as _win_job
+from nexus.util.nx_argv import which_off_cwd
 from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -611,7 +611,9 @@ def _resolve_java_executable() -> str:
         cand = Path(java_home) / "bin" / "java"
         if cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
-    found = shutil.which("java")
+    # Off the working directory: this result is the Popen head, and on Windows
+    # ``shutil.which`` answers with a ``java.exe`` in the cwd first (nexus-f9bgu.37).
+    found = which_off_cwd("java")
     if found:
         return found
     raise StorageServiceStartError(
@@ -818,7 +820,7 @@ def _port_holder(port: int) -> str | None:
     ``ss`` is resolved to an absolute path first (a bare name makes CPython fork
     instead of posix_spawn); absent (macOS), there is simply no holder to name.
     """
-    ss = shutil.which("ss")
+    ss = which_off_cwd("ss")
     if ss is None:
         return None
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — collision path only
@@ -946,6 +948,15 @@ class _LogTailer:
 #: Engine child-log stems by launch kind, production artifact first. The
 #: supervisor writes one of them (``StorageServiceSupervisor._svc_log_name``).
 ENGINE_LOG_STEMS: tuple[str, ...] = ("storage_service_native", "storage_service_jar")
+
+
+def engine_log_stem(launch_kind: str | None) -> str:
+    """The engine child-log stem for *launch_kind* (``"jar"`` or ``"native"``).
+
+    Anything else, including ``None`` (a lease published before the
+    ``launch_kind`` key existed), is the production artifact's stem.
+    """
+    return ENGINE_LOG_STEMS[1] if launch_kind == "jar" else ENGINE_LOG_STEMS[0]
 
 #: A logback line (``%d{ISO8601, UTC} %-5level [%thread] ...``), and one at ERROR.
 _ENGINE_LOGBACK_LINE = re.compile(r"^\d{4}-\d\d-\d\d[ T]\S+\s+[A-Z]+\s")
@@ -1270,9 +1281,7 @@ class StorageServiceSupervisor:
         self._config_dir = config_dir
         self._binary_path = binary_path
         self._launch_kind = launch_kind
-        self._svc_log_name = (
-            "storage_service_jar" if launch_kind == "jar" else "storage_service_native"
-        )
+        self._svc_log_name = engine_log_stem(launch_kind)
         self._pg_port = pg_port
         self._service_port = service_port
         self._creds = creds

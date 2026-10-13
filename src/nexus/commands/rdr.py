@@ -25,7 +25,7 @@ import click
 import yaml
 
 from nexus.bounded_subprocess import run_bounded
-from nexus.util.nx_argv import nx_argv
+from nexus.util.nx_argv import argv_off_cwd, nx_argv
 from nexus.plans.audit_rounds import (
     BLOCKS_PLANNING,
     DISCOVER_AT_IMPLEMENTATION,
@@ -61,7 +61,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
     """
     try:
         repo_root = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
+            argv_off_cwd(["git", "rev-parse", "--show-toplevel"]),
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
     except Exception:  # noqa: BLE001 — best-effort cwd derivation; falls back to working dir on failure
@@ -70,7 +70,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
     repo_name = Path(repo_root).name
     try:
         common_dir = subprocess.check_output(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            argv_off_cwd(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]),
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
         if common_dir:

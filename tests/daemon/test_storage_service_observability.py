@@ -504,3 +504,45 @@ class TestStatusLogPaths:
         assert str(config_dir / "logs" / "storage_service.crash.log") in out
         # pg_log derives from the probed pg_data.
         assert str(Path("/tmp/testpgdata") / "pg.log") in out
+
+    @pytest.mark.parametrize(
+        ("endpoint_extra", "stem"),
+        [
+            ({"launch_kind": "native"}, "storage_service_native"),
+            ({"launch_kind": "jar"}, "storage_service_jar"),
+            ({}, "storage_service_native"),  # a lease that predates the launch_kind key
+        ],
+    )
+    def test_status_names_the_log_the_launch_kind_writes(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+        endpoint_extra: dict[str, str], stem: str,
+    ) -> None:
+        """nexus-gu3ma: a jar launch (NEXUS_SERVICE_JAR) writes storage_service_jar.log, so status must not
+        name storage_service_native.log for it. The lease's launch_kind picks the stem."""
+        import json
+
+        import nexus.commands.daemon as dm
+        from nexus.daemon import binary_lifecycle as jl
+        from nexus.daemon import service_registry as sr
+
+        record = _FakeLeaseRecord()
+        record.endpoint.pop("launch_kind")
+        record.endpoint.update(endpoint_extra)
+
+        class _FakeRegistry:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def discover(self, scope: str):
+                return record
+
+        monkeypatch.setattr(sr, "ServiceRegistry", _FakeRegistry)
+        monkeypatch.setattr(dm, "_probe_health", lambda host, port: "ok")
+        monkeypatch.setattr(dm, "_probe_pg", lambda creds_path: {"pg": "up"})
+        monkeypatch.setattr(jl, "fetch_service_version", lambda host, port: None)
+
+        result = CliRunner().invoke(
+            main, ["daemon", "service", "status", "--json", "--config-dir", str(config_dir)],
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["service_log"] == str(config_dir / "logs" / f"{stem}.log")

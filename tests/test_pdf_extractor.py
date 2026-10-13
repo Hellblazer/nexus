@@ -166,6 +166,24 @@ def test_extract_uses_docling_by_default(extractor, dummy_pdf):
     assert result.metadata["extraction_method"] == "docling"
 
 
+@pytest.mark.parametrize("mode", ["docling", "auto"])
+def test_a_docling_import_failure_is_an_error_not_a_pymupdf_fallback(extractor, dummy_pdf, mode):
+    """A docling failure on one PDF falls back to PyMuPDF; a docling that cannot be IMPORTED is a
+    broken install, and falling back there quietly gives every PDF the plain extraction."""
+    boom = ModuleNotFoundError("No module named 'cv2'")
+    with (
+        patch("nexus.pdf_extractor._has_formulas_quick", return_value=0),
+        patch.object(extractor, "_extract_with_docling", side_effect=boom),
+        patch.object(extractor, "_extract_normalized") as fallback,
+    ):
+        with pytest.raises(RuntimeError, match="docling could not be loaded") as excinfo:
+            extractor.extract(dummy_pdf, extractor=mode)
+    assert excinfo.value.__cause__ is boom
+    assert "cv2" in str(excinfo.value) and "nx doctor" in str(excinfo.value)
+    assert "Reinstall with `" in str(excinfo.value), "the remedy is whatever install_advice names for this install"
+    fallback.assert_not_called()
+
+
 def test_extract_falls_back_on_docling_exception(extractor, dummy_pdf):
     expected = _make_result("pymupdf_normalized")
     with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("crash")):

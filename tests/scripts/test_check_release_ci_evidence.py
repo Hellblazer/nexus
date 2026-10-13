@@ -582,21 +582,76 @@ def test_main_reads_defaults_from_env(monkeypatch, capsys):
 # non-vacuity guard (`_check_mandatory_pin_non_vacuity`) reads: any
 # `-m integration` invocation that actually collects them and sees them
 # both skip FAILS the run instead of reporting green.
-def _live_github_token() -> str:
+def _live_github_token(run=None) -> str:
+    """*run* is ``subprocess.run`` unless a test hands in a fake."""
     import os
     import subprocess
+
+    run = run or subprocess.run
 
     token = os.environ.get("GITHUB_TOKEN", "")
     if token:
         return token
-    try:
-        gh = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True)
-    except (OSError, subprocess.SubprocessError):
-        # `gh` not installed at all -- distinct from "installed but not
-        # logged in" (returncode != 0), but both mean "no token available"
-        # to this helper's callers.
-        return ""
-    return gh.stdout.strip() if gh.returncode == 0 else ""
+    # nexus-ifbm4: the suite runs under a fenced HOME that shadows ~/.config/gh. A keychain-backed
+    # login (the laptop) is still found there; a hosts.yml-backed one (hellmini over ssh, where the
+    # keychain is not available) is not, so all three pins skipped and the zero-skip budget read the
+    # release preflight red on that host. Ask again under the real home the fence recorded.
+    envs: list[dict[str, str]] = [dict(os.environ)]
+    real_home = os.environ.get("NX_REAL_HOME", "").strip()
+    if real_home and real_home != os.environ.get("HOME", ""):
+        unfenced = {k: v for k, v in os.environ.items() if k not in ("XDG_CONFIG_HOME", "GH_CONFIG_DIR")}
+        envs.append({**unfenced, "HOME": real_home})
+    for env in envs:
+        try:
+            gh = run(["gh", "auth", "token"], capture_output=True, text=True, env=env)
+        except (OSError, subprocess.SubprocessError):
+            # `gh` not installed at all -- distinct from "installed but not
+            # logged in" (returncode != 0), but both mean "no token available"
+            # to this helper's callers.
+            return ""
+        if gh.returncode == 0 and gh.stdout.strip():
+            return gh.stdout.strip()
+    return ""
+
+
+def test_live_github_token_falls_back_to_the_real_home(monkeypatch, tmp_path):
+    """nexus-ifbm4: a login the fenced HOME hides is found under NX_REAL_HOME."""
+    import types
+
+    real = tmp_path / "real"
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "fenced"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "fenced" / ".config"))
+    monkeypatch.setenv("NX_REAL_HOME", str(real))
+    seen: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["gh", "auth", "token"]
+        env = kwargs["env"]
+        seen.append(env)
+        if env["HOME"] == str(real):
+            return types.SimpleNamespace(returncode=0, stdout="tok-real\n", stderr="")
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="not logged in")
+
+    assert _live_github_token(run=fake_run) == "tok-real"
+    assert [e["HOME"] for e in seen] == [str(tmp_path / "fenced"), str(real)]
+    assert "XDG_CONFIG_HOME" not in seen[1]
+
+
+def test_live_github_token_is_empty_when_no_home_has_a_login(monkeypatch, tmp_path):
+    import types
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "fenced"))
+    monkeypatch.setenv("NX_REAL_HOME", str(tmp_path / "real"))
+    calls: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(kwargs["env"]["HOME"])
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    assert _live_github_token(run=fake_run) == ""
+    assert len(calls) == 2
 
 
 @pytest.mark.integration

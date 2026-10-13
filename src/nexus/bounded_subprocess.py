@@ -123,6 +123,8 @@ from typing import IO, Any, Literal
 
 import structlog
 
+from nexus.util.nx_argv import argv_off_cwd
+
 _log = structlog.get_logger(__name__)
 
 #: Seconds allowed for the post-kill reap. The group is already SIGKILLed
@@ -272,6 +274,15 @@ def run_bounded(
     """
     if input is not None and stdin is not None:
         raise ValueError("run_bounded: pass input= or stdin=, not both")
+
+    # RDR-224 critique S1 (nexus-f9bgu.37): on Windows ``CreateProcess`` searches the
+    # parent's current directory before ``PATH``, and nx commands run in a cloned
+    # repository, so a bare ``git`` / ``bd`` head would run a planted ``git.exe``.
+    # Resolved here, once, for every caller. POSIX and an absolute head are
+    # unchanged; a tool found only in the cwd raises the ``FileNotFoundError`` that
+    # a missing tool raised from ``Popen``, inside the caller's own handler.
+    if not isinstance(argv, (str, bytes)):
+        argv = argv_off_cwd(argv)
 
     from nexus.util.process_group import contain, isolation_popen_kwargs, release  # noqa: PLC0415 — deferred: avoids import-time cost on the hot common path
 

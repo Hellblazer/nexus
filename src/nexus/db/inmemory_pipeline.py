@@ -32,6 +32,7 @@ a leftover completed row instead of skipping it.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime
 from typing import Any, Callable
 
@@ -104,6 +105,10 @@ class InMemoryPipelineEngine:
         self.pages: dict[tuple[int, int], dict[str, Any]] = {}
         self.chunks: dict[tuple[int, int], dict[str, Any]] = {}
         self._next_id = 1
+        # One request at a time, as each engine request is one transaction: the PDF pipeline's
+        # extractor thread writes pages while its chunker thread reads them, and an unguarded read
+        # raised "dictionary changed size during iteration" (develop 2ea176075).
+        self._lock = threading.RLock()
 
     # ── test conveniences ───────────────────────────────────────────────────
 
@@ -458,7 +463,9 @@ class InMemoryPipelineEngine:
             else dict(request.url.params)
         )
         try:
-            return httpx.Response(200, json=getattr(self, method_name)(payload))
+            with self._lock:
+                result = getattr(self, method_name)(payload)
+            return httpx.Response(200, json=result)
         except ValueError as exc:
             return httpx.Response(400, json={"error": str(exc)})
         except _StaleRun as exc:

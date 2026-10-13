@@ -60,7 +60,6 @@ _ALLOWED: dict[str, str] = {
     "tests/test_35ok4_local_voyage_restart_remedy.py": _STUBBED,
     "tests/test_chunk_seed.py": "parity oracle: drives the same input through the route and through seed_chunks_direct; " + _ROUTE_SUBJECT,
     "tests/test_collection_registration.py": _STUBBED + " (a fake VectorServiceError message)",
-    "tests/test_etl_retry.py": _STUBBED,
     "tests/test_gtl01_upsert_ack_coverage.py": _STUBBED,
     "tests/test_http_vector_client_deadline_header.py": _STUBBED,
     "tests/test_http_vector_client_parity.py": _STUBBED,

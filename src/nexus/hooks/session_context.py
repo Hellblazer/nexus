@@ -117,9 +117,13 @@ def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | 
     """
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, function-level so the hook module itself stays import-light
+
     try:
+        # Windows: a git.exe / bd.exe planted in the project (the hook's cwd) would
+        # run ahead of PATH. Resolved off the cwd; FileNotFoundError is caught below.
         result = run_bounded(
-            args,
+            argv_off_cwd(args),
             timeout=timeout,
             cwd=cwd,
         )

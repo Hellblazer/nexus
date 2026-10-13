@@ -416,46 +416,53 @@ def test_an_engine_without_the_routes_refuses_with_a_clear_message(runner, real_
 # ── the fraction floor ────────────────────────────────────────────────────────
 
 
-def test_a_pass_over_the_floor_is_refused(runner, real_client, monkeypatch):
+def test_a_pass_over_the_floor_is_refused_by_the_engine(runner, real_client, monkeypatch):
+    """The engine judges the floor (nexus-teduy: the verb keeps no listing-based copy). The refusal tells the
+    operator the floor and the override flag, nothing moves, and no expiry follows."""
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    engine = _Engine(total=400, reapable=list(range(1, 121)))  # 30% > the 25% default, 120 >= 100
+    engine = _Engine(total=400, reapable=list(range(1, 121)), floor_refuse=(120, 400))  # 30% > 25%, 120 >= 100
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code != 0
-    assert "NX_GC_FLOOR_FRACTION" in result.output and "NX_GC_FORCE=1" in result.output
-    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+    assert result.exit_code == 1, result.output
+    assert "REFUSING to move: the engine judged 120 of 400 chunk(s)" in result.output
+    assert "NX_GC_FLOOR_FRACTION floor of 25%" in result.output and "NX_GC_FORCE=1" in result.output
+    assert len(engine.moves()) == 1
+    assert _EXPIRE not in engine.paths()
+
+
+def test_the_verb_keeps_no_listing_based_floor_check(runner, real_client, monkeypatch):
+    """nexus-teduy: a listing over the floor is not refused by the verb itself. Against an engine that does not
+    refuse, the move goes out (the verb hands the floor to the engine and nothing else judges it)."""
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=400, reapable=list(range(1, 121)), floor_echo=True)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
+    assert "REFUSING" not in result.output
+    first = engine.moves()[0]
+    assert (first["floor_fraction"], first["floor_min_chunks"], first["force"]) == (0.25, 100, False)
 
 
 def test_nx_gc_force_overrides_the_floor(runner, real_client, monkeypatch):
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     monkeypatch.setenv("NX_GC_FORCE", "1")
-    engine = _Engine(total=400, reapable=list(range(1, 121)))
+    engine = _Engine(total=400, reapable=list(range(1, 121)), floor_refuse=(120, 400))
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
+    assert engine.moves()[-1]["force"] is True
     assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
 
 
-def test_the_floor_does_not_apply_below_the_minimum_reapable_count(runner, real_client, monkeypatch):
-    """The engine's reading: the 100 minimum counts the REAPABLE set (reaper_quarantine_chunks:
-    v_reapable >= p_floor_min_chunks), not the collection's size. 99 reapable chunks is exempt however
-    large a share of the collection they are."""
+def test_a_dry_run_over_the_floor_does_not_foresee_the_engine_refusal(runner, real_client, monkeypatch):
+    """The floor is judged by the engine, and its answer arrives only with the move, so a dry run over the
+    floor reports the listing, exits 0 and moves nothing (nexus-teduy)."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=99, reapable=list(range(1, 100)))  # 100% of a 99-chunk collection
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
-
-
-def test_a_dry_run_over_the_floor_says_a_real_run_would_refuse_and_exits_one(runner, real_client, monkeypatch):
-    """A dry run that names a refusal exits 1, so `nx t3 gc --dry-run && nx t3 gc --no-dry-run --yes`
-    stops where the real run would. A clean dry run still exits 0 (pinned by test_dry_run_moves_nothing)."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=400, reapable=list(range(1, 121)))
+    engine = _Engine(total=400, reapable=list(range(1, 121)), floor_refuse=(120, 400))
     result = _invoke(runner, real_client, engine, ["--dry-run"])
-    assert result.exit_code == 1, result.output
-    assert "REFUSE" in result.output and "NX_GC_FORCE=1" in result.output
+    assert result.exit_code == 0, result.output
+    assert "REFUSE" not in result.output
     assert _MOVE not in engine.paths() and _EXPIRE not in engine.paths()
 
 
@@ -494,23 +501,9 @@ def test_an_engine_that_echoes_the_floor_is_not_second_guessed(runner, real_clie
     assert "did not echo" not in result.output
 
 
-def test_an_engine_that_ignores_the_floor_is_named_and_the_listing_check_stays(runner, real_client, monkeypatch):
-    """An older engine ignores the fields and moves unguarded. The verb cannot know that before the move,
-    so the listing check still runs first (the refusal tests above); after the move the summary says the
-    engine did not judge the floor."""
-    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    engine = _Engine(total=400, reapable=[1, 2, 3])  # no echo
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "quarantined 3 chunk(s)" in result.output
-    assert "NOTE: the engine did not echo the fraction floor" in result.output
-    assert "only floor this run had was the listing check" in result.output
-
-
 def test_the_engine_refuses_a_set_that_grew_past_the_floor_after_the_listing(runner, real_client, monkeypatch):
-    """The listing read 3 reapable chunks (under the 100 minimum, so the advisory check passed); the engine,
-    judging under its lock, reads 130 of 400. Exit 1, nothing moved, no expiry, the override named."""
+    """The listing read 3 reapable chunks; the engine, judging under its lock, reads 130 of 400. Exit 1,
+    nothing moved, no expiry, the floor and the override named."""
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     engine = _Engine(total=400, reapable=[1, 2, 3], floor_refuse=(130, 400))
@@ -518,7 +511,8 @@ def test_the_engine_refuses_a_set_that_grew_past_the_floor_after_the_listing(run
     assert result.exit_code == 1, result.output
     assert "REFUSING to move: the engine judged 130 of 400 chunk(s)" in result.output
     assert "under its own lock" in result.output
-    assert "The listing this verb checked first read 3" in result.output
+    assert "The advisory listing read 3 before the move" in result.output
+    assert "NX_GC_FLOOR_FRACTION floor of 25%" in result.output
     assert "NX_GC_FORCE=1" in result.output and "gc_audit" in result.output
     assert len(engine.moves()) == 1
     assert _EXPIRE not in engine.paths(), "a refused run is not a successful move: no expiry follows"
@@ -675,18 +669,17 @@ def test_the_bounded_move_is_drained_until_remaining_is_zero(runner, real_client
 
 
 def test_the_floor_is_the_gc_family_variable_and_never_the_reapers(runner, real_client, monkeypatch):
-    """The client floor is permanent (the engine route carries none; the reaper's floor lives in a
-    function with no HTTP route) and reads NX_GC_FLOOR_FRACTION, the name the indexer's expiry floor
-    already uses, not the engine reaper's NX_REAPER_FLOOR_FRACTION (a different process's env)."""
+    """The floor the verb hands the engine reads NX_GC_FLOOR_FRACTION, the name the indexer's floor already
+    uses, not the engine reaper's NX_REAPER_FLOOR_FRACTION (a different process's env). The verb no longer
+    judges it (nexus-teduy), so the proof is the value on the wire."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    monkeypatch.setenv("NX_REAPER_FLOOR_FRACTION", "1.0")  # must not loosen the verb's floor
+    monkeypatch.setenv("NX_REAPER_FLOOR_FRACTION", "1.0")  # must not loosen the floor the engine is handed
     monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.5")
-    over = _Engine(total=200, reapable=list(range(1, 121)))  # 60% > 50%
-    refused = _invoke(runner, real_client, over, ["--no-dry-run", "--yes"])
-    assert refused.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in refused.output
-    under = _Engine(total=250, reapable=list(range(1, 101)))  # 40% < 50%
-    allowed = _invoke(runner, real_client, under, ["--no-dry-run", "--yes"])
-    assert allowed.exit_code == 0, allowed.output
+    engine = _Engine(total=200, reapable=list(range(1, 121)), floor_echo=True)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    first = engine.moves()[0]
+    assert (first["floor_fraction"], first["floor_min_chunks"], first["force"]) == (0.5, 100, False)
 
 
 # ── (round 2) a census without scope_chunk_total refuses; it does not switch the guards off ─────
@@ -825,73 +818,6 @@ def test_the_floor_denominator_is_every_stored_chunk_not_just_the_owned_ones(run
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
     assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
-
-
-def test_a_large_manifest_less_bucket_does_not_hide_a_real_floor_breach(runner, real_client, monkeypatch):
-    """The other direction: 300 of 1000 is 30% of the collection, over the floor."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=1000, no_owner=500, reapable=list(range(1, 301)))
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code != 0
-    assert "300 of 1000 chunk(s) (30%)" in result.output
-    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
-
-
-@pytest.mark.parametrize(("candidates", "refused"), [(100, False), (101, True)])
-def test_the_floor_boundary_is_strictly_greater_than_the_fraction(
-    runner, real_client, monkeypatch, candidates, refused,
-):
-    """Exactly 25% of 400 (100 chunks, which is also the 100 minimum) is allowed; one more chunk is
-    refused. (> not >=.)"""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=400, reapable=list(range(1, candidates + 1)))
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    if refused:
-        assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
-        assert _MOVE not in engine.paths()
-    else:
-        assert result.exit_code == 0, result.output
-        assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
-
-
-@pytest.mark.parametrize(("candidates", "refused"), [(99, False), (100, True)])
-def test_the_floor_minimum_counts_the_reapable_chunks_not_the_collection_size(
-    runner, real_client, monkeypatch, candidates, refused,
-):
-    """33% of a 300-chunk collection is over the 25% floor, but the floor engages only from 100
-    REAPABLE chunks (the engine's reading). 99 of 300 moves; 100 of 300 is refused. A basis on the
-    collection size (300 >= 100 in both) refuses the 99 too."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=300, reapable=list(range(1, candidates + 1)))
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    if refused:
-        assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
-        assert _MOVE not in engine.paths()
-    else:
-        assert result.exit_code == 0, result.output
-        assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
-
-
-@pytest.mark.parametrize(("candidates", "refused"), [(116, False), (117, True)])
-def test_the_floor_compares_by_division_not_by_a_float_product(
-    runner, real_client, monkeypatch, candidates, refused,
-):
-    """NX_GC_FLOOR_FRACTION=0.29 over 400 chunks: 116 is exactly 29%, which the engine's
-    v_reapable / v_total > fraction allows. The product 0.29 * 400 is 115.99999999999999, so
-    `116 > 0.29 * 400` refuses a pass the engine would take. One more chunk is over either way."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.29")
-    engine = _Engine(total=400, reapable=list(range(1, candidates + 1)))
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    if refused:
-        assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
-        assert _MOVE not in engine.paths()
-    else:
-        assert result.exit_code == 0, result.output
-        assert engine.paths()[-3:] == [_MOVE, _PROBE, _EXPIRE]
 
 
 # ---- (round 3) the verb runs the client expiry after its own move -----------------------------
