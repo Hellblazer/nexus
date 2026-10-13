@@ -574,8 +574,20 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 #: nexus-d76vc: command names the T1 handoff marker writer/watcher treat as
 #: an MCP server sibling. Matches the two ``[project.scripts]`` entry
 #: points in pyproject.toml (``nx-mcp`` / ``nx-mcp-catalog``) that Claude
-#: Code's ``.mcp.json`` spawns as direct children of the claude process.
+#: Code's ``.mcp.json`` spawns under the claude process: as direct children
+#: until RDR-228, and behind ``uv`` and the plugin's launcher since.
 _MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
+
+#: RDR-228: what the plugin's server entries put between claude and the server,
+#: and the only processes :func:`find_mcp_sibling_pids` looks through. ``uv`` is
+#: the command the entry names; the script is the launcher it runs.
+_LAUNCH_WRAPPER_COMMANDS = ("uv",)
+_LAUNCHER_SCRIPT = "/launch/nx_launch.py"
+
+#: How many wrapper levels may sit between claude and a server. The longest
+#: chain the plugin produces is three, on Windows: ``uv.exe``, uv's
+#: ``python.exe`` stub, the interpreter running the launcher.
+_MAX_WRAPPER_DEPTH = 4
 
 #: Executables that count as "an interpreter running a console script" for
 #: :func:`find_mcp_sibling_pids`. Both entry points above are Python console
@@ -662,8 +674,21 @@ def _list_processes(
 
 
 def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
-    """Return live ``nx-mcp`` / ``nx-mcp-catalog`` pids whose PPID is
-    *claude_pid*.
+    """Return live ``nx-mcp`` / ``nx-mcp-catalog`` pids whose nearest claude
+    ancestor is *claude_pid*: a direct child, or one reached through the
+    plugin's launch wrappers only.
+
+    **Through the wrappers (RDR-228, nexus-sv2wx.8).** The plugin starts the
+    servers as ``uv tool run ... python launch/nx_launch.py nx-mcp``, and uv
+    stays alive as the parent of what it runs (measured, uv 0.8.0), so the
+    server is a grandchild of claude; on Windows the launcher stays too, and
+    uv's ``python.exe`` can be a stub with the interpreter under it. Requiring
+    a direct child found nothing there, and the handoff marker below was never
+    written. The walk therefore looks through a child that is ``uv`` or a
+    python running ``nx_launch.py``, to :data:`_MAX_WRAPPER_DEPTH` levels, and
+    through nothing else: not a shell, not a test runner, and never another
+    claude, whose servers are its own. That keeps the property the direct-child
+    rule gave (see below) for every chain the plugin can produce.
 
     nexus-d76vc: the ancestry check for the T1-handoff marker writer
     (``nexus.hooks._write_t1_handoff_markers``). A marker is only ever
@@ -704,23 +729,44 @@ def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
     """
     if claude_pid <= 0:
         return []
+    # POSIX: one ``ps`` returns the whole table, read once. Windows pays one
+    # process open per row, so each level asks for one parent's children.
+    table = None if _is_windows(None) else _list_processes()
+
+    def children(parent: int) -> list[tuple[int, str]]:
+        rows = _list_processes(ppid=parent) if table is None else table
+        return [(pid, command) for pid, ppid, command in rows if ppid == parent]
+
     matches: list[int] = []
-    for pid, ppid, command_line in _list_processes(ppid=claude_pid):
-        if ppid != claude_pid:
-            continue
-        tokens = command_line.split()
-        if not tokens:
-            continue
-        # ``executable_stem``: either separator, no ``.exe`` -- a Windows
-        # ``nx-mcp.exe`` launcher and ``python.exe`` match the same names
-        # (RDR-224, nexus-f9bgu.21); the identity of a POSIX name.
-        executable = winproc_core.executable_stem(tokens[0])
-        if executable in _MCP_SIBLING_COMMANDS:
-            matches.append(pid)
-            continue
-        if _PYTHON_EXECUTABLE_RE.match(executable) and len(tokens) > 1 \
-                and winproc_core.executable_stem(tokens[1]) in _MCP_SIBLING_COMMANDS:
-            matches.append(pid)
+    seen: set[int] = {claude_pid}
+    frontier = [claude_pid]
+    for _depth in range(_MAX_WRAPPER_DEPTH + 1):
+        wrappers: list[int] = []
+        for parent in frontier:
+            for pid, command_line in children(parent):
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                tokens = command_line.split()
+                if not tokens:
+                    continue
+                # ``executable_stem``: either separator, no ``.exe`` -- a Windows
+                # ``nx-mcp.exe`` launcher and ``python.exe`` match the same names
+                # (RDR-224, nexus-f9bgu.21); the identity of a POSIX name.
+                executable = winproc_core.executable_stem(tokens[0])
+                is_python = bool(_PYTHON_EXECUTABLE_RE.match(executable))
+                if executable in _MCP_SIBLING_COMMANDS or (
+                    is_python and len(tokens) > 1
+                    and winproc_core.executable_stem(tokens[1]) in _MCP_SIBLING_COMMANDS
+                ):
+                    matches.append(pid)
+                elif executable in _LAUNCH_WRAPPER_COMMANDS or (
+                    is_python and any(token.replace("\\", "/").endswith(_LAUNCHER_SCRIPT) for token in tokens[1:])
+                ):
+                    wrappers.append(pid)
+        frontier = wrappers
+        if not frontier:
+            break
     return matches
 
 

@@ -174,8 +174,9 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
 
     Ancestry authentication (MUST-HOLD rn3wo.1) happens entirely via
     *selection*: :func:`~nexus.session.find_mcp_sibling_pids` only ever
-    returns pids that are LIVE, IMMEDIATE children of this hook's own
-    claude ancestor -- there is no separate "verify" step because a
+    returns pids that are LIVE and whose NEAREST claude ancestor is this
+    hook's own (a direct child, or one behind the plugin's launch wrappers,
+    RDR-228) -- there is no separate "verify" step because a
     marker is never written for a pid that was not found this way, so a
     concurrent session's hook (walking its OWN, necessarily different,
     claude ancestor) can structurally never enumerate this session's MCP
