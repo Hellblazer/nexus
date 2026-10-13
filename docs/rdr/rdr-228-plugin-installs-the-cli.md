@@ -2,12 +2,12 @@
 title: "The Plugin Installs the CLI"
 id: RDR-228
 type: Feature
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-12
-accepted_date:
+accepted_date: 2026-10-13
 related_issues: [nexus-qkb9v]
 related_rdrs: [RDR-126, RDR-143, RDR-174, RDR-197, RDR-218, RDR-224]
 ---
@@ -1175,3 +1175,4 @@ is flagged for trimming before then.
   process has one home in the plugin; the lock uses a heartbeat; the page's
   address goes through an owner-only opener file; no fallback build.
 - 2026-10-12: Gate round 2: PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `fe8179c0f`; critique `nexus_rdr/228-gate-critique-2026-10-12-r2`.
+- 2026-10-13: Accepted. Residual dispositions: the Phase 1 release gate (BLOCKS-PLANNING) is carried by nexus-217c3 on Sam's choice; the 18 DISCOVER-AT-IMPLEMENTATION residuals are carried by nexus-j8ebc (4, Phase 1), nexus-9i4d4 (13, Phase 2) and nexus-omlpd (1, Phase 3). No change to the design, so no fix check.
