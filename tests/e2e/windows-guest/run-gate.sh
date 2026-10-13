@@ -10,7 +10,7 @@
 # outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git]]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -26,6 +26,11 @@
 # only orchestrates, and installs Git for all users first, because winget's Git
 # package needs elevation: the run is a standard user on a machine that already
 # has Git. driver/stduser.ps1 lists everything the administrator does.
+# --no-admin-git (with --standard-user) leaves Git out of that: the account
+# installs PortableGit itself, by running the PowerShell block of
+# docs/windows-install.md section 2 exactly as it is written there (this script
+# cuts it out of the file at run time), so the run is a standard user on a
+# machine with no Git following the install guide.
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -100,7 +105,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git]]" >&2
 }
 die() {
     local code="$1"; shift
@@ -114,6 +119,7 @@ wheel=''
 out=''
 keep_guest=0
 standard_user=0
+admin_git=yes
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) [[ $# -ge 2 ]] || { usage; exit 2; }; version="$2"; shift 2 ;;
@@ -122,6 +128,7 @@ while [[ $# -gt 0 ]]; do
         --out) [[ $# -ge 2 ]] || { usage; exit 2; }; out="$2"; shift 2 ;;
         --keep-guest) keep_guest=1; shift ;;
         --standard-user) standard_user=1; shift ;;
+        --no-admin-git) admin_git=no; shift ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -132,6 +139,8 @@ done
 for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_GUEST_KEYCHAIN_SERVICE:$KEYCHAIN_SERVICE" "NX_GUEST_CHECKPOINT:$CHECKPOINT" "NX_GUEST_STD_USER:$STD_USER"; do
     [[ "${pair#*:}" =~ ^[A-Za-z0-9._-]+$ ]] || die 2 "${pair%%:*} must be plain letters, digits, dot, dash or underscore"
 done
+[[ "$admin_git" == yes || $standard_user -eq 1 ]] || { usage; die 2 "--no-admin-git needs --standard-user"; }
+install_doc="$repo/docs/windows-install.md"
 [[ "$STD_USER" != "$GUSER" ]] || die 2 "NX_GUEST_STD_USER must not be the administrator account"
 [[ -f "$gate" ]] || die 2 "no gate script at $gate"
 
@@ -166,6 +175,19 @@ HOST_DIR="C:/build/guest/$RUN"
 out="${out:-${TMPDIR:-/tmp}/nxgate-run-$RUN}"
 mkdir -p "$out" || die 2 "cannot create $out"
 [[ -z "$(ls -A "$out")" ]] || die 2 "$out is not empty"
+
+# The PortableGit block of the install guide, cut out as written: the first
+# powershell fence that names PortableGit. A guide that no longer has one stops
+# the run here, before anything remote.
+if [[ "$admin_git" == no ]]; then
+    awk '/^```powershell/ { buf = ""; inb = 1; next }
+         /^```/ { if (inb && buf ~ /PortableGit/) { printf "%s", buf; found = 1; exit } inb = 0; next }
+         inb { buf = buf $0 "\n" }
+         END { if (!found) exit 1 }' "$install_doc" >"$out/portable-git.ps1" \
+        || die 2 "no powershell block naming PortableGit in $install_doc"
+    grep -q "SetEnvironmentVariable('Path'" "$out/portable-git.ps1" || die 2 "the PortableGit block in $install_doc no longer sets the user PATH"
+    LC_ALL=C grep -q '[^[:print:][:space:]]' "$out/portable-git.ps1" && die 2 "the PortableGit block in $install_doc has a non-ASCII character, which Windows PowerShell 5.1 would misread"
+fi
 
 say() { echo "run-gate.sh: $(date -u +%H:%M:%S) $*"; }
 quiet() { grep -v -i -E 'post-quantum|store now, decrypt later|pq\.html' || true; }
@@ -348,7 +370,9 @@ if [[ -n "$wheel_name" ]]; then
 else
     say "conexus==$version from PyPI"
 fi
-if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); Git is installed for all users by $GUSER first"; fi
+git_note="Git is installed for all users by $GUSER"
+if [[ "$admin_git" == no ]]; then git_note="no Git from $GUSER: the account installs PortableGit with the block in docs/windows-install.md"; fi
+if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); $git_note"; fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 
 # --- stage ------------------------------------------------------------------
@@ -358,6 +382,10 @@ run_bounded 120 ssh "${SSH_OPTS[@]}" "$HOST" "cmd /c \"mkdir $HOST_WIN_DIR\\stag
 host_dir_made=1
 scp "${SSH_OPTS[@]}" -q "$driver"/*.ps1 "$HOST:$HOST_DIR/" 2>&1 | quiet
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die 1 "cannot copy the driver scripts to $HOST:$HOST_DIR"
+if [[ "$admin_git" == no ]]; then
+    scp "${SSH_OPTS[@]}" -q "$out/portable-git.ps1" "$HOST:$HOST_DIR/" 2>&1 | quiet
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || die 1 "cannot copy the PortableGit block to $HOST:$HOST_DIR"
+fi
 if [[ -n "$wheel_name" ]]; then
     scp "${SSH_OPTS[@]}" -q "$gate" "$wheel" "$HOST:$HOST_DIR/stage/" 2>&1 | quiet
 else
@@ -380,7 +408,7 @@ if [[ $standard_user -eq 1 ]]; then
     wheel_arg=''
     if [[ -n "$wheel_name" ]]; then wheel_arg="-Wheel $wheel_name"; fi
     # shellcheck disable=SC2086
-    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" $wheel_arg
+    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" -AdminGit "$admin_git" $wheel_arg
     grep -qF "std gate sha256=$gate_sha" "$out/01s-stduser.txt" || die 1 "the gate script in $STD_USER's profile does not have sha256 $gate_sha"
     if [[ -n "$wheel_name" ]]; then
         grep -qF "std wheel sha256=$wheel_sha" "$out/01s-stduser.txt" || die 1 "the wheel in $STD_USER's profile does not have sha256 $wheel_sha"
@@ -436,5 +464,5 @@ if [[ -n "$wheel_name" ]]; then
 else
     echo "run-gate.sh: conexus==$version from PyPI; gate script sha256 $gate_sha; logs in $out"
 fi
-if [[ $standard_user -eq 1 ]]; then echo "run-gate.sh: run as standard user $STD_USER (not an administrator); Git was installed for all users by $GUSER"; fi
+if [[ $standard_user -eq 1 ]]; then echo "run-gate.sh: run as standard user $STD_USER (not an administrator); $git_note"; fi
 exit "$rc"

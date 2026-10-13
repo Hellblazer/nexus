@@ -1921,3 +1921,17 @@ Right-sized for an Architecture record that replaces an accepted direction.
   eleven uv hook entries (T2 `224-win-run-ffea86080`). The hand runs were in a
   desktop session; the rehearsal job on the runner's service account is the console
   test's first run in session 0.
+- 2026-10-13, later: two more results from the clean guest, text and evidence
+  only. (a) The gate PASSED 5 of 5 as a standard user on a guest with no Git
+  (`run-gate.sh --standard-user --no-admin-git`): the account ran the PortableGit
+  block of `docs/windows-install.md` as written, with no elevation, in 29 s, and
+  the plugin install and Claude Code's Git Bash both worked from the user PATH
+  entry alone (T2 `224-gate-run-standard-user-no-git-7.78.0-2026-10-13`). The
+  administrator then does nothing a user's install needs. Still not covered: a
+  Home or Pro edition, a Microsoft or domain account, and application-control
+  policy, which is the kind of thing that blocks a self-extractor in a user
+  folder. (b) The 16.5 s `mcp-connect-wait` seen in a `claude -p` child during the
+  guest batch is not a Windows matter. The aspect extractor's child loaded the
+  user's settings and so ran every SessionStart hook, and the plugin's connection
+  wait timed out at its bound for an `nx-mcp` that child never starts. The child
+  now passes `--setting-sources ""` (nexus-n6eaj).
