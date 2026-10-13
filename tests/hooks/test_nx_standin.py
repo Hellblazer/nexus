@@ -12,6 +12,7 @@ directory, so the developer's own install is not found.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import os
 import subprocess
@@ -25,8 +26,19 @@ _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
 _STANDIN = _ROOT / "conexus" / "launch" / "nx_standin.py"
 
-_MANUAL_COMMANDS = ("uv tool install conexus --python 3.12", "nx self install", "nx init")
-_INSTALL_PAGE = "https://hellblazer.github.io/nexus/getting-started.html"
+#: The first install on THIS platform, as README.md gives it (Linux names the CPU
+#: build of torch).
+_FIRST = "uv tool install conexus --python 3.12" + (" --torch-backend cpu" if sys.platform.startswith("linux") else "")
+_MANUAL_COMMANDS = (_FIRST, "nx self install", "nx init")
+_INSTALL_PAGE = "https://hellblazer.github.io/nexus/"
+
+
+def _standin():
+    spec = importlib.util.spec_from_file_location("nx_standin_under_test", _STANDIN)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _isolated(tmp_path: Path) -> dict[str, Path]:
@@ -82,7 +94,11 @@ async def test_no_cli_and_nx_mcp_is_a_stand_in_with_exactly_the_two_setup_tools(
     for tool in tools:
         assert tool.inputSchema.get("properties") in ({}, None), f"{tool.name} takes an argument in Phase 1"
         assert "not installed" in (tool.description or ""), tool.name
-    assert init.serverInfo.name
+        assert tool.annotations is None, f"{tool.name}: a hint given now would outlive Phase 1"
+    setup = next(tool for tool in tools if tool.name == "setup")
+    assert "installs nothing" in (setup.description or "")
+    assert "Do not run them yourself" in (setup.description or "")
+    assert init.serverInfo.name == "nexus-not-installed"
 
 
 @pytest.mark.asyncio
@@ -107,6 +123,7 @@ async def test_setup_answers_with_the_manual_commands_and_starts_nothing(tmp_pat
         assert command in setup, command
     assert _INSTALL_PAGE in setup
     assert "/conexus:setup" not in setup
+    assert "do not run them yourself unless the user asks" in setup, "the result must leave the choice with the user"
     assert not calls["setup"].isError
     assert "not installed" in _text(calls["setup_status"])
     assert "/conexus:setup" not in _text(calls["setup_status"])
@@ -120,6 +137,26 @@ async def test_no_cli_and_nx_mcp_catalog_is_a_stand_in_with_no_tools(tmp_path: P
     init, tools, _calls = await _session(_isolated(tmp_path), "nx-mcp-catalog")
     assert tools == []
     assert not init.instructions
+
+
+def test_the_commands_are_the_platform_s_own_and_the_instructions_are_one_sentence() -> None:
+    """README.md: on Linux the first command names the CPU build of torch, and
+    without it uv installs 4.3 GB that Nexus never uses."""
+    mod = _standin()
+    assert mod.manual_commands("linux")[0] == "uv tool install conexus --python 3.12 --torch-backend cpu"
+    for platform in ("darwin", "win32"):
+        assert mod.manual_commands(platform)[0] == "uv tool install conexus --python 3.12"
+    for platform in ("linux", "darwin", "win32"):
+        assert mod.manual_commands(platform)[1:] == ("nx self install", "nx init")
+        text = mod.instructions(platform)
+        assert text.endswith(".") and ". " not in text, f"more than one sentence: {text}"
+        for command in mod.manual_commands(platform):
+            assert command in text and command in mod.setup_text(platform)
+
+
+def test_the_install_page_is_the_site_s_install_guide() -> None:
+    assert _standin().INSTALL_PAGE == _INSTALL_PAGE
+    assert "<title>Installing Nexus</title>" in (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
 
 def test_no_text_the_stand_in_carries_names_the_phase_2_command() -> None:
@@ -150,6 +187,63 @@ def test_the_stand_in_never_writes_to_standard_error(tmp_path: Path) -> None:
     assert "error" in replies[2], "a Nexus tool name must not be served by the stand-in"
     assert "error" in replies[3]
     assert b"\r\n" not in r.stdout, "MCP stdio is newline-delimited, with bare newlines"
+
+
+_HOSTILE = {
+    "bytes that are not UTF-8": b'{"jsonrpc":"2.0","id":1,"method":"pi\xffng"}\n',
+    "nesting past the recursion limit": b"[" * 200_000 + b"\n",
+    "an integer too long to parse": b'{"jsonrpc":"2.0","id":' + b"9" * 5000 + b',"method":"ping"}\n',
+    "a lone surrogate in the id": b'{"jsonrpc":"2.0","id":"\\ud800","method":"ping"}\n',
+    "an id that is not JSON": b'{"jsonrpc":"2.0","id":NaN,"method":"ping"}\n',
+}
+
+
+@pytest.mark.parametrize("line", list(_HOSTILE.values()), ids=list(_HOSTILE))
+def test_hostile_input_gets_a_reply_and_the_server_lives(tmp_path: Path, line: bytes) -> None:
+    """Each of these ended the server with a traceback on standard error (code
+    review of 973e7c470). The server must answer and go on to the next request."""
+    after = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode() + b"\n"
+    r = subprocess.run(
+        [sys.executable, str(_LAUNCH), "nx-mcp"],
+        input=line + after, capture_output=True, env=_env(_isolated(tmp_path)), timeout=60, check=False,
+    )
+    assert r.returncode == 0
+    assert r.stderr == b""
+    replies = [json.loads(reply) for reply in r.stdout.decode("utf-8").splitlines()]
+    assert replies[-1] == {"jsonrpc": "2.0", "id": 7, "result": {}}, replies
+    assert len(replies) == 2, replies
+
+
+def test_a_client_that_stops_reading_ends_the_server_quietly(tmp_path: Path) -> None:
+    proc = subprocess.Popen(
+        [sys.executable, str(_LAUNCH), "nx-mcp"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_env(_isolated(tmp_path)),
+    )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    proc.stdout.close()
+    ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
+    try:
+        proc.stdin.write(ping * 2000)
+        proc.stdin.close()
+    except OSError:
+        pass  # the server left before reading it all, which is the point
+    assert proc.wait(timeout=30) == 0
+    assert proc.stderr.read() == b""
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_to_the_catalog_stand_in_is_an_error(tmp_path: Path) -> None:
+    from mcp import ClientSession, McpError  # noqa: PLC0415
+    from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: PLC0415
+
+    dirs = _isolated(tmp_path)
+    params = StdioServerParameters(command=sys.executable, args=[str(_LAUNCH), "nx-mcp-catalog"], env=_env(dirs))
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            init = await session.initialize()
+            assert init.protocolVersion
+            with pytest.raises(McpError):
+                await session.call_tool("setup", {})
 
 
 @pytest.mark.parametrize("script", [_STANDIN], ids=lambda p: p.name)
