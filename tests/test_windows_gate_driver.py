@@ -35,9 +35,9 @@ DRIVER: Path = GUEST_DIR / "driver"
 RUN_GATE: Path = GUEST_DIR / "run-gate.sh"
 GATE: Path = REPO / "tests" / "e2e" / "windows-phase5-gate.ps1"
 
-PW_SCRIPTS = ("restore.ps1", "guest-run.ps1")
+PW_SCRIPTS = ("restore.ps1", "guest-run.ps1", "stduser.ps1")
 NO_PW_SCRIPTS = ("hostcheck.ps1", "end.ps1")
-INNER_SCRIPTS = ("inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1")
+INNER_SCRIPTS = ("inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1", "as-user.ps1")
 ALL_PS = PW_SCRIPTS + NO_PW_SCRIPTS + INNER_SCRIPTS
 
 
@@ -432,6 +432,14 @@ case "$cmd" in
           echo "wheel sha256=$(shasum -a 256 "$rundir/stage/$w" | cut -d' ' -f1)"
         fi
         echo "NXG-RESULT: ok" ;;
+      stduser.ps1)
+        if [[ "${FAKE_FAIL_STEP:-}" == stduser ]]; then echo "NXG-RESULT: FAIL nxstd did not sign in at the console"; exit 7; fi
+        echo "std gate sha256=$(shasum -a 256 "$rundir/stage/windows-phase5-gate.ps1" | cut -d' ' -f1)"
+        if [[ "$cmd" == *" -Wheel "* ]]; then
+          w="${cmd#* -Wheel }"; w="${w%% *}"
+          echo "std wheel sha256=$(shasum -a 256 "$rundir/stage/$w" | cut -d' ' -f1)"
+        fi
+        echo "NXG-RESULT: ok" ;;
       guest-run.ps1)
         if [[ "$cmd" == *" -Inner "* ]]; then
           i="${cmd#* -Inner }"; i="${i%% *}"
@@ -486,7 +494,7 @@ echo "placeholder-not-a-secret"
 """
 
 _FAKE_LAUNCH = """#!/bin/bash
-echo "bytes_on_stdin=$(wc -c | tr -d ' ') :: $*" >> "$FAKE_ROOT/launch.log"
+echo "bytes_on_stdin=$(wc -c | tr -d ' ') :: run_as=${NX_GUEST_RUN_AS:-} :: $*" >> "$FAKE_ROOT/launch.log"
 [[ "${FAKE_FAIL_STEP:-}" == launch ]] && { echo "launch.sh: FAILED"; exit 1; }
 echo "launch.sh: Claude Code is open in the guest's console session"
 """
@@ -892,3 +900,73 @@ def test_every_ssh_and_scp_call_is_batch_mode_and_the_non_password_ones_read_no_
     assert len(re.findall(r"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File", sh)) == 2
     assert "powershell -NoProfile -ExecutionPolicy" not in sh
     assert "set -uo pipefail" in sh
+
+
+# ---- --standard-user ---------------------------------------------------------
+
+
+def test_a_plain_run_never_names_a_run_as_account(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert not any("stduser.ps1" in ln or "-RunAs" in ln or "-AsUser" in ln for ln in harness.ssh_lines())
+    assert ":: run_as= ::" in (harness.root / "launch.log").read_text()
+    assert "nxguest\\nx-gate\\GATERUN.txt" in (harness.root / "launch.log").read_text()
+    assert "standard user" not in res.stdout
+
+
+def test_a_standard_user_run_makes_the_account_after_the_restore_and_runs_every_later_step_as_it(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    scripts = [ln for ln in harness.ssh_lines() if "-File" in ln]
+    order = [re.search(r"\\([a-z-]+\.ps1)", ln).group(1) for ln in scripts]  # type: ignore[union-attr]
+    assert order[:3] == ["hostcheck.ps1", "restore.ps1", "stduser.ps1"]
+    std = scripts[2]
+    assert "-StdUser nxstd" in std and "-GuestUser nxguest" in std and not std.startswith("bytes_on_stdin=0 ")
+    # the restore still runs as the administrator; everything after the account exists names it
+    assert "-RunAs" not in scripts[1]
+    later = [ln for ln in scripts[3:] if "guest-run.ps1" in ln]
+    assert len(later) == 4 and all(ln.rstrip().endswith("-RunAs nxstd") or "-RunAs nxstd " in ln for ln in later)
+    install = next(ln for ln in later if "-Inner inst.ps1" in ln)
+    assert "-RunAs nxstd -AsUser yes" in install
+    assert sum("-AsUser" in ln for ln in scripts) == 1, "only the install is run as the account by as-user.ps1"
+    launch = (harness.root / "launch.log").read_text()
+    assert ":: run_as=nxstd ::" in launch and "nxstd\\nx-gate\\GATERUN.txt" in launch
+    assert "run as standard user nxstd (not an administrator)" in res.stdout
+    _assert_cleaned_up_once(harness)
+
+
+def test_a_failed_account_step_stops_before_any_install_and_collects_from_the_administrator(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--out", str(harness.out), verdict=_verdict(PASSED), fail_step="stduser")
+    assert res.returncode == 1
+    assert not (harness.root / "inner.log").exists()
+    collect = [ln for ln in harness.ssh_lines() if "guest-run.ps1" in ln]
+    assert len(collect) == 1 and "-Collect yes" in collect[0] and "-RunAs" not in collect[0]
+    _assert_cleaned_up_once(harness)
+
+
+def test_the_standard_user_must_not_be_the_administrator_account(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", env={"NX_GUEST_STD_USER": "nxguest"})
+    assert res.returncode == 2 and not (harness.root / "ssh.log").exists()
+
+
+def test_the_account_step_and_the_run_as_wrapper_keep_their_guarantees() -> None:
+    std = _read("stduser.ps1")
+    # the account is a member of Users only, and the step proves it is no administrator before it reports ok
+    assert "Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $u" in std
+    assert std.count("Add-LocalGroupMember") == 1
+    assert std.index("in Administrators=False") < std.rindex("'NXG-RESULT: ok'")
+    # its secret is random, set without a command line, and removed from Winlogon once the account is signed in
+    assert "RNGCryptoServiceProvider" in std and "net user" not in std and "net.exe" not in std
+    assert std.index("-Name DefaultPassword -Value $tp; $tp = $null") < std.index("Remove-ItemProperty -Path $wl -Name DefaultPassword")
+    assert not re.search(r'"[^"\n]*\$tp\b[^"\n]*"|Write-|Out-File[^\n]*\$tp|Set-Content[^\n]*\$tp', std)
+    asu = _read("as-user.ps1")
+    assert "-UserId $u -LogonType Interactive -RunLevel Limited" in asu
+    assert "administrators-member=False$" in asu
+    assert re.search(r"do \{ Start-Sleep 10;.*\} while \(\(-not \(\$l -match '\^asuser exit='\)\) -and \(\(Get-Date\) - \$t0\)\.TotalMinutes -lt 25\)", asu)
+    # an inner ok is never printed bare when the wrapper itself failed
+    assert 'if ($bad) { $l | ForEach-Object { "inner: $_" }; "NXG-RESULT: FAIL $bad" } else { $l }' in asu
+    # the setup task and the Claude Code window run as the named account
+    assert "$who = if ($env:NXG_RUN_AS) { $env:NXG_RUN_AS } else { $env:USERNAME }" in _read("setup-run.ps1")
+    recv = (GUEST_DIR / "host-recv.ps1").read_text(encoding="utf-8")
+    assert "New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive" in recv
+    assert "NTAccount($env:COMPUTERNAME, $runAs)), 'Read', 'Allow'" in recv

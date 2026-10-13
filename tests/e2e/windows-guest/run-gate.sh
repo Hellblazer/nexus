@@ -10,7 +10,7 @@
 # outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -19,6 +19,13 @@
 # the collected run directory land (default: a new directory under $TMPDIR).
 # --keep-guest leaves the guest running afterwards, for diagnosis; the host files
 # are removed either way.
+# --standard-user runs the install, the setup phase, the Claude Code session and
+# the verify phase as a local account that is a member of Users only
+# (NX_GUEST_STD_USER, default nxstd), which the stduser step creates after the
+# restore and the next restore erases. The administrator account ($GUSER) then
+# only orchestrates, and installs Git for all users first, because winget's Git
+# package needs elevation: the run is a standard user on a machine that already
+# has Git. driver/stduser.ps1 lists everything the administrator does.
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -33,6 +40,7 @@
 #                restore succeeds; this script treats the guest as its own (and
 #                collects from it and powers it off at the end) only when that
 #                line is in the step's output.
+#   1s stduser   (--standard-user only) driver/stduser.ps1
 #   2 install    uv, conexus, Claude Code, Git, the plugin
 #   3 setup      the gate's setup phase, a one-shot Interactive scheduled task
 #   4 gaterun    write GATERUN.txt
@@ -81,6 +89,7 @@ set -uo pipefail
 HOST="${NX_GUEST_HOST:-qwentescence}"
 VM="${NX_GUEST_VM:-nx-clean-win11}"
 GUSER="${NX_GUEST_USER:-nxguest}"
+STD_USER="${NX_GUEST_STD_USER:-nxstd}"
 KEYCHAIN_SERVICE="${NX_GUEST_KEYCHAIN_SERVICE:-nexus-win-guest}"
 CHECKPOINT="${NX_GUEST_CHECKPOINT:-clean-baseline-2026-10-06}"
 export NX_GUEST_HOST="$HOST" NX_GUEST_VM="$VM" NX_GUEST_USER="$GUSER" NX_GUEST_KEYCHAIN_SERVICE="$KEYCHAIN_SERVICE"
@@ -91,7 +100,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user]" >&2
 }
 die() {
     local code="$1"; shift
@@ -104,6 +113,7 @@ engine=''
 wheel=''
 out=''
 keep_guest=0
+standard_user=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) [[ $# -ge 2 ]] || { usage; exit 2; }; version="$2"; shift 2 ;;
@@ -111,6 +121,7 @@ while [[ $# -gt 0 ]]; do
         --wheel) [[ $# -ge 2 ]] || { usage; exit 2; }; wheel="$2"; shift 2 ;;
         --out) [[ $# -ge 2 ]] || { usage; exit 2; }; out="$2"; shift 2 ;;
         --keep-guest) keep_guest=1; shift ;;
+        --standard-user) standard_user=1; shift ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -118,9 +129,10 @@ done
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 2 "--version must be X.Y.Z"
 [[ "$engine" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 2 "--engine must be X.Y.Z"
 # These values reach a remote command line; keep them to plain tokens.
-for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_GUEST_KEYCHAIN_SERVICE:$KEYCHAIN_SERVICE" "NX_GUEST_CHECKPOINT:$CHECKPOINT"; do
+for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_GUEST_KEYCHAIN_SERVICE:$KEYCHAIN_SERVICE" "NX_GUEST_CHECKPOINT:$CHECKPOINT" "NX_GUEST_STD_USER:$STD_USER"; do
     [[ "${pair#*:}" =~ ^[A-Za-z0-9._-]+$ ]] || die 2 "${pair%%:*} must be plain letters, digits, dot, dash or underscore"
 done
+[[ "$STD_USER" != "$GUSER" ]] || die 2 "NX_GUEST_STD_USER must not be the administrator account"
 [[ -f "$gate" ]] || die 2 "no gate script at $gate"
 
 # sha256_of <file> <variable>: the file's sha256 into the variable, or stop. An empty
@@ -169,6 +181,7 @@ bound() {
 }
 bound NX_GUEST_TIMEOUT_HOSTCHECK 300 T_HOSTCHECK
 bound NX_GUEST_TIMEOUT_RESTORE 900 T_RESTORE
+bound NX_GUEST_TIMEOUT_STDUSER 1200 T_STDUSER
 bound NX_GUEST_TIMEOUT_INSTALL 1800 T_INSTALL
 bound NX_GUEST_TIMEOUT_SETUP 1800 T_SETUP
 bound NX_GUEST_TIMEOUT_GATERUN 300 T_GATERUN
@@ -233,9 +246,14 @@ host_ps_pw() {
     security find-generic-password -a "$GUSER" -s "$KEYCHAIN_SERVICE" -w \
         | ssh "${SSH_OPTS[@]}" "$HOST" "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $HOST_WIN_DIR\\$script $*"
 }
+# The account whose profile holds nx-gate: the standard user once the stduser
+# step has made it, the administrator otherwise. run_as is the matching
+# guest-run.ps1 argument.
+home_user="$GUSER"
+run_as=''
 launch_guest() {
-    "$here/launch.sh" --stage "$gate" --permission-mode auto \
-        --prompt "follow the instructions in C:\\Users\\$GUSER\\nx-gate\\GATERUN.txt" </dev/null
+    NX_GUEST_RUN_AS="${run_as:+$STD_USER}" "$here/launch.sh" --stage "$gate" --permission-mode auto \
+        --prompt "follow the instructions in C:\\Users\\$home_user\\nx-gate\\GATERUN.txt" </dev/null
 }
 
 host_dir_made=0
@@ -289,7 +307,8 @@ finish() {
     if [[ $touched -eq 1 && $collected -eq 0 && $collect_started -eq 0 ]]; then
         collect_started=1
         say "collecting what the guest holds"
-        { run_bounded "$T_COLLECT" host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Collect yes 2>&1 | quiet; } >"$out/90-collect-on-exit.txt" 2>&1 || true
+        # shellcheck disable=SC2086
+        { run_bounded "$T_COLLECT" host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Collect yes $run_as 2>&1 | quiet; } >"$out/90-collect-on-exit.txt" 2>&1 || true
         fetch_collected || true
     fi
     [[ $end_started -eq 0 ]] || return 0
@@ -329,6 +348,7 @@ if [[ -n "$wheel_name" ]]; then
 else
     say "conexus==$version from PyPI"
 fi
+if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); Git is installed for all users by $GUSER first"; fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 
 # --- stage ------------------------------------------------------------------
@@ -356,19 +376,38 @@ else
 fi
 grep -qF "gate sha256=$gate_sha" "$out/01-restore.txt" || die 1 "the gate script in the guest does not have sha256 $gate_sha"
 
-if [[ -n "$wheel_name" ]]; then
-    run_step 02 install "$T_INSTALL" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version" -Arg2 "$wheel_name"
-else
-    run_step 02 install "$T_INSTALL" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version"
+if [[ $standard_user -eq 1 ]]; then
+    wheel_arg=''
+    if [[ -n "$wheel_name" ]]; then wheel_arg="-Wheel $wheel_name"; fi
+    # shellcheck disable=SC2086
+    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" $wheel_arg
+    grep -qF "std gate sha256=$gate_sha" "$out/01s-stduser.txt" || die 1 "the gate script in $STD_USER's profile does not have sha256 $gate_sha"
+    if [[ -n "$wheel_name" ]]; then
+        grep -qF "std wheel sha256=$wheel_sha" "$out/01s-stduser.txt" || die 1 "the wheel in $STD_USER's profile does not have sha256 $wheel_sha"
+    fi
+    # From here every step works in the standard user's profile, and the install runs as that account.
+    home_user="$STD_USER"
+    run_as="-RunAs $STD_USER"
 fi
-run_step 03 setup "$T_SETUP" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner setup-run.ps1 -Arg1 "$version" -Arg2 "$engine"
+as_user="${run_as:+-AsUser yes}"
+
+# shellcheck disable=SC2086
 if [[ -n "$wheel_name" ]]; then
-    run_step 04 gaterun "$T_GATERUN" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine" -Arg3 candidate
+    run_step 02 install "$T_INSTALL" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version" -Arg2 "$wheel_name" $run_as $as_user
 else
-    run_step 04 gaterun "$T_GATERUN" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine"
+    run_step 02 install "$T_INSTALL" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner inst.ps1 -Arg1 "$version" $run_as $as_user
+fi
+# shellcheck disable=SC2086
+run_step 03 setup "$T_SETUP" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner setup-run.ps1 -Arg1 "$version" -Arg2 "$engine" $run_as
+# shellcheck disable=SC2086
+if [[ -n "$wheel_name" ]]; then
+    run_step 04 gaterun "$T_GATERUN" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine" -Arg3 candidate $run_as
+else
+    run_step 04 gaterun "$T_GATERUN" 1 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner gaterun.ps1 -Arg1 "$version" -Arg2 "$engine" $run_as
 fi
 run_step 05 launch "$T_LAUNCH" 0 launch_guest
-run_step 06 verdict "$T_VERDICT" 0 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner waitv.ps1 -Collect yes
+# shellcheck disable=SC2086
+run_step 06 verdict "$T_VERDICT" 0 host_ps_pw guest-run.ps1 -VMName "$VM" -GuestUser "$GUSER" -RunDir "$HOST_WIN_DIR" -Inner waitv.ps1 -Collect yes $run_as
 
 fetch_collected
 [[ $collected -eq 1 ]] || die 1 "the guest's run directory was not collected"
@@ -397,4 +436,5 @@ if [[ -n "$wheel_name" ]]; then
 else
     echo "run-gate.sh: conexus==$version from PyPI; gate script sha256 $gate_sha; logs in $out"
 fi
+if [[ $standard_user -eq 1 ]]; then echo "run-gate.sh: run as standard user $STD_USER (not an administrator); Git was installed for all users by $GUSER"; fi
 exit "$rc"

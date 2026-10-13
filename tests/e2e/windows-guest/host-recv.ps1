@@ -8,14 +8,20 @@
 # in the guest's console session through a one-shot scheduled task whose
 # launcher reads the token from a guest pipe. The token lives only in process
 # memory and pipes: no file, task definition or command line carries it.
+# -RunAs <account> (run-gate.sh --standard-user): the window opens as that
+# account, which must be the one signed in at the console, in its profile; the
+# connecting account still orchestrates. The guest pipe then also lets that
+# account read.
 param(
     [string]$VMName = 'nx-clean-win11',
     [string]$GuestUser = 'nxguest',
     [string]$StageDir = 'C:\build\guest\nxgate\stage',
+    [string]$RunAs = '',
     [int]$TokenWaitSec = 180
 )
 $ErrorActionPreference = 'Stop'
 
+if ($RunAs -and $RunAs -notmatch '^[A-Za-z0-9._-]+$') { throw 'RunAs must be a plain account name' }
 $pw = [Console]::In.ReadLine()
 if (-not $pw) { throw 'no guest password on stdin' }
 $cred = New-Object PSCredential($GuestUser, (ConvertTo-SecureString $pw -AsPlainText -Force)); $pw = $null
@@ -34,6 +40,13 @@ if (-not $tok -or $tok.Length -lt 20) { [Console]::Out.WriteLine('FAIL: empty to
 
 $session = New-PSSession -VMName $VMName -Credential $cred
 try {
+    if ($RunAs) {
+        Invoke-Command -Session $session -ArgumentList $RunAs {
+            param($u)
+            if (-not (Test-Path "C:\Users\$u")) { throw "no profile for $u" }
+            $env:USERPROFILE = "C:\Users\$u"
+        }
+    }
     $staged = @()
     if (Test-Path $StageDir) {
         Invoke-Command -Session $session { New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\nx-gate" | Out-Null }
@@ -45,8 +58,9 @@ try {
     }
     if ($staged) { [Console]::Out.WriteLine('staged: ' + ($staged -join ', ')) }
 
-    Invoke-Command -Session $session -ArgumentList $tok {
-        param($tok)
+    Invoke-Command -Session $session -ArgumentList $tok, $RunAs {
+        param($tok, $runAs)
+        $who = if ($runAs) { $runAs } else { $env:USERNAME }
         # Close an earlier gate window with its whole process tree (claude and
         # the MCP servers and hooks it started), so nothing is left orphaned.
         Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*nxgate-claude.ps1*' } | ForEach-Object {
@@ -121,10 +135,11 @@ $p.WaitForExit()
         $name = 'nxgate-' + [guid]::NewGuid().ToString('N')
         $sec = New-Object System.IO.Pipes.PipeSecurity
         $sec.AddAccessRule((New-Object System.IO.Pipes.PipeAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'ReadWrite', 'Allow')))
+        if ($runAs) { $sec.AddAccessRule((New-Object System.IO.Pipes.PipeAccessRule((New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $runAs)), 'Read', 'Allow'))) }
         $srv = New-Object System.IO.Pipes.NamedPipeServerStream($name, [System.IO.Pipes.PipeDirection]::Out, 1,
             [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous, 0, 0, $sec)
         $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoExit -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Pipe $name"
-        $prin = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
+        $prin = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive
         Register-ScheduledTask -TaskName 'nxgate-claude' -Action $act -Principal $prin -Force | Out-Null
         try {
             Start-ScheduledTask -TaskName 'nxgate-claude'

@@ -5,13 +5,16 @@
 # console session, because the supervisor must start in the desktop session
 # and a PowerShell Direct session is not one. Waits at most 25 minutes for the
 # phase's "setup exit=" line. Ends with one "NXG-RESULT:" line: ok only on
-# "setup exit=0".
+# "setup exit=0". The task runs as the session's own account, or as the
+# account guest-run.ps1 -RunAs named ($env:NXG_RUN_AS), which must be the one
+# signed in at the console.
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$Engine
 )
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $Engine -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { 'NXG-RESULT: FAIL version and engine must be X.Y.Z'; return }
 $b = "$env:USERPROFILE\nx-gate"
+$who = if ($env:NXG_RUN_AS) { $env:NXG_RUN_AS } else { $env:USERNAME }
 (@'
 $host.UI.RawUI.WindowTitle = 'Phase 5 gate: setup'
 $env:PATH = "$env:USERPROFILE\.local\bin;C:\Program Files\Git\cmd;" + $env:PATH
@@ -20,7 +23,7 @@ $env:PATH = "$env:USERPROFILE\.local\bin;C:\Program Files\Git\cmd;" + $env:PATH
 '@).Replace('@VERSION@', $Version).Replace('@ENGINE@', $Engine) | Set-Content -Encoding UTF8 "$b\setup-wrapper.ps1"
 Remove-Item "$b\setup.log" -ErrorAction SilentlyContinue
 $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoExit -NoProfile -ExecutionPolicy Bypass -File `"$b\setup-wrapper.ps1`""
-Register-ScheduledTask -TaskName 'nxgate-setup' -Action $act -Principal (New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive) -Force | Out-Null
+Register-ScheduledTask -TaskName 'nxgate-setup' -Action $act -Principal (New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive) -Force | Out-Null
 Start-ScheduledTask -TaskName 'nxgate-setup'
 $t0 = Get-Date
 do { Start-Sleep 10; $l = Get-Content "$b\setup.log" -ErrorAction SilentlyContinue } while ((-not ($l -match '^setup exit=')) -and ((Get-Date) - $t0).TotalMinutes -lt 25)

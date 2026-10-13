@@ -35,6 +35,9 @@ HOST="${NX_GUEST_HOST:-qwentescence}"
 VM="${NX_GUEST_VM:-nx-clean-win11}"
 GUSER="${NX_GUEST_USER:-nxguest}"
 KEYCHAIN_SERVICE="${NX_GUEST_KEYCHAIN_SERVICE:-nexus-win-guest}"
+# The account the window opens as when it is not $GUSER (run-gate.sh --standard-user).
+RUN_AS="${NX_GUEST_RUN_AS:-}"
+[[ -z "$RUN_AS" || "$RUN_AS" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "launch.sh: NX_GUEST_RUN_AS must be a plain account name" >&2; exit 2; }
 REMOTE_SHELL="${NX_GUEST_POSIX_SHELL:-C:/PROGRA~1/Git/bin/bash.exe -s --}"
 HOST_DIR='C:/build/guest/nxgate'
 
@@ -89,7 +92,7 @@ cleanup() {
 }
 trap cleanup EXIT
 security find-generic-password -a "$GUSER" -s "$KEYCHAIN_SERVICE" -w \
-    | ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\build\\guest\\nxgate\\host-recv.ps1 -VMName $VM -GuestUser $GUSER" \
+    | ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\build\\guest\\nxgate\\host-recv.ps1 -VMName $VM -GuestUser $GUSER${RUN_AS:+ -RunAs $RUN_AS}" \
     >"$out" 2>&1 &
 recv=$!
 
