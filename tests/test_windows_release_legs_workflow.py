@@ -739,11 +739,17 @@ WINDOWS_TEST_SET = (
     # Phase 4 (nexus-f9bgu.37 critique S4): the bundle launcher's planted-venv cases, the plugin
     # scripts' off-cwd resolution and the nx-hook shim.
     "tests/test_mcpb_launcher_venv.py", "tests/hooks/test_exec_off_cwd.py", "tests/hooks/test_nx_hook_shim.py",
+    # The P4/P5 test review's three real-Windows legs (S2, S3, S5).
+    "tests/test_pg_ctl_console_isolation_real_windows.py", "tests/test_off_cwd_resolver_real_windows.py",
+    "tests/hooks/test_hook_launcher_cwd_real_windows.py",
 )
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
 PHASE4_WINDOWS_PATHS = (
     "mcpb/src/bootstrap.py", "conexus/hooks/**", "tests/_hook_wiring.py",
     "mcpb/manifest.json", "mcpb/pyproject.toml",
+    # What the S2/S3/S5 tests run: the off-cwd resolver, the hook verbs, the sn plugin's hook tree,
+    # and the POSIX launcher test whose helpers the Windows one imports.
+    "src/nexus/util/nx_argv.py", "src/nexus/hooks/**", "sn/hooks/**", "tests/hooks/test_hook_launcher_cwd.py",
 )
 
 
@@ -797,6 +803,9 @@ REAL_KERNEL_PATTERNS = (
     "tests.test_mcpb_bootstrap.TestRealWindows",
     "test_the_credential_guard_still_denies_through_the_launcher",
     "test_auto_approve_allows_through_uv_and_the_shim",
+    "tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows",
+    "tests.test_off_cwd_resolver_real_windows.TestRealWindows",
+    "tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows",
 )
 
 
