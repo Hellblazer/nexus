@@ -1487,7 +1487,7 @@ findings:
 | B: uv exits 2 when no interpreter is found, which blocks five hook entries | Kept as a loud block (Sam, on nexus-f9bgu.36). `conexus/README.md` names the remedy, `uv python install 3.12` |
 | C: Phase 4 code ran in no Windows job, and the launcher read a planted `.venv` | Fixed: the Windows rehearsal job runs `tests/test_mcpb_bootstrap.py` and `tests/hooks/test_hook_launcher_uv.py` (`e741a577a`); the launcher form above |
 | D: documents and this record claimed more than was measured | Partly fixed. The hooks assumption is marked Verified and `docs/windows-install.md` exists. Open: the Desktop wording in `web/index.html` and `docs/desktop-deployment.md` |
-| E: the aspect-worker daemon died with the bootstrap's job | Fixed in code (`e741a577a`: breakaway allowed on the job, a breakaway-first spawn with a fallback). Tested with a fake `Popen` only; not measured on Windows |
+| E: the aspect-worker daemon died with the bootstrap's job | Fixed in code (`e741a577a`: breakaway allowed on the job, a breakaway-first spawn with a fallback). Tested with a fake `Popen` when this table was first written. Corrected 2026-10-12, later the same day: `06ee0cab2` added three real-Windows tests (`tests.test_mcpb_bootstrap.TestRealWindows`) that close a real Job Object and see the member killed and a breakaway child spared, and that see a refused breakaway retried inside the job. They passed natively (T2 `224-win-run-06ee0cab2`) and in the rehearsal job. Not measured: the breakaway under Claude Desktop's own job |
 | F1: `uv sync` inherited the host's stdin and decoded with the locale codec | Fixed: stdin is `DEVNULL`, output is decoded as UTF-8 with replacement |
 | G: the stdio handoff test could hang | Fixed: the exchange has a deadline |
 
@@ -1498,6 +1498,20 @@ kills a real child, and that a child spawned with breakaway survives it (a hand
 run on qwentescence at `4aa3eb754` covered the kill once, and CI asserts only
 that the job is created); the time a first hook run takes on a box with no
 Python, against the 5 s hook timeout (nexus-f9bgu.37 carries these).
+
+Correction, 2026-10-12, later the same day: the job kill and the breakaway are
+measured. `06ee0cab2` added three real-Windows tests to
+`tests.test_mcpb_bootstrap.TestRealWindows`: a real Job Object is created,
+closing it kills its member and spares a child spawned with breakaway, and a
+job that forbids breakaway refuses it and the retry keeps the child in the job.
+All three passed on qwentescence (T2 `224-win-run-06ee0cab2`: 1591 passed, 55
+skipped, 2 xfailed, 0 failed) and in the rehearsal job, which requires them by
+name. Finding E's fix is
+therefore tested against a real job, not only a fake `Popen`. Still not
+measured: the resolution of bare `uv` and `nx-hook` from the project directory
+by the hosts; the time of a first hook run with no Python on the box; and the
+breakaway under Claude Desktop's own job object, which may forbid it (the retry
+path is tested against a job that does).
 
 ### Phase 5: Gate (Gap 7)
 
@@ -1625,9 +1639,13 @@ skipped assertion fails; it does not pass.
   The junit floor requires `tests.test_mcpb_bootstrap.TestRealWindows` and
   `test_the_credential_guard_still_denies_through_the_launcher` to have passed.
   Status: green on real Windows, run 38194840901 on `2ea176075` (2026-10-12),
-  1560 passed. Not in that job: `tests/hooks/test_hook_launcher_cwd.py` (the
-  planted `.venv` cases; its module skips on Windows), a real job kill and a real
-  breakaway.
+  1560 passed. Not in that job as first recorded: `tests/hooks/test_hook_launcher_cwd.py`
+  (the planted `.venv` cases; its module skips on Windows), a real job kill and a real
+  breakaway. Corrected 2026-10-12, later the same day: `06ee0cab2` put the job kill, the
+  breakaway and a refused-breakaway retry into the job as three tests in
+  `tests.test_mcpb_bootstrap.TestRealWindows`, green on real Windows (T2
+  `224-win-run-06ee0cab2`, 1591 passed) and required by name in the floor. Still not
+  in the job: the planted `.venv` cases.
 - **Scenario**: the Phase 5 gate on a real Windows box — **Verify**: its five
   assertions pass and its executed-assertion count equals the declared count.
 - **Scenario**: Windows 11 machine with Smart App Control enforcing, fresh
@@ -1856,3 +1874,20 @@ Right-sized for an Architecture record that replaces an accepted direction.
   what is not measured. Added a dated note to Gap 5, the shipped launcher and
   its evidence to the hooks assumption, and a Phase 4 Test Plan row. Text and
   evidence only; no status change.
+- 2026-10-12: corrections and Phase 5 results, text and evidence only; no status
+  change. (a) Phase 4: the Test Plan row, the "Not measured" paragraph and the
+  finding E row said the job kill and the breakaway were unmeasured and finding E
+  was tested with a fake `Popen` only. `06ee0cab2` added them as real-Windows
+  tests in `tests.test_mcpb_bootstrap.TestRealWindows`, which passed natively (T2
+  `224-win-run-06ee0cab2`) and in the rehearsal job; each passage now carries a
+  dated note. Still unmeasured: host resolution of bare `uv` and `nx-hook`, the
+  first hook run with no Python, and the breakaway under Claude Desktop's own
+  job. (b) Phase 5: the gate FAILED assertion 4 on published conexus 7.77.1
+  (executed 5 of 5, A4 not passing: a plain `nx daemon service stop` also stopped
+  a PostgreSQL the supervisor had started; T2 `224-gate-run-7.77.1-2026-10-12`;
+  nexus-f9bgu.54). The fix, a PostgreSQL start on a console of its own, shipped in
+  7.78.0, and the gate PASSED 5 of 5 on published conexus 7.78.0 with
+  `engine-service-v0.1.160` on the clean guest, unattended (measured stop times
+  2.1 s with `--with-pg` and 1.9 s plain, against the 15 s bound; T2
+  `224-gate-run-7.78.0-2026-10-12`). The aspect-worker daemon, host sleep and the
+  Desktop bundle stay outside what a green gate covers.
