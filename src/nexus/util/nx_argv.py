@@ -93,12 +93,14 @@ def _candidates(name: str, allow_batch: bool) -> list[str]:
 def _search_dirs() -> list[str]:
     """The ``PATH`` entries a bare name may honestly be looked up in: absolute ones
     (drive and root, so not ``tools``, ``.``, ``C:x`` or ``\\x``, which resolve
-    against the working directory), minus the working directory's own."""
-    cwd = PureWindowsPath(os.getcwd())
+    against the working directory), minus the working directory's own, however the
+    entry spells it (case, separators, a trailing one, ``.`` and ``..`` parts; an 8.3
+    short name is not recognised)."""
+    cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     return [
         entry
         for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry and PureWindowsPath(entry).is_absolute() and PureWindowsPath(entry) != cwd
+        if entry and PureWindowsPath(entry).is_absolute() and PureWindowsPath(ntpath.normpath(entry)) != cwd
     ]
 
 

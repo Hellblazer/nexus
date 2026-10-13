@@ -39,11 +39,12 @@ def install_windows(
     *pathext* defaults to a lower-case list, so a hit reads ``git.exe``; ``None``
     leaves ``PATHEXT`` unset and ``""`` sets it empty (the resolvers then use their
     own upper-case default list, so a hit reads ``git.EXE``)."""
-    existing = {ntpath.normcase(f) for f in files}
+    # normpath as well as normcase: Windows resolves ``.`` and ``..`` parts when it opens a path.
+    existing = {ntpath.normcase(ntpath.normpath(f)) for f in files}
     env = {"PATH": f"{cwd};{TOOLS}" if path is None else path}
     if pathext is not None:
         env["PATHEXT"] = pathext
     setattr_in(monkeypatch, module, "os.getcwd", lambda: cwd)
     setattr_in(monkeypatch, module, "os.pathsep", ";")
     setattr_in(monkeypatch, module, "os.environ", env)
-    setattr_in(monkeypatch, module, "os.path.isfile", lambda p: ntpath.normcase(p) in existing)
+    setattr_in(monkeypatch, module, "os.path.isfile", lambda p: ntpath.normcase(ntpath.normpath(p)) in existing)

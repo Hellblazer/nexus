@@ -32,6 +32,7 @@ host. Not ``shutil.which`` for that branch: it decides Windows-ness from the rea
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import sys
@@ -54,7 +55,8 @@ def _is_search_dir(directory: str, cwd: PureWindowsPath) -> bool:
         return False
     entry = PureWindowsPath(directory)
     absolute = entry.is_absolute() or (os.name != "nt" and os.path.isabs(directory))
-    return absolute and entry != cwd
+    # normpath: an entry that spells the working directory with ``.`` or ``..`` parts is still it.
+    return absolute and PureWindowsPath(ntpath.normpath(directory)) != cwd
 
 
 def which_off_cwd(
@@ -84,7 +86,7 @@ def which_off_cwd(
     # A name that already ends in a listed extension is tried as written only, as
     # ``shutil.which`` and ``nexus.util.nx_argv`` do; appending to it finds ``uv.exe.cmd``.
     exts = [""] if has_ext else listed
-    cwd = PureWindowsPath(os.getcwd())
+    cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     for directory in path.split(";"):
         if not _is_search_dir(directory, cwd):
             continue

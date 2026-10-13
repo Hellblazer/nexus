@@ -53,6 +53,8 @@ _SHAPES: dict[str, Callable[[str, list[str]], list[str]]] = {
     "cwd-upper-case": lambda clone, tail: [clone.upper(), *tail],
     "cwd-trailing-backslash": lambda clone, tail: [clone + "\\", *tail],
     "cwd-forward-slashes": lambda clone, tail: [clone.replace("\\", "/"), *tail],
+    "cwd-through-dot-dot": lambda clone, tail: [clone + "\\relbin\\..", *tail],
+    "cwd-with-dot": lambda clone, tail: [clone + "\\.", *tail],
     "everything-at-once": lambda clone, tail: [".", "", clone, "relbin", *tail],
 }
 

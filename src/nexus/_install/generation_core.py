@@ -376,13 +376,13 @@ def _off_cwd(argv: list[str], platform: str | None = None) -> list[str]:
     drive, tail = ntpath.splitdrive(argv[0])
     if drive or "\\" in tail or "/" in tail:
         return argv
-    cwd = PureWindowsPath(os.getcwd())
+    cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     exts = [e for e in (os.environ.get("PATHEXT") or _DEFAULT_PATHEXT).split(";") if e]
     has_ext = ntpath.splitext(argv[0])[1].upper() in [e.upper() for e in exts]
     names = [argv[0]] if has_ext else [argv[0] + e for e in exts]
     names = [n for n in names if ntpath.splitext(n)[1].lower() not in (".bat", ".cmd")]
     for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry or not PureWindowsPath(entry).is_absolute() or PureWindowsPath(entry) == cwd:
+        if not entry or not PureWindowsPath(entry).is_absolute() or PureWindowsPath(ntpath.normpath(entry)) == cwd:
             continue
         for name in names:
             candidate = ntpath.join(entry, name)

@@ -45,7 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- hook exec off the cwd (nexus-f9bgu.38): `conexus/hooks/scripts/_exec_path.py` skips a `PATH` entry that is the working directory itself and a rooted one without a drive (`\tools`), and tries a name that already ends in a listed extension as written only (`uv.exe`, not `uv.exe.cmd`). It still returns a `.cmd` or `.bat` hit; that stays as the hook shim's Windows tests rely on it. No change on POSIX.
+- hook exec off the cwd (nexus-f9bgu.38): `conexus/hooks/scripts/_exec_path.py` skips a `PATH` entry that is the working directory itself and a rooted one without a drive (`\tools`), and one that spells the working directory with `.` or `..` parts, and tries a name that already ends in a listed extension as written only (`uv.exe`, not `uv.exe.cmd`). It still returns a `.cmd` or `.bat` hit; that stays as the hook shim's Windows tests rely on it. No change on POSIX.
 - lockstep hook plugin set (nexus-gdllu): `conexus/hooks/scripts/version_lockstep_hook.py` reads the plugin list from the marketplace's own clone when the plugin runs from the versioned cache copy, which is every marketplace install. Before, it looked beside the cache directory, found nothing, used the built-in list and printed a fallback line on every session start. A dev checkout is read as before.
 
 

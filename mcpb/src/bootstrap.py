@@ -39,6 +39,7 @@ is not installed yet when this runs.
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import subprocess
 import sys
@@ -170,7 +171,8 @@ def _is_search_dir(directory, cwd):
         return False
     entry = PureWindowsPath(directory)
     absolute = entry.is_absolute() or (os.name != "nt" and os.path.isabs(directory))
-    return absolute and entry != cwd
+    # normpath: an entry that spells the working directory with ``.`` or ``..`` parts is still it.
+    return absolute and PureWindowsPath(ntpath.normpath(directory)) != cwd
 
 
 def _resolve_executable(name, platform=None, path=None, pathext=None):
@@ -210,7 +212,7 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
         # Already ends in a listed extension: tried as written only, as shutil.which
         # does (appending to it would find ``uv.exe.cmd``).
         exts = [""] if has_ext else listed
-    cwd = PureWindowsPath(os.getcwd())
+    cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     for directory in path.split(sep):
         if not directory or (windows and not _is_search_dir(directory, cwd)):
             continue
