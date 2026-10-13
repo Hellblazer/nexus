@@ -154,6 +154,33 @@ def test_the_commands_are_the_platform_s_own_and_the_instructions_are_one_senten
             assert command in text and command in mod.setup_text(platform)
 
 
+def test_linux_is_told_which_uv_the_first_command_needs() -> None:
+    """README.md: `--torch-backend` needs uv 0.9.19 or newer."""
+    mod = _standin()
+    assert "uv 0.9.19 or newer" in mod.setup_text("linux") and "uv self update" in mod.setup_text("linux")
+    for platform in ("darwin", "win32"):
+        assert "0.9.19" not in mod.setup_text(platform)
+
+
+def test_serving_the_stand_in_leaves_no_bytecode_in_the_plugin(tmp_path: Path) -> None:
+    """The launcher imports its siblings from the installed plugin's directories;
+    it must not write a cache there."""
+    import shutil
+
+    for sub in ("hooks/scripts", "launch"):
+        shutil.copytree(_ROOT / "conexus" / sub, tmp_path / "plugin" / sub, ignore=shutil.ignore_patterns("__pycache__"))
+    before = sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "plugin").rglob("*"))
+    dirs = _isolated(tmp_path)
+    ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
+    for argv in (["nx-mcp"], ["nx-hook", "preflight"]):
+        r = subprocess.run(
+            [sys.executable, str(tmp_path / "plugin" / "launch" / "nx_launch.py"), *argv],
+            input=ping, capture_output=True, env=_env(dirs), timeout=30, check=False,
+        )
+        assert r.returncode == 0, r.stderr
+    assert sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "plugin").rglob("*")) == before
+
+
 def test_the_install_page_is_the_site_s_install_guide() -> None:
     assert _standin().INSTALL_PAGE == _INSTALL_PAGE
     assert "<title>Installing Nexus</title>" in (_ROOT / "web" / "index.html").read_text(encoding="utf-8")

@@ -432,7 +432,7 @@ def _stale_mcp_host_warning() -> str:
     ancestry primitive :func:`_write_t1_handoff_markers` already uses
     (:func:`nexus.session.find_immediate_claude_pid` ->
     :func:`nexus.session.find_mcp_sibling_pids`): only a stale host that
-    is a live, immediate child of the Claude process running THIS hook
+    is live and whose nearest Claude ancestor is the one running THIS hook
     counts. A ``run /mcp`` instruction also only ever means anything to
     the human user, never to a model reading this text, reworded to say
     so. Never a network call, never a write: both ancestry lookups and

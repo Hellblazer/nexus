@@ -235,7 +235,7 @@ def test_the_program_is_started_by_its_generation_path_not_through_current(tmp_p
 
 
 @posix_only("a venv interpreter reached through a symlinked directory; Windows launchers embed their generation's python path")
-def test_a_program_started_by_the_launcher_has_no_current_in_sys_prefix(tmp_path: Path) -> None:
+def test_the_measured_mechanism_a_console_script_carries_no_current_in_sys_prefix(tmp_path: Path) -> None:
     """The measured fact behind the test above, with its control. An interpreter
     started THROUGH ``current`` takes ``current`` into ``sys.prefix``; a console
     script does not, because its shebang names the generation's interpreter.
@@ -383,7 +383,7 @@ def test_no_argument_is_a_usage_line_and_exit_1(tmp_path: Path) -> None:
 
 @posix_only("a file with the exec bit and no program in it; Windows decides by extension")
 @pytest.mark.parametrize(("name", "expected"), [("nx-hook", 0), ("nx-mcp", 1)])
-def test_a_program_that_is_found_and_cannot_start_is_treated_as_absent(
+def test_a_program_that_is_found_and_cannot_start_skips_a_hook_and_fails_a_server(
     tmp_path: Path, name: str, expected: int,
 ) -> None:
     tools, gen = _layout(tmp_path)

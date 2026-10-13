@@ -61,6 +61,17 @@ def manual_commands(platform: str | None = None) -> tuple[str, ...]:
     return (first, "nx self install", "nx init")
 
 
+def platform_note(platform: str | None = None) -> str:
+    """What the commands need that the user may not have, or ``""``."""
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("linux"):
+        return (
+            " The first command needs uv 0.9.19 or newer; if uv rejects "
+            "`--torch-backend`, run `uv self update` first."
+        )
+    return ""
+
+
 NOT_INSTALLED: str = (
     "Nexus is not installed on this machine: the conexus plugin is present and the "
     "Nexus CLI it runs is not, so no Nexus tool is available in this session."
@@ -87,7 +98,7 @@ def setup_text(platform: str | None = None) -> str:
         + "".join(f"    {command}\n" for command in manual_commands(platform))
         + "\nThe first installs the CLI, the second moves it to its permanent place, and the "
         "third downloads and starts the local service and asks whether to start it at login. "
-        "Together they download more than a gigabyte and take several minutes. Afterwards the "
+        f"Together they download more than a gigabyte and take several minutes.{platform_note(platform)} Afterwards the "
         "user reconnects the `nexus` server (in Claude Code: /mcp, the server, Reconnect) or "
         "starts a new session.\n\n"
         f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"

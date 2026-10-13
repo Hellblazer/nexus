@@ -119,8 +119,8 @@ def resolve(name: str) -> str | None:
 def missing_note(program: str, what: str) -> str:
     """The one line written when *program* is not found and *what* is skipped."""
     return (
-        f"conexus: `{program}` is not installed (no Nexus CLI in the generation "
-        f"layout or on PATH), so {what} is skipped.\n"
+        f"conexus: `{program}` is not installed (not in the Nexus install "
+        f"directory, not on PATH), so {what} is skipped.\n"
     )
 
 

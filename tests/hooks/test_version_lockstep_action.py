@@ -507,6 +507,7 @@ class TestRefDriftRemedyLogging:
         # nx is resolved on PATH alone (finding A, nexus-f9bgu.36); these cases
         # are about what happens after the spawn, so give them one.
         monkeypatch.setattr(mod, "which_off_cwd", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(mod, "resolve_nx", lambda: "/usr/bin/nx")
 
     def test_subprocess_raise_logs_remedy(self, mod, log, monkeypatch) -> None:
         def boom(*a, **k):
@@ -566,12 +567,51 @@ class TestVersionParsing:
             return R()
 
         setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
-        monkeypatch.setattr(mod, "which_off_cwd", lambda c: "/usr/bin/nx")
+        monkeypatch.setattr(mod, "resolve_nx", lambda: "/usr/bin/nx")
         assert mod.installed_nx_version() == "5.7.0"
 
     def test_installed_nx_version_none_when_absent(self, mod, monkeypatch) -> None:
-        monkeypatch.setattr(mod, "which_off_cwd", lambda c: None)
+        monkeypatch.setattr(mod, "resolve_nx", lambda: None)
         assert mod.installed_nx_version() is None
+
+    def test_nx_is_found_in_the_generation_layout_when_path_lacks_it(self, mod, tmp_path, monkeypatch) -> None:
+        """The hook decides "is there a CLI" by the layout, then PATH. The action
+        looked on PATH alone, so on a machine whose install is newer than the
+        application's PATH the hook said "upgrade dispatched" and the action found
+        no nx, every session (RDR-228 Phase 1 review). One lookup for both."""
+        import sys as _sys
+
+        empty = tmp_path / "bin"
+        empty.mkdir()
+        tools = tmp_path / "tools"
+        gen = tools / "gen-20260101T000000Z"
+        (gen / "bin").mkdir(parents=True)
+        monkeypatch.setenv("PATH", str(empty))
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+        assert mod.resolve_nx() is None and mod.installed_nx_version() is None
+        if _sys.platform == "win32":
+            import _winapi  # noqa: PLC0415 -- Windows only
+
+            (gen / "bin" / "nx.cmd").write_text("@echo nx, version 9.9.9\r\n")
+            _winapi.CreateJunction(str(gen), str(tools / "current"))
+        else:
+            (gen / "bin" / "nx").write_text("#!/bin/sh\necho 'nx, version 9.9.9'\n")
+            (gen / "bin" / "nx").chmod(0o755)
+            (tools / "current").symlink_to(gen)
+        assert mod.resolve_nx() is not None
+        assert mod.installed_nx_version() == "9.9.9"
+        seen: list[list[str]] = []
+
+        class _Done:
+            returncode = 0
+            stdout = stderr = ""
+
+        fake = lambda argv, *a, **k: seen.append(list(argv)) or _Done()  # noqa: E731
+        from tests._module_seam import setattr_in
+
+        setattr_in(monkeypatch, mod, "subprocess.run", fake)
+        assert mod.run_cmd(["nx", "upgrade"]) is True
+        assert seen and seen[0][0] == mod.resolve_nx() and "current" not in Path(seen[0][0]).parts
 
 
 class TestGenerationLayout:

@@ -77,10 +77,22 @@ from pathlib import Path
 # PATH-only lookup (finding A, nexus-f9bgu.36): on Windows a bare name is
 # searched in the cwd first, and this detached action inherits the project cwd.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cli_lookup  # noqa: E402 -- must follow the sys.path insert
 import _endpoint_resolve  # noqa: E402 -- must follow the sys.path insert
 import _exec_path  # noqa: E402 -- must follow the sys.path insert
 
 which_off_cwd = _exec_path.which_off_cwd
+
+
+def resolve_nx() -> str | None:
+    """``nx`` by the launcher's lookup: the generation layout, then PATH.
+
+    The hook that starts this action decides "is there a CLI" the same way
+    (``version_lockstep_hook.cli_present``). A PATH-only lookup here disagreed
+    with it on a machine whose install is newer than the application's PATH:
+    the hook said an upgrade was dispatched and this action found no ``nx``,
+    every session (RDR-228 Phase 1 review)."""
+    return _cli_lookup.resolve("nx")
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 
@@ -283,7 +295,7 @@ def installed_nx_version() -> str | None:
     ``nx --version`` prints e.g. ``nx, version 5.7.0``. Returns None when nx
     is absent or the output cannot be parsed.
     """
-    nx = which_off_cwd("nx")
+    nx = resolve_nx()
     if nx is None:
         return None
     try:
@@ -332,11 +344,12 @@ def satisfies(installed: str | None, target: str) -> bool:
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
     """Run a command; return True on exit 0, False otherwise. Never raises.
 
-    ``cmd[0]`` is resolved on PATH alone and spawned by absolute path; a name
-    that is not on PATH is a failed command, never a cwd lookup."""
-    exe = which_off_cwd(cmd[0])
+    ``cmd[0]`` is resolved off the cwd and spawned by absolute path: ``nx`` by
+    the launcher's lookup (:func:`resolve_nx`), anything else on PATH alone. A
+    name that does not resolve is a failed command, never a cwd lookup."""
+    exe = resolve_nx() if cmd[0] == "nx" else which_off_cwd(cmd[0])
     if exe is None:
-        debug(f"{cmd[0]} not found on PATH")
+        debug(f"{cmd[0]} not found")
         return False
     try:
         result = subprocess.run(
@@ -370,10 +383,10 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     upgrade`` itself (the reason is printed instead), so this is a
     durable record of the outcome, not a gate. No CLI binary upgrade and
     no marker write: ref drift is not a CLI-version fact."""
-    nx = which_off_cwd("nx")
+    nx = resolve_nx()
     try:
         if nx is None:
-            raise FileNotFoundError("nx not found on PATH")
+            raise FileNotFoundError("nx not found")
         result = subprocess.run(
             [nx, "upgrade"], capture_output=True, text=True, timeout=timeout,
         )

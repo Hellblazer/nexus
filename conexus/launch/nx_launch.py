@@ -19,9 +19,10 @@ current directory). No file the plugin writes takes part, so an install done by
 hand at any time is used at the next launch.
 
 * It resolves: run it. On POSIX the launcher replaces itself with the program
-  (``os.execv``), so a running server has no wrapper between it and the
-  application. On Windows it starts the program with its own standard input and
-  output and exits with the program's exit code.
+  (``os.execv``), so the launcher is not left between a running server and
+  the application. ``uv`` is: it stays alive as the parent of what it runs, on
+  every platform. On Windows the launcher starts the program with its own
+  standard input and output and exits with the program's exit code.
 * It does not resolve and a hook program was asked for: exit 0 with one line on
   standard error. A missing CLI never blocks a prompt or a tool call.
 * It does not resolve and a server was asked for: :func:`serve_stand_in`, a
@@ -46,11 +47,14 @@ top-level ``bin/``.
 """
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
-import tempfile
-from typing import BinaryIO
+
+sys.dont_write_bytecode = True  # before the sibling imports: no .pyc in the plugin directory
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+from typing import BinaryIO  # noqa: E402
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "scripts"),
@@ -144,7 +148,9 @@ def main(argv: list[str]) -> int:
             return _hand_off(name, exe, args)
         except OSError as exc:
             # Found and not startable (a generation reaped between the lookup and
-            # the start, a file that is not a program): the same outcome as absent.
+            # the start, a script whose interpreter is gone). A hook is skipped, as
+            # when absent. A server fails with exit 1 and NO stand-in: the install
+            # is there and broken, and "not installed" would be untrue.
             sys.stderr.write(f"conexus: could not start {exe}: {exc}\n")
             return 0 if name in HOOK_PROGRAMS else 1
     if name in HOOK_PROGRAMS:

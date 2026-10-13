@@ -61,7 +61,7 @@ The plugin does not install the Nexus CLI, and the plugin's servers and most of 
 
 - **The CLI is installed and `nx init` has run.** The two Nexus servers start and connect, and the session-start hooks run. This is the working state.
 - **The CLI is installed and `nx init` has not run.** The servers start, and every tool that needs the service reports that it cannot reach it. Run `nx init`.
-- **The CLI is not installed.** Nothing is installed for you. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`; `setup` answers with the commands below and installs nothing. One session-start message tells the model that Nexus is not installed. Every other hook entry that needs the CLI writes one line and does nothing. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
+- **The CLI is not installed.** Nothing is installed for you. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`; `setup` answers with the commands below and installs nothing. One session-start message tells the model that Nexus is not installed. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
 
 The install is three terminal commands, then a reconnect of the `nexus` server (`/mcp`, the server, Reconnect) or a new session:
 
