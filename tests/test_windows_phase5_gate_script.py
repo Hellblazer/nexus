@@ -260,6 +260,13 @@ def _check_hook_coverage(hooks_text: str, gate_text: str) -> None:
     plain = [c for c in cmds if "hooks/scripts/" in c and "nx_hook_shim.py" not in c]
     assert plain, "hooks.json has no plain-script entry"
     assert all(ours.search(c) for c in plain)
+    # Negative cases: a filter that matches everything covers nothing. The shim
+    # filter must not claim a plain-script entry, and ours must not claim a
+    # command that is not a conexus hook.
+    claimed = [c for c in plain if shim.search(c)]
+    assert not claimed, f"HOOK_SHIM_RE matches plain-script entries, so it distinguishes nothing: {claimed}"
+    for foreign in ("echo hello", "node server.js", "C:\\Windows\\System32\\cmd.exe /c dir"):
+        assert not ours.search(foreign), f"HOOK_OURS_RE matches a foreign command {foreign!r}: {ours_src!r}"
 
 
 def test_every_conexus_hook_entry_is_covered_by_the_gates_filters() -> None:
@@ -307,6 +314,18 @@ def test_hook_pin_fails_when_the_gate_filters_are_reverted_to_the_old_launcher_f
         _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), reverted_shim)
 
 
+def test_hook_pin_fails_when_a_filter_matches_everything() -> None:
+    """Mutants: a shim regex of `.` claims every entry, an ours regex of `.`
+    claims commands that are not ours. Both used to pass the coverage pin."""
+    text = _text()
+    base = HOOKS_JSON.read_text(encoding="utf-8")
+    for name in ("HOOK_SHIM_RE", "HOOK_OURS_RE"):
+        mutant = re.sub(r"^\$" + name + r"\s*=.*$", lambda _m, n=name: f"${n} = '.'", text, flags=re.M)
+        assert mutant != text
+        with pytest.raises(AssertionError):
+            _check_hook_coverage(base, mutant)
+
+
 def test_hook_pin_fails_when_a_hook_script_moves_out_from_under_hooks_scripts() -> None:
     """Mutant on a scratch copy of hooks.json: a launched script the gate no
     longer recognises must fail the pin, not shrink A3's coverage silently."""
@@ -349,6 +368,9 @@ def test_stop_is_timed_bounded_and_fails_on_the_degraded_path() -> None:
     assert "Stopwatch" in invoke and "secs =" in invoke
     fn = text[text.index("function Stop-Problem"):text.index("function Get-Status")]
     assert "-match $STOP_DEGRADED_RE" in fn and "-gt $STOP_MAX_SECONDS" in fn
+    # both clauses are live statements, not just text somewhere in the function
+    _live_statement(fn, 'if ("$($stop.out)" -match $STOP_DEGRADED_RE) {')
+    _live_statement(fn, "if ($stop.secs -gt $STOP_MAX_SECONDS) {")
     a1 = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
     a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
     # leg B's stop (assertion 1) and both of assertion 4's stops
@@ -398,6 +420,18 @@ def test_assertion_4_keeps_its_post_stop_and_pg_log_checks_live() -> None:
         """if ($new -match 'was interrupted|not properly shut down|redo starts|automatic recovery') { Fail "next start's pg.log shows crash recovery" }""",
     )
     _live_statement(a4, """if ($new -notmatch 'database system was shut down at') { Fail""")
+    # nexus-f9bgu.54: the check that caught 7.77.1's plain stop taking PostgreSQL down
+    _live_statement(
+        a4, "if ((Get-Stack).postgres.Count -eq 0) { Fail 'plain nx daemon service stop also stopped PostgreSQL' }"
+    )
+    # the plain-stop leg runs on the logon-task shape, so both launcher checks stay live
+    _live_statement(
+        a4, "if (-not (Supervisor-From-Launcher $k)) { Fail ('the stack under test is not the launcher-started one: '"
+    )
+    _live_statement(
+        a4,
+        "if (-not (Supervisor-From-Launcher $k)) { Fail ('after Start-ScheduledTask the stack is not launcher-started: '",
+    )
 
 
 def test_assertion_2_keeps_its_outside_session_check_live() -> None:
