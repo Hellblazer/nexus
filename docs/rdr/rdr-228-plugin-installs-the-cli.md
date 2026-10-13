@@ -287,8 +287,10 @@ current directory (the existing `_exec_path.which_off_cwd`). The layout is
 checked first because an application started before the install does not see a
 `PATH` change until it restarts. When the program is found the launcher
 replaces itself with it (`os.execv`; on Windows it spawns the program and
-relays its exit code), so a running server has no wrapper between it and the
-application. Before the hand-off the launcher changes directory to the
+relays its exit code), so the launcher itself is not left between a running
+server and the application on POSIX. `uv` is: it stays alive as the parent of
+what it runs, on every platform (measured, uv 0.8.0), so the server is a
+grandchild of the application and not a child. Before the hand-off the launcher changes directory to the
 project, because the entries start it with the plugin root as its working
 directory and the programs read the project from theirs: for a hook program
 the payload's `cwd`, else `CLAUDE_PROJECT_DIR` (the rule `nx_hook_shim.py`
@@ -847,7 +849,8 @@ order and the corrected no-CLI note. The bare-name spawn lint
 #### Step 2: The stand-in, notice only
 
 The stand-in for `nx-mcp` with its instructions text and both tools. In this
-phase `setup` starts nothing: it answers with the two manual commands and the
+phase `setup` starts nothing: it answers with the three manual commands
+(`uv tool install conexus --python 3.12`, `nx self install`, `nx init`) and the
 install page, and `setup_status` reports "not installed". The stand-in for
 `nx-mcp-catalog` with no tools. The reconnect from stand-in to real server is
 tried by hand here.
@@ -862,6 +865,15 @@ directory and no service check yet; those arrive in Phase 2 Step 4.
 
 The `.mcp.json` and `hooks.json` entry changes, the lockstep message fix and
 the `docs/desktop-deployment.md` fix.
+
+One change to the CLI goes with the server entries. The hook that hands a new
+session id to the running server on `/clear` and `/resume` found the server
+as a direct child of the application's process
+(`find_mcp_sibling_pids`, `src/nexus/session.py`). Behind `uv` the server is a
+grandchild, the lookup found nothing, and the handoff stopped with no error.
+The lookup now also looks through a child that is `uv` or a Python running
+the launcher, and through nothing else, so one session still cannot reach
+another session's server.
 
 ### Phase 2: Setup
 
@@ -985,6 +997,10 @@ None. The launcher, the hook and the stand-in server are standard library.
   none and no flag it builds the CLI only.
 - `/conexus:setup` contains no `nx` shell line, and says the CLI is too old
   when the server offers no setup tools.
+- The server lookup for the session handoff finds a server behind `uv` and
+  the launcher, built from the real `uv` and a real process listing; it does
+  not look under a shell, a test runner or another Claude process; a space in
+  an executable's path does not hide the server.
 - The existing hook floor tests still pass.
 
 ## Validation
@@ -1102,14 +1118,21 @@ Test Plan covers the "local" path without a network.
   0.12.23.
 - **Licensing**: N/A. No new dependency.
 - **Deployment model**: the launcher, hook, stand-in and command ship in the
-  plugin, through a client release or a plugin-only cut (RDR-197). The
+  plugin. Phase 1 ships only in a client release, because its server entries
+  need the CLI's lookup change (Phase 1 Step 4). A plugin-only cut (RDR-197)
+  may carry the launcher, the lookup module, the shim's change and the notice
+  script, and never `.mcp.json`, `hooks.json` or `version_lockstep_hook.py`
+  ahead of that release. The
   `--bootstrap` flag and the real server's setup tools ship in the CLI
   package, so Phase 2 is one client release and its plugin parts never go
   out in a plugin-only cut ahead of it. The installer scripts are published on the site.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phase 1 alone is shippable: a machine with the CLI
-  gains one extra `uv` launch per server start and hook, and a machine
-  without it gets a stand-in and one true message in place of errors.
+  gains one extra `uv` launch per server start and hook and one resident `uv`
+  process per server, and a machine without it gets a stand-in and one true
+  message in place of errors. A plugin newer than its CLI loses the `/clear`
+  and `/resume` handoff, with no message, until the CLI catches up; the
+  lockstep action upgrades it by the next session.
 - **Secret/credential lifecycle**: the cloud token is typed into a loopback
   page or a terminal prompt with echo off, held in memory until the CLI is
   built, saved with `nx config set` on standard input, and never logged, never placed in the status
@@ -1117,8 +1140,9 @@ Test Plan covers the "local" path without a network.
   owner-only file that is deleted on first load. An `http` service address is accepted, so the token can travel in
   the clear to the address the user typed. Rotation and override are the
   existing `nx config` verbs.
-- **Memory management**: N/A. The launcher replaces itself with the real
-  program on POSIX and holds one idle parent process on Windows.
+- **Memory management**: the launcher replaces itself with the real program
+  on POSIX and stays as one idle parent process on Windows. On every platform
+  `uv` stays as an idle parent of each server it started.
 
 ### Proportionality
 
@@ -1191,4 +1215,12 @@ is flagged for trimming before then.
   (nexus-sv2wx.1); each phase stays on its branch until its release bead,
   with a draft pull request for CI (nexus-sv2wx.2); the layout before `PATH`
   holds on every machine, with no override.
+- 2026-10-13: Implementation, Phase 1 Step 4, on Sam's authorisation. The
+  server entries put `uv` between the application and the server, which
+  broke the CLI's direct-child lookup for the `/clear` handoff; Sam chose to
+  fix the lookup. So Phase 1 is a client release and not a plugin-only cut
+  (Deployment model, Incremental adoption), `uv` is recorded as a resident
+  parent ("The launcher", Memory management), and the lookup change and its
+  test are in Step 4 and the Test Plan. Step 2 says three manual commands,
+  as the README gives them, where it said two.
 - 2026-10-13: Rebased onto develop for the push. The two gated commits were renumbered with the file unchanged, and the gate lines above now cite the new numbers; the T2 gate and fix-check records name both the old and the new.
