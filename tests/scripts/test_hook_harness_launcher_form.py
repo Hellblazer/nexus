@@ -89,6 +89,7 @@ def test_a_path_without_uv_fails_the_gate_instead_of_passing_it(drive, tmp_path,
     assert "`uv` is not on PATH" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: the skew gate is a bash harness that links uv by symlink and writes shebang fakes")
 def test_an_entry_whose_command_cannot_start_is_a_failure(drive, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "real", "exit 0").parent))
     real_symlink = os.symlink
@@ -106,6 +107,7 @@ def test_a_command_absent_by_nobodys_design_is_not_ok(drive, tmp_path, monkeypat
     assert "non-blocking" not in capsys.readouterr().out
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: the skew gate is a bash harness that links uv by symlink and writes shebang fakes")
 def test_fewer_started_than_the_floor_fails_even_with_no_failures(drive, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "real", "echo 'conexus: x is not installed' >&2\nexit 0").parent))
     hooks = _hooks(tmp_path, 2)
@@ -120,6 +122,7 @@ def test_the_default_floor_is_the_manifests_command_entry_count(drive) -> None:
     assert drive.DEFAULT_MIN_EXECUTED == len(_entries())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: the skew gate is a bash harness that links uv by symlink and writes shebang fakes")
 def test_driven_env_has_uv_alone_an_empty_tools_dir_and_the_cli_first(drive, tmp_path, monkeypatch) -> None:
     out = tmp_path / "seen"
     real = _fake_uv(tmp_path / "real", f'printf "%s\\n%s\\n" "$NX_TOOLS_DIR" "$PATH" > {out}\nexit 0')
@@ -137,6 +140,7 @@ def test_driven_env_has_uv_alone_an_empty_tools_dir_and_the_cli_first(drive, tmp
     assert str(real.parent) not in path.split(":"), "the caller's own PATH must not reach the driven entries"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: the skew gate is a bash harness that links uv by symlink and writes shebang fakes")
 def test_a_cli_run_where_the_launcher_found_no_cli_fails(drive, tmp_path, monkeypatch, capsys) -> None:
     """The launcher found this machine's install, or none: the run proves nothing."""
     monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "real", "echo 'conexus: `nx-hook` is not installed' >&2\nexit 0").parent))
@@ -144,12 +148,14 @@ def test_a_cli_run_where_the_launcher_found_no_cli_fails(drive, tmp_path, monkey
     assert "did not find the CLI under test" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: the skew gate is a bash harness that links uv by symlink and writes shebang fakes")
 def test_a_no_cli_run_where_the_launcher_was_silent_fails(drive, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "real", "exit 0").parent))
     assert _drive(drive, tmp_path, monkeypatch, _hooks(tmp_path, 1), "none", "1") == 1
     assert "did not say so" in capsys.readouterr().out
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: the skew gate is a bash harness that links uv by symlink and writes shebang fakes")
 def test_uv_exiting_2_is_still_a_blocking_failure(drive, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "real", "echo 'error: uv could not run' >&2\nexit 2").parent))
     assert _drive(drive, tmp_path, monkeypatch, _hooks(tmp_path, 1), str(tmp_path), "1") == 1
