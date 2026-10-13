@@ -389,10 +389,7 @@ def _launch_windows(argv, popen=None, make_job=None, resolve=None):
             return _resolve_executable(name, platform=_WINDOWS)
     exe = resolve(argv[0])
     if exe is None:
-        sys.stderr.write(
-            "[conexus-mcpb] cannot find %r on PATH (PATHEXT honoured). Install uv "
-            "(https://docs.astral.sh/uv/) and restart Claude Desktop.\n" % argv[0]
-        )
+        _report_missing(argv[0])
         return 127
     job = make_job()
     contained_self = job.assign_self() if job is not None else False
@@ -415,6 +412,13 @@ def _launch_windows(argv, popen=None, make_job=None, resolve=None):
         return child.wait()
 
 
+def _report_missing(name):
+    sys.stderr.write(
+        "[conexus-mcpb] cannot find %r on PATH (PATHEXT honoured). Install uv "
+        "(https://docs.astral.sh/uv/) and restart Claude Desktop.\n" % name
+    )
+
+
 def _launch(argv, platform=None, execvp=None, launch_windows=None):
     """Hand off to *argv*: exec on POSIX (stdio lands on the server process
     itself), child-with-inherited-handles on Windows. Returns the exit code on
@@ -432,7 +436,13 @@ def main(platform=None) -> None:
     uv = "uv"
     if platform == _WINDOWS:
         # PATHEXT: a bare "uv" is uv.exe. Sync and launch both resolve it.
-        uv = _resolve_executable("uv", platform=platform) or "uv"
+        uv = _resolve_executable("uv", platform=platform)
+        if uv is None:
+            # Not the bare name: CreateProcess looks in the working directory before PATH, so
+            # a "uv" spawned by name would run a uv.exe planted there. Same message and code
+            # as the launch step gives; nothing has been spawned yet.
+            _report_missing("uv")
+            sys.exit(127)
     if not os.environ.get("NX_MCPB_SKIP_RESOLVE_RETRY"):
         if platform == _WINDOWS:
             _sync_with_retry(bundle_dir, uv=uv)

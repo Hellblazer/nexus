@@ -506,6 +506,23 @@ def test_main_on_windows_resolves_uv_via_pathext_and_exits_with_child_code(
     assert synced == [str(tmp_path / "uv.exe")]
 
 
+def test_main_on_windows_without_uv_exits_127_before_any_spawn(bootstrap, tmp_path, monkeypatch, capsys):
+    """uv is not on PATH: the bare name "uv" would be found by CreateProcess in the working
+    directory first (a planted uv.exe), so neither the sync nor the launch may be attempted."""
+    monkeypatch.setenv("PATH", str(tmp_path))  # an empty directory
+    monkeypatch.setenv("PATHEXT", ".exe;.cmd")
+    monkeypatch.delenv("NX_MCPB_SKIP_RESOLVE_RETRY", raising=False)
+    spawned = []
+    monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d, uv="uv": spawned.append(("sync", uv)))
+    monkeypatch.setattr(bootstrap, "_launch_windows", lambda argv: spawned.append(("launch", argv)) or 0)
+    with pytest.raises(SystemExit) as exc:
+        bootstrap.main(platform="win32")
+    assert exc.value.code == 127
+    assert spawned == []
+    err = capsys.readouterr().err
+    assert "cannot find 'uv' on PATH" in err and "Install uv" in err
+
+
 def test_sync_uses_the_injected_uv_path(bootstrap):
     runner = _Runner([_proc(0)])
     bootstrap._sync_with_retry("/bundle", run=runner, sleep=lambda s: None, uv="C:/uv/uv.exe")
