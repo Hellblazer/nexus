@@ -51,6 +51,13 @@
 #   The session starts already working the prompt (first-run prompts are
 #   pre-accepted); read the verdict from <RunDir>\verdict.txt. Passed this way
 #   on published 7.72.1, 2026-10-07 (T2 nexus_rdr/224-gate-run-7.72.1-2026-10-07).
+#   The whole unattended procedure, from the checkpoint restore to the verdict
+#   line and the guest's shutdown, is one command on the Mac:
+#      tests/e2e/windows-guest/run-gate.sh --version <v> --engine <e> [--wheel PATH] [--out DIR]
+#   (the scripts it stages on the host are in tests/e2e/windows-guest/driver/).
+#   It exits 0 only when the collected verdict line is PASSED, and --wheel runs a
+#   candidate wheel instead of the published conexus==<v>, named as such in the
+#   output. Steps 0 to 6 above are what it does.
 #
 # THE ASSERTIONS (DECLARED = 5; a precondition runs before each phase)
 #   P0  (setup) no system-wide VC++ runtime (vcruntime140*/msvcp140* in
@@ -238,12 +245,27 @@ function Record([string]$id, [string]$status, [string]$detail) {
     Say ("{0} {1}: {2}" -f $id, $status, $detail)
 }
 
+# Every stop an assertion ran, with its exit code and measured seconds. A FAIL's
+# detail is the exception message and replaces the body, so a failed assertion 4
+# lost both stops' seconds (7.77.1, 2026-10-12, nexus-f9bgu.53). The notes live
+# outside the body, and Run-Assertion appends them to the record on a PASS and
+# on a FAIL alike.
+$script:stopNotes = New-Object System.Collections.ArrayList
+function Note-Stop($stop, [string]$label) {
+    [void]$script:stopNotes.Add(("{0}: exit {1} in {2}s" -f $label, $stop.code, $stop.secs))
+}
+function Stop-Notes {
+    if ($script:stopNotes.Count -eq 0) { return '' }
+    return ' [stops measured: ' + ($script:stopNotes -join '; ') + ']'
+}
+
 function Run-Assertion([int]$id, [string]$name, [scriptblock]$body) {
     $key = "A$id"
     if ($skipIds -contains $id) { Record $key 'SKIPPED' "$name (forced by -ForceSkip)"; return }
     Say "A$id $name"
-    try { $detail = (& $body | Out-String).Trim(); Record $key 'PASS' $detail }
-    catch { Record $key 'FAIL' $_.Exception.Message }
+    $script:stopNotes.Clear()
+    try { $detail = (& $body | Out-String).Trim(); Record $key 'PASS' ($detail + (Stop-Notes)) }
+    catch { Record $key 'FAIL' ($_.Exception.Message + (Stop-Notes)) }
 }
 
 function Invoke-Nx([string]$label, [string[]]$nxArgs) {
@@ -420,6 +442,7 @@ if ($Phase -eq 'setup') {
         if ($k.supervisor.Count -eq 0 -or $k.engine.Count -eq 0 -or $k.postgres.Count -eq 0) { Fail ("leg B: stack incomplete: " + (Describe-Stack $k)) }
         "leg B direct spawn: $b; " + (Describe-Stack $k)
         $stop = Invoke-Nx 'legB-stop-with-pg' @('daemon', 'service', 'stop', '--with-pg')
+        Note-Stop $stop 'A1 leg B --with-pg'
         # Judged at the end of the assertion so the rest of the run still happens.
         $legBStop = Stop-Problem $stop 'leg B stop --with-pg'
         "leg B stop --with-pg: exit $($stop.code) in $($stop.secs)s"
@@ -659,6 +682,7 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
     $stopProblems = New-Object System.Collections.ArrayList
 
     $r = Invoke-Nx 'stop-with-pg' @('daemon', 'service', 'stop', '--with-pg')
+    Note-Stop $r 'A4 --with-pg'
     $sp = Stop-Problem $r 'stop --with-pg'
     if ($sp) { [void]$stopProblems.Add($sp) }
     $withPgSecs = $r.secs
@@ -698,6 +722,7 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
 
     # The Minimum Viable Validation leg: a plain stop leaves PostgreSQL up.
     $r = Invoke-Nx 'stop-plain' @('daemon', 'service', 'stop')
+    Note-Stop $r 'A4 plain'
     $sp = Stop-Problem $r 'plain stop'
     if ($sp) { [void]$stopProblems.Add($sp) }
     Wait-Gone @('supervisor', 'engine') 90 | Out-Null

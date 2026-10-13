@@ -460,3 +460,77 @@ def test_header_not_covered_list_names_the_known_residuals() -> None:
     assert len(items) >= 10
     for item in items:
         assert re.search(r"nexus-[a-z0-9.]+", item), f"no bead named: {item}"
+
+
+# ---- measured stop seconds survive a FAIL (nexus-f9bgu.53) ------------------
+
+
+def _check_stop_notes(gate_text: str) -> None:
+    """Every stop an assertion runs is noted, and Run-Assertion carries the notes
+    into the record on a PASS and on a FAIL.
+
+    A FAIL's detail is the exception message, which replaced the body: 7.77.1's
+    failed assertion 4 lost both stops' measured seconds. The notes sit outside
+    the body so neither outcome can drop them.
+    """
+    fn = gate_text[gate_text.index("function Run-Assertion"):gate_text.index("function Invoke-Nx")]
+    _live_statement(fn, "$script:stopNotes.Clear()")
+    _live_statement(fn, "Record $key 'PASS' ($detail + (Stop-Notes))")
+    _live_statement(fn, "Record $key 'FAIL' ($_.Exception.Message + (Stop-Notes))")
+    a1 = gate_text[gate_text.index("Run-Assertion 1 "):gate_text.index("# --------------------------------------------------------------- verify ----")]
+    a4 = gate_text[gate_text.index("Run-Assertion 4 "):gate_text.index("Run-Assertion 5 ")]
+    # each Note-Stop follows the Invoke-Nx that ran its stop, before anything can throw
+    assert a1.index("Note-Stop $stop 'A1 leg B --with-pg'") > a1.index("Invoke-Nx 'legB-stop-with-pg'")
+    assert a1.index("Note-Stop $stop 'A1 leg B --with-pg'") < a1.index("Stop-Problem $stop")
+    _live_statement(a1, "Note-Stop $stop 'A1 leg B --with-pg'")
+    _live_statement(a4, "Note-Stop $r 'A4 --with-pg'")
+    _live_statement(a4, "Note-Stop $r 'A4 plain'")
+    assert a4.index("Note-Stop $r 'A4 --with-pg'") > a4.index("Invoke-Nx 'stop-with-pg'")
+    assert a4.index("Note-Stop $r 'A4 --with-pg'") < a4.index("Wait-Gone")
+    assert a4.index("Note-Stop $r 'A4 plain'") > a4.index("Invoke-Nx 'stop-plain'")
+    assert a4.index("Note-Stop $r 'A4 plain'") < a4.index("Assert-Absent @('supervisor', 'engine') \"${RECHECK_SECONDS}s after plain stop\"")
+    # every Invoke-Nx stop in the gate is noted: three stops, three notes
+    assert gate_text.count("'daemon', 'service', 'stop'") == 3
+    assert len(re.findall(r"^\s*Note-Stop \$", gate_text, re.M)) == 3
+    notes = gate_text[gate_text.index("function Note-Stop"):gate_text.index("function Run-Assertion")]
+    assert "$stop.code" in notes and "$stop.secs" in notes
+    assert "[stops measured: " in notes
+
+
+def test_measured_stop_seconds_reach_the_record_on_pass_and_on_fail() -> None:
+    _check_stop_notes(_text())
+
+
+def test_stop_notes_pin_fails_when_a_fail_drops_the_notes() -> None:
+    """Mutant: the pre-fix Run-Assertion, whose FAIL record is the bare message."""
+    text = _text()
+    mutant = text.replace(
+        "Record $key 'FAIL' ($_.Exception.Message + (Stop-Notes))", "Record $key 'FAIL' $_.Exception.Message"
+    )
+    assert mutant != text
+    with pytest.raises(AssertionError):
+        _check_stop_notes(mutant)
+
+
+def test_stop_notes_pin_fails_when_a_pass_drops_the_notes() -> None:
+    text = _text()
+    mutant = text.replace("Record $key 'PASS' ($detail + (Stop-Notes))", "Record $key 'PASS' $detail")
+    assert mutant != text
+    with pytest.raises(AssertionError):
+        _check_stop_notes(mutant)
+
+
+def test_stop_notes_pin_fails_when_a_stop_is_not_noted() -> None:
+    text = _text()
+    for note in ("Note-Stop $stop 'A1 leg B --with-pg'", "Note-Stop $r 'A4 --with-pg'", "Note-Stop $r 'A4 plain'"):
+        mutant = text.replace(note, "# " + note)
+        assert mutant != text
+        with pytest.raises(AssertionError):
+            _check_stop_notes(mutant)
+
+
+def test_stop_notes_do_not_touch_the_non_vacuity_rules() -> None:
+    # the counting clauses the verdict stands on are still exactly what they were
+    block = _verdict_block()
+    assert "if ($executed -ne $DECLARED -or $failed.Count -gt 0 -or -not $preOk) {" in block
+    assert "$skipIds -contains $id) { Record $key 'SKIPPED'" in _text()
