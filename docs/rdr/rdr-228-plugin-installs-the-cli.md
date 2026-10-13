@@ -1159,7 +1159,7 @@ is flagged for trimming before then.
 - 2026-10-12: CA-5 run on native Windows: the `uv` launch form, a prototype
   launcher relaying to the real `nx-mcp.exe`, and the fall-through to the
   stand-in all work.
-- 2026-10-12: Gate round 1: BLOCKED (1 Critical, 9 Significant, 1 ship-blocker(s)); commit `2a630e7c5`; critique `nexus_rdr/228-gate-critique-2026-10-12-r1`.
+- 2026-10-12: Gate round 1: BLOCKED (1 Critical, 9 Significant, 1 ship-blocker(s)); commit `ea2593230`; critique `nexus_rdr/228-gate-critique-2026-10-12-r1`.
 - 2026-10-12: Fixes for gate round 1, from `nexus_rdr/228-research-15`. What
   is served is decided from whether the CLI resolves, not from a status
   file; the real server carries the setup tools when no usable service is
@@ -1174,5 +1174,6 @@ is flagged for trimming before then.
   defaults to false and is honoured on the provisioned path; the setup
   process has one home in the plugin; the lock uses a heartbeat; the page's
   address goes through an owner-only opener file; no fallback build.
-- 2026-10-12: Gate round 2: PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `fe8179c0f`; critique `nexus_rdr/228-gate-critique-2026-10-12-r2`.
+- 2026-10-12: Gate round 2: PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `840f6b8a6`; critique `nexus_rdr/228-gate-critique-2026-10-12-r2`.
 - 2026-10-13: Accepted. Residual dispositions: the Phase 1 release gate (BLOCKS-PLANNING) is carried by nexus-217c3 on Sam's choice; the 18 DISCOVER-AT-IMPLEMENTATION residuals are carried by nexus-j8ebc (4, Phase 1), nexus-9i4d4 (13, Phase 2) and nexus-omlpd (1, Phase 3). No change to the design, so no fix check.
+- 2026-10-13: Rebased onto develop for the push. The two gated commits were renumbered with the file unchanged, and the gate lines above now cite the new numbers; the T2 gate and fix-check records name both the old and the new.
