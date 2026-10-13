@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import PureWindowsPath
 
 _WINDOWS = "win32"
 
@@ -155,6 +156,23 @@ def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_R
 _DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
 
 
+def _is_search_dir(directory, cwd):
+    """True when a Windows ``PATH`` entry may honestly be searched: it has a drive
+    and a root (so not ``tools``, ``.``, ``C:x`` or ``\\x``, which resolve against
+    the working directory or its drive) and is not the working directory itself.
+
+    On a real Windows host only a drive-and-root entry counts; ``os.path.isabs``
+    also accepts a rooted ``\\x`` before Python 3.13. A Windows run injected on a
+    POSIX host (the tests) also takes a POSIX absolute path, as its fixtures are
+    real temporary directories.
+    """
+    if not directory:
+        return False
+    entry = PureWindowsPath(directory)
+    absolute = entry.is_absolute() or (os.name != "nt" and os.path.isabs(directory))
+    return absolute and entry != cwd
+
+
 def _resolve_executable(name, platform=None, path=None, pathext=None):
     """Resolve *name* to an executable file the way the platform's own launcher
     would, or return ``None`` when nothing on the search path matches.
@@ -163,10 +181,14 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
 
     Windows: PATHEXT, which ``os.execvp`` ignores. A bare ``uv`` resolves to
     ``uv.exe``; a name that already carries a PATHEXT extension is tried as
-    written first. A name with a directory part is used as given (CreateProcess
+    written only. A name with a directory part is used as given (CreateProcess
     semantics) and never searched. The current directory is deliberately NOT
-    searched first, unlike cmd.exe: a bundle launched with an arbitrary cwd
-    must not pick up a planted ``uv.exe``.
+    searched, neither first like cmd.exe nor through a ``PATH`` entry that is the
+    cwd or is relative (``tools``, ``.``, ``C:x``): a bundle launched with an
+    arbitrary cwd must not pick up a planted ``uv.exe``. A ``.cmd`` or ``.bat`` hit
+    is still returned, unlike ``nexus.util.nx_argv`` (the fixed ``uv run`` argv
+    carries nothing a batch file could misparse; ``tests/test_off_cwd_resolver_parity.py``
+    names the difference).
 
     ``platform``/``path``/``pathext`` are injectable so both branches run on
     any host. Not ``shutil.which``: that decides Windows-ness from the real
@@ -185,9 +207,12 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
             pathext = os.environ.get("PATHEXT") or _DEFAULT_PATHEXT
         listed = [e for e in pathext.split(";") if e]
         has_ext = os.path.splitext(name)[1].upper() in [e.upper() for e in listed]
-        exts = [""] + listed if has_ext else listed
+        # Already ends in a listed extension: tried as written only, as shutil.which
+        # does (appending to it would find ``uv.exe.cmd``).
+        exts = [""] if has_ext else listed
+    cwd = PureWindowsPath(os.getcwd())
     for directory in path.split(sep):
-        if not directory:
+        if not directory or (windows and not _is_search_dir(directory, cwd)):
             continue
         for ext in exts:
             candidate = os.path.join(directory, name + ext)

@@ -45,6 +45,8 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- hook exec off the cwd (nexus-f9bgu.38): `conexus/hooks/scripts/_exec_path.py` skips a `PATH` entry that is the working directory itself and a rooted one without a drive (`\tools`), and tries a name that already ends in a listed extension as written only (`uv.exe`, not `uv.exe.cmd`). It still returns a `.cmd` or `.bat` hit; that stays as the hook shim's Windows tests rely on it. No change on POSIX.
+
 
 
 ## Deferred to the next client release

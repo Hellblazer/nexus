@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Claude Desktop bundle launcher and the hook scripts no longer take a `uv.exe`, `git.exe` or `nx-hook.exe` from the working directory through a `PATH` entry on Windows** (nexus-f9bgu.38). Both carry their own copy of the `PATH` lookup, because neither can import nexus. The bundle launcher skipped neither a relative entry (`PATH=tools` returned `tools\uv.exe`) nor an entry that is the working directory; the hook copy skipped relative entries but not the working directory's own, and both tried `uv.exe.cmd` for a name that already ended in `.exe`. They now follow the same rules as `nexus.util.nx_argv`, and one test runs all four copies over the same cases. A `.cmd` or `.bat` hit is still returned by these two copies, which `nx_argv` refuses. Not verified on a Windows host.
+
 ## [7.78.0] - 2026-10-12
 
 Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). Fixes, most of them for Windows. `nx daemon service stop` no longer also stops a PostgreSQL the supervisor started, and `nx`, the hooks, the indexer and the daemons no longer run a `git.exe`, `bd.exe` or `claude.exe` planted in the working directory. A docling that cannot be imported now fails the PDF and has an `nx doctor` row. No engine change, no schema change and no wire change.
