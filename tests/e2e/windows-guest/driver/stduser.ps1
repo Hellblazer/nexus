@@ -9,7 +9,8 @@
 #
 # What the administrator does here, and a standard user could not:
 #   - installs Git for all users (winget's Git.Git package needs elevation), so
-#     the run is "a standard user on a machine where Git is already installed";
+#     the run is "a standard user on a machine where Git is already installed".
+#     Not with -AdminGit no: then the account installs PortableGit itself;
 #   - turns off the first-sign-in animation and the privacy-settings screen, so
 #     the new account reaches a desktop unattended;
 #   - creates the account and sets it as the automatic sign-in, then restarts.
@@ -22,7 +23,11 @@ param(
     [Parameter(Mandatory = $true)][string]$GuestUser,
     [Parameter(Mandatory = $true)][string]$StdUser,
     [Parameter(Mandatory = $true)][string]$RunDir,
-    [string]$Wheel = ''
+    [string]$Wheel = '',
+    # 'no' (run-gate.sh --no-admin-git): the administrator installs no Git. The
+    # account installs PortableGit itself in the install step, from
+    # portable-git.ps1, which this step copies into its nx-gate folder.
+    [string]$AdminGit = 'yes'
 )
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
 if ($Wheel -and $Wheel -notmatch '^[A-Za-z0-9._+-]+\.whl$') { throw 'Wheel is not a wheel file name' }
@@ -36,14 +41,15 @@ $cred = New-Object PSCredential($GuestUser, $sec)
 $t0 = Get-Date
 $s = New-PSSession -VMName $VMName -Credential $cred -ErrorAction Stop
 try {
-    Invoke-Command -Session $s -ArgumentList $StdUser {
-        param($u)
+    Invoke-Command -Session $s -ArgumentList $StdUser, $AdminGit {
+        param($u, $adminGit)
         $git = 'C:\Program Files\Git\cmd\git.exe'
-        if (-not (Test-Path $git)) {
+        if ($adminGit -eq 'no') { 'the administrator installs no Git (-AdminGit no)' }
+        elseif (-not (Test-Path $git)) {
             winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String -Width 200 | ForEach-Object { $_.TrimEnd() } | Select-Object -Last 4
             "winget exit=$LASTEXITCODE"
         }
-        "gitexe=" + (Test-Path $git) + " (installed for all users by the administrator)"
+        "gitexe=" + (Test-Path $git) + " (for all users, before the account exists)"
         New-Item -Force -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' | Out-Null
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience -Value 1 -Type DWord
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableFirstLogonAnimation -Value 0 -Type DWord
@@ -107,10 +113,16 @@ try {
         "gitexe=" + (Test-Path 'C:\Program Files\Git\cmd\git.exe')
     }
     $info
+    if ($AdminGit -eq 'no') {
+        $dest = Invoke-Command -Session $s -ArgumentList $StdUser { param($u) "C:\Users\$u\nx-gate" }
+        Copy-Item -ToSession $s -Path (Join-Path $RunDir 'portable-git.ps1') -Destination "$dest\portable-git.ps1" -Force
+        'copied portable-git.ps1'
+    }
     $text = ($info | Out-String)
     if ($text -notmatch 'profile=True desktop shell processes=[1-9]') { "NXG-RESULT: FAIL $StdUser has no profile or no desktop"; $rc = 7 }
     elseif ($text -notmatch 'in Administrators=False') { "NXG-RESULT: FAIL $StdUser is an administrator"; $rc = 8 }
-    elseif ($text -notmatch 'gitexe=True') { 'NXG-RESULT: FAIL Git is not installed'; $rc = 9 }
+    elseif ($AdminGit -ne 'no' -and $text -notmatch 'gitexe=True') { 'NXG-RESULT: FAIL Git is not installed'; $rc = 9 }
+    elseif ($AdminGit -eq 'no' -and $text -notmatch 'gitexe=False') { 'NXG-RESULT: FAIL Git is already installed for all users, so this is not a no-Git run'; $rc = 9 }
 } finally { Remove-PSSession $s }
 if ($rc -ne 0) { exit $rc }
 'NXG-RESULT: ok'

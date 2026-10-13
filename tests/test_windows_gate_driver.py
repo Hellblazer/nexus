@@ -970,3 +970,49 @@ def test_the_account_step_and_the_run_as_wrapper_keep_their_guarantees() -> None
     recv = (GUEST_DIR / "host-recv.ps1").read_text(encoding="utf-8")
     assert "New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive" in recv
     assert "NTAccount($env:COMPUTERNAME, $runAs)), 'Read', 'Allow'" in recv
+
+
+# ---- --no-admin-git ----------------------------------------------------------
+
+
+def test_no_admin_git_stages_the_install_guides_own_portablegit_block(harness: Harness) -> None:
+    shutil.copytree(REPO / "docs", harness.tree / "docs", ignore=lambda d, names: [n for n in names if n != "windows-install.md"])
+    res = harness.run(*_BASE, "--standard-user", "--no-admin-git", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    block = (harness.out / "portable-git.ps1").read_text(encoding="utf-8")
+    guide = (REPO / "docs" / "windows-install.md").read_text(encoding="utf-8")
+    assert block.strip() and block in guide, "the staged block must be the guide's text, unchanged"
+    assert "PortableGit" in block and "SetEnvironmentVariable('Path'" in block and "Get-FileHash" in block
+    assert any("portable-git.ps1" in ln for ln in (harness.root / "scp.log").read_text().splitlines())
+    std = next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert "-AdminGit no" in std
+    assert "no Git from nxguest: the account installs PortableGit" in res.stdout
+
+
+def test_a_standard_user_run_without_the_flag_has_the_administrator_install_git(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-AdminGit yes" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert not (harness.out / "portable-git.ps1").exists()
+
+
+def test_no_admin_git_needs_standard_user_and_a_guide_that_still_has_the_block(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--no-admin-git")
+    assert res.returncode == 2 and not (harness.root / "ssh.log").exists()
+    (harness.tree / "docs").mkdir()
+    (harness.tree / "docs" / "windows-install.md").write_text("```powershell\nuv tool install conexus\n```\n", encoding="utf-8")
+    res = harness.run(*_BASE, "--standard-user", "--no-admin-git", "--out", str(harness.out))
+    assert res.returncode == 2 and "no powershell block naming PortableGit" in res.stderr
+    assert not (harness.root / "ssh.log").exists()
+
+
+def test_the_no_git_run_keeps_its_guarantees_in_the_scripts() -> None:
+    std = _read("stduser.ps1")
+    # with -AdminGit no the administrator runs no winget, and a guest that already has Git is refused
+    assert "if ($adminGit -eq 'no') { 'the administrator installs no Git (-AdminGit no)' }" in std
+    assert "this is not a no-Git run" in std
+    inst = _read("inst.ps1")
+    # the account runs the staged block itself, and Git is found in either place afterwards
+    assert 'powershell -NoProfile -ExecutionPolicy Bypass -File "$b\\portable-git.ps1"' in inst
+    assert "$env:LOCALAPPDATA\\Programs\\Git\\cmd" in inst and "if (-not (GitDir)) { $bad += 'git.exe is missing' }" in inst
+    assert "$mine += Join-Path $RunDir 'portable-git.ps1'" in _read("end.ps1")
