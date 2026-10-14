@@ -3936,8 +3936,9 @@ error, not a fallback spawn. With no unit, a unit the manager does not report
 enabled (or cannot be asked), or a manager command that fails, `start` spawns
 the detached supervisor as before and prints one stderr line saying why the
 unit was not used (nothing when no unit is installed). A service that is
-already running is reported without asking the manager. `--foreground` (what
-the unit itself runs) is unchanged.
+already running is reported without asking the manager. `nx init --service`
+and the Windows upgrade's service restart start the service the same way.
+`--foreground` (what the unit itself runs) is unchanged.
 
 `status` is the single is-the-stack-healthy surface: the lease (host, port,
 service pid, generation), supervisor pid, addr-file path, live `/health` probe,

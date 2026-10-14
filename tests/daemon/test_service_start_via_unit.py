@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``nx daemon service start`` goes through an installed, enabled autostart unit
+"""Starting the storage service goes through an installed, enabled autostart unit
 (nexus-crwqm).
+
+The unit-first logic lives in ``ensure_storage_supervisor``, so these tests cover
+every caller: ``nx daemon service start``, ``nx init --service`` and the
+replace-quiesce restart.
 
 Measured in a systemd container (T2 ``nexus_rdr/228-research-30``): with the unit
 installed and enabled and the service stopped, ``service start`` spawned a
@@ -25,7 +29,10 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands import daemon as daemon_mod
+from nexus.commands import init as init_mod
 from nexus.daemon import installer
+from nexus.daemon import service_registry as sr
+from nexus.daemon.replace_quiesce import default_ops
 from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor, service_identity
 
 pytestmark = pytest.mark.usefixtures("launchd_uid")
@@ -74,8 +81,16 @@ class FakeManager:
     answers the start verb with *start_rc* (publishing the unit's lease when it
     succeeds and *publish* is set)."""
 
-    def __init__(self, config_dir: Path, *, start_rc: int = 0, publish: bool = True) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        *,
+        start_rc: int = 0,
+        publish: bool = True,
+        events: list[str] | None = None,
+    ) -> None:
         self.config_dir = config_dir
+        self.events = events
         self.start_rc = start_rc
         self.publish = publish
         self.calls: list[list[str]] = []
@@ -85,6 +100,8 @@ class FakeManager:
         # The argv[0] is the resolved binary (an absolute path on Windows).
         self.calls.append([installer._manager_key(argv[0]), *argv[1:]])
         self.timeouts.append(timeout)
+        if self.events is not None:
+            self.events.append("manager")
         if self.start_rc == 0 and self.publish:
             _publish_lease(self.config_dir)
         return subprocess.CompletedProcess(
@@ -107,11 +124,18 @@ def alive(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def today(monkeypatch: pytest.MonkeyPatch):
-    """Today's path: ``ensure_storage_supervisor`` (the detached spawn), observed."""
-    lease = SimpleNamespace(endpoint={"host": "h", "port": 1, "pid": 2}, generation=3)
-    with patch.object(daemon_mod, "ensure_storage_supervisor", return_value=lease) as ensure:
-        yield ensure
+def today(config_dir: Path):
+    """Today's path: the detached spawn, observed at ``_popen``. The fake child
+    publishes the lease the real supervisor would, and stays running."""
+
+    def _spawn(argv, **_kw):
+        _publish_lease(config_dir, port=18093)
+        return SimpleNamespace(poll=lambda: None)
+
+    with patch("nexus.daemon.service_registry.process_state", return_value="S"), patch.object(
+        daemon_mod, "_popen", side_effect=_spawn
+    ) as popen:
+        yield popen
 
 
 class TestUnitActive:
@@ -121,14 +145,11 @@ class TestUnitActive:
         manager = FakeManager(config_dir)
         monkeypatch.setattr(installer, "run_bounded", manager)
         monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
-        with patch.object(daemon_mod, "_popen") as popen, patch.object(
-            daemon_mod, "ensure_storage_supervisor"
-        ) as ensure:
+        with patch.object(daemon_mod, "_popen") as popen:
             result = _run_start(config_dir)
         assert result.exit_code == 0, result.output
         assert manager.calls == [["systemctl", "--user", "start", "nexus-service.service"]]
         popen.assert_not_called()
-        ensure.assert_not_called()
         assert "Storage service running on 127.0.0.1:18091" in result.output
 
     def test_the_start_verb_is_bounded_by_the_manager_action_timeout(
@@ -193,15 +214,12 @@ class TestUnitActive:
         monkeypatch.setattr(installer, "run_bounded", manager)
         monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
         monkeypatch.setattr(daemon_mod, "_UNIT_START_WAIT_S", 0.05)
-        with patch.object(daemon_mod, "_popen") as popen, patch.object(
-            daemon_mod, "ensure_storage_supervisor"
-        ) as ensure:
+        with patch.object(daemon_mod, "_popen") as popen:
             result = _run_start(config_dir)
         assert result.exit_code == 2
         assert "nexus-service.service was started" in result.output
         assert "did not become ready" in result.output
         popen.assert_not_called()
-        ensure.assert_not_called()
 
 
 class TestUnitNotUsed:
@@ -312,3 +330,99 @@ class TestForegroundUnchanged:
         run.assert_called_once()
         ensure.assert_not_called()
         assert manager.calls == [] and probe_calls == []
+
+
+class TestOtherCallersOfEnsure:
+    """``nx init --service`` and the replace-quiesce restart call
+    ``ensure_storage_supervisor`` directly; they get the unit-first start too."""
+
+    def _active(self, config_dir: Path, monkeypatch: pytest.MonkeyPatch, **kw) -> FakeManager:
+        manager = FakeManager(config_dir, **kw)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        return manager
+
+    def test_init_start_step_goes_through_the_unit(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        manager = self._active(config_dir, monkeypatch)
+        with patch.object(daemon_mod, "_popen") as popen, patch.object(
+            init_mod, "_report_stray_t2_launchagent_cleanup"
+        ):
+            lease = init_mod._start_service_step()
+        assert manager.calls == [["systemctl", "--user", "start", "nexus-service.service"]]
+        popen.assert_not_called()
+        assert lease.endpoint["port"] == 18091
+
+    def test_init_after_the_unit_is_already_running_does_not_start_twice(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """``enable --now`` already started the unit and its supervisor published:
+        the ensure that follows finds that lease and neither asks the manager
+        again nor spawns."""
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        _publish_lease(config_dir, port=18094)
+        manager = self._active(config_dir, monkeypatch)
+        with patch.object(daemon_mod, "_popen") as popen, patch.object(
+            init_mod, "_report_stray_t2_launchagent_cleanup"
+        ):
+            lease = init_mod._start_service_step()
+        assert manager.calls == []
+        popen.assert_not_called()
+        assert lease.endpoint["port"] == 18094
+
+    def test_init_with_a_disabled_unit_still_spawns(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, today
+    ) -> None:
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        manager = FakeManager(config_dir)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(
+            installer, "autostart_activation_state",
+            lambda dest, *, tier: _probe(installer.ActivationState.NOT_ACTIVE, "disabled"),
+        )
+        with patch.object(init_mod, "_report_stray_t2_launchagent_cleanup"):
+            lease = init_mod._start_service_step()
+        today.assert_called_once()
+        assert manager.calls == []
+        assert lease.endpoint["port"] == 18093
+
+    def test_replace_quiesce_restart_goes_through_the_unit(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+
+        manager = self._active(config_dir, monkeypatch)
+        with patch.object(daemon_mod, "_popen") as popen:
+            default_ops(config_dir).start_service()
+        assert manager.calls == [["systemctl", "--user", "start", "nexus-service.service"]]
+        popen.assert_not_called()
+
+    def test_replace_quiesce_restart_without_a_unit_spawns_as_before(
+        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, today
+    ) -> None:
+
+        monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: "linux")
+        monkeypatch.setattr(daemon_mod, "_autostart_install_dir", lambda: tmp_path / "no-units")
+        manager = FakeManager(config_dir)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        default_ops(config_dir).start_service()
+        today.assert_called_once()
+        assert manager.calls == []
+
+    def test_replace_quiesce_restart_clears_the_stop_request_before_starting_the_unit(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """The quiesce stop wrote a stop marker (Windows); the restart is a start,
+        which ends it before the manager is asked, or the launcher would not spawn."""
+        seen: list[str] = []
+        real_clear = sr.clear_stop_marker
+        monkeypatch.setattr(
+            sr, "clear_stop_marker", lambda *a, **k: (seen.append("clear"), real_clear(*a, **k))[1]
+        )
+        manager = self._active(config_dir, monkeypatch, events=seen)
+        default_ops(config_dir).start_service()
+        assert seen == ["clear", "manager"]

@@ -576,6 +576,11 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     the service looked 'serving' at init time but the lease aged out before the
     next client (e.g. ``nx migrate-to-service``) could discover it.
 
+    When the storage-service autostart unit is installed and the OS manager
+    reports it enabled, the supervisor is started THROUGH the unit instead
+    (:func:`_start_via_autostart_unit`, nexus-crwqm), so the manager supervises
+    and restarts it; the detached spawn is the fallback for every other state.
+
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -630,6 +635,16 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
             # per-site call needed here any more (see that function's
             # docstring in db/service_endpoint.py).
             return existing
+
+    # nexus-crwqm: an installed, enabled autostart unit starts the supervisor,
+    # so the OS manager supervises and restarts it. A detached spawn beside the
+    # unit would leave it inactive. Every caller of this function gets this
+    # (``nx daemon service start``, ``nx init --service``, the replace-quiesce
+    # restart). The unit's own ``--foreground`` supervisor never comes through
+    # here: it runs ``run_storage_supervisor`` directly.
+    via_unit = _start_via_autostart_unit(config_dir, registry, scope)
+    if via_unit is not None:
+        return via_unit
 
     # nexus-cd1k0.19 review round 2, finding 4: always RESOLVE to an
     # absolute path before it goes into argv, however config_dir itself
@@ -728,51 +743,35 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 _UNIT_START_WAIT_S: float = 60.0
 
 
-def _start_via_autostart_unit(config_dir: Path):
+def _start_via_autostart_unit(config_dir: Path, registry, scope: str):
     """Start the service through its installed, enabled autostart unit (nexus-crwqm).
 
-    Returns the live :class:`LeaseRecord`, or ``None`` when the unit was not
-    used and the caller keeps its own detached-spawn path. A detached spawn
+    Called by :func:`ensure_storage_supervisor` at the point it would spawn,
+    that is, after it found no live lease and cleared any stop request. Returns
+    the live :class:`LeaseRecord`, or ``None`` when the unit was not used and
+    the caller spawns the detached supervisor as before. A detached spawn
     beside an enabled unit leaves the unit inactive, so the OS manager neither
     supervises nor restarts the service the user asked to autostart.
 
-    Not used (``None``): no unit file (silent); a live lease already exists
-    (``ensure_storage_supervisor`` returns it, so a repeated start never
-    touches the manager); the manager does not report the unit ACTIVE, or its
-    start command fails (one stderr line each says why).
+    Not used (``None``): no unit file (silent); the manager does not report the
+    unit ACTIVE, or its start command fails (one stderr line each says why).
 
-    Used: clear any stop request (a start is the user's "run again"), have the
-    manager start the unit, then POLL the registry for the endpoint. This never
-    spawns a supervisor itself, so it cannot race the one the unit starts into
-    a second: the supervisor's own single-writer election decides the lease
-    holder. A poll that times out raises :class:`StorageServiceStartError`
-    rather than falling back to a spawn, which would race the unit's
-    still-starting supervisor.
+    Used: have the manager start the unit, then POLL the registry for the
+    endpoint. This never spawns a supervisor itself, so it cannot race the one
+    the unit starts into a second: the supervisor's own single-writer election
+    decides the lease holder, and a start verb on an already-running unit is a
+    no-op (``systemctl start``, ``launchctl kickstart`` without ``-k``), so a
+    caller that has just enabled the unit finds its endpoint here. A poll that
+    times out raises :class:`StorageServiceStartError` rather than falling back
+    to a spawn, which would race the unit's still-starting supervisor.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        ServiceRegistry,
-        clear_stop_marker,
-        reclaim_lease_if_dead_owner,
-        service_identity,
-    )
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     unit_path = _service_autostart_unit_installed()
     if unit_path is None:
         return None
-
-    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = service_identity()
-    existing = _service_endpoint.discover_storage_service_lease(registry, scope)
-    if existing is not None and not reclaim_lease_if_dead_owner(
-        registry,
-        existing,
-        log=_log,
-        event="storage_service_dead_lease_reclaim",
-    ):
-        return None  # running: ensure_storage_supervisor reports it, unit or not
 
     probe = installer.autostart_activation_state(unit_path, tier="service")
     if probe.state is not installer.ActivationState.ACTIVE:
@@ -784,7 +783,6 @@ def _start_via_autostart_unit(config_dir: Path):
         )
         return None
 
-    clear_stop_marker(config_dir, "storage_service", scope)
     failure = installer.start_autostart_unit(unit_path, tier="service")
     if failure is not None:
         click.echo(
@@ -872,13 +870,10 @@ def service_start_cmd(
         sys.exit(code)
 
     # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
-    # An installed, enabled autostart unit starts it through the OS manager
-    # (nexus-crwqm), so the manager supervises and restarts it; any other state
-    # spawns the detached supervisor as before.
+    # ensure_storage_supervisor starts an installed, enabled autostart unit
+    # through the OS manager and spawns the detached supervisor only otherwise.
     try:
-        existing = _start_via_autostart_unit(config_dir)
-        if existing is None:
-            existing = ensure_storage_supervisor(config_dir)
+        existing = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(2)
