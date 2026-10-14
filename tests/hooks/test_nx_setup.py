@@ -1805,6 +1805,52 @@ def test_the_config_directory_is_absolute(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "NEXUS_CONFIG_DIR" in mod.config_dir.__doc__ and "P2.R2" in mod.config_dir.__doc__
 
 
+def test_a_lock_directory_still_being_deleted_on_windows_reads_as_held(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """On Windows mkdir and stat of a directory pending deletion fail with access
+    denied for a moment; that is a held lock, not an error. Elsewhere the
+    PermissionError is a real one and propagates."""
+    mod = _load_module()
+
+    def pending(*_a: Any, **_k: Any) -> None:
+        raise PermissionError(13, "access denied")
+
+    setattr_in(monkeypatch, mod, "os.mkdir", pending)
+    setattr_in(monkeypatch, mod, "os.name", "nt")
+    assert mod._make_lock(tmp_path / "lock", "token") is False
+    setattr_in(monkeypatch, mod, "os.name", "posix")
+    with pytest.raises(PermissionError):
+        mod._make_lock(tmp_path / "lock", "token")
+
+
+def test_a_path_that_cannot_be_examined_reads_as_present(tmp_path: Path) -> None:
+    mod = _load_module()
+
+    class Unexaminable(type(tmp_path)):  # type: ignore[misc]
+        def exists(self, *a: Any, **k: Any) -> bool:
+            raise PermissionError(13, "access denied")
+
+    assert mod._exists(Unexaminable(tmp_path)) is True
+    assert mod._exists(tmp_path / "absent") is False
+
+
+def test_a_relative_config_directory_reaches_the_detached_run(box: Box) -> None:
+    """The run starts in the setup directory, so a relative NEXUS_CONFIG_DIR read
+    there names a different tree: it found no lock of its own and exited, while
+    start had said started (verification review of ceb991af2)."""
+    box.behave([box.uv_builds_nx()])
+    r = subprocess.run(
+        [sys.executable, str(_SETUP), "start", "--mode", "cli-only"], capture_output=True, text=True,
+        env=box.env(NEXUS_CONFIG_DIR=box.config.name), cwd=str(box.config.parent), timeout=60, check=False,
+    )
+    assert r.returncode == 0 and json.loads(r.stdout)["started"] is True, r.stdout + r.stderr
+    done = box.wait_terminal()
+    assert done["state"] == "done", box.read_log()
+    assert box.argvs() == [["uv", *_BUILD]]
+    assert not (box.setup / box.config.name).exists()
+
+
 @pytest.mark.parametrize("autostart", [True, False])
 def test_autostart_asked_of_a_running_service_says_the_login_unit_was_not_registered(box: Box, autostart: bool) -> None:
     box.layout()

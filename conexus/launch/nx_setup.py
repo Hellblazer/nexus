@@ -289,6 +289,16 @@ def config_dir() -> Path:
     return Path(os.path.abspath(_endpoint_resolve.default_config_dir()))
 
 
+def _child_env() -> dict[str, str]:
+    """This process's environment with ``NEXUS_CONFIG_DIR`` set to the absolute
+    :func:`config_dir`. A detached run starts in the setup directory, so a relative
+    value read there would name a different tree; the CLI it runs reads only
+    ``NEXUS_CONFIG_DIR``, so this also hands it the same directory."""
+    env = dict(os.environ)
+    env["NEXUS_CONFIG_DIR"] = str(config_dir())
+    return env
+
+
 def setup_dir() -> Path:
     """``setup/`` under :func:`config_dir`."""
     return config_dir() / "setup"
@@ -460,11 +470,26 @@ def _write_heartbeat(lock: Path) -> None:
     (lock / "heartbeat").write_text(str(time.time()), encoding="utf-8")
 
 
+def _exists(path: Path) -> bool:
+    """``path.exists()`` that answers True rather than raising when the path
+    cannot be examined: on Windows a directory being deleted while another
+    process holds a handle to it (an indexer, antivirus) refuses ``stat`` with
+    access denied for a moment."""
+    try:
+        return path.exists()
+    except OSError:
+        return True
+
+
 def _make_lock(lock: Path, token: str) -> bool:
     try:
         os.mkdir(lock)
     except FileExistsError:
         return False
+    except PermissionError:
+        if os.name == "nt":  # the previous lock is still being deleted
+            return False
+        raise
     (lock / "owner").write_text(token, encoding="utf-8")
     _write_heartbeat(lock)
     return True
@@ -488,7 +513,7 @@ def _reclaim(setup: Path, lock: Path, seen_owner: str | None) -> bool:
         except FileExistsError:
             return False
     try:
-        if not lock.exists():
+        if not _exists(lock):
             return True
         if not _lock_stale(lock) or _lock_owner(lock) != seen_owner:
             return False
@@ -505,10 +530,10 @@ def _reclaim(setup: Path, lock: Path, seen_owner: str | None) -> bool:
 def _wait_gone(path: Path, seconds: float) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if not path.exists():
+        if not _exists(path):
             return True
         time.sleep(0.05)
-    return not path.exists()
+    return not _exists(path)
 
 
 def acquire_lock(setup: Path, *, wait_for_finish: bool = False) -> str | None:
@@ -1100,7 +1125,7 @@ def detach(argv: list[str], log_path: Path | str, *, windows: bool | None = None
         with open(str(log_path), "ab") as log:
             subprocess.Popen(  # noqa: S603 -- this interpreter and this file
                 [sys.executable, script, *argv], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                start_new_session=True, cwd=str(Path(str(log_path)).parent),
+                start_new_session=True, cwd=str(Path(str(log_path)).parent), env=_child_env(),
             )
         return
     for breakaway in (True, False):
@@ -1113,7 +1138,7 @@ def detach(argv: list[str], log_path: Path | str, *, windows: bool | None = None
         try:
             relay = subprocess.Popen(  # noqa: S603 -- this interpreter and this file
                 relay_argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=flags,
+                creationflags=flags, env=_child_env(),
             )
             code = relay.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -1173,7 +1198,7 @@ def status_view(setup: Path) -> dict[str, Any]:
     if recorded is not None and recorded.get("state") == FAILED:
         data = {**data, **recorded}
     lock = setup / _LOCK
-    live = lock.exists() and not _lock_stale(lock)
+    live = _exists(lock) and not _lock_stale(lock)
     state = data.get("state", NONE)
     if state == RUNNING and not live:
         state = INTERRUPTED
