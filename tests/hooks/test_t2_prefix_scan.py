@@ -26,6 +26,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -42,10 +43,17 @@ from nexus.hooks.t2_prefix_scan import _SNIPPET_LIMIT
 _TOKEN = "test-bearer-token"
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
+#: The probe reports how long ``scan()`` itself took on stderr, so a timing
+#: assertion measures the scan and not the child's interpreter start and
+#: imports, which cost about 0.7s more on the Windows runner than on a Mac
+#: (nexus-3fme8: 2.21s against a 2.2s bound with the clamp working).
 _SCAN_PROBE = (
-    "import sys\n"
+    "import sys, time\n"
     "from nexus.hooks.t2_prefix_scan import scan\n"
-    "sys.stdout.write(scan(sys.argv[1]))\n"
+    "t0 = time.monotonic()\n"
+    "out = scan(sys.argv[1])\n"
+    "sys.stderr.write('\\nSCAN_SECONDS=%.3f\\n' % (time.monotonic() - t0))\n"
+    "sys.stdout.write(out)\n"
 )
 
 
@@ -234,7 +242,12 @@ def _run(
     assert result.returncode == 0, (
         f"scan exit {result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
+    _last_scan_seconds[0] = float(re.findall(r"SCAN_SECONDS=([0-9.]+)", result.stderr)[-1])
     return result.stdout
+
+
+#: How long the last ``_run``'s ``scan()`` took inside the child.
+_last_scan_seconds: list[float] = [0.0]
 
 
 def _engine_env(engine: _MockMemoryEngine, **extra: str) -> dict[str, str]:
@@ -476,7 +489,8 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
             NX_T2_SCAN_TIMEOUT_S="3.0",
         ),
     )
-    elapsed = time.monotonic() - t0
+    assert time.monotonic() - t0 < 30  # the child as a whole: a hang guard only
+    elapsed = _last_scan_seconds[0]
     assert "entry-0" in out  # the freshest entry's title still renders
     assert elapsed < 2.2, (
         f"scan took {elapsed:.2f}s — the get() call was not clamped to "
@@ -510,9 +524,8 @@ def test_data_access_is_bounded_by_what_is_rendered(tmp_path: Path, mock_engine)
             ],
         },
     )
-    t0 = time.monotonic()
     out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
-    elapsed = time.monotonic() - t0
+    elapsed = _last_scan_seconds[0]
 
     assert "entry-0" in out  # the freshest entry (rank 1) still renders
     assert not [r for r in engine.requests if "/v1/memory/all" in r], (
