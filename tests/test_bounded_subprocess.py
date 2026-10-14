@@ -441,6 +441,40 @@ class TestJobHandleClosesOnEveryOutcome:
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="drives a fake kernel32 on a non-Windows host (the fixture's own teardown check misreads real Windows "
+    "pids, as it does for TestJobHandleClosesOnEveryOutcome); the real-Windows evidence is "
+    "tests/mcp/test_setup_tools.py::test_the_real_servers_setup_detaches_a_run_that_outlives_the_call",
+)
+class TestUncontained:
+    """``contained=False`` (nexus-sv2wx.16): a caller whose child must outlive the
+    call. ``contain`` puts the child in a KILL_ON_JOB_CLOSE job with no breakaway
+    and ``run_bounded`` closes it on return, which would kill what the child
+    started, so such a caller asks for no job at all."""
+
+    def test_no_job_is_created_or_assigned(self, windows_shaped_real_spawn) -> None:
+        fake = windows_shaped_real_spawn
+        done = run_bounded([sys.executable, "-c", "print('ok')"], timeout=10, contained=False)
+        assert done.stdout.strip() == "ok"
+        names = {call[0] for call in fake.calls}
+        assert not names & {"CreateJobObjectW", "AssignProcessToJobObject", "SetInformationJobObject"}, fake.calls
+        assert not fake.closed_handles, "nothing was opened, so nothing may be closed"
+
+    def test_contained_is_the_default(self, windows_shaped_real_spawn) -> None:
+        fake = windows_shaped_real_spawn
+        run_bounded([sys.executable, "-c", "print('ok')"], timeout=10)
+        assert any(call[0] == "AssignProcessToJobObject" for call in fake.calls)
+
+    def test_a_timeout_still_kills_the_direct_child(self, windows_shaped_real_spawn) -> None:
+        fake = windows_shaped_real_spawn
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                run_bounded([sys.executable, "-c", "import time; time.sleep(999)"], timeout=0.2, contained=False)
+        finally:
+            reap_live_children(fake.opened_pids())
+
+
 def test_run_bounded_still_succeeds_when_win_job_raises(
     windows_shaped_real_spawn,
 ) -> None:

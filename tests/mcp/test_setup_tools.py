@@ -47,9 +47,12 @@ def _load(path: Path, name: str) -> Any:
     return module
 
 
+NX_SETUP: Any = _load(_NX_SETUP, "nx_setup_for_setup_tools_tests")
+
+
 @pytest.fixture(scope="module")
 def nx_setup_module() -> Any:
-    return _load(_NX_SETUP, "nx_setup_for_setup_tools_tests")
+    return NX_SETUP
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +63,7 @@ def standin_module() -> Any:
 def _view(**fields: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "state": "none", "live": False, "terminal": False, "not_now": False,
-        "next": "Call setup with a mode (local, cli-only or not-now).",
+        "next": NX_SETUP._NEXT_NONE,
     }
     base.update(fields)
     base["terminal"] = base["state"] in ("done", "doctor-failed", "failed", "unsupported")
@@ -68,29 +71,30 @@ def _view(**fields: Any) -> dict[str, Any]:
 
 
 RUNNING_BUILD = _view(
-    state="running", live=True, stage="build", mode="local", log="/cfg/setup/setup.log",
+    state="running", live=True, stage="build", mode="local", autostart=True, log="/cfg/setup/setup.log",
     message="running: build", next="Call setup_status to follow it.", started=True,
 )
 RUNNING_INIT = {**RUNNING_BUILD, "stage": "init", "message": "running: init"}
 DONE = _view(
-    state="done", stage="verify", mode="local", log="/cfg/setup/setup.log",
+    state="done", stage="verify", mode="local", autostart=True, log="/cfg/setup/setup.log",
     message="Nexus is installed and nx doctor passes.", next="Reconnect the nexus server or start a new session.",
 )
 FAILED = _view(
-    state="failed", stage="build", failed_step="build", mode="local", log="/cfg/setup/setup.log",
-    message="the build exited 1.", next="Call setup again: it resumes at the build step. Log: /cfg/setup/setup.log",
+    state="failed", stage="build", failed_step="build", mode="local", autostart=False, log="/cfg/setup/setup.log",
+    message="the build exited 1.",
+    next="If the user agrees, call setup again: it resumes at the build step. Log: /cfg/setup/setup.log",
 )
 DOCTOR_FAILED = _view(
-    state="doctor-failed", stage="verify", mode="local", log="/cfg/setup/setup.log",
+    state="doctor-failed", stage="verify", mode="local", autostart=True, log="/cfg/setup/setup.log",
     message="nx doctor reported problems.", next="Run `nx doctor` in a terminal to see the failing rows.",
     doctor_failing=["[✗] T3 service: not reachable"],
 )
 INTERRUPTED = _view(
-    state="interrupted", stage="init", mode="local", log="/cfg/setup/setup.log",
-    next="Setup was interrupted. Call setup again: it resumes. Log: /cfg/setup/setup.log",
+    state="interrupted", stage="init", mode="cli-only", autostart=False, log="/cfg/setup/setup.log",
+    next="Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. Log: /cfg/setup/setup.log",
 )
 UNSUPPORTED = _view(
-    state="unsupported", stage="starting", mode="local", log="/cfg/setup/setup.log",
+    state="unsupported", stage="starting", mode="local", autostart=False, log="/cfg/setup/setup.log",
     message="setup cannot detach on this host.", next="Install Nexus in a terminal. Log: /cfg/setup/setup.log",
 )
 NONE = _view()
@@ -166,6 +170,13 @@ def test_the_descriptions_tell_the_model_to_ask_first_and_name_both_fixes() -> N
     assert "minutes" in status, "the description must say how long a run takes"
 
 
+def test_the_download_sizes_are_ceilings_not_promises() -> None:
+    """A provisioned service downloads nothing: the description says "up to"."""
+    text = _tools()["setup"].description
+    assert "up to about 1.3 GB" in text and "up to about 0.7 GB" in text
+    assert "about 1.3 GB to download" not in text.replace("up to about 1.3 GB", "")
+
+
 # -- the instructions notice --------------------------------------------------------
 
 
@@ -182,7 +193,7 @@ def test_no_usable_service_is_said_through_the_instructions(monkeypatch: pytest.
     assert apply_setup_notice(server) is True
     text = server._mcp_server.instructions
     assert "no usable" in text.lower() and "setup" in text and "/conexus:setup" in text
-    assert "ask the user" in text.lower()
+    assert "act only on the user's answer" in text
 
 
 def test_a_usable_service_leaves_the_instructions_alone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,31 +235,183 @@ def test_main_applies_the_setup_notice() -> None:
     assert "apply_setup_notice" in called
 
 
-def test_usable_service_follows_the_endpoint_definition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The record's definition: a saved or exported service URL, or a live local
-    lease. Nothing set, nothing usable. Reads no network."""
-    for name in ("NX_SERVICE_URL", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+def test_the_notice_is_passive_and_asks_nothing_every_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record's form: what is missing, what fixes it, and that the user decides.
+    It does not tell the model to put a question to the user at every server start."""
+    _service(monkeypatch, False)
+    text = setup_tools.no_service_notice() or ""
+    assert "Ask the user whether" not in text and "ask the user" not in text.lower()
+    assert "no usable service" in text and "/conexus:setup" in text and "setup tool" in text and "setup_status" in text
+    assert "act only on the user's answer" in text
+
+
+def test_the_notice_does_not_start_or_read_the_setup_process(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    """Item 5: the not-now marker is not routed through the server start. The
+    notice is built from the endpoint alone, so it starts nothing, and not-now says
+    on the real server what it does there (see the not-now tests)."""
+    from nexus.mcp._first_run import apply_setup_notice
+
+    _service(monkeypatch, False)
+    server = _Server()
+    with mock.patch.object(setup_tools, "run_bounded") as run:
+        assert apply_setup_notice(server) is True
+    run.assert_not_called()
+    assert recorder.calls() == []
+
+
+# -- usable_service is the record's definition: resolve_service_endpoint() ----------------
+
+_ENDPOINT_ENV = ("NX_SERVICE_URL", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN")
+
+
+@pytest.fixture
+def endpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """An empty config directory, no endpoint variable and no lease."""
+    from nexus.db import service_endpoint
+
+    for name in _ENDPOINT_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    config = tmp_path / "endpoint-config"
+    config.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+    monkeypatch.setattr(service_endpoint, "discover_lease", lambda: (None, None))
+    return config
+
+
+def _lease(monkeypatch: pytest.MonkeyPatch, url: str = "http://127.0.0.1:4599", token: str | None = "lease-token") -> None:
+    from nexus.db import service_endpoint
+
+    monkeypatch.setattr(service_endpoint, "discover_lease", lambda: (url, token))
+
+
+def _saved(config: Path, **credentials: str) -> None:
+    body = "credentials:\n" + "".join(f"  {key}: {value}\n" for key, value in credentials.items())
+    (config / "config.yml").write_text(body, encoding="utf-8")
+
+
+def test_nothing_set_is_not_usable(endpoint: Path) -> None:
     assert setup_tools.usable_service() is False
+
+
+def test_a_service_url_with_no_resolvable_token_is_not_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case the earlier definition got wrong: every tool that needs storage
+    raises RuntimeError there, so setup must not say nothing is missing."""
+    from nexus.db.service_endpoint import resolve_service_endpoint
+
     monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
+    with pytest.raises(RuntimeError):
+        resolve_service_endpoint()
+    assert setup_tools.usable_service() is False
+    monkeypatch.delenv("NX_SERVICE_URL")
+    _saved(endpoint, service_url="https://example.invalid")
+    assert setup_tools.usable_service() is False
+
+
+def test_a_service_url_with_a_token_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "t")
     assert setup_tools.usable_service() is True
+
+
+def test_a_saved_service_url_and_token_are_usable(endpoint: Path) -> None:
+    _saved(endpoint, service_url="https://example.invalid", service_token="t")
+    assert setup_tools.usable_service() is True
+
+
+def test_a_service_url_with_a_lease_token_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
+    _lease(monkeypatch)
+    assert setup_tools.usable_service() is True
+    _lease(monkeypatch, token=None)
+    assert setup_tools.usable_service() is False
+
+
+def test_a_service_url_with_a_mint_credential_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
+    monkeypatch.setenv("NX_MINT_TOKEN", "m")
+    assert setup_tools.usable_service() is True
+
+
+def test_the_host_port_and_token_variables_are_usable_together_and_not_apart(
+    endpoint: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4599")
+    assert setup_tools.usable_service() is False, "no token"
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "t")
+    assert setup_tools.usable_service() is True
+    monkeypatch.delenv("NX_SERVICE_HOST")
+    assert setup_tools.usable_service() is True, "the host defaults to 127.0.0.1"
+    monkeypatch.setenv("NX_SERVICE_PORT", "not-a-number")
+    assert setup_tools.usable_service() is False
+
+
+def test_a_live_local_lease_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _lease(monkeypatch)
+    assert setup_tools.usable_service() is True
+
+
+def test_any_failure_to_resolve_is_not_usable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.db import service_endpoint
+
+    def boom(**_: Any) -> tuple[str, str]:
+        raise ValueError("anything")
+
+    monkeypatch.setattr(service_endpoint, "resolve_service_endpoint", boom)
+    assert setup_tools.usable_service() is False
+
+
+def test_usable_service_asks_the_resolver_the_clients_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.db import service_endpoint
+
+    calls: list[dict[str, Any]] = []
+
+    def fake(**kwargs: Any) -> tuple[str, str]:
+        calls.append(kwargs)
+        return "http://x", "t"
+
+    monkeypatch.setattr(service_endpoint, "resolve_service_endpoint", fake)
+    assert setup_tools.usable_service() is True
+    assert calls == [{}], "no wait budget: the check must not wait for a respawning supervisor"
+
+
+def test_the_usable_service_docstring_does_not_claim_no_network() -> None:
+    """Lease discovery can probe the recorded service's /health on the loopback."""
+    doc = (setup_tools.usable_service.__doc__ or "").lower()
+    assert "no network request" not in doc and "makes no network" not in doc
+    assert "/health" in doc
 
 
 # -- setup: no script ---------------------------------------------------------------
 
 
+#: What each mode says when this server cannot start the setup process.
+_NO_SCRIPT_TEXT = {
+    "local": ("nx init", "nothing was started"),
+    "cli-only": ("nothing to install",),
+    "not-now": ("nothing was recorded", "do not ask the user again"),
+}
+
+
 @pytest.mark.parametrize("mode", ["local", "cli-only", "not-now"])
 def test_without_nx_setup_script_setup_starts_no_process(
-    monkeypatch: pytest.MonkeyPatch, mode: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
 ) -> None:
     monkeypatch.delenv(setup_tools.SETUP_SCRIPT_ENV, raising=False)
+    rec = Recorder(tmp_path / "unused")
+    rec.views(status=NONE, start=RUNNING_BUILD, **{"not-now": _view(not_now=True)})
     _service(monkeypatch, False)
-    with mock.patch.object(setup_tools, "run_bounded") as run, patch_in("nexus.mcp.setup_tools", "subprocess.Popen") as popen:
-        text = _call("setup", mode=mode)
+    with mock.patch.object(setup_tools, "run_bounded") as run, patch_in("nexus.mcp.setup_tools", "subprocess.Popen") as popen, \
+            patch_in("nexus.mcp.setup_tools", "subprocess.run") as plain_run:
+        text = _call("setup", mode=mode, autostart=True)
     run.assert_not_called()
     popen.assert_not_called()
-    assert "nx init" in text if mode == "local" else text
+    plain_run.assert_not_called()
+    assert rec.calls() == []
+    lowered = text.lower()
+    for fragment in _NO_SCRIPT_TEXT[mode]:
+        assert fragment in lowered, (mode, fragment, text)
+    assert "not started by the conexus plugin's launcher" in lowered or mode == "cli-only", text
 
 
 def test_without_nx_setup_script_status_starts_no_process_and_gives_the_commands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -261,12 +424,55 @@ def test_without_nx_setup_script_status_starts_no_process_and_gives_the_commands
 
 
 def test_a_script_path_that_is_not_a_file_is_treated_as_not_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv(setup_tools.SETUP_SCRIPT_ENV, str(tmp_path / "missing.py"))
+    monkeypatch.setenv(setup_tools.SETUP_SCRIPT_ENV, str(tmp_path / "nx_setup.py"))
     _service(monkeypatch, False)
     with mock.patch.object(setup_tools, "run_bounded") as run:
         text = _call("setup", mode="local")
     run.assert_not_called()
     assert "nx init" in text
+
+
+def _script_env_case(tmp_path: Path, case: str) -> str:
+    """The value of NX_SETUP_SCRIPT for one kind of wrong answer. Each names a real
+    file or directory that would answer in the recorder's way, were it started."""
+    rec = Recorder(tmp_path / "tools")
+    rec.views(status=NONE, start=RUNNING_BUILD, **{"not-now": _view(not_now=True)})
+    if case == "wrong basename":
+        other = tmp_path / "tools" / "other.py"
+        other.write_text(rec.path.read_text(encoding="utf-8"), encoding="utf-8")
+        return str(other)
+    if case == "right basename in a directory":
+        folder = tmp_path / "dir" / "nx_setup.py"
+        folder.mkdir(parents=True)
+        return str(folder)
+    if case == "case differs":
+        other = tmp_path / "tools" / "NX_SETUP.PY"
+        if other.exists() and other.samefile(rec.path):  # a case-insensitive file system
+            pytest.skip("this file system folds case: the name is the same file")
+        other.write_text(rec.path.read_text(encoding="utf-8"), encoding="utf-8")
+        return str(other)
+    if case == "relative":
+        return "nx_setup.py"
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", ["wrong basename", "right basename in a directory", "case differs", "relative"])
+def test_a_script_variable_that_is_not_an_absolute_nx_setup_py_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str,
+) -> None:
+    """The variable is inherited by every child of the launcher. Only the plugin's
+    own file name, as an absolute path to a file, is ever started."""
+    value = _script_env_case(tmp_path, case)
+    monkeypatch.setenv(setup_tools.SETUP_SCRIPT_ENV, value)
+    if case == "relative":
+        monkeypatch.chdir(tmp_path / "tools")
+    _service(monkeypatch, False)
+    assert setup_tools.setup_script() is None
+    with mock.patch.object(setup_tools, "run_bounded") as run:
+        assert "nx init" in _call("setup", mode="local")
+        assert "nx init" in _call("setup_status")
+    run.assert_not_called()
+    assert Recorder(tmp_path / "tools").calls() == []
 
 
 # -- setup: with the script ---------------------------------------------------------
@@ -331,6 +537,23 @@ def test_not_now_says_it_installed_nothing(monkeypatch: pytest.MonkeyPatch, reco
     _service(monkeypatch, False)
     text = _call("setup", mode="not-now")
     assert "not now" in text.lower() and "nothing was installed" in text.lower()
+
+
+def test_not_now_promises_nothing_this_server_does_not_do(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    """Item 5. On the real server the marker changes nothing the server says: the
+    instructions note about a missing service describes the machine, and is built
+    without reading the marker. The text says so, and does not claim to stop it."""
+    from nexus.mcp._first_run import apply_setup_notice
+
+    _service(monkeypatch, False)
+    text = _call("setup", mode="not-now")
+    lowered = text.lower()
+    assert "stops asking" not in lowered and "stop asking" not in lowered
+    assert "not by this server" in lowered and "stays" in lowered, text
+    assert "/conexus:setup" in text
+    server = _Server()
+    assert apply_setup_notice(server) is True, "the notice is unchanged after not-now"
+    assert "no usable service" in server._mcp_server.instructions
 
 
 def test_an_error_view_is_an_error_result(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
@@ -420,6 +643,140 @@ def test_a_live_run_is_reported_even_when_a_service_already_answers(monkeypatch:
         text = _call(tool, **args)
         assert "in progress" in text and "init" in text, (tool, text)
     assert all(call[0] == "status" for call in recorder.calls()), "setup must start nothing while a run is live"
+
+
+_TROUBLE_STATES = ("doctor-failed", "failed", "interrupted", "unsupported")
+
+
+@pytest.mark.parametrize("state", _TROUBLE_STATES)
+def test_a_run_that_went_wrong_is_reported_even_when_a_service_answers(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder, state: str,
+) -> None:
+    """A service that answers is not proof the last run finished: the log and the
+    failing rows are what the user needs, and "nothing is missing" would hide them."""
+    _service(monkeypatch, True)
+    view = VIEWS[state]
+    recorder.views(status=view, start=view)
+    for tool, args in (("setup_status", {}), ("setup", {"mode": "local"}), ("setup", {"mode": "not-now"})):
+        text = _call(tool, **args)
+        assert "nothing is missing" not in text.lower(), (tool, state, text)
+        assert view["log"] in text and view["next"] in text, (tool, state, text)
+        if view.get("message"):
+            assert view["message"] in text
+        assert "started nothing" in text.lower() or tool == "setup_status", (tool, text)
+    assert all(call[0] == "status" for call in recorder.calls()), "setup must start nothing while a service answers"
+
+
+@pytest.mark.parametrize("state", ["done", "none"])
+def test_a_clean_last_run_is_nothing_missing_when_a_service_answers(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder, state: str,
+) -> None:
+    _service(monkeypatch, True)
+    recorder.views(status=VIEWS[state])
+    assert "nothing is missing" in _call("setup_status").lower()
+    assert "nothing is missing" in _call("setup", mode="local").lower()
+
+
+def test_a_status_the_script_cannot_give_does_not_hide_a_working_service(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    _service(monkeypatch, True)
+    recorder.views(_exit=3)
+    assert "nothing is missing" in _call("setup_status").lower()
+    assert "nothing is missing" in _call("setup", mode="local").lower()
+
+
+# -- the real server's spawn of the script is not contained ---------------------------------
+
+
+def test_the_real_servers_spawn_of_the_script_goes_through_no_containment(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder,
+) -> None:
+    """Ship-blocker (Windows): ``run_bounded`` normally puts the child in a
+    KILL_ON_JOB_CLOSE job with no breakaway and closes it on return, which refuses
+    ``detach`` and would kill the detached build anyway. The tools ask for no job.
+    POSIX has no job to skip, so the observable here is that the containment hook is
+    never reached; the survival test below is the behavioural one."""
+    from nexus.util import process_group
+
+    reached: list[object] = []
+    monkeypatch.setattr(process_group, "contain", lambda proc: reached.append(proc))
+    _service(monkeypatch, False)
+    _call("setup_status")
+    _call("setup", mode="local")
+    _call("setup", mode="not-now")
+    assert recorder.calls() == [["status"], ["start", "--mode", "local"], ["not-now"]]
+    assert reached == [], "the setup script was spawned inside a job object"
+
+
+def test_the_tools_ask_run_bounded_for_no_containment(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    _service(monkeypatch, False)
+    with mock.patch.object(setup_tools, "run_bounded") as run:
+        run.return_value.stdout = json.dumps(NONE)
+        run.return_value.returncode = 0
+        _call("setup_status")
+    assert run.call_args.kwargs.get("contained") is False
+
+
+_GRANDCHILD_SCRIPT = """\
+import json, os, subprocess, sys
+here = os.path.dirname(os.path.abspath(__file__))
+code = "import time; time.sleep(1.5); open(%r, 'w').write('alive')" % os.path.join(here, "survived")
+subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+sys.stdout.write(json.dumps({"state": "none", "live": False, "terminal": False, "not_now": False, "next": "x"}) + "\\n")
+"""
+
+
+def test_what_the_script_starts_outlives_the_call_that_ran_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The behaviour the detach needs. The script starts a child that sleeps past
+    the call's return, as ``nx_setup.py start`` does with its build. On Windows a
+    contained script would have the child killed when the call's job closed; the
+    marker is written only if it lived."""
+    import time
+
+    folder = tmp_path / "grandchild"
+    folder.mkdir()
+    script = folder / "nx_setup.py"
+    script.write_text(_GRANDCHILD_SCRIPT, encoding="utf-8")
+    monkeypatch.setenv(setup_tools.SETUP_SCRIPT_ENV, str(script))
+    _service(monkeypatch, False)
+    _call("setup_status")
+    marker = folder / "survived"
+    assert not marker.exists(), "the child ran past the call before the check"
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not marker.exists():
+        time.sleep(0.2)
+    assert marker.read_text(encoding="utf-8") == "alive", "the child the script started did not survive the call's return"
+
+
+def test_the_real_servers_setup_detaches_a_run_that_outlives_the_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """End to end through the real ``nx_setup.py``: ``setup`` with mode cli-only
+    returns while the stand-in ``uv`` is still building, and the run it detached
+    finishes ``done`` afterwards. On Windows a contained call has the detach refused
+    (state ``unsupported``, the job has no breakaway) or the build killed when the
+    call's job closed; neither happens here."""
+    from tests.hooks.test_nx_setup import Box
+
+    box = Box(tmp_path / "box")
+    for name, value in (
+        ("PATH", str(box.bin)), ("NX_TOOLS_DIR", str(box.tools)), ("NEXUS_CONFIG_DIR", str(box.config)),
+        ("HOME", str(box.home)), ("USERPROFILE", str(box.home)), ("FAKE_LOG", str(box.log)),
+        ("FAKE_BEHAVE", str(box.behave_file)), (setup_tools.SETUP_SCRIPT_ENV, str(_NX_SETUP)),
+    ):
+        monkeypatch.setenv(name, value)
+    for name in ("NX_CONFIG_DIR", *_ENDPOINT_ENV):
+        monkeypatch.delenv(name, raising=False)
+    box.behave([box.uv_builds_nx(sleep=2.0)])
+    _service(monkeypatch, False)
+    text = _call("setup", mode="cli-only")
+    assert "Setup started in mode cli-only" in text, text
+    assert "unsupported" not in text.lower() and "cannot run on this host" not in text.lower(), text
+    assert box.status_file()["state"] == "running", "the call returned after the run, not while it ran"
+    done = box.wait_terminal(120)
+    assert done["state"] == "done", (done, box.read_log())
+    assert [call["args"][:2] for call in box.calls("uv")][:1] == [["tool", "run"]], box.argvs()
 
 
 # -- status -------------------------------------------------------------------------
@@ -530,6 +887,108 @@ def test_the_tools_module_never_resolves_a_config_directory_or_opens_a_file_for_
     assert not names & {"nexus_config_dir", "config_dir", "setup_dir", "Path", "open", "mkdir", "makedirs", "write_text"}, names
 
 
+# -- consent in the text the tools return --------------------------------------------------
+
+#: A sentence that tells the model to call ``setup`` (not ``setup_status``) and does not
+#: forbid it.
+_CALL_SETUP = re.compile(r"(?<!not )(?<!n't )\bcall (?:the )?`?setup\b(?!_)", re.IGNORECASE)
+#: The clause that makes such a sentence conditional on the user.
+_ASK_FIRST = re.compile(
+    r"ask the user|if the user (?:agrees|asks|says|chooses|changes)|if they agree|when the user|only if the user|"
+    r"the user(?:'s)? (?:answer|choice)",
+    re.IGNORECASE,
+)
+
+
+def _string_literals(path: Path) -> list[str]:
+    """Every string a module can hand to the model, docstrings excluded; an f-string
+    is its constant parts with ``{}`` for each field."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docstrings.add(id(body[0].value))
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            found.append("".join(v.value if isinstance(v, ast.Constant) else "{}" for v in node.values))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            found.append(node.value)
+    return found
+
+
+def _unconsented(texts: list[str]) -> list[str]:
+    return [t for t in texts if _CALL_SETUP.search(t) and not _ASK_FIRST.search(t)]
+
+
+def test_no_string_in_the_three_files_tells_the_model_to_call_setup_without_the_ask_first_clause() -> None:
+    """Item 4. The ``next`` strings in ``nx_setup.py`` (the none, interrupted,
+    failed, error and refused-mode texts), the renderers and the tool text. The
+    scan is over source, so a string no test happens to render is covered too."""
+    for path in (_NX_SETUP, _STANDIN, _TOOLS_SOURCE):
+        texts = _string_literals(path)
+        assert any(_CALL_SETUP.search(t) for t in texts), f"{path.name}: the scan found no 'call setup' string at all"
+        assert _unconsented(texts) == [], path.name
+
+
+def test_the_scan_sees_a_string_that_lacks_the_clause() -> None:
+    assert _unconsented(["Call setup again."]) == ["Call setup again."]
+    assert _unconsented(["If the user agrees, call setup again."]) == []
+    assert _unconsented(["Call setup_status to follow it."]) == []
+    assert _unconsented(["do not call setup again while it runs"]) == []
+
+
+@pytest.mark.parametrize("server", ["real", "stand-in"])
+@pytest.mark.parametrize("started", [None, True, False])
+@pytest.mark.parametrize("autostart", [True, False])
+@pytest.mark.parametrize("state", sorted(VIEWS))
+def test_no_rendered_view_tells_the_model_to_call_setup_without_the_clause(
+    standin_module: Any, nx_setup_module: Any, state: str, autostart: bool, started: bool | None, server: str,
+) -> None:
+    render = setup_tools.render if server == "real" else standin_module.render
+    view = {**VIEWS[state], "autostart": autostart}
+    text = render(view, started=started)
+    assert _unconsented(text.split("\n")) == [], text
+
+
+@pytest.mark.parametrize("server", ["real", "stand-in"])
+@pytest.mark.parametrize("state", [s for s in sorted(VIEWS) if s not in ("none", "error")])
+def test_every_view_with_a_recorded_choice_shows_the_mode_and_the_autostart(
+    standin_module: Any, state: str, server: str,
+) -> None:
+    render = setup_tools.render if server == "real" else standin_module.render
+    for autostart, shown in ((True, "autostart yes"), (False, "autostart no")):
+        view = {**VIEWS[state], "autostart": autostart}
+        text = render(view)
+        assert f"Recorded choice: mode {view['mode']}, {shown}." in text, text
+        if state in ("failed", "interrupted", "doctor-failed", "unsupported"):
+            assert "ask the user first" in text and "same choice" in text and f"mode {view['mode']}" in text, text
+            assert ("autostart true" in text) is autostart, text
+
+
+@pytest.mark.parametrize("server", ["real", "stand-in"])
+def test_a_view_with_no_recorded_choice_shows_none(standin_module: Any, server: str) -> None:
+    render = setup_tools.render if server == "real" else standin_module.render
+    for state in ("none", "error"):
+        assert "Recorded choice" not in render(VIEWS[state])
+
+
+def test_the_real_nx_setup_views_pass_the_clause_check(nx_setup_module: Any, tmp_path: Path) -> None:
+    """The ``none`` and ``interrupted`` texts as the script computes them, not as
+    the test copies them."""
+    none = nx_setup_module.status_view(tmp_path / "empty")
+    assert _unconsented([none["next"]]) == []
+    setup = tmp_path / "setup"
+    setup.mkdir()
+    nx_setup_module.write_status(setup, {"state": "running", "stage": "init", "mode": "local", "autostart": True})
+    interrupted = nx_setup_module.status_view(setup)
+    assert interrupted["state"] == "interrupted"
+    assert _unconsented([interrupted["next"]]) == []
+    assert "same mode" in interrupted["next"]
+
+
 # -- stand-in and real server agree ----------------------------------------------------
 
 
@@ -591,6 +1050,103 @@ def test_both_servers_hold_the_same_stage_table_modes_and_texts(standin_module: 
     assert setup_tools.NOT_NOW_TEXT == standin_module.NOT_NOW_TEXT
     assert setup_tools.mode_refusal("cloud") == standin_module.mode_refusal("cloud")
     assert setup_tools.mode_refusal("bogus") == standin_module.mode_refusal("bogus")
+    assert setup_tools._DEFAULT_WAIT == standin_module._DEFAULT_WAIT
+    assert setup_tools._DOCTOR_ROWS_SHOWN == standin_module._DOCTOR_ROWS_SHOWN
+    assert setup_tools._HEADS == standin_module._HEADS
+    assert setup_tools._RESUMABLE == standin_module._RESUMABLE
+
+
+@pytest.mark.parametrize("started", [None, True])
+def test_both_servers_agree_on_an_unknown_stage_and_a_long_doctor_list(standin_module: Any, started: bool | None) -> None:
+    """The generic wait for a stage the table lacks, and the cap on listed rows,
+    were in neither earlier comparison: each copy could drift alone."""
+    rows = [f"[x] row {n}" for n in range(12)]
+    view = {**RUNNING_BUILD, "stage": "a-stage-the-table-lacks", "doctor_failing": rows}
+    real, standin = setup_tools.render(view, started=started), standin_module.render(view, started=started)
+    assert real == standin
+    assert "no sooner than 30 seconds" in real and "a minute or so" in real
+    assert real.count("[x] row") == setup_tools._DOCTOR_ROWS_SHOWN == 10
+    assert "[x] row 10" not in real
+
+
+@pytest.fixture
+def standin_with(standin_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Recorder:
+    """A recording script wired into the STAND-IN, which finds its script beside
+    itself and so is pointed at one through its ``setup_script``."""
+    rec = Recorder(tmp_path / "standin-recorder")
+    monkeypatch.setattr(standin_module, "setup_script", lambda: str(rec.path))
+    return rec
+
+
+_NO_SERVICE_PREFIX = "No usable Nexus service was found on this machine.\n"
+
+
+def _answer(call: Any) -> tuple[str, str]:
+    """("ok" | "error", text) for one tool call, whichever exception class it raises."""
+    try:
+        return "ok", call()
+    except Exception as exc:  # noqa: BLE001 -- each server has its own SetupError class
+        if type(exc).__name__ != "SetupError":
+            raise
+        return "error", str(exc)
+
+
+@pytest.mark.parametrize("state", sorted(VIEWS))
+def test_both_servers_answer_setup_status_alike_for_every_state(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder, standin_with: Recorder, standin_module: Any, state: str,
+) -> None:
+    """Behaviour, not constants: the same script prints the same view and each
+    server's ``setup_status`` is read.
+
+    INTENTIONALLY DIFFERENT, and removed before comparing: the real server first
+    asks whether a service is usable and, finding none, leads with "No usable Nexus
+    service was found on this machine."; the stand-in has no such question and,
+    for a ``none`` state, leads with "Nexus is not installed". Everything after the
+    lead (stage, message, doctor rows, choice, next, log, wait) must be identical.
+    The real server alone says "Nothing is missing" for a usable service, and its
+    answer for a script it cannot start is the terminal commands for a machine with
+    a CLI; the stand-in's is the install commands for a machine without one."""
+    _service(monkeypatch, False)
+    view = VIEWS[state]
+    for rec in (recorder, standin_with):
+        rec.views(status=view)
+    real = _answer(setup_tools.run_status)
+    standin = _answer(standin_module.run_status)
+    assert real[0] == standin[0], (real, standin)
+    real_text = real[1].removeprefix(_NO_SERVICE_PREFIX)
+    standin_text = standin[1].removeprefix(standin_module.NOT_INSTALLED + "\n")
+    assert real_text == standin_text, (state, real_text, standin_text)
+    assert recorder.calls() == standin_with.calls() == [["status"]]
+
+
+_SETUP_CASES = [
+    ("local", True, ["start", "--mode", "local", "--autostart"]),
+    ("local", False, ["start", "--mode", "local"]),
+    ("cli-only", True, ["start", "--mode", "cli-only"]),
+    ("not-now", False, ["not-now"]),
+]
+
+
+@pytest.mark.parametrize(("mode", "autostart", "argv"), _SETUP_CASES)
+@pytest.mark.parametrize("state", sorted(VIEWS))
+def test_both_servers_answer_setup_alike_for_every_state_and_start_the_same_command(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder, standin_with: Recorder, standin_module: Any,
+    state: str, mode: str, autostart: bool, argv: list[str],
+) -> None:
+    """Same recording script on both, same view for the command; the text and the
+    command line each server produced are equal. Intentionally different, and not
+    exercised here: the real server answers "Nothing is missing" first when a
+    service is usable (``_service`` pins it unusable) and has no script-less path
+    that matches the stand-in's. Argument validation is the framework's on the real
+    server and hand-rolled in the stand-in (tests above)."""
+    _service(monkeypatch, False)
+    view = {**VIEWS[state], "started": state == "running"}
+    for rec in (recorder, standin_with):
+        rec.views(status=NONE, start=view, **{"not-now": view})
+    real = _answer(lambda: setup_tools.run_setup(mode, autostart))
+    standin = _answer(lambda: standin_module.run_setup({"mode": mode, "autostart": autostart}))
+    assert real == standin, (real, standin)
+    assert recorder.calls() == standin_with.calls() == [argv]
 
 
 def test_every_stage_nx_setup_reports_has_a_wait(nx_setup_module: Any) -> None:

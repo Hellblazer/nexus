@@ -258,9 +258,9 @@ _AUTOSTART_NOTE = (
     "A usable service was already running, so the login unit was not registered. "
     "To start the service at login, run `nx daemon service install --autostart` in a terminal."
 )
-_NEXT_NONE = "Call setup with a mode (local, cli-only or not-now)."
+_NEXT_NONE = "Ask the user which they want (local, cli-only or not-now), then call setup with that mode."
 _REFUSED_MODE = "This build of the plugin cannot set up a managed service yet: it has no credentials page for one."
-_REFUSED_MODE_NEXT = "Call setup with mode local or cli-only."
+_REFUSED_MODE_NEXT = "Ask the user to choose local or cli-only, then call setup with that mode."
 
 
 class DetachUnsupported(Exception):
@@ -763,7 +763,7 @@ class _Run:
         record = {
             "state": FAILED, "stage": self.stage, "failed_step": self.stage, "mode": self.mode, "log": str(self.log_path),
             "updated_at": _now(), "message": message,
-            "next": f"Free disk space or fix the permissions on {self.setup}, then call setup again. Log: {self.log_path}",
+            "next": f"Free disk space or fix the permissions on {self.setup}, then, if the user agrees, call setup again. Log: {self.log_path}",
         }
         with contextlib.suppress(Exception):
             _write_private_json(self.setup, _ERROR_FILE, record)
@@ -773,7 +773,7 @@ class _Run:
     def fail(self, step: str, message: str) -> int:
         return self.end(
             FAILED, message,
-            f"Call setup again: it resumes at the {step} step. Log: {self.log_path}",
+            f"If the user agrees, call setup again: it resumes at the {step} step. Log: {self.log_path}",
             failed_step=step,
         )
 
@@ -914,7 +914,7 @@ def _execute(run: _Run) -> int:
     if run.mode == MODE_CLI_ONLY:
         return run.end(
             DONE, "The Nexus CLI is installed. No service is set up.",
-            "Reconnect the nexus server or start a new session. To set up a service, call setup with mode local.",
+            "Reconnect the nexus server or start a new session. To set up a service, ask the user first; if they agree, call setup with mode local.",
         )
 
     config = config_dir()
@@ -1202,7 +1202,7 @@ def status_view(setup: Path) -> dict[str, Any]:
     state = data.get("state", NONE)
     if state == RUNNING and not live:
         state = INTERRUPTED
-        data["next"] = f"Setup was interrupted. Call setup again: it resumes. Log: {setup / _LOG}"
+        data["next"] = f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. Log: {setup / _LOG}"
     data.setdefault("next", _NEXT_NONE)
     data.update(state=state, live=live, terminal=state in TERMINAL_STATES, not_now=(setup / _MARKER).exists())
     if setup.exists():
@@ -1214,7 +1214,7 @@ def _error_view(message: str) -> dict[str, Any]:
     """What a command prints when it could not do its work."""
     return {
         "state": ERROR, "started": False, "live": False, "terminal": False, "not_now": False,
-        "message": message, "next": "Nothing was started. Fix the problem the message names, then call setup again.",
+        "message": message, "next": "Nothing was started. Fix the problem the message names, then, if the user agrees, call setup again.",
     }
 
 
@@ -1274,7 +1274,7 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
         except OSError as exc:
             base.update(
                 state=FAILED, failed_step="start", message=f"the setup process could not be started: {exc}",
-                next="Call setup again.",
+                next="If the user agrees, call setup again.",
             )
             write_status(setup, base)
             return {**status_view(setup), "started": False}

@@ -242,6 +242,7 @@ def run_bounded(
     stdout: IO[Any] | int = subprocess.PIPE,
     stderr: IO[Any] | int = subprocess.PIPE,
     extra_creationflags: int = 0,
+    contained: bool = True,
 ) -> subprocess.CompletedProcess[Any]:
     """``subprocess.run(capture_output=True, timeout=...)`` that is actually bounded.
 
@@ -268,6 +269,15 @@ def run_bounded(
     ``CREATE_NEW_PROCESS_GROUP`` this helper always sets: the way a caller asks for
     ``DETACHED_PROCESS`` and the like without giving up the group kill
     (RDR-224, nexus-f9bgu.33: the console helper must start with no console).
+
+    *contained* (Windows only; POSIX has no job to skip) is ``True`` by default:
+    the child joins a fresh KILL_ON_JOB_CLOSE job object, which this function closes
+    on EVERY return, killing whatever the child left running. A caller whose child
+    starts something meant to outlive the call (the setup tools start ``nx_setup.py``,
+    which detaches a build; nexus-sv2wx.16) passes ``False``: no job is created, so
+    nothing is killed on return and the child may break away from the caller's own
+    job. A timeout then reaches the direct child only, the same reach as a failed
+    containment.
 
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
@@ -305,7 +315,7 @@ def run_bounded(
     # no-op returning None on POSIX (the process group above already
     # contains the tree) or on any Windows failure (degrades to the
     # single-process reach kill_child_and_descendants already reported).
-    job = contain(proc)
+    job = contain(proc) if contained else None
     try:
         try:
             out, err = proc.communicate(input=input, timeout=timeout)

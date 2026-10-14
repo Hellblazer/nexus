@@ -143,8 +143,14 @@ Both start `conexus/launch/nx_setup.py`, the file the launcher names in the
 `NX_SETUP_SCRIPT` environment variable, with the server's own Python, and read
 its one JSON answer; the server never reads the setup directory. A server that
 was not started by the launcher has no such variable, starts nothing, and
-answers with the terminal commands (`nx init`). When no usable service is found
-the server's `instructions` say so and name both tools. Neither tool is
+answers with the terminal commands (`nx init`). The launcher's value is used
+only if it is an absolute path to a file named `nx_setup.py`. A service is usable
+when the storage clients' own endpoint resolution succeeds (`resolve_service_endpoint`),
+so a saved `service_url` with no resolvable token is not usable. A last run that
+failed, was interrupted, ended with `nx doctor` problems or could not detach is
+reported even when a service answers. When no usable service is found the server's
+`instructions` say what is missing and that the tools fix it, and leave the decision
+to the user; `not-now` does not silence that note on this server. Neither tool is
 auto-approved (see Permission auto-approval below).
 
 ### Hook-tier tools (internal plumbing, RDR-215)

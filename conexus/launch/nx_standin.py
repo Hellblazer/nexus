@@ -132,7 +132,7 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "about 1.3 GB to download), cli-only (the CLI alone, about 0.7 GB; a service can be added later), "
+    "up to about 1.3 GB to download), cli-only (the CLI alone, up to about 0.7 GB to download; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
@@ -203,8 +203,9 @@ CLOUD_REFUSAL: str = (
     "Setting up a managed service is not offered by this build yet. Choose local, cli-only or not-now."
 )
 NOT_NOW_TEXT: str = (
-    'Recorded "not now": nothing was installed, and the session-start notice stops asking. '
-    "Call setup with mode local or cli-only if the user changes their mind."
+    'Recorded "not now": nothing was installed. The record is read by the plugin\'s session-start check, '
+    "not by this server, so any note from this server that no service is set up stays: it describes the machine. "
+    "The setup tool and /conexus:setup still work if the user changes their mind."
 )
 
 _HEADS: dict[str, str] = {
@@ -217,6 +218,24 @@ _HEADS: dict[str, str] = {
     "error": "Setup could not be started or read.",
 }
 _DOCTOR_ROWS_SHOWN = 10
+
+#: States where calling setup again would resume the recorded choice.
+_RESUMABLE: tuple[str, ...] = ("failed", "interrupted", "doctor-failed", "unsupported")
+
+
+def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
+    """The mode and autostart the last run recorded, so a model that is asked to
+    resume does not have to invent them; and for a state that can be resumed, that
+    the user is asked first and the same choice is passed."""
+    mode = view.get("mode")
+    if not mode or state in ("none", "error"):
+        return []
+    autostart = bool(view.get("autostart"))
+    lines = [f"Recorded choice: mode {mode}, autostart {'yes' if autostart else 'no'}."]
+    if state in _RESUMABLE:
+        again = f"mode {mode}" + (", autostart true" if autostart else "")
+        lines.append(f"To resume, ask the user first; if they agree, call setup again with the same choice ({again}).")
+    return lines
 
 
 def mode_refusal(mode: str) -> str:
@@ -250,6 +269,7 @@ def render(view: dict[str, Any], *, started: bool | None = None) -> str:
             lines.append(f"Last stage: {stage}.")
     if view.get("message"):
         lines.append(str(view["message"]))
+    lines.extend(_choice_lines(view, state))
     rows = view.get("doctor_failing") or []
     if rows:
         lines.append("Failing nx doctor rows:")

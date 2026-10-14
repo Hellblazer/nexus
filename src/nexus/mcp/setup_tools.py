@@ -59,7 +59,7 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "about 1.3 GB to download), cli-only (the CLI alone, about 0.7 GB; a service can be added later), "
+    "up to about 1.3 GB to download), cli-only (the CLI alone, up to about 0.7 GB to download; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
@@ -105,8 +105,9 @@ CLOUD_REFUSAL: str = (
     "Setting up a managed service is not offered by this build yet. Choose local, cli-only or not-now."
 )
 NOT_NOW_TEXT: str = (
-    'Recorded "not now": nothing was installed, and the session-start notice stops asking. '
-    "Call setup with mode local or cli-only if the user changes their mind."
+    'Recorded "not now": nothing was installed. The record is read by the plugin\'s session-start check, '
+    "not by this server, so any note from this server that no service is set up stays: it describes the machine. "
+    "The setup tool and /conexus:setup still work if the user changes their mind."
 )
 
 _HEADS: dict[str, str] = {
@@ -119,6 +120,24 @@ _HEADS: dict[str, str] = {
     "error": "Setup could not be started or read.",
 }
 _DOCTOR_ROWS_SHOWN = 10
+
+#: States where calling setup again would resume the recorded choice.
+_RESUMABLE: tuple[str, ...] = ("failed", "interrupted", "doctor-failed", "unsupported")
+
+
+def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
+    """The mode and autostart the last run recorded, so a model that is asked to
+    resume does not have to invent them; and for a state that can be resumed, that
+    the user is asked first and the same choice is passed."""
+    mode = view.get("mode")
+    if not mode or state in ("none", "error"):
+        return []
+    autostart = bool(view.get("autostart"))
+    lines = [f"Recorded choice: mode {mode}, autostart {'yes' if autostart else 'no'}."]
+    if state in _RESUMABLE:
+        again = f"mode {mode}" + (", autostart true" if autostart else "")
+        lines.append(f"To resume, ask the user first; if they agree, call setup again with the same choice ({again}).")
+    return lines
 
 
 def mode_refusal(mode: str) -> str:
@@ -152,6 +171,7 @@ def render(view: dict[str, Any], *, started: bool | None = None) -> str:
             lines.append(f"Last stage: {stage}.")
     if view.get("message"):
         lines.append(str(view["message"]))
+    lines.extend(_choice_lines(view, state))
     rows = view.get("doctor_failing") or []
     if rows:
         lines.append("Failing nx doctor rows:")
@@ -173,40 +193,39 @@ def render(view: dict[str, Any], *, started: bool | None = None) -> str:
 
 
 def usable_service() -> bool:
-    """Whether an endpoint resolves: ``service_url`` set in the environment or the
-    config file, or a live local supervisor lease. Reads files and the environment;
-    makes no network request. Any failure counts as not usable: setup re-checks the
-    same fact itself, so the cost of a wrong "no" is one question to the user and the
-    cost of a wrong "yes" would be a machine that cannot be set up."""
+    """The record's definition: whether ``resolve_service_endpoint()`` succeeds.
+
+    That is the function every storage client calls, so "usable" here means "a Nexus
+    tool that needs storage would get an endpoint and a credential": ``service_url``
+    with a token (environment, config file, the local lease, or a mint credential),
+    or the host and port halves, or a live local lease. A saved ``service_url`` with
+    no resolvable token raises there, and is not usable here. Any exception counts as
+    not usable.
+
+    It reads the environment and the config files, and lease discovery may probe the
+    recorded local service's ``/health`` on the loopback address; it contacts nothing
+    else and waits for nothing (no wait budget).
+    """
     try:
-        from nexus.config import get_credential  # noqa: PLC0415 -- the check runs once per call
+        from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 -- the check runs once per call
 
-        if (get_credential("service_url") or "").strip():
-            return True
-        from nexus.db.service_endpoint import (  # noqa: PLC0415
-            ServiceEndpointUnresolvableError,
-            resolve_service_config,
-        )
-
-        try:
-            resolve_service_config()
-        except ServiceEndpointUnresolvableError:
-            return False
-        return True
+        resolve_service_endpoint()
     except Exception:  # noqa: BLE001 -- see the docstring
         return False
+    return True
 
 
 def no_service_notice() -> str | None:
     """The instructions sentence for a server that finds no usable service, or
-    ``None`` when one is usable."""
+    ``None`` when one is usable. Passive, as the record has it: what is missing, what
+    fixes it, and that the user decides."""
     if usable_service():
         return None
     return (
         "Nexus has no usable service on this machine: no service address is configured and no local service "
-        "is running, so the Nexus tools that need storage will fail. Ask the user whether to set one up and "
-        "act only on their answer: the setup tool does it, as does /conexus:setup, and setup_status says what "
-        "is already done."
+        "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
+        "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software, "
+        "so act only on the user's answer."
     )
 
 
@@ -218,10 +237,19 @@ class SetupError(Exception):
     model and carries the terminal commands."""
 
 
+#: The only file name the tools will start.
+SETUP_SCRIPT_NAME: str = "nx_setup.py"
+
+
 def setup_script() -> str | None:
-    """The path ``NX_SETUP_SCRIPT`` names, when it names a file."""
+    """The path ``NX_SETUP_SCRIPT`` names, when it is an absolute path to an existing
+    file called ``nx_setup.py``. The variable is inherited by every child of the
+    launcher, so a value that names anything else starts nothing: this server runs
+    the plugin's setup process or none."""
     value = os.environ.get(SETUP_SCRIPT_ENV, "").strip()
-    return value if value and os.path.isfile(value) else None
+    if not value or not os.path.isabs(value) or os.path.basename(value) != SETUP_SCRIPT_NAME:
+        return None
+    return value if os.path.isfile(value) else None
 
 
 def terminal_commands(mode: str) -> str:
@@ -248,9 +276,13 @@ _FALLBACK = " Setup can also be done in a terminal: the user runs `nx init`."
 def _call_script(script: str, args: list[str]) -> dict[str, Any]:
     """Run one ``nx_setup.py`` command and return its JSON object."""
     try:
+        # contained=False: ``start`` detaches a build that must outlive this call. A
+        # contained child lives in a job that is closed when the call returns, which
+        # on Windows kills what it started and leaves it no way to break away.
         done = run_bounded(
             [sys.executable, script, *args],
             timeout=_SCRIPT_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, extra_creationflags=_CREATE_NO_WINDOW,
+            contained=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise SetupError(f"The setup process could not be run: {exc}.{_FALLBACK}") from exc
@@ -278,21 +310,35 @@ NOTHING_MISSING: str = (
 )
 
 
+#: Last-run states that mean a run did not finish cleanly. They are reported even
+#: when a service answers: the log and the failing rows are what the user needs.
+_TROUBLE: tuple[str, ...] = ("doctor-failed", "failed", "interrupted", "unsupported")
+
+
+def _report_for_usable_service(view: dict[str, Any]) -> str | None:
+    """What to say, besides "nothing is missing", when a service answers: a live
+    run (the service answers before the last step ends) or a run that went wrong."""
+    if view.get("live") and view.get("state") == "running":
+        return render(view)
+    if view.get("state") in _TROUBLE:
+        return "A Nexus service answers on this machine, but the last setup run did not finish cleanly.\n" + render(view)
+    return None
+
+
 def run_setup(mode: str, autostart: bool) -> str:
     """The ``setup`` tool. Raises :class:`SetupError` for a refusal or a failure."""
     if mode not in MODES:
         raise SetupError(mode_refusal(mode))
     script = setup_script()
     if usable_service():
-        # Nothing is missing, but a run that is still live is reported first: the
-        # service answers before the last step ends.
         if script is not None:
             try:
                 view = _call_script(script, ["status"])
             except SetupError:
                 view = {}
-            if view.get("live") and view.get("state") == "running":
-                return render(view)
+            report = _report_for_usable_service(view)
+            if report is not None:
+                return report + ("" if view.get("state") == "running" else "\nThis call started nothing: a service already answers.")
         return NOTHING_MISSING
     if script is None:
         return terminal_commands(mode)
@@ -318,13 +364,14 @@ def run_status() -> str:
         except SetupError:
             if not usable:
                 raise
-    if view is not None and view.get("live") and view.get("state") == "running":
-        return render(view)
     if usable:
-        return NOTHING_MISSING
+        report = _report_for_usable_service(view) if view is not None else None
+        return report if report is not None else NOTHING_MISSING
     if view is None:
         return (
             "No usable Nexus service was found. " + terminal_commands("local")
             + " With a setup process, the setup tool does the same after asking the user."
         )
+    if view.get("live") and view.get("state") == "running":
+        return render(view)
     return "No usable Nexus service was found on this machine.\n" + _checked(view)
