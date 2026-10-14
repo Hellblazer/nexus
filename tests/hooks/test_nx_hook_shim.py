@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 from tests._module_seam import setattr_in
-from tests._platform import IS_WINDOWS, posix_only, scrubbed_env
+from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SHIM = _ROOT / "conexus" / "hooks" / "scripts" / "nx_hook_shim.py"
@@ -62,9 +62,10 @@ def _install_fake(bindir: Path, source: str) -> dict[str, str]:
     """Put a fake ``nx-hook`` first on PATH; returns the env the shim needs.
 
     POSIX: a shebang script. Windows cannot execute one, and the shim finds
-    ``nx-hook`` through PATHEXT, as it finds the real console-script ``.exe``:
-    there the fake is ``nx-hook.cmd`` running the same Python source, and the
-    env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
+    ``nx-hook`` through PATHEXT and refuses a batch file, so the fake there is
+    a real ``nx-hook.exe``: setuptools' console launcher, which runs the
+    ``nx-hook-script.py`` beside it with the interpreter its ``#!`` line names.
+    The env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
 
     ``NX_TOOLS_DIR`` names a directory that does not exist: the shim looks in the
     generation layout before ``PATH`` (RDR-228), and without the override it
@@ -76,9 +77,7 @@ def _install_fake(bindir: Path, source: str) -> dict[str, str]:
         fake.write_text(source.format(python=sys.executable))
         fake.chmod(0o755)
         return env
-    script = bindir / "nx-hook.py"
-    script.write_text(source.format(python=sys.executable))
-    (bindir / "nx-hook.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+    install_windows_exe_fake(bindir, "nx-hook", source.format(python=f'"{sys.executable}"'))
     return env
 
 

@@ -592,7 +592,9 @@ class TestVersionParsing:
         if _sys.platform == "win32":
             import _winapi  # noqa: PLC0415 -- Windows only
 
-            (gen / "bin" / "nx.cmd").write_text("@echo nx, version 9.9.9\r\n")
+            from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake  # noqa: PLC0415 -- Windows only
+
+            install_windows_exe_fake(gen / "bin", "nx", f"{WINDOWS_SHEBANG}\nprint('nx, version 9.9.9')\n")
             _winapi.CreateJunction(str(gen), str(tools / "current"))
         else:
             (gen / "bin" / "nx").write_text("#!/bin/sh\necho 'nx, version 9.9.9'\n")

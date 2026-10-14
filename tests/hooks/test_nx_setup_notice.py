@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._platform import scrubbed_env
+from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _HOOK = _ROOT / "conexus" / "hooks" / "scripts" / "nx_setup_notice.py"
@@ -49,7 +49,7 @@ def _dirs(tmp_path: Path) -> dict[str, Path]:
 
 def _install_nx_mcp(bindir: Path) -> None:
     if os.name == "nt":
-        (bindir / "nx-mcp.cmd").write_text("@echo real\r\n")
+        install_windows_exe_fake(bindir, "nx-mcp", f"{WINDOWS_SHEBANG}\nprint('real')\n")
     else:
         fake = bindir / "nx-mcp"
         fake.write_text("#!/bin/sh\necho real\n")
@@ -235,7 +235,7 @@ def test_the_hook_speaks_exactly_when_the_launcher_serves_the_stand_in(tmp_path:
     notice from the hook, and the notice names the program that was not found."""
     dirs = _dirs(tmp_path)
     if os.name == "nt":
-        (dirs["bin"] / "nx.cmd").write_text("@echo nx\r\n")
+        install_windows_exe_fake(dirs["bin"], "nx", f"{WINDOWS_SHEBANG}\nprint('nx')\n")
     else:
         (dirs["bin"] / "nx").write_text("#!/bin/sh\necho nx\n")
         (dirs["bin"] / "nx").chmod(0o755)

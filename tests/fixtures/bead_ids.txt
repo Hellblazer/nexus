@@ -148,6 +148,7 @@ nexus-0ne1m
 nexus-0ne1m.1
 nexus-0ne4s
 nexus-0ng3v
+nexus-0nskc
 nexus-0ntxj
 nexus-0ntxj.1
 nexus-0o76a

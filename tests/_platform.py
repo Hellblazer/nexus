@@ -11,12 +11,38 @@ Windows form through these helpers rather than skipping.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
 IS_WINDOWS: bool = os.name == "nt"
+
+#: First line of a Windows fake program's script: the interpreter, quoted, as
+#: setuptools' console launcher reads it.
+WINDOWS_SHEBANG: str = f'#!"{sys.executable}"'
+
+
+def install_windows_exe_fake(bindir: Path, name: str, script: str) -> Path:
+    """Put a fake program *name* in *bindir* as a real ``<name>.exe``; returns it.
+
+    The plugin's ``PATH`` lookups refuse a ``.cmd`` or ``.bat`` hit, as the CLI's
+    do, so a Windows fake has to be an executable. The one the suite can place
+    is setuptools' console launcher: copied as ``<name>.exe`` it runs
+    ``<name>-script.py`` beside it with the interpreter that file's ``#!`` line
+    names, passes arguments and stdio through and returns its exit code.
+    *script* is that file's whole text; start it with :data:`WINDOWS_SHEBANG`.
+    """
+    import setuptools  # noqa: PLC0415 -- Windows only; its launcher is the one real .exe the suite can place
+
+    launcher = Path(setuptools.__file__).parent / "cli-64.exe"
+    assert launcher.is_file(), f"setuptools ships no console launcher at {launcher}"
+    exe = bindir / f"{name}.exe"
+    shutil.copyfile(launcher, exe)
+    (bindir / f"{name}-script.py").write_text(script)
+    return exe
 
 
 def posix_only(reason: str) -> pytest.MarkDecorator:

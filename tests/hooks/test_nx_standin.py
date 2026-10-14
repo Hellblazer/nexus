@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests._platform import scrubbed_env
+from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
@@ -319,7 +319,7 @@ def test_a_cli_that_resolves_is_run_and_the_stand_in_is_not(tmp_path: Path) -> N
     launcher runs it, whatever else is true."""
     dirs = _isolated(tmp_path)
     if os.name == "nt":
-        (dirs["bin"] / "nx-mcp.cmd").write_text("@echo real\r\n")
+        install_windows_exe_fake(dirs["bin"], "nx-mcp", f"{WINDOWS_SHEBANG}\nprint('real')\n")
     else:
         fake = dirs["bin"] / "nx-mcp"
         fake.write_text("#!/bin/sh\necho real\n")

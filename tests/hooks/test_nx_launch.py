@@ -20,7 +20,7 @@ import types
 from pathlib import Path
 
 import pytest
-from tests._platform import IS_WINDOWS, posix_only, scrubbed_env
+from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
@@ -50,9 +50,10 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 def _install_fake(bindir: Path, name: str, marker: str) -> Path:
     """Write a fake *name* into *bindir*; returns the file a lookup resolves.
 
-    POSIX: a shebang script. Windows cannot execute one, so the fake is
-    ``<name>.cmd`` running ``<name>.py`` beside it by ``%~dp0``, which keeps the
-    directory the launcher started it through visible in ``argv0``.
+    POSIX: a shebang script. Windows cannot execute one and the lookup refuses
+    a batch file, so the fake is a real ``<name>.exe`` running
+    ``<name>-script.py`` beside it (``install_windows_exe_fake``), which keeps
+    the directory the launcher started it through visible in ``argv0``.
     """
     bindir.mkdir(parents=True, exist_ok=True)
     source = _FAKE.format(python=sys.executable, marker=marker)
@@ -61,10 +62,7 @@ def _install_fake(bindir: Path, name: str, marker: str) -> Path:
         fake.write_text(source)
         fake.chmod(0o755)
         return fake
-    (bindir / f"{name}.py").write_text(source)
-    cmd = bindir / f"{name}.cmd"
-    cmd.write_text(f'@"{sys.executable}" "%~dp0{name}.py" %*\r\n')
-    return cmd
+    return install_windows_exe_fake(bindir, name, _FAKE.format(python=f'"{sys.executable}"', marker=marker))
 
 
 def _point_current(tools: Path, generation: Path) -> None:
@@ -114,8 +112,12 @@ def _report(r: subprocess.CompletedProcess[bytes]) -> dict:
 
 
 def _same_file(a: str, b: Path) -> bool:
-    """Path equality that sees through Windows case and a ``.py``/``.cmd`` pair."""
-    return os.path.normcase(os.path.splitext(a)[0]) == os.path.normcase(os.path.splitext(str(b))[0])
+    """Path equality that sees through Windows case and the ``<name>.exe`` /
+    ``<name>-script.py`` pair of a Windows fake."""
+    def stem(path: str) -> str:
+        return os.path.normcase(os.path.splitext(path)[0]).removesuffix("-script")
+
+    return stem(a) == stem(str(b))
 
 
 # -- standard library only, no nexus ----------------------------------------------
