@@ -10,7 +10,7 @@
 # outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow]]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll]]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -48,6 +48,11 @@
 # the audit run of 2026-10-13). The script rules are audit only in this mode:
 # enforced, they put PowerShell in ConstrainedLanguage, where the uv installer
 # script cannot run whatever the executable rules say.
+# --applocker-allow-dll-audit is --applocker-allow plus AppLocker's DLL rule
+# collection (default rules and the same folders) in audit only: nothing more is
+# blocked, and the log names every DLL (event 8003) the DLL rules would refuse.
+# --applocker-allow-dll enforces those DLL rules, with the folders outside the
+# install's that the audit run recorded (driver/stduser.ps1 $dllExtra).
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -122,7 +127,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow]]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll]]" >&2
 }
 die() {
     local code="$1"; shift
@@ -150,6 +155,8 @@ while [[ $# -gt 0 ]]; do
         --applocker) applocker=yes; shift ;;
         --applocker-audit) applocker=audit; shift ;;
         --applocker-allow) applocker=allow; shift ;;
+        --applocker-allow-dll-audit) applocker=allow-dll-audit; shift ;;
+        --applocker-allow-dll) applocker=allow-dll; shift ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -397,6 +404,8 @@ if [[ "$admin_git" == no ]]; then git_note="no Git from $GUSER: the account inst
 if [[ "$applocker" == yes ]]; then git_note="$git_note; AppLocker default rules enforced"; fi
 if [[ "$applocker" == allow ]]; then git_note="$git_note; AppLocker default rules enforced for programs, with allow rules for this install's folders; script rules audit only"; fi
 if [[ "$applocker" == audit ]]; then git_note="$git_note; AppLocker default rules in audit only (nothing is blocked)"; fi
+if [[ "$applocker" == allow-dll-audit ]]; then git_note="$git_note; AppLocker default rules enforced for programs, with allow rules for this install's folders; DLL rules and script rules audit only"; fi
+if [[ "$applocker" == allow-dll ]]; then git_note="$git_note; AppLocker default rules enforced for programs and DLLs, with allow rules for this install's folders; script rules audit only"; fi
 if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); $git_note"; fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 

@@ -1088,9 +1088,32 @@ def test_applocker_allow_enforces_programs_and_names_the_installs_folders(harnes
     assert "-AppLocker allow" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
     assert "script rules audit only" in res.stdout
     std = _read("stduser.ps1")
-    # the allow rules exist only in this mode; any other mode replaces the marker with nothing
-    assert std.index("$allow = ''") < std.index("if ($appLocker -eq 'allow') {") < std.index("$xml = $xml.Replace('@ALLOW@', $allow)")
+    # the allow rules exist only in the allow modes; any other mode replaces the marker with nothing
+    assert std.index("$allow = ''") < std.index("if ($appLocker -in 'allow', 'allow-dll-audit', 'allow-dll') {") < std.index("$xml = $xml.Replace('@ALLOW@', $allow)")
     for folder in (".local\\bin\\*", "AppData\\Roaming\\uv\\*", "AppData\\Local\\uv\\cache\\*", "AppData\\Local\\Programs\\Git\\*", ".config\\nexus\\*"):
         assert f"'{folder}'" in std
     # the control file's folder is not among them, so the enforcement wait still sees a refused start
     assert "'nx-gate" not in std
+
+
+@pytest.mark.parametrize(
+    ("flag", "mode", "note"),
+    [
+        ("--applocker-allow-dll-audit", "allow-dll-audit", "DLL rules and script rules audit only"),
+        ("--applocker-allow-dll", "allow-dll", "enforced for programs and DLLs"),
+    ],
+)
+def test_applocker_dll_modes_add_the_dll_collection(harness: Harness, flag: str, mode: str, note: str) -> None:
+    res = harness.run(*_BASE, flag)
+    assert res.returncode == 2 and not (harness.root / "ssh.log").exists()
+    res = harness.run(*_BASE, "--standard-user", flag, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert f"-AppLocker {mode}" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert note in res.stdout
+    std = _read("stduser.ps1")
+    # the DLL collection exists only in these two modes, enforced only in allow-dll, and carries the
+    # install's folders; the executable control wait still expects a refused start (8004)
+    block = std[std.index("if ($appLocker -in 'allow-dll-audit', 'allow-dll') {"):std.index("$xml = $xml.Replace('@ALLOW@', $allow)")]
+    assert '<RuleCollection Type="Dll" EnforcementMode="' in block
+    assert "if ($appLocker -eq 'allow-dll') { 'Enabled' } else { 'AuditOnly' }" in block
+    assert "foreach ($p in @($folders) + $(if ($appLocker -eq 'allow-dll') { $dllExtra } else { @() }))" in block

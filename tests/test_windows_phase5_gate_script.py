@@ -134,7 +134,7 @@ def test_assertion_bodies_keep_their_deciding_clauses() -> None:
     assert "nx search outside the session does not find the nonce" in a2
     a3 = text[text.index("Run-Assertion 3 "):text.index("function Invoke-ClaudeP")]
     assert """"$(K $_ 'type')" -ne 'hook_success' -or [int](K $_ 'exitCode') -ne 0""" in a3
-    assert "'nx-hook session-start'" in a3
+    assert "-match $SESSION_START_RE" in a3
     a5 = text[text.index("Run-Assertion 5 "):text.index("# -------------------------------------------------------------- verdict ----")]
     assert "a credential file appeared during the run" in a5
     # Credential Manager (nexus-pwscd): the baseline is taken in setup, before
@@ -279,6 +279,30 @@ def _check_hook_coverage(hooks_text: str, gate_text: str) -> None:
 
 def test_every_conexus_hook_entry_is_covered_by_the_gates_filters() -> None:
     _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), _text())
+
+
+# The gate installs the PUBLISHED plugin, whose hooks.json (through 7.78.0) runs the
+# nx-hook verbs bare. A filter written only for the next release's launcher form saw
+# none of them, so assertion 3 failed every run (nexus-f9bgu.53, 2026-10-14).
+_BARE_FORM_COMMANDS = ["nx-hook session-start", "nx-hook upgrade-auto", "nx-hook self-gc", "nx-hook rdr"]
+_LAUNCHER_FORM_COMMANDS = [
+    "uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python "
+    "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py nx-hook " + verb
+    for verb in ("session-start", "upgrade-auto", "self-gc", "rdr")
+]
+
+
+@pytest.mark.parametrize("cmd", _BARE_FORM_COMMANDS + _LAUNCHER_FORM_COMMANDS)
+def test_hook_filter_sees_both_plugin_forms(cmd: str) -> None:
+    ours = re.compile(_ps_literal(_text(), "HOOK_OURS_RE"), re.I)
+    assert ours.search(cmd), f"HOOK_OURS_RE misses {cmd!r}"
+
+
+def test_session_start_pattern_takes_both_forms_and_only_that_verb() -> None:
+    start = re.compile(_ps_literal(_text(), "SESSION_START_RE"), re.I)
+    assert start.search(_BARE_FORM_COMMANDS[0]) and start.search(_LAUNCHER_FORM_COMMANDS[0])
+    for other in _BARE_FORM_COMMANDS[1:] + _LAUNCHER_FORM_COMMANDS[1:] + ["nx-hook session-start-extra", "echo nx-hook session-start x"]:
+        assert not start.search(other), f"SESSION_START_RE matches {other!r}"
 
 
 def _rewrite_launcher(hooks_text: str, launcher: list[str]) -> str:

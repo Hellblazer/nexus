@@ -207,9 +207,13 @@ $STOP_DEGRADED_RE = 'unclean_stop|hard-killing|win_console_helper_failed|bounded
 # plugin's hooks/scripts matches too (the recorded command keeps
 # ${CLAUDE_PLUGIN_ROOT} unexpanded, so the plugin cannot be told apart); the
 # guest has only the conexus plugin installed.
-# RDR-228: the nx-hook entries run as `uv ... launch/nx_launch.py nx-hook <verb>`,
-# so the clause names the launcher and the program, not the start of the command.
-$HOOK_OURS_RE = 'nx_launch\.py nx-hook |nx-session-end-launcher|^plugin:conexus:nexus/|hooks/scripts/[^ ]+\.py'
+# Both plugin forms: the released plugin (through 7.78.0) runs `nx-hook <verb>`
+# itself, and RDR-228's runs `uv ... launch/nx_launch.py nx-hook <verb>`. The
+# gate installs the PUBLISHED plugin, so dropping the first form left
+# assertion 3 blind to every nx-hook entry (nexus-f9bgu.53, 2026-10-14).
+$HOOK_OURS_RE = '^nx-hook |nx_launch\.py nx-hook |nx-session-end-launcher|^plugin:conexus:nexus/|hooks/scripts/[^ ]+\.py'
+# The session-start entry in either form, matched as the whole verb.
+$SESSION_START_RE = '(^|nx_launch\.py )nx-hook session-start$'
 $HOOK_SHIM_RE = 'nx_hook_shim\.py'
 if (-not $RunDir) { $RunDir = Join-Path $env:USERPROFILE 'nx-gate\run' }
 
@@ -636,7 +640,7 @@ Run-Assertion 3 'the conexus hooks fire in the live session' {
     $ours = @($h | Where-Object { "$(K $_ 'command')" -match $HOOK_OURS_RE })
     $bad = @($ours | Where-Object { "$(K $_ 'type')" -ne 'hook_success' -or [int](K $_ 'exitCode') -ne 0 })
     if ($bad.Count -gt 0) { Fail ("{0} conexus hook run(s) failed, first: {1} {2} exit={3}" -f $bad.Count, (K $bad[0] 'type'), (K $bad[0] 'command'), (K $bad[0] 'exitCode')) }
-    $start = @($ours | Where-Object { "$(K $_ 'command')" -eq 'nx-hook session-start' -and "$(K $_ 'hookEvent')" -eq 'SessionStart' -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
+    $start = @($ours | Where-Object { "$(K $_ 'command')" -match $SESSION_START_RE -and "$(K $_ 'hookEvent')" -eq 'SessionStart' -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
     if ($start.Count -eq 0) { Fail 'nx-hook session-start did not run with output in the live session' }
     $shim = @($ours | Where-Object { "$(K $_ 'command')" -match $HOOK_SHIM_RE -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
     if ($shim.Count -eq 0) { Fail 'no nx_hook_shim.py hook produced output in the live session' }
