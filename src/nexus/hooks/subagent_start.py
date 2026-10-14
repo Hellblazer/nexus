@@ -439,17 +439,20 @@ def _classify(agent_type: str, task_text: str) -> tuple[bool, bool]:
     return False, False
 
 
+def _config_dir() -> str:
+    """``nexus.config.nexus_config_dir``: NEXUS_CONFIG_DIR when set, else
+    ``~/.config/nexus``. Read inline to keep this module import-light; the
+    Knowledge Map cache and the catalog live under it (nexus-3fme8)."""
+    return os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".config", "nexus"
+    )
+
+
 def _knowledge_map_section(repo_root: str) -> str:
     """The L1 Knowledge Map cache dump, or "" (subagent-start.sh:306-336)."""
     if not repo_root:
         return ""
-    # The directory nexus.context writes to: NEXUS_CONFIG_DIR when set, as
-    # nexus.config.nexus_config_dir resolves it (read inline to keep this
-    # module import-light).
-    config_dir = os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
-        os.path.expanduser("~"), ".config", "nexus"
-    )
-    context_dir = os.path.join(config_dir, "context")
+    context_dir = os.path.join(_config_dir(), "context")
     repo_hash = hashlib.sha1(repo_root.encode()).hexdigest()[:8]  # noqa: S324 — cache key, not security
     repo_name = os.path.basename(repo_root)
     context_file = os.path.join(context_dir, f"{repo_name}-{repo_hash}.txt")
@@ -520,9 +523,7 @@ def run(payload: dict | None) -> HookResult:
         parts.append(_OPERATORS)
 
     if _CATALOG_TASK_RE.search(task_text):
-        catalog_path = os.environ.get("NEXUS_CATALOG_PATH") or os.path.join(
-            os.path.expanduser("~"), ".config", "nexus", "catalog"
-        )
+        catalog_path = os.environ.get("NEXUS_CATALOG_PATH") or os.path.join(_config_dir(), "catalog")
         if os.path.isdir(os.path.join(catalog_path, ".git")) and os.path.isfile(
             os.path.join(catalog_path, "documents.jsonl")
         ):

@@ -337,6 +337,42 @@ class TestSubagentHookInjection:
 
         assert "Résumé parsing — naïve (42)" in section
 
+    def test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale(self, tmp_path: Path) -> None:
+        """The pins above pass on a UTF-8 locale with or without the fix. This
+        one runs both hooks' readers in a child whose locale encoding is ASCII
+        (the C locale, UTF-8 mode and locale coercion off), so a dropped
+        ``encoding="utf-8"`` fails here on POSIX as cp1252 does on Windows: the
+        read raises and the hook's handler returns no map (nexus-3fme8)."""
+        import subprocess
+        import sys
+
+        repo_dir = tmp_path / "localerepo"
+        config_dir = tmp_path / ".config" / "nexus"
+        label = "Résumé parsing — naïve (42)"
+        self._seed_cache(config_dir / "context", repo_dir, f"## Knowledge Map\n\ncode: {label}\n")
+        driver = (
+            "import os, sys, locale\n"
+            "assert sys.flags.utf8_mode == 0 and locale.getpreferredencoding(False).lower() != 'utf-8', "
+            "locale.getpreferredencoding(False)\n"
+            "from nexus.hooks import session_context\n"
+            "from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root\n"
+            "session_context.which = lambda cmd: False\n"
+            "sub = _knowledge_map_section(_repo_root(dict(os.environ)))\n"
+            "sess = session_context.run(None).stdout or ''\n"
+            "sys.stdout.buffer.write(('SUB:' + sub + '\\nSESS:' + sess).encode('utf-8'))\n"
+        )
+        env = {
+            **os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+            "HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "NEXUS_CONFIG_DIR": str(config_dir),
+            "CLAUDE_PROJECT_DIR": str(repo_dir),
+        }
+        result = subprocess.run([sys.executable, "-c", driver], cwd=str(repo_dir), env=env, capture_output=True)
+        assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+        out = result.stdout.decode("utf-8")
+        sub, _, sess = out.partition("\nSESS:")
+        assert label in sub, f"SubagentStart dropped or garbled the map: {sub[:300]!r}"
+        assert label in sess, f"SessionStart dropped or garbled the map: {sess[:300]!r}"
+
     def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
         """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
         when that is set; the hook looked under ~/.config/nexus regardless, so a

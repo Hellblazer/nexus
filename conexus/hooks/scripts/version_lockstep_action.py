@@ -213,7 +213,7 @@ def log_event(event: str, **fields: str) -> None:
                 path.replace(path.with_name(path.name + ".1"))
         except FileNotFoundError:
             pass
-        with path.open("a") as f:
+        with path.open("a", encoding="utf-8") as f:
             f.write(line)
     except OSError as exc:
         debug(f"log_event failed (non-fatal): {exc}")
@@ -370,7 +370,7 @@ def write_marker(version: str) -> None:
     """Record *version* as the confirmed-in-lockstep CLI version."""
     path = marker_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(version)
+    path.write_text(version, encoding="utf-8")
     debug(f"wrote marker {path} = {version}")
 
 
