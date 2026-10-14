@@ -723,6 +723,95 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     )
 
 
+#: How long ``nx daemon service start`` waits for the supervisor a unit started
+#: to publish its lease (the same bound the detached spawn uses).
+_UNIT_START_WAIT_S: float = 60.0
+
+
+def _start_via_autostart_unit(config_dir: Path):
+    """Start the service through its installed, enabled autostart unit (nexus-crwqm).
+
+    Returns the live :class:`LeaseRecord`, or ``None`` when the unit was not
+    used and the caller keeps its own detached-spawn path. A detached spawn
+    beside an enabled unit leaves the unit inactive, so the OS manager neither
+    supervises nor restarts the service the user asked to autostart.
+
+    Not used (``None``): no unit file (silent); a live lease already exists
+    (``ensure_storage_supervisor`` returns it, so a repeated start never
+    touches the manager); the manager does not report the unit ACTIVE, or its
+    start command fails (one stderr line each says why).
+
+    Used: clear any stop request (a start is the user's "run again"), have the
+    manager start the unit, then POLL the registry for the endpoint. This never
+    spawns a supervisor itself, so it cannot race the one the unit starts into
+    a second: the supervisor's own single-writer election decides the lease
+    holder. A poll that times out raises :class:`StorageServiceStartError`
+    rather than falling back to a spawn, which would race the unit's
+    still-starting supervisor.
+    """
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        ServiceRegistry,
+        clear_stop_marker,
+        reclaim_lease_if_dead_owner,
+        service_identity,
+    )
+    from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    unit_path = _service_autostart_unit_installed()
+    if unit_path is None:
+        return None
+
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    scope = service_identity()
+    existing = _service_endpoint.discover_storage_service_lease(registry, scope)
+    if existing is not None and not reclaim_lease_if_dead_owner(
+        registry,
+        existing,
+        log=_log,
+        event="storage_service_dead_lease_reclaim",
+    ):
+        return None  # running: ensure_storage_supervisor reports it, unit or not
+
+    probe = installer.autostart_activation_state(unit_path, tier="service")
+    if probe.state is not installer.ActivationState.ACTIVE:
+        click.echo(
+            f"Not starting through the autostart unit {unit_path} "
+            f"({probe.state.value}: {probe.detail or 'the manager did not report it enabled'}); "
+            "starting the supervisor directly.",
+            err=True,
+        )
+        return None
+
+    clear_stop_marker(config_dir, "storage_service", scope)
+    failure = installer.start_autostart_unit(unit_path, tier="service")
+    if failure is not None:
+        click.echo(
+            f"Not starting through the autostart unit {unit_path} ({failure}); "
+            "starting the supervisor directly.",
+            err=True,
+        )
+        return None
+
+    deadline = time.monotonic() + _UNIT_START_WAIT_S
+    while True:
+        lease = _service_endpoint.discover_storage_service_lease(registry, scope)
+        if lease is not None:
+            return lease
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    logs_dir = config_dir / "logs"
+    raise _ssd.StorageServiceStartError(
+        f"The autostart unit {unit_path.name} was started but the storage service "
+        f"did not become ready within {_UNIT_START_WAIT_S:g}s. "
+        f"Check {logs_dir / 'storage_service.log'} (supervisor) and "
+        f"{logs_dir / 'storage_service.crash.log'}, the manager's own log for the "
+        "unit, or run 'nx daemon service start --foreground' to see the error."
+    )
+
+
 @service_group.command("start")
 @click.option(
     "--config-dir",
@@ -783,8 +872,13 @@ def service_start_cmd(
         sys.exit(code)
 
     # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
+    # An installed, enabled autostart unit starts it through the OS manager
+    # (nexus-crwqm), so the manager supervises and restarts it; any other state
+    # spawns the detached supervisor as before.
     try:
-        existing = ensure_storage_supervisor(config_dir)
+        existing = _start_via_autostart_unit(config_dir)
+        if existing is None:
+            existing = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(2)

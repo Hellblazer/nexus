@@ -387,6 +387,51 @@ def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
     return ["systemctl", "--user", "disable", "--now", dest.name]
 
 
+def _start_cmd(dest: Path, *, tier: str) -> list[str]:
+    """Start the REGISTERED unit now, through its manager (nexus-crwqm).
+
+    Unlike :func:`_activate_cmd` this never registers anything: Linux
+    ``systemctl --user start <unit>``, macOS ``launchctl kickstart
+    gui/<uid>/<label>`` (the label is tier-specific, as in
+    :func:`_deactivate_cmd`), Windows ``schtasks /Run`` (:func:`_task_run_cmd`).
+    All three are mutating verbs, so they pass the fence in :func:`_run_manager`.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if _daemon._autostart_platform() == "win32":
+        return _task_run_cmd()
+    if _daemon._autostart_platform() == "darwin":
+        return ["launchctl", "kickstart", f"gui/{os.getuid()}/{_launchd_label_for(tier)}"]
+    return ["systemctl", "--user", "start", dest.name]
+
+
+def start_autostart_unit(dest: Path, *, tier: str) -> str | None:
+    """Ask the OS manager to start the installed unit at ``dest`` (nexus-crwqm).
+
+    Returns ``None`` when the manager accepted the start, else one line saying
+    why it did not (no manager, a refused verb, a timeout, a non-zero exit).
+    Never raises: the caller keeps its own start path for every failure. A
+    return of ``None`` means the manager took the request, not that the
+    service is up; the caller waits on the service's own lease.
+    """
+    cmd = _start_cmd(dest, tier=tier)
+    shown = " ".join(cmd)
+    try:
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_MANAGER_ACTION_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:  # also ManagerRefusedUnderFence
+        return f"`{shown}` could not run: {exc}"
+    except subprocess.TimeoutExpired:
+        return f"`{shown}` did not answer within {_MANAGER_ACTION_TIMEOUT_S:g}s"
+    except (OSError, ValueError) as exc:
+        return f"`{shown}` could not run ({exc})"
+    if result.returncode != 0:
+        return f"`{shown}` exited {result.returncode}: {_first_line(result)}"
+    return None
+
+
 class ActivationState(Enum):
     """What the OS service manager says about an installed autostart unit
     (nexus-mac7t). Distinct from the unit FILE being present: the file is

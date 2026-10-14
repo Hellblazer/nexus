@@ -3926,6 +3926,19 @@ auto-discover. The native binary is the sole launch artifact (RDR-161: the
 `java -jar` path is expunged); acquire it with `install-binary` (below) or
 `nx init`, which places and verifies it.
 
+When the storage-service autostart unit is installed and the OS manager reports
+it enabled (`nx daemon service install --autostart`), `start` asks the manager
+to start the unit (`systemctl --user start`, `launchctl kickstart`, or
+`schtasks /Run`) and waits up to 60 s for the supervisor it starts to publish
+the endpoint, so the manager supervises and restarts the service. It never
+spawns a second supervisor beside the unit, and a wait that times out is an
+error, not a fallback spawn. With no unit, a unit the manager does not report
+enabled (or cannot be asked), or a manager command that fails, `start` spawns
+the detached supervisor as before and prints one stderr line saying why the
+unit was not used (nothing when no unit is installed). A service that is
+already running is reported without asking the manager. `--foreground` (what
+the unit itself runs) is unchanged.
+
 `status` is the single is-the-stack-healthy surface: the lease (host, port,
 service pid, generation), supervisor pid, addr-file path, live `/health` probe,
 the PG cluster (port, data dir, up/down, installed pgvector version,
