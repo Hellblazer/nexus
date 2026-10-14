@@ -41,14 +41,16 @@ from tests._platform import make_group_readable
 _VERB_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "mailbox-drain"]
 
 #: The PLUGIN copy (RDR-208 Phase 3 close gate, nexus-galkv.27): hooks.json
-#: launches this exact script under a bare ``python3`` -- PATH decides the
-#: interpreter, not ``sys.executable`` -- with no ``-m`` and no args, matching
-#: the exec-form entry ``conexus/hooks/hooks.json`` declares for
-#: ``UserPromptSubmit``. This is the copy that actually runs in production;
-#: every test in this module besides :class:`TestPluginEntryPointParity`
-#: exercises only the wheel copy above.
+#: launches this exact script with no ``-m`` and no args, matching the entry
+#: ``conexus/hooks/hooks.json`` declares for ``UserPromptSubmit``. Since RDR-228
+#: Phase 1 that entry is ``uv tool run ... --python >=3.12 python <script>``, so
+#: the interpreter is one uv chose, not a bare ``python3`` off ``PATH``; this
+#: test stands in for it with the interpreter running the suite. A bare
+#: ``python3`` was also absent on the Windows runner's account (nexus-3fme8).
+#: This is the copy that actually runs in production; every test in this module
+#: besides :class:`TestPluginEntryPointParity` exercises only the wheel copy above.
 _PLUGIN_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
-_PLUGIN_ARGV = ["python3", str(_PLUGIN_SCRIPT)]
+_PLUGIN_ARGV = [sys.executable, str(_PLUGIN_SCRIPT)]
 
 SESSION_ID = "sess-mailbox-drain"
 
@@ -777,7 +779,7 @@ class TestPluginEntryPointParity:
     """RDR-208 Phase 3 close gate (bead nexus-galkv.27, test-validator gap).
 
     ``hooks.json`` runs ``conexus/hooks/scripts/mailbox_drain.py`` -- a stdlib
-    plugin script, launched under exec-form ``python3`` with no ``-m`` and no
+    plugin script, launched by ``uv tool run ... python`` with no ``-m`` and no
     args -- in PRODUCTION. Every other test in this module drives only the
     wheel copy, ``src/nexus/hooks/mailbox_drain.py``, through ``nx-hook``'s own
     ``-m nexus._hook_runtime.entry`` dispatch. The two copies are written
@@ -790,13 +792,9 @@ class TestPluginEntryPointParity:
     still drained -- run against BOTH entry points, parametrized rather than
     duplicated (independent signal: the argv, not the assertions), so a
     regression in one copy fails its own parametrize id while the other stays
-    green. The plugin script is launched exactly as ``hooks.json`` launches
-    it (:data:`_PLUGIN_ARGV`): ``python3`` resolved off ``PATH`` (this
-    module's ``_env`` sets ``PATH=/usr/bin:/bin`` for both entry points
-    already, unchanged from the wheel-only tests above), the script's own
-    path, and no other args -- the script re-execs itself into a capable
-    interpreter internally (``_interpreter.reexec_if_needed``) exactly as it
-    does under the real harness.
+    green. The plugin script is launched as ``hooks.json`` launches it
+    (:data:`_PLUGIN_ARGV`): a capable interpreter, the script's own path, and
+    no other args.
     """
 
     @_ENTRY_POINTS
