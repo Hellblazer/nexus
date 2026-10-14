@@ -115,6 +115,8 @@ def _same_file(a: str, b: Path) -> bool:
     """Path equality that sees through Windows case and the ``<name>.exe`` /
     ``<name>-script.py`` pair of a Windows fake."""
     def stem(path: str) -> str:
+        # The executable fake reports its script by an extended-length path.
+        path = path.removeprefix("\\\\?\\")
         return os.path.normcase(os.path.splitext(path)[0]).removesuffix("-script")
 
     return stem(a) == stem(str(b))
