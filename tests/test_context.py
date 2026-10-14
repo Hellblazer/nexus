@@ -305,8 +305,55 @@ class TestSubagentHookInjection:
         from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root
 
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))  # Windows' home for expanduser
+        # The hook reads the cache from NEXUS_CONFIG_DIR when set, as nexus.context
+        # writes it (nexus-3fme8); the suite's fence sets one, so point it here.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(home / ".config" / "nexus"))
         monkeypatch.chdir(repo_dir)
         return _knowledge_map_section(_repo_root(dict(os.environ)))
+
+    @staticmethod
+    def _seed_cache(context_dir: Path, repo_dir: Path, body: str) -> None:
+        import hashlib
+        import subprocess
+
+        repo_dir.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo_dir), check=True, capture_output=True, text=True)
+        repo_root = repo_dir.resolve()
+        repo_hash = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / f"{repo_root.name}-{repo_hash}.txt").write_bytes(body.encode("utf-8"))
+
+    def test_hook_reads_the_cache_as_utf8(self, tmp_path: Path, monkeypatch) -> None:
+        """nexus.context writes the cache as UTF-8. The hook read it with the
+        locale encoding, cp1252 on Windows, which garbled or dropped a map with
+        a non-ASCII label (nexus-3fme8). Fails on the old code only where the
+        locale encoding is not UTF-8."""
+        body = "## Knowledge Map\n\ncode: Résumé parsing — naïve (42)\n"
+        repo_dir = tmp_path / "utf8repo"
+        self._seed_cache(tmp_path / ".config" / "nexus" / "context", repo_dir, body)
+
+        section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
+
+        assert "Résumé parsing — naïve (42)" in section
+
+    def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
+        """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
+        when that is set; the hook looked under ~/.config/nexus regardless, so a
+        box with the override never showed a subagent its map (nexus-3fme8)."""
+        from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root
+
+        config_dir = tmp_path / "elsewhere"
+        repo_dir = tmp_path / "cfgrepo"
+        self._seed_cache(config_dir / "context", repo_dir, "## Knowledge Map\n\ncode: Override Topic (7)\n")
+        empty_home = tmp_path / "home"
+        empty_home.mkdir()
+        monkeypatch.setenv("HOME", str(empty_home))
+        monkeypatch.setenv("USERPROFILE", str(empty_home))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.chdir(repo_dir)
+
+        assert "Override Topic (7)" in _knowledge_map_section(_repo_root(dict(os.environ)))
 
     def test_hook_emits_knowledge_map(self, tmp_path: Path, monkeypatch) -> None:
         """SubagentStart hook outputs the cached knowledge map content.

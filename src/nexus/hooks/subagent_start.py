@@ -443,14 +443,22 @@ def _knowledge_map_section(repo_root: str) -> str:
     """The L1 Knowledge Map cache dump, or "" (subagent-start.sh:306-336)."""
     if not repo_root:
         return ""
-    context_dir = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context")
+    # The directory nexus.context writes to: NEXUS_CONFIG_DIR when set, as
+    # nexus.config.nexus_config_dir resolves it (read inline to keep this
+    # module import-light).
+    config_dir = os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".config", "nexus"
+    )
+    context_dir = os.path.join(config_dir, "context")
     repo_hash = hashlib.sha1(repo_root.encode()).hexdigest()[:8]  # noqa: S324 — cache key, not security
     repo_name = os.path.basename(repo_root)
     context_file = os.path.join(context_dir, f"{repo_name}-{repo_hash}.txt")
     if not os.path.isfile(context_file):
         return ""
     try:
-        content = Path(context_file).read_text()
+        # nexus.context writes UTF-8; the locale default is cp1252 on Windows,
+        # where a non-ASCII label raised here and dropped the map (nexus-3fme8).
+        content = Path(context_file).read_text(encoding="utf-8")
     except Exception:  # noqa: BLE001 — carried: an unreadable cache file is "no map"
         return ""
     return "\n" + content

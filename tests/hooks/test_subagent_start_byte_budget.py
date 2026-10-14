@@ -192,7 +192,15 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     )
     t2_seed = home / "t2-seed.txt"
     t2_seed.write_text(_T2_SEED, encoding="utf-8")
-    return {**os.environ, "HOME": str(home), "NX_BUDGET_T2_SEED_FILE": str(t2_seed)}
+    # USERPROFILE: Windows' home for expanduser; NEXUS_CONFIG_DIR: the
+    # directory the hook reads the cache from (nexus-3fme8).
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "NEXUS_CONFIG_DIR": str(home / ".config" / "nexus"),
+        "NX_BUDGET_T2_SEED_FILE": str(t2_seed),
+    }
 
 
 def _assert_seeds_reached(conexus_ctx: str) -> None:

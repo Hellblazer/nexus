@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests._fence_home import _link_through
 from tests._module_seam import setattr_in
 
 SCRIPT = (
@@ -637,7 +638,9 @@ class TestGenerationLayout:
         tools = tmp_path / "tools"
         gen = tools / "gen-20260826T010000Z"
         gen.mkdir(parents=True)
-        (tools / "current").symlink_to(gen)
+        # A junction where the account cannot make symlinks (WinError 1314
+        # under a limited token, nexus-3fme8), as `nx self install` makes one.
+        _link_through(tools / "current", gen)
         monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
 
         assert mod.generation_install_present() is True
@@ -646,8 +649,10 @@ class TestGenerationLayout:
         """Fail-safe, matching uv_receipt_present's own posture: every edge
         case resolves to False rather than proceeding on a broken layout."""
         tools = tmp_path / "tools"
-        tools.mkdir()
-        (tools / "current").symlink_to(tools / "gen-gone")
+        gone = tools / "gen-gone"
+        gone.mkdir(parents=True)
+        _link_through(tools / "current", gone)
+        gone.rmdir()  # dangling: a junction is made to a live directory first
         monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
 
         assert mod.generation_install_present() is False
