@@ -14,13 +14,13 @@ on a bare-name spawn or a ``shutil.which`` call anywhere else under this tree.
 
 Windows: PATHEXT is honoured (``os.execvp`` and ``Popen`` ignore it), no exec bit
 is needed, and a relative or empty PATH entry, or one that is the cwd itself, is
-skipped because it resolves to the cwd, which is the same hole. Unlike
-``nexus.util.nx_argv`` this walk returns a ``.cmd`` or ``.bat`` hit: the shim
-launches ``nx-hook`` and a real install provides ``nx-hook.exe``, but the shim's
-Windows tests install a ``nx-hook.cmd`` (``tests/test_off_cwd_resolver_parity.py``
-names the difference). POSIX: ``shutil.which``, which already
-ignores the cwd unless PATH itself names ``.`` or has an empty entry; the lookup
-is unchanged there.
+skipped because it resolves to the cwd, which is the same hole. A ``.cmd`` or
+``.bat`` hit is not returned, as in ``nexus.util.nx_argv``: a batch file runs
+through ``cmd.exe`` with quoting CPython does not escape for it, and every program
+a hook spawns (``nx-hook``, ``nx``, ``uv``, ``git``, a Python) is an ``.exe`` in a
+real install. A tool found only as a batch file counts as not found. POSIX:
+``shutil.which``, which already ignores the cwd unless PATH itself names ``.`` or
+has an empty entry; the lookup is unchanged there.
 
 Standard library only, no ``nexus`` import: hook scripts run under
 ``uv tool run python``. ``bootstrap.py`` in ``mcpb/src`` carries the same rule
@@ -39,6 +39,7 @@ import sys
 from pathlib import PureWindowsPath
 
 _DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
 
 
 def _is_search_dir(directory: str, cwd: PureWindowsPath) -> bool:
@@ -86,12 +87,13 @@ def which_off_cwd(
     # A name that already ends in a listed extension is tried as written only, as
     # ``shutil.which`` and ``nexus.util.nx_argv`` do; appending to it finds ``uv.exe.cmd``.
     exts = [""] if has_ext else listed
+    names = [n for n in (name + e for e in exts) if os.path.splitext(n)[1].lower() not in _BATCH_SUFFIXES]
     cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     for directory in path.split(";"):
         if not _is_search_dir(directory, cwd):
             continue
-        for ext in exts:
-            candidate = os.path.join(directory, name + ext)
+        for candidate_name in names:
+            candidate = os.path.join(directory, candidate_name)
             if os.path.isfile(candidate):
                 return candidate
     return None

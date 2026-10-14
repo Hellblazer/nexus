@@ -20,9 +20,8 @@ one parametrised test runs all four over the same simulated Windows cases, so th
 next drift fails here instead of in a user's clone. Each case also states the answer
 outright: copies that agree on a wrong answer would otherwise pass.
 
-One difference is deliberate and asserted by name in ``_BATCH_EXCEPTIONS``: the hook
-helper and the bundle launcher return a ``.cmd`` or ``.bat`` hit that ``nx_argv`` and
-``generation_core`` refuse (BatBadBut, ``nx_argv.which_off_cwd``'s docstring).
+All four refuse a ``.cmd`` or ``.bat`` hit (BatBadBut, ``nx_argv.which_off_cwd``'s
+docstring). The hook helper and the bundle launcher returned one until 2026-10-13.
 """
 from __future__ import annotations
 
@@ -59,6 +58,7 @@ _CASES = [
     pytest.param({rf"{TOOLS}\uv.cmd"}, None, ".com;.exe;.bat;.cmd", "uv", _RAISES, id="batch-only-hit"),
     pytest.param({rf"{TOOLS}\uv.bat"}, None, ".com;.exe;.bat;.cmd", "uv", _RAISES, id="bat-only-hit"),
     pytest.param({rf"{TOOLS}\uv.cmd", r"C:\more\uv.exe"}, rf"{CWD};{TOOLS};C:\more", ".com;.exe;.bat;.cmd", "uv", r"C:\more\uv.exe", id="batch-then-exe"),
+    pytest.param({rf"{TOOLS}\uv.cmd"}, None, ".com;.exe;.bat;.cmd", "uv.cmd", _RAISES, id="batch-name-as-written"),
     pytest.param({rf"{TOOLS}\uv.exe"}, None, ".com;.exe;.bat;.cmd", "uv.exe", rf"{TOOLS}\uv.exe", id="name-with-listed-extension"),
     pytest.param({r"\tools\uv.exe"}, r"\tools;" + TOOLS, ".com;.exe;.bat;.cmd", "uv", _RAISES, id="rooted-path-entry-only"),
     pytest.param({r"C:tools\uv.exe"}, rf"C:tools;{TOOLS}", ".com;.exe;.bat;.cmd", "uv", _RAISES, id="drive-relative-path-entry-only"),
@@ -73,20 +73,6 @@ _CASES = [
     pytest.param(set(), None, ".com;.exe;.bat;.cmd", "C:uv", _SAME, id="drive-relative-head"),
     pytest.param(set(), None, ".com;.exe;.bat;.cmd", r"\\srv\share\uv.exe", _SAME, id="unc-head"),
 ]
-
-
-#: Where the hook helper and the bundle launcher knowingly answer differently: they return
-#: a ``.cmd`` or ``.bat`` hit that ``nx_argv`` and ``generation_core`` refuse. Kept as named,
-#: asserted entries so the difference cannot widen or close unnoticed. The hook shim's own
-#: Windows tests install a fake ``nx-hook.cmd`` and ``tests/test_mcpb_bootstrap.py`` pins
-#: ``.cmd`` winning when ``PATHEXT`` lists it first; a real install has ``nx-hook.exe`` and
-#: ``uv.exe``. Closing it changes plugin and bundle behaviour (nexus-f9bgu.38 decision).
-_BATCH_EXCEPTIONS: dict[str, str] = {
-    "batch-only-hit": rf"{TOOLS}\uv.cmd",
-    "bat-only-hit": rf"{TOOLS}\uv.bat",
-    "batch-then-exe": rf"{TOOLS}\uv.cmd",
-}
-_BATCH_LENIENT = ("hooks", "bootstrap")
 
 
 def _load(path: pathlib.Path, name: str) -> types.ModuleType:
@@ -138,22 +124,12 @@ def _outcomes(monkeypatch, files, path, pathext, head) -> dict[str, object]:  # 
 def test_the_four_resolvers_agree(request, monkeypatch, files, path, pathext, head, expected) -> None:
     got = _outcomes(monkeypatch, files, path, pathext, head)
     case_id = request.node.callspec.id
-    want = {name: expected for name in got}
+    want = dict.fromkeys(got, expected)
     if expected == _SAME:
         # explicit-path heads: the two argv-style copies leave them alone
         got = {name: got[name] for name in ("core", "helper")}
         want = {name: _SAME for name in got}
-    for name in _BATCH_LENIENT if case_id in _BATCH_EXCEPTIONS else ():
-        want[name] = _BATCH_EXCEPTIONS[case_id]
     assert {k: _norm(v) for k, v in got.items()} == {k: _norm(v) for k, v in want.items()}, case_id
-
-
-def test_the_batch_exceptions_are_exactly_the_cases_where_nx_argv_refuses_a_batch_hit() -> None:
-    """The named exceptions are real cases, and no other case is excused."""
-    ids = {p.id for p in _CASES}
-    assert set(_BATCH_EXCEPTIONS) <= ids
-    for case_id, want in _BATCH_EXCEPTIONS.items():
-        assert ntpath.splitext(want)[1].lower() in {".cmd", ".bat"}, case_id
 
 
 def test_the_stdlib_copy_imports_nothing_from_nexus() -> None:

@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -57,9 +58,10 @@ def _install_fake(bindir: Path, source: str) -> dict[str, str]:
     """Put a fake ``nx-hook`` first on PATH; returns the env the shim needs.
 
     POSIX: a shebang script. Windows cannot execute one, and the shim finds
-    ``nx-hook`` through PATHEXT, as it finds the real console-script ``.exe``:
-    there the fake is ``nx-hook.cmd`` running the same Python source, and the
-    env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
+    ``nx-hook`` through PATHEXT and refuses a batch file, so the fake there is
+    a real ``nx-hook.exe``: setuptools' console launcher, which runs the
+    ``nx-hook-script.py`` beside it with the interpreter its ``#!`` line names.
+    The env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
     """
     env = scrubbed_env(PATH=str(bindir))
     if not IS_WINDOWS:
@@ -67,9 +69,12 @@ def _install_fake(bindir: Path, source: str) -> dict[str, str]:
         fake.write_text(source.format(python=sys.executable))
         fake.chmod(0o755)
         return env
-    script = bindir / "nx-hook.py"
-    script.write_text(source.format(python=sys.executable))
-    (bindir / "nx-hook.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+    import setuptools  # noqa: PLC0415 - Windows only; its launcher is the one real .exe the suite can place
+
+    launcher = Path(setuptools.__file__).parent / "cli-64.exe"
+    assert launcher.is_file(), f"setuptools ships no console launcher at {launcher}"
+    shutil.copyfile(launcher, bindir / "nx-hook.exe")
+    (bindir / "nx-hook-script.py").write_text(source.format(python=f'"{sys.executable}"'))
     return env
 
 

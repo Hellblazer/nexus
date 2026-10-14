@@ -1497,7 +1497,10 @@ the manifest from the project directory on Windows; that closing the Job Object
 kills a real child, and that a child spawned with breakaway survives it (a hand
 run on qwentescence at `4aa3eb754` covered the kill once, and CI asserts only
 that the job is created); the time a first hook run takes on a box with no
-Python, against the 5 s hook timeout (nexus-f9bgu.37 carries these).
+Python, against the 5 s hook timeout (nexus-f9bgu.37 carries these). The first
+of these was measured on 2026-10-13: Claude Code 2.1.296 ran the installed
+programs, not copies planted in the working directory (Revision History,
+2026-10-13 evening).
 
 Correction, 2026-10-12, later the same day: the job kill and the breakaway are
 measured. `06ee0cab2` added three real-Windows tests to

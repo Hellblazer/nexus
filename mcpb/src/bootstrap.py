@@ -155,6 +155,7 @@ def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_R
 # ── executable resolution ───────────────────────────────────────────────────
 
 _DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
 
 
 def _is_search_dir(directory, cwd):
@@ -188,9 +189,9 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
     searched, neither first like cmd.exe nor through a ``PATH`` entry that is the
     cwd or is relative (``tools``, ``.``, ``C:x``): a bundle launched with an
     arbitrary cwd must not pick up a planted ``uv.exe``. A ``.cmd`` or ``.bat`` hit
-    is still returned, unlike ``nexus.util.nx_argv`` (the fixed ``uv run`` argv
-    carries nothing a batch file could misparse; ``tests/test_off_cwd_resolver_parity.py``
-    names the difference).
+    is not returned, as in ``nexus.util.nx_argv``: a batch file runs through
+    ``cmd.exe`` with quoting CPython does not escape for it, and uv installs as
+    ``uv.exe``. A ``uv`` found only as a batch file counts as not found.
 
     ``platform``/``path``/``pathext`` are injectable so both branches run on
     any host. Not ``shutil.which``: that decides Windows-ness from the real
@@ -212,12 +213,15 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
         # Already ends in a listed extension: tried as written only, as shutil.which
         # does (appending to it would find ``uv.exe.cmd``).
         exts = [""] if has_ext else listed
+    names = [name + e for e in exts]
+    if windows:
+        names = [n for n in names if os.path.splitext(n)[1].lower() not in _BATCH_SUFFIXES]
     cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     for directory in path.split(sep):
         if not directory or (windows and not _is_search_dir(directory, cwd)):
             continue
-        for ext in exts:
-            candidate = os.path.join(directory, name + ext)
+        for candidate_name in names:
+            candidate = os.path.join(directory, candidate_name)
             if os.path.isfile(candidate) and (windows or os.access(candidate, os.X_OK)):
                 return candidate
     return None
