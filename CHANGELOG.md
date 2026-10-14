@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx self install --bootstrap` installs the CLI for the first time from a throwaway `uv` environment** (RDR-228 Phase 2 Step 1, nexus-sv2wx.14). `uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap` builds one generation from the package index at the version of the `nx` running it, points `current` at it and writes the shims, with a receipt that lists no extras. It does not run `uv cache prune`, which the plain command runs at its end (23.4 GiB removed from a developer's cache in the CA-3 test). The flag is the only way into this path: without it a throwaway environment and a development checkout refuse with the same message as before. With a complete install present (a generation with a receipt, or a `uv tool` install) the flag refuses in one line naming the plain `nx self install` and changes nothing. It takes neither `--version` nor `--extras`.
+
 ### Changed
 
 - **The conexus plugin starts its Nexus servers and hooks through a launcher, and a machine with the plugin and no CLI gets a true message in place of errors** (RDR-228 Phase 1, nexus-sv2wx). `conexus/.mcp.json` and `conexus/hooks/hooks.json` no longer name `nx-mcp`, `nx-mcp-catalog`, `nx-hook` and `nx-session-end-launcher` directly; each entry runs `uv tool run ... launch/nx_launch.py <program>`. With no CLI the two servers connect as stand-ins that offer `setup` and `setup_status` (in this release `setup` installs nothing and answers with the install commands), one session-start message says Nexus is not installed, and every other hook entry writes one line. Before, that machine got six "Executable not found" hook errors, two failed servers and a message that an upgrade had been dispatched. What changes on a machine that has the CLI:

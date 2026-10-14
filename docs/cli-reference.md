@@ -4167,7 +4167,7 @@ plugins, so drift is caught without anyone remembering `--check`.
 ## nx self install
 
 ```
-nx self install [--keep N] [--version X.Y.Z] [--extras NAME] [--dry-run]
+nx self install [--keep N] [--version X.Y.Z] [--extras NAME] [--bootstrap] [--dry-run]
 ```
 
 Upgrade this install of `nx`. Installs are **side-by-side generations**: the
@@ -4187,6 +4187,33 @@ launcher exe cannot be replaced on Windows, so nothing is written into
 keep the old `nx` until restarted. A legacy `uv tool install` tree is migrated
 on the first run and its old launchers are removed by `nx self gc` once
 nothing runs them. The installer runs in Python there, never through `bash`.
+
+**First install from nothing: `--bootstrap` (RDR-228, nexus-sv2wx.14).** The
+plain command refuses a program that is not a generation or a packaged
+install, which includes the throwaway `uv` environment that
+`uv tool run --from conexus==X nx ...` runs from. `--bootstrap` is the one way
+into a first install from there, and nothing is inferred from where the
+process runs. The command the plugin runs is:
+
+```
+uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap
+```
+
+With the flag the command installs the released package from the package
+index, at the version of the `nx` that is running it, into a new
+`gen-<stamp>`, points `current` at it and writes the command shims (on Windows,
+the launchers and the user PATH entry described above). The receipt lists no
+extras, as the documented first install records none; `nx init` provisions the
+service. Unlike the plain command it does **not** run `uv cache prune` at the
+end, because that prune removes unreferenced packages from `uv`'s cache, which
+is shared with every other tool on the account. It takes neither `--version`
+nor `--extras` (both are refused: the version is the running program's, and a
+first install has no extras), and `--keep` has no effect because nothing is
+reaped. With a complete install already present, a generation with a receipt
+or a `uv tool install conexus` tree, it refuses in one line that names the
+plain `nx self install` and changes nothing. `--dry-run` prints the build and
+stops. There is no fallback to `uv tool install` followed by `nx self install`:
+that route runs the prune and leaves two copies on disk.
 
 **Adding an extra (nexus-pffc4):** `nx self install --extras local` builds the
 new generation with that extra ADDED — the flag MERGES with the extras the

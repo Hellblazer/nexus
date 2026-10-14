@@ -59,6 +59,7 @@ import subprocess
 import sys
 import urllib.parse
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -157,7 +158,7 @@ class _WindowsBuild:
 
 def perform_self_install(
     *, keep: int = 3, version: str | None = None, dry_run: bool = False,
-    add_extras: tuple[str, ...] = (),
+    add_extras: tuple[str, ...] = (), bootstrap: bool = False,
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
 
@@ -169,6 +170,11 @@ def perform_self_install(
     set travels through ``install_generation.sh --extras`` and is rendered
     by ``install_layout.build_spec``, so spec and extras cannot disagree.
 
+    *bootstrap* (RDR-228, nexus-sv2wx.14) is the explicit first-install path:
+    see :func:`_bootstrap_install`. It is the only way into that path; nothing
+    is inferred from where this process runs, and without it every refusal
+    below is unchanged.
+
     Returns the new generation, or ``None`` on a dry run.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
@@ -178,6 +184,10 @@ def perform_self_install(
     install_dir = packaged_install_dir()
     tools = install_layout.tools_dir()
     bin_dir = install_layout.bin_dir()
+    if bootstrap:
+        return _bootstrap_install(
+            install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
+        )
     host = running_generation()
 
     # THREE SITES, NOT TWO (nexus-gu9zo). The original guard asked one
@@ -277,6 +287,93 @@ def perform_self_install(
     # test for this ordering reaped a free tree exactly that way.
     _register_legacy_tree_if_present(install_dir, tools)
     return generation
+
+
+@dataclass(frozen=True)
+class _RegistryReceipt:
+    """What a bootstrap build asks for, in the shape :func:`_build_request`
+    reads from a receipt: the distribution name from the package index, and no
+    extras (the documented first install records none; local mode's embedding
+    model belongs to the service, which ``nx init`` provisions)."""
+
+    source: str = "conexus"
+    extras: tuple[str, ...] = ()
+
+
+def _running_version() -> str:
+    """The version of the conexus this process is running."""
+    from importlib.metadata import PackageNotFoundError, version as dist_version  # noqa: PLC0415 — stdlib, deferred
+
+    try:
+        return dist_version("conexus")
+    except PackageNotFoundError as exc:
+        raise click.ClickException(
+            "--bootstrap installs the version of the conexus that is running this "
+            "command, and this process has no conexus distribution metadata. "
+            "Nothing was changed."
+        ) from exc
+
+
+def _existing_install(tools: Path) -> str | None:
+    """Words naming a COMPLETE install on this box, or ``None``: a generation
+    with a receipt (the completion marker; a receipt-less ``gen-*`` is wreckage
+    and not an install), or a ``uv tool install conexus`` tree."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    generations = install_layout.list_generations(tools=tools)
+    if generations:
+        return f"generation {generations[-1].name} under {tools}"
+    legacy = install_layout.uv_conexus_venv(platform=_plat())
+    if install_layout.venv_bin(legacy, platform=_plat()).is_dir():
+        return f"a `uv tool` install at {legacy}"
+    return None
+
+
+def _bootstrap_install(
+    install_dir: Path, tools: Path, bin_dir: Path, *, version: str | None,
+    extras: list[str], dry_run: bool,
+) -> Path | None:
+    """The first install of the CLI, in one command and one generation (RDR-228
+    Phase 2 Step 1, nexus-sv2wx.14).
+
+    Reached ONLY through ``--bootstrap``. Installs the released package, at the
+    running program's own version and with no extras, from the package index
+    into a new ``gen-<stamp>``, points ``current`` at it and writes the command
+    shims. It is what ``uv tool run --python 3.12 --from conexus==<v> nx self
+    install --bootstrap`` runs, from a throwaway ``uv`` environment that
+    ``perform_self_install`` otherwise refuses (CA-3).
+
+    NOT DONE HERE, on purpose:
+
+    * No cache prune. The plain command prunes ``uv``'s shared cache at its end
+      (23.4 GiB from a developer's cache in the CA-3 test); this path never
+      calls :func:`prune_uv_cache`.
+    * No reap and no legacy-tree registration: with an existing install it
+      refuses, so there is nothing older to reap.
+    * No fallback to ``uv tool install`` then ``nx self install``: that runs the
+      prune and leaves two copies on disk.
+
+    With a complete install present it refuses, in one line naming the plain
+    command. The record states the flag for a first install and nothing else:
+    refusing is the reading that cannot overwrite anything (checked by
+    P2.R2, nexus-sv2wx.22).
+    """
+    if version or extras:
+        raise click.ClickException(
+            "--bootstrap installs the version of the running nx with no extras, so it "
+            "takes neither --version nor --extras. Nothing was changed."
+        )
+    existing = _existing_install(tools)
+    if existing is not None:
+        raise click.ClickException(
+            f"--bootstrap is for a first install and {existing} is already installed. "
+            "Run `nx self install` to update it. Nothing was changed."
+        )
+    build = _build_request(install_dir, _RegistryReceipt(), version=_running_version())
+    if dry_run:
+        click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
+        return None
+    return _build_flip_shims(build, install_dir=install_dir, tools=tools, bin_dir=bin_dir)
 
 
 _EXTRA_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -1076,9 +1173,16 @@ def self_group() -> None:
               help="Extra(s) to ADD, e.g. --extras local (repeatable, or "
                    "comma-separated). MERGED with the extras this install "
                    "already has — never replaces them (nexus-pffc4).")
+@click.option("--bootstrap", is_flag=True,
+              help="First install from nothing: build the released package, at the version "
+                   "of the nx running this command and with no extras, into a new "
+                   "generation. Takes neither --version nor --extras, does not prune "
+                   "uv's package cache, and refuses when an install already exists.")
 @click.option("--dry-run", is_flag=True,
               help="Print the build command and stop.")
-def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run: bool) -> None:
+def install_cmd(
+    keep: int, version: str | None, extras: tuple[str, ...], bootstrap: bool, dry_run: bool,
+) -> None:
     """Install a new generation from the one this process is running from.
 
     Safe under live sessions: nothing is swapped underneath a running process.
@@ -1089,11 +1193,15 @@ def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run
     fresh install needs no `nx upgrade`: `nx init` converges the ladder.
     """
     generation = perform_self_install(
-        keep=keep, version=version, dry_run=dry_run, add_extras=extras,
+        keep=keep, version=version, dry_run=dry_run, add_extras=extras, bootstrap=bootstrap,
     )
     if generation is None:
         return
     click.echo(f"installed {generation.name}")
+    if bootstrap:
+        # A first install: no cache prune (RDR-228), and nothing to migrate.
+        click.echo("a fresh install is set up by `nx init`")
+        return
     click.echo(prune_uv_cache())
     click.echo(
         "if this upgraded an existing install, run `nx upgrade` for migrations "
