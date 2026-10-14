@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.79.0] - 2026-10-14
+
+Plugin version aligned with conexus 7.79.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied), all from RDR-228 Phase 1 and the Windows work:
+
+- **Servers and hooks through the launcher** (nexus-sv2wx.5, nexus-sv2wx.8). `.mcp.json` starts `nexus` and `nexus-catalog`, and `hooks.json` runs the `nx-hook` session-start entries and the session-end entry, through `launch/nx_launch.py`. The launcher finds the CLI in the install directory's generation, then on `PATH`, and with no CLI a hook exits 0 with one line and a server is answered by the stand-in.
+- **Stand-in servers** (nexus-sv2wx.6). `launch/nx_standin.py` answers in place of `nx-mcp` when no CLI is installed and says so in its instructions; its `setup` tool gives the manual install commands. In place of `nx-mcp-catalog` it offers no tools.
+- **Setup notice** (nexus-sv2wx.7, nexus-217c3). `hooks/scripts/nx_setup_notice.py` is the first session-start entry: silent when `nx-mcp` resolves or in a cloud session, otherwise it tells the model Nexus is not installed and gives the install commands.
+- **One CLI lookup** (nexus-sv2wx.5). `hooks/scripts/_cli_lookup.py` is shared by the launcher and the hook shim, so `nx_hook_shim.py` also finds an install made after the application started.
+- **Version lockstep** (nexus-sv2wx.8, nexus-sv2wx.9, nexus-gdllu). The hook does nothing when `nx` does not resolve, its action finds `nx` by the launcher's lookup, and the hook reads the plugin list from the marketplace's own clone when it runs from the cache copy.
+- **Hook exec off the working directory on Windows** (nexus-f9bgu.38). `hooks/scripts/_exec_path.py` skips a `PATH` entry that is the working directory, a driveless rooted entry, and a `.cmd` or `.bat` hit.
+
+Claude Desktop picks these up only after the marketplace is removed and added again (RDR-228 Discovery 6).
+
 ## [7.78.0] - 2026-10-12
 
 Plugin version aligned with conexus 7.78.0. No plugin-side changes: `PENDING_RELEASE.md` held no entries.

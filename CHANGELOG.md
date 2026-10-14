@@ -6,12 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.79.0] - 2026-10-14
+
+Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). The plugin starts its servers and hooks through a launcher and says plainly when the CLI is not installed (RDR-228 Phase 1). On Windows, `nx` programs no longer crash on a WMI query at import, and `nx daemon service install-binary` extracts the PostgreSQL bundle it installs. `nx daemon service start` starts an installed autostart unit through the OS manager.
+
 ### Changed
 
 - **The conexus plugin starts its Nexus servers and hooks through a launcher, and a machine with the plugin and no CLI gets a true message in place of errors** (RDR-228 Phase 1, nexus-sv2wx). `conexus/.mcp.json` and `conexus/hooks/hooks.json` no longer name `nx-mcp`, `nx-mcp-catalog`, `nx-hook` and `nx-session-end-launcher` directly; each entry runs `uv tool run ... launch/nx_launch.py <program>`. With no CLI the two servers connect as stand-ins that offer `setup` and `setup_status` (in this release `setup` installs nothing and answers with the install commands), one session-start message says Nexus is not installed, and every other hook entry writes one line. Before, that machine got six "Executable not found" hook errors, two failed servers and a message that an upgrade had been dispatched. What changes on a machine that has the CLI:
   - **`uv` is now needed for the Nexus servers.** They used to start without it; the plugin's other hooks and its thinking server already needed it. A CLI installed with `pip` or `pipx` on a machine with no `uv` loses both servers until `uv` is installed.
   - **The plugin looks for the CLI in its install directory before `PATH`.** An install made after the application started is found without a restart. On a machine with a generation and another `nx` earlier on `PATH`, the plugin's servers and hooks run the generation's programs; the `/conexus:*` commands still run the `nx` that `PATH` finds.
   - Each server has one resident `uv` parent process, and each server start and hook gains one `uv` launch (25 ms measured).
+  - **Claude Desktop picks this up only after the marketplace is removed and added again.** Desktop keeps the plugin's earlier copy until then (RDR-228 Discovery 6).
 
 ### Fixed
 
