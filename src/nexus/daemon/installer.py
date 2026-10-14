@@ -177,11 +177,57 @@ def _task_user_sid() -> str:
     return service_identity()
 
 
+def generation_pythonw(generation: Path) -> str:
+    """The windowless interpreter of *generation*'s venv (Windows layout).
+
+    ``pythonw.exe`` when it exists, else the venv's ``python.exe``: the same
+    choice :func:`nexus.daemon.windows_autostart.pythonw_for` makes. The one
+    place the task's interpreter is derived from a generation, so ``nx self
+    install``'s retarget and :func:`_task_pythonw` (hence the doctor row and the
+    converge pass) cannot name different files for the same generation.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import — Windows-only path
+
+    pythonw = install_layout.venv_script(generation, "pythonw", platform="win32")
+    if pythonw.is_file():
+        return str(pythonw)
+    return str(install_layout.venv_python(generation, platform="win32"))
+
+
+def _current_generation_pythonw() -> str | None:
+    """The interpreter of the generation ``current`` names, or None.
+
+    None when there is no generation layout (a dev checkout, a plain uv tool
+    install), when ``current`` dangles, or when the generation holds no
+    interpreter: the task must never name a file that is not there.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import — Windows-only path
+
+    try:
+        generation = install_layout.current_generation()
+    except Exception:  # noqa: BLE001 — no pointer, relative pointer, unreadable root: no layout
+        return None
+    python = install_layout.venv_python(generation, platform="win32")
+    pythonw = install_layout.venv_script(generation, "pythonw", platform="win32")
+    if not (python.is_file() or pythonw.is_file()):
+        return None
+    return generation_pythonw(generation)
+
+
 def _task_pythonw() -> str:
-    """The windowless interpreter the task launches (seam: tests inject one)."""
+    """The windowless interpreter the task launches (seam: tests inject one).
+
+    The CURRENT generation's when the generation layout is present, whichever
+    interpreter runs this ``nx`` (nexus-50l3e). ``sys.executable`` is the tree
+    of the shim that was invoked, and a shell opened before ``nx self install``
+    still finds uv's shim, which runs the legacy tree: registering that tree
+    left a task the session-start gc could reap out from under (measured in the
+    Windows guest, T2 ``nexus_rdr/228-research-29``). Without a generation
+    layout the running interpreter is all there is.
+    """
     from nexus.daemon.windows_autostart import pythonw_for  # noqa: PLC0415 — deferred import — Windows-only path
 
-    return pythonw_for(sys.executable)
+    return _current_generation_pythonw() or pythonw_for(sys.executable)
 
 
 def _render_windows_task(_daemon: ModuleType) -> tuple[Path, str]:

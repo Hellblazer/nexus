@@ -598,13 +598,10 @@ def _retarget_autostart_task(generation: Path) -> None:
     leaves it starting the old tree (``installer.retarget_windows_task`` has the
     measurement). Best effort after a successful flip: a failure here is a line
     for the operator, never a failed install."""
-    from nexus import install_layout  # noqa: PLC0415 — deferred import
     from nexus.daemon import installer  # noqa: PLC0415 — deferred import
-    from nexus.daemon.windows_autostart import pythonw_for  # noqa: PLC0415 — deferred import
 
-    python = install_layout.venv_python(generation, platform="win32")
     try:
-        lines = installer.retarget_windows_task(pythonw_for(str(python)))
+        lines = installer.retarget_windows_task(installer.generation_pythonw(generation))
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         lines = [
             f"the storage-service logon task could not be repointed at {generation.name} "
