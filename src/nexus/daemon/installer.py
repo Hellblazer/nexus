@@ -185,6 +185,10 @@ def generation_pythonw(generation: Path) -> str:
     place the task's interpreter is derived from a generation, so ``nx self
     install``'s retarget and :func:`_task_pythonw` (hence the doctor row and the
     converge pass) cannot name different files for the same generation.
+
+    Neither file is checked for: with no ``pythonw.exe`` the ``python.exe``
+    path is returned whether or not it exists, as ``pythonw_for`` does. The
+    caller guarantees a built generation.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import — Windows-only path
 

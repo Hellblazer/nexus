@@ -765,7 +765,6 @@ class TestTaskFollowsTheCurrentGeneration:
         result = installer.install_autostart(tier="service")
         body = result.dest.read_text()
         assert f"<Command>{gen / 'Scripts' / 'pythonw.exe'}</Command>" in body
-        assert "uv" not in body.split("<Command>")[1].split("</Command>")[0]
         assert win.verbs() == ["create", "run"], "non-vacuity: the task was registered"
 
     def test_a_task_naming_the_old_generation_is_drift_and_the_retarget_clears_it(
