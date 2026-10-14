@@ -116,6 +116,103 @@ def resolve(name: str) -> str | None:
     return _exec_path.which_off_cwd(name, path=os.pathsep.join(entries))
 
 
+#: How much of a program is read to find its shebang line.
+_SHEBANG_BYTES = 256
+
+
+def _venv_problem(exe: str) -> str | None:
+    """Why the venv *exe* sits in cannot run, from its ``pyvenv.cfg``, or ``None``.
+
+    ``<venv>/bin/<name>`` (POSIX) and ``<venv>\\bin\\<name>.exe`` or
+    ``<venv>\\Scripts\\<name>.exe`` (Windows) all have the venv two levels up.
+    ``pyvenv.cfg`` names the directory of the interpreter the venv was built from
+    (``home``), and ``uv`` removes that directory when it prunes the Python. A
+    generation's launchers are copies with no shebang on Windows, so this is the
+    only evidence there. A missing or unreadable ``pyvenv.cfg``, or one with no
+    ``home`` line, is no evidence.
+    """
+    root = os.path.dirname(os.path.dirname(exe))
+    try:
+        with open(os.path.join(root, "pyvenv.cfg"), encoding="utf-8", errors="replace") as cfg:
+            text = cfg.read(8192)
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "home":
+            home = value.strip()
+            if home and not os.path.isdir(home):
+                return f"the Python it was built with ({home}) is gone"
+            return None
+    return None
+
+
+def _shebang_problem(exe: str) -> str | None:
+    """Why the script *exe* cannot be started, from its ``#!`` line, or ``None``.
+
+    Only a shebang whose meaning is certain counts: an absolute interpreter path
+    (it must exist and be executable; a dangling symlink, which is how ``uv``
+    leaves a pruned interpreter, does not exist) or ``/usr/bin/env <name>`` (the
+    name must be on ``PATH``). A relative interpreter, ``env`` with options or an
+    assignment, and any file that does not start with ``#!`` are not judged.
+    """
+    try:
+        with open(exe, "rb") as handle:
+            head = handle.read(_SHEBANG_BYTES)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    fields = head[2:].split(b"\n", 1)[0].decode("utf-8", "replace").split()
+    if not fields:
+        return None
+    interpreter = fields[0]
+    if os.path.basename(interpreter) == "env":
+        name = fields[1] if len(fields) > 1 else ""
+        if not name or name.startswith("-") or "=" in name or os.path.dirname(name):
+            return None
+        return None if _exec_path.which_off_cwd(name) else f"it needs `{name}`, which is not on PATH"
+    if not os.path.isabs(interpreter):
+        return None
+    if not os.path.exists(interpreter):
+        return f"its interpreter ({interpreter}) is missing"
+    if not os.access(interpreter, os.X_OK):
+        return f"its interpreter ({interpreter}) is not executable"
+    return None
+
+
+def cannot_start(exe: str, *, windows: bool | None = None) -> str | None:
+    """Why the program at *exe* cannot start, or ``None`` when nothing says so.
+
+    RDR-228 Phase 2 Step 4 (nexus-sv2wx.17; Sam, 2026-10-14). The lookup finds a
+    program by its file, and an install whose interpreter ``uv`` pruned still has
+    the file. Started, it fails. The answer is from files alone, a few stats and
+    two small reads, because the launcher and the session-start hook decide with
+    it in milliseconds: no process is started to ask. It claims "cannot start" only
+    on positive evidence, so a program in a directory with no ``pyvenv.cfg``
+    (the suite's fakes, a binary) is runnable here.
+
+    Two sources of evidence. The venv around the program (``pyvenv.cfg``'s
+    ``home`` is not a directory), on every platform. On POSIX also the program's
+    own shebang (:func:`_shebang_problem`), for a program outside a venv or whose
+    venv answers. The path is checked as given and, when it is a link, as it
+    resolves. *windows* selects the Windows branch (no shebang) for a test.
+    """
+    windows = (os.name == "nt") if windows is None else windows
+    try:
+        candidates = [exe]
+        real = os.path.realpath(exe)
+        if real != exe:
+            candidates.append(real)
+        for candidate in candidates:
+            problem = _venv_problem(candidate)
+            if problem is not None:
+                return problem
+        return None if windows else _shebang_problem(exe)
+    except (OSError, ValueError):
+        return None
+
+
 def missing_note(program: str, what: str) -> str:
     """The one line written when *program* is not found and *what* is skipped."""
     return (

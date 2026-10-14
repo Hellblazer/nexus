@@ -493,6 +493,16 @@ class TestCommandStructure:
                 )
         assert not offenders, "\n".join(offenders)
 
+    #: Commands with no ``nx`` shell line, each with the reason. A command here must
+    #: still carry no fenced ```! block, and ``test_the_exempt_commands_really_have_no_shell_line``
+    #: holds the exemption to the commands that earn it.
+    _NO_NX_LINE_EXEMPT = {
+        "setup.md": (
+            "/conexus:setup runs on a machine where the nx CLI does not exist; it works "
+            "through the nexus server's setup and setup_status tools only (RDR-228, nexus-sv2wx.17)"
+        ),
+    }
+
     def test_every_command_uses_single_line_nx(self) -> None:
         """RDR-130: a command injects bash via a single-line inline
         ``!`nx …` `` call — never a fenced ```! block or inlined heredoc.
@@ -511,11 +521,56 @@ class TestCommandStructure:
                     f"{cmd_path.name}: migrated command must inject via a single-line "
                     "!`nx …` call, not a fenced ```! block (RDR-130 P1.5)."
                 )
+            if cmd_path.name in self._NO_NX_LINE_EXEMPT:
+                continue
             if not re.search(r"(?m)^!`nx [^`]+`\s*$", text):
                 offenders.append(
                     f"{cmd_path.name}: expected a single-line !`nx …` injection (RDR-130 P1.5)."
                 )
         assert not offenders, "\n".join(offenders)
+
+    def test_the_exempt_commands_really_have_no_shell_line(self) -> None:
+        """An exemption from the ``nx`` line is for a command that runs no shell
+        command at all, and is held to it: no ``!`` injection of any kind."""
+        by_name = {p.name: p for p in command_files()}
+        assert set(self._NO_NX_LINE_EXEMPT) <= set(by_name), "an exemption names a command that is gone"
+        for name, reason in self._NO_NX_LINE_EXEMPT.items():
+            assert len(reason) > 40, f"{name}: the exemption needs its reason"
+            text = by_name[name].read_text()
+            assert not re.search(r"(?m)^\s*!`", text) and "```!" not in text, f"{name}: runs a shell command"
+
+    def test_setup_command_is_the_tools_only_way_back_and_names_the_update_commands(self) -> None:
+        """RDR-228 Phase 2 Step 4 (nexus-sv2wx.17). ``/conexus:setup`` calls
+        ``setup_status``, shows the table with the choices still open, asks first, and
+        calls ``setup`` with the answer. It has no ``nx`` shell line. When the server
+        offers no setup tools the CLI is older than the release that carries them, and
+        the command says so and gives the update commands from docs/getting-started.md
+        as text."""
+        text = (COMMANDS_DIR / "setup.md").read_text()
+        assert not re.search(r"(?m)^\s*!`", text) and "```!" not in text, "it has no shell line"
+        assert "allowed-tools" not in text.split("---")[1], (
+            "the setup tools stay out of auto-approval: pre-approving them here would defeat the consent control"
+        )
+        assert "setup_status" in text and "`setup` tool" in text
+        assert "older than the release that carries the setup tools" in text
+        getting_started = (REPO_ROOT / "docs" / "getting-started.md").read_text()
+        assert "nx self install               # 1. update the code" in getting_started
+        assert "nx upgrade                    # 2. converge the data" in getting_started
+        assert re.search(r"(?m)^nx self install$", text) and re.search(r"(?m)^nx upgrade$", text)
+        assert "uv tool upgrade conexus" in text and "uv tool upgrade conexus" in getting_started
+        assert "ASK THE USER FIRST" in text and "Do not call `setup` before the user has answered" in text
+        assert "Cloud" not in text, "the Cloud row waits for the credentials page (nexus-sv2wx.18)"
+
+    def test_setup_command_table_is_the_stand_ins(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("nx_standin_for_command", REPO_ROOT / "conexus" / "launch" / "nx_standin.py")
+        assert spec is not None and spec.loader is not None
+        standin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(standin)
+        text = (COMMANDS_DIR / "setup.md").read_text()
+        assert standin.QUESTION_TABLE in text
+        assert standin.LOCAL_FOLLOW_UP in text
 
 
 

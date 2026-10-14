@@ -40,14 +40,12 @@ policy without re-deriving the lease/config reads.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import stat
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
 
@@ -360,6 +358,15 @@ _WINDOWS_SHARING_RETRY_FIRST_S = 0.002
 _WINDOWS_SHARING_RETRY_MAX_S = 0.01
 
 
+#: The longest the SESSION-START HOOK lets a lease read retry a Windows sharing
+#: violation (RDR-228 Phase 2 Step 4, nexus-sv2wx.17; residual nexus-9i4d4 item 9).
+#: The registry's own budget is two seconds, which suits a client that can wait; the
+#: hook has 100 ms in all, so it retries for at most this long and then reads the
+#: lease as absent. A miss then reports "no service" for that one session start,
+#: which is the safe side of the same question the hook asks again next time.
+HOOK_LEASE_RETRY_BUDGET_S = 0.03
+
+
 def read_lease_text(
     path: Path,
     *,
@@ -367,6 +374,7 @@ def read_lease_text(
     read: Callable[[Path], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    budget_s: float | None = None,
 ) -> str:
     """Read the supervisor lease file, retrying a Windows sharing violation.
 
@@ -382,7 +390,7 @@ def read_lease_text(
     do_read = read if read is not None else (lambda p: p.read_text())
     if not _is_windows(platform):
         return do_read(path)
-    deadline = monotonic() + _WINDOWS_SHARING_RETRY_BUDGET_S
+    deadline = monotonic() + (_WINDOWS_SHARING_RETRY_BUDGET_S if budget_s is None else budget_s)
     pause = _WINDOWS_SHARING_RETRY_FIRST_S
     while True:
         try:
@@ -395,17 +403,21 @@ def read_lease_text(
             pause = min(pause * 2, _WINDOWS_SHARING_RETRY_MAX_S)
 
 
-def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
+def read_storage_service_lease(config_dir: Path, *, retry_budget_s: float | None = None) -> dict[str, Any] | None:
     """Best-effort read of the local supervisor's ``ServiceRegistry``
     lease: ``{"host", "port", "token"}``, or ``None``. Any failure --
     missing file, unreadable, malformed JSON, non-``live`` status, or a
     heartbeat older than its TTL -- resolves to ``None``. Never raises.
+
+    *retry_budget_s* bounds the Windows sharing-violation retry (default: the
+    registry's two seconds); the session-start hook passes
+    :data:`HOOK_LEASE_RETRY_BUDGET_S`.
     """
     path = _lease_path_or_none(config_dir)
     if path is None:
         return None
     try:
-        data = json.loads(read_lease_text(path))
+        data = json.loads(read_lease_text(path, budget_s=retry_budget_s))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     try:
@@ -503,9 +515,11 @@ def _strip_inline_comment(value: str) -> str:
     return value.rstrip()
 
 
-def read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
+def read_config_yml_credentials(
+    config_dir: Path, keys: tuple[str, ...] = ("service_url", "service_token"),
+) -> dict[str, str]:
     """Bounded, stdlib-only extraction of ``service_url``/``service_token``
-    from the persisted ``config.yml``.
+    (or the other *keys* asked for) from the persisted ``config.yml``.
 
     NOT a general YAML parser -- this module cannot import ``nexus`` or a
     third-party YAML library (nexus-vg6d4). It is a line-oriented scan
@@ -553,7 +567,7 @@ def read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
         if indent <= cred_indent:
             # Dedented back out of the credentials block -- done scanning.
             break
-        for key in ("service_url", "service_token"):
+        for key in keys:
             prefix = f"{key}:"
             if not stripped.startswith(prefix):
                 continue
@@ -590,6 +604,9 @@ def read_data_token_lease(
     host still reproduces a matching digest and would otherwise be
     indistinguishable from a same-tenant lease by that check alone.
     """
+    import hashlib  # noqa: PLC0415 -- lazy: the session-start hook's 100 ms; only this reader needs them
+    import urllib.parse  # noqa: PLC0415
+
     host = urllib.parse.urlsplit(base_url).netloc or base_url
     now = time.time()
     best_token: str | None = None
@@ -708,3 +725,65 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
         f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
         f"supervisor lease at {_shown(lease_path)}"
     )
+
+
+def _credential(name: str, env_var: str, saved: dict[str, str]) -> str:
+    """``nexus.config.get_credential(name).strip()``: the environment variable
+    when it is set to anything (a blank value does NOT fall back to the file),
+    else the saved ``config.yml`` value."""
+    value = os.environ.get(env_var, "")
+    if not value:
+        value = saved.get(name, "")
+    return value.strip()
+
+
+def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None) -> bool:
+    """Whether the CLI would resolve a service endpoint: the plugin's restatement
+    of ``nexus.db.service_endpoint.resolve_service_endpoint()`` returning and not
+    raising (RDR-228 Phase 2 Step 4, nexus-sv2wx.17; residual nexus-9i4d4 item 9).
+
+    :func:`resolve_base_url` answers a different question, the base URL the other
+    hooks use with a credential policy of their own, and it returns a saved address
+    with no token and a lease with no token, where the CLI raises. The CLI is the
+    program that connects, so its answer is the one that counts. The four legs, in
+    the CLI's order:
+
+    1. ``NX_SERVICE_URL``, else a saved ``service_url``. Usable with a token
+       (``NX_SERVICE_TOKEN`` else a saved ``service_token``), else with the token of
+       a live local lease, else with a mint credential (``NX_MINT_TOKEN`` else a
+       saved ``mint_token``). A URL that is only slashes is no URL.
+    2. Otherwise ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` / ``NX_SERVICE_TOKEN``
+       from the environment alone (the saved token is not read on this leg), with a
+       live lease filling whichever of the three is missing. Usable with a port and
+       a token. A port that is not an integer is not usable.
+    3. Otherwise the live lease alone, which supplies all three.
+
+    No network request, no wait, nothing written. *retry_budget_s* bounds the
+    Windows sharing-violation retry of the lease read (the hook passes
+    :data:`HOOK_LEASE_RETRY_BUDGET_S`). One difference from the CLI, which can probe
+    a socket and this cannot: a lease past its TTL is absent here, where the CLI
+    keeps one whose owner process is alive and answering. Any error is "not usable".
+    """
+    try:
+        saved = read_config_yml_credentials(config_dir, ("service_url", "service_token", "mint_token"))
+        url = _credential("service_url", "NX_SERVICE_URL", saved).rstrip("/")
+        if url:
+            if _credential("service_token", "NX_SERVICE_TOKEN", saved):
+                return True
+            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s)
+            if lease is not None and lease["token"]:
+                return True
+            return bool(_credential("mint_token", "NX_MINT_TOKEN", saved))
+        # The host never decides the answer (it defaults to 127.0.0.1), so a lease is
+        # read only when the port or the token is missing.
+        port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+        port = int(port_str) if port_str else None
+        token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+        if port is None or token is None:
+            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s)
+            if lease is not None:
+                port = port if port is not None else lease["port"]
+                token = token or lease["token"] or None
+        return port is not None and bool(token)
+    except Exception:  # noqa: BLE001 -- any failure to resolve is "not usable", as the CLI's raise is
+        return False

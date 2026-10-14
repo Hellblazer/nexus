@@ -100,6 +100,11 @@ try:
             shutil.copytree(eff["copytree"][0], eff["copytree"][1], dirs_exist_ok=True)
         if "point_current" in eff:
             point_current(*eff["point_current"])
+        if "repoint_current" in eff:
+            link = os.path.join(eff["repoint_current"][0], "current")
+            if os.path.lexists(link):
+                os.rmdir(link) if os.name == "nt" else os.unlink(link)
+            point_current(*eff["repoint_current"])
         if "write" in eff:
             os.makedirs(os.path.dirname(eff["write"][0]), exist_ok=True)
             open(eff["write"][0], "w").write(eff["write"][1])
@@ -195,16 +200,18 @@ class Box:
         self.install(gen / "bin", "nx", "built")
         return gen
 
-    def uv_builds_nx(self, *, sleep: float = 0.0, exit: int = 0) -> dict[str, Any]:
+    def uv_builds_nx(self, *, sleep: float = 0.0, exit: int = 0, repoint: bool = False) -> dict[str, Any]:
         """The rule for a ``uv`` that, when it runs the bootstrap build, leaves a
-        generation and a ``current`` link behind."""
+        generation and a ``current`` link behind. With *repoint* the link is moved
+        even when one exists, as the real bootstrap flips ``current`` over a
+        generation that cannot run."""
         gen = self.stage_generation()
         target = self.tools / gen.name
         rule: dict[str, Any] = {"prog": "uv", "match": [], "sleep": sleep, "exit": exit}
         if exit == 0:
             rule["effects"] = [
                 {"copytree": [str(gen), str(target)]},
-                {"point_current": [str(self.tools), str(target)]},
+                {("repoint_current" if repoint else "point_current"): [str(self.tools), str(target)]},
             ]
         return rule
 
@@ -590,7 +597,7 @@ def test_autostart_decides_the_login_unit_on_the_provisioned_and_down_path(box: 
 def test_a_service_that_resolves_is_left_alone(box: Box) -> None:
     box.layout()
     box.provision()
-    box.start("local", True, NX_SERVICE_URL="http://127.0.0.1:9")
+    box.start("local", True, NX_SERVICE_URL="http://127.0.0.1:9", NX_SERVICE_TOKEN="tok")
     done = box.wait_terminal()
     assert done["state"] == "done"
     assert box.argvs() == [["nx", "doctor"]]
@@ -1540,6 +1547,103 @@ def test_a_layout_install_that_bootstrap_would_still_finish_runs_the_build_step(
     assert box.probes() == [["layout", "self", "install", "--bootstrap", "--dry-run"]]
 
 
+# -- a Nexus CLI that is found and cannot start (Sam, 2026-10-14) ----------------------------------
+
+
+def _prune_python(gen: Path, root: Path) -> None:
+    """What ``uv`` does to a generation: the interpreter ``pyvenv.cfg`` names is gone."""
+    (gen / "pyvenv.cfg").write_text(f"home = {root / 'uv' / 'cpython-3.12-pruned'}\n")
+
+
+def test_a_layout_install_whose_interpreter_is_gone_is_not_asked_and_the_build_runs(box: Box) -> None:
+    """Before: the layout's nx was asked ``--bootstrap --dry-run``, could not start,
+    the OSError read as "nothing to do", and the build was skipped, so ``setup``
+    reported done over an install that could not run."""
+    gen = box.layout("broken")
+    _prune_python(gen, box.root)
+    box.behave([box.uv_builds_nx(repoint=True)])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done", done
+    assert box.argvs() == [["uv", *_BUILD]], "the build ran"
+    assert [m for m, *_ in box.probes()] == [], "the broken nx was never started"
+    assert (box.tools / "current").resolve().name == "gen-20260202T000000Z", "current was moved to the new generation"
+
+
+def test_a_layout_nx_that_cannot_be_spawned_at_all_is_a_build_and_not_a_skip(box: Box) -> None:
+    """The OSError of the dry run itself (no pyvenv.cfg evidence, the system refuses
+    to execute it) is a program that cannot start, and the build repairs it."""
+    class CannotSpawn:
+        def cmd(self, *_args: object, **_kwargs: object) -> None:
+            raise OSError(8, "Exec format error")
+
+    assert _load_module()._bootstrap_would_act(CannotSpawn(), "/x/nx") is True
+
+
+def test_a_path_nexus_that_cannot_start_is_not_run_and_the_build_runs(box: Box) -> None:
+    broken = box.root / "broken-venv"
+    box.install(broken / "bin", "nx", "broken")
+    box.install(broken / "bin", "nx-mcp", "broken")
+    _prune_python(broken, box.root)
+    box.extra_env["PATH"] = os.pathsep.join([str(box.bin), str(broken / "bin")])
+    box.behave([box.uv_builds_nx()])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done", done
+    assert len(box.calls("uv")) == 1
+    assert not [e for e in box.calls("nx", probes=True) if e["marker"] == "broken"], "the broken nx was never started"
+
+
+def test_a_build_that_leaves_an_nx_that_cannot_start_fails_the_build_step_and_says_why(box: Box) -> None:
+    rule = box.uv_builds_nx()
+    box.behave([rule])
+    # The "built" generation's own pyvenv.cfg names a Python that is not there.
+    _prune_python(box.stage / "gen-20260202T000000Z", box.root)
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "failed" and done["failed_step"] == "build"
+    assert "cannot start" in done["message"] and "cpython-3.12-pruned" in done["message"]
+
+
+def test_a_healthy_layout_install_is_still_asked_and_still_skipped(box: Box) -> None:
+    """The cannot-start check must not turn a working install into a rebuild."""
+    box.layout()
+    (box.tools / "gen-20260101T000000Z" / "pyvenv.cfg").write_text(f"home = {box.root}\n")  # a directory that exists
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done" and box.calls() == []
+    assert len(box.probes()) == 1
+
+
+def _saved_service(box: Box, *, token: bool) -> None:
+    (box.config / "config.yml").write_text(
+        "credentials:\n  service_url: https://svc.example\n" + ("  service_token: tok\n" if token else ""),
+        encoding="utf-8",
+    )
+
+
+def test_a_saved_address_with_no_token_is_not_a_service_and_local_still_sets_one_up(box: Box) -> None:
+    """Residual 9 at the setup process: ``local`` skipped its service step whenever an
+    address resolved; the address alone is not a usable service."""
+    box.layout()
+    box.provision()
+    _saved_service(box, token=False)
+    box.start("local")
+    done = box.wait_terminal()
+    assert [a[1:] for a in box.argvs() if a[0] == "nx"] == [["daemon", "service", "start"], ["doctor"]], box.argvs()
+    assert done["state"] == "done"
+
+
+def test_a_saved_address_and_token_is_a_service_and_local_starts_nothing(box: Box) -> None:
+    box.layout()
+    box.provision()
+    _saved_service(box, token=True)
+    box.start("local")
+    done = box.wait_terminal()
+    assert [a[1:] for a in box.argvs() if a[0] == "nx"] == [["doctor"]], box.argvs()
+    assert done["state"] == "done"
+
+
 def test_find_uv_ignores_a_relative_path_entry(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _load_module()
     rel = box.root / "rel"
@@ -1855,7 +1959,7 @@ def test_a_relative_config_directory_reaches_the_detached_run(box: Box) -> None:
 def test_autostart_asked_of_a_running_service_says_the_login_unit_was_not_registered(box: Box, autostart: bool) -> None:
     box.layout()
     box.provision()
-    box.start("local", autostart, NX_SERVICE_URL="http://127.0.0.1:9")
+    box.start("local", autostart, NX_SERVICE_URL="http://127.0.0.1:9", NX_SERVICE_TOKEN="tok")
     done = box.wait_terminal()
     assert done["state"] == "done"
     assert not [a for a in box.argvs() if a[1:3] == ["daemon", "service"]]

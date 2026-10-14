@@ -388,20 +388,137 @@ def test_no_argument_is_a_usage_line_and_exit_1(tmp_path: Path) -> None:
 
 
 @posix_only("a file with the exec bit and no program in it; Windows decides by extension")
-@pytest.mark.parametrize(("name", "expected"), [("nx-hook", 0), ("nx-mcp", 1)])
-def test_a_program_that_is_found_and_cannot_start_skips_a_hook_and_fails_a_server(
-    tmp_path: Path, name: str, expected: int,
-) -> None:
+def test_a_program_the_system_will_not_execute_skips_a_hook(tmp_path: Path) -> None:
     tools, gen = _layout(tmp_path)
-    broken = gen / "bin" / name
-    broken.parent.mkdir()
+    broken = gen / "bin" / "nx-hook"
+    broken.parent.mkdir(exist_ok=True)
     broken.write_bytes(b"")
     broken.chmod(0o755)
-    r = _run([name, "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
-    assert r.returncode == expected
+    r = _run(["nx-hook", "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert r.returncode == 0
     assert r.stdout == b""
     lines = r.stderr.decode().splitlines()
     assert len(lines) == 1 and "could not start" in lines[0], lines
+
+
+@posix_only("a file with the exec bit and no program in it; Windows decides by extension")
+def test_a_server_the_system_will_not_execute_is_served_the_installed_but_cannot_start_stand_in(
+    tmp_path: Path,
+) -> None:
+    """Sam, 2026-10-14: before, exit 1 and no stand-in, so the application showed
+    a failed server and said nothing. Now the stand-in tells the model and the user."""
+    tools, gen = _layout(tmp_path)
+    broken = gen / "bin" / "nx-mcp"
+    broken.parent.mkdir(exist_ok=True)
+    broken.write_bytes(b"")
+    broken.chmod(0o755)
+    r = _run(["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0
+    assert r.stderr == b""
+    assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
+
+
+# -- the CLI is found and cannot start (Sam, 2026-10-14) -------------------------------------
+
+_BROKEN_PHRASE = "Nexus is installed but cannot start; setup repairs it"
+_INITIALIZE = (
+    json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+    }).encode() + b"\n"
+    + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).encode() + b"\n"
+)
+
+
+def _broken_layout(tmp_path: Path, *names: str) -> tuple[Path, Path]:
+    """A generation holding fakes for *names*, whose ``pyvenv.cfg`` names a Python
+    that is gone: what ``uv`` leaves when it prunes the interpreter. The same on
+    POSIX and Windows, where the fake is a launcher ``.exe`` with no shebang."""
+    tools, gen = _layout(tmp_path, *names)
+    (gen / "pyvenv.cfg").write_text(f"home = {tmp_path / 'uv' / 'cpython-3.12-pruned'}\nversion = 3.12.1\n")
+    return tools, gen
+
+
+@pytest.mark.parametrize("invocation", _hook_invocations(), ids=" ".join)
+def test_a_hook_whose_cli_cannot_start_is_exit_0_with_one_line(tmp_path: Path, invocation: tuple[str, ...]) -> None:
+    tools, _gen = _broken_layout(tmp_path, *_HOOK_PROGRAMS)
+    r = _run(list(invocation), tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert r.returncode == 0
+    assert r.stdout == b"", "the broken program must not have run"
+    lines = r.stderr.decode().splitlines()
+    assert len(lines) == 1, lines
+    assert "could not start" in lines[0] and "cpython-3.12-pruned" in lines[0], lines
+    assert "is not installed" not in lines[0], "it is installed"
+
+
+def test_nx_mcp_whose_cli_cannot_start_is_served_the_stand_in_that_says_so(tmp_path: Path) -> None:
+    tools, _gen = _broken_layout(tmp_path, *_SERVER_PROGRAMS)
+    call = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "setup_status", "arguments": {}}})
+    r = _run(
+        ["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE + call.encode() + b"\n",
+        NEXUS_CONFIG_DIR=str(_empty(tmp_path, "config")), HOME=str(_empty(tmp_path, "home")),
+        USERPROFILE=str(tmp_path / "home"),
+    )
+    assert r.returncode == 0
+    assert r.stderr == b"", "a stdio server's standard error is recorded as an error by the application"
+    init, listed, status = (json.loads(line) for line in r.stdout.splitlines())
+    assert _BROKEN_PHRASE in init["result"]["instructions"]
+    assert "cpython-3.12-pruned" in init["result"]["instructions"]
+    assert "Nexus is not installed" not in init["result"]["instructions"]
+    tools_listed = {t["name"]: t for t in listed["result"]["tools"]}
+    assert sorted(tools_listed) == ["setup", "setup_status"]
+    for tool in tools_listed.values():
+        assert tool["description"].startswith(_BROKEN_PHRASE), "Desktop shows the model the descriptions only"
+    text = status["result"]["content"][0]["text"]
+    assert text.startswith(_BROKEN_PHRASE) and "Nexus is not installed" not in text
+    assert "ask the user first" in text.lower()
+
+
+def test_nx_mcp_catalog_whose_cli_cannot_start_is_the_stand_in_with_no_tools(tmp_path: Path) -> None:
+    tools, _gen = _broken_layout(tmp_path, *_SERVER_PROGRAMS)
+    r = _run(["nx-mcp-catalog"], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0 and r.stderr == b""
+    init, listed = (json.loads(line) for line in r.stdout.splitlines())
+    assert "instructions" not in init["result"] and listed["result"]["tools"] == []
+
+
+def test_any_other_program_whose_cli_cannot_start_fails_with_one_line(tmp_path: Path) -> None:
+    tools, _gen = _broken_layout(tmp_path, "nx")
+    r = _run(["nx", "doctor"], tools=tools, path=_empty(tmp_path, "bin"))
+    assert r.returncode == 1 and r.stdout == b""
+    assert len(r.stderr.decode().splitlines()) == 1, r.stderr
+
+
+def test_a_working_cli_beside_a_broken_one_on_path_is_not_chosen(tmp_path: Path) -> None:
+    """The layout is searched first, and a layout hit that cannot start is the
+    answer: serving the stand-in and not a `PATH` program is the same fact the
+    setup hook states, and `setup` repairs the layout."""
+    tools, _gen = _broken_layout(tmp_path, "nx-hook")
+    _install_fake(tmp_path / "bin", "nx-hook", "path")
+    r = _run(["nx-hook", "preflight"], tools=tools, path=tmp_path / "bin", payload=b"{}")
+    assert r.stdout == b"" and b"could not start" in r.stderr
+
+
+@posix_only("a shebang names the interpreter the kernel starts")
+@pytest.mark.parametrize("name", ["nx-hook", "nx-mcp"])
+def test_a_script_whose_shebang_interpreter_is_gone_cannot_start(tmp_path: Path, name: str) -> None:
+    """The POSIX shape of the pruned interpreter: a console script whose shebang
+    names the generation's python, a link `uv` left dangling."""
+    tools, gen = _layout(tmp_path)
+    gone = tmp_path / "uv" / "cpython-3.12-pruned" / "bin" / "python3.12"
+    link = gen / "bin" / "python"
+    link.parent.mkdir(exist_ok=True)
+    os.symlink(gone, link)
+    script = gen / "bin" / name
+    script.write_text(f"#!{link}\nprint('never run')\n")
+    script.chmod(0o755)
+    r = _run([name], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0
+    assert b"never run" not in r.stdout
+    if name == "nx-hook":
+        assert r.stdout == b"" and b"could not start" in r.stderr and str(link).encode() in r.stderr
+    else:
+        assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
 
 
 def test_a_dangling_current_falls_through_to_path(tmp_path: Path) -> None:

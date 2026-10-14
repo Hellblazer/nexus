@@ -129,13 +129,93 @@ async def test_no_cli_and_nx_mcp_is_a_stand_in_with_exactly_the_two_setup_tools(
 
 
 @pytest.mark.asyncio
-async def test_the_instructions_say_nexus_is_not_installed_and_name_the_manual_commands(tmp_path: Path) -> None:
+async def test_the_instructions_say_nexus_is_not_installed_put_the_one_question_and_name_the_manual_commands(
+    tmp_path: Path,
+) -> None:
+    """RDR-228 "The one question": the same table the hook gives, the Local follow-up
+    (start at login; a no means starting it again after each reboot), the command,
+    and the clause that the user is asked first."""
     init, _tools, _calls = await _session(_isolated(tmp_path), "nx-mcp")
     text = init.instructions or ""
+    mod = _standin()
     assert "Nexus is not installed" in text
     for command in _MANUAL_COMMANDS:
         assert command in text, command
-    assert "/conexus:setup" not in text
+    assert mod.QUESTION_TABLE in text and mod.LOCAL_FOLLOW_UP in text
+    assert "/conexus:setup" in text
+    assert "ASK THE USER FIRST" in text
+    assert "Cloud" not in text and "cloud" not in text, "the Cloud row waits for the credentials page (nexus-sv2wx.18)"
+    assert "installed but cannot start" not in text
+
+
+def test_the_table_is_the_records_with_the_cloud_row_absent() -> None:
+    """The record's four choices with their sizes; this build offers three."""
+    record = (_ROOT / "docs" / "rdr" / "rdr-228-plugin-installs-the-cli.md").read_text(encoding="utf-8")
+    rows = [line for line in record.splitlines() if line.startswith("| ") and line.count("|") == 4]
+    by_choice = {row.split("|")[1].strip(): row for row in rows}
+    ours = [line for line in _standin().QUESTION_TABLE.splitlines() if line.startswith("| ") and not line.startswith("| Choice")]
+    assert len(ours) == 3
+    for line in ours:
+        choice = line.split("|")[1].strip()
+        assert by_choice[choice].strip() == line.strip(), choice
+    assert "| Cloud |" in record and not any("Cloud" in line for line in ours)
+
+
+def test_the_tool_descriptions_give_the_tables_sizes() -> None:
+    mod = _standin()
+    description = " ".join(tool["description"] for tool in mod.SETUP_TOOLS)
+    assert "1.3 GB" in description and "0.7 GB" in description
+    assert "1.3 GB" in mod.QUESTION_TABLE and "0.7 GB" in mod.QUESTION_TABLE
+
+
+# -- installed but cannot start (Sam, 2026-10-14) --------------------------------------------
+
+
+def test_the_broken_stand_in_says_installed_but_cannot_start_in_every_channel() -> None:
+    mod = _standin()
+    reason = "the Python it was built with (/x/cpython-gone) is gone"
+    stand_in = mod.stand_in("nx-mcp", reason)
+    assert stand_in.broken == reason
+    for text in (stand_in.instructions, *(tool["description"] for tool in stand_in.tools)):
+        assert text.startswith(mod.BROKEN_PHRASE) or mod.BROKEN_PHRASE in text
+        assert "/x/cpython-gone" in text
+        assert "Nexus is not installed" not in text
+    assert "ASK THE USER FIRST" in stand_in.instructions
+    assert [t["name"] for t in stand_in.tools] == ["setup", "setup_status"]
+    plain = mod.stand_in("nx-mcp")
+    assert plain.broken is None and plain.tools == mod.SETUP_TOOLS, "the plain stand-in is unchanged"
+    # Schemas and titles are the normal ones: only the description changes.
+    for broken, normal in zip(stand_in.tools, mod.SETUP_TOOLS, strict=True):
+        assert {k: v for k, v in broken.items() if k != "description"} == {k: v for k, v in normal.items() if k != "description"}
+
+
+def test_the_catalog_stand_in_is_the_same_whether_the_cli_is_missing_or_broken() -> None:
+    mod = _standin()
+    plain, broken = mod.stand_in("nx-mcp-catalog"), mod.stand_in("nx-mcp-catalog", "x")
+    assert (plain.instructions, plain.tools, plain.name) == (broken.instructions, broken.tools, broken.name) == ("", (), plain.name)
+
+
+@pytest.mark.asyncio
+async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_broken_stand_in(tmp_path: Path) -> None:
+    dirs = _isolated(tmp_path)
+    gen = dirs["tools"] / "gen-20260101T000000Z"
+    (gen / "bin").mkdir(parents=True)
+    exe = gen / "bin" / ("nx-mcp.exe" if os.name == "nt" else "nx-mcp")
+    exe.write_bytes(b"MZ" if os.name == "nt" else b"\x7fELF")
+    exe.chmod(0o755)
+    (gen / "pyvenv.cfg").write_text(f"home = {tmp_path / 'uv' / 'cpython-pruned'}\n")
+    if os.name == "nt":
+        import _winapi  # noqa: PLC0415 -- Windows only
+
+        _winapi.CreateJunction(str(gen), str(dirs["tools"] / "current"))
+    else:
+        os.symlink(gen, dirs["tools"] / "current")
+    init, tools, (status,) = await _session(dirs, "nx-mcp", calls=(("setup_status", {}),))
+    assert init.serverInfo.name == "nexus-installed-cannot-start"
+    assert "Nexus is installed but cannot start; setup repairs it" in (init.instructions or "")
+    assert sorted(t.name for t in tools) == ["setup", "setup_status"]
+    assert all((t.description or "").startswith("Nexus is installed but cannot start") for t in tools)
+    assert "cpython-pruned" in _text(status) and "Nexus is not installed" not in _text(status)
 
 
 @pytest.mark.asyncio
@@ -287,7 +367,7 @@ async def test_no_cli_and_nx_mcp_catalog_is_a_stand_in_with_no_tools(tmp_path: P
     assert not init.instructions
 
 
-def test_the_commands_are_the_platform_s_own_and_the_instructions_are_one_sentence() -> None:
+def test_the_commands_are_the_platform_s_own_and_the_instructions_name_them() -> None:
     """README.md: on Linux the first command names the CPU build of torch, and
     without it uv installs 4.3 GB that Nexus never uses."""
     mod = _standin()
@@ -297,7 +377,7 @@ def test_the_commands_are_the_platform_s_own_and_the_instructions_are_one_senten
     for platform in ("linux", "darwin", "win32"):
         assert mod.manual_commands(platform)[1:] == ("nx self install", "nx init")
         text = mod.instructions(platform)
-        assert text.endswith(".") and ". " not in text, f"more than one sentence: {text}"
+        assert text.endswith(")."), text
         for command in mod.manual_commands(platform):
             assert command in text and command in mod.setup_text(platform)
 
@@ -336,12 +416,12 @@ def test_the_install_page_is_the_site_s_install_guide() -> None:
 
 def test_the_descriptions_name_the_command_that_ships_with_the_tools() -> None:
     """Phase 1 held ``/conexus:setup`` back; it ships in the client release that
-    carries these tools, so the descriptions name it. The instructions text is the
-    Phase 1 sentence and stays so until the question and the command land."""
+    carries these tools (nexus-sv2wx.17), so the descriptions and the instructions
+    name it."""
     mod = _standin()
     for tool in mod.SETUP_TOOLS:
         assert "/conexus:setup" in tool["description"]
-    assert "/conexus:setup" not in mod.instructions()
+    assert "/conexus:setup" in mod.instructions()
 
 
 def test_the_stand_in_never_writes_to_standard_error(tmp_path: Path) -> None:

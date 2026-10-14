@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import ntpath
 import os
-import shutil
 import sys
 from pathlib import PureWindowsPath
 
@@ -79,6 +78,8 @@ def which_off_cwd(
     if os.path.dirname(name) or (windows and ("/" in name or "\\" in name)):
         return name if os.path.isfile(name) else None
     if not windows:
+        import shutil  # noqa: PLC0415 -- lazy: the Windows branch never needs it, and the session-start hook has 100 ms
+
         return shutil.which(name, path=path)
     if pathext is None:
         pathext = os.environ.get("PATHEXT") or _DEFAULT_PATHEXT

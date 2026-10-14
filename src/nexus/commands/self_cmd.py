@@ -362,12 +362,31 @@ def _shims_are_in_place(tools: Path, bin_dir: Path) -> bool:
     return nx.is_symlink() and nx.exists() and install_layout.is_under_uv_tool_install(nx)
 
 
+def _generation_interpreter_gone(generation: Path) -> bool:
+    """Whether the Python *generation* was built on is gone: ``pyvenv.cfg`` names a
+    ``home`` directory that no longer exists, which is what ``uv`` leaves when it
+    prunes a managed CPython (the pipx#146 / uv#8028 class; ``Receipt.base_interpreter``
+    records the same fact for ``nx doctor``). A generation with no ``pyvenv.cfg``, or
+    one with no ``home`` line, gives no evidence either way."""
+    try:
+        text = (generation / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    home = _generation()._pyvenv_value(text, "home").strip()
+    return bool(home) and not Path(home).is_dir()
+
+
 def _existing_install(tools: Path, bin_dir: Path) -> str | None:
     """Words naming a COMPLETE install on this box, or ``None``.
 
-    Complete means ``current`` resolves to a receipted generation AND the shim
+    Complete means ``current`` resolves to a receipted generation that can run
+    (its Python is not gone, :func:`_generation_interpreter_gone`) AND the shim
     step's output is in place (:func:`_shims_are_in_place`), or a
-    ``uv tool install conexus`` tree exists. Neither half alone will do: the
+    ``uv tool install conexus`` tree exists. A generation whose interpreter was
+    pruned is not complete: the plugin's launcher serves the stand-in for it and its
+    ``setup`` runs ``--bootstrap`` to repair it (RDR-228 Phase 2 Step 4, nexus-sv2wx.17;
+    Sam, 2026-10-14), and a refusal here would leave the repair with nothing to run.
+    Neither half alone will do: the
     receipt is written when the build ends, before ``current``, and ``current``
     is flipped before the shims, so a run that died at either point leaves state
     that nothing runs and that the plain command cannot be run from; see
@@ -379,6 +398,7 @@ def _existing_install(tools: Path, bin_dir: Path) -> str | None:
     if (
         current is not None
         and _read_receipt_or_none(current) is not None
+        and not _generation_interpreter_gone(current)
         and _shims_are_in_place(tools, bin_dir)
     ):
         return f"generation {current.name} under {tools}"

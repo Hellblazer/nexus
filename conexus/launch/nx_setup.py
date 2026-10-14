@@ -70,7 +70,10 @@ file's own history alone:
    which is ``--bootstrap`` saying it would still act (a build died after the flip
    and before the shims: the build step resumes it). A hit on ``PATH`` counts only
    with ``nx-mcp`` beside it and ``nx --version`` printing ``nx, version <x>``;
-   anything else (Nrwl's ``nx``) is never run again and the build runs. The build
+   anything else (Nrwl's ``nx``) is never run again and the build runs. An ``nx`` that
+   is found and cannot start (``_cli_lookup.cannot_start``: an interpreter ``uv``
+   pruned; Sam, 2026-10-14) is not asked anything and the build runs, and
+   ``nx self install --bootstrap`` replaces the generation that cannot run. The build
    is ``uv tool run --python 3.12 --from conexus==<plugin version> nx self install
    --bootstrap``. The version is the ``plugin.json`` beside this script. There is
    no fallback to the two documented commands: they run the cache prune and leave
@@ -164,12 +167,10 @@ import sys
 
 sys.dont_write_bytecode = True  # before the sibling imports: no .pyc in the plugin directory
 
-import argparse  # noqa: E402
 import contextlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
-import secrets  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
 import subprocess  # noqa: E402
@@ -380,6 +381,8 @@ def _write_private_json(setup: Path, name: str, data: dict[str, Any]) -> None:
     """Replace ``setup/<name>`` with *data*: owner-only throughout, flushed to disk
     before it replaces the old file."""
     payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+    import secrets  # noqa: PLC0415 -- lazy: the session-start hook imports this file and has 100 ms
+
     tmp = setup / f"{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     fd = _create_private(str(tmp))
     try:
@@ -543,6 +546,8 @@ def acquire_lock(setup: Path, *, wait_for_finish: bool = False) -> str | None:
     removing its lock, and the caller waits a moment for it instead of dropping
     its own request.
     """
+    import secrets  # noqa: PLC0415 -- see _write_private_json
+
     token = secrets.token_hex(8)
     lock = setup / _LOCK
     for _ in range(3):
@@ -670,11 +675,11 @@ def provisioned(config: Path | None = None) -> bool:
 
 
 def _endpoint_resolves(config: Path) -> bool:
-    try:
-        _endpoint_resolve.resolve_base_url(config)
-    except Exception:  # noqa: BLE001 -- any failure means no usable service
-        return False
-    return True
+    """Whether a usable service is already configured: the CLI's own definition
+    (``resolve_service_endpoint()`` returning), restated in ``_endpoint_resolve``. A
+    saved address with no token is not usable (nexus-sv2wx.17, residual 9), so the
+    service step does not call such a machine finished."""
+    return _endpoint_resolve.endpoint_usable(config)
 
 
 # -- children: no window, their own process group, killed whole ----------------------------------
@@ -849,6 +854,8 @@ def _is_nexus_cli(run: _Run, hit: str) -> bool:
     version line in the Nexus form. A hit without ``nx-mcp`` is never run."""
     if _exec_path.which_off_cwd("nx-mcp", path=os.path.dirname(hit)) is None:
         return False
+    if _cli_lookup.cannot_start(hit) is not None:  # found and cannot start: never run, never trusted
+        return False
     try:
         code, text = run.cmd([hit, "--version"], timeout=PROBE_TIMEOUT_SECONDS)
     except OSError:
@@ -865,7 +872,7 @@ def _bootstrap_would_act(run: _Run, nx: str) -> bool:
     try:
         code, _ = run.cmd([nx, "self", "install", "--bootstrap", "--dry-run"], timeout=PROBE_TIMEOUT_SECONDS)
     except OSError:
-        return False
+        return True  # it cannot even be started: whatever is installed is broken, and the build repairs it
     return code == 0
 
 
@@ -874,6 +881,11 @@ def _locate_nexus_cli(run: _Run) -> tuple[str | None, bool]:
     build step must run."""
     layout = _layout_nx()
     if layout is not None:
+        if _cli_lookup.cannot_start(layout) is not None:
+            # Found and cannot start (an interpreter uv pruned; Sam, 2026-10-14). It is
+            # not asked anything, so it cannot say "an install exists": the build runs,
+            # and ``nx self install --bootstrap`` replaces the generation that cannot run.
+            return None, True
         return layout, _bootstrap_would_act(run, layout)
     hit = _on_path("nx")
     if hit is not None and _is_nexus_cli(run, hit):
@@ -884,7 +896,7 @@ def _locate_nexus_cli(run: _Run) -> tuple[str | None, bool]:
 def _nx_after_build(run: _Run) -> str | None:
     layout = _layout_nx()
     if layout is not None:
-        return layout
+        return layout if _cli_lookup.cannot_start(layout) is None else None
     hit = _on_path("nx")
     return hit if hit is not None and _is_nexus_cli(run, hit) else None
 
@@ -908,6 +920,10 @@ def _execute(run: _Run) -> int:
             return run.fail("build", "the build timed out." if code is None else f"the build exited {code}.")
         nx = _nx_after_build(run)
         if nx is None:
+            layout = _layout_nx()
+            reason = _cli_lookup.cannot_start(layout) if layout is not None else None
+            if reason is not None:
+                return run.fail("build", f"the build finished but the `nx` it left cannot start: {reason}.")
             return run.fail("build", "the build finished but `nx` is not in the Nexus install directory or on PATH.")
     assert nx is not None
     run.step_done("build")
@@ -1288,6 +1304,8 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
 def main(argv: list[str]) -> int:
     if argv[:1] == ["_relay"]:
         return _relay(argv[1:])
+    import argparse  # noqa: PLC0415 -- only the command line needs it
+
     parser = argparse.ArgumentParser(prog="nx_setup.py", description="Install Nexus in the background.")
     sub = parser.add_subparsers(dest="command", required=True)
     start_p = sub.add_parser("start", help="start a run")

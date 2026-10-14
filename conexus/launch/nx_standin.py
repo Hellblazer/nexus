@@ -11,12 +11,20 @@ plugin and no CLI the launcher serves one of these in their place, so the
 application shows a connected server and the model is told the truth.
 
 * In place of ``nx-mcp``: the handshake carries ``instructions`` saying Nexus is
-  not installed and which commands install it, and the server offers two tools,
-  ``setup`` and ``setup_status``. The tools' descriptions say what is missing and
-  that ``/conexus:setup`` or the ``setup`` tool fixes it, because a Claude Desktop
-  conversation is passed a server's tools and not its ``instructions``.
+  not installed, the one question with its table of choices, and the commands that
+  install it by hand; the server offers two tools, ``setup`` and ``setup_status``.
+  The tools' descriptions say what is missing and that ``/conexus:setup`` or the
+  ``setup`` tool fixes it, because a Claude Desktop conversation is passed a
+  server's tools and not its ``instructions``.
 * In place of ``nx-mcp-catalog``: no tools and no instructions, so the notice is
   not given twice.
+
+RDR-228 Phase 2 Step 4 (nexus-sv2wx.17; Sam, 2026-10-14): the launcher serves the
+same stand-in when the CLI is FOUND AND CANNOT START (``_cli_lookup.cannot_start``:
+an interpreter ``uv`` pruned). It then says so, in the instructions, in both tools'
+descriptions and in ``setup_status``: "Nexus is installed but cannot start; setup
+repairs it", with the reason. ``setup`` is the same call; its build step does not
+skip a CLI that cannot start (``nx_setup.py``).
 
 RDR-228 Phase 2 Step 3 (nexus-sv2wx.16): the two tools do their work. ``setup``
 (``mode`` and, for ``local``, ``autostart``) starts ``nx_setup.py``, the file beside
@@ -86,13 +94,68 @@ NOT_INSTALLED: str = (
 )
 
 
-def instructions(platform: str | None = None) -> str:
-    """The server instructions. One sentence, as the record asks."""
+#: The one question's choices, as the record gives them (RDR-228 "The one question"),
+#: with the sizes it measured. The session-start hook (``nx_setup_notice.py``) imports
+#: this text, so the hook's message and this server's instructions cannot differ. The
+#: Cloud row is not here until the credentials page exists (nexus-sv2wx.18).
+QUESTION_TABLE: str = (
+    "| Choice | What happens | Download |\n"
+    "|---|---|---|\n"
+    "| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |\n"
+    "| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |\n"
+    "| Not now | Nothing is installed | none |"
+)
+
+#: What Local adds to the question, and what a no means.
+LOCAL_FOLLOW_UP: str = (
+    "With Local, also ask whether the service should start when the user logs in: yes registers a login unit, "
+    "and no means the user starts the service again after each reboot."
+)
+
+#: Said once to the model wherever the question is put: nothing is installed
+#: without the user's answer.
+ASK_FIRST: str = "ASK THE USER FIRST, once, and act only on the answer."
+
+#: The words every "installed but cannot start" text opens with (Sam, 2026-10-14).
+BROKEN_PHRASE: str = "Nexus is installed but cannot start; setup repairs it"
+
+#: What the repair asks and costs: it builds the CLI again (the work of ``cli-only``).
+BROKEN_REPAIR: str = (
+    "Setup repairs it by building the CLI again, up to about 0.7 GB to download and several minutes. "
+    "ASK THE USER FIRST and act only on the answer: cli-only repairs the CLI, local repairs it and also sets up "
+    "or starts a service on this machine (up to about 1.3 GB), not-now leaves it."
+)
+
+
+def question() -> str:
+    """The one question for the model to put to the user: the table of choices, the
+    Local follow-up and what answering does."""
+    return (
+        f"{ASK_FIRST} The choices:\n\n{QUESTION_TABLE}\n\n{LOCAL_FOLLOW_UP} "
+        "Then, with the user's answer, call the setup tool with mode local (autostart true or false), "
+        "cli-only or not-now; the user can also run /conexus:setup."
+    )
+
+
+def broken_text(reason: str) -> str:
+    """The opening of every text that reports a found program that cannot start."""
+    return f"{BROKEN_PHRASE}. Why it cannot start: {reason}."
+
+
+def instructions(platform: str | None = None, broken: str | None = None) -> str:
+    """The server instructions. With *broken* (the reason a found program cannot
+    start), the install is installed-but-broken, not missing."""
+    if broken is not None:
+        return (
+            f"{broken_text(broken)} This server has no Nexus tools until it is repaired. {BROKEN_REPAIR} "
+            "The user can also run /conexus:setup. Afterwards the user reconnects this server."
+        )
     inline = ", then ".join(f"`{command}`" for command in manual_commands(platform))
     return (
-        "Nexus is not installed on this machine, so this server has no Nexus tools; to install "
-        f"it the user runs {inline} in a terminal and then reconnects this server "
-        f"(install guide: {INSTALL_PAGE})."
+        "Nexus is not installed on this machine, so this server has no Nexus tools yet. "
+        f"{question()} Setup runs in the background for several minutes; follow it with setup_status, and "
+        f"afterwards the user reconnects this server. To install by hand instead, the user runs {inline} in a "
+        f"terminal (install guide: {INSTALL_PAGE})."
     )
 
 
@@ -183,6 +246,18 @@ SETUP_TOOLS: tuple[dict[str, Any], ...] = (
         "inputSchema": {"type": "object", "properties": {}},
     },
 )
+
+def setup_tools(broken: str | None = None) -> tuple[dict[str, Any], ...]:
+    """The two tools. With *broken* (why a found CLI cannot start), each description
+    opens with the installed-but-cannot-start statement and the reason: a Claude
+    Desktop conversation is passed the tools and not the server instructions, so
+    the descriptions are where its model and user are told. Schemas and titles
+    are the normal ones."""
+    if broken is None:
+        return SETUP_TOOLS
+    head = f"{broken_text(broken)} "
+    return tuple({**tool, "description": head + tool["description"]} for tool in SETUP_TOOLS)
+
 
 # -- the words the tools answer with -------------------------------------------------------
 
@@ -360,10 +435,13 @@ def run_setup(arguments: Any) -> str:
     return _checked(view, started=bool(view.get("started")))
 
 
-def run_status() -> str:
-    """The ``setup_status`` tool."""
+def run_status(broken: str | None = None) -> str:
+    """The ``setup_status`` tool. With *broken*, a state with no setup history opens
+    with the installed-but-cannot-start statement and not "not installed"."""
     view = _call_script(["status"])
     text = _checked(view)
+    if broken is not None:
+        return f"{broken_text(broken)} {BROKEN_REPAIR}\n{text}"
     if view.get("state") == "none":
         return f"{NOT_INSTALLED}\n{text}"
     return text
@@ -372,17 +450,27 @@ def run_status() -> str:
 class StandIn:
     """What one stand-in server offers: its name, instructions and tools."""
 
-    def __init__(self, name: str, instructions: str, tools: tuple[dict[str, Any], ...]) -> None:
+    def __init__(
+        self, name: str, instructions: str, tools: tuple[dict[str, Any], ...], broken: str | None = None,
+    ) -> None:
         self.name = name
         self.instructions = instructions
         self.tools = tools
+        #: Why the CLI was found and cannot start, or ``None`` when it was not found.
+        self.broken = broken
 
 
-#: The stand-in for each CLI server program.
-STAND_INS: dict[str, StandIn] = {
-    "nx-mcp": StandIn("nexus-not-installed", instructions(), SETUP_TOOLS),
-    "nx-mcp-catalog": StandIn("nexus-catalog-not-installed", "", ()),
-}
+def stand_in(program: str, broken: str | None = None) -> StandIn:
+    """The stand-in for the CLI server *program*. *broken* is why the program was
+    found and cannot start; ``None`` means it was not found."""
+    if program == "nx-mcp":
+        name = "nexus-installed-cannot-start" if broken is not None else "nexus-not-installed"
+        return StandIn(name, instructions(broken=broken), setup_tools(broken), broken)
+    return StandIn("nexus-catalog-not-installed", "", ())
+
+
+#: The stand-in for each CLI server program, for a program that is not found.
+STAND_INS: dict[str, StandIn] = {program: stand_in(program) for program in ("nx-mcp", "nx-mcp-catalog")}
 
 
 def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -426,7 +514,7 @@ def handle(server: StandIn, message: Any) -> dict[str, Any] | None:
                 return _error(request_id, -32602, f"Unknown tool: {name!r}. Nexus is not installed.")
             arguments = params.get("arguments") if isinstance(params, dict) else None
             try:
-                text = run_setup(arguments if arguments is not None else {}) if name == "setup" else run_status()
+                text = run_setup(arguments if arguments is not None else {}) if name == "setup" else run_status(server.broken)
             except SetupError as exc:
                 return _result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
             return _result(request_id, {"content": [{"type": "text", "text": text}]})
@@ -482,8 +570,9 @@ def _client_gone() -> int:
     return 0
 
 
-def main(program: str) -> int:
-    """Serve the stand-in for the CLI server *program* on this process's stdio."""
+def main(program: str, broken: str | None = None) -> int:
+    """Serve the stand-in for the CLI server *program* on this process's stdio.
+    *broken* is why the CLI was found and cannot start (``None``: it was not found)."""
     if sys.stdin is None or sys.stdout is None:  # started with a stream closed
         return 0
     # Text-mode stdio on Windows would translate "\n" to "\r\n" and decode with
@@ -492,7 +581,7 @@ def main(program: str) -> int:
     sys.stdin.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
     try:
-        return serve(STAND_INS[program])
+        return serve(stand_in(program, broken))
     except KeyboardInterrupt:
         return 0
 

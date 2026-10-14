@@ -946,6 +946,76 @@ class TestTheFlagTakesNothingElse:
         assert world.snapshot() == before
 
 
+def _prune_the_python(generation: Path, world: World) -> Path:
+    """What ``uv`` does when it prunes the managed CPython a generation was built on:
+    the directory ``pyvenv.cfg`` names as ``home`` is gone. Returns the missing path."""
+    gone = world.root / "uv" / "cpython-3.12-pruned"
+    cfg = generation / "pyvenv.cfg"
+    lines = [
+        f"home = {gone}" if line.partition("=")[0].strip() == "home" else line
+        for line in cfg.read_text(encoding="utf-8").splitlines()
+    ]
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # On POSIX the venv's interpreters are links into the managed CPython, and a prune
+    # leaves them dangling. Editing the cfg alone is not enough there: Python falls
+    # back to the link's real location and still starts (measured on Linux), so the
+    # generation would answer and read as healthy.
+    for link in (generation / "bin").glob("python*") if not ON_WINDOWS else ():
+        if link.is_symlink():
+            link.unlink()
+            link.symlink_to(gone / "bin" / link.name)
+    return gone
+
+
+class TestAnInstallWhoseInterpreterWasPruned:
+    """Sam, 2026-10-14 (nexus-sv2wx.17). A generation that ``current`` names, with a
+    receipt and the shims, is complete only if it can run. When ``uv`` has pruned the
+    Python it was built on, the install is FOUND AND CANNOT START: the launcher serves
+    the stand-in, ``setup`` runs this command, and this command must repair it. Before,
+    it refused with "already installed" and the repair was a loop."""
+
+    def test_it_is_not_a_complete_install_and_the_dry_run_says_what_it_would_build(self, world: World) -> None:
+        generation = _built(world)
+        _prune_the_python(generation, world)
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "already installed" not in result.stdout + result.stderr
+        assert world.snapshot() == before, "a dry run changes nothing"
+
+    def test_it_builds_a_new_generation_and_moves_current(self, world: World) -> None:
+        old = _built(world)
+        gone = _prune_the_python(old, world)
+        assert not gone.exists()
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        generations = _generations(world)
+        assert len(generations) == 2 and old in generations, "the old generation is left for garbage collection"
+        (new,) = [g for g in generations if g != old]
+        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+        assert _shim_of(world).is_file()
+        # The repaired install is complete again: the next call refuses.
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 1 and "already installed" in again.stderr
+
+    def test_a_generation_that_can_run_is_still_a_complete_install(self, world: World) -> None:
+        """The check is for the interpreter that is gone, not for any pyvenv.cfg."""
+        _built(world)
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1 and "already installed" in result.stderr
+
+    def test_the_helper_reads_only_the_home_line(self, tmp_path: Path) -> None:
+        generation = tmp_path / "gen"
+        generation.mkdir()
+        assert self_cmd._generation_interpreter_gone(generation) is False, "no pyvenv.cfg is no evidence"
+        (generation / "pyvenv.cfg").write_text("version = 3.12.1\n")
+        assert self_cmd._generation_interpreter_gone(generation) is False, "no home line is no evidence"
+        (generation / "pyvenv.cfg").write_text(f"home = {tmp_path}\n")
+        assert self_cmd._generation_interpreter_gone(generation) is False
+        (generation / "pyvenv.cfg").write_text(f"home = {tmp_path / 'missing'}\n")
+        assert self_cmd._generation_interpreter_gone(generation) is True
+
+
 class TestTheWindowsTwin:
     """The Windows build, flip and PATH steps run through ``generation_core``;
     their failure texts must name the bootstrap command on the bootstrap path
