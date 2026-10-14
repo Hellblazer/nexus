@@ -94,6 +94,7 @@ import sys
 # `_run_python_hook.sh` used to perform, before anything that needs 3.12
 # or `nexus` is imported. See _interpreter.py for what is at stake.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cli_lookup  # noqa: E402 -- must follow the sys.path insert
 import _exec_path  # noqa: E402 -- must follow the sys.path insert
 import _interpreter  # noqa: E402 -- must follow the sys.path insert
 
@@ -207,28 +208,46 @@ def read_plugin_version() -> str | None:
 
 
 def _marketplace_json_path() -> Path | None:
-    """The clone's own marketplace.json, next to the plugin root Claude
-    Code already resolved for this process (``CLAUDE_PLUGIN_ROOT``, read
-    by :func:`read_plugin_version` above).
+    """The marketplace.json that lists the plugin set this process's
+    plugin (``CLAUDE_PLUGIN_ROOT``, read by :func:`read_plugin_version`
+    above) was installed from. Two install shapes, tried in this order:
 
-    A real Claude Code install sets ``CLAUDE_PLUGIN_ROOT`` to
-    ``<clone_root>/<plugin-subdir>`` -- verified against a real clone by
-    ``tests/test_plugin_install.py``'s own fixture, and by inspection
-    ``<plugin-subdir>/.claude-plugin/plugin.json`` is what
-    :func:`read_plugin_version` reads. So the PARENT of
-    ``CLAUDE_PLUGIN_ROOT`` is the clone root, and it carries
-    ``.claude-plugin/marketplace.json`` for every install shape this hook
-    runs under: a marketplace-cloned install, and a project-scoped dev
-    checkout alike (there, ``CLAUDE_PLUGIN_ROOT`` is the repo's own
-    ``conexus/`` directory, whose parent is the repo root). ``None`` when
-    ``CLAUDE_PLUGIN_ROOT`` is unset -- :func:`read_plugin_version` already
-    returns ``None`` in that case too, so this hook has nothing to look a
-    plugin set up for regardless.
+    - A dev checkout or a plugin loaded straight from a clone:
+      ``CLAUDE_PLUGIN_ROOT`` is ``<clone_root>/<plugin-subdir>``, so its
+      PARENT is the clone root and carries
+      ``.claude-plugin/marketplace.json``.
+    - A marketplace install: ``CLAUDE_PLUGIN_ROOT`` is the versioned
+      cache copy, ``<plugins>/cache/<marketplace>/<plugin>/<version>``,
+      whose parent holds only version directories. The marketplace's own
+      clone is elsewhere, at the ``installLocation``
+      ``known_marketplaces.json`` records for ``<marketplace>``
+      (:func:`_marketplace_install_location`, the lookup the pinned-ref
+      check below already uses).
+
+    Until nexus-gdllu only the first shape was tried, so every installed
+    plugin read a path that does not exist and fell back to
+    :data:`_FALLBACK_PLUGINS` on every session start (seen on a Windows
+    guest, 2026-10-13; the layout is the same on every platform).
+
+    Returns the first candidate that exists; when none does, the last
+    one tried, so the fallback notice names where it looked. ``None``
+    when ``CLAUDE_PLUGIN_ROOT`` is unset -- :func:`read_plugin_version`
+    already returns ``None`` in that case too, so this hook has nothing
+    to look a plugin set up for regardless.
     """
     root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     if not root:
         return None
-    return Path(root).parent / ".claude-plugin" / "marketplace.json"
+    plugin_root = Path(root)
+    beside = plugin_root.parent / ".claude-plugin" / "marketplace.json"
+    if beside.is_file():
+        return beside
+    parents = plugin_root.parents
+    if len(parents) >= 3 and parents[2].name == "cache":
+        location = _marketplace_install_location(parents[1].name)
+        if location is not None:
+            return location / ".claude-plugin" / "marketplace.json"
+    return beside
 
 
 def _warn_fallback(reason: str) -> None:
@@ -655,10 +674,27 @@ def dispatch_ref_drift_action() -> None:
         debug(f"failed to dispatch ref-drift action: {exc}")
 
 
+def cli_present() -> bool:
+    """True when ``nx`` resolves by the launcher's lookup: the generation
+    layout, then ``PATH`` (``_cli_lookup.resolve``)."""
+    return _cli_lookup.resolve("nx") is not None
+
+
 def main() -> None:
     """Detect skew (version mismatch, and separately, nexus-konsk ref
-    drift), nudge + dispatch on either. Always fail-safe."""
+    drift), nudge + dispatch on either. Always fail-safe.
+
+    With no CLI there is nothing to keep in lockstep, so the hook does nothing
+    at all: no message, no action, no marker (RDR-228 Gap 2). Before, it told
+    the model an upgrade had been dispatched, and the action it started found
+    neither a generation nor a ``uv tool`` install and returned. The check comes
+    before BOTH paths, the version mismatch and the ref drift. The session's
+    one message about a missing CLI is ``nx_setup_notice.py``'s.
+    """
     try:
+        if not cli_present():
+            debug("no Nexus CLI resolves; nothing to keep in lockstep")
+            return
         plugin_version = read_plugin_version()
         version_mismatch = bool(plugin_version) and read_marker() != plugin_version
         if version_mismatch:

@@ -174,8 +174,9 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
 
     Ancestry authentication (MUST-HOLD rn3wo.1) happens entirely via
     *selection*: :func:`~nexus.session.find_mcp_sibling_pids` only ever
-    returns pids that are LIVE, IMMEDIATE children of this hook's own
-    claude ancestor -- there is no separate "verify" step because a
+    returns pids that are LIVE and whose NEAREST claude ancestor is this
+    hook's own (a direct child, or one behind the plugin's launch wrappers,
+    RDR-228) -- there is no separate "verify" step because a
     marker is never written for a pid that was not found this way, so a
     concurrent session's hook (walking its OWN, necessarily different,
     claude ancestor) can structurally never enumerate this session's MCP
@@ -431,7 +432,7 @@ def _stale_mcp_host_warning() -> str:
     ancestry primitive :func:`_write_t1_handoff_markers` already uses
     (:func:`nexus.session.find_immediate_claude_pid` ->
     :func:`nexus.session.find_mcp_sibling_pids`): only a stale host that
-    is a live, immediate child of the Claude process running THIS hook
+    is live and whose nearest Claude ancestor is the one running THIS hook
     counts. A ``run /mcp`` instruction also only ever means anything to
     the human user, never to a model reading this text, reworded to say
     so. Never a network call, never a write: both ancestry lookups and

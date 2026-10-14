@@ -179,6 +179,39 @@ def test_census_predicate_carries_the_exact_matched_statement(fixture_repo: Path
     assert "UPDATE nexus.gadgets SET note = 'legacy' WHERE status = 'archived'" in predicate
 
 
+def test_dynamic_sql_drop_in_a_do_block_is_listed(fixture_repo: Path):
+    """nexus-679v1: a DROP issued as EXECUTE format(...) inside a DO block was
+    reported as 'No data-effecting changesets' (staging-6)."""
+    changelog_dir = fixture_repo / "service" / "src" / "main" / "resources" / "db" / "changelog"
+    (changelog_dir / "d.xml").write_text(
+        _changelog(
+            """    <changeSet id="d-1" author="t">
+        <comment>Drops the landing tables.</comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    EXECUTE format('DROP TABLE IF EXISTS staging.%I', 'chunks');
+END
+$$;
+        </sql>
+    </changeSet>"""
+        )
+    )
+    (changelog_dir / "db.changelog-master.xml").write_text(
+        _MASTER_TEMPLATE.format(
+            includes="".join(f'    <include file="{n}.xml"/>\n' for n in "abcd")
+        )
+    )
+    _git(fixture_repo, "add", "-A")
+    _git(fixture_repo, "commit", "-q", "-m", "v3")
+    _git(fixture_repo, "tag", "v3")
+
+    rows = lde.find_added_data_effecting_changesets("v2", "v3", repo_root=fixture_repo)
+    assert [(r.file, r.changeset_id) for r in rows] == [("d.xml", "d-1")]
+    assert "DROP TABLE IF EXISTS staging.%I" in lde._census_predicate(rows[0].finding)
+    assert "MISSING" in lde.render_markdown_table(rows)
+
+
 def test_check_exits_nonzero_when_a_missing_row_is_present(fixture_repo: Path, capsys):
     rc = lde.check("v1", "v2", repo_root=fixture_repo)
     assert rc == 1

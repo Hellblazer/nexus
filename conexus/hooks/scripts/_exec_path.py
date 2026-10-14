@@ -13,10 +13,14 @@ passes the absolute path it returns. ``tests/test_hooks_bare_exec_lint.py`` fail
 on a bare-name spawn or a ``shutil.which`` call anywhere else under this tree.
 
 Windows: PATHEXT is honoured (``os.execvp`` and ``Popen`` ignore it), no exec bit
-is needed, and a relative or empty PATH entry is skipped because it resolves
-against the cwd, which is the same hole. POSIX: ``shutil.which``, which already
-ignores the cwd unless PATH itself names ``.`` or has an empty entry; the lookup
-is unchanged there.
+is needed, and a relative or empty PATH entry, or one that is the cwd itself, is
+skipped because it resolves to the cwd, which is the same hole. A ``.cmd`` or
+``.bat`` hit is not returned, as in ``nexus.util.nx_argv``: a batch file runs
+through ``cmd.exe`` with quoting CPython does not escape for it, and every program
+a hook spawns (``nx-hook``, ``nx``, ``uv``, ``git``, a Python) is an ``.exe`` in a
+real install. A tool found only as a batch file counts as not found. POSIX:
+``shutil.which``, which already ignores the cwd unless PATH itself names ``.`` or
+has an empty entry; the lookup is unchanged there.
 
 Standard library only, no ``nexus`` import: hook scripts run under
 ``uv tool run python``. ``bootstrap.py`` in ``mcpb/src`` carries the same rule
@@ -32,8 +36,28 @@ import ntpath
 import os
 import shutil
 import sys
+from pathlib import PureWindowsPath
 
 _DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
+
+
+def _is_search_dir(directory: str, cwd: PureWindowsPath) -> bool:
+    """True when a Windows ``PATH`` entry may honestly be searched: it has a drive
+    and a root (so not ``tools``, ``.``, ``C:x`` or ``\\x``, which resolve against
+    the working directory or its drive) and is not the working directory itself.
+
+    On a real Windows host only a drive-and-root entry counts; ``os.path.isabs``
+    also accepts a rooted ``\\x`` before Python 3.13. A Windows run injected on a
+    POSIX host (the tests) also takes a POSIX absolute path, as its fixtures are
+    real temporary directories.
+    """
+    if not directory:
+        return False
+    entry = PureWindowsPath(directory)
+    absolute = entry.is_absolute() or (os.name != "nt" and os.path.isabs(directory))
+    # normpath: an entry that spells the working directory with ``.`` or ``..`` parts is still it.
+    return absolute and PureWindowsPath(ntpath.normpath(directory)) != cwd
 
 
 def which_off_cwd(
@@ -60,12 +84,16 @@ def which_off_cwd(
         pathext = os.environ.get("PATHEXT") or _DEFAULT_PATHEXT
     listed = [e for e in pathext.split(";") if e]
     has_ext = os.path.splitext(name)[1].upper() in [e.upper() for e in listed]
-    exts = [""] + listed if has_ext else listed
+    # A name that already ends in a listed extension is tried as written only, as
+    # ``shutil.which`` and ``nexus.util.nx_argv`` do; appending to it finds ``uv.exe.cmd``.
+    exts = [""] if has_ext else listed
+    names = [n for n in (name + e for e in exts) if os.path.splitext(n)[1].lower() not in _BATCH_SUFFIXES]
+    cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     for directory in path.split(";"):
-        if not directory or not (os.path.isabs(directory) or ntpath.isabs(directory)):
+        if not _is_search_dir(directory, cwd):
             continue
-        for ext in exts:
-            candidate = os.path.join(directory, name + ext)
+        for candidate_name in names:
+            candidate = os.path.join(directory, candidate_name)
             if os.path.isfile(candidate):
                 return candidate
     return None

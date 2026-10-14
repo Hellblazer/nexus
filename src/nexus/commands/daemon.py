@@ -28,6 +28,7 @@ import threading
 import time
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape as _xml_escape
 
 import click
@@ -36,6 +37,9 @@ import structlog
 from nexus import config as _config
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import nx_argv
+
+if TYPE_CHECKING:
+    from nexus.daemon.service_registry import LeaseRecord, ServiceRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -206,12 +210,28 @@ def _resolve_nx_bin() -> list[str]:
     there searches the current directory first, so an ``nx.exe`` left in the
     working directory would be spawned as the supervisor. The argv is the same
     program the ``nx`` console script runs.
+
+    On POSIX with ``nx`` off ``PATH`` (a fresh macOS login has no
+    ``~/.local/bin`` on it), the ``nx`` shim ``nx self install`` writes into
+    :func:`nexus.install_layout.bin_dir` comes before the interpreter form
+    (nexus-wkkeq). The interpreter is the current generation's venv when the
+    caller ran through that shim, and a unit that bakes it breaks once a later
+    self install flips ``current`` and the gc reaps that generation; the shim
+    follows ``current`` instead, as the launchd and systemd units expect.
     """
     if _autostart_platform() == "win32":
         return nx_argv()
     found = shutil.which("nx")
     if found:
         return [found]
+    from nexus import install_layout  # noqa: PLC0415 — deferred import — only the off-PATH fallback needs it
+
+    try:
+        shim = install_layout.bin_dir() / "nx"
+        if shim.is_file() and os.access(shim, os.X_OK):
+            return [str(shim)]
+    except (OSError, install_layout.LayoutError):
+        pass
     return [sys.executable, "-m", "nexus.cli"]
 
 
@@ -537,7 +557,11 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 
     Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
     is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
-    service start`` is safe). Otherwise it detached-spawns the ``--foreground``
+    service start`` is safe). Otherwise, when the storage-service autostart
+    unit is installed for this config dir and the OS manager reports it
+    enabled, it starts the unit through the manager and waits for its lease
+    (:func:`_start_via_autostart_unit`, nexus-crwqm). In every other case it
+    detached-spawns the ``--foreground``
     supervisor (``start_new_session=True``; on Windows its own process group and
     a hidden console, see :func:`_supervisor_popen_kwargs`) and waits up to 60s
     for it to publish a lease. *platform* is a test seam for that choice.
@@ -576,7 +600,8 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     the service looked 'serving' at init time but the lease aged out before the
     next client (e.g. ``nx migrate-to-service``) could discover it.
 
-    Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
+    Raises :class:`StorageServiceStartError` on a spawn, or a unit start, that
+    never becomes ready.
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         ServiceRegistry,
@@ -630,6 +655,16 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
             # per-site call needed here any more (see that function's
             # docstring in db/service_endpoint.py).
             return existing
+
+    # nexus-crwqm: an installed, enabled autostart unit starts the supervisor,
+    # so the OS manager supervises and restarts it. A detached spawn beside the
+    # unit would leave it inactive. Every caller of this function gets this
+    # (``nx daemon service start``, ``nx init --service``, the replace-quiesce
+    # restart). The unit's own ``--foreground`` supervisor never comes through
+    # here: it runs ``run_storage_supervisor`` directly.
+    via_unit = _start_via_autostart_unit(config_dir, registry, scope)
+    if via_unit is not None:
+        return via_unit
 
     # nexus-cd1k0.19 review round 2, finding 4: always RESOLVE to an
     # absolute path before it goes into argv, however config_dir itself
@@ -723,6 +758,140 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     )
 
 
+#: How long ``nx daemon service start`` waits for the supervisor a unit started
+#: to publish its lease (the same bound the detached spawn uses).
+_UNIT_START_WAIT_S: float = 60.0
+
+
+def _start_via_autostart_unit(
+    config_dir: Path, registry: ServiceRegistry, scope: str
+) -> LeaseRecord | None:
+    """Start the service through its installed, enabled autostart unit (nexus-crwqm).
+
+    Called by :func:`ensure_storage_supervisor` at the point it would spawn,
+    that is, after it found no live lease and cleared any stop request. Returns
+    the live :class:`LeaseRecord`, or ``None`` when the unit was not used and
+    the caller spawns the detached supervisor as before. A detached spawn
+    beside an enabled unit leaves the unit inactive, so the OS manager neither
+    supervises nor restarts the service the user asked to autostart.
+
+    Not used (``None``): no unit file (silent). One stderr line each says why
+    for the rest: this process requested a launch artifact explicitly
+    (``NEXUS_SERVICE_BIN`` / ``NEXUS_SERVICE_JAR``), which the unit's
+    supervisor would not inherit since it runs with the unit's environment;
+    the unit is baked for a different config dir than *config_dir*, or cannot
+    be read; the manager does not report the unit ACTIVE; its start command
+    fails.
+
+    Used: have the manager start the unit, then POLL the registry for the
+    endpoint. This path never spawns a supervisor itself: the supervisor's own
+    single-writer election decides the lease holder, and a start verb on an
+    already-running unit is a no-op (``systemctl start``, ``launchctl kickstart``
+    without ``-k``), so a caller that has just enabled the unit finds its
+    endpoint here. No artifact check runs on the lease found: a caller that
+    requested an artifact explicitly never reaches this path. A poll that times
+    out raises :class:`StorageServiceStartError` naming the unit's own log,
+    rather than falling back to a spawn, which would race the unit's
+    still-starting supervisor. The fallback cases above do spawn, and can race
+    a unit that is itself mid-start.
+    """
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    unit_path = _service_autostart_unit_installed()
+    if unit_path is None:
+        return None
+
+    def _not_used(reason: str) -> None:
+        click.echo(
+            f"Not starting through the autostart unit {unit_path} ({reason}); "
+            "starting the supervisor directly.",
+            err=True,
+        )
+
+    try:
+        explicit = _ssd.requested_launch_artifact_if_explicit(config_dir) is not None
+    except _ssd.StorageServiceStartError:
+        # Set but unresolvable: the direct spawn reports the same error loudly.
+        explicit = True
+    if explicit:
+        _not_used(
+            "NEXUS_SERVICE_BIN or NEXUS_SERVICE_JAR is set in this process, and the "
+            "unit's supervisor runs with the unit's environment, not this one"
+        )
+        return None
+
+    windows = _autostart_platform() == "win32"
+    try:
+        unit_dir = installer.autostart_unit_config_dir(unit_path)
+    except ValueError as exc:
+        _not_used(f"its --config-dir could not be read: {exc}")
+        return None
+    try:
+        wanted, baked = Path(config_dir).resolve(), unit_dir.resolve()
+    except (OSError, RuntimeError) as exc:
+        # An unresolvable path (a symlink loop, a permission error): the same
+        # one-line fallback as an unreadable unit, never a traceback.
+        _not_used(f"its --config-dir could not be resolved: {exc}")
+        return None
+    if (str(wanted).casefold() != str(baked).casefold()) if windows else wanted != baked:
+        _not_used(f"it runs the service for {baked}, not {wanted}")
+        return None
+
+    probe = installer.autostart_activation_state(unit_path, tier="service")
+    if probe.state is not installer.ActivationState.ACTIVE:
+        _not_used(
+            f"{probe.state.value}: {probe.detail or 'the manager did not report it enabled'}"
+        )
+        return None
+
+    # The unit's supervisor writes its stderr (its "Error: ..." line) to the
+    # unit's own log, never to the detached spawn's crash log. On Windows the
+    # task's launcher points the supervisor at storage_service.crash.log and
+    # keeps its own windows_autostart.crash.log beside it.
+    if windows:
+        from nexus.daemon.windows_autostart import TASK_NAME  # noqa: PLC0415 — deferred import — Windows-only path
+
+        unit_name = f"task {TASK_NAME}"
+        error_log = config_dir / "logs" / "storage_service.crash.log"
+        unit_logs = [error_log, config_dir / "logs" / "windows_autostart.crash.log"]
+        retrying = "Task Scheduler restarts the task when it fails"
+    else:
+        unit_name = unit_path.name
+        error_log = _autostart_log_dir() / "nexus-service.err"
+        unit_logs = [error_log, _autostart_log_dir() / "nexus-service.log"]
+        retrying = "the service manager keeps restarting the unit"
+    try:
+        error_mark = error_log.stat().st_size
+    except OSError:
+        error_mark = 0
+
+    failure = installer.start_autostart_unit(unit_path, tier="service")
+    if failure is not None:
+        _not_used(failure)
+        return None
+
+    deadline = time.monotonic() + _UNIT_START_WAIT_S
+    while True:
+        lease = _service_endpoint.discover_storage_service_lease(registry, scope)
+        if lease is not None:
+            return lease
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    last_error = _ssd.last_supervisor_error_line(error_log, error_mark)
+    detail = f"The supervisor reported: {last_error}\n" if last_error else ""
+    raise _ssd.StorageServiceStartError(
+        f"The autostart unit {unit_name} was started but the storage service "
+        f"did not become ready within {_UNIT_START_WAIT_S:g}s; {retrying}.\n"
+        f"{detail}"
+        f"Check {' and '.join(str(path) for path in unit_logs)}, "
+        f"{config_dir / 'logs' / 'storage_service.log'} (supervisor), "
+        "or stop the unit and run 'nx daemon service start --foreground' to see the error."
+    )
+
+
 @service_group.command("start")
 @click.option(
     "--config-dir",
@@ -783,6 +952,8 @@ def service_start_cmd(
         sys.exit(code)
 
     # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
+    # ensure_storage_supervisor starts an installed, enabled autostart unit
+    # through the OS manager and spawns the detached supervisor only otherwise.
     try:
         existing = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
@@ -988,6 +1159,32 @@ def service_install_binary_cmd(
         click.echo(f"  -> {pg_dest}")
         click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
         click.echo("  signature: verified (keyless Sigstore)")
+        # nexus-f9bgu.56: the daemon finds PostgreSQL only in the extracted tree
+        # (pg_bundle.extracted_bin_dir), so an archive that is only placed is
+        # never used: a restart kept the old PostgreSQL, and a box whose
+        # extracted tree was gone stayed unstartable. extract_bundle is a no-op
+        # for the archive already extracted; a different one is staged first
+        # and swapped in (on Windows with the stack stopped for the swap only).
+        import lzma  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        import tarfile  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+        from nexus.db import pg_bundle as _pg_bundle  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+        try:
+            pg_bin = _pg_bundle.extract_bundle(pg_dest, _pg_bundle.bundle_extract_root(config_dir))
+        except (ReplaceBlockedError, RestartAfterReplaceError) as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        except (RuntimeError, OSError, tarfile.TarError, lzma.LZMAError) as exc:
+            click.echo(
+                f"Error: the PostgreSQL bundle archive installed ({pg_dest}), but "
+                f"extracting it failed: {exc}\nRe-run `nx daemon service "
+                "install-binary <tag>` to retry; the installed PostgreSQL in use "
+                "is unchanged.",
+                err=True,
+            )
+            sys.exit(2)
+        click.echo(f"  extracted -> {pg_bin.parent.parent}")
 
     click.echo(
         "\nRestart the service to pick it up: nx daemon service stop && "

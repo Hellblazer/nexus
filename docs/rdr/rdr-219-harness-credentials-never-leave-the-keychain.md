@@ -445,6 +445,46 @@ Rejected alternatives:
 - A dispatch daemon started from the harness shell: a product change of that
   size made only for harnesses.
 
+**The Windows gate guest** (`tests/e2e/windows-guest/launch.sh`, RDR-224 Phase 5, added after
+this RDR closed; nexus-pwscd). The token reaches a Claude Code window inside a Hyper-V guest on
+qwentescence over five hops, all of them in memory:
+
+1. `claude_credentials.py run --remote` sends it to `token-send.sh` on the host, on the ssh
+   channel's stdin.
+2. `token-send.ps1` writes it into the host pipe `\\.\pipe\nxgate-host`, readable by the
+   connecting account only, where `host-recv.ps1` reads it.
+3. `host-recv.ps1` writes it into a guest pipe over PowerShell Direct. That pipe is readable by
+   the account the window opens as, and by the orchestrating administrator.
+4. A one-shot scheduled task's launcher reads it from that pipe. The task definition carries only
+   the pipe's name.
+5. The launcher starts `claude.exe` with the token in two environment variables:
+   `CLAUDE_CODE_OAUTH_TOKEN`, and `NX_HARNESS_CLAUDE_OAUTH_TOKEN`, so that the gate's own
+   `claude -p` legs can authenticate.
+
+No file, argument list or task definition carries the token at any hop. The guest password
+travels separately, on line 1 of `host-recv.ps1`'s stdin.
+
+Gate assertion 5 checks the guest after every run. It looks for a credential-named file at
+depth 1 under the run account's `.claude` folder, and for a new Windows Credential Manager
+target naming Claude or Anthropic, each compared with a reading taken before the session.
+No run has found either: Claude Code 2.1.29x on Windows 11 Enterprise, Pro and Home, as an
+administrator and as a standard user, 2026-10-13 and 2026-10-14.
+
+**Exposure this shape accepts, for a disposable guest that every run restores from a
+checkpoint:**
+
+- `NX_HARNESS_CLAUDE_OAUTH_TOKEN` is in Claude's own environment, so every child Claude starts
+  inherits it: its Bash tool commands, its MCP servers and its hooks. This is the shape the
+  Phase 3b amendment rejected for the Mac harnesses ("the harness name in Claude's
+  environment"), where the grant goes to nx-mcp alone through a piped `--mcp-config` env block.
+  The gate depends on the inheritance: its verify phase runs from the session's Bash tool and
+  starts `claude -p` with the inherited token.
+- The plugin guard's ban on protected-name references applies inside the guest session too.
+  Nothing else stops a process there from reading the variable.
+- A Hyper-V checkpoint taken while the window is open stores the token in the guest's saved
+  memory, so checkpoints are taken with the gate window closed (`build-guest.sh` takes its
+  checkpoint before any token arrives).
+
 **Migration of the 26 sites.** Each site from the inventory moves to `run --`
 and drops its `.credentials.json` write. The persistent snapshot and
 `auth-login.sh` are deleted. `~/nexus-sandbox` stops receiving a
@@ -899,3 +939,6 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-26: Host-side harness Claude launches take the token on fd 3 (`claude_fd_exec.sh`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`), so it is no longer in Claude's exec environment there; container harnesses unchanged, since their init process holds it (nexus-wauo1.36).
 - 2026-09-26: nexus-wauo1.37 measured the plugin-loaded case: in hook-surface-shakeout's container, an `--mcp-config` entry named exactly `plugin:conexus:nexus` (not the earlier, broken plain `nexus`) leaves the six measured `mcp_tool` hooks firing identically with and without the override, proved by two container runs against the same image and read with `hook_census.py` itself (T2 `nexus_rdr/219-plugin-override-proof`). "The nx-mcp dispatch grant" is updated from "unmeasured" to the proof, and `claude_mcp_grant.sh` now allows `--plugin-dir` when `CLAUDE_MCP_GRANT_SERVER_NAME=plugin:conexus:nexus`, refusing it under any other name. Scope stated afterwards (critique): six of the nine `mcp_tool` hooks measured, the other three inferred; Claude Code 2.1.277.
 - 2026-09-26: Closed, implemented. Close-time critique: justified, 0 Critical, 0 Significant (T2 `nexus_rdr/219-critique-scope-audit-2026-09-26`). Post-mortem: `post-mortem/219-harness-credentials-never-leave-the-keychain.md`. The .37 entry above now says "the six measured hooks" where it said "every".
+- 2026-10-14: Inventory: the Windows gate guest's launch shape (nexus-pwscd), with the
+  assertion-5 checks and the accepted exposure, including that its harness grant sits in
+  Claude's environment, which the Phase 3b amendment rejected for the Mac harnesses.

@@ -148,6 +148,7 @@ nexus-0ne1m
 nexus-0ne1m.1
 nexus-0ne4s
 nexus-0ng3v
+nexus-0nskc
 nexus-0ntxj
 nexus-0ntxj.1
 nexus-0o76a
@@ -448,6 +449,7 @@ nexus-20uv3
 nexus-20w
 nexus-20w.1
 nexus-217
+nexus-217c3
 nexus-21drl
 nexus-223oj
 nexus-2297
@@ -671,6 +673,7 @@ nexus-3f0o
 nexus-3f95
 nexus-3fab5
 nexus-3fab5.1
+nexus-3fme8
 nexus-3foc9
 nexus-3fsyx
 nexus-3g05n
@@ -904,6 +907,7 @@ nexus-4901f
 nexus-4922x
 nexus-4922x.1
 nexus-492qf
+nexus-498xj
 nexus-49bw
 nexus-49cw
 nexus-49dj2
@@ -1971,6 +1975,7 @@ nexus-9h7nz
 nexus-9hfcu
 nexus-9hoyj
 nexus-9hoyj.1
+nexus-9i4d4
 nexus-9ifls
 nexus-9ifls.1
 nexus-9iw41
@@ -3233,6 +3238,7 @@ nexus-f9bgu.50
 nexus-f9bgu.51
 nexus-f9bgu.52
 nexus-f9bgu.53
+nexus-f9bgu.54
 nexus-f9bgu.6
 nexus-f9bgu.7
 nexus-f9bgu.8
@@ -3494,6 +3500,7 @@ nexus-gcwq.1
 nexus-gcx2r
 nexus-gd3b9
 nexus-gdb3
+nexus-gdllu
 nexus-gednd
 nexus-ger02
 nexus-ger02.1
@@ -4157,6 +4164,7 @@ nexus-j7ae6
 nexus-j7ae6.1
 nexus-j7uo
 nexus-j862l
+nexus-j8ebc
 nexus-j94u4
 nexus-j94u4.1
 nexus-j9ey
@@ -4924,6 +4932,7 @@ nexus-n3qu.4
 nexus-n3qu.5
 nexus-n41p
 nexus-n66kv
+nexus-n6eaj
 nexus-n6ygk
 nexus-n75jg
 nexus-n75jg.1
@@ -5317,6 +5326,7 @@ nexus-o9jwf
 nexus-oa7r
 nexus-oa9k
 nexus-oabh4
+nexus-oacd3
 nexus-oay5b
 nexus-ob4vc
 nexus-ob4vc.1
@@ -5377,6 +5387,7 @@ nexus-ols6a
 nexus-om64x
 nexus-om64x.1
 nexus-omdjz
+nexus-omlpd
 nexus-on1js
 nexus-onjvy
 nexus-onjvy.1
@@ -5994,6 +6005,7 @@ nexus-rw6
 nexus-rw6.1
 nexus-rwlt
 nexus-rwnjs
+nexus-rwv5i
 nexus-rwxxt
 nexus-rx92s
 nexus-rxh1o
@@ -6201,6 +6213,39 @@ nexus-suuja
 nexus-suy8
 nexus-sv152
 nexus-sv152.1
+nexus-sv2wx
+nexus-sv2wx.1
+nexus-sv2wx.10
+nexus-sv2wx.11
+nexus-sv2wx.12
+nexus-sv2wx.13
+nexus-sv2wx.14
+nexus-sv2wx.15
+nexus-sv2wx.16
+nexus-sv2wx.17
+nexus-sv2wx.18
+nexus-sv2wx.19
+nexus-sv2wx.2
+nexus-sv2wx.20
+nexus-sv2wx.21
+nexus-sv2wx.22
+nexus-sv2wx.23
+nexus-sv2wx.24
+nexus-sv2wx.25
+nexus-sv2wx.26
+nexus-sv2wx.27
+nexus-sv2wx.28
+nexus-sv2wx.29
+nexus-sv2wx.3
+nexus-sv2wx.30
+nexus-sv2wx.31
+nexus-sv2wx.32
+nexus-sv2wx.4
+nexus-sv2wx.5
+nexus-sv2wx.6
+nexus-sv2wx.7
+nexus-sv2wx.8
+nexus-sv2wx.9
 nexus-sv7t
 nexus-svcg
 nexus-svcg.1

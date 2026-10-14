@@ -33,6 +33,7 @@ from __future__ import annotations
 import ntpath
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -176,11 +177,72 @@ def _task_user_sid() -> str:
     return service_identity()
 
 
+def generation_pythonw(generation: Path) -> str:
+    """The windowless interpreter of *generation*'s venv (Windows layout).
+
+    ``pythonw.exe`` when it exists, else the venv's ``python.exe``: the same
+    choice :func:`nexus.daemon.windows_autostart.pythonw_for` makes. The one
+    place the task's interpreter is derived from a generation, so ``nx self
+    install``'s retarget and :func:`_task_pythonw` (hence the doctor row and the
+    converge pass) cannot name different files for the same generation.
+
+    Neither file is checked for: with no ``pythonw.exe`` the ``python.exe``
+    path is returned whether or not it exists, as ``pythonw_for`` does. The
+    caller guarantees a built generation.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import — Windows-only path
+
+    pythonw = install_layout.venv_script(generation, "pythonw", platform="win32")
+    if pythonw.is_file():
+        return str(pythonw)
+    return str(install_layout.venv_python(generation, platform="win32"))
+
+
+def _current_generation_pythonw() -> str | None:
+    """The interpreter of the generation ``current`` names, or None.
+
+    A generation is usable only when its console ``python.exe`` exists: the
+    task may run ``pythonw.exe`` (preferred, as :func:`generation_pythonw`
+    chooses), but the supervisor it starts is ``console_python_for`` that
+    interpreter, so a generation without ``python.exe`` would register a task
+    whose supervisor is not there.
+
+    None when there is no generation layout (a plain uv tool install), when
+    ``current`` dangles, when the generation holds no console interpreter, or
+    when reading any of that raises (``is_file`` can fail with EACCES on
+    Windows): the task must never name a file that is not there, and every
+    such case falls back to the running interpreter.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import — Windows-only path
+
+    try:
+        generation = install_layout.current_generation()
+        if not install_layout.venv_python(generation, platform="win32").is_file():
+            return None
+        return generation_pythonw(generation)
+    except Exception:  # noqa: BLE001 — no pointer, relative pointer, unreadable root or file: no layout
+        return None
+
+
 def _task_pythonw() -> str:
-    """The windowless interpreter the task launches (seam: tests inject one)."""
+    """The windowless interpreter the task launches (seam: tests inject one).
+
+    The CURRENT generation's when the generation layout is present, whichever
+    interpreter runs this ``nx`` (nexus-50l3e). ``sys.executable`` is the tree
+    of the shim that was invoked, and a shell opened before ``nx self install``
+    still finds uv's shim, which runs the legacy tree: registering that tree
+    left a task the session-start gc could reap out from under (measured in the
+    Windows guest, T2 ``nexus_rdr/228-research-29``). Without a generation
+    layout the running interpreter is all there is.
+
+    This includes a dev checkout: run on a box that also has a generation
+    layout, it registers the installed current generation, not the checkout's
+    venv. That matches launchd and systemd, whose units name the
+    ``~/.local/bin/nx`` shim rather than the interpreter that rendered them.
+    """
     from nexus.daemon.windows_autostart import pythonw_for  # noqa: PLC0415 — deferred import — Windows-only path
 
-    return pythonw_for(sys.executable)
+    return _current_generation_pythonw() or pythonw_for(sys.executable)
 
 
 def _render_windows_task(_daemon: ModuleType) -> tuple[Path, str]:
@@ -385,6 +447,159 @@ def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
         )
         return ["launchctl", "bootout", f"gui/{uid}/{label}"]
     return ["systemctl", "--user", "disable", "--now", dest.name]
+
+
+def _start_cmd(dest: Path, *, tier: str) -> list[str]:
+    """Start the REGISTERED unit now, through its manager (nexus-crwqm).
+
+    Unlike :func:`_activate_cmd` this never registers anything: Linux
+    ``systemctl --user start <unit>``, macOS ``launchctl kickstart
+    gui/<uid>/<label>`` (the label is tier-specific, as in
+    :func:`_deactivate_cmd`), Windows ``schtasks /Run`` (:func:`_task_run_cmd`).
+    All three are mutating verbs, so they pass the fence in :func:`_run_manager`.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if _daemon._autostart_platform() == "win32":
+        return _task_run_cmd()
+    if _daemon._autostart_platform() == "darwin":
+        return ["launchctl", "kickstart", f"gui/{os.getuid()}/{_launchd_label_for(tier)}"]
+    return ["systemctl", "--user", "start", dest.name]
+
+
+def start_autostart_unit(dest: Path, *, tier: str) -> str | None:
+    """Ask the OS manager to start the installed unit at ``dest`` (nexus-crwqm).
+
+    Returns ``None`` when the manager accepted the start, else one line saying
+    why it did not (no manager, a refused verb, a timeout, a non-zero exit).
+    Never raises: the caller keeps its own start path for every failure. A
+    return of ``None`` means the manager took the request, not that the
+    service is up; the caller waits on the service's own lease.
+    """
+    cmd = _start_cmd(dest, tier=tier)
+    shown = " ".join(cmd)
+    try:
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_MANAGER_ACTION_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:  # also ManagerRefusedUnderFence
+        return f"`{shown}` could not run: {exc}"
+    except subprocess.TimeoutExpired:
+        return f"`{shown}` did not answer within {_MANAGER_ACTION_TIMEOUT_S:g}s"
+    except (OSError, ValueError) as exc:
+        return f"`{shown}` could not run ({exc})"
+    if result.returncode != 0:
+        return f"`{shown}` exited {result.returncode}: {_first_line(result)}"
+    return None
+
+
+_TASK_ARGUMENTS_RE = re.compile(r"<Arguments>(.*?)</Arguments>", re.DOTALL)
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _split_windows_command_line(text: str) -> list[str]:
+    """Split *text* the way the MSVC runtime builds ``argv`` (the inverse of
+    :func:`subprocess.list2cmdline`, which renders the task's arguments): a
+    run of backslashes is literal unless a quote follows it, when each pair
+    is one backslash and an odd one escapes the quote."""
+    args: list[str] = []
+    buf: list[str] = []
+    in_quotes = False
+    started = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\":
+            run = 0
+            while i < len(text) and text[i] == "\\":
+                run += 1
+                i += 1
+            started = True
+            if i < len(text) and text[i] == '"':
+                buf.append("\\" * (run // 2))
+                if run % 2:
+                    buf.append('"')
+                    i += 1
+            else:
+                buf.append("\\" * run)
+            continue
+        if char == '"':
+            in_quotes = not in_quotes
+            started = True
+        elif char in " \t" and not in_quotes:
+            if started:
+                args.append("".join(buf))
+                buf, started = [], False
+        else:
+            buf.append(char)
+            started = True
+        i += 1
+    if started:
+        args.append("".join(buf))
+    return args
+
+
+def _unit_argv(dest: Path, text: str) -> list[str]:
+    """The argv the installed unit at *dest* runs, from its rendered body."""
+    import html  # noqa: PLC0415 — deferred import — only the unit-start path reads a unit back
+    import plistlib  # noqa: PLC0415 — deferred import — only the unit-start path reads a unit back
+
+    if dest.suffix == ".plist":
+        # The shipped template's comment spells ``--config-dir`` and
+        # ``--autostart``; ``--`` inside a comment is not well-formed XML, which
+        # launchd tolerates and expat does not. A comment carries no data.
+        body = _XML_COMMENT_RE.sub("", text)
+        try:
+            arguments = plistlib.loads(body.encode("utf-8")).get("ProgramArguments")
+        except (plistlib.InvalidFileException, ValueError, AttributeError) as exc:
+            raise ValueError(f"{dest} is not a readable launchd plist ({exc})") from exc
+        if not isinstance(arguments, list) or not all(isinstance(a, str) for a in arguments):
+            raise ValueError(f"{dest} has no ProgramArguments string array")
+        return arguments
+    if dest.suffix == ".xml":
+        match = _TASK_ARGUMENTS_RE.search(text)
+        if match is None:
+            raise ValueError(f"{dest} has no <Arguments> element")
+        return _split_windows_command_line(html.unescape(match.group(1)))
+    lines = [line for line in text.splitlines() if line.startswith("ExecStart=")]
+    if len(lines) != 1:
+        raise ValueError(f"{dest} has {len(lines)} ExecStart= lines, expected one")
+    try:
+        return shlex.split(lines[0].removeprefix("ExecStart="))
+    except ValueError as exc:
+        raise ValueError(f"{dest} has an unparseable ExecStart= line ({exc})") from exc
+
+
+def autostart_unit_config_dir(dest: Path) -> Path:
+    """The config dir the installed service unit at *dest* starts its supervisor
+    for (nexus-crwqm): the ``--config-dir`` the renderers bake into the
+    systemd ``ExecStart``, the launchd ``ProgramArguments`` or the Windows
+    task's ``<Arguments>``. A unit with no flag (one installed before the flag
+    was baked, nexus-cd1k0.19) means the DEFAULT dir: the units set no
+    ``NEXUS_CONFIG_DIR``, so a flagless supervisor resolves ``~/.config/nexus``,
+    the same literal ``storage_service_stack_matcher`` uses. The path is
+    returned as written, unresolved.
+
+    Raises ``ValueError`` naming the problem when the file cannot be read or
+    parsed, or the flag has no value.
+    """
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{dest} could not be read ({exc})") from exc
+    argv = _unit_argv(dest, text)
+    for index, token in enumerate(argv):
+        if token.startswith("--config-dir="):
+            value = token.removeprefix("--config-dir=")
+        elif token == "--config-dir":
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+        else:
+            continue
+        if not value:
+            raise ValueError(f"{dest} has --config-dir with no value")
+        return Path(value)
+    return Path.home() / ".config" / "nexus"
 
 
 class ActivationState(Enum):

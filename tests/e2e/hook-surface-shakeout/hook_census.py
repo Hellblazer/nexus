@@ -43,14 +43,20 @@ import sys
 #: Declared silent on a healthy virgin box. Absence from the TRANSCRIPT is
 #: expected for these and means nothing; absence from the SHIM roster is a
 #: real finding, because the shim runs before the handler can decline to speak.
-SILENT_BY_DESIGN = {"nx-hook preflight"}
+#: ``nx_setup_notice.py`` prints nothing when the CLI is present (RDR-228: it
+#: speaks only when ``nx-mcp`` does not resolve), and this harness's box always
+#: has the CLI, so it is silent here by design, like ``preflight``.
+SILENT_BY_DESIGN = {"nx-hook preflight", "nx_setup_notice.py"}
 
 #: Removed from the staged manifest by run.sh because they would mutate the
 #: wheel under test: `upgrade-auto` installs a generation and flips
 #: <tools>/current, `self-gc` reaps generations. The denominator is the
 #: ORIGINAL manifest, so they must be named as excluded rather than counted
 #: as absent -- a harness's own exclusions appearing as findings is how a
-#: census loses the reader's trust in the findings that are real.
+#: census loses the reader's trust in the findings that are real. Keyed on
+#: :func:`label`, which reads through the launcher: run.sh drops by this set
+#: and asserts it dropped every member, so a form change that makes the names
+#: match nothing fails the staging instead of running the entries.
 EXCLUDED_BY_HARNESS = {"nx-hook upgrade-auto", "nx-hook self-gc"}
 
 #: Real, documented events (code.claude.com/docs/en/hooks.md) that this
@@ -64,23 +70,48 @@ NOT_PROVOKED: dict[str, str] = {}
 def label(entry: dict) -> str:
     """One command-tier entry's census name; run.sh's shims write the same.
 
-    ``nx-hook <verb>``; ``nx_hook_shim.py <verb>`` for a verb wired through the
-    stdlib shim (nexus-rcoze), because a bare script name would fold every shim
-    entry into one handler and one firing would mark them all fired; otherwise
-    the script's file name, or the bare command.
+    ``nx-hook <verb>`` for a verb, whether the entry runs ``nx-hook`` directly or
+    through the launcher (RDR-228: ``uv tool run ... python launch/nx_launch.py
+    nx-hook <verb>``); the program's own name for any other launcher entry
+    (``nx-session-end-launcher``, ``nx-mcp``), because the launcher's file name
+    would fold all seven entries into one label and one firing would mark them
+    all fired; ``nx_hook_shim.py <verb>`` for a verb wired through the stdlib
+    shim (nexus-rcoze); otherwise the script's file name, or the bare command.
     """
     args = [a for a in (entry.get("args") or []) if isinstance(a, str)]
     cmd = entry.get("command") or "?"
     if cmd == "nx-hook" and args:
         return f"nx-hook {args[0]}"
     if cmd == "uv":
-        # The launcher (nexus-efk2h): skip its flags; the handler is the first
+        # The uv launcher (nexus-efk2h): skip its flags; the handler is the first
         # script path and whatever follows it.
         i = next((k for k, a in enumerate(args) if a.endswith(".py")), len(args))
         args = args[i:]
+    if args and pathlib.Path(args[0]).name == "nx_launch.py" and len(args) >= 2:
+        # The CLI launcher: the program it starts, and for nx-hook its verb.
+        if args[1] == "nx-hook" and len(args) >= 3:
+            return f"nx-hook {args[2]}"
+        return args[1]
     if args and pathlib.Path(args[0]).name == "nx_hook_shim.py" and len(args) == 2:
         return f"nx_hook_shim.py {args[1]}"
     return pathlib.Path(args[0]).name if args else cmd
+
+
+def server_argv(mcp: dict, name: str, plugin_root: str) -> list[str]:
+    """The argv the plugin's ``.mcp.json`` runs for server *name*, with
+    ``${CLAUDE_PLUGIN_ROOT}`` replaced by *plugin_root*.
+
+    run.sh bakes this into the tee that observes the server, so the server
+    starts the way the manifest says (behind ``uv`` and the launcher) and not
+    through a command the harness chose. A server that does not go through the
+    launcher is refused: the harness would be measuring something else.
+    """
+    entry = mcp[name]
+    argv = [entry["command"], *(entry.get("args") or [])]
+    argv = [a.replace("${CLAUDE_PLUGIN_ROOT}", plugin_root) for a in argv]
+    if not any(pathlib.Path(a).name == "nx_launch.py" for a in argv):
+        raise ValueError(f"server {name!r} does not start through the launcher: {argv}")
+    return argv
 
 
 def declared(hooks_json: pathlib.Path) -> dict[str, str]:

@@ -317,15 +317,18 @@ def test_windows_resolves_bare_name_through_pathext(bootstrap, tmp_path):
     assert got == str(uv)
 
 
-def test_windows_pathext_order_decides_between_candidates(bootstrap, tmp_path):
+def test_windows_never_returns_a_batch_file(bootstrap, tmp_path):
+    """A batch file runs through cmd.exe with quoting CPython does not escape for it,
+    so a ``.cmd`` or ``.bat`` is passed over whatever PATHEXT's order, and a ``uv``
+    that exists only as one is not found."""
     _exe(tmp_path, "uv.cmd")
+    _exe(tmp_path, "uv.bat")
+    for pathext in (".exe;.cmd;.bat", ".cmd;.bat;.exe"):
+        assert bootstrap._resolve_executable("uv", platform="win32", path=str(tmp_path), pathext=pathext) is None
+    assert bootstrap._resolve_executable("uv.cmd", platform="win32", path=str(tmp_path), pathext=".cmd;.exe") is None
     exe = _exe(tmp_path, "uv.exe")
-    assert bootstrap._resolve_executable(
-        "uv", platform="win32", path=str(tmp_path), pathext=".exe;.cmd"
-    ) == str(exe)
-    assert bootstrap._resolve_executable(
-        "uv", platform="win32", path=str(tmp_path), pathext=".cmd;.exe"
-    ) == str(tmp_path / "uv.cmd")
+    for pathext in (".exe;.cmd;.bat", ".cmd;.bat;.exe"):
+        assert bootstrap._resolve_executable("uv", platform="win32", path=str(tmp_path), pathext=pathext) == str(exe)
 
 
 def test_windows_name_with_extension_and_path_order(bootstrap, tmp_path):
@@ -504,6 +507,23 @@ def test_main_on_windows_resolves_uv_via_pathext_and_exits_with_child_code(
         bootstrap.main(platform="win32")
     assert exc.value.code == 9
     assert synced == [str(tmp_path / "uv.exe")]
+
+
+def test_main_on_windows_without_uv_exits_127_before_any_spawn(bootstrap, tmp_path, monkeypatch, capsys):
+    """uv is not on PATH: the bare name "uv" would be found by CreateProcess in the working
+    directory first (a planted uv.exe), so neither the sync nor the launch may be attempted."""
+    monkeypatch.setenv("PATH", str(tmp_path))  # an empty directory
+    monkeypatch.setenv("PATHEXT", ".exe;.cmd")
+    monkeypatch.delenv("NX_MCPB_SKIP_RESOLVE_RETRY", raising=False)
+    spawned = []
+    monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d, uv="uv": spawned.append(("sync", uv)))
+    monkeypatch.setattr(bootstrap, "_launch_windows", lambda argv: spawned.append(("launch", argv)) or 0)
+    with pytest.raises(SystemExit) as exc:
+        bootstrap.main(platform="win32")
+    assert exc.value.code == 127
+    assert spawned == []
+    err = capsys.readouterr().err
+    assert "cannot find 'uv' on PATH" in err and "Install uv" in err
 
 
 def test_sync_uses_the_injected_uv_path(bootstrap):

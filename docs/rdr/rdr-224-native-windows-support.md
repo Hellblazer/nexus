@@ -1487,7 +1487,7 @@ findings:
 | B: uv exits 2 when no interpreter is found, which blocks five hook entries | Kept as a loud block (Sam, on nexus-f9bgu.36). `conexus/README.md` names the remedy, `uv python install 3.12` |
 | C: Phase 4 code ran in no Windows job, and the launcher read a planted `.venv` | Fixed: the Windows rehearsal job runs `tests/test_mcpb_bootstrap.py` and `tests/hooks/test_hook_launcher_uv.py` (`e741a577a`); the launcher form above |
 | D: documents and this record claimed more than was measured | Partly fixed. The hooks assumption is marked Verified and `docs/windows-install.md` exists. Open: the Desktop wording in `web/index.html` and `docs/desktop-deployment.md` |
-| E: the aspect-worker daemon died with the bootstrap's job | Fixed in code (`e741a577a`: breakaway allowed on the job, a breakaway-first spawn with a fallback). Tested with a fake `Popen` only; not measured on Windows |
+| E: the aspect-worker daemon died with the bootstrap's job | Fixed in code (`e741a577a`: breakaway allowed on the job, a breakaway-first spawn with a fallback). Tested with a fake `Popen` when this table was first written. Corrected 2026-10-12, later the same day: `06ee0cab2` added three real-Windows tests (`tests.test_mcpb_bootstrap.TestRealWindows`) that close a real Job Object and see the member killed and a breakaway child spared, and that see a refused breakaway retried inside the job. They passed natively (T2 `224-win-run-06ee0cab2`) and in the rehearsal job. Not measured: the breakaway under Claude Desktop's own job |
 | F1: `uv sync` inherited the host's stdin and decoded with the locale codec | Fixed: stdin is `DEVNULL`, output is decoded as UTF-8 with replacement |
 | G: the stdio handoff test could hang | Fixed: the exchange has a deadline |
 
@@ -1497,7 +1497,24 @@ the manifest from the project directory on Windows; that closing the Job Object
 kills a real child, and that a child spawned with breakaway survives it (a hand
 run on qwentescence at `4aa3eb754` covered the kill once, and CI asserts only
 that the job is created); the time a first hook run takes on a box with no
-Python, against the 5 s hook timeout (nexus-f9bgu.37 carries these).
+Python, against the 5 s hook timeout (nexus-f9bgu.37 carries these). The first
+of these was measured on 2026-10-13: Claude Code 2.1.296 ran the installed
+programs, not copies planted in the working directory (Revision History,
+2026-10-13 evening).
+
+Correction, 2026-10-12, later the same day: the job kill and the breakaway are
+measured. `06ee0cab2` added three real-Windows tests to
+`tests.test_mcpb_bootstrap.TestRealWindows`: a real Job Object is created,
+closing it kills its member and spares a child spawned with breakaway, and a
+job that forbids breakaway refuses it and the retry keeps the child in the job.
+All three passed on qwentescence (T2 `224-win-run-06ee0cab2`: 1591 passed, 55
+skipped, 2 xfailed, 0 failed) and in the rehearsal job, which requires them by
+name. Finding E's fix is
+therefore tested against a real job, not only a fake `Popen`. Still not
+measured: the resolution of bare `uv` and `nx-hook` from the project directory
+by the hosts; the time of a first hook run with no Python on the box; and the
+breakaway under Claude Desktop's own job object, which may forbid it (the retry
+path is tested against a job that does).
 
 ### Phase 5: Gate (Gap 7)
 
@@ -1625,9 +1642,13 @@ skipped assertion fails; it does not pass.
   The junit floor requires `tests.test_mcpb_bootstrap.TestRealWindows` and
   `test_the_credential_guard_still_denies_through_the_launcher` to have passed.
   Status: green on real Windows, run 38194840901 on `2ea176075` (2026-10-12),
-  1560 passed. Not in that job: `tests/hooks/test_hook_launcher_cwd.py` (the
-  planted `.venv` cases; its module skips on Windows), a real job kill and a real
-  breakaway.
+  1560 passed. Not in that job as first recorded: `tests/hooks/test_hook_launcher_cwd.py`
+  (the planted `.venv` cases; its module skips on Windows), a real job kill and a real
+  breakaway. Corrected 2026-10-12, later the same day: `06ee0cab2` put the job kill, the
+  breakaway and a refused-breakaway retry into the job as three tests in
+  `tests.test_mcpb_bootstrap.TestRealWindows`, green on real Windows (T2
+  `224-win-run-06ee0cab2`, 1591 passed) and required by name in the floor. Still not
+  in the job: the planted `.venv` cases.
 - **Scenario**: the Phase 5 gate on a real Windows box — **Verify**: its five
   assertions pass and its executed-assertion count equals the declared count.
 - **Scenario**: Windows 11 machine with Smart App Control enforcing, fresh
@@ -1856,3 +1877,114 @@ Right-sized for an Architecture record that replaces an accepted direction.
   what is not measured. Added a dated note to Gap 5, the shipped launcher and
   its evidence to the hooks assumption, and a Phase 4 Test Plan row. Text and
   evidence only; no status change.
+- 2026-10-12: corrections and Phase 5 results, text and evidence only; no status
+  change. (a) Phase 4: the Test Plan row, the "Not measured" paragraph and the
+  finding E row said the job kill and the breakaway were unmeasured and finding E
+  was tested with a fake `Popen` only. `06ee0cab2` added them as real-Windows
+  tests in `tests.test_mcpb_bootstrap.TestRealWindows`, which passed natively (T2
+  `224-win-run-06ee0cab2`) and in the rehearsal job; each passage now carries a
+  dated note. Still unmeasured: host resolution of bare `uv` and `nx-hook`, the
+  first hook run with no Python, and the breakaway under Claude Desktop's own
+  job. (b) Phase 5: the gate FAILED assertion 4 on published conexus 7.77.1
+  (executed 5 of 5, A4 not passing: a plain `nx daemon service stop` also stopped
+  a PostgreSQL the supervisor had started; T2 `224-gate-run-7.77.1-2026-10-12`;
+  nexus-f9bgu.54). The fix, a PostgreSQL start on a console of its own, shipped in
+  7.78.0, and the gate PASSED 5 of 5 on published conexus 7.78.0 with
+  `engine-service-v0.1.160` on the clean guest, unattended (measured stop times
+  2.1 s with `--with-pg` and 1.9 s plain, against the 15 s bound; T2
+  `224-gate-run-7.78.0-2026-10-12`). The aspect-worker daemon, host sleep and the
+  Desktop bundle stay outside what a green gate covers.
+- 2026-10-13: measurements on the clean guest, text and evidence only; no status
+  change. (a) The Phase 5 gate PASSED 5 of 5 on published conexus 7.78.0 run as a
+  standard user: a local account in Users only, created after the restore by
+  `tests/e2e/windows-guest/run-gate.sh --standard-user`, which then runs the
+  install, the setup phase (with `nx init` and the `NexusStorageService` task),
+  the Claude Code session and the verify phase as that account. The gate's
+  precondition recorded "Administrators not a member, integrity Medium" (T2
+  `224-gate-run-standard-user-7.78.0-2026-10-13`). This closes the Phase 3 "not
+  run" item for a standard account as far as the gate reaches. The administrator
+  still installed Git for all users, since winget's package needs elevation, so a
+  standard user with no Git is not covered; neither is a Home or Pro edition, a
+  Microsoft or domain account, or a managed machine's application policy. (b)
+  `nx daemon service install-binary` with the published `windows-x64` assets: exit
+  0 in 12.8 s with the PostgreSQL bundle and 6.7 s with `--no-pg-bundle`, a
+  same-version reinstall with the service stopped (T2
+  `224-guest-batch-2026-10-12`). (c) Host resolution of bare `uv` and `nx-hook`:
+  with `uv.exe` and `nx-hook.exe` planted in the session's working directory, all
+  four recorded SessionStart hooks ran the installed programs. On the guest
+  `claude.exe` shares a directory with the installed ones, so this does not
+  separate "the host never searches the working directory" from "the
+  application's directory wins first". (d) Not measurable on this guest: sleep (the
+  VM's firmware offers no sleep state) and a first hook run with no Python (the
+  only Python is the one `uv tool install` brings; with it present the cold first
+  session's hooks took 3.4 s against the 5 s timeout). Both stay open. (e) Three
+  real-Windows tests joined the rehearsal's required floor: the PostgreSQL start
+  flags under a console-wide CTRL_BREAK, with an unflagged control that dies; the
+  off-cwd resolver against real planted files; and a planted `.venv` against the
+  eleven uv hook entries (T2 `224-win-run-ffea86080`). The hand runs were in a
+  desktop session; the rehearsal job on the runner's service account is the console
+  test's first run in session 0.
+- 2026-10-13, later: two more results from the clean guest, text and evidence
+  only. (a) The gate PASSED 5 of 5 as a standard user on a guest with no Git
+  (`run-gate.sh --standard-user --no-admin-git`): the account ran the PortableGit
+  block of `docs/windows-install.md` as written, with no elevation, in 29 s, and
+  the plugin install and Claude Code's Git Bash both worked from the user PATH
+  entry alone (T2 `224-gate-run-standard-user-no-git-7.78.0-2026-10-13`). The
+  administrator then does nothing a user's install needs. Still not covered: a
+  Home or Pro edition, a Microsoft or domain account, and application-control
+  policy, which is the kind of thing that blocks a self-extractor in a user
+  folder. (b) The 16.5 s `mcp-connect-wait` seen in a `claude -p` child during the
+  guest batch is not a Windows matter. The aspect extractor's child loaded the
+  user's settings and so ran every SessionStart hook, and the plugin's connection
+  wait timed out at its bound for an `nx-mcp` that child never starts. The child
+  now passes `--setting-sources ""` (nexus-n6eaj).
+- 2026-10-13, evening: two more results from the clean guest, text and evidence
+  only. (a) Host resolution of bare `uv` and `nx-hook` with the installed
+  programs NOT beside `claude.exe`: they were moved to a directory that is only
+  on the user PATH, and copies of `whoami.exe` were planted under their names in
+  the session's working directory. A plain `CreateProcess` and `cmd /c` both ran
+  the plant; Claude Code 2.1.296 ran the installed programs for all four
+  recorded SessionStart hooks and for the `uv`-launched MCP server (T2
+  `224-hook-resolution-off-app-dir-2026-10-13`). This closes the limit recorded
+  in the earlier 2026-10-13 entry, for one host version; `nx-session-end-launcher`
+  stays unobserved because SessionEnd did not fire. (b) Application control:
+  with AppLocker's default rules enforced by the administrator
+  (`run-gate.sh --standard-user --no-admin-git --applocker`), the standard
+  account's install failed at its first step and nothing from
+  `docs/windows-install.md` worked. PowerShell ran in ConstrainedLanguage, so the
+  uv installer script failed; the Claude Code installer's executable and the
+  PortableGit archive were refused by policy (T2
+  `224-gate-run-applocker-7.78.0-2026-10-13`). A first run showed that the policy
+  reads as effective about 75 s before anything is blocked, and in that window
+  the account installed uv and conexus; once enforcement began, `nx.exe`,
+  `uv.exe` and the tool environment's `python.exe` were refused by path. The
+  driver now waits for a start in the account's profile to be recorded as
+  blocked before the account does anything. Not measured: which allow rules make
+  the install and the gate pass, WDAC, and Smart App Control. The install guide
+  now states the standard-account passes and the AppLocker result.
+- 2026-10-13, night: the allow rules an AppLocker machine needs, text and
+  evidence only. An audit-only run (`--applocker-audit`) passed the gate 5 of 5
+  and its log named every program the enforced rules would refuse: all sit in
+  `.local\bin`, `AppData\Roaming\uv`, `AppData\Local\uv\cache`,
+  `AppData\Local\Programs\Git` and `.config\nexus` under the profile. With the
+  executable rules enforced and seven path rules for those folders and the two
+  installer locations (`--applocker-allow`), the standard account installed from
+  the guide and the gate PASSED 5 of 5 (T2
+  `224-gate-run-applocker-allow-rules-7.78.0-2026-10-13`). The script rules were
+  audit only in that run: enforced, they put PowerShell in ConstrainedLanguage,
+  where the uv installer script fails and no path rule helps. Publisher rules
+  cannot replace the path rules while the engine and the PostgreSQL bundle are
+  unsigned (P0.2). Not measured: DLL rules, WDAC, Smart App Control, update and
+  removal under the policy. `docs/windows-install.md` lists the rules.
+- 2026-10-13, late: the hook helper and the Desktop bundle launcher no longer
+  return a `.cmd` or `.bat` hit from their `PATH` lookups (Sam's decision, the
+  question the Phase 4 test review left open). A batch file runs through
+  `cmd.exe` with quoting CPython does not escape for it; `nexus.util.nx_argv`
+  and `generation_core` already refused one, so the four copies now agree and
+  the parity test names no exception. A `uv` or `nx-hook` that exists only as a
+  batch file counts as not found. The hook shim's Windows tests, which had
+  installed a fake `nx-hook.cmd`, now place a real `nx-hook.exe` (setuptools'
+  console launcher). Native Windows run at `091c9453e`: the rehearsal set 1637
+  passed, 0 failed, floor met; the parity test 26 passed (T2
+  `224-win-run-091c9453e`). Also corrected: the Phase 4 "Not measured" paragraph
+  now points at the 2026-10-13 host-resolution measurement.

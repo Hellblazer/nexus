@@ -134,9 +134,17 @@ def test_assertion_bodies_keep_their_deciding_clauses() -> None:
     assert "nx search outside the session does not find the nonce" in a2
     a3 = text[text.index("Run-Assertion 3 "):text.index("function Invoke-ClaudeP")]
     assert """"$(K $_ 'type')" -ne 'hook_success' -or [int](K $_ 'exitCode') -ne 0""" in a3
-    assert "'nx-hook session-start'" in a3
+    assert "-match $SESSION_START_RE" in a3
     a5 = text[text.index("Run-Assertion 5 "):text.index("# -------------------------------------------------------------- verdict ----")]
     assert "a credential file appeared during the run" in a5
+    # Credential Manager (nexus-pwscd): the baseline is taken in setup, before
+    # the session, and assertion 5 fails on a new Claude or Anthropic target.
+    assert "a Claude credential appeared in Credential Manager during the run" in a5
+    assert "$_ -match 'claude|anthropic'" in a5 and "K $script:state 'cred_targets_ok'" in a5
+    setup_state = text[text.index("if ($Phase -eq 'setup')"):text.index("# P0: the precondition.")]
+    assert setup_state.index("Credential-Targets") < setup_state.index("Save-State $script:state")
+    targets = text[text.index("function Credential-Targets"):text.index("# ---------------------------------------------------------------- setup ----")]
+    assert "'Currently stored credentials'" in targets and "$LASTEXITCODE -eq 0" in targets
     setup = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
     assert "setup cannot be re-run on this box" in setup and "exit 1" in setup
 
@@ -260,10 +268,41 @@ def _check_hook_coverage(hooks_text: str, gate_text: str) -> None:
     plain = [c for c in cmds if "hooks/scripts/" in c and "nx_hook_shim.py" not in c]
     assert plain, "hooks.json has no plain-script entry"
     assert all(ours.search(c) for c in plain)
+    # Negative cases: a filter that matches everything covers nothing. The shim
+    # filter must not claim a plain-script entry, and ours must not claim a
+    # command that is not a conexus hook.
+    claimed = [c for c in plain if shim.search(c)]
+    assert not claimed, f"HOOK_SHIM_RE matches plain-script entries, so it distinguishes nothing: {claimed}"
+    for foreign in ("echo hello", "node server.js", "C:\\Windows\\System32\\cmd.exe /c dir"):
+        assert not ours.search(foreign), f"HOOK_OURS_RE matches a foreign command {foreign!r}: {ours_src!r}"
 
 
 def test_every_conexus_hook_entry_is_covered_by_the_gates_filters() -> None:
     _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), _text())
+
+
+# The gate installs the PUBLISHED plugin, whose hooks.json (through 7.78.0) runs the
+# nx-hook verbs bare. A filter written only for the next release's launcher form saw
+# none of them, so assertion 3 failed every run (nexus-f9bgu.53, 2026-10-14).
+_BARE_FORM_COMMANDS = ["nx-hook session-start", "nx-hook upgrade-auto", "nx-hook self-gc", "nx-hook rdr"]
+_LAUNCHER_FORM_COMMANDS = [
+    "uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python "
+    "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py nx-hook " + verb
+    for verb in ("session-start", "upgrade-auto", "self-gc", "rdr")
+]
+
+
+@pytest.mark.parametrize("cmd", _BARE_FORM_COMMANDS + _LAUNCHER_FORM_COMMANDS)
+def test_hook_filter_sees_both_plugin_forms(cmd: str) -> None:
+    ours = re.compile(_ps_literal(_text(), "HOOK_OURS_RE"), re.I)
+    assert ours.search(cmd), f"HOOK_OURS_RE misses {cmd!r}"
+
+
+def test_session_start_pattern_takes_both_forms_and_only_that_verb() -> None:
+    start = re.compile(_ps_literal(_text(), "SESSION_START_RE"), re.I)
+    assert start.search(_BARE_FORM_COMMANDS[0]) and start.search(_LAUNCHER_FORM_COMMANDS[0])
+    for other in _BARE_FORM_COMMANDS[1:] + _LAUNCHER_FORM_COMMANDS[1:] + ["nx-hook session-start-extra", "echo nx-hook session-start x"]:
+        assert not start.search(other), f"SESSION_START_RE matches {other!r}"
 
 
 def _rewrite_launcher(hooks_text: str, launcher: list[str]) -> str:
@@ -307,6 +346,18 @@ def test_hook_pin_fails_when_the_gate_filters_are_reverted_to_the_old_launcher_f
         _check_hook_coverage(HOOKS_JSON.read_text(encoding="utf-8"), reverted_shim)
 
 
+def test_hook_pin_fails_when_a_filter_matches_everything() -> None:
+    """Mutants: a shim regex of `.` claims every entry, an ours regex of `.`
+    claims commands that are not ours. Both used to pass the coverage pin."""
+    text = _text()
+    base = HOOKS_JSON.read_text(encoding="utf-8")
+    for name in ("HOOK_SHIM_RE", "HOOK_OURS_RE"):
+        mutant = re.sub(r"^\$" + name + r"\s*=.*$", lambda _m, n=name: f"${n} = '.'", text, flags=re.M)
+        assert mutant != text
+        with pytest.raises(AssertionError):
+            _check_hook_coverage(base, mutant)
+
+
 def test_hook_pin_fails_when_a_hook_script_moves_out_from_under_hooks_scripts() -> None:
     """Mutant on a scratch copy of hooks.json: a launched script the gate no
     longer recognises must fail the pin, not shrink A3's coverage silently."""
@@ -315,7 +366,9 @@ def test_hook_pin_fails_when_a_hook_script_moves_out_from_under_hooks_scripts() 
     assert moved != base
     with pytest.raises(AssertionError):
         _check_hook_coverage(moved, _text())
-    renamed = base.replace('"command": "nx-session-end-launcher"', '"command": "nx-session-end"')
+    # The session-end entry runs through the launcher (RDR-228), so its program
+    # is the launcher's last argument, not its `command`.
+    renamed = base.replace('"nx-session-end-launcher"', '"nx-session-end"')
     assert renamed != base
     with pytest.raises(AssertionError):
         _check_hook_coverage(renamed, _text())
@@ -349,6 +402,9 @@ def test_stop_is_timed_bounded_and_fails_on_the_degraded_path() -> None:
     assert "Stopwatch" in invoke and "secs =" in invoke
     fn = text[text.index("function Stop-Problem"):text.index("function Get-Status")]
     assert "-match $STOP_DEGRADED_RE" in fn and "-gt $STOP_MAX_SECONDS" in fn
+    # both clauses are live statements, not just text somewhere in the function
+    _live_statement(fn, 'if ("$($stop.out)" -match $STOP_DEGRADED_RE) {')
+    _live_statement(fn, "if ($stop.secs -gt $STOP_MAX_SECONDS) {")
     a1 = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
     a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
     # leg B's stop (assertion 1) and both of assertion 4's stops
@@ -398,6 +454,18 @@ def test_assertion_4_keeps_its_post_stop_and_pg_log_checks_live() -> None:
         """if ($new -match 'was interrupted|not properly shut down|redo starts|automatic recovery') { Fail "next start's pg.log shows crash recovery" }""",
     )
     _live_statement(a4, """if ($new -notmatch 'database system was shut down at') { Fail""")
+    # nexus-f9bgu.54: the check that caught 7.77.1's plain stop taking PostgreSQL down
+    _live_statement(
+        a4, "if ((Get-Stack).postgres.Count -eq 0) { Fail 'plain nx daemon service stop also stopped PostgreSQL' }"
+    )
+    # the plain-stop leg runs on the logon-task shape, so both launcher checks stay live
+    _live_statement(
+        a4, "if (-not (Supervisor-From-Launcher $k)) { Fail ('the stack under test is not the launcher-started one: '"
+    )
+    _live_statement(
+        a4,
+        "if (-not (Supervisor-From-Launcher $k)) { Fail ('after Start-ScheduledTask the stack is not launcher-started: '",
+    )
 
 
 def test_assertion_2_keeps_its_outside_session_check_live() -> None:
@@ -460,3 +528,77 @@ def test_header_not_covered_list_names_the_known_residuals() -> None:
     assert len(items) >= 10
     for item in items:
         assert re.search(r"nexus-[a-z0-9.]+", item), f"no bead named: {item}"
+
+
+# ---- measured stop seconds survive a FAIL (nexus-f9bgu.53) ------------------
+
+
+def _check_stop_notes(gate_text: str) -> None:
+    """Every stop an assertion runs is noted, and Run-Assertion carries the notes
+    into the record on a PASS and on a FAIL.
+
+    A FAIL's detail is the exception message, which replaced the body: 7.77.1's
+    failed assertion 4 lost both stops' measured seconds. The notes sit outside
+    the body so neither outcome can drop them.
+    """
+    fn = gate_text[gate_text.index("function Run-Assertion"):gate_text.index("function Invoke-Nx")]
+    _live_statement(fn, "$script:stopNotes.Clear()")
+    _live_statement(fn, "Record $key 'PASS' ($detail + (Stop-Notes))")
+    _live_statement(fn, "Record $key 'FAIL' ($_.Exception.Message + (Stop-Notes))")
+    a1 = gate_text[gate_text.index("Run-Assertion 1 "):gate_text.index("# --------------------------------------------------------------- verify ----")]
+    a4 = gate_text[gate_text.index("Run-Assertion 4 "):gate_text.index("Run-Assertion 5 ")]
+    # each Note-Stop follows the Invoke-Nx that ran its stop, before anything can throw
+    assert a1.index("Note-Stop $stop 'A1 leg B --with-pg'") > a1.index("Invoke-Nx 'legB-stop-with-pg'")
+    assert a1.index("Note-Stop $stop 'A1 leg B --with-pg'") < a1.index("Stop-Problem $stop")
+    _live_statement(a1, "Note-Stop $stop 'A1 leg B --with-pg'")
+    _live_statement(a4, "Note-Stop $r 'A4 --with-pg'")
+    _live_statement(a4, "Note-Stop $r 'A4 plain'")
+    assert a4.index("Note-Stop $r 'A4 --with-pg'") > a4.index("Invoke-Nx 'stop-with-pg'")
+    assert a4.index("Note-Stop $r 'A4 --with-pg'") < a4.index("Wait-Gone")
+    assert a4.index("Note-Stop $r 'A4 plain'") > a4.index("Invoke-Nx 'stop-plain'")
+    assert a4.index("Note-Stop $r 'A4 plain'") < a4.index("Assert-Absent @('supervisor', 'engine') \"${RECHECK_SECONDS}s after plain stop\"")
+    # every Invoke-Nx stop in the gate is noted: three stops, three notes
+    assert gate_text.count("'daemon', 'service', 'stop'") == 3
+    assert len(re.findall(r"^\s*Note-Stop \$", gate_text, re.M)) == 3
+    notes = gate_text[gate_text.index("function Note-Stop"):gate_text.index("function Run-Assertion")]
+    assert "$stop.code" in notes and "$stop.secs" in notes
+    assert "[stops measured: " in notes
+
+
+def test_measured_stop_seconds_reach_the_record_on_pass_and_on_fail() -> None:
+    _check_stop_notes(_text())
+
+
+def test_stop_notes_pin_fails_when_a_fail_drops_the_notes() -> None:
+    """Mutant: the pre-fix Run-Assertion, whose FAIL record is the bare message."""
+    text = _text()
+    mutant = text.replace(
+        "Record $key 'FAIL' ($_.Exception.Message + (Stop-Notes))", "Record $key 'FAIL' $_.Exception.Message"
+    )
+    assert mutant != text
+    with pytest.raises(AssertionError):
+        _check_stop_notes(mutant)
+
+
+def test_stop_notes_pin_fails_when_a_pass_drops_the_notes() -> None:
+    text = _text()
+    mutant = text.replace("Record $key 'PASS' ($detail + (Stop-Notes))", "Record $key 'PASS' $detail")
+    assert mutant != text
+    with pytest.raises(AssertionError):
+        _check_stop_notes(mutant)
+
+
+def test_stop_notes_pin_fails_when_a_stop_is_not_noted() -> None:
+    text = _text()
+    for note in ("Note-Stop $stop 'A1 leg B --with-pg'", "Note-Stop $r 'A4 --with-pg'", "Note-Stop $r 'A4 plain'"):
+        mutant = text.replace(note, "# " + note)
+        assert mutant != text
+        with pytest.raises(AssertionError):
+            _check_stop_notes(mutant)
+
+
+def test_stop_notes_do_not_touch_the_non_vacuity_rules() -> None:
+    # the counting clauses the verdict stands on are still exactly what they were
+    block = _verdict_block()
+    assert "if ($executed -ne $DECLARED -or $failed.Count -gt 0 -or -not $preOk) {" in block
+    assert "$skipIds -contains $id) { Record $key 'SKIPPED'" in _text()

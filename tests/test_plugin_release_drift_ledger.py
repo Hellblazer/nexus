@@ -62,6 +62,10 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 #: is skill-only now -- so the example was updated to two files that still
 #: exist.)
 #:
+#: launch/ holds the script every server and hook entry starts through
+#: (RDR-228, nexus-sv2wx.5): it is run from $CLAUDE_PLUGIN_ROOT exactly as a
+#: hook script is.
+#:
 #: WHY THE REST OF conexus/ IS OUT, stated rather than left to luck:
 #:   CHANGELOG.md / README.md  docs; stale docs in a shipped plugin are
 #:                             harmless, a stale hook is a guard not guarding.
@@ -87,6 +91,7 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
         "conexus/agents/",
         "conexus/resources/",
         "conexus/mcp/",
+        "conexus/launch/",
         "conexus/.mcp.json",
     ),
     "sn": (
@@ -430,6 +435,38 @@ def _declared_paths_for(plugin: str) -> set[str]:
     }
 
 
+def _pending_declarations(
+    declared: set[str], deferred: set[str], *, at_pinned_plugin_tag: bool
+) -> set[str]:
+    """The declarations the stale-entry check holds to "must still differ".
+
+    At the pinned plugin tag's own checkout (the tag workflow's run) the
+    cut held deferred paths back to the previous tree's content, so they
+    cannot differ from the tag that held them back; they are pending, not
+    shipped (nexus-sv2wx.13). Everywhere else every declaration counts.
+    """
+    return declared - deferred if at_pinned_plugin_tag else set(declared)
+
+
+def _head_is_plugin_tag(ref: str) -> bool:
+    """True when *ref* is an anchored plugin tag and HEAD is its commit.
+
+    A client tag does not qualify: a client release ships deferred entries,
+    so at its checkout they are stale like any other.
+    """
+    from plugin_channel import parse_plugin_tag
+
+    if parse_plugin_tag(ref) is None:
+        return False
+    head = _git("rev-parse", "--verify", "HEAD^{commit}")
+    tag = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
+    return (
+        head.returncode == 0
+        and tag.returncode == 0
+        and head.stdout.strip() == tag.stdout.strip()
+    )
+
+
 def _deferred_declared_paths() -> set[str]:
     """DEFERRED entries' channel paths (nexus-2x3qy) -- exempt from the
     release-window "ledger must be empty" contract below.
@@ -509,7 +546,10 @@ def test_the_ledger_has_no_stale_entries() -> None:
                 f"test_every_drifted_file_is_declared_in_the_ledger)."
             )
             continue
-        declared |= _declared_paths_for(plugin)
+        declared |= _pending_declarations(
+            _declared_paths_for(plugin), deferred,
+            at_pinned_plugin_tag=_head_is_plugin_tag(ref),
+        )
         drifted |= set(_drifted_paths(plugin, ref))
 
     stale = sorted(declared - drifted)
@@ -520,6 +560,46 @@ def test_the_ledger_has_no_stale_entries() -> None:
         + "\n\nRemove them. A ledger of already-shipped changes is "
         "indistinguishable from a ledger of pending ones."
     )
+
+
+def test_deferred_entries_are_pending_only_at_the_pinned_plugin_tag() -> None:
+    """The tag workflow's checkout IS the pin, so a held-back deferred entry
+    cannot differ from it; anywhere else a deferred entry with no drift is
+    stale like any other (nexus-sv2wx.13, found by the cut rehearsal)."""
+    declared = {"conexus/a.py", "conexus/b.py"}
+    deferred = {"conexus/b.py"}
+    assert _pending_declarations(
+        declared, deferred, at_pinned_plugin_tag=True
+    ) == {"conexus/a.py"}
+    assert _pending_declarations(
+        declared, deferred, at_pinned_plugin_tag=False
+    ) == declared
+
+
+def test_a_client_tag_checkout_is_not_a_plugin_tag_checkout() -> None:
+    """A client release ships deferred entries, so its checkout keeps them
+    under the stale check. Judged before HEAD is even read."""
+    assert _head_is_plugin_tag("v7.78.0") is False
+    assert _head_is_plugin_tag("plugin-v9.9.9-1") is False  # no such tag
+
+
+def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them() -> None:
+    """RDR-228 Phase 2's plugin parts never ride a plugin-only cut (nexus-sv2wx.13).
+
+    The same check the cut runs (`cut_plugin_release.phase2_deferral_check`),
+    run here against the tree being landed, so a Phase 2 bead that files its
+    entry under "Awaiting" fails on develop the day it lands, not at cut
+    time. It has nothing to check while `conexus/launch/nx_setup.py` is not
+    in the tree or the pinned tag already carries it; the fixture tests in
+    test_cut_plugin_release.py (TestPhase2DeferralGuard) prove the refusal.
+    """
+    _require_or_skip()
+    from cut_plugin_release import phase2_deferral_check
+
+    ref = _pinned_refs()["conexus"]
+    if plugin_in_release_window("conexus", ref):
+        return  # the pin IS this branch's content; deferral is judged by the cut
+    phase2_deferral_check(REPO_ROOT, ref, "HEAD", _ledger_text())
 
 
 # --- the skip/require mechanism is itself tested ----------------------------

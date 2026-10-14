@@ -51,6 +51,13 @@
 #   The session starts already working the prompt (first-run prompts are
 #   pre-accepted); read the verdict from <RunDir>\verdict.txt. Passed this way
 #   on published 7.72.1, 2026-10-07 (T2 nexus_rdr/224-gate-run-7.72.1-2026-10-07).
+#   The whole unattended procedure, from the checkpoint restore to the verdict
+#   line and the guest's shutdown, is one command on the Mac:
+#      tests/e2e/windows-guest/run-gate.sh --version <v> --engine <e> [--wheel PATH] [--out DIR]
+#   (the scripts it stages on the host are in tests/e2e/windows-guest/driver/).
+#   It exits 0 only when the collected verdict line is PASSED, and --wheel runs a
+#   candidate wheel instead of the published conexus==<v>, named as such in the
+#   output. Steps 0 to 6 above are what it does.
 #
 # THE ASSERTIONS (DECLARED = 5; a precondition runs before each phase)
 #   P0  (setup) no system-wide VC++ runtime (vcruntime140*/msvcp140* in
@@ -104,7 +111,9 @@
 #       NX_HARNESS_CLAUDE_OAUTH_TOKEN and this script maps it back for its
 #       child only (RDR-219 "The nx-mcp dispatch grant"). An auth failure is
 #       reported as such, distinct from a hang. No credential file may appear
-#       under %USERPROFILE%\.claude during the run.
+#       under %USERPROFILE%\.claude during the run, and no Credential Manager
+#       target naming Claude or Anthropic may appear between setup and verify
+#       (cmdkey /list target names; other new targets are reported).
 #
 # NON-VACUITY: an assertion counts only when it executed (PASS or FAIL). A
 #   -ForceSkip'd or never-reached assertion is recorded SKIPPED, and the
@@ -133,9 +142,11 @@
 #     only; sleep is nexus-f9bgu.53.
 #   - Autostart at the next logon and the sign-out/restart path: measured by
 #     nexus-f9bgu.46, fixed by nexus-f9bgu.51, not re-asserted here.
-#   - Windows Credential Manager. Assertion 5's credential check lists file
-#     names at depth 1 under %USERPROFILE%\.claude and never reads the
-#     Credential Manager store. RDR-219 inventory; nexus-f9bgu.53.
+#   - Windows Credential Manager beyond target names. Assertion 5 lists file
+#     names at depth 1 under %USERPROFILE%\.claude and compares cmdkey /list
+#     target names between setup and verify; it reads no secret, fails only on
+#     a new target naming Claude or Anthropic, and a non-English listing reads
+#     as unmeasured. RDR-219 inventory; nexus-pwscd; nexus-f9bgu.53.
 #   - Windows on ARM. Out of scope by decision (no GraalVM windows-aarch64
 #     target, no onnxruntime Windows-ARM64 library). RDR-224 Technical
 #     Environment and Briefly Rejected; nexus-f9bgu.53.
@@ -196,7 +207,13 @@ $STOP_DEGRADED_RE = 'unclean_stop|hard-killing|win_console_helper_failed|bounded
 # plugin's hooks/scripts matches too (the recorded command keeps
 # ${CLAUDE_PLUGIN_ROOT} unexpanded, so the plugin cannot be told apart); the
 # guest has only the conexus plugin installed.
-$HOOK_OURS_RE = '^nx-hook |nx-session-end-launcher|^plugin:conexus:nexus/|hooks/scripts/[^ ]+\.py'
+# Both plugin forms: the released plugin (through 7.78.0) runs `nx-hook <verb>`
+# itself, and RDR-228's runs `uv ... launch/nx_launch.py nx-hook <verb>`. The
+# gate installs the PUBLISHED plugin, so dropping the first form left
+# assertion 3 blind to every nx-hook entry (nexus-f9bgu.53, 2026-10-14).
+$HOOK_OURS_RE = '^nx-hook |nx_launch\.py nx-hook |nx-session-end-launcher|^plugin:conexus:nexus/|hooks/scripts/[^ ]+\.py'
+# The session-start entry in either form, matched as the whole verb.
+$SESSION_START_RE = '(^|nx_launch\.py )nx-hook session-start$'
 $HOOK_SHIM_RE = 'nx_hook_shim\.py'
 if (-not $RunDir) { $RunDir = Join-Path $env:USERPROFILE 'nx-gate\run' }
 
@@ -238,12 +255,27 @@ function Record([string]$id, [string]$status, [string]$detail) {
     Say ("{0} {1}: {2}" -f $id, $status, $detail)
 }
 
+# Every stop an assertion ran, with its exit code and measured seconds. A FAIL's
+# detail is the exception message and replaces the body, so a failed assertion 4
+# lost both stops' seconds (7.77.1, 2026-10-12, nexus-f9bgu.53). The notes live
+# outside the body, and Run-Assertion appends them to the record on a PASS and
+# on a FAIL alike.
+$script:stopNotes = New-Object System.Collections.ArrayList
+function Note-Stop($stop, [string]$label) {
+    [void]$script:stopNotes.Add(("{0}: exit {1} in {2}s" -f $label, $stop.code, $stop.secs))
+}
+function Stop-Notes {
+    if ($script:stopNotes.Count -eq 0) { return '' }
+    return ' [stops measured: ' + ($script:stopNotes -join '; ') + ']'
+}
+
 function Run-Assertion([int]$id, [string]$name, [scriptblock]$body) {
     $key = "A$id"
     if ($skipIds -contains $id) { Record $key 'SKIPPED' "$name (forced by -ForceSkip)"; return }
     Say "A$id $name"
-    try { $detail = (& $body | Out-String).Trim(); Record $key 'PASS' $detail }
-    catch { Record $key 'FAIL' $_.Exception.Message }
+    $script:stopNotes.Clear()
+    try { $detail = (& $body | Out-String).Trim(); Record $key 'PASS' ($detail + (Stop-Notes)) }
+    catch { Record $key 'FAIL' ($_.Exception.Message + (Stop-Notes)) }
 }
 
 function Invoke-Nx([string]$label, [string[]]$nxArgs) {
@@ -361,6 +393,16 @@ function Credential-Files {
         Where-Object { $_.Name -match 'credential' })
 }
 
+# Target names (never secrets) in this account's Windows Credential Manager,
+# from cmdkey's English output. Ok is false when the output is not that shape,
+# so a localized or failed listing reads as unmeasured, not as empty.
+function Credential-Targets {
+    $out = @(& "$env:windir\System32\cmdkey.exe" /list 2>$null)
+    $ok = ($LASTEXITCODE -eq 0) -and (($out -join "`n") -match 'Currently stored credentials')
+    $targets = @($out | ForEach-Object { if ("$_" -match '^\s*Target:\s*(.+?)\s*$') { $Matches[1] } })
+    return @{ ok = $ok; targets = $targets }
+}
+
 # ---------------------------------------------------------------- setup ----
 if ($Phase -eq 'setup') {
     $script:state = @{
@@ -368,6 +410,9 @@ if ($Phase -eq 'setup') {
         nonce = ([guid]::NewGuid().ToString('N').Substring(0, 12)); results = @{}
         script_sha256 = $scriptSha
     }
+    $ct = Credential-Targets
+    $script:state['cred_targets_ok'] = [bool]$ct.ok
+    $script:state['cred_targets'] = @($ct.targets)
     Save-State $script:state
 
     # P0: the precondition. Not one of the five; a failure stops the run.
@@ -420,6 +465,7 @@ if ($Phase -eq 'setup') {
         if ($k.supervisor.Count -eq 0 -or $k.engine.Count -eq 0 -or $k.postgres.Count -eq 0) { Fail ("leg B: stack incomplete: " + (Describe-Stack $k)) }
         "leg B direct spawn: $b; " + (Describe-Stack $k)
         $stop = Invoke-Nx 'legB-stop-with-pg' @('daemon', 'service', 'stop', '--with-pg')
+        Note-Stop $stop 'A1 leg B --with-pg'
         # Judged at the end of the assertion so the rest of the run still happens.
         $legBStop = Stop-Problem $stop 'leg B stop --with-pg'
         "leg B stop --with-pg: exit $($stop.code) in $($stop.secs)s"
@@ -594,7 +640,7 @@ Run-Assertion 3 'the conexus hooks fire in the live session' {
     $ours = @($h | Where-Object { "$(K $_ 'command')" -match $HOOK_OURS_RE })
     $bad = @($ours | Where-Object { "$(K $_ 'type')" -ne 'hook_success' -or [int](K $_ 'exitCode') -ne 0 })
     if ($bad.Count -gt 0) { Fail ("{0} conexus hook run(s) failed, first: {1} {2} exit={3}" -f $bad.Count, (K $bad[0] 'type'), (K $bad[0] 'command'), (K $bad[0] 'exitCode')) }
-    $start = @($ours | Where-Object { "$(K $_ 'command')" -eq 'nx-hook session-start' -and "$(K $_ 'hookEvent')" -eq 'SessionStart' -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
+    $start = @($ours | Where-Object { "$(K $_ 'command')" -match $SESSION_START_RE -and "$(K $_ 'hookEvent')" -eq 'SessionStart' -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
     if ($start.Count -eq 0) { Fail 'nx-hook session-start did not run with output in the live session' }
     $shim = @($ours | Where-Object { "$(K $_ 'command')" -match $HOOK_SHIM_RE -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
     if ($shim.Count -eq 0) { Fail 'no nx_hook_shim.py hook produced output in the live session' }
@@ -659,6 +705,7 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
     $stopProblems = New-Object System.Collections.ArrayList
 
     $r = Invoke-Nx 'stop-with-pg' @('daemon', 'service', 'stop', '--with-pg')
+    Note-Stop $r 'A4 --with-pg'
     $sp = Stop-Problem $r 'stop --with-pg'
     if ($sp) { [void]$stopProblems.Add($sp) }
     $withPgSecs = $r.secs
@@ -698,6 +745,7 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
 
     # The Minimum Viable Validation leg: a plain stop leaves PostgreSQL up.
     $r = Invoke-Nx 'stop-plain' @('daemon', 'service', 'stop')
+    Note-Stop $r 'A4 plain'
     $sp = Stop-Problem $r 'plain stop'
     if ($sp) { [void]$stopProblems.Add($sp) }
     Wait-Gone @('supervisor', 'engine') 90 | Out-Null
@@ -715,7 +763,20 @@ Run-Assertion 5 'a plain claude -p returns, with the stack up and with no endpoi
     if (-not $script:claudeNoEndpoint.ok) { Fail "no endpoint: $($script:claudeNoEndpoint.why)" }
     $new = @(Credential-Files | Where-Object { $credBefore -notcontains $_.FullName -or $_.LastWriteTimeUtc -gt $since } | ForEach-Object FullName)
     if ($new.Count -gt 0) { Fail ("a credential file appeared during the run: " + ($new -join ', ')) }
-    "stack up: $($script:claudeUp.why); no endpoint: $($script:claudeNoEndpoint.why); no credential file under .claude"
+    # Credential Manager: a new target naming Claude or Anthropic fails; any other
+    # new target is reported. Unreadable either time is reported as unmeasured.
+    $ctNow = Credential-Targets
+    if ((K $script:state 'cred_targets_ok') -and $ctNow.ok) {
+        $ctBefore = K $script:state 'cred_targets'
+        if ($null -eq $ctBefore) { $ctBefore = @() }
+        $ctNew = @($ctNow.targets | Where-Object { $ctBefore -notcontains $_ })
+        $ctBad = @($ctNew | Where-Object { $_ -match 'claude|anthropic' })
+        if ($ctBad.Count -gt 0) { Fail ("a Claude credential appeared in Credential Manager during the run: " + ($ctBad -join ', ')) }
+        $cm = "Credential Manager targets $($ctBefore.Count) before, $(@($ctNow.targets).Count) after, new: [$($ctNew -join ', ')]"
+    } else {
+        $cm = 'Credential Manager not measured (cmdkey /list unreadable)'
+    }
+    "stack up: $($script:claudeUp.why); no endpoint: $($script:claudeNoEndpoint.why); no credential file under .claude; $cm"
 }
 
 # -------------------------------------------------------------- verdict ----

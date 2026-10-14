@@ -193,6 +193,10 @@ def _verb_table_at_tag(tag: str) -> set[str]:
     )
 
 
+#: How a launcher entry names the launcher script, whatever the plugin root is.
+_LAUNCHER_SUFFIX = "/launch/nx_launch.py"
+
+
 def _nx_hook_verbs_in_hooks_json(path: Path = HOOKS_JSON) -> list[tuple[str, str]]:
     """Every ``nx-hook <verb>`` invocation in *path*, as ``(verb,
     joined-line)`` pairs for diagnostics.
@@ -207,10 +211,19 @@ def _nx_hook_verbs_in_hooks_json(path: Path = HOOKS_JSON) -> list[tuple[str, str
 
     def _walk(node: object) -> None:
         if isinstance(node, dict):
+            args = [a for a in (node.get("args") or []) if isinstance(a, str)]
             if node.get("command") == "nx-hook":
-                args = [a for a in (node.get("args") or []) if isinstance(a, str)]
                 if args:
                     found.append((args[0], " ".join(["nx-hook", *args])))
+            # RDR-228 (nexus-sv2wx.8): the entries reach `nx-hook` through the
+            # launcher, `... python <plugin>/launch/nx_launch.py nx-hook <verb>`.
+            # The launcher hands the verb to `nx-hook` and passes its exit code
+            # back unchanged, so a verb the installed CLI lacks blocks exactly as
+            # it does for a bare entry. The nx_hook_shim.py entries are NOT
+            # collected: the shim is what turns that exit into a skip.
+            for i, arg in enumerate(args[:-2]):
+                if arg.endswith(_LAUNCHER_SUFFIX) and args[i + 1] == "nx-hook":
+                    found.append((args[i + 2], " ".join(["nx_launch.py", *args[i + 1:]])))
             for key, value in node.items():
                 if key not in ("command", "args"):
                     _walk(value)
@@ -241,9 +254,25 @@ def test_the_resolved_tags_verb_table_is_not_vacuous() -> None:
     assert "session-start" in table, f"{tag}'s VERB_TABLE is missing session-start: {table!r}"
 
 
+def test_the_extraction_reads_the_launcher_form_and_not_the_shim(tmp_path: Path) -> None:
+    """One entry of each kind: bare, through the launcher, through the shim."""
+    form = ["tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python"]
+    manifest = tmp_path / "hooks.json"
+    manifest.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+        {"type": "command", "command": "nx-hook", "args": ["bare-verb"]},
+        {"type": "command", "command": "uv", "args": [*form, "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py", "nx-hook", "launched-verb"]},
+        {"type": "command", "command": "uv", "args": [*form, "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py", "nx-session-end-launcher"]},
+        {"type": "command", "command": "uv", "args": [*form, "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "shimmed-verb"]},
+    ]}]}}), encoding="utf-8")
+    assert [verb for verb, _ in _nx_hook_verbs_in_hooks_json(manifest)] == ["bare-verb", "launched-verb"]
+
+
 def test_hooks_json_extraction_is_not_vacuous() -> None:
     invocations = _nx_hook_verbs_in_hooks_json()
-    assert invocations, (
+    assert len(invocations) >= 6, (
+        f"conexus/hooks/hooks.json named only {len(invocations)} nx-hook invocations; six "
+        "session-start entries go through the launcher (RDR-228). "
+    ) + (
         "conexus/hooks/hooks.json named zero nx-hook invocations -- the extractor "
         "broke, the manifest moved, or every nx-hook entry was deleted; this "
         "module's own hooks.json anchor (test_hooks_json_shape_lint.py) pins a "

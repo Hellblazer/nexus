@@ -170,6 +170,43 @@ class TestVersionLockstepHookKeepsTheThirdPlugin:
             f"{SYNTHETIC_PLUGIN!r} even though marketplace.json lists it"
         )
 
+    def test_known_plugins_reads_the_marketplace_clone_for_a_cache_installed_plugin(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """nexus-gdllu: an installed plugin's root is the versioned cache
+        copy, whose parent has no marketplace.json; the list lives in the
+        marketplace's clone, which known_marketplaces.json locates."""
+        plugins_dir = tmp_path / "home" / ".claude" / "plugins"
+        clone = plugins_dir / "marketplaces" / "nexus-plugins"
+        (clone / ".claude-plugin").mkdir(parents=True)
+        mkt = _write_marketplace(tmp_path)
+        (clone / ".claude-plugin" / "marketplace.json").write_text(mkt.read_text())
+        plugin_root = plugins_dir / "cache" / "nexus-plugins" / "conexus" / "9.8.7"
+        plugin_root.mkdir(parents=True)
+        (plugins_dir / "known_marketplaces.json").write_text(
+            json.dumps({"nexus-plugins": {"installLocation": str(clone)}})
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        mod = self._load_module()
+        monkeypatch.setattr(mod, "_marketplaces_path", lambda: plugins_dir / "known_marketplaces.json")
+        names = mod.known_plugins()
+        assert SYNTHETIC_PLUGIN in names, names
+        assert "falling back" not in capsys.readouterr().err
+
+    def test_a_cache_installed_plugin_with_no_recorded_clone_still_falls_back_out_loud(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        plugins_dir = tmp_path / "home" / ".claude" / "plugins"
+        plugin_root = plugins_dir / "cache" / "nexus-plugins" / "conexus" / "9.8.7"
+        plugin_root.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        mod = self._load_module()
+        monkeypatch.setattr(mod, "_marketplaces_path", lambda: plugins_dir / "known_marketplaces.json")
+        assert mod.known_plugins() == mod._FALLBACK_PLUGINS
+        assert "falling back to built-in plugin set" in capsys.readouterr().err
+
     def test_our_plugin_shas_keeps_a_synthetic_third_plugin(self, tmp_path, monkeypatch) -> None:
         mkt_dir = tmp_path / "clone"
         (mkt_dir / ".claude-plugin").mkdir(parents=True)

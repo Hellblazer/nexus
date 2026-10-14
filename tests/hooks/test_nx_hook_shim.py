@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 from tests._module_seam import setattr_in
-from tests._platform import IS_WINDOWS, posix_only, scrubbed_env
+from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SHIM = _ROOT / "conexus" / "hooks" / "scripts" / "nx_hook_shim.py"
@@ -53,30 +53,38 @@ if mode == "sleep":
 """
 
 
+def _no_cli_env(bindir: Path) -> dict[str, str]:
+    """An environment with *bindir* as the whole ``PATH`` and no generation layout."""
+    return scrubbed_env(PATH=str(bindir), NX_TOOLS_DIR=str(bindir.parent / "no-tools"))
+
+
 def _install_fake(bindir: Path, source: str) -> dict[str, str]:
     """Put a fake ``nx-hook`` first on PATH; returns the env the shim needs.
 
     POSIX: a shebang script. Windows cannot execute one, and the shim finds
-    ``nx-hook`` through PATHEXT, as it finds the real console-script ``.exe``:
-    there the fake is ``nx-hook.cmd`` running the same Python source, and the
-    env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
+    ``nx-hook`` through PATHEXT and refuses a batch file, so the fake there is
+    a real ``nx-hook.exe``: setuptools' console launcher, which runs the
+    ``nx-hook-script.py`` beside it with the interpreter its ``#!`` line names.
+    The env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
+
+    ``NX_TOOLS_DIR`` names a directory that does not exist: the shim looks in the
+    generation layout before ``PATH`` (RDR-228), and without the override it
+    would find the developer's own install.
     """
-    env = scrubbed_env(PATH=str(bindir))
+    env = _no_cli_env(bindir)
     if not IS_WINDOWS:
         fake = bindir / "nx-hook"
         fake.write_text(source.format(python=sys.executable))
         fake.chmod(0o755)
         return env
-    script = bindir / "nx-hook.py"
-    script.write_text(source.format(python=sys.executable))
-    (bindir / "nx-hook.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+    install_windows_exe_fake(bindir, "nx-hook", source.format(python=f'"{sys.executable}"'))
     return env
 
 
 def _run(tmp_path: Path, mode: str | None, verb: str = "mcp-connect-check", payload: bytes = b"{}"):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    env = _install_fake(bindir, _FAKE) if mode is not None else scrubbed_env(PATH=str(bindir))
+    env = _install_fake(bindir, _FAKE) if mode is not None else _no_cli_env(bindir)
     env |= {"FAKE_MODE": mode or "", "FAKE_PIDFILE": str(tmp_path / "child.pid")}
     return subprocess.run(
         [sys.executable, str(_SHIM), verb],
@@ -112,6 +120,10 @@ def test_no_nx_hook_at_all_is_exit_0_with_a_notice(tmp_path: Path) -> None:
     r = _run(tmp_path, None, verb="auto-approve")
     assert r.returncode == 0
     assert b"`nx-hook` is not installed" in r.stderr
+    # With no CLI at all there is nothing to upgrade, so the note no longer names
+    # an upgrade command (RDR-228). It is the launcher's line.
+    assert b"nx self install" not in r.stderr
+    assert len(r.stderr.decode().splitlines()) == 1, r.stderr
 
 
 @posix_only("SIGTERM sent to the shim and forwarded to its nx-hook child; Windows has no signal delivery between processes")
@@ -126,7 +138,7 @@ def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -
     fake.write_text(_FAKE.format(python=sys.executable))
     fake.chmod(0o755)
     pidfile = tmp_path / "child.pid"
-    env = {"PATH": str(bindir), "FAKE_MODE": "sleep", "FAKE_PIDFILE": str(pidfile)}
+    env = _no_cli_env(bindir) | {"FAKE_MODE": "sleep", "FAKE_PIDFILE": str(pidfile)}
     shim = subprocess.Popen([sys.executable, str(_SHIM), "mailbox-drain"],
                             stdin=subprocess.PIPE, env=env)
     shim.stdin.write(b"{}")
@@ -189,10 +201,12 @@ def test_the_shim_imports_only_the_standard_library() -> None:
         elif isinstance(n, ast.ImportFrom) and n.module:
             found.add(n.module.split(".")[0])
     assert found, "no imports found; the scan examined nothing"
-    # ``_exec_path`` is the sibling PATH-only lookup (finding A, nexus-f9bgu.36);
-    # tests/hooks/test_exec_off_cwd.py pins that it is itself standard library only.
-    assert found <= set(sys.stdlib_module_names) | {"__future__", "_exec_path"}, found
-    assert "_exec_path" in found, "the shim no longer resolves nx-hook through the PATH-only helper"
+    # ``_cli_lookup`` is the lookup the launcher and the shim share (RDR-228): the
+    # generation layout, then the PATH-only ``_exec_path`` (finding A,
+    # nexus-f9bgu.36). tests/hooks/test_nx_launch.py pins that it is standard
+    # library only.
+    assert found <= set(sys.stdlib_module_names) | {"__future__", "_cli_lookup"}, found
+    assert "_cli_lookup" in found, "the shim no longer resolves nx-hook through the shared lookup"
 
 
 @pytest.mark.lint
@@ -277,3 +291,57 @@ def test_nx_hook_inherits_the_cwd_when_no_project_is_known(tmp_path: Path) -> No
     plugin_root.mkdir()
     r = _run_cwd(tmp_path, payload=b"{}", project_env=None, shim_cwd=plugin_root)
     assert r.stdout.decode() == os.path.realpath(plugin_root), r
+
+
+# -- one lookup, shared with the launcher (RDR-228 Phase 1 Step 1) -----------------
+#
+# conexus/launch/nx_launch.py runs the six `nx-hook` entries; this shim keeps three.
+# Both must find a fresh install the same way: the generation layout first, because
+# an application started before the install has the old PATH, then PATH.
+
+_LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
+
+_WHO_FAKE = """#!{python}
+import sys
+sys.stdin.buffer.read()
+sys.stdout.write({marker!r})
+"""
+
+
+def _install_who(bindir: Path, marker: str) -> None:
+    bindir.mkdir(parents=True, exist_ok=True)
+    _install_fake(bindir, _WHO_FAKE.replace("{marker!r}", repr(marker)))
+
+
+@pytest.mark.parametrize(
+    ("in_layout", "on_path", "expected"),
+    [(True, True, "layout"), (True, False, "layout"), (False, True, "path"), (False, False, "")],
+)
+def test_the_shim_and_the_launcher_resolve_the_same_nx_hook(
+    tmp_path: Path, in_layout: bool, on_path: bool, expected: str,
+) -> None:
+    tools, bindir = tmp_path / "tools", tmp_path / "bin"
+    gen = tools / "gen-20260101T000000Z"
+    gen.mkdir(parents=True)
+    bindir.mkdir()
+    if IS_WINDOWS:
+        import _winapi  # noqa: PLC0415 -- Windows only
+
+        _winapi.CreateJunction(str(gen), str(tools / "current"))
+    else:
+        os.symlink(gen, tools / "current")
+    if in_layout:
+        _install_who(gen / "bin", "layout")
+    if on_path:
+        _install_who(bindir, "path")
+    env = scrubbed_env(PATH=str(bindir), NX_TOOLS_DIR=str(tools))
+    seen = {}
+    for label, argv in (("shim", [str(_SHIM), "auto-approve"]), ("launcher", [str(_LAUNCH), "nx-hook", "auto-approve"])):
+        r = subprocess.run(
+            [sys.executable, *argv], input=b"{}", capture_output=True, env=env, timeout=30, check=False,
+        )
+        assert r.returncode == 0, (label, r)
+        seen[label] = r.stdout.decode()
+        if not expected:
+            assert b"`nx-hook` is not installed" in r.stderr, (label, r.stderr)
+    assert seen == {"shim": expected, "launcher": expected}

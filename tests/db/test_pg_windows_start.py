@@ -216,6 +216,9 @@ def test_windows_start_spawns_pg_ctl_with_a_new_process_group_and_a_file_not_a_p
     # addressed to a pid that is not a group root goes to every process on that
     # console, whatever group each is in.
     assert kw["creationflags"] == CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    # The real-Windows console test (tests/test_pg_ctl_console_isolation_real_windows.py) spawns its
+    # probe with this constant, so the spawn site must be passing the very same value.
+    assert kw["creationflags"] == pp.PG_CTL_START_CREATIONFLAGS
     assert kw["stdout"] is not subprocess.PIPE and kw["stderr"] is subprocess.STDOUT
     assert kw["stdin"] is subprocess.DEVNULL
     assert hasattr(kw["stdout"], "write")  # a real file object, the one pg_ctl.out is written through

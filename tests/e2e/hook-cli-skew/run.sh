@@ -13,6 +13,13 @@
 # against each (tests/e2e/hook-cli-skew/drive.py). Any exit 2, or stdout that
 # is not JSON, fails the gate.
 #
+# Every entry starts with `uv tool run ... python launch/nx_launch.py ...`
+# (RDR-228), so drive.py puts `uv` alone on the driven PATH and points
+# NX_TOOLS_DIR at an empty directory, which makes the launcher find the CLI
+# under test on PATH rather than this machine's install. An entry that did not
+# start, or fewer than the floor of started entries, fails the gate: a driver
+# whose PATH lacks `uv` used to count every entry "command not found" and pass.
+#
 # Positive control first: the raw `nx-hook` of 7.57.0 must still exit 2 on an
 # unknown verb here, or this environment does not reproduce the failure and
 # a clean pass would mean nothing.
@@ -52,6 +59,11 @@ _cli() {  # $1 = version -> prints its bin dir, installing on a cache miss
 }
 
 mkdir -p "$CACHE"
+# uv's own caches are shared across the driven runs: drive.py gives each entry a
+# scratch HOME, and a HOME-relative cache would be cold for every CLI.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE/uv-cache}"
+UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$(uv python dir)}"
+export UV_PYTHON_INSTALL_DIR
 echo "── positive control: raw nx-hook 7.57.0 on an unknown verb ──"
 BIN57="$(_cli 7.57.0)"
 set +e
@@ -73,12 +85,31 @@ cat > "$WORK/negctl/hooks.json" <<'JSON'
   {"type": "command", "command": "nx-hook", "args": ["mcp-connect-check"], "timeout": 5}]}]}}
 JSON
 set +e
-"$E2E_PYTHON" "$HERE/drive.py" "$WORK/negctl/hooks.json" "$ROOT/conexus" "$BIN57" negctl "$WORK/negctl" > "$WORK/negctl.out" 2>&1
+"$E2E_PYTHON" "$HERE/drive.py" "$WORK/negctl/hooks.json" "$ROOT/conexus" "$BIN57" negctl "$WORK/negctl" 1 > "$WORK/negctl.out" 2>&1
 NRC=$?
 set -e
 [ "$NRC" = 1 ] && grep -q 'FAIL  \[UserPromptSubmit\] nx-hook mcp-connect-check: exit 2' "$WORK/negctl.out" \
     || _fail "negative control: drive.py did not flag a direct unknown verb under 7.57.0 (rc=$NRC): $(cat "$WORK/negctl.out")"
 echo "  a hooks.json entry naming a verb 7.57.0 lacks, wired directly, is flagged as blocking"
+
+echo "── launcher control: the plugin's launcher must reach the CLI under test ──"
+# The same unknown verb, through `uv` and launch/nx_launch.py with an EMPTY
+# generation root and a PATH of 7.57.0's bin, uv alone and the system dirs. Exit
+# 2 here means the launcher found 7.57.0 on PATH and ran it. Exit 0 would mean it
+# found some other install (this machine's, or none), and every PASSED below
+# would be a statement about that instead.
+mkdir -p "$WORK/lc/uvbin" "$WORK/lc/tools" "$WORK/lc/home"
+ln -sf "$(command -v uv)" "$WORK/lc/uvbin/uv"
+set +e
+echo '{}' | env -i HOME="$WORK/lc/home" NX_TOOLS_DIR="$WORK/lc/tools" PATH="$BIN57:$WORK/lc/uvbin:/usr/bin:/bin" \
+    uv tool run --directory "$ROOT/conexus" --no-config --quiet --python '>=3.12' python \
+    "$ROOT/conexus/launch/nx_launch.py" nx-hook no-such-verb-skew-gate >/dev/null 2>"$WORK/lc.err"
+LRC=$?
+set -e
+if [ "$LRC" != 2 ] || ! grep -q "unknown verb" "$WORK/lc.err"; then
+    _fail "launcher control: exit $LRC through the launcher, not 2 from the 7.57.0 CLI: $(cat "$WORK/lc.err")"
+fi
+echo "  the launcher reached the 7.57.0 CLI on PATH, not this machine's install"
 
 echo "── this checkout's wheel ──"
 HEADV="$WORK/cli-head"

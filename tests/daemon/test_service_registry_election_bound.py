@@ -227,8 +227,11 @@ def test_mark_shutting_down_and_relinquish_default_to_blocking(
 
     def release_later() -> None:
         time.sleep(0.2)
-        _locking.unlock_fd(held_flock)
+        # Set BEFORE the unlock: the waiter can take the flock and return the instant it is
+        # free, ahead of this thread's next statement (a loaded CI shard did, 2026-10-13).
+        # A waiter that did not block still returns inside the sleep, with the event unset.
         released.set()
+        _locking.unlock_fd(held_flock)
 
     threading.Thread(target=release_later, daemon=True).start()
     registry.mark_shutting_down(rec)
@@ -247,8 +250,11 @@ def test_publish_still_blocks_on_a_held_election(
 
     def release_later() -> None:
         time.sleep(0.2)
-        _locking.unlock_fd(held_flock)
+        # Set BEFORE the unlock: the waiter can take the flock and return the instant it is
+        # free, ahead of this thread's next statement (a loaded CI shard did, 2026-10-13).
+        # A waiter that did not block still returns inside the sleep, with the event unset.
         released.set()
+        _locking.unlock_fd(held_flock)
 
     threading.Thread(target=release_later, daemon=True).start()
     rec = registry.publish("42", endpoint=_endpoint(), version="1", owner_token="a")

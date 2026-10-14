@@ -20,6 +20,15 @@ and starts the nexus-service that serves every tier in the default config, and
 offers to register the OS autostart unit (accept it, or use `--no-autostart`
 for a session-only supervisor).
 
+**Which `nx` a Claude Code session uses.** The plugin's servers and hooks look
+for the CLI in the install directory `scripts/reinstall-tool.sh` writes
+(`~/.local/share/nexus/tools/current`) BEFORE they look on `PATH` (RDR-228).
+So a session runs the generation you last built with `reinstall-tool.sh`, even
+when a shell with an activated `.venv` started it; run the script again to get
+your edits into sessions. The `/conexus:*` commands still run the `nx` that
+`PATH` finds. A test or harness that isolates itself by setting `PATH` must
+also set `NX_TOOLS_DIR` to an empty directory, or it finds your install.
+
 The SQLite T2 daemon is retired (nexus-i711w), so there is no daemon to hack
 on, restart after a version bump, or run in the foreground. T2 is served by
 the nexus-service; for that stack use `nx daemon service start|stop|status`.

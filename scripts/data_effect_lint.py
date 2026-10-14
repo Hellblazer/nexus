@@ -41,7 +41,13 @@ invisible to anything that isn't scanning raw file text.
 WHAT COUNTS AS DATA-EFFECTING. Scoped to the bead's explicit list:
 DELETE, UPDATE, TRUNCATE, DROP TABLE, DROP COLUMN, and
 ``ALTER ... TYPE ... USING`` (a column rewrite touching every existing
-row). Detected two ways:
+row), plus DROP SCHEMA (added 2026-10-13: with ``CASCADE`` it takes every
+table in the schema with it, named nowhere in the statement; without it
+PostgreSQL refuses a schema that still holds anything, so the statement
+removes no rows, but it is classified all the same so that a deployer sees
+every schema removal and one rule covers both spellings). The schema's
+name goes in the reason's ``table`` field, so the DATA EFFECT sentence must
+name it. Detected two ways:
 
   1. Raw SQL in forward ``<sql>`` elements (see _classify_sql_text).
   2. Structured Liquibase change-type elements ``<delete>``, ``<update>``,
@@ -51,8 +57,24 @@ row). Detected two ways:
      2026-09-13, every changeset here uses raw ``<sql>`` — but the bead
      names these explicitly and a future changeset could use them).
 
-KNOWN LIMITS, DELIBERATELY NOT BUILT (code-review pass, 2026-09-13). Two SQL
-shapes are invisible to this classifier and are NOT closed here:
+DYNAMIC SQL (nexus-679v1). ``EXECUTE 'DROP SCHEMA ...'`` and ``EXECUTE
+format('DROP TABLE IF EXISTS staging.%I', t)`` inside a ``DO`` block put the
+destructive keyword inside a string literal, which ``_split_statements`` blanks to
+``''`` before the keyword regexes run (by design: a label column containing the
+text "DELETE FROM" must not classify). ``staging-6-drop-landing-schema`` dropped
+seven tables that way and was reported as having no data effect. So the text of
+each ``EXECUTE <literal>`` / ``EXECUTE format(<literal>, ...)`` argument is
+extracted (``_dynamic_sql_texts``) and classified by the SAME rules as top-level
+SQL. Only the literal parts count: a ``%I`` placeholder stays as written and the
+non-literal operands of a ``'...' || name || '...'`` concatenation become an
+opaque ``__dyn__`` word, so a table named only at run time is reported with no
+resolvable table name, or only its static schema qualifier (``staging.%I``
+reports ``staging``); the structural check then requires the prose and
+reversibility, not a table it cannot know. A bare ``GRANT EXECUTE`` /
+``REVOKE EXECUTE`` is not dynamic SQL and is not touched. A dynamic ``DROP
+SCHEMA`` classifies like a top-level one.
+
+KNOWN LIMIT, DELIBERATELY NOT BUILT (code-review pass, 2026-09-13):
 
   - **Function/trigger-body DML that a changeset calls back IMMEDIATELY**,
     in the same ``<sql>`` block, right after defining it (e.g.
@@ -64,19 +86,7 @@ shapes are invisible to this classifier and are NOT closed here:
     ``gc_quarantine_orphans``, called only via a separate HTTP endpoint,
     not by its own changeset), but would miss a changeset that defines
     then immediately calls a destructive function in the same breath.
-  - **Dynamic SQL DML** (``EXECUTE 'DELETE ...'`` / ``EXECUTE
-    format('DELETE FROM %I...', ...)``): the destructive keyword sits
-    inside a string literal, which ``_split_statements`` blanks to ``''``
-    before any DELETE/UPDATE/TRUNCATE regex runs, by design (see
-    ``_split_statements``'s own docstring) — so a dynamically-built
-    DELETE/UPDATE is invisible to the classifier by construction.
-
-Neither shape appears anywhere in the current 63-changeset corpus (grep-
-verified 2026-09-13: no co-located CREATE FUNCTION + immediate call, no
-EXECUTE/format use with a DELETE/UPDATE keyword — every hit is
-GRANT/REVOKE/ALTER/SELECT). A future changeset using either shape ships
-UNDETECTED by this module; closing them is tracked as follow-up work, not
-attempted here.
+    No changeset in the corpus has that shape (grep-verified 2026-09-13).
 
 ``<rollback>`` bodies are STRUCTURALLY EXCLUDED, mirroring
 ``test_changelog_rls_lint.py``'s own established, reviewed convention:
@@ -255,6 +265,46 @@ def _split_statements(sql: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic SQL (nexus-679v1)
+# ---------------------------------------------------------------------------
+
+_DYN = "__dyn__"
+# EXECUTE followed (through an optional ``format(``) by a string literal. A bare
+# ``GRANT EXECUTE ON ...`` has neither, so it never matches.
+_EXECUTE_RE = re.compile(r"(?<![A-Za-z0-9_])EXECUTE\s+(?:format\s*\(\s*)?(?=')", re.IGNORECASE)
+_SQ_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'")
+# What may sit between two literals of one concatenated command: ``||``, an
+# expression with no quote or comma at top level, ``||``.
+_CONCAT_GAP_RE = re.compile(r"^\s*\|\|\s*(?:[^'|,]*?\|\|\s*)?$")
+
+
+def _dynamic_sql_texts(stmt: str) -> list[str]:
+    """SQL text built by each ``EXECUTE '<literal>' [|| expr || '<literal>']`` or
+    ``EXECUTE format('<literal>', ...)`` in *stmt* (a statement with its string
+    literals intact). ``format()`` placeholders (``%I``) stay as written, since
+    that is the statement as the deployer reads it; the operands between
+    concatenated literals become the opaque word ``__dyn__``. The arguments of
+    ``format()`` and the ``USING`` list are not part of the command and are
+    ignored."""
+    texts: list[str] = []
+    for m in _EXECUTE_RE.finditer(stmt):
+        first = _SQ_LITERAL_RE.match(stmt, m.end())
+        if not first:
+            continue
+        parts = [first.group(1)]
+        pos = first.end()
+        while True:
+            nxt = _SQ_LITERAL_RE.search(stmt, pos)
+            if not nxt or not _CONCAT_GAP_RE.match(stmt[pos : nxt.start()]):
+                break
+            parts.append(nxt.group(1))
+            pos = nxt.end()
+        text = f" {_DYN} ".join(p.replace("''", "'") for p in parts)
+        texts.append(text)
+    return texts
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -263,6 +313,8 @@ _UPDATE_RE = re.compile(r"^UPDATE\s+\S+.*?\bSET\b", re.IGNORECASE | re.DOTALL)
 _TRUNCATE_RE = re.compile(r"^TRUNCATE\b", re.IGNORECASE)
 _DROP_TABLE_RE = re.compile(r"\bDROP\s+TABLE\b", re.IGNORECASE)
 _DROP_COLUMN_RE = re.compile(r"\bDROP\s+COLUMN\b", re.IGNORECASE)
+_DROP_SCHEMA_RE = re.compile(r"\bDROP\s+SCHEMA\b", re.IGNORECASE)
+_CASCADE_RE = re.compile(r"\bCASCADE\b", re.IGNORECASE)
 # ALTER COLUMN ... TYPE ... USING <expr> — a table rewrite of every existing
 # row's value in that column. Bounded to one statement (already split on
 # ';'), DOTALL because the TYPE/USING pair can span a formatted multi-line
@@ -309,13 +361,19 @@ _TRUNCATE_TABLE_RE = re.compile(
     rf"^TRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
 )
 _DROP_TABLE_TABLE_RE = re.compile(
-    rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+    rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?!IF\b)({_TABLE_TOKEN})", re.IGNORECASE
+)
+# ``(?!IF\b)``: when the name is a run-time placeholder (``DROP TABLE IF EXISTS %I``)
+# the optional ``IF EXISTS`` must not be skipped and ``IF`` read as the name.
+# The schema's own name, carried in DataEffectReason.table like a table's.
+_DROP_SCHEMA_NAME_RE = re.compile(
+    rf"\bDROP\s+SCHEMA\s+(?:IF\s+EXISTS\s+)?(?!IF\b)({_IDENT_SEGMENT})", re.IGNORECASE
 )
 # Covers both DROP COLUMN and ALTER COLUMN ... TYPE ... USING -- both are
 # clauses of an ALTER TABLE statement, so the table name comes from the
 # same place either way.
 _ALTER_TABLE_TABLE_RE = re.compile(
-    rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+    rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?!IF\b|ONLY\b)({_TABLE_TOKEN})", re.IGNORECASE
 )
 
 _TABLE_EXTRACTORS: dict[str, tuple[re.Pattern[str], str]] = {
@@ -325,6 +383,7 @@ _TABLE_EXTRACTORS: dict[str, tuple[re.Pattern[str], str]] = {
     "truncate": (_TRUNCATE_TABLE_RE, "match"),
     "drop_table": (_DROP_TABLE_TABLE_RE, "search"),
     "drop_column": (_ALTER_TABLE_TABLE_RE, "search"),
+    "drop_schema": (_DROP_SCHEMA_NAME_RE, "search"),
     "alter_type_using": (_ALTER_TABLE_TABLE_RE, "search"),
 }
 
@@ -348,7 +407,7 @@ def _extract_table(kind: str, stmt_text: str) -> str:
 
 @dataclass(frozen=True)
 class DataEffectReason:
-    kind: str  # "delete" | "update" | "truncate" | "drop_table" | "drop_column" | "alter_type_using" | "structured:<tag>"
+    kind: str  # "delete" | "update" | "truncate" | "drop_table" | "drop_column" | "drop_schema" | "alter_type_using" | "structured:<tag>"
     detail: str
     # The exact matched SQL statement, comment-stripped, string literals
     # INTACT (see _split_statements) -- empty for a structured-tag reason
@@ -386,47 +445,55 @@ def _classify_sql_text(sql_text: str) -> list[DataEffectReason]:
         seen.add(key)
         reasons.append(DataEffectReason(kind, detail, orig_stmt, table))
 
-    for orig, blanked in _split_statements(sql_text):
+    def _classify_statement(orig: str, blanked: str, dynamic: bool = False) -> None:
         stmt_for_leading = _strip_leading_with(_LEADING_DO_BEGIN_RE.sub("", blanked))
         orig_for_leading = _strip_leading_with(_LEADING_DO_BEGIN_RE.sub("", orig))
 
+        def table_of(kind: str) -> str:
+            table = _extract_table(kind, orig_for_leading)
+            # A name known only at run time (``staging.__dyn__``): keep the
+            # static qualifier if any, never the placeholder.
+            return table.split(_DYN)[0].rstrip(".") if _DYN in table else table
+
         if _DELETE_RE.match(stmt_for_leading):
-            _add(
-                "delete", "DELETE FROM statement", orig,
-                _extract_table("delete", orig_for_leading),
-            )
+            _add("delete", "DELETE FROM statement", orig, table_of("delete"))
 
         if _UPDATE_RE.match(stmt_for_leading):
-            _add(
-                "update", "UPDATE ... SET statement", orig,
-                _extract_table("update", orig_for_leading),
-            )
+            _add("update", "UPDATE ... SET statement", orig, table_of("update"))
 
         if _TRUNCATE_RE.match(stmt_for_leading):
-            _add(
-                "truncate", "TRUNCATE statement", orig,
-                _extract_table("truncate", orig_for_leading),
-            )
+            _add("truncate", "TRUNCATE statement", orig, table_of("truncate"))
 
         if _DROP_TABLE_RE.search(stmt_for_leading):
-            _add(
-                "drop_table", "DROP TABLE statement", orig,
-                _extract_table("drop_table", orig_for_leading),
-            )
+            _add("drop_table", "DROP TABLE statement", orig, table_of("drop_table"))
 
         if _DROP_COLUMN_RE.search(stmt_for_leading):
-            _add(
-                "drop_column", "DROP COLUMN clause", orig,
-                _extract_table("drop_column", orig_for_leading),
+            _add("drop_column", "DROP COLUMN clause", orig, table_of("drop_column"))
+
+        if _DROP_SCHEMA_RE.search(stmt_for_leading):
+            detail = (
+                "DROP SCHEMA ... CASCADE statement (takes every object in the schema)"
+                if _CASCADE_RE.search(stmt_for_leading)
+                else "DROP SCHEMA statement (succeeds only on an empty schema)"
             )
+            _add("drop_schema", detail, orig, table_of("drop_schema"))
 
         if _ALTER_TYPE_USING_RE.search(stmt_for_leading):
             _add(
                 "alter_type_using",
                 "ALTER COLUMN ... TYPE ... USING clause",
                 orig,
-                _extract_table("alter_type_using", orig_for_leading),
+                table_of("alter_type_using"),
             )
+
+        if not dynamic:
+            # nexus-679v1: EXECUTE <literal> / EXECUTE format(<literal>, ...).
+            for dyn_text in _dynamic_sql_texts(orig):
+                for d_orig, d_blanked in _split_statements(dyn_text):
+                    _classify_statement(d_orig, d_blanked, dynamic=True)
+
+    for orig, blanked in _split_statements(sql_text):
+        _classify_statement(orig, blanked)
 
     return reasons
 

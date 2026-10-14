@@ -39,10 +39,12 @@ is not installed yet when this runs.
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import subprocess
 import sys
 import time
+from pathlib import PureWindowsPath
 
 _WINDOWS = "win32"
 
@@ -153,6 +155,25 @@ def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_R
 # ── executable resolution ───────────────────────────────────────────────────
 
 _DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
+
+
+def _is_search_dir(directory, cwd):
+    """True when a Windows ``PATH`` entry may honestly be searched: it has a drive
+    and a root (so not ``tools``, ``.``, ``C:x`` or ``\\x``, which resolve against
+    the working directory or its drive) and is not the working directory itself.
+
+    On a real Windows host only a drive-and-root entry counts; ``os.path.isabs``
+    also accepts a rooted ``\\x`` before Python 3.13. A Windows run injected on a
+    POSIX host (the tests) also takes a POSIX absolute path, as its fixtures are
+    real temporary directories.
+    """
+    if not directory:
+        return False
+    entry = PureWindowsPath(directory)
+    absolute = entry.is_absolute() or (os.name != "nt" and os.path.isabs(directory))
+    # normpath: an entry that spells the working directory with ``.`` or ``..`` parts is still it.
+    return absolute and PureWindowsPath(ntpath.normpath(directory)) != cwd
 
 
 def _resolve_executable(name, platform=None, path=None, pathext=None):
@@ -163,10 +184,14 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
 
     Windows: PATHEXT, which ``os.execvp`` ignores. A bare ``uv`` resolves to
     ``uv.exe``; a name that already carries a PATHEXT extension is tried as
-    written first. A name with a directory part is used as given (CreateProcess
+    written only. A name with a directory part is used as given (CreateProcess
     semantics) and never searched. The current directory is deliberately NOT
-    searched first, unlike cmd.exe: a bundle launched with an arbitrary cwd
-    must not pick up a planted ``uv.exe``.
+    searched, neither first like cmd.exe nor through a ``PATH`` entry that is the
+    cwd or is relative (``tools``, ``.``, ``C:x``): a bundle launched with an
+    arbitrary cwd must not pick up a planted ``uv.exe``. A ``.cmd`` or ``.bat`` hit
+    is not returned, as in ``nexus.util.nx_argv``: a batch file runs through
+    ``cmd.exe`` with quoting CPython does not escape for it, and uv installs as
+    ``uv.exe``. A ``uv`` found only as a batch file counts as not found.
 
     ``platform``/``path``/``pathext`` are injectable so both branches run on
     any host. Not ``shutil.which``: that decides Windows-ness from the real
@@ -185,12 +210,18 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
             pathext = os.environ.get("PATHEXT") or _DEFAULT_PATHEXT
         listed = [e for e in pathext.split(";") if e]
         has_ext = os.path.splitext(name)[1].upper() in [e.upper() for e in listed]
-        exts = [""] + listed if has_ext else listed
+        # Already ends in a listed extension: tried as written only, as shutil.which
+        # does (appending to it would find ``uv.exe.cmd``).
+        exts = [""] if has_ext else listed
+    names = [name + e for e in exts]
+    if windows:
+        names = [n for n in names if os.path.splitext(n)[1].lower() not in _BATCH_SUFFIXES]
+    cwd = PureWindowsPath(ntpath.normpath(os.getcwd()))
     for directory in path.split(sep):
-        if not directory:
+        if not directory or (windows and not _is_search_dir(directory, cwd)):
             continue
-        for ext in exts:
-            candidate = os.path.join(directory, name + ext)
+        for candidate_name in names:
+            candidate = os.path.join(directory, candidate_name)
             if os.path.isfile(candidate) and (windows or os.access(candidate, os.X_OK)):
                 return candidate
     return None
@@ -364,10 +395,7 @@ def _launch_windows(argv, popen=None, make_job=None, resolve=None):
             return _resolve_executable(name, platform=_WINDOWS)
     exe = resolve(argv[0])
     if exe is None:
-        sys.stderr.write(
-            "[conexus-mcpb] cannot find %r on PATH (PATHEXT honoured). Install uv "
-            "(https://docs.astral.sh/uv/) and restart Claude Desktop.\n" % argv[0]
-        )
+        _report_missing(argv[0])
         return 127
     job = make_job()
     contained_self = job.assign_self() if job is not None else False
@@ -390,6 +418,13 @@ def _launch_windows(argv, popen=None, make_job=None, resolve=None):
         return child.wait()
 
 
+def _report_missing(name):
+    sys.stderr.write(
+        "[conexus-mcpb] cannot find %r on PATH (PATHEXT honoured). Install uv "
+        "(https://docs.astral.sh/uv/) and restart Claude Desktop.\n" % name
+    )
+
+
 def _launch(argv, platform=None, execvp=None, launch_windows=None):
     """Hand off to *argv*: exec on POSIX (stdio lands on the server process
     itself), child-with-inherited-handles on Windows. Returns the exit code on
@@ -407,7 +442,13 @@ def main(platform=None) -> None:
     uv = "uv"
     if platform == _WINDOWS:
         # PATHEXT: a bare "uv" is uv.exe. Sync and launch both resolve it.
-        uv = _resolve_executable("uv", platform=platform) or "uv"
+        uv = _resolve_executable("uv", platform=platform)
+        if uv is None:
+            # Not the bare name: CreateProcess looks in the working directory before PATH, so
+            # a "uv" spawned by name would run a uv.exe planted there. Same message and code
+            # as the launch step gives; nothing has been spawned yet.
+            _report_missing("uv")
+            sys.exit(127)
     if not os.environ.get("NX_MCPB_SKIP_RESOLVE_RETRY"):
         if platform == _WINDOWS:
             _sync_with_retry(bundle_dir, uv=uv)

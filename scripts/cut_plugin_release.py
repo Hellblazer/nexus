@@ -300,6 +300,151 @@ def deferred_paths(ledger_text: str) -> set[str]:
     return paths
 
 
+#: RDR-228 Phase 2 guard (nexus-sv2wx.13). Phase 2's plugin parts never go
+#: out in a plugin-only cut ahead of the client release that carries
+#: `--bootstrap` and the real server's setup tools. Phase 2 has SHIPPED to
+#: installs when the reference tree carries this file. Phase 1 never adds it,
+#: so its presence tells Phase 2 content from Phase 1 content in the files
+#: both phases change.
+PHASE2_MARKER = "conexus/launch/nx_setup.py"
+#: Phase 1's launcher. A reference tree without it is one Phase 1 has not
+#: reached, which widens the rule (see :func:`phase2_deferral_check`).
+PHASE1_LAUNCHER = "conexus/launch/nx_launch.py"
+#: Phase 1's whole footprint under ``conexus/launch/``. Any OTHER file there,
+#: or the setup command, arms the guard even before the marker lands, so a
+#: Phase 2 part that arrives ahead of ``nx_setup.py`` is still held to it.
+PHASE1_LAUNCH_FILES = frozenset({PHASE1_LAUNCHER, "conexus/launch/nx_standin.py"})
+#: Keyed on the DIRECTORY, not on file names: the stand-in's file and the
+#: credentials page's module were not named when this guard was written, and
+#: a list of guessed names would pass without covering them.
+PHASE2_GUARDED = (
+    "conexus/launch/",
+    "conexus/hooks/scripts/nx_setup_notice.py",
+    "conexus/hooks/scripts/_endpoint_resolve.py",
+    "conexus/commands/setup.md",
+)
+#: Added while the reference lacks the launcher: these call it (the two
+#: server entries and the hook entries) or are deferred with the file that
+#: does (the lockstep hook, which shares a deferral with the hook entries).
+PHASE2_GUARDED_WITHOUT_LAUNCHER = (
+    "conexus/hooks/hooks.json",
+    "conexus/.mcp.json",
+    "conexus/hooks/scripts/version_lockstep_hook.py",
+)
+
+
+def _exists_at(repo: Path, ref: str, path: str) -> bool:
+    return _git(repo, "cat-file", "-e", f"{ref}:{path}", check=False).returncode == 0
+
+
+def _phase2_armed_by(repo: Path, source_ref: str) -> str | None:
+    """The path in *source_ref* that shows Phase 2 is present, or None."""
+    for path in (PHASE2_MARKER, "conexus/commands/setup.md"):
+        if _exists_at(repo, source_ref, path):
+            return path
+    launch = _git(
+        repo, "ls-tree", "-r", "--name-only", source_ref, "--", "conexus/launch/"
+    ).stdout.splitlines()
+    for path in sorted(p.strip() for p in launch if p.strip()):
+        if path not in PHASE1_LAUNCH_FILES:
+            return path
+    return None
+
+
+def phase2_deferral_check(
+    repo: Path, reference: str, source_ref: str, ledger_text: str
+) -> str:
+    """Every guarded path that differs from *reference* must be DEFERRED.
+
+    *reference* is what installs already have: ``origin/main`` in a cut
+    (the tree the cut branch starts from and holds deferred paths back
+    to), the marketplace pin in the drift-ledger test. NOT the client tag:
+    after one plugin cut ships Phase 1, the client tag still lacks it, and
+    measuring from there would demand deferral entries for files that no
+    longer differ from the pin, which the stale-entry test then rejects.
+    *source_ref* is the tree the cut ships from; *ledger_text* is that
+    tree's ``conexus/PENDING_RELEASE.md``.
+
+    Returns a one-line account: that it had nothing to check (Phase 2 is
+    not in the tree, or *reference* already carries it), or how many paths
+    it confirmed deferred. Raises :class:`CutRefused` naming each path that
+    is not under "Deferred to the next client release", or either ref when
+    it does not resolve.
+
+    The case the refusal states: Phase 2 changes files Phase 1 adds. When
+    Phase 1 has not shipped, a file cannot be "Awaiting" for Phase 1 and
+    "Deferred" for Phase 2, because deferring holds the whole file back.
+    Phase 1 and Phase 2 then ship in the SAME client release and every path
+    of both sits under "Deferred". The guard widens to the launcher's
+    callers (``hooks.json``, ``.mcp.json``, the lockstep hook) in that
+    case, so a plugin-only cut cannot ship entries that call a launcher
+    the cut holds back.
+    """
+    for ref in (reference, source_ref):
+        if _git(repo, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+                check=False).returncode != 0:
+            raise CutRefused(
+                f"phase 2 guard: {ref} does not resolve, so whether Phase 2 "
+                "is present or shipped is unknown"
+            )
+    armed_by = _phase2_armed_by(repo, source_ref)
+    if armed_by is None:
+        return (
+            f"phase 2 guard: nothing to check -- no Phase 2 part is in "
+            f"{source_ref}"
+        )
+    if _exists_at(repo, reference, PHASE2_MARKER):
+        return (
+            f"phase 2 guard: nothing to check -- {reference} carries "
+            f"{PHASE2_MARKER}, so Phase 2 has shipped"
+        )
+    launcher_shipped = _exists_at(repo, reference, PHASE1_LAUNCHER)
+    guarded: list[str] = list(PHASE2_GUARDED)
+    if not launcher_shipped:
+        guarded += PHASE2_GUARDED_WITHOUT_LAUNCHER
+    # --no-renames: a rename lists only its new name by default, and the
+    # old name's deletion reaches installs through a cut like any edit.
+    differing = [
+        line.strip()
+        for line in _git(
+            repo, "diff", "--name-only", "--no-renames", reference, source_ref,
+            "--", *guarded,
+        ).stdout.splitlines()
+        if line.strip()
+    ]
+    deferred = deferred_paths(ledger_text)
+    missing = sorted(set(differing) - deferred)
+    if missing:
+        message = (
+            f"RDR-228 Phase 2 is in {source_ref} ({armed_by}) and {reference} "
+            f"does not carry {PHASE2_MARKER}, so every Phase 2 plugin path "
+            f"that differs from {reference} must sit under "
+            f"'## {DEFERRED_SECTION_HEADING}' in {LEDGER}. Not under that "
+            f"heading:\n  " + "\n  ".join(missing)
+            + "\nMove each entry under the 'Deferred to the next client "
+            "release' heading; a plugin-only cut ahead of the client release "
+            "that carries --bootstrap and the real setup tools would ship "
+            "setup parts that cannot work. Do not take a shared file off the "
+            "guarded list to make this pass. An unrelated fix to a guarded "
+            "file waits for that client release too."
+        )
+        if not launcher_shipped:
+            message += (
+                f"\nPhase 1 has not shipped ({reference} lacks "
+                f"{PHASE1_LAUNCHER}), so a file cannot be 'Awaiting' for "
+                "Phase 1 and 'Deferred' for Phase 2: deferring holds the "
+                "whole file back. Phase 1 and Phase 2 then ship in the same "
+                "client release, and every path of both -- including "
+                "hooks.json, .mcp.json and the lockstep hook -- sits under "
+                "'Deferred'."
+            )
+        raise CutRefused(message)
+    return (
+        f"phase 2 guard: {len(differing)} guarded path(s) differing from "
+        f"{reference}, all under '{DEFERRED_SECTION_HEADING}'"
+    )
+
+
 def attribute_entry(entry: str) -> str:
     """One bead per entry, by the rule that needs no interpreting.
 
@@ -609,7 +754,19 @@ def perform_cut(
             "origin/develop: there is nothing to ship"
         )
 
-    # BEFORE the branch exists: a refusal here leaves nothing behind.
+    # BEFORE the branch exists: a refusal here leaves nothing behind. The
+    # Phase 2 guard is not the injectable seam: a stubbed split check must
+    # not be able to skip it.
+    develop_ledger_text = _git(
+        repo, "show", f"origin/develop:{LEDGER}", check=False
+    )
+    # Measured from origin/main, the tree the cut branch starts from and
+    # holds deferred paths back to, not from the client tag.
+    phase2_check = phase2_deferral_check(
+        repo, "origin/main", "origin/develop",
+        develop_ledger_text.stdout if develop_ledger_text.returncode == 0 else "",
+    )
+    print(phase2_check)
     split_check(repo, base_tag, changed)
 
     branch = f"plugin-release/{version}-{n}"
@@ -728,7 +885,10 @@ def perform_cut(
     print("  (a bare `install` on an already-installed plugin at the same declared version")
     print("  is a no-op even when the ref moved -- measured against the real CLI; the")
     print("  uninstall-then-install pair is what plugin_lockstep.py itself runs.)")
-    return {"n": n, "tag": tag, "branch": branch, "moved_plugins": moved}
+    return {
+        "n": n, "tag": tag, "branch": branch, "moved_plugins": moved,
+        "phase2_check": phase2_check,
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:

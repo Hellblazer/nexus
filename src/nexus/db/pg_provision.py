@@ -1384,6 +1384,19 @@ _PG_CTL_WAIT_TICK_S: float = 1.0
 #: Lines of each log file :func:`_log_tail` puts in an error message.
 _LOG_TAIL_LINES: int = 40
 
+#: ``creationflags`` of the detached ``pg_ctl start`` on Windows
+#: (:func:`_pg_ctl_start_detached`, nexus-f9bgu.54): ``CREATE_NEW_PROCESS_GROUP``
+#: and ``CREATE_NO_WINDOW``, so PostgreSQL gets a console of its own that no
+#: console-wide CTRL_BREAK sent to the supervisor's console can reach. A named
+#: constant so the real-Windows test spawns its probe children with exactly what
+#: production spawns pg_ctl with. ``subprocess`` has the two names only on
+#: Windows; the fallbacks are the Win32 values (``winbase.h``) so this module
+#: still imports on POSIX, where the value is never used.
+PG_CTL_START_CREATIONFLAGS: int = (
+    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+)
+
 
 def _log_tail(path: Path, *, lines: int = _LOG_TAIL_LINES) -> str:
     """The last *lines* lines of *path*, credential-scrubbed, or a marker.
@@ -1468,8 +1481,6 @@ def _pg_ctl_start_detached(
     without killing pg_ctl.
     """
     refuse_root()
-    from nexus.util.win_job import CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW  # noqa: PLC0415 — deferred: Windows spawn path only
-
     pg_ctl = os.path.abspath(str(bins.pg_ctl))
     pglog = pgdata / "pg.log"
     ctl_out = pgdata / "pg_ctl.out"
@@ -1483,7 +1494,7 @@ def _pg_ctl_start_detached(
             stdout=out,
             stderr=subprocess.STDOUT,
             env=env,
-            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            creationflags=PG_CTL_START_CREATIONFLAGS,
         )
         deadline = time.monotonic() + _PG_CTL_WAIT_TIMEOUT_S
         while True:

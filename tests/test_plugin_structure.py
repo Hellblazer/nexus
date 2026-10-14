@@ -617,8 +617,10 @@ class TestHooks:
         events = data.get("hooks", data)
         session_end = events.get("SessionEnd")
         assert session_end, "SessionEnd hook is missing -- see test docstring for why it must stay"
+        # The command and its arguments: since RDR-228 the entry starts the
+        # launcher, which is given the cleanup program's name.
         commands = [
-            sub.get("command", "")
+            " ".join([sub.get("command", ""), *(a for a in sub.get("args", []) if isinstance(a, str))])
             for entry in session_end
             for sub in entry.get("hooks", [])
         ]

@@ -174,9 +174,11 @@ counters are since-boot and the engine exposes no per-client breakdown, so the r
 name the cause (an old client, a process still running old code, a non-nexus caller) and
 cannot clear after the cause is fixed until the engine restarts. It does not warn that the
 installed client is older than the paired release: an old client has no new doctor to run
-it, and a stale local process is what `Process freshness` reports. That per-client signal
-needs the engine to count would-refuse writes by `client_version` and report a
-`last_would_refuse_at` timestamp in `/v1/status` (an additive change, nexus-z0o2p.39).
+it, and a stale local process is what `Process freshness` reports. A per-client breakdown
+would have the engine count would-refuse writes by `client_version` and report the time of
+the last one in `/v1/status`. It was considered and not built: the cloud has run in `enforce`
+mode since 2026-10-12, so the would-refuse counter no longer moves there, and the row stays
+as described above.
 
 ## What the published-client gate expected
 

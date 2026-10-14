@@ -31,6 +31,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -309,6 +310,33 @@ def test_default_argv_carries_strict_mcp_config(monkeypatch) -> None:
     assert "--strict-mcp-config" in captured_argv[0], (
         f"default argv missing --strict-mcp-config: {captured_argv[0]!r}"
     )
+
+
+def test_default_argv_loads_no_settings_so_no_session_hooks_run(monkeypatch) -> None:
+    """``--strict-mcp-config`` stops MCP servers, not hooks. Without
+    ``--setting-sources ""`` the child ran the user's SessionStart hooks, and
+    the conexus plugin's ``mcp-connect-wait`` waited 15 s for an ``nx-mcp`` a
+    strict-config child never starts (measured 2026-10-13: 19 s against 2 s).
+    Pinned as the adjacent pair, because the empty string is the flag's value."""
+    captured: list[list[str]] = []
+
+    class _Reaped:
+        args = ["claude"]
+        returncode = 0
+
+        def communicate(self, *a, **k):
+            return ('{"result": "{}"}', "")
+
+    setattr_in(monkeypatch, ax, "subprocess.Popen", lambda argv, **kw: captured.append(argv) or _Reaped())
+    ax._run_claude_isolated("x", timeout=1)
+    ax._run_claude_isolated("x", timeout=1, model="claude-haiku-4-5-20251001")
+    for argv in captured:
+        i = argv.index("--setting-sources")
+        assert argv[i + 1] == "", argv
+        # the same flag the operator dispatch passes by default
+    from nexus.operators import dispatch
+
+    assert '"--setting-sources", ""' in Path(dispatch.__file__).read_text(encoding="utf-8")
 
 
 def test_default_argv_pins_the_config_model(monkeypatch) -> None:
