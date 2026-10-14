@@ -282,17 +282,21 @@ async def test_setup_status_reports_the_stage_the_log_and_the_next_step(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_finished_build_says_to_reconnect_or_start_a_new_session(tmp_path: Path) -> None:
-    """Record: the stand-in does not swap itself for the real server; when the
-    build is done its status says to reconnect the server or start a new session."""
+async def test_a_done_record_with_no_cli_found_is_not_reported_as_a_finished_build(tmp_path: Path) -> None:
+    """Record: the stand-in does not swap itself for the real server, and when the build is
+    done its status says to reconnect. The poll asks the lookup first, so a ``done`` record on
+    a machine where no CLI resolves (here: the isolated machine has none) is an install that is
+    gone, not a finished build; the reconnect step once the CLI resolves is pinned in process
+    (``test_once_the_cli_can_start_the_record_is_reported_with_the_reconnect_step_once``)."""
     launch, recorder = _plugin_with_recorder(tmp_path)
     recorder.views(status={
         "state": "done", "live": False, "stage": "verify", "mode": "local", "log": "/cfg/setup/setup.log",
         "message": "Nexus is installed and nx doctor passes.", "next": "Reconnect the nexus server or start a new session.",
     })
     _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup_status", {}),))
-    assert "Setup is done." in _text(result) and "Reconnect the nexus server or start a new session." in _text(result)
-    assert "no sooner than" not in _text(result)
+    text = _text(result)
+    assert text.startswith("Nexus is not installed") and "is gone" in text and "Log: /cfg/setup/setup.log" in text
+    assert "Setup is done." not in text and "no sooner than" not in text
 
 
 @pytest.mark.asyncio
@@ -659,31 +663,71 @@ def test_in_broken_mode_a_recorded_history_does_not_hide_the_cannot_start_statem
         assert text.index(mod.BROKEN_REPAIR) < text.index(mod.render(_VIEWS[state]))
 
 
-def test_in_broken_mode_a_failed_repair_says_it_failed_and_gives_the_log(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_in_broken_mode_a_failed_run_says_it_failed_and_gives_the_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``failed`` on record may be an old build or init failure, not a repair, so the words
+    say the last run failed and do not claim a repair was tried."""
     mod = _status_of(_standin(), monkeypatch, "failed")
     monkeypatch.setattr(mod, "_call_script", lambda args, broken=None: {**_VIEWS["failed"], "log": "/c/setup/setup.log"})
     _cli_is(mod, monkeypatch, "broken", _REASON)
     text = mod.run_status(_REASON)
-    assert "The repair failed" in text and "Log: /c/setup/setup.log" in text and "the build exited 2." in text
+    assert "The last setup run failed" in text and "Log: /c/setup/setup.log" in text and "the build exited 2." in text
+    assert "repair failed" not in text
 
 
+#: The ``next`` a real ``done`` record carries (``nx_setup.py``): the reconnect step itself.
+_DONE_NEXT = "Reconnect the nexus server or start a new session."
+
+
+@pytest.mark.parametrize("launcher_reason", [_REASON, None], ids=["found broken at start", "not found at start"])
 @pytest.mark.parametrize("state", ["none", "running", "done", "failed", "interrupted", "doctor-failed"])
-def test_in_broken_mode_once_the_cli_can_start_the_record_is_reported_with_the_reconnect_step(
-    monkeypatch: pytest.MonkeyPatch, state: str,
+def test_once_the_cli_can_start_the_record_is_reported_with_the_reconnect_step_once(
+    monkeypatch: pytest.MonkeyPatch, state: str, launcher_reason: str | None,
 ) -> None:
-    mod = _status_of(_standin(), monkeypatch, state)
+    """Whichever way the launcher found the CLI at start, once it can start the answer is the
+    record and ONE reconnect step: a ``done`` keeps its own next step (which is that step),
+    any other record's next step was written before the CLI could start and is dropped."""
+    mod = _standin()
+    view = {**_VIEWS[state], "next": _DONE_NEXT if state == "done" else "Ask the user, then call setup."}
+    monkeypatch.setattr(mod, "_call_script", lambda args, broken=None: dict(view))
     _cli_is(mod, monkeypatch, "startable")
-    text = mod.run_status(_REASON)
-    assert text.startswith(mod.render(_VIEWS[state]))
-    assert mod.BROKEN_PHRASE not in text and mod.BROKEN_REPAIR not in text
-    if state != "running":
-        assert "Reconnect" in text or "reconnect" in text
+    text = mod.run_status(launcher_reason)
+    assert mod.BROKEN_PHRASE not in text and mod.BROKEN_REPAIR not in text and mod.NOT_INSTALLED not in text
+    if state == "running":
+        assert text == mod.render(view)
+        return
+    assert "Ask the user, then call setup." not in text, "a next step from before the CLI could start is not offered"
+    assert sum(text.count(s) for s in (_DONE_NEXT, mod.RECONNECT)) == 1, text
 
 
-def test_in_broken_mode_a_cli_that_has_gone_is_not_installed_not_broken(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("launcher_reason", [_REASON, None], ids=["found broken at start", "not found at start"])
+def test_a_done_record_with_no_cli_now_is_an_install_that_is_gone(
+    monkeypatch: pytest.MonkeyPatch, launcher_reason: str | None,
+) -> None:
+    """A ``done`` from an earlier setup outlives the install (its tools directory removed or
+    moved): with no CLI found now, the answer is "not installed" and the question again, never
+    "Setup is done ... reconnect", which would serve the stand-in again forever."""
     mod = _status_of(_standin(), monkeypatch, "done")
     _cli_is(mod, monkeypatch, "missing")
-    assert mod.run_status(_REASON) == mod.run_status(None)
+    text = mod.run_status(launcher_reason)
+    assert text.startswith(mod.NOT_INSTALLED) and "is gone" in text and mod.question() in text
+    assert "Setup is done" not in text and "econnect" not in text
+    assert mod.BROKEN_PHRASE not in text
+
+
+@pytest.mark.parametrize("state", ["none", "failed", "interrupted", "doctor-failed", "unsupported"])
+def test_with_no_cli_now_any_other_record_is_reported_under_not_installed(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    mod = _status_of(_standin(), monkeypatch, state)
+    _cli_is(mod, monkeypatch, "missing")
+    assert mod.run_status(_REASON) == mod.run_status(None) == f"{mod.NOT_INSTALLED}\n{mod.render(_VIEWS[state])}"
+
+
+def test_a_lookup_that_cannot_be_loaded_changes_nothing_from_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``cli_state`` answers ``("broken", None)`` when the lookup cannot be loaded: the launcher's
+    own finding stands, broken with its reason or not installed."""
+    mod = _status_of(_standin(), monkeypatch, "done")
+    _cli_is(mod, monkeypatch, "broken", None)
+    assert mod.run_status(_REASON).startswith(mod.broken_text(_REASON))
+    assert mod.run_status(None).startswith(mod.NOT_INSTALLED)
 
 
 def test_the_poll_asks_the_lookup_again_of_the_program_the_launcher_judged(
@@ -708,6 +752,7 @@ def test_the_poll_asks_the_lookup_again_of_the_program_the_launcher_judged(
 
 def test_without_the_broken_reason_nothing_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _status_of(_standin(), monkeypatch, "none")
+    _cli_is(mod, monkeypatch, "missing")
     assert mod.run_status(None) == f"{mod.NOT_INSTALLED}\n{mod.render(_VIEWS['none'])}"
 
 
@@ -721,6 +766,7 @@ def test_a_missing_setup_process_in_broken_mode_says_cannot_start_not_not_instal
     assert plain.startswith(mod.NOT_INSTALLED), "the plain text is unchanged"
     # Through the tools: a missing nx_setup.py in broken mode.
     monkeypatch.setattr(mod, "setup_script", lambda: None)
+    _cli_is(mod, monkeypatch, "broken", _REASON)
     with pytest.raises(mod.SetupError) as status_error:
         mod.run_status(_REASON)
     assert mod.BROKEN_PHRASE in str(status_error.value) and "not installed" not in str(status_error.value).lower()

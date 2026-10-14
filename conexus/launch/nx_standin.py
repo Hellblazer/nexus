@@ -524,36 +524,61 @@ def _still_broken(view: dict[str, Any], text: str, reason: str) -> str:
     words = LAST_RUN_WORDS.get(state)
     if words is None:
         return f"{head}\nThe record of the last setup run follows.\n{text}"
-    lead = "The repair failed. " if state == "failed" else ""
-    return f"{head}\n{lead}The last setup run {words}, and the CLI still cannot start.\n{text}"
+    return f"{head}\nThe last setup run {words}, and the CLI still cannot start.\n{text}"
+
+
+def _missing(view: dict[str, Any], text: str) -> str:
+    """The poll's answer while no CLI resolves and no run is live: "not installed", then
+    the record. A ``done`` on record describes an install that is gone now (removed, or
+    its tools directory moved), so it is not reported as a finished setup: the one
+    question is put again instead."""
+    if view.get("state") == "done":
+        mode = f" (mode {view['mode']})" if view.get("mode") else ""
+        log = f" Log: {view['log']}" if view.get("log") else ""
+        return (
+            f"{NOT_INSTALLED}\nA setup run is on record as done{mode}, but the Nexus CLI is not found now, so what "
+            f"it installed is gone.{log}\n{question()}"
+        )
+    return f"{NOT_INSTALLED}\n{text}"
+
+
+def _startable(view: dict[str, Any]) -> str:
+    """The poll's answer once the CLI can start and no run is live: the record and the
+    reconnect step, once. A ``done`` record's own next step is that step
+    (``nx_setup.py`` writes it), so it is kept as it is; any other record's next step was
+    written before the CLI could start and is dropped for the reconnect step."""
+    if view.get("state") == "done":
+        return render(view)
+    return f"{render({k: v for k, v in view.items() if k != 'next'})}\n{RECONNECT}"
 
 
 def run_status(broken: str | None = None) -> str:
-    """The ``setup_status`` tool. Without *broken* (the CLI was not found) the record's
-    report, opened by "not installed" when no setup has run.
+    """The ``setup_status`` tool. The stand-in is served until the user reconnects, and
+    the record outlives the install it describes, so the lookup is asked again at each
+    poll (:func:`cli_state`) and the answer follows what it says now, whichever way the
+    launcher found the CLI at start (*broken*: why a found CLI could not start; ``None``:
+    it was not found).
 
-    With *broken* (why a found CLI cannot start) the stand-in is served until the user
-    reconnects, and the record outlives the install it describes, so the lookup is asked
-    again at each poll and the answer follows what it says now. A LIVE run is reported as
-    it is: a poll during the repair must not offer it again. While the CLI still cannot
-    start, any other state keeps the statement and the repair offer, with the record's
-    report after it. Once the CLI can start, the record and the reconnect step. If it is
-    gone, the answer is the one for a CLI that is not installed."""
-    if broken is None:
-        view = _call_script(["status"])
-        text = _checked(view)
-        return f"{NOT_INSTALLED}\n{text}" if view.get("state") == "none" else text
+    A LIVE run is reported as it is: a poll during the setup or the repair must not offer
+    it again. Otherwise: no CLI resolves, "not installed" and the record (a ``done`` is an
+    install that is gone, :func:`_missing`); it resolves and cannot start, the statement
+    and the repair offer with the record after it (:func:`_still_broken`); it can start,
+    the record and the reconnect step (:func:`_startable`)."""
     kind, fresh = cli_state()
-    if kind == "missing":
-        return run_status(None)
-    reason = fresh or broken
+    if kind == "broken" and fresh is None:
+        # The lookup could not be loaded: nothing is known to have changed since the start.
+        kind = "missing" if broken is None else "broken"
+    # The fallback when the setup process cannot answer: "not installed" only when no CLI resolves.
+    reason = None if kind == "missing" else (fresh or broken)
     view = _call_script(["status"], reason)
     text = _checked(view)
     if view.get("state") == "running":
         return text
+    if kind == "missing":
+        return _missing(view, text)
     if kind == "startable":
-        return text if "econnect" in text else f"{text}\n{RECONNECT}"
-    return _still_broken(view, text, reason)
+        return _startable(view)
+    return _still_broken(view, text, reason or "an unknown reason")
 
 
 class StandIn:

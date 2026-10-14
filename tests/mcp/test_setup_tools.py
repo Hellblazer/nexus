@@ -1144,8 +1144,17 @@ def test_both_servers_answer_setup_status_alike_for_every_state(
     lead (stage, message, doctor rows, choice, next, log, wait) must be identical.
     The real server alone says "Nothing is missing" for a usable service, and its
     answer for a script it cannot start is the terminal commands for a machine with
-    a CLI; the stand-in's is the install commands for a machine without one."""
+    a CLI; the stand-in's is the install commands for a machine without one.
+
+    The stand-in asks the plugin's lookup at each poll (nexus-sv2wx.17), so it is pinned
+    here and the machine's own CLI cannot decide the answer. It is "no CLI resolves",
+    the state the stand-in is served in, except for ``done``: a ``done`` with no CLI found
+    is an install that is gone (``nx_standin._missing``), so ``done`` is compared where it
+    is a finished setup, the poll after the build while the stand-in still serves and the
+    CLI now resolves."""
     _service(monkeypatch, False)
+    kind = "startable" if state == "done" else "missing"
+    monkeypatch.setattr(standin_module, "cli_state", lambda: (kind, None))
     view = VIEWS[state]
     for rec in (recorder, standin_with):
         rec.views(status=view)

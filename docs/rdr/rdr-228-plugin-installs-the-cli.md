@@ -355,17 +355,19 @@ install done by hand at any time is used at the next launch.
 The stand-in is served only while there is no CLI or the CLI cannot start. It
 does not try to swap itself for the real server inside one connection; when the
 build is done its status says to reconnect the server or start a new session.
-In the cannot-start mode `setup_status` asks the lookup again at each poll,
-of the same program the launcher judged, because the setup record is never
-cleared and outlives the install it describes: a `done` from a setup months
-ago says nothing about a Python `uv` pruned since. A live run is reported as it
-is, so a poll during the repair does not offer it again. While the CLI still
-cannot start, any other state keeps the statement and the repair offer, with
-the record's report after them, in words that cannot be read as a finished
-repair: a `done` on record "did not repair this", and a `failed` run says the
-repair failed and gives the log. Once the CLI can start, the answer is the
-record and the reconnect step; if it is no longer found, the answer is the one
-for a CLI that is not installed. (One limit: when the launcher fell into the
+`setup_status` asks the lookup again at each poll, in both modes, of the same
+program the launcher judged, because the setup record is never cleared and
+outlives the install it describes: a `done` from a setup months ago says
+nothing about a Python `uv` pruned since, or a tools directory removed since. A
+live run is reported as it is, so a poll during the setup or the repair does not
+offer it again. While the CLI cannot start, any other state keeps the statement
+and the repair offer, with the record's report after them, in words that cannot
+be read as a finished repair: a `done` on record "did not repair this", and a
+`failed` run says the last run failed and gives the log. While no CLI is found,
+the answer opens "not installed", and a `done` on record is an install that is
+gone, so the one question is put again. Once the CLI can start, the answer is
+the record and the reconnect step once (a `done` record's own next step is that
+step; any other record's next step predates the CLI and is dropped). (One limit: when the launcher fell into the
 cannot-start mode because the system refused to run a program the files say is
 fine, nothing in the files can show the problem gone, so the poll then reads the
 CLI as startable.) The hook's state 2 gives the same statement and offer.
@@ -1430,4 +1432,6 @@ is flagged for trimming before then.
   live, so a wedged supervisor does not make it skip the start step. The
   hook's 30 ms read budget starts after the plugin parts are imported. The
   words for a run that did not end well fit the run (interrupted, failed, nx
-  doctor problems, cannot run on this host).
+  doctor problems, cannot run on this host). Its verification found the same
+  stale `done` when no CLI is found at all (an install removed since), so the
+  poll asks the lookup in that mode too and puts the question again.
