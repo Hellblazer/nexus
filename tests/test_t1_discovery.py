@@ -335,6 +335,31 @@ class TestFindMcpSiblingPids:
             # server claims its marker by.
             assert find_mcp_sibling_pids(1200) == [1300, 1310]
 
+    def test_finds_the_server_under_the_generation_s_python_redirector(self):
+        """The chain a native Windows machine really has, listed from live
+        processes under Claude Desktop on 2026-10-13 (nexus-217c3): under
+        ``nx-mcp.exe`` the generation's ``Scripts\\python.exe`` is a venv
+        redirector and the interpreter that runs the server is ITS child. That
+        last pid is the one the server claims its marker by; looking one level
+        under ``nx-mcp.exe`` stopped at the redirector."""
+        from nexus.session import find_mcp_sibling_pids
+
+        launch = r"C:/a/rpm/plugin_01/launch/nx_launch.py nx-mcp"
+        gen = r"C:\Users\Sam\.local\share\nexus\tools\gen-20261011T224558Z"
+        table = [
+            (1200, 1, "claude.exe"),
+            (1250, 1200, r"C:\b\uv.exe tool run --directory C:/a/rpm/plugin_01 python " + launch),
+            (1260, 1250, r"C:\c\archive-v0\x\Scripts\python.exe " + launch),
+            (1270, 1260, r"C:\c\archive-v0\x\Scripts\python.exe " + launch),
+            (1300, 1270, gen + r"\bin\nx-mcp.EXE"),
+            (1310, 1300, gen + r"\Scripts\python.exe " + gen + r"\bin\nx-mcp.EXE"),
+            (1320, 1310, r"C:\u\cpython-3.12-windows-x86_64-none\python.exe " + gen + r"\bin\nx-mcp.EXE"),
+            # A process the server itself starts is not a server.
+            (1330, 1320, r"C:\Windows\System32\git.exe status"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == [1300, 1310, 1320]
+
     def test_does_not_look_under_anything_but_the_launch_wrappers(self):
         """A server under a shell, a test runner or an editor is not this
         session's plugin server: only `uv` and a python running nx_launch.py

@@ -593,6 +593,11 @@ _NAMES_OF_INTEREST = ("nx-mcp", "nx_launch.py", "uv")
 #: ``python.exe`` stub, the interpreter running the launcher.
 _MAX_WRAPPER_DEPTH = 4
 
+#: How many server-shaped processes may sit under a server's own launcher. On
+#: Windows there are two: the generation's venv ``python.exe`` redirector and
+#: the interpreter it starts.
+_MAX_SERVER_DEPTH = 3
+
 #: Executables that count as "an interpreter running a console script" for
 #: :func:`find_mcp_sibling_pids`. Both entry points above are Python console
 #: scripts, so on a real box ``ps`` reports the interpreter as the executable
@@ -754,13 +759,22 @@ def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
                 kind = _mcp_process_kind(pid, command_line)
                 if kind == "server":
                     matches.append(pid)
-                    # Windows: ``nx-mcp.exe`` is a launcher stub and the server
-                    # is the python under it, which is the pid that claims the
-                    # marker. Both are returned; a marker nobody claims is inert.
-                    for child, child_line in children(pid):
-                        if child not in seen and _mcp_process_kind(child, child_line) == "server":
-                            seen.add(child)
-                            matches.append(child)
+                    # Windows: ``nx-mcp.exe`` is a launcher stub, the
+                    # generation's ``Scripts\python.exe`` under it is a venv
+                    # redirector, and the interpreter under THAT is the server,
+                    # the pid that claims the marker (listed from live processes,
+                    # nexus-217c3). Every level is returned; a marker nobody
+                    # claims is inert.
+                    below = [pid]
+                    for _level in range(_MAX_SERVER_DEPTH):
+                        below = [
+                            child for parent_pid in below for child, child_line in children(parent_pid)
+                            if child not in seen and _mcp_process_kind(child, child_line) == "server"
+                        ]
+                        if not below:
+                            break
+                        seen.update(below)
+                        matches.extend(below)
                 elif kind == "wrapper":
                     wrappers.append(pid)
         frontier = wrappers
