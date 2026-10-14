@@ -536,6 +536,32 @@ class TestSessionHookInjection:
         )
 
 
+    def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
+        """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
+        when set. SessionStart looked under ~/.config/nexus regardless, so with
+        the override it showed no map (nexus-3fme8). The cache here is only
+        under the override, and home is empty."""
+        from nexus.hooks import session_context
+
+        repo_dir = tmp_path / "cfgrepo"
+        config_dir = tmp_path / "elsewhere"
+        TestSubagentHookInjection._seed_cache(
+            config_dir / "context", repo_dir, "## Knowledge Map\n\ncode: Session Override Topic (8)\n"
+        )
+        empty_home = tmp_path / "home"
+        empty_home.mkdir()
+        monkeypatch.setenv("HOME", str(empty_home))
+        monkeypatch.setenv("USERPROFILE", str(empty_home))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
+        monkeypatch.chdir(repo_dir)
+        monkeypatch.setattr(session_context, "which", lambda cmd: False)
+
+        result = session_context.run(None)
+
+        assert "Session Override Topic (8)" in (result.stdout or "")
+
+
 class TestRefreshContextL1:
     """Convenience wrapper that opens T2 and delegates."""
 

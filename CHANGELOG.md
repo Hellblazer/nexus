@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Subagents and new sessions get the Knowledge Map on Windows, and wherever `NEXUS_CONFIG_DIR` is set** (nexus-3fme8). The SubagentStart and SessionStart hooks read the map that `nx context refresh` writes as UTF-8 with the locale encoding, cp1252 on Windows, so a label with a non-ASCII character dropped the whole map without a word. Both also looked under `~/.config/nexus` while the map is written under `NEXUS_CONFIG_DIR` when that is set. The plugin's version-lockstep and endpoint scripts, `nx`'s plugin lockstep and the RDR hook's `.nexus.yml` read now read their files as UTF-8 too.
+
 ## [7.79.0] - 2026-10-14
 
 Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). The plugin starts its servers and hooks through a launcher and says plainly when the CLI is not installed (RDR-228 Phase 1). On Windows, `nx` programs no longer crash on a WMI query at import, and `nx daemon service install-binary` extracts the PostgreSQL bundle it installs. `nx daemon service start` starts an installed autostart unit through the OS manager.

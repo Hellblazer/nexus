@@ -744,7 +744,7 @@ WINDOWS_TEST_SET = (
     # nexus-3fme8: the whole hook suite (which holds the hook files named here before), the
     # plugin structure checks and the hooks' Knowledge Map readers; 21 of these failed on
     # native Windows while only five hook files ran here.
-    "tests/hooks/", "tests/test_plugin_structure.py",
+    "tests/hooks/",
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
@@ -763,10 +763,13 @@ def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -
         assert module in paths, module
     assert "tests/daemon/**" in paths
     for test in WINDOWS_TEST_SET[1:]:
-        # A directory triggers on everything under it, a test class on its file.
-        path = test.split("::")[0]
-        path = path + "**" if path.endswith("/") else path
-        assert path in paths, test
+        # A test file triggers the workflow. tests/hooks/ and the two tests/test_context.py
+        # classes do not (nexus-3fme8): with no per-job filter a test-only edit would rebuild
+        # the bundle and the engine, so they run with the next change to the code they test.
+        if test == "tests/hooks/" or "::" in test:
+            continue
+        assert test in paths, test
+    assert "src/nexus/hooks/**" in paths, "the hook suite rides on its source path"
     # A dependency bump changes what runs on Windows (nexus-6046d / zw44w).
     assert "pyproject.toml" in paths and "uv.lock" in paths
 
@@ -813,6 +816,8 @@ REAL_KERNEL_PATTERNS = (
     "tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows",
     "tests.test_off_cwd_resolver_real_windows.TestRealWindows",
     "tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows",
+    # nexus-3fme8: the hooks' Knowledge Map read under a locale that is not UTF-8.
+    "test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale",
 )
 
 
