@@ -527,6 +527,25 @@ def test_the_ledger_has_no_stale_entries() -> None:
     )
 
 
+def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them() -> None:
+    """RDR-228 Phase 2's plugin parts never ride a plugin-only cut (nexus-sv2wx.13).
+
+    The same check the cut runs (`cut_plugin_release.phase2_deferral_check`),
+    run here against the tree being landed, so a Phase 2 bead that files its
+    entry under "Awaiting" fails on develop the day it lands, not at cut
+    time. It has nothing to check while `conexus/launch/nx_setup.py` is not
+    in the tree or the pinned tag already carries it; the fixture tests in
+    test_cut_plugin_release.py (TestPhase2DeferralGuard) prove the refusal.
+    """
+    _require_or_skip()
+    from cut_plugin_release import phase2_deferral_check
+
+    ref = _pinned_refs()["conexus"]
+    if plugin_in_release_window("conexus", ref):
+        return  # the pin IS this branch's content; deferral is judged by the cut
+    phase2_deferral_check(REPO_ROOT, ref, "HEAD", _ledger_text())
+
+
 # --- the skip/require mechanism is itself tested ----------------------------
 
 
