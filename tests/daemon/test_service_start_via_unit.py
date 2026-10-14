@@ -20,6 +20,7 @@ config dir.
 from __future__ import annotations
 
 import os
+import sys
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -531,6 +532,11 @@ class TestUnitConfigDirMustMatch:
         assert manager.calls == [["schtasks", "/Run", "/TN", "NexusStorageService"]]
         popen.assert_not_called()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="a Windows host's Path.resolve() returns an existing dir's real case, "
+        "so the other spelling resolves to the same path before the comparison",
+    )
     def test_posix_compares_the_config_dir_case_sensitively(
         self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, today
     ) -> None:
