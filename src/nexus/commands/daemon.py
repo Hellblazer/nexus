@@ -210,12 +210,28 @@ def _resolve_nx_bin() -> list[str]:
     there searches the current directory first, so an ``nx.exe`` left in the
     working directory would be spawned as the supervisor. The argv is the same
     program the ``nx`` console script runs.
+
+    On POSIX with ``nx`` off ``PATH`` (a fresh macOS login has no
+    ``~/.local/bin`` on it), the ``nx`` shim ``nx self install`` writes into
+    :func:`nexus.install_layout.bin_dir` comes before the interpreter form
+    (nexus-wkkeq). The interpreter is the current generation's venv when the
+    caller ran through that shim, and a unit that bakes it breaks once a later
+    self install flips ``current`` and the gc reaps that generation; the shim
+    follows ``current`` instead, as the launchd and systemd units expect.
     """
     if _autostart_platform() == "win32":
         return nx_argv()
     found = shutil.which("nx")
     if found:
         return [found]
+    from nexus import install_layout  # noqa: PLC0415 — deferred import — only the off-PATH fallback needs it
+
+    try:
+        shim = install_layout.bin_dir() / "nx"
+        if shim.is_file() and os.access(shim, os.X_OK):
+            return [str(shim)]
+    except (OSError, install_layout.LayoutError):
+        pass
     return [sys.executable, "-m", "nexus.cli"]
 
 
