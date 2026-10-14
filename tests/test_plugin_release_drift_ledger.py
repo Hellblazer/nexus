@@ -435,8 +435,29 @@ def _declared_paths_for(plugin: str) -> set[str]:
     }
 
 
-def _head_is(ref: str) -> bool:
-    """True when HEAD is the commit *ref* names (a tag checkout)."""
+def _pending_declarations(
+    declared: set[str], deferred: set[str], *, at_pinned_plugin_tag: bool
+) -> set[str]:
+    """The declarations the stale-entry check holds to "must still differ".
+
+    At the pinned plugin tag's own checkout (the tag workflow's run) the
+    cut held deferred paths back to the previous tree's content, so they
+    cannot differ from the tag that held them back; they are pending, not
+    shipped (nexus-sv2wx.13). Everywhere else every declaration counts.
+    """
+    return declared - deferred if at_pinned_plugin_tag else set(declared)
+
+
+def _head_is_plugin_tag(ref: str) -> bool:
+    """True when *ref* is an anchored plugin tag and HEAD is its commit.
+
+    A client tag does not qualify: a client release ships deferred entries,
+    so at its checkout they are stale like any other.
+    """
+    from plugin_channel import parse_plugin_tag
+
+    if parse_plugin_tag(ref) is None:
+        return False
     head = _git("rev-parse", "--verify", "HEAD^{commit}")
     tag = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
     return (
@@ -525,14 +546,10 @@ def test_the_ledger_has_no_stale_entries() -> None:
                 f"test_every_drifted_file_is_declared_in_the_ledger)."
             )
             continue
-        plugin_declared = _declared_paths_for(plugin)
-        if _head_is(ref):
-            # The checkout IS the pinned tag (the tag workflow's own run). The
-            # cut held deferred paths back to the previous tag's content, so
-            # they cannot differ from the tag that held them back; they are
-            # still pending, not shipped (nexus-sv2wx.13).
-            plugin_declared -= deferred
-        declared |= plugin_declared
+        declared |= _pending_declarations(
+            _declared_paths_for(plugin), deferred,
+            at_pinned_plugin_tag=_head_is_plugin_tag(ref),
+        )
         drifted |= set(_drifted_paths(plugin, ref))
 
     stale = sorted(declared - drifted)
@@ -543,6 +560,27 @@ def test_the_ledger_has_no_stale_entries() -> None:
         + "\n\nRemove them. A ledger of already-shipped changes is "
         "indistinguishable from a ledger of pending ones."
     )
+
+
+def test_deferred_entries_are_pending_only_at_the_pinned_plugin_tag() -> None:
+    """The tag workflow's checkout IS the pin, so a held-back deferred entry
+    cannot differ from it; anywhere else a deferred entry with no drift is
+    stale like any other (nexus-sv2wx.13, found by the cut rehearsal)."""
+    declared = {"conexus/a.py", "conexus/b.py"}
+    deferred = {"conexus/b.py"}
+    assert _pending_declarations(
+        declared, deferred, at_pinned_plugin_tag=True
+    ) == {"conexus/a.py"}
+    assert _pending_declarations(
+        declared, deferred, at_pinned_plugin_tag=False
+    ) == declared
+
+
+def test_a_client_tag_checkout_is_not_a_plugin_tag_checkout() -> None:
+    """A client release ships deferred entries, so its checkout keeps them
+    under the stale check. Judged before HEAD is even read."""
+    assert _head_is_plugin_tag("v7.78.0") is False
+    assert _head_is_plugin_tag("plugin-v9.9.9-1") is False  # no such tag
 
 
 def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them() -> None:

@@ -1161,15 +1161,25 @@ def _phase_repo(
     awaiting: list[str],
     deferred: list[str],
     remove: tuple[str, ...] = (),
+    main_after_tag: dict[str, str] | None = None,
 ) -> tuple[pathlib.Path, str]:
+    """*main_after_tag*: files an earlier plugin cut shipped to main after
+    the client tag, so origin/main (what installs have) is ahead of it."""
     repo = _mini_nexus(tmp_path, payload="sn", main_extra=base)
+    if main_after_tag:
+        for rel, content in main_after_tag.items():
+            _write(repo, rel, content)
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "plugin cut #1 shipped these")
+        _run(repo, "push", "-q", "origin", "main")
     ledger = _ledger(awaiting, deferred)
     _land_on_develop(repo, develop, ledger, remove=remove)
     return repo, ledger
 
 
 def _check(repo: pathlib.Path, ledger: str) -> str:
-    return phase2_deferral_check(repo, BASE_TAG, "origin/develop", ledger)
+    """The cut's own reference: origin/main, never the client tag."""
+    return phase2_deferral_check(repo, "origin/main", "origin/develop", ledger)
 
 
 class TestPhase2DeferralGuard:
@@ -1217,7 +1227,7 @@ class TestPhase2DeferralGuard:
             tmp_path, base=_PRE_PHASE1, develop={**_P1_FILES, **_P2_FILES},
             awaiting=[], deferred=_ALL_PATHS,
         )
-        assert "nothing to check" not in _check(repo, ledger)
+        assert f"{len(_ALL_PATHS)} guarded path(s)" in _check(repo, ledger)
 
     def test_an_unchanged_listed_path_needs_no_deferral(
         self, tmp_path: pathlib.Path
@@ -1230,7 +1240,7 @@ class TestPhase2DeferralGuard:
             develop={**_P1_FILES, **_P2_FILES, SETUP_MD: "tag copy\n"},
             awaiting=[], deferred=[p for p in _ALL_PATHS if p != SETUP_MD],
         )
-        assert "nothing to check" not in _check(repo, ledger)
+        assert f"{len(_ALL_PATHS) - 1} guarded path(s)" in _check(repo, ledger)
 
     def test_a_deleted_launch_file_is_a_difference(
         self, tmp_path: pathlib.Path
@@ -1310,7 +1320,7 @@ class TestPhase2DeferralGuard:
             develop={**_P2_FILES, HOOKS_JSON: "hooks v3\n", MCP_JSON: "mcp v3\n"},
             awaiting=[HOOKS_JSON, MCP_JSON], deferred=sorted(_P2_FILES),
         )
-        assert "nothing to check" not in _check(repo, ledger)
+        assert f"{len(_P2_FILES)} guarded path(s)" in _check(repo, ledger)
 
     def test_perform_cut_refuses_before_any_mutation(
         self, tmp_path: pathlib.Path
@@ -1341,3 +1351,93 @@ class TestPhase2DeferralGuard:
         assert not (repo / CREDS_PY).exists()
         assert (repo / SETUP_MD).read_text() == "tag copy\n"
         assert (repo / ENDPOINT_PY).read_text() == "endpoint v1\n"
+
+    def test_a_phase1_plugin_cut_already_on_main_needs_no_deferral(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """A plugin cut shipped Phase 1 to main; the client tag still lacks
+        it. Measured from the client tag, the guard demanded Deferred
+        entries for Phase 1 files that no longer differ from the pin, which
+        the stale-entry test rejects: no later cut could pass. Measured from
+        origin/main, only the Phase 2 paths count."""
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PRE_PHASE1, main_after_tag=_P1_FILES,
+            develop={**_P1_FILES, **_P2_FILES},
+            awaiting=[], deferred=sorted(_P2_FILES),
+        )
+        assert f"{len(_P2_FILES)} guarded path(s)" in _check(repo, ledger)
+        result = _cut(repo)
+        assert f"{len(_P2_FILES)} guarded path(s)" in result["phase2_check"]
+        assert (repo / LAUNCH_PY).read_text() == _P1_FILES[LAUNCH_PY]
+        assert not (repo / SETUP_PY).exists()
+
+    def test_a_renamed_launch_file_counts_its_old_name(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Rename detection lists only the new name; the old name's
+        deletion ships through a cut too."""
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PHASE1_SHIPPED,
+            develop={**_P2_FILES, "conexus/launch/nx_standin2.py": "standin v1\n"},
+            remove=(STANDIN_PY,),
+            awaiting=[STANDIN_PY],
+            deferred=[*sorted(_P2_FILES), "conexus/launch/nx_standin2.py"],
+        )
+        with pytest.raises(CutRefused) as exc:
+            _check(repo, ledger)
+        assert STANDIN_PY in str(exc.value)
+
+    def test_setup_command_without_the_marker_still_arms(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """A Phase 2 part landing ahead of nx_setup.py is still guarded."""
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PHASE1_SHIPPED, develop={SETUP_MD: "early\n"},
+            awaiting=[SETUP_MD], deferred=[],
+        )
+        with pytest.raises(CutRefused) as exc:
+            _check(repo, ledger)
+        assert SETUP_MD in str(exc.value)
+
+    def test_an_unknown_launch_module_without_the_marker_still_arms(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PHASE1_SHIPPED, develop={CREDS_PY: "early\n"},
+            awaiting=[CREDS_PY], deferred=[],
+        )
+        with pytest.raises(CutRefused) as exc:
+            _check(repo, ledger)
+        assert CREDS_PY in str(exc.value)
+
+    def test_phase1_files_alone_do_not_arm(self, tmp_path: pathlib.Path) -> None:
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PHASE1_SHIPPED,
+            develop={LAUNCH_PY: "launcher v3\n", STANDIN_PY: "standin v3\n"},
+            awaiting=[LAUNCH_PY, STANDIN_PY], deferred=[],
+        )
+        assert "nothing to check" in _check(repo, ledger)
+
+    def test_an_unresolvable_reference_refuses_rather_than_passing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PRE_PHASE1, develop={**_P1_FILES, **_P2_FILES},
+            awaiting=[], deferred=_ALL_PATHS,
+        )
+        for reference, source in (("v0.0.0", "origin/develop"),
+                                  ("origin/main", "origin/nope")):
+            with pytest.raises(CutRefused) as exc:
+                phase2_deferral_check(repo, reference, source, ledger)
+            assert "does not resolve" in str(exc.value)
+
+    def test_the_phase1_paragraph_is_absent_once_the_launcher_shipped(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PHASE1_SHIPPED, develop=_P2_FILES,
+            awaiting=[SETUP_PY], deferred=[],
+        )
+        with pytest.raises(CutRefused) as exc:
+            _check(repo, ledger)
+        assert "Phase 1 has not shipped" not in str(exc.value)
