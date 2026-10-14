@@ -94,6 +94,7 @@ import sys
 # `_run_python_hook.sh` used to perform, before anything that needs 3.12
 # or `nexus` is imported. See _interpreter.py for what is at stake.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cli_lookup  # noqa: E402 -- must follow the sys.path insert
 import _exec_path  # noqa: E402 -- must follow the sys.path insert
 import _interpreter  # noqa: E402 -- must follow the sys.path insert
 
@@ -673,10 +674,27 @@ def dispatch_ref_drift_action() -> None:
         debug(f"failed to dispatch ref-drift action: {exc}")
 
 
+def cli_present() -> bool:
+    """True when ``nx`` resolves by the launcher's lookup: the generation
+    layout, then ``PATH`` (``_cli_lookup.resolve``)."""
+    return _cli_lookup.resolve("nx") is not None
+
+
 def main() -> None:
     """Detect skew (version mismatch, and separately, nexus-konsk ref
-    drift), nudge + dispatch on either. Always fail-safe."""
+    drift), nudge + dispatch on either. Always fail-safe.
+
+    With no CLI there is nothing to keep in lockstep, so the hook does nothing
+    at all: no message, no action, no marker (RDR-228 Gap 2). Before, it told
+    the model an upgrade had been dispatched, and the action it started found
+    neither a generation nor a ``uv tool`` install and returned. The check comes
+    before BOTH paths, the version mismatch and the ref drift. The session's
+    one message about a missing CLI is ``nx_setup_notice.py``'s.
+    """
     try:
+        if not cli_present():
+            debug("no Nexus CLI resolves; nothing to keep in lockstep")
+            return
         plugin_version = read_plugin_version()
         version_mismatch = bool(plugin_version) and read_marker() != plugin_version
         if version_mismatch:

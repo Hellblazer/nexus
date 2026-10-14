@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from tests._hook_wiring import NX_SETUP_NOTICE, command_verb, launcher_script_args, runs_cli_program
+
 
 # ── SC-5: MCP version divergence warning ────────────────────────────────────
 
@@ -69,7 +71,13 @@ class TestSC6Delegation:
 
 
 class TestSC8HooksJson:
-    def test_upgrade_auto_first(self) -> None:
+    def test_upgrade_auto_first_cli_hook_after_the_setup_notice(self) -> None:
+        """The self-upgrade runs before every other hook that runs a CLI program.
+
+        The setup notice (RDR-228) is ahead of it on purpose: it starts no CLI
+        program, so it cannot be upgraded or broken by one, and it is the only
+        entry that speaks when there is no CLI to upgrade.
+        """
         hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         startup_hooks = next(
@@ -77,12 +85,14 @@ class TestSC8HooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        # Exec form since RDR-215 bead nexus-q02nx.22 -- see the twin of
-        # this assertion in tests/test_phase5_integration.py for why the
-        # old `.startswith("nx upgrade --auto")` had to go.
-        assert startup_hooks[0]["command"] == "nx-hook"
-        assert startup_hooks[0]["args"] == ["upgrade-auto"]
-        assert startup_hooks[0]["timeout"] == 30
+        assert launcher_script_args(startup_hooks[0])[:1] == [NX_SETUP_NOTICE]
+        assert not runs_cli_program(startup_hooks[0])
+        cli_hooks = [h for h in startup_hooks if runs_cli_program(h)]
+        assert cli_hooks, "no SessionStart hook runs a CLI program: the order below would be vacuous"
+        assert command_verb(cli_hooks[0]) == "upgrade-auto"
+        assert cli_hooks[0]["timeout"] == 30
+        # Nothing but the notice may stand ahead of it.
+        assert startup_hooks.index(cli_hooks[0]) == 1
 
     def test_pretooluse_bash_timeout_is_short(self) -> None:
         """PreToolUse Bash timeout must stay short.

@@ -34,7 +34,10 @@ SEQ_SCRIPT = REPO_ROOT / "conexus" / "mcp" / "sequential_thinking.py"
 #: (uv.exe, uvx.exe, and the nx console-script .exe shims), so Claude Code
 #: can spawn it without a shell. npx/npm/node need Node.js and are .cmd
 #: shims on Windows; cmd/sh/bash are platform-specific.
-WINDOWS_SAFE_COMMANDS = frozenset({"uv", "uvx", "nx-mcp", "nx-mcp-catalog"})
+#: Since RDR-228 (nexus-sv2wx.8) the two Nexus servers are not named directly
+#: either: `nx-mcp` and `nx-mcp-catalog` are programs of the CLI package, and a
+#: machine with the plugin and no CLI failed to start them.
+WINDOWS_SAFE_COMMANDS = frozenset({"uv", "uvx"})
 
 #: The launch argv for sequential-thinking: the hardened uv form the hooks use
 #: (a tool environment never consults a project's or an ancestor's .venv, and
@@ -103,6 +106,23 @@ def test_the_shape_check_rejects_the_old_forms(command: str) -> None:
 def test_context7_is_the_hosted_http_endpoint() -> None:
     cfg = json.loads(MCP_JSONS["sn"].read_text())["context7"]
     assert cfg == {"type": "http", "url": CONTEXT7_URL, "alwaysLoad": True}
+
+
+@pytest.mark.parametrize(
+    ("server", "program", "always_load"),
+    [("nexus", "nx-mcp", True), ("nexus-catalog", "nx-mcp-catalog", False)],
+)
+def test_the_nexus_servers_start_through_the_launcher(server: str, program: str, always_load: bool) -> None:
+    """RDR-228 Phase 1 Step 4: the hardened uv form, the launcher, one program.
+    With the CLI absent the launcher serves a stand-in; a bare `nx-mcp` entry
+    failed to start."""
+    cfg = json.loads(MCP_JSONS["conexus"].read_text())[server]
+    assert cfg == {
+        "command": "uv",
+        "args": [*SEQ_ARGS[:-1], "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py", program],
+        "alwaysLoad": always_load,
+    }
+    assert (REPO_ROOT / "conexus" / "launch" / "nx_launch.py").is_file()
 
 
 def test_sequential_thinking_launch_argv() -> None:

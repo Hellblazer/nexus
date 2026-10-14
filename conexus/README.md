@@ -290,24 +290,32 @@ or PATH interpreter and never consults a `.venv`. `--python >=3.12` is the floor
 scripts' own guards enforce, so uv never runs them under an older interpreter it finds
 first; `--no-config` keeps a `uv.toml` from choosing the interpreter. `--directory` makes a
 script's process cwd the plugin root; it takes the project from the payload's `cwd`, else
-`CLAUDE_PROJECT_DIR`, and the shim starts `nx-hook` in that directory. The first hook run on a machine with no Python 3.12 or newer
+`CLAUDE_PROJECT_DIR`, and the shim and the launcher start their program in that directory. The first hook run on a machine with no Python 3.12 or newer
 makes uv fetch one, which can outlast a hook's timeout once; later runs find it.
 
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
 `No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
-`PermissionRequest` and `UserPromptSubmit`, so five of the seven uv-launched entries (both
+`PermissionRequest` and `UserPromptSubmit`, so five of the fifteen uv-launched entries (both
 Bash gates, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
-conexus tool call and every prompt until Python exists; the two `SessionStart` entries only
-print the error. The entries are in exec form (`args` is set, so there is no shell), and an
+conexus tool call and every prompt until Python exists; the `SessionStart` and `SessionEnd`
+entries only print the error. The entries are in exec form (`args` is set, so there is no shell), and an
 exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
 command on that machine: `uv python install 3.12` (online once, then it is cached). A
 shell-form wrapper could map the failure to exit 0; it is not used because Claude Code runs
 shell-form hooks through Git Bash or PowerShell depending on the machine, and no one string is
-correct in both (nexus-f9bgu.36). Direct `nx-hook <verb>` entries are unchanged.
+correct in both (nexus-f9bgu.36).
+
+**No direct `nx-hook` entries (RDR-228).** `nx-hook` and `nx-session-end-launcher` are programs
+of the Nexus CLI. An entry that named one directly failed with "Executable not found" on a
+machine that has the plugin and no CLI. Each such entry now starts `launch/nx_launch.py` with
+the program and its verb. The launcher finds the program in the CLI's install directory, then
+on `PATH`, and runs it; with no CLI it writes one line and exits 0. The table below still
+names each handler by its program and verb.
 
 | Event | Handler | Purpose |
 |-------|--------|---------|
+| `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Prints nothing when the Nexus CLI is found, and nothing in a cloud session (`CLAUDE_CODE_REMOTE`), where the servers are not. When the CLI is not found, tells the model Nexus is not installed and gives the commands that install it (RDR-228) |
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
 | `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |

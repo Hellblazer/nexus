@@ -62,6 +62,10 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 #: is skill-only now -- so the example was updated to two files that still
 #: exist.)
 #:
+#: launch/ holds the script every server and hook entry starts through
+#: (RDR-228, nexus-sv2wx.5): it is run from $CLAUDE_PLUGIN_ROOT exactly as a
+#: hook script is.
+#:
 #: WHY THE REST OF conexus/ IS OUT, stated rather than left to luck:
 #:   CHANGELOG.md / README.md  docs; stale docs in a shipped plugin are
 #:                             harmless, a stale hook is a guard not guarding.
@@ -87,6 +91,7 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
         "conexus/agents/",
         "conexus/resources/",
         "conexus/mcp/",
+        "conexus/launch/",
         "conexus/.mcp.json",
     ),
     "sn": (

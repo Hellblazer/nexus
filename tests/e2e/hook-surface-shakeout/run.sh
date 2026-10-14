@@ -94,6 +94,12 @@ fi
 
 cp "$ROOT/conexus/.claude-plugin/plugin.json" "$STAGE/plugin/.claude-plugin/"
 cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
+# launch/ is what every launcher entry and the nexus server run
+# (`uv tool run ... python ${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py ...`, RDR-228).
+# Not staged, the seven hook entries and both servers name a file that is not
+# there, and a hook that cannot start is non-blocking: the census would blame
+# the handlers.
+cp -R "$ROOT/conexus/launch" "$STAGE/plugin/launch"
 # THE PLUGIN'S OWN MCP REGISTRATION, and it is load-bearing for the tool tier.
 # hooks.json addresses `"server": "plugin:conexus:nexus"`; that name is what
 # Claude Code namespaces the plugin's own `.mcp.json` key `nexus` to when it
@@ -113,6 +119,13 @@ cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
 # never ran. nx-mcp is ours and every dispatch crosses its stdin as JSON-RPC
 # naming the tool, whether or not the handler says anything. Teeing that is
 # the server-side roster without changing the wheel under test to measure it.
+# The tee WRAPS WHAT THE MANIFEST RUNS: its child is the `uv tool run ... python
+# launch/nx_launch.py nx-mcp` argv of the plugin's own `.mcp.json`, baked in below
+# with ${CLAUDE_PLUGIN_ROOT} replaced by the staged plugin's path, so the server
+# starts behind `uv` and the launcher exactly as it does for a user. (It used to
+# exec nx-mcp directly, which measured a start no user gets.) Baked, not passed
+# as args, because the SHAKEOUT_MCP_OVERRIDE form hands Claude Code a
+# --mcp-config entry that never expands the plugin variable.
 "$E2E_PYTHON" - "$ROOT/conexus/.mcp.json" "$STAGE/plugin/.mcp.json" <<'PY'
 import json, os, sys
 d = json.load(open(sys.argv[1]))
@@ -147,9 +160,20 @@ if [ -n "${NX_MCP_START_DELAY:-}" ]; then
     printf '{"event":"start_delay_elapsed","delay_s":%s,"ts":%s}\n' \
         "$NX_MCP_START_DELAY" "$(date +%s.%N)" >> /home/nexus/run/race.jsonl
 fi
-exec tee -a /home/nexus/run/mcp-stdin.jsonl | /home/nexus/nxenv/bin/nx-mcp
+exec tee -a /home/nexus/run/mcp-stdin.jsonl | __MCP_SERVER__
 SH
 chmod +x "$STAGE/mcp_tee.sh"
+"$E2E_PYTHON" - "$ROOT/conexus/.mcp.json" "$STAGE/mcp_tee.sh" "$HERE" <<'PY'
+import json, shlex, sys
+sys.path.insert(0, sys.argv[3])
+from hook_census import server_argv  # noqa: E402 -- the one reading of the manifest
+tee = open(sys.argv[2]).read()
+argv = server_argv(json.load(open(sys.argv[1])), "nexus", "/home/nexus/plugin")
+if "__MCP_SERVER__" not in tee:
+    sys.exit("mcp_tee.sh has no server placeholder")
+open(sys.argv[2], "w").write(tee.replace("__MCP_SERVER__", shlex.join(argv)))
+print(f"[stage] mcp_tee.sh child: {argv[0]} ... {' '.join(argv[-2:])}")
+PY
 
 # hooks.json UNTRIMMED except for the two entries that would mutate the thing
 # under test. `upgrade-auto` installs a generation and flips <tools>/current,
@@ -165,7 +189,6 @@ mkdir -p "$STAGE/shims"
 import json, os, stat, sys
 src, dst, shimdir = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(src))
-DROP = {"upgrade-auto", "self-gc"}
 
 # EVERY COMMAND-TIER ENTRY IS ROUTED THROUGH A SHIM that appends one row and
 # THEN runs the real handler, recording its exit code. Three properties, in the order they matter:
@@ -188,14 +211,15 @@ DROP = {"upgrade-auto", "self-gc"}
 CENSUS = "/home/nexus/run/hook-census.tsv"
 EXITS = "/home/nexus/run/hook-exits.tsv"
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[4])))
-from hook_census import label  # noqa: E402 -- one labelling rule for shims and census
+# One labelling rule for the drop, the shims and the census; it reads through
+# the launcher (`uv ... nx_launch.py nx-hook <verb>`) to the verb.
+from hook_census import EXCLUDED_BY_HARNESS, label  # noqa: E402
 kept = dropped = shimmed = 0
 for event, groups in d["hooks"].items():
     for g in groups:
         out = []
         for h in g.get("hooks", []):
-            args = h.get("args") or []
-            if h.get("command") == "nx-hook" and args and args[0] in DROP:
+            if h.get("type") != "mcp_tool" and label(h) in EXCLUDED_BY_HARNESS:
                 dropped += 1
                 continue
             if h.get("type") != "mcp_tool" and h.get("command"):
@@ -230,6 +254,12 @@ for event, groups in d["hooks"].items():
             out.append(h)
             kept += 1
         g["hooks"] = out
+# Non-vacuity: a drop rule that matches nothing leaves the wheel-mutating entries
+# in, and `upgrade-auto` would replace the wheel under test mid-run. It matched
+# nothing once already, when the entries moved behind the launcher.
+if dropped != len(EXCLUDED_BY_HARNESS):
+    sys.exit(f"[stage] FAILED: dropped {dropped} entries, expected {len(EXCLUDED_BY_HARNESS)} "
+             f"({', '.join(sorted(EXCLUDED_BY_HARNESS))}); the drop rule no longer matches the manifest")
 json.dump(d, open(dst, "w"), indent=2)
 print(f"[stage] hooks.json: {kept} entries kept, {dropped} dropped "
       f"(mutate-the-wheel only), {shimmed} command-tier entries shimmed")

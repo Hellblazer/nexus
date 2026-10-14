@@ -12,6 +12,10 @@ decision that changes over time:
   ``{"type": "command", "command": "uv", "args": [*UV_LAUNCHER_ARGV,
   "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "<name-with-dashes>"]}``, which is how a verb that an older CLI lacks
   is wired so it cannot block. It is still the command tier.
+  Since RDR-228 (nexus-sv2wx.8) every other verb goes through the launcher,
+  ``[*UV_LAUNCHER_ARGV, "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py", "nx-hook",
+  "<name-with-dashes>"]``, so that a machine with the plugin and no CLI gets one
+  line and exit 0 where a bare ``nx-hook`` entry got "Executable not found".
 
 Tests that assert WHICH EVENT a hook fires on, or that it is wired
 exactly once, are making a claim about the hook. Writing those against
@@ -36,10 +40,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
+NX_LAUNCH = "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py"
 
 
 def command_verb(entry: dict) -> str | None:
-    """The nx-hook verb a command-tier entry runs, directly or via the shim."""
+    """The nx-hook verb a command-tier entry runs: directly, via the shim, or
+    via the launcher."""
     if entry.get("type") != "command":
         return None
     args = [a for a in (entry.get("args") or []) if isinstance(a, str)]
@@ -48,7 +54,15 @@ def command_verb(entry: dict) -> str | None:
     shim_args = launcher_script_args(entry)
     if len(shim_args) == 2 and shim_args[0] == NX_HOOK_SHIM:
         return shim_args[1]
+    if len(shim_args) == 3 and shim_args[:2] == [NX_LAUNCH, "nx-hook"]:
+        return shim_args[2]
     return None
+
+
+def launched_program(entry: dict) -> list[str]:
+    """``[program, *args]`` for an entry that goes through the launcher, else ``[]``."""
+    script_args = launcher_script_args(entry)
+    return script_args[1:] if script_args[:1] == [NX_LAUNCH] else []
 
 
 #: Everything `uv` is given before the script path (nexus-efk2h): sn's argv.
@@ -68,6 +82,31 @@ def launcher_script_args(entry: dict) -> list[str]:
     if entry.get("command") == "uv" and tuple(args[:n]) == UV_LAUNCHER_ARGV:
         return args[n:]
     return []
+
+
+#: The plugin script that tells the model Nexus is not installed (RDR-228 P1).
+#: It starts no CLI program and prints nothing when the CLI is there, which is
+#: why the design record puts it ahead of every entry that does run one.
+NX_SETUP_NOTICE = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py"
+
+
+def runs_cli_program(entry: dict) -> bool:
+    """Does this hook entry run a program of the Nexus CLI package?
+
+    True for a verb of ``nx-hook`` in any of its three forms (bare, shim,
+    launcher), for any other launcher entry (``nx-session-end-launcher``), for
+    a bare ``nx*`` console script, and for an ``mcp_tool`` entry (a tool of the
+    nexus MCP server). False for a plugin-resident script that only runs under
+    ``uv`` (the setup notice, the lockstep hook, the routing guards).
+    """
+    if entry.get("type") == "mcp_tool":
+        return True
+    command = entry.get("command")
+    return (
+        command_verb(entry) is not None
+        or bool(launched_program(entry))
+        or (isinstance(command, str) and (command == "nx" or command.startswith("nx-")))
+    )
 
 
 def is_plugin_launcher(entry: dict) -> bool:

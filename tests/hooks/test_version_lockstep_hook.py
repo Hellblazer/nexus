@@ -49,7 +49,11 @@ def _load_module():
 
 @pytest.fixture()
 def mod():
-    return _load_module()
+    """The hook, with a CLI present. ``main`` does nothing at all without one
+    (RDR-228, ``TestNoCli`` below), and a test host has none installed."""
+    module = _load_module()
+    module.cli_present = lambda: True
+    return module
 
 
 @pytest.fixture()
@@ -206,6 +210,71 @@ class TestMainOrchestration:
         # Must not raise; fail-safe exit 0.
         mod.main()
         assert capsys.readouterr().out.strip() == ""
+
+
+class TestNoCli:
+    """RDR-228 Gap 2 (nexus-sv2wx.8, residual nexus-j8ebc item 4). With no CLI
+    the hook told the model "an extras-preserving upgrade has been dispatched",
+    and the action it started did nothing, because there was nothing to upgrade.
+    With no CLI the hook now says nothing, starts no action and writes no marker,
+    on the version path and on the ref-drift path; the setup notice hook is what
+    speaks."""
+
+    def _arm(self, module, plugin_root, tmp_path, monkeypatch, *, drift: bool) -> dict[str, list]:
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(tmp_path / "marker"))  # missing: a version mismatch
+        calls: dict[str, list] = {"action": [], "ref_action": [], "ref_marker": []}
+        monkeypatch.setattr(module, "dispatch_action", lambda v: calls["action"].append(v))
+        monkeypatch.setattr(module, "dispatch_ref_drift_action", lambda: calls["ref_action"].append(1))
+        monkeypatch.setattr(module, "write_ref_drift_marker", lambda entries: calls["ref_marker"].append(entries))
+        monkeypatch.setattr(module, "detect_ref_drift", lambda: [("conexus@x", "aaa", "bbb")] if drift else [])
+        monkeypatch.setattr(module, "read_ref_drift_marker", lambda: {})
+        return calls
+
+    @pytest.mark.parametrize("drift", [False, True], ids=["version-path", "ref-drift-path"])
+    def test_no_cli_is_silent_and_starts_nothing(self, plugin_root, tmp_path, monkeypatch, capsys, drift) -> None:
+        module = _load_module()
+        module.cli_present = lambda: False
+        calls = self._arm(module, plugin_root, tmp_path, monkeypatch, drift=drift)
+        module.main()
+        assert capsys.readouterr().out == ""
+        assert calls == {"action": [], "ref_action": [], "ref_marker": []}
+
+    @pytest.mark.parametrize("drift", [False, True], ids=["version-path", "ref-drift-path"])
+    def test_the_same_setup_with_a_cli_does_dispatch(self, plugin_root, tmp_path, monkeypatch, capsys, drift) -> None:
+        """The control: without it the test above passes on a hook that never
+        dispatches at all."""
+        module = _load_module()
+        module.cli_present = lambda: True
+        calls = self._arm(module, plugin_root, tmp_path, monkeypatch, drift=drift)
+        module.main()
+        assert capsys.readouterr().out.strip()
+        assert calls["action"] == ["9.9.9"]
+        assert bool(calls["ref_action"]) is drift and bool(calls["ref_marker"]) is drift
+
+    def test_cli_present_is_the_launcher_s_lookup(self, tmp_path, monkeypatch) -> None:
+        """The generation layout, then PATH: an install made after the application
+        started is seen."""
+        module = _load_module()
+        empty = tmp_path / "bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tmp_path / "tools"))
+        assert module.cli_present() is False
+        gen = tmp_path / "tools" / "gen-20260101T000000Z"
+        (gen / "bin").mkdir(parents=True)
+        if sys.platform == "win32":
+            import _winapi  # noqa: PLC0415 -- Windows only
+
+            from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake  # noqa: PLC0415 -- Windows only
+
+            install_windows_exe_fake(gen / "bin", "nx", f"{WINDOWS_SHEBANG}\nprint('nx')\n")
+            _winapi.CreateJunction(str(gen), str(tmp_path / "tools" / "current"))
+        else:
+            (gen / "bin" / "nx").write_text("#!/bin/sh\n")
+            (gen / "bin" / "nx").chmod(0o755)
+            (tmp_path / "tools" / "current").symlink_to(gen)
+        assert module.cli_present() is True
 
 
 class TestDispatchIsNonBlocking:

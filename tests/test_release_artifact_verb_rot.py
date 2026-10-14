@@ -150,6 +150,8 @@ import click
 import pytest
 import yaml
 
+from tests._hook_wiring import launched_program
+
 REPO_ROOT = Path(__file__).parent.parent
 
 _SKILL_GLOB = ".claude/skills/*/SKILL.md"
@@ -508,6 +510,11 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     # (`upgrade-auto`, `preflight`, `self-gc`, `session-start`,
     # `session-context`, `rdr`). Floor set to 4, the same deliberate slack
     # under the observed count this dict uses everywhere else.
+    #
+    # Unchanged at RDR-228 (nexus-sv2wx.8), which moved every one of those six
+    # behind `uv ... launch/nx_launch.py nx-hook <verb>`: the verb is still in
+    # `args`, still after `nx-hook`, so the join finds the same six (measured
+    # against the manifest before and after: 6 and 6).
     "conexus/hooks/hooks.json": 4,
     # REMOVED at RDR-215 bead nexus-q02nx.21: the
     # "conexus/hooks/scripts/subagent-start.sh": 3 anchor. That script (and
@@ -753,8 +760,10 @@ def test_mutation_an_unregistered_hooks_json_verb_is_caught_end_to_end(tmp_path)
     def _walk(node: object) -> None:
         nonlocal renamed
         if isinstance(node, dict):
-            if node.get("command") == "nx-hook" and isinstance(node.get("args"), list):
-                node["args"] = ["definitely-not-a-registered-verb"]
+            # The launcher form (RDR-228): the verb is the launcher's last
+            # argument, behind ``uv ... nx_launch.py nx-hook``.
+            if launched_program(node)[:1] == ["nx-hook"]:
+                node["args"][-1] = "definitely-not-a-registered-verb"
                 renamed += 1
             for value in node.values():
                 _walk(value)
@@ -764,8 +773,8 @@ def test_mutation_an_unregistered_hooks_json_verb_is_caught_end_to_end(tmp_path)
 
     _walk(data)
     assert renamed >= 1, (
-        "no nx-hook entry found in the real hooks.json to perturb — this "
-        "mutation test is no longer exercising anything"
+        "no launcher-form nx-hook entry found in the real hooks.json to perturb — "
+        "this mutation test is no longer exercising anything"
     )
 
     perturbed = tmp_path / "hooks.json"

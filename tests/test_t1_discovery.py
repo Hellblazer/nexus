@@ -293,6 +293,200 @@ class TestFindMcpSiblingPids:
         with patch("nexus.session._list_processes", return_value=table):
             assert find_mcp_sibling_pids(1200) == []
 
+    # -- through the plugin's launcher (RDR-228, nexus-sv2wx.8) ------------------
+    #
+    # The plugin starts the servers as `uv tool run ... python launch/nx_launch.py
+    # nx-mcp`. uv stays alive as the parent of what it runs, so the server is a
+    # GRANDCHILD of claude. On POSIX the launcher replaces itself with the server;
+    # on Windows it stays as a further parent, and uv's own python.exe there can
+    # be a launcher stub with the real interpreter under it.
+
+    _UV = "uv tool run --directory /p --no-config --quiet --python >=3.12 python /p/launch/nx_launch.py"
+
+    def test_finds_a_server_started_through_uv_and_the_launcher(self):
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1250, 1200, f"{self._UV} nx-mcp"),
+            (1300, 1250, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp"),
+            (1251, 1200, f"{self._UV} nx-mcp-catalog"),
+            (1301, 1251, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp-catalog"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert sorted(find_mcp_sibling_pids(1200)) == [1300, 1301]
+
+    def test_finds_a_server_under_the_windows_chain(self):
+        """uv.exe -> python.exe (stub) -> python.exe running the launcher ->
+        nx-mcp.exe -> python.exe, the server itself."""
+        from nexus.session import find_mcp_sibling_pids
+
+        launch = r"C:\p\launch\nx_launch.py nx-mcp"
+        table = [
+            (1200, 1, "claude.exe"),
+            (1250, 1200, r"C:\b\uv.exe tool run --directory C:\p python " + launch),
+            (1260, 1250, r"C:\e\Scripts\python.exe " + launch),
+            (1270, 1260, r"C:\py\python.exe " + launch),
+            (1300, 1270, r"C:\t\current\bin\nx-mcp.exe"),
+            (1310, 1300, r"C:\t\gen-1\Scripts\python.exe C:\t\gen-1\Scripts\nx-mcp.exe"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            # The launcher stub and the python under it, which is the pid the
+            # server claims its marker by.
+            assert find_mcp_sibling_pids(1200) == [1300, 1310]
+
+    def test_finds_the_server_under_the_generation_s_python_redirector(self):
+        """The chain a native Windows machine really has, listed from live
+        processes under Claude Desktop on 2026-10-13 (nexus-217c3): under
+        ``nx-mcp.exe`` the generation's ``Scripts\\python.exe`` is a venv
+        redirector and the interpreter that runs the server is ITS child. That
+        last pid is the one the server claims its marker by; looking one level
+        under ``nx-mcp.exe`` stopped at the redirector."""
+        from nexus.session import find_mcp_sibling_pids
+
+        launch = r"C:/a/rpm/plugin_01/launch/nx_launch.py nx-mcp"
+        gen = r"C:\Users\Sam\.local\share\nexus\tools\gen-20261011T224558Z"
+        table = [
+            (1200, 1, "claude.exe"),
+            (1250, 1200, r"C:\b\uv.exe tool run --directory C:/a/rpm/plugin_01 python " + launch),
+            (1260, 1250, r"C:\c\archive-v0\x\Scripts\python.exe " + launch),
+            (1270, 1260, r"C:\c\archive-v0\x\Scripts\python.exe " + launch),
+            (1300, 1270, gen + r"\bin\nx-mcp.EXE"),
+            (1310, 1300, gen + r"\Scripts\python.exe " + gen + r"\bin\nx-mcp.EXE"),
+            (1320, 1310, r"C:\u\cpython-3.12-windows-x86_64-none\python.exe " + gen + r"\bin\nx-mcp.EXE"),
+            # A process the server itself starts is not a server.
+            (1330, 1320, r"C:\Windows\System32\git.exe status"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == [1300, 1310, 1320]
+
+    def test_does_not_look_under_anything_but_the_launch_wrappers(self):
+        """A server under a shell, a test runner or an editor is not this
+        session's plugin server: only `uv` and a python running nx_launch.py
+        are looked through."""
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1250, 1200, "/bin/zsh -c uv run pytest"),
+            (1260, 1250, "uv run pytest"),
+            (1300, 1260, "/v/bin/python /v/bin/nx-mcp"),
+            (1251, 1200, "/usr/bin/python3 /somewhere/other_wrapper.py nx-mcp"),
+            (1301, 1251, "/v/bin/python /v/bin/nx-mcp"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == []
+
+    def test_does_not_look_under_another_claude(self):
+        """MUST-HOLD rn3wo.1 through the wrappers too: a server whose nearest
+        claude ancestor is a DIFFERENT claude belongs to that one."""
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1250, 1200, "uv tool run claude -p hello"),
+            (2200, 1250, "claude -p hello"),
+            (2250, 2200, f"{self._UV} nx-mcp"),
+            (2300, 2250, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == []
+            assert find_mcp_sibling_pids(2200) == [2300]
+
+    @pytest.mark.parametrize(("wrappers", "found"), [(4, [1300]), (5, [])])
+    def test_a_wrapper_chain_is_followed_four_levels_and_no_further(self, wrappers, found):
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [(1200, 1, "claude")]
+        parent = 1200
+        for i in range(wrappers):
+            table.append((1250 + i, parent, f"{self._UV} nx-mcp"))
+            parent = 1250 + i
+        table.append((1300, parent, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp"))
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == found
+
+    def test_a_row_listed_twice_is_matched_once(self):
+        from nexus.session import find_mcp_sibling_pids
+
+        row = (1300, 1250, "/t/gen-1/bin/python /t/gen-1/bin/nx-mcp")
+        table = [(1200, 1, "claude"), (1250, 1200, f"{self._UV} nx-mcp"), row, row]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == [1300]
+
+    def test_a_space_in_the_path_of_uv_and_python_does_not_hide_the_server(self):
+        """A Windows profile named ``John Smith``: the listing is the argv joined
+        with spaces, so the first token is ``C:\\Users\\John``. The image name
+        is asked for instead (code review of 0eb55a713)."""
+        from nexus.session import find_mcp_sibling_pids
+
+        launch = r"C:\Users\John Smith\p\launch\nx_launch.py nx-mcp"
+        table = [
+            (1200, 1, "claude.exe"),
+            (1250, 1200, r"C:\Users\John Smith\.local\bin\uv.exe tool run python " + launch),
+            (1260, 1250, r"C:\Users\John Smith\uv\python.exe " + launch),
+            (1300, 1260, r"C:\Users\John Smith\t\current\bin\nx-mcp.exe"),
+            (1310, 1300, r"C:\Users\John Smith\t\gen-1\Scripts\python.exe C:\Users\John Smith\t\gen-1\Scripts\nx-mcp.exe"),
+            (1400, 1200, r"C:\Users\John Smith\vim.exe C:\Users\John Smith\nx-mcp.exe"),
+        ]
+        images = {1250: "uv", 1260: "python", 1300: "nx-mcp", 1310: "python", 1400: "vim"}
+        with patch("nexus.session._list_processes", return_value=table), \
+                patch("nexus.session._command_name_of", side_effect=lambda pid, **_k: images.get(pid, "")):
+            assert find_mcp_sibling_pids(1200) == [1300, 1310]
+
+    def test_through_uv_against_the_REAL_process_table(self, tmp_path):
+        """The chain the plugin produces, from real processes: this test process
+        stands in for claude, the real ``uv`` runs a python whose script is named
+        ``nx-mcp`` and stays alive as its parent. Found through a real process
+        listing. Before RDR-228's change this returned nothing."""
+        import shutil
+        import time
+
+        from nexus.session import _list_processes, find_mcp_sibling_pids
+
+        uv = shutil.which("uv")
+        assert uv, "uv is not on PATH; it is the wrapper under test, so this is a failure, not a skip"
+        me = os.getpid()
+        if not any(pid == me for pid, _ppid, _cmd in _list_processes()):
+            pytest.skip(f"process enumeration cannot see this test's own pid ({me})")
+        pidfile = tmp_path / "server.pid"
+        server = tmp_path / "nx-mcp"
+        server.write_text(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        proc = subprocess.Popen(  # noqa: S603 -- an absolute path from shutil.which
+            [uv, "tool", "run", "--no-config", "--quiet", "--python", ">=3.12", "python", str(server), str(pidfile)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(tmp_path),
+        )
+        server_pid = 0
+        try:
+            found: list[int] = []
+            for _ in range(300):
+                if pidfile.exists() and pidfile.read_text().strip():
+                    server_pid = int(pidfile.read_text())
+                    found = find_mcp_sibling_pids(me)
+                    if found:
+                        break
+                time.sleep(0.1)
+            rows = [row for row in _list_processes() if row[0] == proc.pid or row[1] == proc.pid]
+            assert server_pid, f"the server never started; uv exited {proc.poll()}"
+            assert found, f"not found through uv; the listing said {rows}"
+            assert proc.pid not in found, "uv itself is not a server"
+            # POSIX: the script's own pid. Windows: uv's python.exe can be a stub
+            # with the interpreter under it, and the stub is what is found.
+            if os.name != "nt":
+                assert found == [server_pid], (found, server_pid, rows)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            if server_pid:
+                try:
+                    os.kill(server_pid, 15)
+                except OSError:
+                    pass
+
     def test_against_the_REAL_process_table(self, tmp_path):
         """No fabricated table: spawn an actual child process named
         ``nx-mcp`` and find it through a real ``ps`` enumeration.

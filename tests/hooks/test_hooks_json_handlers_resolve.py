@@ -84,6 +84,9 @@ _MIN_MCP_TOOL_ENTRIES = 1
 #: 15 -> 10 at cleanup step A1 (nexus-0r1uz): the RDR-184 ledger and RDR-205
 #: projector entries and the behaviour census entry are deleted.
 #: 10 -> 9 at cleanup step A2: the bd-close gate's shim entry is deleted.
+#: Unchanged at nexus-sv2wx.8 (RDR-228): six of the nine now go through the
+#: launcher and three through the shim; `tests/_hook_wiring.command_verb` reads
+#: all three forms.
 _MIN_NX_HOOK_ENTRIES = 9
 
 
@@ -203,6 +206,11 @@ def _mentions(handler: str, cells: list[str]) -> bool:
         # names the script (and a shim verb), so start the comparison there.
         tokens = handler.split()
         i = next((k for k, t in enumerate(tokens) if t.endswith(".py")), 0)
+        if tokens[i].endswith("/launch/nx_launch.py"):
+            # RDR-228: the launcher's arguments are the handler, `nx-hook <verb>`
+            # or `nx-session-end-launcher`, and that is what the table names.
+            assert tokens[i + 1:], f"a launcher entry with no program: {handler!r}"
+            i += 1
         handler = " ".join(tokens[i:])
     core = handler.split(" 2>")[0].split(" >")[0].strip()
     if core.startswith("python3 ") or core.endswith(".py") or ".py " in core:

@@ -87,6 +87,9 @@ def world(tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace:
     for plugin in _PLUGINS:
         root = home / ".claude" / "plugins" / "cache" / "nexus-plugins" / plugin / "0.0.0"
         shutil.copytree(REPO_ROOT / plugin / "hooks", root / "hooks")
+        if (REPO_ROOT / plugin / "launch").is_dir():
+            # RDR-228: seven conexus entries start `launch/nx_launch.py`.
+            shutil.copytree(REPO_ROOT / plugin / "launch", root / "launch")
         roots[plugin] = root
     outer = base / "outer"
     project = outer / "project"
@@ -123,7 +126,22 @@ def _run(
     body = payload or {
         "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "cwd-test",
     }
-    argv = [shutil.which("uv") or "uv", *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in args)]
+    uv = shutil.which("uv") or "uv"
+    if any(a.endswith("/launch/nx_launch.py") for a in args):
+        # A launcher entry would find this machine's own install and run its real
+        # hook verbs (an upgrade, a generation sweep). This file is about which
+        # interpreter uv picks, so the launcher gets no generation layout and a PATH
+        # with every directory that holds a Nexus hook program removed: it starts,
+        # finds no CLI and exits 0. uv is named by absolute path, so it needs no PATH.
+        env["NX_TOOLS_DIR"] = str(world.state / "no-tools")
+        env["PATH"] = os.pathsep.join(
+            entry for entry in env.get("PATH", "").split(os.pathsep)
+            if entry and not any(
+                (Path(entry) / name).exists()
+                for name in ("nx-hook", "nx-hook.exe", "nx-session-end-launcher", "nx-session-end-launcher.exe")
+            )
+        )
+    argv = [uv, *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in args)]
     return subprocess.run(
         argv, input=json.dumps({**body, "cwd": str(world.project)}), capture_output=True, text=True,
         encoding="utf-8", timeout=180, env=env, cwd=str(world.project),
@@ -133,9 +151,19 @@ def _run(
 @pytest.mark.skipif(not ON_WINDOWS, reason="needs a real Windows venv layout and uv's Windows interpreter discovery")
 class TestRealWindows:
     def test_the_walk_finds_the_uv_entries(self) -> None:
-        """Non-vacuity: seven conexus entries and four sn entries launch through uv."""
+        """Non-vacuity: fifteen conexus entries and four sn entries launch through uv
+        (7 until RDR-228, nexus-sv2wx.8, put seven entries behind the launcher and
+        added the setup notice hook)."""
         counts = {p: sum(1 for plugin, _, _ in _uv_entries() if plugin == p) for p in _PLUGINS}
-        assert counts == {"conexus": 7, "sn": 4}, counts
+        assert counts == {"conexus": 15, "sn": 4}, counts
+
+    def test_a_launcher_entry_really_starts_the_launcher(self, clean: SimpleNamespace) -> None:
+        """The never-runs cases prove nothing about an entry whose script did not
+        start. With no CLI the launcher writes its one line, which shows uv ran it."""
+        hook = next(h for p, _, h in _uv_entries() if p == "conexus" and "nx-hook" in h["args"])
+        proc = _run(clean, hook["args"], "conexus")
+        assert proc.returncode == 0 and "`nx-hook` is not installed" in proc.stderr, proc
+        assert not clean.marker.exists()
 
     @pytest.mark.parametrize(
         "plugin,event,hook",
