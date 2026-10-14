@@ -1145,13 +1145,20 @@ Test Plan covers the "local" path without a network.
 - **Licensing**: N/A. No new dependency.
 - **Deployment model**: the launcher, hook, stand-in and command ship in the
   plugin. Phase 1 ships only in a client release, because its server entries
-  need the CLI's lookup change (Phase 1 Step 4). A plugin-only cut (RDR-197)
-  may carry the launcher, the lookup module, the shim's change and the notice
-  script, and never `.mcp.json`, `hooks.json` or `version_lockstep_hook.py`
-  ahead of that release. The
+  need the CLI's lookup change (Phase 1 Step 4). Until Phase 2 is in the
+  tree, a plugin-only cut (RDR-197) may carry the launcher, the lookup
+  module, the shim's change and the notice script, and never `.mcp.json`,
+  `hooks.json` or `version_lockstep_hook.py` ahead of that release. The
   `--bootstrap` flag and the real server's setup tools ship in the CLI
   package, so Phase 2 is one client release and its plugin parts never go
-  out in a plugin-only cut ahead of it. The installer scripts are published on the site.
+  out in a plugin-only cut ahead of it. Phase 2 changes files Phase 1 adds,
+  and a deferred file is held back whole, so once any Phase 2 part is in
+  the tree and the pinned release does not carry Phase 2, the launcher, the
+  stand-in, the notice script and the entries that call them wait for that
+  one client release with Phase 2's own parts; the lookup module and the
+  shim's change may still go out in a cut. The cut script
+  enforces this (`phase2_deferral_check`, nexus-sv2wx.13). The installer
+  scripts are published on the site.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phase 1 alone is shippable: a machine with the CLI
   gains one extra `uv` launch per server start and hook and one resident `uv`
