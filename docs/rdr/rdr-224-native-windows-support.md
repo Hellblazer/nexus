@@ -1976,3 +1976,15 @@ Right-sized for an Architecture record that replaces an accepted direction.
   cannot replace the path rules while the engine and the PostgreSQL bundle are
   unsigned (P0.2). Not measured: DLL rules, WDAC, Smart App Control, update and
   removal under the policy. `docs/windows-install.md` lists the rules.
+- 2026-10-13, late: the hook helper and the Desktop bundle launcher no longer
+  return a `.cmd` or `.bat` hit from their `PATH` lookups (Sam's decision, the
+  question the Phase 4 test review left open). A batch file runs through
+  `cmd.exe` with quoting CPython does not escape for it; `nexus.util.nx_argv`
+  and `generation_core` already refused one, so the four copies now agree and
+  the parity test names no exception. A `uv` or `nx-hook` that exists only as a
+  batch file counts as not found. The hook shim's Windows tests, which had
+  installed a fake `nx-hook.cmd`, now place a real `nx-hook.exe` (setuptools'
+  console launcher). Native Windows run at `091c9453e`: the rehearsal set 1637
+  passed, 0 failed, floor met; the parity test 26 passed (T2
+  `224-win-run-091c9453e`). Also corrected: the Phase 4 "Not measured" paragraph
+  now points at the 2026-10-13 host-resolution measurement.
