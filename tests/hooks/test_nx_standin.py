@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, scrubbed_env
+from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, prune_python, scrubbed_env
 from tests._setup_recorder import Recorder
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -162,10 +162,19 @@ def test_the_table_is_the_records_with_the_cloud_row_absent() -> None:
 
 
 def test_the_tool_descriptions_give_the_tables_sizes() -> None:
+    """Download and disk, taken from the table itself so the two cannot drift."""
+    import re
+
     mod = _standin()
-    description = " ".join(tool["description"] for tool in mod.SETUP_TOOLS)
-    assert "1.3 GB" in description and "0.7 GB" in description
-    assert "1.3 GB" in mod.QUESTION_TABLE and "0.7 GB" in mod.QUESTION_TABLE
+    description = mod.SETUP_DESCRIPTION
+    rows = {
+        m.group(1): (m.group(2), m.group(3))
+        for m in re.finditer(r"\| (Local|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+) GB on disk \|", mod.QUESTION_TABLE)
+    }
+    assert rows == {"Local": ("1.3", "2.4"), "CLI only": ("0.7", "1.6")}, rows
+    local, cli = rows["Local"], rows["CLI only"]
+    assert f"up to about {local[0]} GB to download, {local[1]} GB on disk" in description
+    assert f"up to about {cli[0]} GB to download, {cli[1]} GB on disk" in description
 
 
 # -- installed but cannot start (Sam, 2026-10-14) --------------------------------------------
@@ -203,7 +212,7 @@ async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_b
     exe = gen / "bin" / ("nx-mcp.exe" if os.name == "nt" else "nx-mcp")
     exe.write_bytes(b"MZ" if os.name == "nt" else b"\x7fELF")
     exe.chmod(0o755)
-    (gen / "pyvenv.cfg").write_text(f"home = {tmp_path / 'uv' / 'cpython-pruned'}\n")
+    prune_python(gen, tmp_path / "uv" / "cpython-pruned")
     if os.name == "nt":
         import _winapi  # noqa: PLC0415 -- Windows only
 
@@ -570,3 +579,84 @@ def test_a_cli_that_resolves_is_run_and_the_stand_in_is_not(tmp_path: Path) -> N
         input=b"", capture_output=True, env=_env(dirs), timeout=30, check=False,
     )
     assert r.stdout.strip() == b"real"
+
+
+# -- the broken stand-in's tools, by the state of the setup record (review of 4cffeb898, critic 2) -----------
+
+_REASON = "the Python it was built with (/x/cpython-gone) is gone"
+
+#: ``(state, view)``: what ``nx_setup.py status`` can answer.
+_VIEWS: dict[str, dict] = {
+    "none": {"state": "none", "next": "Ask the user which they want.", "log": "/c/setup/setup.log", "live": False},
+    "running": {"state": "running", "stage": "build", "mode": "cli-only", "live": True, "log": "/c/setup/setup.log"},
+    "done": {"state": "done", "stage": "verify", "mode": "cli-only", "message": "The Nexus CLI is installed.", "live": False},
+    "failed": {"state": "failed", "stage": "build", "mode": "cli-only", "message": "the build exited 2.", "live": False},
+    "interrupted": {"state": "interrupted", "stage": "build", "mode": "local", "live": False},
+    "doctor-failed": {"state": "doctor-failed", "stage": "verify", "mode": "local", "doctor_failing": ["[✗] x"], "live": False},
+}
+
+
+def _status_of(mod, monkeypatch: pytest.MonkeyPatch, state: str):
+    monkeypatch.setattr(mod, "_call_script", lambda args, broken=None: dict(_VIEWS[state]))
+    return mod
+
+
+def test_in_broken_mode_a_machine_with_no_setup_history_gets_the_cannot_start_text_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _status_of(_standin(), monkeypatch, "none")
+    text = mod.run_status(_REASON)
+    assert text.startswith(mod.broken_text(_REASON)) and mod.BROKEN_REPAIR in text
+    assert "Nexus is not installed" not in text
+    assert text.endswith(mod.render(_VIEWS["none"]))
+
+
+@pytest.mark.parametrize("state", ["running", "done", "failed", "interrupted", "doctor-failed"])
+def test_in_broken_mode_a_setup_history_is_reported_as_it_is_and_never_under_the_repair_offer(
+    monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    """The stand-in is served until the user reconnects, so a poll DURING or AFTER the
+    repair must say how the repair went, not offer it again with 'ask first'."""
+    mod = _status_of(_standin(), monkeypatch, state)
+    text = mod.run_status(_REASON)
+    assert text == mod.render(_VIEWS[state])
+    assert mod.BROKEN_PHRASE not in text and "ASK THE USER FIRST" not in text
+    plain = mod.run_status(None)
+    assert plain == text, "without the broken reason the answer is the same for a state with a history"
+
+
+def test_without_the_broken_reason_nothing_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _status_of(_standin(), monkeypatch, "none")
+    assert mod.run_status(None) == f"{mod.NOT_INSTALLED}\n{mod.render(_VIEWS['none'])}"
+
+
+def test_a_missing_setup_process_in_broken_mode_says_cannot_start_not_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _standin()
+    text = mod.setup_text(broken=_REASON)
+    assert mod.BROKEN_PHRASE in text and "/x/cpython-gone" in text
+    assert "not installed" not in text.lower()
+    assert "self install --bootstrap" in text, "the one command that repairs it, for the user to run"
+    plain = mod.setup_text()
+    assert plain.startswith(mod.NOT_INSTALLED), "the plain text is unchanged"
+    # Through the tools: a missing nx_setup.py in broken mode.
+    monkeypatch.setattr(mod, "setup_script", lambda: None)
+    with pytest.raises(mod.SetupError) as status_error:
+        mod.run_status(_REASON)
+    assert mod.BROKEN_PHRASE in str(status_error.value) and "not installed" not in str(status_error.value).lower()
+    with pytest.raises(mod.SetupError) as setup_error:
+        mod.run_setup({"mode": "cli-only"}, _REASON)
+    assert mod.BROKEN_PHRASE in str(setup_error.value) and "not installed" not in str(setup_error.value).lower()
+    with pytest.raises(mod.SetupError) as plain_error:
+        mod.run_setup({"mode": "cli-only"})
+    assert str(plain_error.value).startswith(mod.NOT_INSTALLED)
+
+
+def test_the_tool_call_hands_the_broken_reason_to_both_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _standin()
+    monkeypatch.setattr(mod, "setup_script", lambda: None)
+    server = mod.stand_in("nx-mcp", _REASON)
+    for name, arguments in (("setup", {"mode": "cli-only"}), ("setup_status", {})):
+        reply = mod.handle(server, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments},
+        })
+        assert reply is not None
+        text = reply["result"]["content"][0]["text"]
+        assert reply["result"]["isError"] is True and mod.BROKEN_PHRASE in text and "not installed" not in text.lower(), name

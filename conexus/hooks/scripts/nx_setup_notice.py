@@ -26,8 +26,17 @@ with Sam's 2026-10-14 state inserted as 2):
 7. The CLI resolves, no usable service, a local service is provisioned: it is down.
 8. The CLI resolves, no usable service, none provisioned: none is set up.
 
-The marker changes state 6 only. A state that suggests a call to ``setup`` says to ask
-the user first, in the setup tools' own words: states 1, 4 and 5 are
+4, 5, 7 and 8 are one quiet line with the marker, and 7 and 8 with a recorded CLI-only
+choice (below).
+
+The user's choice is honoured (Sam, 2026-10-14: "honour the choice"). The "not now" marker
+turns state 6 into one quiet line, as before, and now also states 7 and 8 and the stale
+report of a failed or interrupted run (4, 5): one quiet line that names ``/conexus:setup``
+(and, for 4 and 5, the log) and asks nothing. A recorded CLI-only choice (the status says
+mode ``cli-only``, state ``done``) turns 7 and 8 into the same quiet line, because a service
+that is not set up is what the user chose. A live run (1), a CLI that cannot start (2) and a
+usable service (3) are not affected. Any other state that suggests a call to ``setup``
+says to ask the user first, in the setup tools' own words: states 1, 4 and 5 are
 ``nx_standin.render`` of ``nx_setup.status_view``, the text ``setup_status`` returns, and
 the table is the stand-in's ``QUESTION_TABLE``.
 
@@ -40,8 +49,9 @@ the user's machine, and the hook cannot see them from there (measured 2026-10-13
 nexus-217c3).
 
 It starts no process, opens no socket, makes no network request and writes no file,
-its own bytecode cache included. It does not read its payload. A Windows lease read
-retries for at most ``HOOK_LEASE_RETRY_BUDGET_S``, so the whole hook stays inside its
+its own bytecode cache included. It does not read its payload. Its file reads (the
+status file and its error record, the lease) retry a Windows sharing violation for at
+most ``HOOK_READ_BUDGET_S`` ALL TOGETHER, so a held file cannot stretch the hook past its
 100 ms. Standard output carries the hook's JSON and nothing else, nothing is written
 to standard error, and it exits 0 whatever happens: a session start must not be
 disturbed by this hook failing.
@@ -58,6 +68,7 @@ sys.dont_write_bytecode = True  # before the sibling imports: no .pyc in the plu
 
 import json  # noqa: E402
 import os  # noqa: E402
+import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -68,6 +79,15 @@ PROBE_PROGRAM = "nx-mcp"
 #: Claude Code sets this to ``true`` where the session's loop, and so this hook,
 #: runs in a remote workspace and not on the user's machine.
 REMOTE_ENV = "CLAUDE_CODE_REMOTE"
+
+#: The most time the hook's file reads may spend, ALL TOGETHER, waiting out a Windows
+#: sharing violation (the status file, its error record, the lease): 30 ms of the hook's
+#: 100. The setup process's own reads wait two seconds; this hook has no such time. A
+#: file still held when the budget is spent reads as absent, which is the safe side
+#: of the question the hook asks again at the next session start.
+#: ``_endpoint_resolve.HOOK_LEASE_RETRY_BUDGET_S`` is the same number
+#: (``tests/hooks/test_usable_service_agreement.py`` pins them equal).
+HOOK_READ_BUDGET_S = 0.03
 
 #: The siblings, imported by :func:`load_siblings` and not at module scope: a plugin
 #: laid out without one of them must end in silence and exit 0, not a traceback.
@@ -98,11 +118,16 @@ def in_remote_workspace() -> bool:
     return (os.environ.get(REMOTE_ENV) or "").strip().lower() in ("true", "1")
 
 
-def service_usable(config: Path) -> bool:
+def _remaining(deadline: float | None) -> float:
+    """What is left of the hook's read budget at *deadline* (``None``: all of it)."""
+    return HOOK_READ_BUDGET_S if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+def service_usable(config: Path, deadline: float | None = None) -> bool:
     """Whether a Nexus service is usable: the CLI's own resolution, with the lease
-    read bounded for the hook's 100 ms."""
+    read bounded by what is left of the hook's read budget."""
     load_siblings()
-    return bool(_endpoint_resolve.endpoint_usable(config, retry_budget_s=_endpoint_resolve.HOOK_LEASE_RETRY_BUDGET_S))
+    return bool(_endpoint_resolve.endpoint_usable(config, retry_budget_s=_remaining(deadline)))
 
 
 # -- the words -----------------------------------------------------------------------------------
@@ -129,6 +154,37 @@ def declined_text() -> str:
         "Nexus is not installed on this machine, and the user chose not to install it for now. "
         "Do not raise it unprompted; /conexus:setup installs it if they change their mind."
     )
+
+
+def quiet_unfinished_text(view: dict[str, Any]) -> str:
+    """States 4 and 5 with the "not now" marker: one quiet line, no question."""
+    what = "was interrupted" if view.get("state") == "interrupted" else "did not finish"
+    log = f" The log is at {view['log']}." if view.get("log") else ""
+    return (
+        f"The last Nexus setup run {what}, and the user chose not to be asked about Nexus for now. "
+        f"Do not raise it unprompted; /conexus:setup picks it up again.{log}"
+    )
+
+
+def quiet_down_text() -> str:
+    """State 7 with the "not now" marker or a recorded CLI-only choice: one quiet line."""
+    return (
+        "Nexus is installed and its local service is not running; the user chose to leave it so "
+        "(CLI only, or not now). Do not raise it unprompted; /conexus:setup starts the service if they change their mind."
+    )
+
+
+def quiet_no_service_text() -> str:
+    """State 8 with the "not now" marker or a recorded CLI-only choice: one quiet line."""
+    return (
+        "Nexus is installed and no Nexus service is set up, as the user chose (CLI only, or not now). "
+        "Do not raise it unprompted; /conexus:setup sets one up if they change their mind."
+    )
+
+
+def chose_cli_only(view: dict[str, Any]) -> bool:
+    """Whether the setup record says the user chose the CLI alone and that run finished."""
+    return view.get("mode") == "cli-only" and view.get("state") == "done"
 
 
 def cannot_start_text(reason: str, view: dict[str, Any]) -> str:
@@ -169,11 +225,12 @@ _UNFINISHED = (*_FAILURES, "interrupted")
 # -- the decision --------------------------------------------------------------------------------
 
 
-def _status(config: Path) -> dict[str, Any]:
-    """The setup directory's view, through the one implementation in ``nx_setup.py``.
-    Any failure reads as no record."""
+def _status(config: Path, deadline: float | None = None) -> dict[str, Any]:
+    """The setup directory's view, through the one implementation in ``nx_setup.py``,
+    with its reads bounded by what is left of the read budget. Any failure reads as
+    no record."""
     try:
-        view = nx_setup.status_view(config / "setup")
+        view = nx_setup.status_view(config / "setup", read_budget_s=_remaining(deadline))
     except Exception:  # noqa: BLE001 -- see the module docstring: the hook never fails a session start
         return {}
     return view if isinstance(view, dict) else {}
@@ -183,9 +240,10 @@ def decide() -> str | None:
     """The text for the model, or ``None`` for silence."""
     if in_remote_workspace():
         return None
+    deadline = time.monotonic() + HOOK_READ_BUDGET_S
     load_siblings()
     config = nx_setup.config_dir()
-    view = _status(config)
+    view = _status(config, deadline)
     state = view.get("state")
     if state == "running" and view.get("live"):  # 1
         return f"A Nexus setup run is live on this machine. {nx_standin.render(view)}"
@@ -194,17 +252,19 @@ def decide() -> str | None:
         reason = _cli_lookup.cannot_start(exe)
         if reason is not None:  # 2
             return cannot_start_text(reason, view)
-        if service_usable(config):  # 3
+        if service_usable(config, deadline):  # 3
             return None
+    not_now = bool(view.get("not_now"))
     if state == "interrupted" or state in _FAILURES:  # 4, 5
-        return nx_standin.render(view)
+        return quiet_unfinished_text(view) if not_now else nx_standin.render(view)
     if exe is None:  # 6
-        if view.get("not_now"):
+        if not_now:
             return declined_text()
         return not_installed_text(nx_standin.manual_commands(), nx_standin.INSTALL_PAGE)
+    quiet = not_now or chose_cli_only(view)
     if nx_setup.provisioned(config):  # 7
-        return service_down_text()
-    return no_service_text()  # 8
+        return quiet_down_text() if quiet else service_down_text()
+    return quiet_no_service_text() if quiet else no_service_text()  # 8
 
 
 def main() -> int:

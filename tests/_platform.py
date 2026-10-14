@@ -45,6 +45,35 @@ def install_windows_exe_fake(bindir: Path, name: str, script: str) -> Path:
     return exe
 
 
+def prune_python(venv: Path, gone: Path) -> Path:
+    """Leave *venv* as ``uv`` leaves a venv whose managed CPython it pruned (the
+    pipx#146 / uv#8028 class); returns *gone*, the directory that no longer exists.
+
+    ``pyvenv.cfg`` names *gone* as ``home`` (every platform). On POSIX the venv's
+    ``bin/python`` and ``bin/python3`` are also links into the pruned directory, so
+    they dangle. Both facts are what a real prune produces, and the second is what
+    the plugin and the CLI require beside the first: Python starts from a venv whose
+    ``home`` is gone as long as the link still resolves (measured on macOS and
+    Linux), so ``home`` alone is no evidence on POSIX. Windows has no links, and
+    ``home`` is the whole of it.
+    """
+    cfg = venv / "pyvenv.cfg"
+    kept = [
+        line for line in (cfg.read_text(encoding="utf-8").splitlines() if cfg.exists() else [])
+        if line.partition("=")[0].strip() != "home"
+    ]
+    cfg.write_text("\n".join([f"home = {gone}", *kept]) + "\n", encoding="utf-8")
+    if not IS_WINDOWS:
+        bindir = venv / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        for name in ("python", "python3"):
+            link = bindir / name
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(gone / "bin" / name)
+    return gone
+
+
 def posix_only(reason: str) -> pytest.MarkDecorator:
     """Skip on native Windows; *reason* names the POSIX-only mechanism pinned."""
     return pytest.mark.skipif(IS_WINDOWS, reason=f"POSIX-only: {reason}")

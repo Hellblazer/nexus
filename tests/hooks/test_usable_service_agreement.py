@@ -19,10 +19,13 @@ resolvers. The four legs of the resolver, in order, and the case of none:
 3. ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` (and ``NX_SERVICE_TOKEN``) in the environment;
 4. a live local supervisor lease.
 
-Known difference, not tested for agreement because it needs a process and a socket: a
-lease that has just passed its TTL is read as live by the real server when its owner
-process is alive and its port answers ``/health`` (reader grace, nexus-wo6sc). The plugin
-makes no network request, so it reads that lease as absent.
+Reader grace (nexus-wo6sc): a lease that has just passed its TTL is read as live by the
+real server when its owner process is alive and its port answers ``/health``. A laptop that
+slept would otherwise be told "service down" by the hook. The plugin makes no network
+request, so it accepts the part it can see (the recorded owner process is alive, the lease
+is within ten TTLs, the host is loopback) and not the ``/health``. The cases below hold
+the two together wherever the port answers; the one named difference, an owner that is alive
+and whose port does not answer, is pinned as a difference and not hidden.
 
 The Windows lease-read bound: the hook's read retries a sharing violation for at most
 ``HOOK_LEASE_RETRY_BUDGET_S`` (the registry's own budget is two seconds, against the
@@ -93,12 +96,16 @@ def _config() -> Path:
     return path
 
 
-def _lease(*, host: str = "127.0.0.1", port: int = 4242, token: str = "lease-token", ttl: float = 60.0, clock: float | None = None) -> None:
+def _lease(
+    *, host: str = "127.0.0.1", port: int = 4242, token: str = "lease-token", ttl: float = 60.0,
+    clock: float | None = None, payload: dict | None = None,
+) -> None:
     registry = ServiceRegistry(
         dir=_config(), tier="storage_service", ttl=ttl, **({} if clock is None else {"clock": lambda: clock}),
     )
     registry.publish(
         service_identity(), endpoint={"host": host, "port": port, "token": token}, version="test", owner_token="agreement",
+        payload=payload,
     )
 
 
@@ -164,6 +171,132 @@ CASES: list[tuple[str, Case, bool]] = [
 ]
 
 
+# -- a lease past its TTL (reader grace) -----------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def healthy_port():
+    """A loopback server that answers ``GET /health`` as the storage service does, so the real
+    server's grace probe finds its service where the lease says it is."""
+    import http.server
+    import threading
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 -- the stdlib's name
+            body = b'{"status": "ok", "db": "up"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server.server_address[1]
+    server.shutdown()
+    server.server_close()
+
+
+def _dead_pid() -> int:
+    import subprocess
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 -- our own interpreter
+    child.wait()
+    return child.pid
+
+
+def _stale(port: int, *, age: float = 25.0, ttl: float = 10.0, pid: int | None = None, host: str = "127.0.0.1", token: str = "t") -> None:
+    """A lease last stamped *age* seconds ago against a *ttl*, owned by *pid* (default: this process)."""
+    payload = {"supervisor_pid": os.getpid() if pid is None else pid}
+    _lease(host=host, port=port, token=token, ttl=ttl, clock=time.time() - age, payload=payload)
+
+
+def _stale_without_pid(port: int) -> None:
+    _lease(port=port, ttl=10.0, clock=time.time() - 25.0, payload=None)
+
+
+def _stale_shutting_down(port: int) -> None:
+    _stale(port)
+    path = _config() / f"storage_service_addr.{service_identity()}"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["status"] = "shutting_down"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+GraceCase = Callable[[pytest.MonkeyPatch, int], None]
+GRACE_CASES: list[tuple[str, GraceCase, bool]] = [
+    ("stale lease, owner alive, port answers", lambda m, port: _stale(port), True),
+    ("stale lease, owner alive, no token in it", lambda m, port: _stale(port, token=""), False),
+    ("stale lease, owner dead", lambda m, port: _stale(port, pid=_dead_pid()), False),
+    ("stale lease, owner alive, past ten TTLs", lambda m, port: _stale(port, age=1000.0), False),
+    ("stale lease, owner alive, just inside ten TTLs", lambda m, port: _stale(port, age=90.0), True),
+    ("stale lease, no owner pid recorded", lambda m, port: _stale_without_pid(port), False),
+    ("stale lease marked shutting down, owner alive", lambda m, port: _stale_shutting_down(port), False),
+    ("stale lease, owner alive, host is not loopback", lambda m, port: _stale(port, host="10.0.0.5"), False),
+    ("stale lease, owner alive, localhost", lambda m, port: _stale(port, host="localhost"), True),
+    # The same lease on the other legs that read it.
+    ("env url, stale lease token, owner alive", lambda m, port: (_env(m, NX_SERVICE_URL="https://svc.example:443"), _stale(port)), True),
+    ("env url, stale lease token, owner dead", lambda m, port: (_env(m, NX_SERVICE_URL="https://svc.example:443"), _stale(port, pid=_dead_pid())), False),
+    ("saved url, stale lease token, owner alive", lambda m, port: (_save(service_url="https://svc.example"), _stale(port)), True),
+    ("host and port env, token from a stale lease, owner alive", lambda m, port: (_env(m, NX_SERVICE_HOST="10.0.0.5", NX_SERVICE_PORT="8123"), _stale(port)), True),
+    ("host and port env, token from a stale lease, owner dead", lambda m, port: (_env(m, NX_SERVICE_HOST="10.0.0.5", NX_SERVICE_PORT="8123"), _stale(port, pid=_dead_pid())), False),
+]
+
+
+@pytest.mark.parametrize(("setup", "usable"), [(c[1], c[2]) for c in GRACE_CASES], ids=[c[0] for c in GRACE_CASES])
+def test_a_lease_past_its_ttl_is_judged_the_same_when_the_port_answers(
+    monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType, nx_setup: ModuleType, notice: ModuleType,
+    healthy_port: int, setup: GraceCase, usable: bool,
+) -> None:
+    setup(monkeypatch, healthy_port)
+    config = _config()
+    # The plugin first and the real resolver last: discovery REAPS a stale lease it will not
+    # honour, and a plugin that read the lease afterwards would agree with "no" for no reason.
+    plugin = (endpoint.endpoint_usable(config), nx_setup._endpoint_resolves(config), notice.service_usable(config))
+    real = setup_tools.usable_service()
+    assert real is usable, "the case's own expectation is wrong, or the real resolver changed"
+    assert plugin == (real, real, real), "a laptop that slept is not told 'service down'"
+
+
+def test_the_owner_check_wants_a_positive_integer_pid(endpoint: ModuleType) -> None:
+    """``_stale_owner_alive`` on its own: a pid that is missing, not an integer or not
+    positive denies the grace (the real registry's guard), before any process is asked."""
+    base = {"endpoint": {"host": "127.0.0.1", "port": 4242}}
+    alive = os.getpid()
+    assert endpoint._stale_owner_alive({**base, "payload": {"supervisor_pid": alive}}, 25.0, 10.0) is True
+    for payload in (None, {}, {"supervisor_pid": None}, {"supervisor_pid": "x"}, {"supervisor_pid": 0}, {"supervisor_pid": -1}, "pid"):
+        assert endpoint._stale_owner_alive({**base, "payload": payload}, 25.0, 10.0) is False, payload
+    assert endpoint._stale_owner_alive({**base}, 25.0, 10.0) is False, "no payload at all"
+
+
+def test_the_named_difference_an_owner_that_is_alive_whose_port_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType,
+) -> None:
+    """The one place the two part: the real server probes ``/health`` and the plugin makes no
+    network request. A supervisor that is alive and wedged, inside ten TTLs, reads as a
+    usable service to the hook and not to the CLI. Pinned so a change on either side is seen."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    _stale(dead_port)
+    # The plugin first: the real resolver reaps a stale lease whose port is dead.
+    assert endpoint.endpoint_usable(_config()) is True
+    assert setup_tools.usable_service() is False
+
+
+def test_only_the_usable_service_check_grants_the_grace(endpoint: ModuleType, healthy_port: int) -> None:
+    """The other hooks read the lease with their own policy (a stale one is not a bearer
+    credential), and ``read_storage_service_lease`` keeps its answer for them."""
+    _stale(healthy_port)
+    assert endpoint.read_storage_service_lease(_config()) is None
+    assert endpoint.read_storage_service_lease(_config(), grace=True) is not None
+
+
 def _corrupt_lease(m: pytest.MonkeyPatch) -> None:
     (_config() / f"storage_service_addr.{service_identity()}").write_text("{ not json", encoding="utf-8")
 
@@ -176,9 +309,26 @@ def _shutdown_lease(m: pytest.MonkeyPatch) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
+def _hand_edited(text: str) -> Case:
+    """A ``config.yml`` a person wrote by hand (the CLI writes block style only): the
+    CLI reads it with PyYAML, the plugin with a line scanner."""
+    def apply(m: pytest.MonkeyPatch) -> None:
+        (_config() / "config.yml").write_text(text, encoding="utf-8")
+    return apply
+
+
 CASES += [
     ("corrupt lease", _corrupt_lease, False),
     ("lease marked shutting down", _shutdown_lease, False),
+    # -- a hand-edited config.yml: the CLI reads any YAML, the plugin a narrow scan --
+    ("flow-style credentials, url and token", _hand_edited("credentials: {service_url: https://svc.example, service_token: tok}\n"), True),
+    ("flow-style credentials, url only", _hand_edited("credentials: {service_url: https://svc.example}\n"), False),
+    ("flow-style credentials, quoted values", _hand_edited("credentials: {service_url: 'https://svc.example', service_token: \"t,ok\"}\n"), True),
+    ("flow-style credentials over several lines", _hand_edited("credentials: {\n  service_url: https://svc.example,\n  service_token: tok,\n}\n"), True),
+    ("flow-style credentials after other keys", _hand_edited("verbose: true\ncredentials: {service_url: https://svc.example, service_token: tok}\nother: 1\n"), True),
+    ("flow-style empty credentials", _hand_edited("credentials: {}\n"), False),
+    ("flow-style credentials with a mint token", _hand_edited("credentials: {service_url: https://svc.example, mint_token: m}\n"), True),
+    ("block-style with an inline comment", _hand_edited("credentials:\n  service_url: https://svc.example  # prod\n  service_token: tok # t\n"), True),
 ]
 
 
@@ -292,4 +442,42 @@ def test_the_hook_passes_its_budget(notice: ModuleType, endpoint: ModuleType, mo
 
     monkeypatch.setattr(notice._endpoint_resolve, "endpoint_usable", fake)
     assert notice.service_usable(_config()) is True
-    assert seen["budget"] == endpoint.HOOK_LEASE_RETRY_BUDGET_S
+    assert seen["budget"] == notice.HOOK_READ_BUDGET_S == endpoint.HOOK_LEASE_RETRY_BUDGET_S
+    # With a deadline already spent by the status reads, the lease gets what is left, nothing.
+    assert notice.service_usable(_config(), deadline=time.monotonic() - 1.0) is True
+    assert seen["budget"] == 0.0
+
+
+# -- the hand-edited config.yml: what the plugin's scan reads, and the limits it states ----------------
+
+
+def _scan(endpoint: ModuleType, text: str, keys: tuple[str, ...] = ("service_url", "service_token")) -> dict[str, str]:
+    (_config() / "config.yml").write_text(text, encoding="utf-8")
+    return endpoint.read_config_yml_credentials(_config(), keys)
+
+
+def test_the_scan_reads_a_flow_mapping_on_one_line_and_over_several(endpoint: ModuleType) -> None:
+    assert _scan(endpoint, "credentials: {service_url: https://a.example, service_token: t1}\n") == {
+        "service_url": "https://a.example", "service_token": "t1",
+    }
+    assert _scan(endpoint, "credentials: {\n service_url: https://a.example,\n service_token: t1\n}\n") == {
+        "service_url": "https://a.example", "service_token": "t1",
+    }
+    assert _scan(endpoint, 'credentials: {"service_url": \'https://a.example\', service_token: "t,1"}\n') == {
+        "service_url": "https://a.example", "service_token": "t,1",
+    }
+    assert _scan(endpoint, "credentials: {service_url: https://a.example, other: x}\n") == {"service_url": "https://a.example"}
+
+
+def test_the_scan_states_its_limits_by_reading_nothing_where_it_does_not_understand(endpoint: ModuleType) -> None:
+    """THE LIMITS (the docstring's list): a key of a document-wide flow mapping, a nested
+    mapping and an unterminated mapping read as absent, never as a guess. A machine
+    configured that way is read as having no saved address by the plugin and as having
+    one by the CLI: the one divergence left in the hand-edited config, and a name for it."""
+    assert _scan(endpoint, "{credentials: {service_url: https://a.example, service_token: t}}\n") == {}
+    assert _scan(endpoint, "credentials: {service_url: {nested: x}, service_token: t}\n") == {"service_token": "t"}
+    assert _scan(endpoint, "credentials: {extra: {a: 1, service_token: x}, service_url: u}\n") == {"service_url": "u"}, "a nested mapping's keys are not credentials"
+    assert _scan(endpoint, "credentials: {service_url: https://a.example\n") == {}
+    assert _scan(endpoint, "credentials:\n  service_url: https://a.example\n  service_token: t\n") == {
+        "service_url": "https://a.example", "service_token": "t",
+    }

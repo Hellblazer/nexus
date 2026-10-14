@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests._platform import posix_only
+from tests._platform import posix_only, prune_python
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 
@@ -136,8 +136,12 @@ def test_a_program_that_vanished_is_not_judged(lookup, tmp_path: Path) -> None:
 def test_a_generation_whose_base_python_was_pruned_cannot_start(lookup, tmp_path: Path, windows: bool) -> None:
     """``pyvenv.cfg`` names the interpreter the venv was built from; ``uv`` removes
     that directory when it prunes the Python. On Windows the program is a launcher
-    copy with no shebang, and this is the whole check."""
-    gen = _venv(tmp_path / "gen-20260101T000000Z", home=tmp_path / "uv" / "cpython-3.12-gone")
+    copy with no shebang, and this is the whole check. On POSIX the interpreter links
+    dangle too (``prune_python`` leaves both)."""
+    if os.name == "nt" and not windows:
+        pytest.skip("the POSIX reading needs links, which a Windows host's prune does not leave")
+    gen = _venv(tmp_path / "gen-20260101T000000Z", home=None, with_cfg=False)
+    prune_python(gen, tmp_path / "uv" / "cpython-3.12-gone")
     exe = gen / "bin" / ("nx-mcp.exe" if windows else "nx-mcp")
     exe.write_bytes(b"MZ not a real launcher" if windows else b"\x7fELF" + bytes(8))
     exe.chmod(0o755)
@@ -177,7 +181,8 @@ def test_a_pyvenv_cfg_without_a_home_line_is_not_judged(lookup, tmp_path: Path) 
 @posix_only("a symlinked program")
 def test_a_symlink_into_a_pruned_venv_cannot_start(lookup, tmp_path: Path) -> None:
     """A ``PATH`` entry that links to a program inside a venv is judged by that venv."""
-    gen = _venv(tmp_path / "tool", home=tmp_path / "gone-python")
+    gen = _venv(tmp_path / "tool", home=None, with_cfg=False)
+    prune_python(gen, tmp_path / "gone-python")
     target = gen / "bin" / "nx"
     target.write_bytes(b"\x7fELF")
     target.chmod(0o755)
@@ -185,6 +190,121 @@ def test_a_symlink_into_a_pruned_venv_cannot_start(lookup, tmp_path: Path) -> No
     link.parent.mkdir()
     os.symlink(target, link)
     assert lookup.cannot_start(str(link), windows=False) is not None
+
+
+# -- a gone home is no evidence on POSIX by itself (Sam, 2026-10-14; review of 4cffeb898 I1) -------
+
+
+def _real_venv(root: Path) -> Path:
+    """A real venv (standard library, no pip, links into the running interpreter)
+    holding a console script whose shebang names the venv's own python, as ``uv``
+    writes them."""
+    import venv
+
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(root)
+    script = root / "bin" / "nx-mcp"
+    script.write_text(f"#!{root / 'bin' / 'python'}\nprint('real server')\n")
+    script.chmod(0o755)
+    return root
+
+
+def _set_home(venv_root: Path, home: Path) -> None:
+    cfg = venv_root / "pyvenv.cfg"
+    lines = [
+        f"home = {home}" if line.partition("=")[0].strip() == "home" else line
+        for line in cfg.read_text(encoding="utf-8").splitlines()
+    ]
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@posix_only("a venv's python is a link that can resolve whatever pyvenv.cfg says")
+def test_a_real_venv_whose_home_is_gone_but_whose_interpreter_still_resolves_is_not_called_broken(lookup, tmp_path: Path) -> None:
+    """The review's false positive (4cffeb898 I1): ``home`` names a directory that is
+    not there while ``bin/python`` still resolves. Sam's rule: ``home`` alone is no
+    evidence on POSIX. Whether such a venv then starts depends on the interpreter
+    build (measured 2026-10-14: a system CPython falls back to the link's real path
+    and runs; a ``uv`` standalone CPython fails to find its library), so the test
+    pins the rule and not the start."""
+    root = _real_venv(tmp_path / "venv")
+    _set_home(root, tmp_path / "uv" / "cpython-gone")
+    assert not (tmp_path / "uv" / "cpython-gone").exists()
+    assert (root / "bin" / "python").resolve().exists()
+    assert lookup.cannot_start(str(root / "bin" / "nx-mcp"), windows=False) is None
+
+
+@posix_only("a pruned venv's python links dangle")
+def test_a_real_venv_whose_home_is_gone_and_whose_interpreter_dangles_cannot_start(lookup, tmp_path: Path) -> None:
+    """What a real ``uv`` prune leaves, and the program really does not start."""
+    import subprocess
+
+    root = _real_venv(tmp_path / "venv")
+    prune_python(root, tmp_path / "uv" / "cpython-gone")
+    with pytest.raises(OSError):  # the kernel cannot find the shebang's interpreter
+        subprocess.run([str(root / "bin" / "nx-mcp")], capture_output=True, timeout=60, check=False)
+    reason = lookup.cannot_start(str(root / "bin" / "nx-mcp"), windows=False)
+    assert reason is not None and "cpython-gone" in reason
+
+
+@posix_only("links and a missing home")
+def test_a_gone_home_with_no_dangling_link_is_runnable_for_a_program_with_no_shebang(lookup, tmp_path: Path) -> None:
+    gen = _venv(tmp_path / "gen", home=tmp_path / "uv" / "cpython-gone")
+    (gen / "bin" / "python").symlink_to(Path(sys.executable))
+    exe = gen / "bin" / "nx-mcp"
+    exe.write_bytes(b"\x7fELF")
+    exe.chmod(0o755)
+    assert lookup.cannot_start(str(exe), windows=False) is None
+
+
+@posix_only("links and a present home")
+def test_a_dangling_link_with_the_home_present_is_not_enough_either(lookup, tmp_path: Path) -> None:
+    """One fact is not enough: both the home and a link must say it is gone."""
+    home = tmp_path / "uv" / "cpython-3.12"
+    home.mkdir(parents=True)
+    gen = _venv(tmp_path / "gen", home=home)
+    (gen / "bin" / "python").symlink_to(tmp_path / "nowhere" / "python")
+    exe = gen / "bin" / "nx-mcp"
+    exe.write_bytes(b"\x7fELF")
+    exe.chmod(0o755)
+    assert lookup.cannot_start(str(exe), windows=False) is None
+
+
+def test_on_windows_a_gone_home_alone_is_the_whole_evidence(lookup, tmp_path: Path) -> None:
+    """There are no links there: a launcher copy with no shebang, and ``home``."""
+    gen = _venv(tmp_path / "gen", home=tmp_path / "uv" / "cpython-gone")
+    exe = gen / "bin" / "nx-mcp.exe"
+    exe.write_bytes(b"MZ")
+    assert lookup.cannot_start(str(exe), windows=True) is not None
+
+
+@posix_only("a shebang names the interpreter the kernel starts")
+def test_a_shebang_longer_than_256_bytes_is_read_whole(lookup, tmp_path: Path) -> None:
+    """The line used to be cut at 256 bytes, which named a path that is not there and
+    so called a working program broken (and cut a missing path short in the reason)."""
+    deep = tmp_path
+    for i in range(3):
+        deep = deep / (f"d{i}-" + "x" * 120)
+    deep.mkdir(parents=True)
+    alive = deep / "python"
+    alive.symlink_to(Path(sys.executable))
+    long_line = f"#!{alive}"
+    assert len(long_line) > 256, len(long_line)
+    exe = _script(tmp_path / "bin" / "nx-mcp", long_line)
+    assert lookup.cannot_start(str(exe), windows=False) is None
+    dead = deep / "pruned" / "python"
+    exe2 = _script(tmp_path / "bin" / "nx-hook", f"#!{dead}")
+    reason = lookup.cannot_start(str(exe2), windows=False)
+    assert reason is not None and str(dead) in reason, reason
+
+
+@posix_only("a shebang names the interpreter the kernel starts")
+def test_a_first_line_that_never_ends_is_not_judged(lookup, tmp_path: Path) -> None:
+    """Bounded read: a file that starts ``#!`` and has no line end within the bound
+    is not a shebang anyone can resolve."""
+    exe = tmp_path / "bin" / "nx-mcp"
+    exe.parent.mkdir()
+    exe.write_bytes(b"#!/nowhere/" + b"a" * 20000)
+    exe.chmod(0o755)
+    assert lookup.cannot_start(str(exe), windows=False) is None
 
 
 def test_a_home_that_is_a_file_cannot_start(lookup, tmp_path: Path) -> None:
@@ -206,3 +326,62 @@ def test_the_check_starts_no_process_and_opens_no_socket() -> None:
         alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
     } | {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
     assert not imported & {"subprocess", "socket", "urllib", "http"}, imported
+
+
+# -- the plugin and the CLI judge a generation by one rule -------------------------------------------
+
+
+def _generation_fixture(root: Path, *, home: str, link: str, shebang: str) -> Path:
+    """A generation with ``bin/nx`` and ``bin/nx-mcp`` (the same file twice), built
+    from three independent facts: what ``pyvenv.cfg`` says, what ``bin/python`` is, and
+    what the scripts' first line says."""
+    gen = root / "gen"
+    (gen / "bin").mkdir(parents=True)
+    gone = root / "uv" / "cpython-gone"
+    cfg = {
+        "ok": f"home = {root}\n", "gone": f"home = {gone}\n", "nocfg": None, "nohomeline": "version = 3.12.1\n",
+    }[home]
+    if cfg is not None:
+        (gen / "pyvenv.cfg").write_text(cfg)
+    if os.name != "nt":
+        if link == "resolves":
+            (gen / "bin" / "python").symlink_to(Path(sys.executable))
+        elif link == "dangles":
+            (gen / "bin" / "python").symlink_to(gone / "bin" / "python")
+    first = {
+        "none": None, "ok": f"#!{sys.executable}", "missing": f"#!{root / 'pruned' / 'python'}",
+        "env-missing": "#!/usr/bin/env pythonx-not-here",
+    }[shebang]
+    for name in ("nx", "nx-mcp"):
+        exe = gen / "bin" / name
+        exe.write_bytes((first + "\nprint('x')\n").encode() if first else b"\x7fELF")
+        exe.chmod(0o755)
+    return gen
+
+
+@pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
+@pytest.mark.parametrize("shebang", ["none", "ok", "missing", "env-missing"])
+@pytest.mark.parametrize("link", ["absent", "resolves", "dangles"])
+@pytest.mark.parametrize("home", ["ok", "gone", "nocfg", "nohomeline"])
+def test_the_plugin_and_the_cli_give_the_same_verdict_on_a_generation(
+    lookup, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: str, link: str, shebang: str, windows: bool,
+) -> None:
+    """``_cli_lookup.cannot_start`` decides for the launcher and the hook;
+    ``self_cmd._generation_interpreter_gone`` decides whether ``--bootstrap`` refuses
+    or repairs. A disagreement is the loop the review found: the plugin says
+    "setup repairs it" and setup's build is refused as "already installed"."""
+    if os.name == "nt" and not windows:
+        pytest.skip("the POSIX reading needs links and a shebang")
+    from nexus.commands import self_cmd
+
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    gen = _generation_fixture(tmp_path, home=home, link=link, shebang=shebang)
+    plugin = lookup.cannot_start(str(gen / "bin" / "nx-mcp"), windows=windows) is not None
+    cli = self_cmd._generation_interpreter_gone(gen, windows=windows)
+    assert plugin == cli, (home, link, shebang, windows, plugin, cli)
+    # Not only agreement: each cell has its expected answer, so two wrong verdicts cannot agree.
+    expected = (
+        home == "gone"
+    ) if windows else ((home == "gone" and link == "dangles") or shebang in ("missing", "env-missing"))
+    assert plugin is expected
+

@@ -116,20 +116,47 @@ def resolve(name: str) -> str | None:
     return _exec_path.which_off_cwd(name, path=os.pathsep.join(entries))
 
 
-#: How much of a program is read to find its shebang line.
-_SHEBANG_BYTES = 256
+#: The most of a program that is read to find its shebang line. A line that does not
+#: end inside it is not a shebang anyone can resolve (the kernel's own limit is a few
+#: hundred bytes), so it is not judged.
+_SHEBANG_BYTES = 8192
 
 
-def _venv_problem(exe: str) -> str | None:
+def _dangling_interpreter(root: str) -> str | None:
+    """A ``python*`` link in ``<root>/bin`` that points nowhere, or ``None``.
+
+    That is what ``uv`` leaves in a venv when it prunes the managed CPython the venv
+    was built on: ``bin/python`` and ``bin/python3`` stay, linking into a directory
+    that is gone. A venv whose links resolve is not judged by this.
+    """
+    found: list[str] = []
+    try:
+        with os.scandir(os.path.join(root, "bin")) as entries:
+            for entry in entries:
+                if entry.name.startswith("python") and entry.is_symlink() and not os.path.exists(entry.path):
+                    found.append(entry.path)
+    except OSError:
+        return None
+    return min(found) if found else None
+
+
+def _venv_problem(exe: str, windows: bool) -> str | None:
     """Why the venv *exe* sits in cannot run, from its ``pyvenv.cfg``, or ``None``.
 
     ``<venv>/bin/<name>`` (POSIX) and ``<venv>\\bin\\<name>.exe`` or
     ``<venv>\\Scripts\\<name>.exe`` (Windows) all have the venv two levels up.
     ``pyvenv.cfg`` names the directory of the interpreter the venv was built from
-    (``home``), and ``uv`` removes that directory when it prunes the Python. A
-    generation's launchers are copies with no shebang on Windows, so this is the
-    only evidence there. A missing or unreadable ``pyvenv.cfg``, or one with no
-    ``home`` line, is no evidence.
+    (``home``), and ``uv`` removes that directory when it prunes the Python.
+
+    Windows: a gone ``home`` is the whole of the evidence, because a generation's
+    launchers are copies with no shebang and there are no links. POSIX (Sam,
+    2026-10-14; the review of 4cffeb898 measured the false positive): a venv whose
+    ``home`` is gone can still start, because its ``bin/python`` is a link and the
+    interpreter finds its way back through the link's real path, so ``home`` alone
+    says nothing. It counts only beside a ``python*`` link in the venv that points
+    nowhere, which is the other thing a prune leaves. The program's own shebang is
+    judged separately (:func:`_shebang_problem`). A missing or unreadable
+    ``pyvenv.cfg``, or one with no ``home`` line, is no evidence.
     """
     root = os.path.dirname(os.path.dirname(exe))
     try:
@@ -141,9 +168,14 @@ def _venv_problem(exe: str) -> str | None:
         key, sep, value = line.partition("=")
         if sep and key.strip() == "home":
             home = value.strip()
-            if home and not os.path.isdir(home):
+            if not home or os.path.isdir(home):
+                return None
+            if windows:
                 return f"the Python it was built with ({home}) is gone"
-            return None
+            dangling = _dangling_interpreter(root)
+            if dangling is None:
+                return None
+            return f"the Python it was built with ({home}) is gone and {dangling} points nowhere"
     return None
 
 
@@ -154,16 +186,19 @@ def _shebang_problem(exe: str) -> str | None:
     (it must exist and be executable; a dangling symlink, which is how ``uv``
     leaves a pruned interpreter, does not exist) or ``/usr/bin/env <name>`` (the
     name must be on ``PATH``). A relative interpreter, ``env`` with options or an
-    assignment, and any file that does not start with ``#!`` are not judged.
+    assignment, and any file that does not start with ``#!`` are not judged. The
+    whole line is read, up to :data:`_SHEBANG_BYTES`.
     """
     try:
         with open(exe, "rb") as handle:
-            head = handle.read(_SHEBANG_BYTES)
+            head = handle.readline(_SHEBANG_BYTES)
     except OSError:
         return None
     if not head.startswith(b"#!"):
         return None
-    fields = head[2:].split(b"\n", 1)[0].decode("utf-8", "replace").split()
+    if len(head) >= _SHEBANG_BYTES and not head.endswith(b"\n"):
+        return None
+    fields = head[2:].decode("utf-8", "replace").split()
     if not fields:
         return None
     interpreter = fields[0]
@@ -192,11 +227,14 @@ def cannot_start(exe: str, *, windows: bool | None = None) -> str | None:
     on positive evidence, so a program in a directory with no ``pyvenv.cfg``
     (the suite's fakes, a binary) is runnable here.
 
-    Two sources of evidence. The venv around the program (``pyvenv.cfg``'s
-    ``home`` is not a directory), on every platform. On POSIX also the program's
-    own shebang (:func:`_shebang_problem`), for a program outside a venv or whose
-    venv answers. The path is checked as given and, when it is a link, as it
-    resolves. *windows* selects the Windows branch (no shebang) for a test.
+    The rule, which ``nexus.commands.self_cmd._generation_interpreter_gone`` states
+    again for the CLI (``tests/hooks/test_cli_cannot_start.py`` runs the two over one
+    matrix, so they cannot disagree). Windows: ``pyvenv.cfg``'s ``home`` is not a
+    directory. POSIX: ``home`` is not a directory AND a ``python*`` link in the venv
+    dangles (:func:`_venv_problem`), or the program's own shebang names an
+    interpreter that is missing (:func:`_shebang_problem`). The path is checked as
+    given and, when it is a link, as it resolves. *windows* selects the Windows
+    branch (no shebang, no links) for a test.
     """
     windows = (os.name == "nt") if windows is None else windows
     try:
@@ -205,7 +243,7 @@ def cannot_start(exe: str, *, windows: bool | None = None) -> str | None:
         if real != exe:
             candidates.append(real)
         for candidate in candidates:
-            problem = _venv_problem(candidate)
+            problem = _venv_problem(candidate, windows)
             if problem is not None:
                 return problem
         return None if windows else _shebang_problem(exe)

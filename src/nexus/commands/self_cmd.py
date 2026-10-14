@@ -362,18 +362,78 @@ def _shims_are_in_place(tools: Path, bin_dir: Path) -> bool:
     return nx.is_symlink() and nx.exists() and install_layout.is_under_uv_tool_install(nx)
 
 
-def _generation_interpreter_gone(generation: Path) -> bool:
-    """Whether the Python *generation* was built on is gone: ``pyvenv.cfg`` names a
-    ``home`` directory that no longer exists, which is what ``uv`` leaves when it
-    prunes a managed CPython (the pipx#146 / uv#8028 class; ``Receipt.base_interpreter``
-    records the same fact for ``nx doctor``). A generation with no ``pyvenv.cfg``, or
-    one with no ``home`` line, gives no evidence either way."""
+#: The most of a program read to find its shebang line (``_cli_lookup._SHEBANG_BYTES``).
+_SHEBANG_BYTES = 8192
+
+
+def _python_link_dangles(venv: Path) -> bool:
+    """Whether a ``python*`` link in ``<venv>/bin`` points nowhere: what ``uv`` leaves
+    when it prunes the managed CPython the venv was built on."""
+    try:
+        with os.scandir(venv / "bin") as entries:
+            return any(
+                e.name.startswith("python") and e.is_symlink() and not os.path.exists(e.path) for e in entries
+            )
+    except OSError:
+        return False
+
+
+def _shebang_interpreter_missing(program: Path) -> bool:
+    """Whether *program*'s ``#!`` line names an interpreter that cannot be started: an
+    absolute path that is missing or not executable, or ``/usr/bin/env <name>`` with
+    no such ``<name>`` on the absolute ``PATH`` entries. Relative interpreters, ``env``
+    with options or an assignment, and any file with no ``#!`` line are not judged.
+    The plugin's ``_cli_lookup._shebang_problem`` states the same rule."""
+    try:
+        with open(program, "rb") as handle:
+            head = handle.readline(_SHEBANG_BYTES)
+    except OSError:
+        return False
+    if not head.startswith(b"#!") or (len(head) >= _SHEBANG_BYTES and not head.endswith(b"\n")):
+        return False
+    fields = head[2:].decode("utf-8", "replace").split()
+    if not fields:
+        return False
+    interpreter = fields[0]
+    if os.path.basename(interpreter) == "env":
+        name = fields[1] if len(fields) > 1 else ""
+        if not name or name.startswith("-") or "=" in name or os.path.dirname(name):
+            return False
+        import shutil  # noqa: PLC0415 — stdlib, deferred
+
+        entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(e)]
+        return shutil.which(name, path=os.pathsep.join(entries)) is None
+    if not os.path.isabs(interpreter):
+        return False
+    return not os.path.exists(interpreter) or not os.access(interpreter, os.X_OK)
+
+
+def _generation_interpreter_gone(generation: Path, *, windows: bool | None = None) -> bool:
+    """Whether a venv (a generation, or the legacy ``uv tool`` tree) cannot start
+    because the Python it was built on is gone. The plugin's
+    ``_cli_lookup.cannot_start`` states the same rule for a program, and
+    ``tests/hooks/test_cli_cannot_start.py`` runs the two over one matrix.
+
+    Windows: ``pyvenv.cfg`` names a ``home`` that is not a directory, which is what
+    ``uv`` leaves when it prunes a managed CPython (the pipx#146 / uv#8028 class;
+    ``Receipt.base_interpreter`` records the same fact for ``nx doctor``). POSIX (Sam,
+    2026-10-14): a gone ``home`` alone says nothing, because the venv's ``bin/python``
+    is a link and the interpreter can find its way back through it; it counts beside
+    a ``python*`` link that dangles, and a console script whose own shebang names a
+    missing interpreter counts alone. A venv with no ``pyvenv.cfg``, or one with no
+    ``home`` line, gives no evidence from the cfg."""
+    windows = _is_windows() if windows is None else windows
     try:
         text = (generation / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
     except OSError:
+        text = ""
+    home = _generation()._pyvenv_value(text, "home").strip() if text else ""
+    if home and not Path(home).is_dir() and (windows or _python_link_dangles(generation)):
+        return True
+    if windows:
         return False
-    home = _generation()._pyvenv_value(text, "home").strip()
-    return bool(home) and not Path(home).is_dir()
+    # The two console scripts a generation always has (order is the plugin's; not an argv).
+    return any(_shebang_interpreter_missing(generation / "bin" / name) for name in ("nx-mcp", "nx"))
 
 
 def _existing_install(tools: Path, bin_dir: Path) -> str | None:
@@ -382,10 +442,14 @@ def _existing_install(tools: Path, bin_dir: Path) -> str | None:
     Complete means ``current`` resolves to a receipted generation that can run
     (its Python is not gone, :func:`_generation_interpreter_gone`) AND the shim
     step's output is in place (:func:`_shims_are_in_place`), or a
-    ``uv tool install conexus`` tree exists. A generation whose interpreter was
-    pruned is not complete: the plugin's launcher serves the stand-in for it and its
-    ``setup`` runs ``--bootstrap`` to repair it (RDR-228 Phase 2 Step 4, nexus-sv2wx.17;
-    Sam, 2026-10-14), and a refusal here would leave the repair with nothing to run.
+    ``uv tool install conexus`` tree exists that can run. A tree or generation whose
+    interpreter was pruned is not complete: the plugin's launcher serves the stand-in
+    for it and its ``setup`` runs ``--bootstrap`` to repair it (RDR-228 Phase 2 Step 4,
+    nexus-sv2wx.17; Sam, 2026-10-14), and a refusal here would leave the repair with
+    nothing to run. That holds for the legacy tree (the README's own install path) as
+    much as for a generation, and a broken ``current`` generation is repaired even
+    when a working legacy tree sits beside it: the plugin's lookup is layout-first, so
+    the broken generation is the one it runs and the one to replace.
     Neither half alone will do: the
     receipt is written when the build ends, before ``current``, and ``current``
     is flipped before the shims, so a run that died at either point leaves state
@@ -395,15 +459,13 @@ def _existing_install(tools: Path, bin_dir: Path) -> str | None:
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     current = _current_generation_dir(tools)
-    if (
-        current is not None
-        and _read_receipt_or_none(current) is not None
-        and not _generation_interpreter_gone(current)
-        and _shims_are_in_place(tools, bin_dir)
-    ):
-        return f"generation {current.name} under {tools}"
+    if current is not None and _read_receipt_or_none(current) is not None:
+        if _generation_interpreter_gone(current):
+            return None
+        if _shims_are_in_place(tools, bin_dir):
+            return f"generation {current.name} under {tools}"
     legacy = install_layout.uv_conexus_venv(platform=_plat())
-    if install_layout.venv_bin(legacy, platform=_plat()).is_dir():
+    if install_layout.venv_bin(legacy, platform=_plat()).is_dir() and not _generation_interpreter_gone(legacy):
         return f"a `uv tool` install at {legacy}"
     return None
 

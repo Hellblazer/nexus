@@ -59,7 +59,7 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download), cli-only (the CLI alone, up to about 0.7 GB to download; a service can be added later), "
+    "up to about 1.3 GB to download, 2.4 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
@@ -224,8 +224,9 @@ def no_service_notice() -> str | None:
     return (
         "Nexus has no usable service on this machine: no service address is configured and no local service "
         "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
-        "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software, "
-        "so act only on the user's answer."
+        "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software "
+        "(a local service: up to about 1.3 GB to download, 2.4 GB on disk; the CLI alone: up to about 0.7 GB to "
+        "download, 1.6 GB on disk), so act only on the user's answer."
     )
 
 

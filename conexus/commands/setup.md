@@ -10,7 +10,9 @@ The way back after "not now" or "CLI only", the way to start a service that is d
 
 Call the `setup_status` tool of the nexus server (in Claude Code its full name is `mcp__plugin_conexus_nexus__setup_status`) and read the answer.
 
-If the nexus server offers no `setup_status` tool, the installed Nexus CLI is older than the release that carries the setup tools. Say that, and give the user these two commands as text, to run in a terminal. Do not run them yourself.
+If the nexus server offers no `setup_status` tool, first check that the server is connected: in Claude Code look at `/mcp`. A server that is disconnected, failed or still starting offers no tools at all, and that is not an older CLI. Tell the user what `/mcp` shows; if the server is not connected, have the user reconnect it (`/mcp`, the server, Reconnect) or start a new session, then call `setup_status` again.
+
+Only when the server is connected and still offers no `setup_status` tool, the installed Nexus CLI is older than the release that carries the setup tools. Say that, and give the user these two commands as text, to run in a terminal. Do not run them yourself.
 
 ```
 nx self install

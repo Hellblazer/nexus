@@ -34,6 +34,7 @@ from tests._platform import (
     assert_owner_only,
     install_windows_exe_fake,
     posix_only,
+    prune_python,
     scrubbed_env,
 )
 
@@ -97,7 +98,7 @@ try:
                 open(p, "a").close()
         if "copytree" in eff:
             import shutil
-            shutil.copytree(eff["copytree"][0], eff["copytree"][1], dirs_exist_ok=True)
+            shutil.copytree(eff["copytree"][0], eff["copytree"][1], symlinks=True, dirs_exist_ok=True)  # links kept as links: a pruned venv's dangle
         if "point_current" in eff:
             point_current(*eff["point_current"])
         if "repoint_current" in eff:
@@ -1551,8 +1552,9 @@ def test_a_layout_install_that_bootstrap_would_still_finish_runs_the_build_step(
 
 
 def _prune_python(gen: Path, root: Path) -> None:
-    """What ``uv`` does to a generation: the interpreter ``pyvenv.cfg`` names is gone."""
-    (gen / "pyvenv.cfg").write_text(f"home = {root / 'uv' / 'cpython-3.12-pruned'}\n")
+    """What ``uv`` does to a generation: the interpreter ``pyvenv.cfg`` names is gone and
+    (POSIX) the venv's python links dangle. ``home`` alone is no evidence on POSIX."""
+    prune_python(gen, root / "uv" / "cpython-3.12-pruned")
 
 
 def test_a_layout_install_whose_interpreter_is_gone_is_not_asked_and_the_build_runs(box: Box) -> None:
@@ -1968,3 +1970,53 @@ def test_autostart_asked_of_a_running_service_says_the_login_unit_was_not_regist
         assert "nx daemon service install --autostart" in done["message"]
     else:
         assert "login unit" not in done["message"]
+
+
+# -- the sharing-violation retry: two seconds for the setup process, a caller's bound for the hook ----
+
+
+def test_the_retry_gives_up_inside_a_callers_budget_and_keeps_two_seconds_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import inspect
+
+    mod = _load_module()
+    assert inspect.signature(mod._retry_sharing).parameters["budget_s"].default == 2.0, "the writers keep their patience"
+    calls = {"n": 0}
+
+    def busy() -> None:
+        calls["n"] += 1
+        raise PermissionError(13, "sharing violation")
+
+    monkeypatch.setattr(mod, "_windows", lambda: True)
+    started = time.monotonic()
+    with pytest.raises(PermissionError):
+        mod._retry_sharing(busy, budget_s=0.03)
+    elapsed = time.monotonic() - started
+    assert 0.02 <= elapsed < 0.3, elapsed
+    assert calls["n"] > 1, "it retries inside the budget"
+    calls["n"] = 0
+    with pytest.raises(PermissionError):
+        mod._retry_sharing(busy, budget_s=0)
+    assert calls["n"] == 1, "a zero budget tries once"
+
+
+@posix_only("a mode-000 file is how POSIX produces the PermissionError the Windows branch retries")
+def test_status_view_spends_one_read_budget_across_its_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two files are read (status and the error record); the bound is for the pair."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    setup.mkdir()
+    for name in ("status.json", "status.error"):
+        (setup / name).write_text("{}", encoding="utf-8")
+        (setup / name).chmod(0)
+    monkeypatch.setattr(mod, "_windows", lambda: True)
+    try:
+        started = time.monotonic()
+        view = mod.status_view(setup, read_budget_s=0.03)
+        elapsed = time.monotonic() - started
+    finally:
+        for name in ("status.json", "status.error"):
+            (setup / name).chmod(0o600)
+    assert view["state"] == "none", "unreadable reads as no record"
+    assert elapsed < 0.2, f"two files held took {elapsed:.2f}s against a 0.03s budget for the pair"

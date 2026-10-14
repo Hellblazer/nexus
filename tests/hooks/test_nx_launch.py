@@ -21,7 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
-from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
+from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, prune_python, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
@@ -435,7 +435,7 @@ def _broken_layout(tmp_path: Path, *names: str) -> tuple[Path, Path]:
     that is gone: what ``uv`` leaves when it prunes the interpreter. The same on
     POSIX and Windows, where the fake is a launcher ``.exe`` with no shebang."""
     tools, gen = _layout(tmp_path, *names)
-    (gen / "pyvenv.cfg").write_text(f"home = {tmp_path / 'uv' / 'cpython-3.12-pruned'}\nversion = 3.12.1\n")
+    prune_python(gen, tmp_path / "uv" / "cpython-3.12-pruned")
     return tools, gen
 
 

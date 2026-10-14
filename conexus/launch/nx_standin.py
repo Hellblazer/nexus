@@ -39,9 +39,9 @@ arguments and descriptions (``nexus.mcp.setup_tools``), and
 ``nexus``, so it holds its own.
 
 A stand-in never serves a Nexus tool, and it does not swap itself for the real
-server inside one connection. The launcher decides at each start from one fact,
-whether the program resolves, so the next start after an install runs the real
-server.
+server inside one connection. The launcher decides at each start from two facts,
+whether the program resolves and, when it does, whether it can start, so the next
+start after an install or a repair runs the real server.
 
 Transport: MCP stdio, newline-delimited JSON-RPC 2.0 on stdin/stdout. It writes
 nothing to stderr: Claude Code records every stderr line of a stdio server as an
@@ -159,9 +159,29 @@ def instructions(platform: str | None = None, broken: str | None = None) -> str:
     )
 
 
-def setup_text(platform: str | None = None) -> str:
+#: The one command that repairs an install that cannot start, as ``nx_setup.py``'s build
+#: step runs it (there pinned to the plugin's version; here, with no version known, the
+#: latest). For the user to run when the setup process is missing from the plugin.
+REPAIR_COMMAND: str = "uv tool run --python 3.12 --from conexus nx self install --bootstrap"
+
+
+def setup_text(platform: str | None = None, broken: str | None = None) -> str:
     """What the tools answer when the setup process (``nx_setup.py``) is missing
-    from the plugin: the commands, for the user to run."""
+    from the plugin: the commands, for the user to run. With *broken* (why a found CLI
+    cannot start) the text says Nexus is installed and cannot start, and gives the
+    command that repairs it, not the commands of a first install."""
+    if broken is not None:
+        return (
+            f"{broken_text(broken)}\n\n"
+            "The plugin's setup process is missing, so this tool repaired nothing. "
+            "Show the user the command below and let them decide. "
+            "It is for the user to run in a terminal; do not run it yourself unless the user asks you to.\n\n"
+            f"    {REPAIR_COMMAND}\n\n"
+            "It builds the CLI again: up to about 0.7 GB to download and several minutes. Afterwards the user "
+            "reconnects the `nexus` server (in Claude Code: /mcp, the server, Reconnect) or starts a new "
+            "session.\n\n"
+            f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
+        )
     return (
         f"{NOT_INSTALLED}\n\n"
         "The plugin's setup process is missing, so this tool installed nothing. "
@@ -195,7 +215,7 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download), cli-only (the CLI alone, up to about 0.7 GB to download; a service can be added later), "
+    "up to about 1.3 GB to download, 2.4 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
@@ -381,11 +401,13 @@ def setup_script() -> str | None:
     return path if os.path.isfile(path) else None
 
 
-def _call_script(args: list[str]) -> dict[str, Any]:
-    """Run one ``nx_setup.py`` command and return its JSON object."""
+def _call_script(args: list[str], broken: str | None = None) -> dict[str, Any]:
+    """Run one ``nx_setup.py`` command and return its JSON object. *broken* is why a
+    found CLI cannot start (``None``: it was not found); a failure says which."""
     script = setup_script()
+    fallback = setup_text(broken=broken)
     if script is None or not sys.executable:
-        raise SetupError(setup_text())
+        raise SetupError(fallback)
     try:
         done = subprocess.run(  # noqa: S603 -- our own interpreter and the plugin's script
             [sys.executable, script, *args],
@@ -394,16 +416,16 @@ def _call_script(args: list[str]) -> dict[str, Any]:
             creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise SetupError(f"The setup process could not be run: {exc}.\n\n{setup_text()}") from exc
+        raise SetupError(f"The setup process could not be run: {exc}.\n\n{fallback}") from exc
     lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
     if done.returncode != 0 or not lines:
-        raise SetupError(f"The setup process failed (exit {done.returncode}) and printed no answer.\n\n{setup_text()}")
+        raise SetupError(f"The setup process failed (exit {done.returncode}) and printed no answer.\n\n{fallback}")
     try:
         view = json.loads(lines[-1])
     except ValueError as exc:
-        raise SetupError(f"The setup process printed something other than JSON.\n\n{setup_text()}") from exc
+        raise SetupError(f"The setup process printed something other than JSON.\n\n{fallback}") from exc
     if not isinstance(view, dict) or "state" not in view:
-        raise SetupError(f"The setup process printed an answer with no state.\n\n{setup_text()}")
+        raise SetupError(f"The setup process printed an answer with no state.\n\n{fallback}")
     return view
 
 
@@ -414,8 +436,10 @@ def _checked(view: dict[str, Any], *, started: bool | None = None) -> str:
     return text
 
 
-def run_setup(arguments: Any) -> str:
-    """The ``setup`` tool. Raises :class:`SetupError` for a refusal or a failure."""
+def run_setup(arguments: Any, broken: str | None = None) -> str:
+    """The ``setup`` tool. Raises :class:`SetupError` for a refusal or a failure.
+    *broken* is why a found CLI cannot start, so a failure to run the setup process
+    says "cannot start" and not "not installed"."""
     if not isinstance(arguments, dict):
         raise SetupError("setup takes an object: mode, and for local optionally autostart.")
     mode = arguments.get("mode")
@@ -427,22 +451,26 @@ def run_setup(arguments: Any) -> str:
     if mode not in MODES:
         raise SetupError(mode_refusal(mode))
     if mode == "not-now":
-        view = _call_script(["not-now"])
+        view = _call_script(["not-now"], broken)
         if view.get("state") == "error":
             return _checked(view)
         return NOT_NOW_TEXT + (("\n" + render(view)) if view.get("live") else "")
-    view = _call_script(["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []))
+    view = _call_script(["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []), broken)
     return _checked(view, started=bool(view.get("started")))
 
 
 def run_status(broken: str | None = None) -> str:
-    """The ``setup_status`` tool. With *broken*, a state with no setup history opens
-    with the installed-but-cannot-start statement and not "not installed"."""
-    view = _call_script(["status"])
+    """The ``setup_status`` tool. With no setup history (state ``none``) the answer opens
+    with the statement of what is wrong: "not installed", or with *broken* (why a found
+    CLI cannot start) "installed but cannot start" and the repair offer. With a history
+    (running, done, failed, interrupted) it is the record's own report and nothing
+    before it: the stand-in is served until the user reconnects, so a poll during or
+    after the repair must say how the repair went, not offer it again."""
+    view = _call_script(["status"], broken)
     text = _checked(view)
-    if broken is not None:
-        return f"{broken_text(broken)} {BROKEN_REPAIR}\n{text}"
     if view.get("state") == "none":
+        if broken is not None:
+            return f"{broken_text(broken)} {BROKEN_REPAIR}\n{text}"
         return f"{NOT_INSTALLED}\n{text}"
     return text
 
@@ -514,7 +542,7 @@ def handle(server: StandIn, message: Any) -> dict[str, Any] | None:
                 return _error(request_id, -32602, f"Unknown tool: {name!r}. Nexus is not installed.")
             arguments = params.get("arguments") if isinstance(params, dict) else None
             try:
-                text = run_setup(arguments if arguments is not None else {}) if name == "setup" else run_status(server.broken)
+                text = run_setup(arguments if arguments is not None else {}, server.broken) if name == "setup" else run_status(server.broken)
             except SetupError as exc:
                 return _result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
             return _result(request_id, {"content": [{"type": "text", "text": text}]})

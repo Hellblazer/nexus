@@ -44,6 +44,7 @@ from nexus import install_layout
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
 from nexus.commands import self_cmd
+from tests._platform import prune_python
 
 ON_WINDOWS = os.name == "nt"
 
@@ -1005,15 +1006,175 @@ class TestAnInstallWhoseInterpreterWasPruned:
         assert result.returncode == 1 and "already installed" in result.stderr
 
     def test_the_helper_reads_only_the_home_line(self, tmp_path: Path) -> None:
+        """Windows-shaped (``windows=True``): a gone ``home`` is the whole evidence."""
         generation = tmp_path / "gen"
         generation.mkdir()
-        assert self_cmd._generation_interpreter_gone(generation) is False, "no pyvenv.cfg is no evidence"
+        assert self_cmd._generation_interpreter_gone(generation, windows=True) is False, "no pyvenv.cfg is no evidence"
         (generation / "pyvenv.cfg").write_text("version = 3.12.1\n")
-        assert self_cmd._generation_interpreter_gone(generation) is False, "no home line is no evidence"
+        assert self_cmd._generation_interpreter_gone(generation, windows=True) is False, "no home line is no evidence"
         (generation / "pyvenv.cfg").write_text(f"home = {tmp_path}\n")
-        assert self_cmd._generation_interpreter_gone(generation) is False
+        assert self_cmd._generation_interpreter_gone(generation, windows=True) is False
         (generation / "pyvenv.cfg").write_text(f"home = {tmp_path / 'missing'}\n")
+        assert self_cmd._generation_interpreter_gone(generation, windows=True) is True
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="POSIX-only: a venv's python is a link")
+    def test_on_posix_a_gone_home_alone_is_no_evidence_and_a_dangling_python_beside_it_is(self, tmp_path: Path) -> None:
+        """The rule the plugin's ``cannot_start`` states (Sam, 2026-10-14): a venv whose
+        ``home`` is gone but whose ``bin/python`` still resolves is judged runnable."""
+        generation = tmp_path / "gen"
+        (generation / "bin").mkdir(parents=True)
+        (generation / "pyvenv.cfg").write_text(f"home = {tmp_path / 'missing'}\n")
+        (generation / "bin" / "python").symlink_to(Path(sys.executable))
+        assert self_cmd._generation_interpreter_gone(generation) is False
+        prune_python(generation, tmp_path / "missing")
         assert self_cmd._generation_interpreter_gone(generation) is True
+        assert self_cmd._generation_interpreter_gone(generation, windows=False) is True
+
+
+def _legacy_tree(world: World, *, pruned: bool) -> Path:
+    """The legacy ``uv tool install conexus`` tree under ``UV_TOOL_DIR``: a venv with
+    the two console scripts, and (POSIX) the ``~/.local/bin`` links uv makes to them.
+    *pruned* leaves it as ``uv`` leaves a tree whose managed CPython it pruned."""
+    legacy = world.uv_tools / "conexus"
+    scripts = lc.venv_bin(legacy)
+    scripts.mkdir(parents=True)
+    for name in ("nx", "nx-mcp"):
+        program = scripts / lc.exe_name(name)
+        program.write_text("#!/bin/sh\necho legacy\n" if not ON_WINDOWS else "MZ")
+        program.chmod(0o755)
+    (legacy / "pyvenv.cfg").write_text(f"home = {Path(sys._base_executable).parent}\nversion = 3.12.1\n")
+    if not ON_WINDOWS:
+        (legacy / "bin" / "python").symlink_to(Path(sys.executable))
+        for name in ("nx", "nx-mcp"):
+            (world.bin / name).symlink_to(scripts / name)
+    if pruned:
+        prune_python(legacy, world.root / "uv" / "cpython-3.12-pruned")
+    return legacy
+
+
+class TestALegacyUvToolInstallWhoseInterpreterWasPruned:
+    """The uv#8028 class on the README's own install path (review of 4cffeb898, I2).
+    ``uv tool install conexus`` leaves a tree under ``UV_TOOL_DIR``; when ``uv`` prunes
+    its Python the hook and the stand-in say ``setup`` repairs it, so ``--bootstrap``
+    must not call that tree a complete install."""
+
+    def test_a_pruned_tree_is_repaired_and_the_dry_run_says_what_it_would_build(self, world: World) -> None:
+        _legacy_tree(world, pruned=True)
+        dry = world.run(world.python, "self", "install", "--bootstrap", "--dry-run")
+        assert dry.returncode == 0, dry.stdout + dry.stderr
+        assert "already installed" not in dry.stdout + dry.stderr
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        (generation,) = _generations(world)
+        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(generation)
+        assert _shim_of(world).is_file()
+        if not ON_WINDOWS:
+            assert not (world.bin / "nx").is_symlink(), "the shim replaced uv's link to the pruned tree"
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 1 and "already installed" in again.stderr
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="POSIX-only: the venv's python is a link")
+    def test_a_tree_whose_home_is_gone_but_whose_python_resolves_is_still_complete(self, world: World) -> None:
+        legacy = _legacy_tree(world, pruned=False)
+        (legacy / "pyvenv.cfg").write_text(f"home = {world.root / 'uv' / 'cpython-3.12-pruned'}\n")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1 and "already installed" in result.stderr
+        assert _generations(world) == []
+
+    def test_a_working_tree_is_still_complete(self, world: World) -> None:
+        _legacy_tree(world, pruned=False)
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1 and "already installed" in result.stderr
+        assert _generations(world) == []
+
+    def test_a_broken_current_generation_beside_a_working_tree_is_repaired_and_not_refused(self, world: World) -> None:
+        """Pick one (the lookup is layout-first, and the layout names the broken
+        generation): the repair handles it. The working tree no longer makes
+        ``--bootstrap`` refuse, so ``setup`` has something to run."""
+        _legacy_tree(world, pruned=False)
+        old = _built_beside(world)
+        prune_python(old, world.root / "uv" / "cpython-3.12-pruned")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        generations = _generations(world)
+        assert len(generations) == 2 and old in generations
+        (new,) = [g for g in generations if g != old]
+        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+
+
+_SETUP_PROCESS = Path(__file__).resolve().parents[1] / "conexus" / "launch" / "nx_setup.py"
+
+#: The ``uv`` the setup process finds: ``uv tool run ...`` runs the bootstrap command from the
+#: throwaway environment, the program the real command would run it from; every other call
+#: goes to the real ``uv`` (the build itself uses it). (The stand-in index holds hand-built
+#: wheels whose ``nx`` is not this checkout, so the real ``uv tool run`` would not reach
+#: ``self install --bootstrap``.)
+_STAND_IN_UV = """#!{python}
+import os, subprocess, sys
+if sys.argv[1:3] == ["tool", "run"]:
+    sys.exit(subprocess.call([{throwaway!r}, "-c", {driver!r}, "self", "install", "--bootstrap"]))
+os.execv({real_uv!r}, [{real_uv!r}, *sys.argv[1:]])
+"""
+
+
+@pytest.mark.skipif(ON_WINDOWS, reason="POSIX-only: the legacy tree's links on PATH; the Windows launcher is not a link")
+class TestSetupRepairsAPrunedLegacyTree:
+    """End to end, review I2: the plugin's setup process, with a stand-in ``uv`` that runs
+    the real ``--bootstrap`` from the throwaway environment, against a legacy
+    ``uv tool install`` whose Python was pruned. Before: the plugin said "setup repairs
+    it", the setup's build was refused as "already installed", and the state repeated."""
+
+    def test_setup_builds_a_generation_beside_it_and_finds_a_working_nx(self, world: World, tmp_path: Path) -> None:
+        import time
+
+        _legacy_tree(world, pruned=True)
+        standin = tmp_path / "standin"
+        standin.mkdir()
+        uv = standin / "uv"
+        real_uv = shutil.which("uv")
+        assert real_uv is not None, "the suite needs uv"
+        uv.write_text(_STAND_IN_UV.format(
+            python=sys.executable, throwaway=str(world.python), driver=_DRIVER, real_uv=real_uv,
+        ))
+        uv.chmod(0o755)
+        config = tmp_path / "config"
+        env = world.env()
+        env.update({
+            "PATH": os.pathsep.join([str(standin), str(world.bin), os.environ.get("PATH", "")]),
+            "NEXUS_CONFIG_DIR": str(config),
+        })
+        started = subprocess.run(  # noqa: S603 — fixed argv
+            [sys.executable, str(_SETUP_PROCESS), "start", "--mode", "cli-only"],
+            capture_output=True, text=True, env=env, timeout=120, check=False,
+        )
+        assert started.returncode == 0, started.stdout + started.stderr
+        deadline = time.monotonic() + 300
+        view: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            view = json.loads(subprocess.run(  # noqa: S603 — fixed argv
+                [sys.executable, str(_SETUP_PROCESS), "status"],
+                capture_output=True, text=True, env=env, timeout=60, check=True,
+            ).stdout)
+            if view.get("terminal"):
+                break
+            time.sleep(0.5)
+        log = (config / "setup" / "setup.log").read_text(errors="replace") if (config / "setup" / "setup.log").exists() else ""
+        assert view.get("state") == "done", (view, log)
+        (generation,) = _generations(world)
+        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(generation)
+        assert not (world.bin / "nx").is_symlink(), "the shim replaced uv's link to the pruned tree"
+        assert "already installed" not in log
+
+
+def _built_beside(world: World) -> Path:
+    """One real bootstrap into a world that already holds a legacy tree: the existing
+    ``_built`` helper, which asserts a first install, cannot be used there, so the
+    generation is made directly."""
+    generation = _receipted_generation(world)
+    _point_current(world, generation)
+    _seed_shims(world)
+    (generation / "pyvenv.cfg").write_text(f"home = {Path(sys._base_executable).parent}\n")
+    return generation
 
 
 class TestTheWindowsTwin:

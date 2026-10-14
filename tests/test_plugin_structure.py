@@ -561,6 +561,18 @@ class TestCommandStructure:
         assert "ASK THE USER FIRST" in text and "Do not call `setup` before the user has answered" in text
         assert "Cloud" not in text, "the Cloud row waits for the credentials page (nexus-sv2wx.18)"
 
+    def test_setup_command_checks_the_server_is_connected_before_blaming_an_old_cli(self) -> None:
+        """Review of 4cffeb898 (critic 8): a nexus server that is not connected offers no
+        tools at all, and "no setup_status tool" then read as "the CLI is older". The command
+        tells the model to look at /mcp first, and the conclusion comes after the check."""
+        text = (COMMANDS_DIR / "setup.md").read_text()
+        check = text.index("look at `/mcp`")
+        verdict = text.index("older than the release that carries the setup tools")
+        assert check < verdict, "the connection check comes before the old-CLI conclusion"
+        around = text[max(0, check - 300): check + 400].lower()
+        assert "connected" in around and "not an older cli" in around, around
+        assert "reconnect" in text.lower()
+
     def test_setup_command_table_is_the_stand_ins(self) -> None:
         import importlib.util
 

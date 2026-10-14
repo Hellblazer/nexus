@@ -362,19 +362,33 @@ def _create_private(path: str) -> int:
     return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
 
 
-def _retry_sharing(action: Any) -> Any:
+def _windows() -> bool:
+    """Whether this is native Windows. A seam: the retry below has a Windows branch a
+    test on another host selects through this function, not by patching ``os.name``."""
+    return os.name == "nt"
+
+
+#: How long the writers, and the setup tools' own status reads, wait for a Windows
+#: sharing violation to clear.
+SHARING_RETRY_BUDGET_S = 2.0
+
+
+def _retry_sharing(action: Any, *, budget_s: float = SHARING_RETRY_BUDGET_S) -> Any:
     """Run *action*, retrying a Windows sharing violation (a reader holds the file
-    during a rename) for up to two seconds. Elsewhere a PermissionError is real."""
-    if os.name != "nt":
+    during a rename) for up to *budget_s* seconds (default two). Elsewhere a
+    PermissionError is real. A budget of zero or less tries once. The session-start
+    hook passes a few milliseconds, because it has 100 ms in all."""
+    if not _windows():
         return action()
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + budget_s
     while True:
         try:
             return action()
         except PermissionError:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise
-            time.sleep(0.01)
+            time.sleep(min(0.01, remaining))
 
 
 def _write_private_json(setup: Path, name: str, data: dict[str, Any]) -> None:
@@ -402,18 +416,18 @@ def write_status(setup: Path, data: dict[str, Any]) -> None:
     _write_private_json(setup, _STATUS, data)
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
+def _read_json(path: Path, *, budget_s: float = SHARING_RETRY_BUDGET_S) -> dict[str, Any] | None:
     try:
-        text = _retry_sharing(lambda: path.read_text(encoding="utf-8"))
+        text = _retry_sharing(lambda: path.read_text(encoding="utf-8"), budget_s=budget_s)
         data = json.loads(text)
     except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
         return None
     return data if isinstance(data, dict) else None
 
 
-def read_status(setup: Path) -> dict[str, Any] | None:
+def read_status(setup: Path, *, budget_s: float = SHARING_RETRY_BUDGET_S) -> dict[str, Any] | None:
     """``status.json`` as a dict, or ``None`` when it is missing or not JSON."""
-    return _read_json(setup / _STATUS)
+    return _read_json(setup / _STATUS, budget_s=budget_s)
 
 
 def _sweep_tmp(setup: Path) -> None:
@@ -1197,8 +1211,12 @@ def _relay(argv: list[str]) -> int:
     return 0
 
 
-def status_view(setup: Path) -> dict[str, Any]:
+def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str, Any]:
     """What ``status`` prints: the status file plus what is true now. Reads only.
+
+    *read_budget_s* bounds the time its two file reads may spend waiting out a Windows
+    sharing violation, together: only the session-start hook passes it (its whole
+    decision has 100 ms), and everything else keeps the two seconds each.
 
     ``state`` is one of :data:`ALL_STATES`. A status file that is missing, not
     JSON, not an object or holds a ``state`` outside :data:`STATES` reads as
@@ -1207,10 +1225,15 @@ def status_view(setup: Path) -> dict[str, Any]:
     them with ``failed`` and the OS error text. Also ``live`` (a fresh lock),
     ``terminal``, ``not_now`` (the marker), ``next`` and ``log``.
     """
-    data = read_status(setup) or {}
+    deadline = None if read_budget_s is None else time.monotonic() + read_budget_s
+
+    def budget() -> float:
+        return SHARING_RETRY_BUDGET_S if deadline is None else max(0.0, deadline - time.monotonic())
+
+    data = read_status(setup, budget_s=budget()) or {}
     if data.get("state") not in STATES:
         data = {}
-    recorded = _read_json(setup / _ERROR_FILE)
+    recorded = _read_json(setup / _ERROR_FILE, budget_s=budget())
     if recorded is not None and recorded.get("state") == FAILED:
         data = {**data, **recorded}
     lock = setup / _LOCK

@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, scrubbed_env
+from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, prune_python, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _HOOK = _ROOT / "conexus" / "hooks" / "scripts" / "nx_setup_notice.py"
@@ -214,7 +214,7 @@ def _cli_cannot_start(dirs: dict[str, Path]) -> None:
     gen = dirs["tools"] / "gen-20260101T000000Z"
     (gen / "bin").mkdir(parents=True)
     _install_nx_mcp(gen / "bin")
-    (gen / "pyvenv.cfg").write_text(f"home = {dirs['home'] / 'uv' / 'cpython-3.12-pruned'}\n")
+    prune_python(gen, dirs["home"] / "uv" / "cpython-3.12-pruned")
     _point_current(dirs["tools"], gen)
 
 
@@ -392,22 +392,130 @@ def test_states_7_and_8_are_one_line(tmp_path: Path, state: str) -> None:
     assert text is not None and "\n" not in text.strip()
 
 
-# -- the "not now" marker changes state 6 only ----------------------------------------------------------
+# -- the user's choice is honoured (Sam, 2026-10-14) ---------------------------------------------------
+#
+# A recorded CLI-only choice (the status says mode cli-only, state done) or the "not now"
+# marker turns states 7 and 8 into one quiet line that names /conexus:setup and asks nothing.
+# The marker also turns a stale failed or interrupted run's report (4, 5) into one quiet line
+# naming /conexus:setup and the log. A live run (1), a CLI that cannot start (2) and a usable
+# service (3) are not affected, and state 6 already read the marker.
 
 
-@pytest.mark.parametrize("state", sorted(STATES))
-def test_the_marker_changes_state_6_and_no_other(tmp_path: Path, state: str) -> None:
+def _cli_only_done(dirs: dict[str, Path]) -> None:
+    _status(dirs, state="done", stage="verify", mode="cli-only", message="The Nexus CLI is installed. No service is set up.")
+
+
+#: The states the marker changes, and the ones it leaves alone.
+_MARKER_CHANGES = ("4 a run was interrupted", "5 the last run failed", "6 no CLI", "7 the CLI, no service, one provisioned", "8 the CLI, no service, none provisioned")
+_MARKER_LEAVES = ("1 a setup run is live", "2 the CLI cannot start", "3 the CLI and a usable service")
+
+
+def _quiet(text: str | None) -> bool:
+    """One line, names /conexus:setup, asks nothing."""
+    return (
+        text is not None and "\n" not in text.strip() and "/conexus:setup" in text
+        and not _ASK_FIRST.search(text) and "?" not in text and "| Local |" not in text
+    )
+
+
+def test_the_marker_and_the_states_it_changes_and_leaves_are_all_the_eight() -> None:
+    assert sorted(_MARKER_CHANGES + _MARKER_LEAVES) == sorted(STATES)
+
+
+@pytest.mark.parametrize("state", _MARKER_CHANGES)
+def test_the_marker_turns_the_state_into_one_quiet_line(tmp_path: Path, state: str) -> None:
     dirs = _build(_dirs(tmp_path), *STATES[state])
     without = _says(_run(dirs))
     _not_now(dirs)
     with_marker = _says(_run(dirs))
+    assert without is not None and with_marker is not None and with_marker != without
+    assert _quiet(with_marker), with_marker
+    if state in ("4 a run was interrupted", "5 the last run failed"):
+        assert "setup.log" in with_marker, "it names the log"
     if state == "6 no CLI":
-        assert without is not None and with_marker is not None and with_marker != without
-        assert "\n" not in with_marker.strip(), "one line"
-        assert "/conexus:setup" in with_marker and "Nexus is not installed" in with_marker
-        assert "| Local |" not in with_marker and "?" not in with_marker, "it does not ask"
-    else:
-        assert with_marker == without, state
+        assert "Nexus is not installed" in with_marker
+
+
+@pytest.mark.parametrize("state", _MARKER_LEAVES)
+def test_the_marker_changes_nothing_in_a_live_run_a_broken_cli_or_a_usable_service(tmp_path: Path, state: str) -> None:
+    dirs = _build(_dirs(tmp_path), *STATES[state])
+    without = _says(_run(dirs))
+    _not_now(dirs)
+    assert _says(_run(dirs)) == without, state
+
+
+@pytest.mark.parametrize("state", ["7 the CLI, no service, one provisioned", "8 the CLI, no service, none provisioned"])
+def test_a_recorded_cli_only_choice_turns_7_and_8_into_one_quiet_line(tmp_path: Path, state: str) -> None:
+    dirs = _build(_dirs(tmp_path), *STATES[state])
+    asks = _says(_run(dirs))
+    assert asks is not None and _ASK_FIRST.search(asks), "without the choice it asks"
+    _cli_only_done(dirs)
+    quiet = _says(_run(dirs))
+    assert _quiet(quiet), quiet
+    marker_dirs = _build(_dirs(tmp_path / "m"), *STATES[state], _not_now)
+    assert _says(_run(marker_dirs)) == quiet, "the marker and the choice say the same thing"
+
+
+def test_the_quiet_lines_for_7_and_8_differ_and_say_what_is_true(tmp_path: Path) -> None:
+    down = _says(_run(_build(_dirs(tmp_path / "a"), _cli, _provisioned, _cli_only_done)))
+    none = _says(_run(_build(_dirs(tmp_path / "b"), _cli, _cli_only_done)))
+    assert down is not None and none is not None and down != none
+    assert "not running" in down and "no Nexus service" in none
+
+
+def test_a_recorded_cli_only_choice_changes_no_other_state(tmp_path: Path) -> None:
+    """The choice is read only where a service is missing: a live run, a CLI that cannot
+    start, a usable service, a failed run and no CLI at all read as they do without it."""
+    for i, (facts, expect) in enumerate([
+        ((_cli_cannot_start,), _BROKEN_PHRASE),
+        ((_cli, _service_usable), None),
+        ((), "Nexus is not installed"),
+    ]):
+        dirs = _build(_dirs(tmp_path / str(i)), *facts)
+        before = _says(_run(dirs))
+        _cli_only_done(dirs)
+        after = _says(_run(dirs))
+        if expect is None:
+            assert before is None and after is None
+        else:
+            assert before is not None and after is not None and expect in after
+            assert (before == after) or facts == (_cli_cannot_start,), (facts, before, after)
+
+
+def test_only_a_finished_cli_only_run_is_the_choice() -> None:
+    """``chose_cli_only`` reads the record: the CLI-only mode AND a run that finished. (Where
+    the hook asks, a failed or interrupted run has already been reported, so the second half
+    cannot be seen through the hook; the function states it.)"""
+    mod = _load(_HOOK, "nx_setup_notice_choice")
+    assert mod.chose_cli_only({"mode": "cli-only", "state": "done"}) is True
+    for view in (
+        {"mode": "cli-only", "state": "failed"}, {"mode": "cli-only", "state": "interrupted"},
+        {"mode": "cli-only", "state": "running"}, {"mode": "cli-only", "state": "doctor-failed"},
+        {"mode": "local", "state": "done"}, {"mode": "not-now", "state": "done"}, {"state": "done"}, {},
+    ):
+        assert mod.chose_cli_only(view) is False, view
+
+
+def test_a_cli_only_choice_whose_run_failed_still_reports_the_failure(tmp_path: Path) -> None:
+    """Only the marker quiets a stale failure: ``mode cli-only`` with state failed is a run
+    that did not finish, and the user has not said to stop hearing about it."""
+    dirs = _build(_dirs(tmp_path), _cli, _failed_run)
+    text = _says(_run(dirs))
+    assert text is not None and "Setup failed." in text and _ASK_FIRST.search(text)
+    assert not _quiet(text)
+
+
+def test_a_local_choice_with_the_service_gone_still_asks(tmp_path: Path) -> None:
+    dirs = _build(_dirs(tmp_path), _cli)
+    _status(dirs, state="done", stage="verify", mode="local")
+    text = _says(_run(dirs))
+    assert text is not None and _ASK_FIRST.search(text) and "no Nexus service is set up" in text
+
+
+def test_a_cli_only_choice_beside_a_provisioned_service_that_is_down_is_quiet_too(tmp_path: Path) -> None:
+    """The literal rule (Sam): CLI only quiets 7 as well as 8."""
+    text = _says(_run(_build(_dirs(tmp_path), _cli, _provisioned, _cli_only_done)))
+    assert _quiet(text) and "not running" in text
 
 
 # -- the hook starts nothing, opens nothing, writes nothing ---------------------------------------------
@@ -615,3 +723,88 @@ def test_a_status_reader_that_raises_does_not_silence_the_other_states(tmp_path:
     monkeypatch.setattr(mod.nx_setup, "status_view", boom)
     text = mod.decide()
     assert text is not None and "Nexus is not installed" in text
+
+
+# -- the hook's time budget on Windows: a held file cannot stretch it -------------------------------------
+
+
+def _hold_unreadable(path: Path):
+    """Make every read of *path* fail with a PermissionError until the returned release
+    is called: a mode-000 file on POSIX; on Windows the file is opened with no sharing,
+    which is what a writer in the middle of an ``os.replace`` presents to a reader."""
+    if os.name != "nt":
+        path.chmod(0)
+        return lambda: path.chmod(0o600)
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    invalid = ctypes.c_void_p(-1).value
+    handle = k32.CreateFileW(str(path), 0x80000000 | 0x40000000, 0, None, 3, 0x80, None)  # read+write, share none, OPEN_EXISTING
+    assert handle not in (None, invalid), ctypes.get_last_error()
+    return lambda: k32.CloseHandle(handle)
+
+
+def _held_files(dirs: dict[str, Path]) -> list:
+    """A status file and a lease, both held. Returns the release callables."""
+    endpoint = _load(_ROOT / "conexus" / "hooks" / "scripts" / "_endpoint_resolve.py", "endpoint_for_budget")
+    _status(dirs, state="failed", stage="build", mode="local", message="x")
+    lease = dirs["config"] / f"storage_service_addr.{endpoint.service_identity()}"
+    lease.write_text("{}", encoding="utf-8")
+    return [_hold_unreadable(dirs["config"] / "setup" / "status.json"), _hold_unreadable(lease)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the real Windows case is the next test; this one drives the Windows branch from POSIX")
+def test_a_held_status_file_and_lease_cannot_stretch_the_hook_past_its_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The status reads went through the retry that waits up to two seconds for a Windows
+    sharing violation, the lease read through a second one, and the old hook read no file
+    at all. The hook now asks for ONE bound, ``HOOK_READ_BUDGET_S`` (30 ms), spent across
+    both: with both files held, the whole decision comes back in a fraction of a second
+    (unbounded it is two reads of two seconds), reading both as absent."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    mod = _load(_HOOK, "nx_setup_notice_budget")
+    dirs = _build(_dirs(tmp_path), _cli)
+    for key, value in {"PATH": str(dirs["bin"]), "NX_TOOLS_DIR": str(dirs["tools"]), "NEXUS_CONFIG_DIR": str(dirs["config"])}.items():
+        monkeypatch.setenv(key, value)
+    for name in ("CLAUDE_CODE_REMOTE", "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_MINT_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    mod.load_siblings()
+    monkeypatch.setattr(mod.nx_setup, "_windows", lambda: True)
+    monkeypatch.setattr(mod._endpoint_resolve, "_is_windows", lambda platform=None: True)
+    releases = _held_files(dirs)
+    try:
+        started = time.monotonic()
+        text = mod.decide()
+        elapsed = time.monotonic() - started
+    finally:
+        for release in releases:
+            release()
+    assert elapsed < 0.4, f"the hook took {elapsed:.2f}s with its files held; the bound is {mod.HOOK_READ_BUDGET_S}s"
+    assert text is not None and "no Nexus service is set up" in text, "both held files read as absent"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a file opened with no sharing is the Windows case")
+def test_on_windows_a_held_status_file_and_lease_end_the_real_hook_quickly(tmp_path: Path) -> None:
+    dirs = _build(_dirs(tmp_path), _cli)
+    releases = _held_files(dirs)
+    try:
+        started = time.monotonic()
+        r = _run(dirs)
+        elapsed = time.monotonic() - started
+    finally:
+        for release in releases:
+            release()
+    assert r.returncode == 0 and r.stderr == b""
+    assert elapsed < 1.5, f"the real hook took {elapsed:.2f}s; unbounded it waits two seconds per held file"
+    assert "no Nexus service is set up" in _context(r)
+
+
+def test_the_budget_is_far_inside_the_hooks_100_ms() -> None:
+    mod = _load(_HOOK, "nx_setup_notice_budget_value")
+    assert 0 < mod.HOOK_READ_BUDGET_S <= 0.03
