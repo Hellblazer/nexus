@@ -4209,9 +4209,12 @@ end, because that prune removes unreferenced packages from `uv`'s cache, which
 is shared with every other tool on the account. It takes neither `--version`
 nor `--extras` (both are refused: the version is the running program's, and a
 first install has no extras), and `--keep` has no effect because nothing is
-reaped. With a complete install already present, `current` pointing at a
-generation with a receipt or a `uv tool install conexus` tree, it refuses in one
-line that names the plain `nx self install` and changes nothing. `--dry-run`
+reaped. With a complete install already present it refuses in one line that
+names the plain `nx self install` and changes nothing. Complete means `current`
+pointing at a generation with a receipt **and** the shim step's output in place
+(POSIX: `<bin>/nx` is a nexus shim or a symlink into the `uv tool` tree;
+Windows: `current\bin\nx.exe` exists and that directory is on the user PATH), or
+a `uv tool install conexus` tree. `--dry-run`
 prints the build and stops (and refuses the same way when an install exists).
 There is no fallback to `uv tool install` followed by `nx self install`:
 that route runs the prune and leaves two copies on disk.
@@ -4219,14 +4222,23 @@ that route runs the prune and leaves two copies on disk.
 Two states the flag handles itself, because on that machine there is no `nx` to
 run the plain command:
 
-- **A run that died after its build.** The receipt is written when the build
-  ends, before `current` and the shims. If a generation with a receipt exists and
-  `current` is absent or points at nothing, running the same `--bootstrap`
-  command again finishes the install for the newest such generation, with no
-  rebuild, and says so. If the build itself failed there is no generation, and
-  the command builds from the start. A failed build names re-running the same
-  bootstrap command (with `UV_INDEX_URL=https://pypi.org/simple` when the index
-  was a private one that could not be reached), not `nx self install`.
+- **A run that died after its build or after the flip.** The receipt is written
+  when the build ends, before `current`, and `current` is flipped before the
+  shims, so a run that dies, fails or is killed between those steps leaves a
+  receipted generation that nothing runs from: `current` absent or pointing at
+  nothing, or `current` set with no shims (on Windows, no PATH entry).
+  Running the same `--bootstrap` command again finishes the install with no
+  rebuild and names the generation and its version. It does so only for a
+  generation whose receipt names the running version and whose own interpreter
+  answers the console-script lookup the shim step makes; an older-version or
+  broken leftover is not finished, and the command builds afresh. If the build
+  itself failed there is no generation, and the command builds from the start.
+  A failed build names re-running the same bootstrap command (with
+  `UV_INDEX_URL=https://pypi.org/simple` when the index was a private one that
+  could not be reached), not `nx self install`. When `current` names an existing
+  directory whose receipt is missing or unreadable, the command refuses in one
+  line, naming it and the `bin/nx` inside it that can repair it with
+  `self install`, and moves nothing.
 - **A program in the bin directory that is not nexus's.** Before building, the
   command refuses in one line, naming the file, when `nx`, `nx-mcp` or another
   name it would write already exists there and is neither a shim this install

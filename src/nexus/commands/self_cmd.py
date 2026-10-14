@@ -314,33 +314,69 @@ def _running_version() -> str:
         ) from exc
 
 
-def _current_receipted_generation(tools: Path) -> Path | None:
-    """The generation ``<tools>/current`` names, when it exists and carries a
-    receipt; ``None`` for an absent, dangling, unreadable or receipt-less
-    pointer."""
+def _current_generation_dir(tools: Path) -> Path | None:
+    """The directory ``<tools>/current`` names, when it resolves to one that
+    exists; ``None`` for an absent, dangling or unreadable pointer."""
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     try:
         target = install_layout.current_generation(tools=tools, platform=_plat())
     except Exception:  # noqa: BLE001 — no pointer, unreadable root: no current generation
         return None
-    return target if install_layout.receipt_path(target).is_file() else None
+    return target if target.is_dir() else None
 
 
-def _existing_install(tools: Path) -> str | None:
-    """Words naming a COMPLETE install on this box, or ``None``.
-
-    Complete means ``current`` resolves to a receipted generation (the receipt
-    alone is not enough: it is written when the build ends, before ``current``
-    and the shims, so a run that died in between leaves a receipted generation
-    that nothing runs; see :func:`_unfinished_generation`), or a
-    ``uv tool install conexus`` tree exists. A uv tree is complete by uv's own
-    standard and carries its own ``nx``, so the plain command is runnable from
-    it; there is no equivalent trap on that side."""
+def _read_receipt_or_none(generation: Path):
+    """*generation*'s receipt, or ``None`` when it has none or cannot be read."""
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
-    current = _current_receipted_generation(tools)
-    if current is not None:
+    try:
+        return install_layout.read_receipt(generation)
+    except Exception:  # noqa: BLE001 — missing, corrupt or unknown-schema: not receipted
+        return None
+
+
+def _shims_are_in_place(tools: Path, bin_dir: Path) -> bool:
+    """Whether the shim step's output is there: the part of an install that comes
+    AFTER the flip and is what puts ``nx`` on the PATH.
+
+    POSIX: ``<bin>/nx`` exists and is a shim this install wrote
+    (``shims_core._is_ours``) or a symlink into the ``uv tool`` conexus tree.
+    Windows: ``<tools>\\current\\bin\\nx.exe`` exists and that directory is on the
+    user PATH store (``inspect_user_path`` also reports a directory ahead of it
+    that provides ``nx.exe``; the shim step repairs that too, so it is unfinished)."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if _is_windows():
+        core = _generation()
+        return not core.inspect_user_path(core.current_launcher_dir(tools))
+    from nexus._install import shims_core  # noqa: PLC0415 — deferred import
+
+    nx = bin_dir / "nx"
+    if shims_core._is_ours(nx, tools / install_layout.CURRENT_LINK_NAME):
+        return True
+    return nx.is_symlink() and nx.exists() and install_layout.is_under_uv_tool_install(nx)
+
+
+def _existing_install(tools: Path, bin_dir: Path) -> str | None:
+    """Words naming a COMPLETE install on this box, or ``None``.
+
+    Complete means ``current`` resolves to a receipted generation AND the shim
+    step's output is in place (:func:`_shims_are_in_place`), or a
+    ``uv tool install conexus`` tree exists. Neither half alone will do: the
+    receipt is written when the build ends, before ``current``, and ``current``
+    is flipped before the shims, so a run that died at either point leaves state
+    that nothing runs and that the plain command cannot be run from; see
+    :func:`_unfinished_generation`. A uv tree is complete by uv's own standard
+    and carries its own ``nx``."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    current = _current_generation_dir(tools)
+    if (
+        current is not None
+        and _read_receipt_or_none(current) is not None
+        and _shims_are_in_place(tools, bin_dir)
+    ):
         return f"generation {current.name} under {tools}"
     legacy = install_layout.uv_conexus_venv(platform=_plat())
     if install_layout.venv_bin(legacy, platform=_plat()).is_dir():
@@ -348,34 +384,69 @@ def _existing_install(tools: Path) -> str | None:
     return None
 
 
-def _unfinished_generation(tools: Path) -> Path | None:
-    """The newest receipted generation, when ``current`` does not resolve to one
-    (the state a bootstrap that died after its build leaves), else ``None``."""
+def _generation_answers_for_its_shims(generation: Path) -> bool:
+    """Whether *generation*'s own interpreter answers the console-script lookup
+    the shim step makes, and the answer includes ``nx``. A generation that does
+    not (its interpreter is gone, its distribution declares nothing) would
+    flip and then shim nothing."""
+    try:
+        return "nx" in _shim_names_of(generation)
+    except Exception:  # noqa: BLE001 — LayoutError, OSError: the generation cannot say
+        return False
+
+
+def _shim_names_of(generation: Path) -> list[str]:
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
-    if _current_receipted_generation(tools) is not None:
-        return None
-    generations = install_layout.list_generations(tools=tools)
-    return generations[-1] if generations else None
+    return sorted(install_layout.owned_shim_names(generation, platform=_plat()))
 
 
-def _shim_names_to_write() -> list[str]:
-    """The command names the shim step would write: this distribution's own
-    console scripts plus the dependency scripts it also shims, minus the names
-    nexus never shims. Asked of the running program, because the generation
-    that will carry them does not exist yet."""
-    from importlib.metadata import distribution  # noqa: PLC0415 — stdlib, deferred
+def _unfinished_generation(tools: Path, running: str) -> Path | None:
+    """The generation a bootstrap that died after its build can finish, or ``None``.
+
+    Reached only when no complete install exists. The candidates are the
+    generation ``current`` names (a run that died after the flip) or, when it
+    names none, every receipted generation, newest first. A candidate is
+    finished only when it is what a fresh build would produce: its receipt says
+    *running* and its interpreter answers the shim step's lookup. Otherwise the
+    caller builds afresh, which is safe because nothing complete is replaced."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    current = _current_generation_dir(tools)
+    candidates = [current] if current is not None else list(reversed(install_layout.list_generations(tools=tools)))
+    for generation in candidates:
+        receipt = _read_receipt_or_none(generation)
+        if receipt is not None and receipt.version == running and _generation_answers_for_its_shims(generation):
+            return generation
+    return None
+
+
+def _shim_names_to_write(generation: Path | None = None) -> list[str]:
+    """The command names the shim step would write. For a generation that
+    already exists, that generation's own answer. Otherwise asked of the running
+    program, because the generation that will carry them does not exist yet: this
+    distribution's console scripts plus the dependency scripts it also shims,
+    minus the names nexus never shims."""
+    if generation is not None:
+        return _shim_names_of(generation)
+    from importlib.metadata import PackageNotFoundError, distribution  # noqa: PLC0415 — stdlib, deferred
 
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
-    declared = {
-        entry.name for entry in distribution("conexus").entry_points
-        if entry.group == "console_scripts"
-    }
+    try:
+        entry_points = distribution("conexus").entry_points
+    except PackageNotFoundError as exc:
+        raise click.ClickException(
+            "--bootstrap cannot tell which command names it would write, because this "
+            "process has no conexus distribution metadata. Nothing was changed."
+        ) from exc
+    declared = {entry.name for entry in entry_points if entry.group == "console_scripts"}
     return sorted((declared | install_layout.DEPENDENCY_SCRIPTS) - install_layout.NEVER_SHIM)
 
 
-def _refuse_a_foreign_program_in_the_bin_directory(tools: Path, bin_dir: Path) -> None:
+def _refuse_a_foreign_program_in_the_bin_directory(
+    tools: Path, bin_dir: Path, generation: Path | None = None,
+) -> None:
     """Refuse, in one line, when a file the shim step would replace is not ours.
 
     The shim step ``os.replace``s whatever is at ``<bin>/nx`` and the other shim
@@ -392,7 +463,7 @@ def _refuse_a_foreign_program_in_the_bin_directory(tools: Path, bin_dir: Path) -
     from nexus._install import shims_core  # noqa: PLC0415 — deferred import
 
     pointer = tools / install_layout.CURRENT_LINK_NAME
-    for name in _shim_names_to_write():
+    for name in _shim_names_to_write(generation):
         path = bin_dir / name
         if not (path.exists() or path.is_symlink()):
             continue
@@ -430,14 +501,20 @@ def _bootstrap_install(
     * No fallback to ``uv tool install`` then ``nx self install``: that runs the
       prune and leaves two copies on disk.
 
-    With a complete install present (``current`` resolving to a receipted
-    generation, or a ``uv tool`` install) it refuses, in one line naming the
-    plain command. The record states the flag for a first install and nothing
-    else: refusing is the reading that cannot overwrite a generation (checked by
-    P2.R2, nexus-sv2wx.22). It also refuses, before building, when a shim name
-    in the bin directory holds a program that is not nexus's. With a receipted
-    generation and no ``current`` (a run that died after its build) it finishes
-    ``current`` and the shims for the newest such generation without rebuilding.
+    With a complete install present it refuses, in one line naming the plain
+    command. Complete means ``current`` resolving to a receipted generation AND
+    the shim step's output in place, or a ``uv tool`` install. The record states
+    the flag for a first install and nothing else: refusing is the reading that
+    cannot overwrite a generation (checked by P2.R2, nexus-sv2wx.22). It also
+    refuses, before building, when ``current`` names an existing directory whose
+    receipt is missing or unreadable, and when a shim name in the bin directory
+    holds a program that is not nexus's. Anything short of complete is finished
+    rather than refused, because there is no ``nx`` on that machine to run the
+    plain command: a receipted generation with no ``current`` (a run that died
+    after its build) or with ``current`` and no shims (a run that died after the
+    flip) is finished without rebuilding, but only when its receipt names the
+    running version and its interpreter answers the shim step's lookup; any
+    other leftover falls through to a fresh build.
     Two bootstraps at once are P2.2's lock, not this command's.
     """
     if version or extras:
@@ -445,30 +522,42 @@ def _bootstrap_install(
             "--bootstrap installs the version of the running nx with no extras, so it "
             "takes neither --version nor --extras. Nothing was changed."
         )
-    existing = _existing_install(tools)
+    existing = _existing_install(tools, bin_dir)
     if existing is not None:
         raise click.ClickException(
             f"--bootstrap is for a first install and {existing} is already installed. "
             "Run `nx self install` to update it. Nothing was changed."
         )
-    _refuse_a_foreign_program_in_the_bin_directory(tools, bin_dir)
-    unfinished = _unfinished_generation(tools)
+    current = _current_generation_dir(tools)
+    if current is not None and _read_receipt_or_none(current) is None:
+        # `current` names a directory that exists and whose receipt is missing or
+        # unreadable. Whatever runs from it is not ours to move.
+        from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+        nx = install_layout.venv_script(current, "nx", platform=_plat())
+        raise click.ClickException(
+            f"--bootstrap will not move `current`: it names {current}, whose receipt is missing "
+            f"or unreadable. Repair it with `{nx} self install`. Nothing was changed."
+        )
+    running = _running_version()
+    unfinished = _unfinished_generation(tools, running)
+    _refuse_a_foreign_program_in_the_bin_directory(tools, bin_dir, unfinished)
     if unfinished is not None:
         # An earlier bootstrap built this generation and died before `current`
-        # and the shims. There is no `nx` here to run, so the same command
-        # finishes the job, with no rebuild.
-        said = (
-            f"finishing the interrupted install: {unfinished.name} is already built "
-            "(no rebuild); setting `current` and the command shims"
-        )
+        # and the shims, or after `current` and before the shims. There is no
+        # `nx` here to run, so the same command finishes the job, with no
+        # rebuild. Only a generation at the running version that answers the
+        # shim lookup is finished; any other leftover falls through to a build.
+        what = f"{unfinished.name} (conexus {running}) is already built"
         if dry_run:
-            click.echo(f"would finish the interrupted install: {unfinished.name} is already "
-                       "built (no rebuild); would set `current` and write the command shims")
+            click.echo(f"would finish the interrupted install: {what} (no rebuild); "
+                       "would set `current` and write the command shims")
             return None
-        click.echo(said)
+        click.echo(f"finishing the interrupted install: {what} (no rebuild); "
+                   "setting `current` and the command shims")
         _flip_and_shim(unfinished, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True)
         return unfinished
-    build = _build_request(install_dir, _RegistryReceipt(), version=_running_version())
+    build = _build_request(install_dir, _RegistryReceipt(), version=running)
     if dry_run:
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None

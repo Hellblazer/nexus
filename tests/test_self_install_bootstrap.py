@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import json
 import os
 import shutil
 import subprocess
@@ -352,11 +353,13 @@ class TestTheRefusalsThatStay:
         assert world.snapshot() == before
 
 
-def _receipted_generation(world: World, name: str = "gen-20260101T000000Z") -> Path:
+def _receipted_generation(
+    world: World, name: str = "gen-20260101T000000Z", version: str = "1.0.0",
+) -> Path:
     generation = world.tools / name
     generation.mkdir()
     receipt = lc.Receipt(
-        version="1.0.0", spec="conexus==1.0.0", source_kind="registry", source="conexus",
+        version=version, spec=f"conexus=={version}", source_kind="registry", source="conexus",
         python="3.12.0", base_interpreter=str(Path(sys.base_prefix)), created_at="2026-01-01T00:00:00Z",
     )
     (generation / lc.RECEIPT_NAME).write_text(receipt.to_json())
@@ -372,9 +375,36 @@ def _point_current(world: World, target: Path) -> None:
         os.symlink(target, world.tools / "current")
 
 
+def _seed_shims(world: World) -> None:
+    """What the shim step leaves, for the generation ``current`` names. POSIX: our
+    ``nx`` shim in the bin directory. Windows: ``nx.exe`` in ``<tools>\\current\\bin``
+    and that directory on the user PATH (the sandbox store)."""
+    if ON_WINDOWS:
+        launcher = world.tools / "current" / "bin"
+        launcher.mkdir(exist_ok=True)
+        (launcher / "nx.exe").write_bytes(b"MZ")
+        world.path_store.write_text(str(launcher) + "\n", encoding="utf-8")
+    else:
+        shim = world.bin / "nx"
+        shim.write_text(lc.render_shim("nx", tools=world.tools))
+        shim.chmod(0o755)
+
+
+def _lose_the_shims(world: World) -> None:
+    """The state a run that died AFTER the flip leaves: ``current`` stays, the
+    shim step's output is gone."""
+    if ON_WINDOWS:
+        world.path_store.write_text("\n", encoding="utf-8")
+    else:
+        for entry in world.bin.iterdir():
+            entry.unlink()
+
+
 def _seed_current_generation(world: World) -> None:
-    """A complete install: a receipted generation that ``current`` points at."""
+    """A complete install: a receipted generation that ``current`` points at,
+    with the shim step's output in place."""
     _point_current(world, _receipted_generation(world))
+    _seed_shims(world)
 
 
 def _seed_uv_tool_install(world: World) -> None:
@@ -492,33 +522,297 @@ class TestAnInterruptedBootstrap:
         current = install_layout.current_generation(tools=world.tools)
         assert lc.compare_key(current) == lc.compare_key(generation)
 
-    def test_the_newest_receipted_generation_is_the_one_finished(self, world: World, monkeypatch) -> None:
-        older = _receipted_generation(world, "gen-20260101T000000Z")
-        newer = _receipted_generation(world, "gen-20260202T000000Z")
-        finished: list[Path] = []
-        monkeypatch.setattr(
-            self_cmd, "_flip_and_shim", lambda generation, **_: finished.append(generation),
-        )
+    def _invoke_in_process(self, world: World, monkeypatch: pytest.MonkeyPatch, *args: str):
         for name in ("NX_TOOLS_DIR", "NX_BIN_DIR", "UV_TOOL_DIR"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("NX_TOOLS_DIR", str(world.tools))
         monkeypatch.setenv("NX_BIN_DIR", str(world.bin))
         monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
-        result = CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap"])
+        return CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap", *args])
+
+    def test_the_newest_usable_generation_is_the_one_finished(self, world: World, monkeypatch) -> None:
+        older = _receipted_generation(world, "gen-20260101T000000Z", version=_running_version())
+        newer = _receipted_generation(world, "gen-20260202T000000Z", version=_running_version())
+        finished: list[Path] = []
+        monkeypatch.setattr(
+            self_cmd, "_flip_and_shim", lambda generation, **_: finished.append(generation),
+        )
+        monkeypatch.setattr(self_cmd, "_shim_names_of", lambda generation: ["nx"])
+        result = self._invoke_in_process(world, monkeypatch)
         assert result.exit_code == 0, result.output
         assert finished == [newer] and older not in finished
+
+    def test_a_newer_generation_that_cannot_be_finished_is_passed_over_for_an_older_one(
+        self, world: World, monkeypatch,
+    ) -> None:
+        older = _receipted_generation(world, "gen-20260101T000000Z", version=_running_version())
+        newer = _receipted_generation(world, "gen-20260202T000000Z", version=_running_version())
+        finished: list[Path] = []
+        monkeypatch.setattr(
+            self_cmd, "_flip_and_shim", lambda generation, **_: finished.append(generation),
+        )
+        def names(generation: Path) -> list[str]:
+            if generation != older:
+                raise lc.LayoutError("no interpreter")
+            return ["nx"]
+        monkeypatch.setattr(self_cmd, "_shim_names_of", names)
+        result = self._invoke_in_process(world, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert finished == [older] and newer not in finished
 
     def test_a_dry_run_says_what_it_would_finish_and_changes_nothing(
         self, world: World, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        generation = _receipted_generation(world, version=_running_version())
+        monkeypatch.setattr(self_cmd, "_shim_names_of", lambda generation: ["nx"])
+        before = world.snapshot()
+        result = self._invoke_in_process(world, monkeypatch, "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert generation.name in result.output and "no rebuild" in result.output
+        assert _running_version() in result.output
+        assert world.snapshot() == before
+
+
+def _built(world: World) -> Path:
+    """One real bootstrap, returning its generation."""
+    first = world.run(world.python, "self", "install", "--bootstrap")
+    assert first.returncode == 0, first.stdout + first.stderr
+    (generation,) = _generations(world)
+    return generation
+
+
+def _record_version(generation: Path, version: str) -> None:
+    path = generation / lc.RECEIPT_NAME
+    data = json.loads(path.read_text())
+    data["version"] = version
+    path.write_text(json.dumps(data))
+
+
+class TestAnInstallThatDiedAfterTheFlip:
+    """The flip comes before the shim step, so a run that dies, fails or is
+    killed in between leaves ``current`` at a receipted generation with nothing
+    on the PATH. That is NOT a complete install: refusing it would send the reader
+    to a `nx self install` that does not exist on the machine."""
+
+    def test_current_set_and_no_shims_is_finished_without_a_rebuild(self, world: World) -> None:
+        generation = _built(world)
+        _lose_the_shims(world)
+        assert install_layout.current_generation(tools=world.tools) == generation
+
+        again = world.run(world.python, "self", "install", "--bootstrap")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [generation], "a second generation was built"
+        assert _shim_of(world).is_file()
+        if not ON_WINDOWS:
+            assert (world.bin / "nx").read_text().startswith("#!")
+        assert "no rebuild" in again.stdout and generation.name in again.stdout
+
+    @pytest.mark.skipif(
+        ON_WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="a read-only bin directory stops writes for a non-root POSIX user",
+    )
+    def test_a_shim_step_that_fails_leaves_a_state_the_same_command_finishes(self, world: World) -> None:
+        world.bin.chmod(0o555)
+        try:
+            failed = world.run(world.python, "self", "install", "--bootstrap")
+            assert failed.returncode != 0, failed.stdout + failed.stderr
+            (generation,) = _generations(world)
+            assert install_layout.current_generation(tools=world.tools) == generation, "the flip did not happen"
+            assert not (world.bin / "nx").exists()
+        finally:
+            world.bin.chmod(0o755)
+
+        again = world.run(world.python, "self", "install", "--bootstrap")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [generation]
+        assert (world.bin / "nx").is_file()
+
+    def test_a_complete_install_still_refuses_with_the_old_text(self, bootstrapped: Bootstrapped) -> None:
+        world = bootstrapped.world
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert result.stderr.strip() == (
+            f"Error: --bootstrap is for a first install and generation "
+            f"{_generations(world)[0].name} under {world.tools} is already installed. "
+            "Run `nx self install` to update it. Nothing was changed."
+        )
+        assert world.snapshot() == before
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="nexus writes no file into the bin directory on Windows")
+    def test_a_shim_that_is_not_ours_does_not_make_the_install_complete_or_get_replaced(
+        self, world: World,
+    ) -> None:
+        _built(world)
+        (world.bin / "nx").unlink()
+        (world.bin / "nx").write_text("#!/bin/sh\necho somebody else's nx\n")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert str(world.bin / "nx") in result.stderr and "not a nexus shim" in result.stderr
+        assert (world.bin / "nx").read_text() == "#!/bin/sh\necho somebody else's nx\n"
+
+
+class TestWhatCompleteMeansOnWindows:
+    """The Windows reading, on any host: ``current\\bin\\nx.exe`` exists and its
+    directory is on the user PATH (the sandbox store stands in for the registry)."""
+
+    @pytest.fixture
+    def windows(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+        world = _make_world(tmp_path / "w")
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        monkeypatch.setenv("NX_USER_PATH_STORE", str(world.path_store))
+        monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
         generation = _receipted_generation(world)
+        os.symlink(generation, world.tools / "current")
+        (generation / "bin").mkdir()
+        return world
+
+    def _complete(self, world: World) -> bool:
+        return self_cmd._existing_install(world.tools, world.bin) is not None
+
+    def test_the_launcher_and_the_path_entry_make_it_complete(self, windows: World) -> None:
+        (windows.tools / "current" / "bin" / "nx.exe").write_bytes(b"MZ")
+        windows.path_store.write_text(str(windows.tools / "current" / "bin") + "\n", encoding="utf-8")
+        assert self._complete(windows)
+
+    def test_a_launcher_with_no_path_entry_is_unfinished(self, windows: World) -> None:
+        (windows.tools / "current" / "bin" / "nx.exe").write_bytes(b"MZ")
+        windows.path_store.write_text("C:\\other\n", encoding="utf-8")
+        assert not self._complete(windows)
+
+    def test_a_path_entry_with_no_launcher_is_unfinished(self, windows: World) -> None:
+        windows.path_store.write_text(str(windows.tools / "current" / "bin") + "\n", encoding="utf-8")
+        assert not self._complete(windows)
+
+
+class TestAResumeNeedsTheRightVersionAndAHealthyGeneration:
+    """A leftover generation is finished only when it is what a fresh build would
+    produce: the running program's version, answering the console-script lookup
+    the shim step makes. Anything else falls through to a fresh build, which is
+    safe because no complete install exists."""
+
+    def _fresh_build_took_over(self, world: World, old: Path, again) -> Path:
+        assert again.returncode == 0, again.stdout + again.stderr
+        generations = _generations(world)
+        assert len(generations) == 2 and old in generations, generations
+        (new,) = [g for g in generations if g != old]
+        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+        assert install_layout.read_receipt(new).version == _running_version()
+        assert "no rebuild" not in again.stdout
+        assert _shim_of(world).is_file()
+        return new
+
+    @pytest.mark.parametrize("flipped", [False, True], ids=["no-current", "current-set-no-shims"])
+    def test_an_older_version_leftover_is_not_finished(self, world: World, flipped: bool) -> None:
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        if flipped:
+            _lose_the_shims(world)
+        else:
+            _interrupt(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        self._fresh_build_took_over(world, old, again)
+
+    @pytest.mark.parametrize("flipped", [False, True], ids=["no-current", "current-set-no-shims"])
+    def test_a_leftover_whose_interpreter_is_gone_is_not_finished(self, world: World, flipped: bool) -> None:
+        old = _built(world)
+        lc.venv_python(old).unlink()
+        if flipped:
+            _lose_the_shims(world)
+        else:
+            _interrupt(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        self._fresh_build_took_over(world, old, again)
+
+    def test_a_matching_healthy_leftover_is_finished_and_the_message_names_its_version(
+        self, world: World,
+    ) -> None:
+        old = _built(world)
+        _interrupt(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [old]
+        assert "no rebuild" in again.stdout and _running_version() in again.stdout
+
+
+class TestAnUnreadableCurrentIsNeverMoved:
+    """``current`` names a directory that exists but whose receipt cannot be
+    read: whatever runs from it is working or at least not ours to move, so the
+    flag refuses in one line, naming the generation and the way to repair it from
+    the generation's own ``nx`` (there may be none on the PATH)."""
+
+    def _refused(self, world: World, generation: Path) -> None:
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1, result.stdout + result.stderr
+        message = result.stderr.strip()
+        assert message.startswith("Error: ") and "\n" not in message, message
+        assert str(generation) in message
+        assert f"{lc.venv_script(generation, 'nx')} self install" in message
+        assert world.snapshot() == before
+        assert result.stdout == ""
+
+    def test_a_generation_without_a_receipt(self, world: World) -> None:
+        generation = world.tools / "gen-20260101T000000Z"
+        generation.mkdir()
+        _point_current(world, generation)
+        self._refused(world, generation)
+
+    def test_a_generation_whose_receipt_is_garbage(self, world: World) -> None:
+        generation = world.tools / "gen-20260101T000000Z"
+        generation.mkdir()
+        (generation / lc.RECEIPT_NAME).write_text("{not json")
+        _point_current(world, generation)
+        _seed_shims(world)
+        self._refused(world, generation)
+
+    def test_a_dry_run_refuses_too(self, world: World) -> None:
+        generation = world.tools / "gen-20260101T000000Z"
+        generation.mkdir()
+        _point_current(world, generation)
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--dry-run")
+        assert result.returncode == 1 and str(generation) in result.stderr
+        assert world.snapshot() == before
+
+
+class TestWithoutDistributionMetadata:
+    """``--bootstrap`` asks the running program which shim names it would write.
+    A process with no conexus metadata must refuse in one line, never raise."""
+
+    @pytest.fixture
+    def no_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def missing(name: str):
+            raise importlib.metadata.PackageNotFoundError(name)
+        monkeypatch.setattr(importlib.metadata, "distribution", missing)
+
+    def test_asked_for_the_names_it_refuses_in_one_line(self, no_metadata: None) -> None:
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._shim_names_to_write()
+        assert "\n" not in exc.value.message and "conexus" in exc.value.message
+
+    def test_given_a_generation_it_reports_that_generations_own_names(
+        self, no_metadata: None, bootstrapped: Bootstrapped,
+    ) -> None:
+        generation = _generations(bootstrapped.world)[0]
+        names = self_cmd._shim_names_to_write(generation)
+        assert names == sorted(install_layout.owned_shim_names(generation, platform=self_cmd._plat()))
+        assert "nx" in names and "nx-mcp" in names
+
+    def test_a_bootstrap_with_no_metadata_refuses_in_one_line(
+        self, world: World, no_metadata: None, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(self_cmd, "_running_version", lambda: "1.0.0")
         monkeypatch.setenv("NX_TOOLS_DIR", str(world.tools))
         monkeypatch.setenv("NX_BIN_DIR", str(world.bin))
         monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
         before = world.snapshot()
-        result = CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap", "--dry-run"])
-        assert result.exit_code == 0, result.output
-        assert generation.name in result.output and "no rebuild" in result.output
+        result = CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap"])
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit)
+        assert "Traceback" not in result.output and len(result.output.strip().splitlines()) == 1
         assert world.snapshot() == before
 
 

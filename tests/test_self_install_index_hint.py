@@ -12,6 +12,7 @@ running generation was untouched, and the message said neither.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -34,6 +35,25 @@ _RESOLVER_FAILURE = (
     "  x No solution found when resolving dependencies:\n"
     "  Because conexus==99 was not found in the package registry\n"
 )
+
+
+def _usable_bash() -> str:
+    """The ``bash`` these tests hand a fake build script to.
+
+    POSIX: ``bash`` on the PATH. Windows: the first ``bash`` on the PATH is
+    usually ``System32\\bash.exe``, the WSL launcher, which runs the script in a
+    Linux distribution (or fails when none is installed), so it is not used.
+    Git for Windows' own bash, next to ``git.exe``, is; with neither the tests
+    skip. Test-only: the Windows install path never runs bash."""
+    if os.name != "nt":
+        return "bash"
+    git = shutil.which("git")
+    if git:
+        root = Path(git).resolve().parent.parent
+        for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    pytest.skip("no Git for Windows bash next to git.exe (the bash on PATH may be the WSL launcher)")
 
 
 class TestTheHint:
@@ -208,7 +228,7 @@ class TestTheBuildFailureMessage:
         script = tmp_path / "fake_install_generation.sh"
         script.write_text(f"#!/usr/bin/env bash\ncat >&2 <<'EOF'\n{stderr}EOF\nexit 1\n")
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
-        return ["bash", str(script)]
+        return [_usable_bash(), str(script)]
 
     def _fail(self, tmp_path: Path, stderr: str, monkeypatch) -> str:
         for name in ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX", "HTTPS_PROXY", "https_proxy",
@@ -323,7 +343,7 @@ class TestTheBootstrapVariant:
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
         with pytest.raises(click.ClickException) as exc:
             self_cmd._build_flip_shims(
-                ["bash", str(script)], install_dir=tmp_path, tools=tmp_path / "tools",
+                [_usable_bash(), str(script)], install_dir=tmp_path, tools=tmp_path / "tools",
                 bin_dir=tmp_path / "bin", bootstrap=True,
             )
         message = exc.value.message
