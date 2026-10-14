@@ -315,7 +315,7 @@ names each handler by its program and verb.
 
 | Event | Handler | Purpose |
 |-------|--------|---------|
-| `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Prints nothing when the Nexus CLI is found. When it is not, tells the model Nexus is not installed and gives the commands that install it (RDR-228) |
+| `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Prints nothing when the Nexus CLI is found, and nothing in a cloud session (`CLAUDE_CODE_REMOTE`), where the servers are not. When the CLI is not found, tells the model Nexus is not installed and gives the commands that install it (RDR-228) |
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
 | `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |

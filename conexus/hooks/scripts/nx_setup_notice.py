@@ -10,8 +10,15 @@ hooks are programs of the Nexus CLI, and a machine can have the plugin and no
 CLI. This hook is the one place a session says so. Every other entry that finds
 no CLI writes one line and stays out of the way.
 
-Two outcomes in this phase:
+Three outcomes in this phase:
 
+* The hook runs in a remote workspace (``CLAUDE_CODE_REMOTE`` is true): print
+  nothing. A Desktop conversation's loop runs in a cloud workspace that has
+  ``uv`` and no CLI, while the plugin's servers run on the user's machine and
+  reach the conversation through the application's bridge. The hook cannot see
+  those servers from there, and its notice was false for a working install
+  (measured 2026-10-13, nexus-217c3). When the user's machine has no CLI the
+  stand-in's tool descriptions say so through the bridge.
 * ``nx-mcp`` resolves (``_cli_lookup.resolve``, the launcher's lookup): print
   nothing. The fact is the one the launcher serves by, so the hook speaks
   exactly when the stand-in server is what the session got.
@@ -42,6 +49,10 @@ import os  # noqa: E402
 #: stand-in for.
 PROBE_PROGRAM = "nx-mcp"
 
+#: Claude Code sets this to ``true`` where the session's loop, and so this hook,
+#: runs in a remote workspace and not on the user's machine.
+REMOTE_ENV = "CLAUDE_CODE_REMOTE"
+
 
 def notice(commands: tuple[str, ...], install_page: str) -> str:
     """What the model is told when there is no CLI."""
@@ -57,7 +68,13 @@ def notice(commands: tuple[str, ...], install_page: str) -> str:
     )
 
 
+def in_remote_workspace() -> bool:
+    return (os.environ.get(REMOTE_ENV) or "").strip().lower() in ("true", "1")
+
+
 def main() -> int:
+    if in_remote_workspace():
+        return 0
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(here)), "launch"))
     sys.path.insert(0, here)

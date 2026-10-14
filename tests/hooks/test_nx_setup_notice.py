@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests._platform import scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -55,12 +57,15 @@ def _install_nx_mcp(bindir: Path) -> None:
 
 
 def _run(
-    dirs: dict[str, Path], *, guarded: bool = False, hook: Path = _HOOK, **popen: object,
+    dirs: dict[str, Path], *, guarded: bool = False, hook: Path = _HOOK, remote: str | None = None,
+    **popen: object,
 ) -> subprocess.CompletedProcess[bytes]:
     env = scrubbed_env(
         PATH=str(dirs["bin"]), NX_TOOLS_DIR=str(dirs["tools"]), NEXUS_CONFIG_DIR=str(dirs["config"]),
         HOME=str(dirs["home"]), USERPROFILE=str(dirs["home"]),
     )
+    if remote is not None:
+        env["CLAUDE_CODE_REMOTE"] = remote
     if guarded:
         (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS)
         env["PYTHONPATH"] = str(dirs["site"])
@@ -119,6 +124,27 @@ def test_no_cli_and_the_hook_names_the_manual_commands(tmp_path: Path) -> None:
     assert "?" not in text, "Phase 1 asks no question; the question arrives with the setup tools"
     assert "ask the user" not in text.lower() and "tell the user" not in text.lower()
     assert "unless the user asks" in text, "the commands are the user's to run"
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1"])
+def test_in_a_remote_workspace_with_no_cli_the_hook_says_nothing(tmp_path: Path, value: str) -> None:
+    """A Desktop conversation's loop runs in a cloud workspace that has ``uv``
+    and no CLI, while the servers run on the user's machine and reach it through
+    the application's bridge (measured 2026-10-13, T2 nexus_rdr/228-research-22).
+    The hook cannot see those servers from there, and "this session has no Nexus
+    tools" was false. When the machine really has no CLI the stand-in's tool
+    descriptions say so through the bridge."""
+    r = _run(_dirs(tmp_path), remote=value)
+    assert r.returncode == 0
+    assert r.stdout == b""
+    assert r.stderr == b""
+
+
+@pytest.mark.parametrize("value", ["", "false", "0", "no"])
+def test_a_remote_marker_that_is_not_set_true_does_not_silence_the_hook(tmp_path: Path, value: str) -> None:
+    r = _run(_dirs(tmp_path), remote=value)
+    assert r.returncode == 0
+    assert "Nexus is not installed" in _context(r)
 
 
 def test_it_opens_no_socket_and_starts_no_process(tmp_path: Path) -> None:

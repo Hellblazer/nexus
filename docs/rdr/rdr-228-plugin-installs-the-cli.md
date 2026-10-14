@@ -85,7 +85,7 @@ turned off for those whose servers the application started itself
 that launch with Desktop's own binary, the plugin's `mcp-connect-wait` hook
 waited its full 15 seconds and reported that `nx-mcp` did not connect. The
 one live conversation measured on today's Desktop build ran no local session
-and no hook (Discovery 7), so no user is known to pay this wait now. This
+and no hook on the laptop (Discovery 7), so no user is known to pay this wait now. This
 record does not change the hook for that launch. It does make sure its own
 design never causes the same wait; see "The connect wait".
 
@@ -191,6 +191,12 @@ assumed (`-13`, replaced by the Windows run in `-14`).
    application still starts a local session in some cases is not known; a
    workspace virtual machine did boot on the laptop a minute after the answer,
    for a reason the logs do not show.
+   **Corrected 2026-10-13** (one live conversation, Phase 1 gate,
+   `nexus_rdr/228-research-22`): the plugin's hooks do run for a Desktop
+   conversation, in the cloud workspace and not on the laptop. That workspace
+   has `uv` and no CLI, and sets `CLAUDE_CODE_REMOTE`. The setup hook's notice
+   reached the model there and was false, because the servers on the laptop
+   were working. "No hook ran" above holds for the laptop only.
 8. **Documented.** Plain chat and the claude.ai web application ignore a
    plugin's local servers and hooks. Cowork refuses a plugin that has a
    top-level `bin/` directory. `${CLAUDE_PLUGIN_DATA}` is a per-plugin
@@ -201,7 +207,7 @@ assumed (`-13`, replaced by the Windows run in `-14`).
 
 - **CA-1 (Refuted for the conversation measured).** The draft assumed a
   Desktop session runs the plugin's hooks. In the live conversation of
-  Discovery 7 no hook ran, because the loop was not on the laptop. The design
+  Discovery 7 no hook ran on the laptop, because the loop was not there. The design
   now treats the plugin's server as the only channel that reaches every
   surface; see "How the question reaches the user".
 - **CA-2 (Not applicable to that path).** With no hooks, the 15 second
@@ -402,7 +408,9 @@ this record called the CLI "about 0.1 GB", which was wrong.
 **How the question reaches the user.** Two channels carry the same state and
 the same table, because no one channel reaches every surface. In Claude Code
 and the Code tab a session-start hook tells the model at the start of the
-session. In a Desktop conversation no hook runs (Discovery 7), and the only
+session. In a Desktop conversation the hooks run in a cloud workspace and
+not on the user's machine (Discovery 7), so the hook cannot see the servers
+and says nothing there, and the only
 part of the plugin on the user's machine that the model can see is the
 server. So the server that is running, stand-in or real, also states it,
 twice. Its `instructions` text says what is missing and that `/conexus:setup`
@@ -414,7 +422,10 @@ first asks for something Nexus would do, not at the start.
 
 **The setup hook.** A new session-start hook, `nx_setup_notice.py`, first in
 the list, runs the same way as the launcher. It starts nothing and makes no
-network request. It reads the facts above and the setup directory, and
+network request. In a remote workspace (`CLAUDE_CODE_REMOTE` is true) it
+says nothing and reads nothing: the servers are not there, and neither is
+the machine a setup would install on (Discovery 7). Elsewhere it reads the
+facts above and the setup directory, and
 reports the first state that matches, in this order:
 
 1. A setup run is live (the lock's heartbeat is fresh): report its stage.
@@ -826,8 +837,8 @@ On each surface, note whether the application asked before `setup` ran
 Done 2026-10-12, on the laptop and the Windows box. Results are in Critical
 Assumptions and Discovery 7.
 
-1. A live Desktop conversation: the loop is off the machine, no hook runs,
-   plugin tools are bridged.
+1. A live Desktop conversation: the loop is off the machine, no hook runs
+   on the machine, plugin tools are bridged.
 2. `nx self install` from a throwaway `uv` environment: refused. The design
    adds the `--bootstrap` flag.
 3. A stand-in server in Claude Code: accepted, `instructions` delivered.
@@ -1063,7 +1074,7 @@ None open.
 ### Contradiction Check
 
 Two research findings contradicted earlier drafts and the design was changed
-to match each. The live Desktop conversation ran no hook (Discovery 7), so the
+to match each. The live Desktop conversation ran no hook on the user's machine (Discovery 7), so the
 setup notice is carried by the server as well as by the hook.
 `nx self install` refuses a throwaway `uv` environment (CA-3), so the build
 step adds `--bootstrap`. Gate round 1 found a third: "setup complete" was decided from a
@@ -1249,3 +1260,10 @@ is flagged for trimming before then.
   accepted as built for Phase 1 and goes to Phase 2 Step 4 (Failure Modes).
   The setup hook speaks on every session-start event (Phase 1 Step 3).
 - 2026-10-13: Rebased onto develop for the push. The two gated commits were renumbered with the file unchanged, and the gate lines above now cite the new numbers; the T2 gate and fix-check records name both the old and the new.
+- 2026-10-13: Phase 1 gate, Desktop on macOS, on Sam's decision. The
+  plugin's hooks run for a Desktop conversation in its cloud workspace, and
+  the setup hook told the model Nexus was not installed while the servers on
+  the laptop worked (`nexus_rdr/228-research-22`). Discovery 7 is corrected:
+  no hook runs on the user's machine. The setup hook now says nothing when
+  `CLAUDE_CODE_REMOTE` is true ("The setup hook", "How the question reaches
+  the user"); the server's tool descriptions stay the Desktop channel.
