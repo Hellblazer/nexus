@@ -768,15 +768,16 @@ def _start_via_autostart_unit(
     fails.
 
     Used: have the manager start the unit, then POLL the registry for the
-    endpoint. This never spawns a supervisor itself, so it cannot race the one
-    the unit starts into a second: the supervisor's own single-writer election
-    decides the lease holder, and a start verb on an already-running unit is a
-    no-op (``systemctl start``, ``launchctl kickstart`` without ``-k``), so a
-    caller that has just enabled the unit finds its endpoint here. The lease
-    found gets the same artifact check the live-lease short-circuit applies. A
-    poll that times out raises :class:`StorageServiceStartError` naming the
-    unit's own log, rather than falling back to a spawn, which would race the
-    unit's still-starting supervisor.
+    endpoint. This path never spawns a supervisor itself: the supervisor's own
+    single-writer election decides the lease holder, and a start verb on an
+    already-running unit is a no-op (``systemctl start``, ``launchctl kickstart``
+    without ``-k``), so a caller that has just enabled the unit finds its
+    endpoint here. No artifact check runs on the lease found: a caller that
+    requested an artifact explicitly never reaches this path. A poll that times
+    out raises :class:`StorageServiceStartError` naming the unit's own log,
+    rather than falling back to a spawn, which would race the unit's
+    still-starting supervisor. The fallback cases above do spawn, and can race
+    a unit that is itself mid-start.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -811,7 +812,13 @@ def _start_via_autostart_unit(
     except ValueError as exc:
         _not_used(f"its --config-dir could not be read: {exc}")
         return None
-    wanted, baked = Path(config_dir).resolve(), unit_dir.resolve()
+    try:
+        wanted, baked = Path(config_dir).resolve(), unit_dir.resolve()
+    except (OSError, RuntimeError) as exc:
+        # An unresolvable path (a symlink loop, a permission error): the same
+        # one-line fallback as an unreadable unit, never a traceback.
+        _not_used(f"its --config-dir could not be resolved: {exc}")
+        return None
     if (str(wanted).casefold() != str(baked).casefold()) if windows else wanted != baked:
         _not_used(f"it runs the service for {baked}, not {wanted}")
         return None
@@ -853,7 +860,6 @@ def _start_via_autostart_unit(
     while True:
         lease = _service_endpoint.discover_storage_service_lease(registry, scope)
         if lease is not None:
-            _ssd._raise_or_warn_on_artifact_mismatch(config_dir, lease.endpoint)
             return lease
         if time.monotonic() >= deadline:
             break

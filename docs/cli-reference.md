@@ -3930,18 +3930,20 @@ When the storage-service autostart unit is installed and the OS manager reports
 it enabled (`nx daemon service install --autostart`), `start` asks the manager
 to start the unit (`systemctl --user start`, `launchctl kickstart`, or
 `schtasks /Run`) and waits up to 60 s for the supervisor it starts to publish
-the endpoint, so the manager supervises and restarts the service. It never
-spawns a second supervisor beside the unit, and a wait that times out is an
+the endpoint, so the manager supervises and restarts the service. That path
+never spawns a supervisor itself, and a wait that times out is an
 error, not a fallback spawn, naming the unit's own log (`nexus-service.err`
 beside the unit's other logs; on Windows `storage_service.crash.log` and
 `windows_autostart.crash.log` under the config dir's `logs`). With no unit, a
-unit installed for a different config dir than the one `start` resolved, a
+unit installed for a different config dir than the one `start` resolved (or
+one whose config dir cannot be read), a
 `NEXUS_SERVICE_BIN` or `NEXUS_SERVICE_JAR` set in the calling process (the
 unit's supervisor runs with the unit's environment and would not see it), a
 unit the manager does not report enabled (or cannot be asked), or a manager
 command that fails, `start` spawns
 the detached supervisor as before and prints one stderr line saying why the
-unit was not used (nothing when no unit is installed). A service that is
+unit was not used (nothing when no unit is installed); that spawn can race a
+unit that is itself mid-start. A service that is
 already running is reported without asking the manager. `nx init --service`
 and the Windows upgrade's service restart start the service the same way.
 `--foreground` (what the unit itself runs) is unchanged.
