@@ -13,20 +13,26 @@ from __future__ import annotations
 
 import subprocess
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
 from nexus import health, upgrade_finish
 from nexus.commands import daemon as daemon_cmd
+from nexus.commands import self_cmd
 from nexus.daemon import installer, windows_autostart
 from nexus.daemon.service_registry import ttl_for_tier
 from nexus.util import win_job
+from tests._fence_home import _link_through
 from tests._module_seam import setattr_in
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 SID = "S-1-5-21-111-222-333-1001"
 PYTHONW = r"C:\Users\sam\AppData\Roaming\uv\tools\conexus\Scripts\pythonw.exe"
+
+#: The genuine interpreter chooser, captured before the ``win`` fixture swaps in
+#: a canned one, for the tests that exercise the generation lookup itself.
+_REAL_TASK_PYTHONW = installer._task_pythonw
 
 
 def _root(xml: str) -> ET.Element:
@@ -635,3 +641,151 @@ class TestWindowsRetarget:
     def test_off_windows_nothing_happens(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "linux")
         assert installer.retarget_windows_task(NEW_PYTHONW) == []
+
+
+# ── the task follows the CURRENT generation (nexus-50l3e) ────────────────────
+
+
+def _make_generation(tools: Path, stamp: str, *, pythonw: bool = True, python: bool = True) -> Path:
+    """A generation directory with a Windows venv's interpreters in it."""
+    gen = tools / f"gen-{stamp}"
+    (gen / "Scripts").mkdir(parents=True)
+    if python:
+        (gen / "Scripts" / "python.exe").write_bytes(b"")
+    if pythonw:
+        (gen / "Scripts" / "pythonw.exe").write_bytes(b"")
+    return gen
+
+
+def _point_current_at(tools: Path, gen: Path) -> None:
+    """Point ``current`` at *gen*: a symlink, or on a Windows account without
+    SeCreateSymbolicLinkPrivilege (the win-release runner, WinError 1314) a
+    junction, which is what the real layout holds there."""
+    link = tools / "current"
+    if link.is_junction():
+        link.rmdir()  # removes the junction, never its target
+    elif link.is_symlink():
+        link.unlink()
+    _link_through(link, gen)
+
+
+def _point_current_at_a_reaped_generation(tools: Path) -> None:
+    """A dangling ``current`` on both platforms: link at a real directory
+    (a junction needs its target to exist when it is made), then remove it."""
+    gone = tools / "gen-gone"
+    gone.mkdir()
+    _point_current_at(tools, gone)
+    gone.rmdir()
+
+
+@pytest.fixture
+def legacy_python(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A legacy uv tree's interpreter, which is what ``sys.executable`` names.
+
+    The shape of a box whose shell still resolves the old uv shim after
+    ``nx self install``."""
+    scripts = tmp_path / "uv" / "tools" / "conexus" / "Scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "python.exe").write_bytes(b"")
+    (scripts / "pythonw.exe").write_bytes(b"")
+    setattr_in(monkeypatch, ("nexus.daemon.installer",), "sys.executable", str(scripts / "python.exe"))
+    return scripts / "python.exe"
+
+
+@pytest.fixture
+def layout(win: _FakeSchtasks, legacy_python: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The generation tools directory, with the REAL interpreter chooser restored."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    monkeypatch.setattr(installer, "_task_pythonw", _REAL_TASK_PYTHONW)
+    return tools
+
+
+class TestTaskFollowsTheCurrentGeneration:
+    """``nx init`` through a legacy shim registered the task with the LEGACY
+    tree's pythonw (measured in the Windows guest, nexus_rdr/228-research-29),
+    and the session-start gc reaps that tree once nothing holds it. With the
+    generation layout present the task is rendered from the generation
+    ``current`` names, whichever interpreter runs ``nx``."""
+
+    def test_the_interpreter_is_the_current_generations_not_the_running_one(self, layout: Path) -> None:
+        gen = _make_generation(layout, "20261014T000000Z")
+        _point_current_at(layout, gen)
+        chosen = installer._task_pythonw()
+        assert Path(chosen) == gen / "Scripts" / "pythonw.exe"
+        assert "uv" not in Path(chosen).parts, "the legacy tree must not be named"
+
+    def test_a_generation_without_pythonw_uses_its_python(self, layout: Path) -> None:
+        gen = _make_generation(layout, "20261014T000000Z", pythonw=False)
+        _point_current_at(layout, gen)
+        assert Path(installer._task_pythonw()) == gen / "Scripts" / "python.exe"
+
+    @pytest.mark.parametrize("state", [
+        "no-layout", "dangling-current", "generation-has-no-interpreter",
+        "generation-has-only-pythonw", "is-file-raises",
+    ])
+    def test_without_a_usable_generation_the_running_interpreter_is_kept(
+        self, layout: Path, legacy_python: Path, state: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A generation is usable only with its console ``python.exe``: the
+        supervisor runs ``console_python_for`` the task's interpreter, so a
+        pythonw-only generation would start a supervisor that is not there.
+        Any error reading the layout (EACCES from ``is_file`` on Windows) is
+        the same as no layout."""
+        if state == "dangling-current":
+            _point_current_at_a_reaped_generation(layout)
+            assert not (layout / "current").exists(), "non-vacuity: the pointer dangles"
+        elif state == "generation-has-no-interpreter":
+            empty = layout / "gen-empty"
+            empty.mkdir()
+            _point_current_at(layout, empty)
+        elif state == "generation-has-only-pythonw":
+            _point_current_at(layout, _make_generation(layout, "20261014T000000Z", python=False))
+        elif state == "is-file-raises":
+            _point_current_at(layout, _make_generation(layout, "20261014T000000Z"))
+
+            def denied(self: Path) -> bool:
+                raise PermissionError(13, "Access is denied", str(self))
+
+            monkeypatch.setattr(Path, "is_file", denied)
+        chosen = installer._task_pythonw()
+        # pythonw_for builds a Windows path that exists only on a Windows host,
+        # so a POSIX host gets the python.exe form: either names the legacy tree.
+        assert PureWindowsPath(chosen) in {
+            PureWindowsPath(str(legacy_python)),
+            PureWindowsPath(str(legacy_python.with_name("pythonw.exe"))),
+        }
+
+    def test_an_install_through_the_legacy_shim_registers_the_generations_interpreter(
+        self, layout: Path, win: _FakeSchtasks,
+    ) -> None:
+        gen = _make_generation(layout, "20261014T000000Z")
+        _point_current_at(layout, gen)
+        result = installer.install_autostart(tier="service")
+        body = result.dest.read_text()
+        assert f"<Command>{gen / 'Scripts' / 'pythonw.exe'}</Command>" in body
+        assert win.verbs() == ["create", "run"], "non-vacuity: the task was registered"
+
+    def test_a_task_naming_the_old_generation_is_drift_and_the_retarget_clears_it(
+        self, layout: Path, win: _FakeSchtasks, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The doctor row, the converge pass and ``retarget_windows_task`` all
+        render through ``_task_pythonw``, so they agree on the expected value."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        old = _make_generation(layout, "20261013T000000Z")
+        _point_current_at(layout, old)
+        installer.install_autostart(tier="service")
+        (row,) = health._check_service_autostart_drift()
+        assert row.ok, "a task naming the current generation is not drift"
+
+        new = _make_generation(layout, "20261014T000000Z")
+        _point_current_at(layout, new)
+        (stale,) = health._check_service_autostart_drift()
+        assert not stale.ok, "after a flip the old generation's task is stale"
+
+        self_cmd._retarget_autostart_task(new)
+        (fixed,) = health._check_service_autostart_drift()
+        assert fixed.ok, "the retarget writes exactly what the doctor expects"
+        _, rendered = installer.rendered_unit_content(tier="service")
+        assert str(new / "Scripts" / "pythonw.exe") in rendered

@@ -768,7 +768,7 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
         for builder in (
             "_task_run_cmd", "_task_end_cmd", "_activate_cmd", "_deactivate_cmd",
             "_activation_query_cmd", "_windows_task_activation", "_windows_task_registered",
-            "_launchd_loaded_now",
+            "_launchd_loaded_now", "_start_cmd",
         )
     },
     ("nexus/bounded_subprocess.py", "run_bounded", "unresolved-spawn-argv"):
@@ -1054,7 +1054,7 @@ def test_the_installer_allowance_names_its_builders_and_covers_nothing_else() ->
     assert named == {
         "_task_run_cmd", "_task_end_cmd", "_activate_cmd", "_deactivate_cmd",
         "_activation_query_cmd", "_windows_task_activation", "_windows_task_registered",
-        "_launchd_loaded_now",
+        "_launchd_loaded_now", "_start_cmd",
     }
     assert not _tree_allowed((_INSTALLER, "_a_new_function", "bare-argv0"))
     assert not _tree_allowed(("nexus/daemon/other.py", "_task_run_cmd", "bare-argv0"))
