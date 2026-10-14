@@ -76,10 +76,11 @@
 #       leg A: --yes                      -> the Task Scheduler launcher starts it.
 #   2   MCP store_put then search, in the live session (its sessionId, not a
 #       sidechain), returns the stored text; nx search outside the session
-#       finds it too, and a psql query of nexus.chunks in the cluster the
-#       supervisor started, as its superuser and not through the engine, finds
-#       the row. Session id, Claude Code version, engine tag and row count are
-#       recorded (nexus-ijue9.2).
+#       finds it too, and psql, as the local cluster's superuser and outside
+#       the engine's process and HTTP path, finds the row in nexus.chunks of the
+#       cluster whose data directory is a running bundle postgres.exe's -D.
+#       Session id, Claude Code version, engine tag, row count, collection and
+#       data directory are recorded (nexus-ijue9.2).
 #   3   the conexus hooks fire in the live session: nx-hook session-start
 #       succeeds WITH output (a missing nx-hook cannot produce it), the
 #       hooks/scripts/nx_hook_shim.py launcher (nexus-efk2h) succeeds with
@@ -290,14 +291,19 @@ function Invoke-Nx([string]$label, [string[]]$nxArgs) {
     return @{ code = $code; out = $out; log = $log; secs = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
 }
 
-# The rows of nexus.chunks whose text holds $needle, counted by psql in the
-# cluster the supervisor started, as that cluster's superuser: the role
+# The rows of nexus.chunks whose text holds $needle, counted by psql outside the
+# engine's process and HTTP path, as the local cluster's superuser: the role
 # pg_provision.windows_superuser_name derives from this account's SID, with the
-# port and password from pg_credentials. Not through the engine, so a row the
-# engine reported but never wrote is not counted (nexus-ijue9.2 deliverable 2).
+# port, data directory and password from pg_credentials. The same query returns
+# the server's own port and data directory, and the gate requires both to match
+# pg_credentials and the data directory to be the -D of a running bundle
+# postgres.exe, so the count comes from the cluster the supervisor runs, not from
+# whatever the file names (nexus-ijue9.2 deliverable 2). As superuser the count
+# spans every tenant and collection; the collections it found are returned too.
 # The password reaches psql as PGPASSWORD in this process's environment only and
-# is removed after; nothing here prints or logs it. Returns the count, or throws.
-function Count-ChunkRows([string]$label, [string]$needle) {
+# the previous value is restored after; nothing here prints or logs it.
+# Returns @{ count; collections; datadir; port }, or throws.
+function Count-ChunkRows([string]$label, [string]$needle, $stack) {
     if ($needle -notmatch '^[0-9a-f]+$') { throw "refusing a needle that is not lowercase hex: $needle" }
     $credPath = Join-Path $cfg 'pg_credentials'
     if (-not (Test-Path $credPath)) { throw "no pg_credentials at $credPath" }
@@ -305,23 +311,37 @@ function Count-ChunkRows([string]$label, [string]$needle) {
     foreach ($line in Get-Content -Path $credPath) {
         if ($line -match '^\s*([A-Z_]+)=(.*)$') { $cred[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'") }
     }
-    if (-not $cred['PG_PORT'] -or -not $cred['PG_SUPERUSER_PASS']) { throw 'pg_credentials lacks PG_PORT or PG_SUPERUSER_PASS' }
+    foreach ($key in 'PG_PORT', 'PG_DATA', 'PG_SUPERUSER_PASS') {
+        if (-not $cred[$key]) { throw "pg_credentials lacks $key" }
+    }
     $psqlExe = Get-ChildItem -Path (Join-Path $cfg 'pg-bundle') -Recurse -Filter 'psql.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $psqlExe) { throw "no psql.exe under $(Join-Path $cfg 'pg-bundle')" }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $sha = [Security.Cryptography.SHA256]::Create()
     $role = 'nx_' + (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sid)) | ForEach-Object { $_.ToString('x2') })).Substring(0, 16)
-    $sql = "SELECT count(*) FROM nexus.chunks WHERE strpos(chunk_text, '$needle') > 0"
+    $hit = "strpos(chunk_text, '$needle') > 0"
+    $sql = "SELECT inet_server_port()::text || '|' || current_setting('data_directory') || '|' || " +
+        "(SELECT count(*) FROM nexus.chunks WHERE $hit)::text || '|' || " +
+        "coalesce((SELECT string_agg(DISTINCT collection, ',') FROM nexus.chunks WHERE $hit), '')"
+    $hadPassword = Test-Path Env:PGPASSWORD
+    $previous = $env:PGPASSWORD
     $env:PGPASSWORD = $cred['PG_SUPERUSER_PASS']
     try {
-        $out = Native { & $psqlExe.FullName -h 127.0.0.1 -p $cred['PG_PORT'] -U $role -d nexus -At -v ON_ERROR_STOP=1 -c $sql }
+        $out = Native { & $psqlExe.FullName -w -h 127.0.0.1 -p $cred['PG_PORT'] -U $role -d nexus -At -v ON_ERROR_STOP=1 -c $sql }
         $code = $LASTEXITCODE
     } finally {
-        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        if ($hadPassword) { $env:PGPASSWORD = $previous } else { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
     }
     Set-Content -Path (Join-Path $RunDir "$label.log") -Value ("role $role port $($cred['PG_PORT']) exit $code`n$out") -Encoding UTF8
-    if ($code -ne 0 -or "$out".Trim() -notmatch '^\d+$') { throw "psql exited $code (see $label.log)" }
-    return [int]"$out".Trim()
+    $last = @("$out" -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 1
+    if ($code -ne 0 -or "$last" -notmatch '^(\d+)\|(.+)\|(\d+)\|(.*)$') { throw "psql exited $code (see $label.log)" }
+    $r = @{ port = $Matches[1]; datadir = $Matches[2].Trim(); count = [int]$Matches[3]; collections = $Matches[4].Trim() }
+    $norm = { param($p) ([IO.Path]::GetFullPath($p)).TrimEnd('\').ToLowerInvariant() }
+    if ($r.port -ne $cred['PG_PORT']) { throw "psql reached a server on port $($r.port), not pg_credentials' $($cred['PG_PORT'])" }
+    if ((& $norm $r.datadir) -ne (& $norm $cred['PG_DATA'])) { throw "the server's data directory $($r.datadir) is not pg_credentials' $($cred['PG_DATA'])" }
+    $owners = @($stack.postgres | Where-Object { "$($_.CommandLine)".Replace('/', '\').ToLowerInvariant().Contains((& $norm $r.datadir)) })
+    if ($owners.Count -eq 0) { throw "no running bundle postgres.exe has -D $($r.datadir)" }
+    return $r
 }
 
 # '' when the stop was graceful and quick; otherwise what was wrong with it.
@@ -667,9 +687,9 @@ Run-Assertion 2 'MCP store_put then search from the live session returns the sto
     if ($hits.Count -eq 0) { Fail "no search tool_result in live session $($script:sid) contains the nonce $nonce" }
     $cli = Invoke-Nx 'nx-search-nonce' @('search', "nx phase5 gate nonce $nonce", '--corpus', 'knowledge', '-c')
     if ($cli.out -notlike "*$nonce*") { Fail "nx search outside the session does not find the nonce (exit $($cli.code), see nx-search-nonce.log)" }
-    $rows = Count-ChunkRows 'psql-nonce' $nonce
-    if ($rows -lt 1) { Fail "nexus.chunks in the supervisor's cluster holds no row with the nonce (see psql-nonce.log)" }
-    "session $($script:sid), Claude Code $($script:view.version), engine-service-v$ExpectedEngine at $script:endpoint; store_put ok ($($okStore.Count)); search returned the nonce ($($hits.Count)); nx search finds it outside the session; psql finds $rows row(s) in nexus.chunks"
+    $pg = Count-ChunkRows 'psql-nonce' $nonce (Get-Stack)
+    if ($pg.count -lt 1) { Fail "nexus.chunks in the supervisor's cluster holds no row with the nonce (see psql-nonce.log)" }
+    "session $($script:sid), Claude Code $($script:view.version), engine-service-v$ExpectedEngine at $script:endpoint; store_put ok ($($okStore.Count)); search returned the nonce ($($hits.Count)); nx search finds it outside the session; psql, outside the engine process and HTTP path, finds $($pg.count) row(s) in nexus.chunks (collection $($pg.collections)) of the cluster at $($pg.datadir), port $($pg.port), the -D of a running bundle postgres.exe"
 }
 
 Run-Assertion 3 'the conexus hooks fire in the live session' {
