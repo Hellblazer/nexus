@@ -28,6 +28,7 @@ import threading
 import time
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape as _xml_escape
 
 import click
@@ -36,6 +37,9 @@ import structlog
 from nexus import config as _config
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import nx_argv
+
+if TYPE_CHECKING:
+    from nexus.daemon.service_registry import LeaseRecord, ServiceRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -537,7 +541,11 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 
     Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
     is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
-    service start`` is safe). Otherwise it detached-spawns the ``--foreground``
+    service start`` is safe). Otherwise, when the storage-service autostart
+    unit is installed for this config dir and the OS manager reports it
+    enabled, it starts the unit through the manager and waits for its lease
+    (:func:`_start_via_autostart_unit`, nexus-crwqm). In every other case it
+    detached-spawns the ``--foreground``
     supervisor (``start_new_session=True``; on Windows its own process group and
     a hidden console, see :func:`_supervisor_popen_kwargs`) and waits up to 60s
     for it to publish a lease. *platform* is a test seam for that choice.
@@ -576,12 +584,8 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     the service looked 'serving' at init time but the lease aged out before the
     next client (e.g. ``nx migrate-to-service``) could discover it.
 
-    When the storage-service autostart unit is installed and the OS manager
-    reports it enabled, the supervisor is started THROUGH the unit instead
-    (:func:`_start_via_autostart_unit`, nexus-crwqm), so the manager supervises
-    and restarts it; the detached spawn is the fallback for every other state.
-
-    Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
+    Raises :class:`StorageServiceStartError` on a spawn, or a unit start, that
+    never becomes ready.
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         ServiceRegistry,
@@ -743,7 +747,9 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 _UNIT_START_WAIT_S: float = 60.0
 
 
-def _start_via_autostart_unit(config_dir: Path, registry, scope: str):
+def _start_via_autostart_unit(
+    config_dir: Path, registry: ServiceRegistry, scope: str
+) -> LeaseRecord | None:
     """Start the service through its installed, enabled autostart unit (nexus-crwqm).
 
     Called by :func:`ensure_storage_supervisor` at the point it would spawn,
@@ -753,17 +759,24 @@ def _start_via_autostart_unit(config_dir: Path, registry, scope: str):
     beside an enabled unit leaves the unit inactive, so the OS manager neither
     supervises nor restarts the service the user asked to autostart.
 
-    Not used (``None``): no unit file (silent); the manager does not report the
-    unit ACTIVE, or its start command fails (one stderr line each says why).
+    Not used (``None``): no unit file (silent). One stderr line each says why
+    for the rest: this process requested a launch artifact explicitly
+    (``NEXUS_SERVICE_BIN`` / ``NEXUS_SERVICE_JAR``), which the unit's
+    supervisor would not inherit since it runs with the unit's environment;
+    the unit is baked for a different config dir than *config_dir*, or cannot
+    be read; the manager does not report the unit ACTIVE; its start command
+    fails.
 
     Used: have the manager start the unit, then POLL the registry for the
     endpoint. This never spawns a supervisor itself, so it cannot race the one
     the unit starts into a second: the supervisor's own single-writer election
     decides the lease holder, and a start verb on an already-running unit is a
     no-op (``systemctl start``, ``launchctl kickstart`` without ``-k``), so a
-    caller that has just enabled the unit finds its endpoint here. A poll that
-    times out raises :class:`StorageServiceStartError` rather than falling back
-    to a spawn, which would race the unit's still-starting supervisor.
+    caller that has just enabled the unit finds its endpoint here. The lease
+    found gets the same artifact check the live-lease short-circuit applies. A
+    poll that times out raises :class:`StorageServiceStartError` naming the
+    unit's own log, rather than falling back to a spawn, which would race the
+    unit's still-starting supervisor.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -773,40 +786,87 @@ def _start_via_autostart_unit(config_dir: Path, registry, scope: str):
     if unit_path is None:
         return None
 
-    probe = installer.autostart_activation_state(unit_path, tier="service")
-    if probe.state is not installer.ActivationState.ACTIVE:
+    def _not_used(reason: str) -> None:
         click.echo(
-            f"Not starting through the autostart unit {unit_path} "
-            f"({probe.state.value}: {probe.detail or 'the manager did not report it enabled'}); "
+            f"Not starting through the autostart unit {unit_path} ({reason}); "
             "starting the supervisor directly.",
             err=True,
+        )
+
+    try:
+        explicit = _ssd.requested_launch_artifact_if_explicit(config_dir) is not None
+    except _ssd.StorageServiceStartError:
+        # Set but unresolvable: the direct spawn reports the same error loudly.
+        explicit = True
+    if explicit:
+        _not_used(
+            "NEXUS_SERVICE_BIN or NEXUS_SERVICE_JAR is set in this process, and the "
+            "unit's supervisor runs with the unit's environment, not this one"
         )
         return None
 
+    windows = _autostart_platform() == "win32"
+    try:
+        unit_dir = installer.autostart_unit_config_dir(unit_path)
+    except ValueError as exc:
+        _not_used(f"its --config-dir could not be read: {exc}")
+        return None
+    wanted, baked = Path(config_dir).resolve(), unit_dir.resolve()
+    if (str(wanted).casefold() != str(baked).casefold()) if windows else wanted != baked:
+        _not_used(f"it runs the service for {baked}, not {wanted}")
+        return None
+
+    probe = installer.autostart_activation_state(unit_path, tier="service")
+    if probe.state is not installer.ActivationState.ACTIVE:
+        _not_used(
+            f"{probe.state.value}: {probe.detail or 'the manager did not report it enabled'}"
+        )
+        return None
+
+    # The unit's supervisor writes its stderr (its "Error: ..." line) to the
+    # unit's own log, never to the detached spawn's crash log. On Windows the
+    # task's launcher points the supervisor at storage_service.crash.log and
+    # keeps its own windows_autostart.crash.log beside it.
+    if windows:
+        from nexus.daemon.windows_autostart import TASK_NAME  # noqa: PLC0415 — deferred import — Windows-only path
+
+        unit_name = f"task {TASK_NAME}"
+        error_log = config_dir / "logs" / "storage_service.crash.log"
+        unit_logs = [error_log, config_dir / "logs" / "windows_autostart.crash.log"]
+        retrying = "Task Scheduler restarts the task when it fails"
+    else:
+        unit_name = unit_path.name
+        error_log = _autostart_log_dir() / "nexus-service.err"
+        unit_logs = [error_log, _autostart_log_dir() / "nexus-service.log"]
+        retrying = "the service manager keeps restarting the unit"
+    try:
+        error_mark = error_log.stat().st_size
+    except OSError:
+        error_mark = 0
+
     failure = installer.start_autostart_unit(unit_path, tier="service")
     if failure is not None:
-        click.echo(
-            f"Not starting through the autostart unit {unit_path} ({failure}); "
-            "starting the supervisor directly.",
-            err=True,
-        )
+        _not_used(failure)
         return None
 
     deadline = time.monotonic() + _UNIT_START_WAIT_S
     while True:
         lease = _service_endpoint.discover_storage_service_lease(registry, scope)
         if lease is not None:
+            _ssd._raise_or_warn_on_artifact_mismatch(config_dir, lease.endpoint)
             return lease
         if time.monotonic() >= deadline:
             break
         time.sleep(0.5)
-    logs_dir = config_dir / "logs"
+    last_error = _ssd.last_supervisor_error_line(error_log, error_mark)
+    detail = f"The supervisor reported: {last_error}\n" if last_error else ""
     raise _ssd.StorageServiceStartError(
-        f"The autostart unit {unit_path.name} was started but the storage service "
-        f"did not become ready within {_UNIT_START_WAIT_S:g}s. "
-        f"Check {logs_dir / 'storage_service.log'} (supervisor) and "
-        f"{logs_dir / 'storage_service.crash.log'}, the manager's own log for the "
-        "unit, or run 'nx daemon service start --foreground' to see the error."
+        f"The autostart unit {unit_name} was started but the storage service "
+        f"did not become ready within {_UNIT_START_WAIT_S:g}s; {retrying}.\n"
+        f"{detail}"
+        f"Check {' and '.join(str(path) for path in unit_logs)}, "
+        f"{config_dir / 'logs' / 'storage_service.log'} (supervisor), "
+        "or stop the unit and run 'nx daemon service start --foreground' to see the error."
     )
 
 

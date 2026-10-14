@@ -31,17 +31,50 @@ from click.testing import CliRunner
 from nexus.commands import daemon as daemon_mod
 from nexus.commands import init as init_mod
 from nexus.daemon import installer
+from nexus.daemon import storage_service_daemon as ssd
 from nexus.daemon import service_registry as sr
 from nexus.daemon.replace_quiesce import default_ops
 from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor, service_identity
+from nexus.daemon.windows_autostart import TASK_FILENAME, task_xml
+from tests._module_seam import setattr_in
 
-pytestmark = pytest.mark.usefixtures("launchd_uid")
+pytestmark = pytest.mark.usefixtures("launchd_uid", "no_explicit_artifact")
 
 ACTIVE = installer.ActivationProbe(installer.ActivationState.ACTIVE)
 
 
 def _probe(state: installer.ActivationState, detail: str = "") -> installer.ActivationProbe:
     return installer.ActivationProbe(state, detail)
+
+
+@pytest.fixture
+def no_explicit_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ambient launch-artifact request: the tests that want one set it."""
+    monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
+    monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+
+
+def _write_unit(path: Path, platform: str, config_dir: Path | None) -> None:
+    """Write the unit body the installer renders for *platform*, baking
+    *config_dir* (resolved, as the installer does). ``None`` writes a legacy
+    flagless systemd unit."""
+    if config_dir is None:
+        path.write_text(
+            "[Service]\nExecStart=/usr/local/bin/nx daemon service start --foreground\n"
+        )
+        return
+    baked = str(config_dir.resolve())
+    if platform == "win32":
+        body = task_xml(sid="S-1-5-21-1-2-3-1001", pythonw=r"C:\Py\pythonw.exe", config_dir=baked)
+    else:
+        body = daemon_mod._render_template(
+            path.name,
+            nx_bin=["/usr/local/bin/nx"],
+            log_dir="/tmp/nexus-logs",
+            path_env="/usr/bin:/bin",
+            config_dir=baked,
+        )
+    path.write_text(body)
 
 
 @pytest.fixture
@@ -58,8 +91,9 @@ def unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     units.mkdir()
     monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: "linux")
     monkeypatch.setattr(daemon_mod, "_autostart_install_dir", lambda: units)
+    monkeypatch.setattr(daemon_mod, "_autostart_log_dir", lambda: tmp_path / "unit-logs")
     path = units / daemon_mod._SERVICE_SERVICE_NAME
-    path.write_text("[Unit]\n")
+    _write_unit(path, "linux", tmp_path / "cfg")
     return path
 
 
@@ -182,7 +216,7 @@ class TestUnitActive:
         units.mkdir()
         monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: platform)
         monkeypatch.setattr(daemon_mod, "_autostart_install_dir", lambda: units)
-        (units / daemon_mod._autostart_filename_service()).write_text("x")
+        _write_unit(units / daemon_mod._autostart_filename_service(), platform, config_dir)
         manager = FakeManager(config_dir)
         monkeypatch.setattr(installer, "run_bounded", manager)
         monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
@@ -220,6 +254,93 @@ class TestUnitActive:
         assert "nexus-service.service was started" in result.output
         assert "did not become ready" in result.output
         popen.assert_not_called()
+
+    def test_the_lease_may_appear_only_after_several_poll_ticks(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """The unit's supervisor takes a while to boot: the poll sleeps, looks
+        again, and returns the lease once it appears, before the deadline."""
+        manager = FakeManager(config_dir, publish=False)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        sleeps: list[float] = []
+
+        def tick(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) == 3:
+                _publish_lease(config_dir, port=18095)
+
+        setattr_in(monkeypatch, daemon_mod, "time.sleep", tick)
+        with patch.object(daemon_mod, "_popen") as popen:
+            result = _run_start(config_dir)
+        assert result.exit_code == 0, result.output
+        assert len(sleeps) == 3
+        assert "18095" in result.output
+        popen.assert_not_called()
+
+    def test_the_lease_the_unit_publishes_gets_the_artifact_mismatch_check(
+        self, config_dir: Path, unit: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """The same check the live-lease short-circuit runs, on the unit's lease."""
+        manager = FakeManager(config_dir)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        checked: list[tuple[Path, dict]] = []
+        monkeypatch.setattr(
+            ssd, "_raise_or_warn_on_artifact_mismatch", lambda cd, ep: checked.append((cd, ep))
+        )
+        assert _run_start(config_dir).exit_code == 0
+        assert manager.calls  # the unit path ran
+        assert len(checked) == 1 and checked[0][1]["port"] == 18091
+
+
+class TestUnitStartTimeoutMessage:
+    """The unit's supervisor writes to the unit's own log, never to the
+    detached spawn's crash log, so the timeout names that log."""
+
+    def _never_publishes(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch, *, err_log: Path | None = None
+    ) -> None:
+        def start(argv, *, timeout, **_kw):
+            if err_log is not None:
+                err_log.parent.mkdir(parents=True, exist_ok=True)
+                with err_log.open("a") as fh:
+                    fh.write("Error: pg_credentials missing; run nx init\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(installer, "run_bounded", start)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        monkeypatch.setattr(daemon_mod, "_UNIT_START_WAIT_S", 0.05)
+
+    def test_linux_names_the_units_err_log_and_its_last_error(
+        self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        err_log = tmp_path / "unit-logs" / "nexus-service.err"
+        err_log.parent.mkdir(parents=True)
+        err_log.write_text("Error: an earlier boot's failure\n")
+        self._never_publishes(config_dir, monkeypatch, err_log=err_log)
+        result = _run_start(config_dir)
+        assert result.exit_code == 2
+        assert str(err_log) in result.output
+        assert "storage_service.crash.log" not in result.output
+        assert "pg_credentials missing" in result.output
+        assert "an earlier boot" not in result.output
+        assert "keeps restarting" in result.output
+
+    def test_windows_names_the_task_and_the_launchers_logs(
+        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        units = tmp_path / "units"
+        units.mkdir()
+        monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: "win32")
+        monkeypatch.setattr(daemon_mod, "_autostart_install_dir", lambda: units)
+        _write_unit(units / daemon_mod._autostart_filename_service(), "win32", config_dir)
+        self._never_publishes(config_dir, monkeypatch)
+        result = _run_start(config_dir)
+        assert result.exit_code == 2
+        assert "NexusStorageService" in result.output
+        assert "nexus-service-task.xml" not in result.output
+        assert "windows_autostart.crash.log" in result.output
 
 
 class TestUnitNotUsed:
@@ -306,6 +427,125 @@ class TestUnitNotUsed:
         assert result.exit_code == 0, result.output
         today.assert_called_once()
         assert "could not run" in result.output
+
+
+class TestUnitConfigDirMustMatch:
+    """The unit runs the supervisor for the dir baked into it; a start for a
+    different dir must not be answered by that unit's service."""
+
+    def test_a_unit_baked_for_another_dir_takes_todays_path_with_one_line(
+        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, today
+    ) -> None:
+        units = tmp_path / "units"
+        units.mkdir()
+        monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: "linux")
+        monkeypatch.setattr(daemon_mod, "_autostart_install_dir", lambda: units)
+        other = tmp_path / "other-profile"
+        other.mkdir()
+        _write_unit(units / daemon_mod._SERVICE_SERVICE_NAME, "linux", other)
+        manager = FakeManager(config_dir)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        result = _run_start(config_dir)
+        assert result.exit_code == 0, result.output
+        today.assert_called_once()
+        assert manager.calls == []
+        lines = [l for l in result.output.splitlines() if "autostart unit" in l]
+        assert len(lines) == 1, result.output
+        assert str(other.resolve()) in lines[0] and str(config_dir.resolve()) in lines[0]
+
+    def test_a_flagless_legacy_unit_means_the_default_dir(
+        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, today
+    ) -> None:
+        units = tmp_path / "units"
+        units.mkdir()
+        monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: "linux")
+        monkeypatch.setattr(daemon_mod, "_autostart_install_dir", lambda: units)
+        _write_unit(units / daemon_mod._SERVICE_SERVICE_NAME, "linux", None)
+        manager = FakeManager(config_dir)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        result = _run_start(config_dir)
+        assert result.exit_code == 0, result.output
+        today.assert_called_once()
+        assert manager.calls == []
+        assert str((Path.home() / ".config" / "nexus").resolve()) in result.output
+
+
+class TestExplicitArtifactBypassesTheUnit:
+    """A NEXUS_SERVICE_BIN / NEXUS_SERVICE_JAR in THIS process never reaches the
+    unit's supervisor, which runs with the unit's environment."""
+
+    def test_an_explicit_binary_takes_todays_path_with_one_line(
+        self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, today
+    ) -> None:
+        binary = tmp_path / "nexus-service"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        monkeypatch.setenv("NEXUS_SERVICE_BIN", str(binary))
+        manager = FakeManager(config_dir)
+        monkeypatch.setattr(installer, "run_bounded", manager)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        result = _run_start(config_dir)
+        assert result.exit_code == 0, result.output
+        today.assert_called_once()
+        assert manager.calls == []
+        lines = [l for l in result.output.splitlines() if "autostart unit" in l]
+        assert len(lines) == 1, result.output
+        assert "NEXUS_SERVICE_BIN" in lines[0]
+        assert str(binary) not in result.output
+
+
+class TestAutostartUnitConfigDir:
+    """``installer.autostart_unit_config_dir`` reads back what the renderers bake."""
+
+    @pytest.mark.parametrize(
+        "name", [daemon_mod._SERVICE_SERVICE_NAME, daemon_mod._SERVICE_PLIST_NAME]
+    )
+    def test_posix_units_round_trip_a_dir_with_a_space(self, name: str, tmp_path: Path) -> None:
+        baked = tmp_path / "my profile" / "nexus"
+        baked.mkdir(parents=True)
+        path = tmp_path / name
+        _write_unit(path, "linux", baked)
+        assert installer.autostart_unit_config_dir(path) == baked.resolve()
+
+    @pytest.mark.parametrize(
+        "baked",
+        [r"C:\Users\Sam Q\AppData\nexus", r"C:\cfg\trailing\\", r'C:\odd"quote\dir'],
+    )
+    def test_the_windows_task_round_trips(self, baked: str, tmp_path: Path) -> None:
+        path = tmp_path / TASK_FILENAME
+        path.write_text(task_xml(sid="S-1-5-21-1", pythonw=r"C:\Py\pythonw.exe", config_dir=baked))
+        assert str(installer.autostart_unit_config_dir(path)) == str(Path(baked))
+
+    def test_an_equals_spelling_is_read(self, tmp_path: Path) -> None:
+        path = tmp_path / daemon_mod._SERVICE_SERVICE_NAME
+        path.write_text("[Service]\nExecStart=/bin/nx daemon service start --foreground --config-dir=/srv/nx\n")
+        assert installer.autostart_unit_config_dir(path) == Path("/srv/nx")
+
+    def test_no_flag_is_the_default_dir(self, tmp_path: Path) -> None:
+        path = tmp_path / daemon_mod._SERVICE_SERVICE_NAME
+        _write_unit(path, "linux", None)
+        assert installer.autostart_unit_config_dir(path) == Path.home() / ".config" / "nexus"
+
+    @pytest.mark.parametrize(
+        ("name", "body"),
+        [
+            (daemon_mod._SERVICE_SERVICE_NAME, "[Service]\nType=simple\n"),
+            (daemon_mod._SERVICE_SERVICE_NAME, "[Service]\nExecStart=/bin/nx --config-dir\n"),
+            (daemon_mod._SERVICE_PLIST_NAME, "not a plist"),
+            ("nexus-service-task.xml", "<Task></Task>"),
+        ],
+    )
+    def test_an_unreadable_unit_is_a_value_error(self, name: str, body: str, tmp_path: Path) -> None:
+        path = tmp_path / name
+        path.write_text(body)
+        with pytest.raises(ValueError):
+            installer.autostart_unit_config_dir(path)
+
+    def test_a_missing_file_is_a_value_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            installer.autostart_unit_config_dir(tmp_path / daemon_mod._SERVICE_SERVICE_NAME)
 
 
 class TestForegroundUnchanged:

@@ -40,6 +40,7 @@ EXEMPT: dict[tuple[str, str], int] = {
     # launchctl's gui/<uid> domain: macOS only, the number IS the POSIX uid, never a Windows identity.
     ("src/nexus/daemon/installer.py", "_activate_cmd"): 1,
     ("src/nexus/daemon/installer.py", "_deactivate_cmd"): 1,
+    ("src/nexus/daemon/installer.py", "_start_cmd"): 1,
     ("src/nexus/daemon/installer.py", "_activation_query_cmd"): 1,
     ("src/nexus/daemon/installer.py", "autostart_activation_state"): 1,
     ("src/nexus/daemon/installer.py", "_launchd_loaded_now"): 1,

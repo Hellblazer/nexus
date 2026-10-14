@@ -33,6 +33,7 @@ from __future__ import annotations
 import ntpath
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -430,6 +431,114 @@ def start_autostart_unit(dest: Path, *, tier: str) -> str | None:
     if result.returncode != 0:
         return f"`{shown}` exited {result.returncode}: {_first_line(result)}"
     return None
+
+
+_TASK_ARGUMENTS_RE = re.compile(r"<Arguments>(.*?)</Arguments>", re.DOTALL)
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _split_windows_command_line(text: str) -> list[str]:
+    """Split *text* the way the MSVC runtime builds ``argv`` (the inverse of
+    :func:`subprocess.list2cmdline`, which renders the task's arguments): a
+    run of backslashes is literal unless a quote follows it, when each pair
+    is one backslash and an odd one escapes the quote."""
+    args: list[str] = []
+    buf: list[str] = []
+    in_quotes = False
+    started = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\":
+            run = 0
+            while i < len(text) and text[i] == "\\":
+                run += 1
+                i += 1
+            started = True
+            if i < len(text) and text[i] == '"':
+                buf.append("\\" * (run // 2))
+                if run % 2:
+                    buf.append('"')
+                    i += 1
+            else:
+                buf.append("\\" * run)
+            continue
+        if char == '"':
+            in_quotes = not in_quotes
+            started = True
+        elif char in " \t" and not in_quotes:
+            if started:
+                args.append("".join(buf))
+                buf, started = [], False
+        else:
+            buf.append(char)
+            started = True
+        i += 1
+    if started:
+        args.append("".join(buf))
+    return args
+
+
+def _unit_argv(dest: Path, text: str) -> list[str]:
+    """The argv the installed unit at *dest* runs, from its rendered body."""
+    import html  # noqa: PLC0415 — deferred import — only the unit-start path reads a unit back
+    import plistlib  # noqa: PLC0415 — deferred import — only the unit-start path reads a unit back
+
+    if dest.suffix == ".plist":
+        # The shipped template's comment spells ``--config-dir`` and
+        # ``--autostart``; ``--`` inside a comment is not well-formed XML, which
+        # launchd tolerates and expat does not. A comment carries no data.
+        body = _XML_COMMENT_RE.sub("", text)
+        try:
+            arguments = plistlib.loads(body.encode("utf-8")).get("ProgramArguments")
+        except (plistlib.InvalidFileException, ValueError, AttributeError) as exc:
+            raise ValueError(f"{dest} is not a readable launchd plist ({exc})") from exc
+        if not isinstance(arguments, list) or not all(isinstance(a, str) for a in arguments):
+            raise ValueError(f"{dest} has no ProgramArguments string array")
+        return arguments
+    if dest.suffix == ".xml":
+        match = _TASK_ARGUMENTS_RE.search(text)
+        if match is None:
+            raise ValueError(f"{dest} has no <Arguments> element")
+        return _split_windows_command_line(html.unescape(match.group(1)))
+    lines = [line for line in text.splitlines() if line.startswith("ExecStart=")]
+    if len(lines) != 1:
+        raise ValueError(f"{dest} has {len(lines)} ExecStart= lines, expected one")
+    try:
+        return shlex.split(lines[0].removeprefix("ExecStart="))
+    except ValueError as exc:
+        raise ValueError(f"{dest} has an unparseable ExecStart= line ({exc})") from exc
+
+
+def autostart_unit_config_dir(dest: Path) -> Path:
+    """The config dir the installed service unit at *dest* starts its supervisor
+    for (nexus-crwqm): the ``--config-dir`` the renderers bake into the
+    systemd ``ExecStart``, the launchd ``ProgramArguments`` or the Windows
+    task's ``<Arguments>``. A unit with no flag (one installed before the flag
+    was baked, nexus-cd1k0.19) means the DEFAULT dir: the units set no
+    ``NEXUS_CONFIG_DIR``, so a flagless supervisor resolves ``~/.config/nexus``,
+    the same literal ``storage_service_stack_matcher`` uses. The path is
+    returned as written, unresolved.
+
+    Raises ``ValueError`` naming the problem when the file cannot be read or
+    parsed, or the flag has no value.
+    """
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{dest} could not be read ({exc})") from exc
+    argv = _unit_argv(dest, text)
+    for index, token in enumerate(argv):
+        if token.startswith("--config-dir="):
+            value = token.removeprefix("--config-dir=")
+        elif token == "--config-dir":
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+        else:
+            continue
+        if not value:
+            raise ValueError(f"{dest} has --config-dir with no value")
+        return Path(value)
+    return Path.home() / ".config" / "nexus"
 
 
 class ActivationState(Enum):
