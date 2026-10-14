@@ -9,9 +9,10 @@ generation and not a ``uv tool`` install.
 
 These tests drive the real command in a real subprocess whose ``sys.prefix`` is
 a throwaway virtual environment (made with the standard library, so it needs no
-network), against a LOCAL package index: a directory of hand-built stand-in
-``conexus`` wheels that ``uv`` reads through ``UV_FIND_LINKS`` with
-``UV_NO_INDEX`` set. The index holds the running program's own version and a
+network), against a LOCAL package index: a ``file://`` simple-API index of hand-built stand-in
+``conexus`` wheels, handed to ``uv`` as ``UV_INDEX_URL``. (``UV_NO_INDEX`` is not
+enough: uv 0.8.0 ignored it and read the real PyPI, where the real wheel of the
+running version exists, so the first version of these tests installed that.) The index holds the running program's own version and a
 higher one, so a build that asked for "the latest" instead of the running
 version installs the higher stand-in and fails the version test.
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -32,11 +34,13 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
 import nexus
 from nexus import install_layout
+from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
 from nexus.commands import self_cmd
 
@@ -93,10 +97,28 @@ def _write_standin_wheel(index: Path, version: str) -> None:
     ]
     record.append(f"{dist_info}/RECORD,,")
     files[f"{dist_info}/RECORD"] = "\n".join(record) + "\n"
-    index.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(index / f"conexus-{version}-py3-none-any.whl", "w") as wheel:
+    project = index / "conexus"
+    project.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(project / f"conexus-{version}-py3-none-any.whl", "w") as wheel:
         for name, body in files.items():
             wheel.writestr(name, body)
+    _write_index_page(index)
+
+
+def _write_index_page(index: Path) -> None:
+    """The PEP 503 page for ``conexus``: one link per wheel now in the directory."""
+    project = index / "conexus"
+    links = "".join(
+        f'<a href="{wheel.name}">{wheel.name}</a><br>\n' for wheel in sorted(project.glob("*.whl"))
+    )
+    (project / "index.html").write_text(
+        f"<!DOCTYPE html><html><body>\n{links}</body></html>\n", encoding="utf-8",
+    )
+
+
+def _drop_wheel(index: Path, version: str) -> None:
+    (index / "conexus" / f"conexus-{version}-py3-none-any.whl").unlink()
+    _write_index_page(index)
 
 
 @dataclass
@@ -121,9 +143,8 @@ class World:
     def env(self) -> dict[str, str]:
         env = dict(os.environ)
         for name in list(env):
-            if name.startswith(("NX_", "UV_")) or name in ("VIRTUAL_ENV", "PYTHONHOME"):
+            if name.startswith(("NX_", "UV_")) or name in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH"):
                 del env[name]
-        site = {sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]}
         env.update({
             "HOME": str(self.root / "home"),
             "USERPROFILE": str(self.root / "home"),
@@ -134,21 +155,24 @@ class World:
             "NX_USER_PATH_STORE": str(self.path_store),
             "UV_CACHE_DIR": str(self.uv_cache),
             "UV_TOOL_DIR": str(self.uv_tools),
-            "UV_FIND_LINKS": str(self.index),
-            "UV_NO_INDEX": "1",
+            "UV_INDEX_URL": self.index.as_uri(),
             # The refusal text holds an em dash; a Windows child would otherwise
             # write it in the console code page and this test would read mojibake.
             "PYTHONIOENCODING": "utf-8",
-            "PYTHONPATH": os.pathsep.join([str(Path(nexus.__file__).resolve().parents[1]), *sorted(site)]),
         })
         return env
 
-    def run(self, python: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
-        """``nx <args>``, run by *python* (a program that imports this checkout)."""
+    def run(
+        self, python: Path | str, *args: str, **extra: str,
+    ) -> subprocess.CompletedProcess[str]:
+        """``nx <args>``, run by *python* (a program that imports this checkout).
+        *extra* adds or replaces environment variables."""
+        env = self.env()
+        env.update(extra)
         return subprocess.run(  # noqa: S603 — fixed argv
             [str(python), "-c", _DRIVER, *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            env=self.env(), timeout=600, check=False,
+            env=env, timeout=600, check=False,
         )
 
     def prefix_of(self, python: Path | str) -> str:
@@ -194,7 +218,26 @@ def _make_world(root: Path) -> World:
     _write_standin_wheel(world.index, _running_version())
     _write_standin_wheel(world.index, HIGHER)
     venv.EnvBuilder(with_pip=False, symlinks=not ON_WINDOWS).create(world.throwaway)
+    _let_the_throwaway_import_this_checkout(world)
     return world
+
+
+def _let_the_throwaway_import_this_checkout(world: World) -> None:
+    """Make the checkout and its dependencies importable by the throwaway
+    environment's own interpreter, through a ``.pth`` file in ITS site-packages.
+
+    Not ``PYTHONPATH``: that variable is inherited by every child, including the
+    interpreter ``uv`` inspects when it builds the new generation, and a
+    generation that sees this checkout's ``conexus`` on its path finds the
+    requested version "already installed" and fetches nothing. The first version
+    of these tests did that, so none of them reached the package index."""
+    purelib = subprocess.run(  # noqa: S603 — fixed argv
+        [str(world.python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True, timeout=60,
+    ).stdout.strip()
+    site = {sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]}
+    paths = [str(Path(nexus.__file__).resolve().parents[1]), *sorted(site)]
+    Path(purelib, "checkout.pth").write_text("\n".join(paths) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
@@ -309,27 +352,67 @@ class TestTheRefusalsThatStay:
         assert world.snapshot() == before
 
 
-def _seed_generation(world: World) -> None:
-    generation = world.tools / "gen-20260101T000000Z"
+def _receipted_generation(world: World, name: str = "gen-20260101T000000Z") -> Path:
+    generation = world.tools / name
     generation.mkdir()
     receipt = lc.Receipt(
         version="1.0.0", spec="conexus==1.0.0", source_kind="registry", source="conexus",
         python="3.12.0", base_interpreter=str(Path(sys.base_prefix)), created_at="2026-01-01T00:00:00Z",
     )
     (generation / lc.RECEIPT_NAME).write_text(receipt.to_json())
+    return generation
+
+
+def _point_current(world: World, target: Path) -> None:
+    """``current`` -> *target*: a symlink on POSIX, a junction on Windows (where
+    the generation module's own flip makes it)."""
+    if ON_WINDOWS:
+        gen_core.flip_current(target, world.tools, platform="win32")
+    else:
+        os.symlink(target, world.tools / "current")
+
+
+def _seed_current_generation(world: World) -> None:
+    """A complete install: a receipted generation that ``current`` points at."""
+    _point_current(world, _receipted_generation(world))
 
 
 def _seed_uv_tool_install(world: World) -> None:
     (lc.venv_bin(world.uv_tools / "conexus")).mkdir(parents=True)
 
 
+def _remove_link(path: Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+    else:
+        os.rmdir(path)
+
+
+def _interrupt(world: World, *, keep_shims: bool = False) -> None:
+    """Leave the state a run that died after the receipt leaves: the generation
+    and its receipt, no ``current``, and (unless *keep_shims*) no shims."""
+    _remove_link(world.tools / "current")
+    if not keep_shims:
+        for entry in world.bin.iterdir():
+            entry.unlink()
+
+
+def _shim_of(world: World) -> Path:
+    if ON_WINDOWS:
+        return world.tools / "current" / "bin" / lc.exe_name("nx", platform="win32")
+    return world.bin / "nx"
+
+
 class TestAnExistingInstall:
     """A reading of the record, not a statement in it (checked by P2.R2,
-    nexus-sv2wx.22): the flag is for a first install, so with a complete install
+    nexus-sv2wx.22): the flag is for a first install, so with a COMPLETE install
     present it refuses and names the plain command, which is the reading that
-    cannot overwrite anything."""
+    cannot overwrite anything. Complete means ``current`` resolves to a receipted
+    generation, or a ``uv tool`` install of conexus exists."""
 
-    @pytest.mark.parametrize("seed", [_seed_generation, _seed_uv_tool_install], ids=["generation", "uv-tool"])
+    @pytest.mark.parametrize(
+        "seed", [_seed_current_generation, _seed_uv_tool_install], ids=["generation", "uv-tool"],
+    )
     def test_it_refuses_in_one_line_naming_plain_self_install_and_changes_nothing(
         self, world: World, seed,
     ) -> None:
@@ -353,6 +436,166 @@ class TestAnExistingInstall:
         assert world.snapshot() == before
         assert len(_generations(world)) == 1
 
+    def test_a_dry_run_with_an_existing_install_refuses_too(self, world: World) -> None:
+        _seed_current_generation(world)
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--dry-run")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Run `nx self install`" in result.stderr
+        assert result.stdout == ""
+        assert world.snapshot() == before
+
+
+class TestAnInterruptedBootstrap:
+    """The receipt is written when the build finishes, BEFORE ``current`` and the
+    shims. A run that dies in between leaves a receipted generation and no
+    ``current``, on a machine that has no ``nx`` on its PATH: the refusal's
+    "Run `nx self install`" would be unrunnable there, so the same command
+    finishes the install instead, without rebuilding."""
+
+    @pytest.mark.parametrize("keep_shims", [False, True], ids=["no-shims", "our-shims-left"])
+    def test_a_receipted_generation_with_no_current_is_finished_without_a_rebuild(
+        self, world: World, keep_shims: bool,
+    ) -> None:
+        first = world.run(world.python, "self", "install", "--bootstrap")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (generation,) = _generations(world)
+        receipt_before = (generation / lc.RECEIPT_NAME).read_bytes()
+        _interrupt(world, keep_shims=keep_shims)
+        assert not (world.tools / "current").exists()
+
+        again = world.run(world.python, "self", "install", "--bootstrap")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [generation], "a second generation was built"
+        assert (generation / lc.RECEIPT_NAME).read_bytes() == receipt_before
+        current = install_layout.current_generation(tools=world.tools)
+        assert lc.compare_key(current) == lc.compare_key(generation)
+        assert _shim_of(world).is_file()
+        assert f"installed {generation.name}" in again.stdout
+        assert "no rebuild" in again.stdout and generation.name in again.stdout
+
+    def test_a_dangling_current_is_finished_the_same_way(self, world: World) -> None:
+        first = world.run(world.python, "self", "install", "--bootstrap")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (generation,) = _generations(world)
+        _interrupt(world)
+        elsewhere = world.root / "elsewhere"
+        elsewhere.mkdir()
+        _point_current(world, elsewhere)
+        shutil.rmtree(elsewhere)
+
+        again = world.run(world.python, "self", "install", "--bootstrap")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [generation]
+        current = install_layout.current_generation(tools=world.tools)
+        assert lc.compare_key(current) == lc.compare_key(generation)
+
+    def test_the_newest_receipted_generation_is_the_one_finished(self, world: World, monkeypatch) -> None:
+        older = _receipted_generation(world, "gen-20260101T000000Z")
+        newer = _receipted_generation(world, "gen-20260202T000000Z")
+        finished: list[Path] = []
+        monkeypatch.setattr(
+            self_cmd, "_flip_and_shim", lambda generation, **_: finished.append(generation),
+        )
+        for name in ("NX_TOOLS_DIR", "NX_BIN_DIR", "UV_TOOL_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("NX_TOOLS_DIR", str(world.tools))
+        monkeypatch.setenv("NX_BIN_DIR", str(world.bin))
+        monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
+        result = CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap"])
+        assert result.exit_code == 0, result.output
+        assert finished == [newer] and older not in finished
+
+    def test_a_dry_run_says_what_it_would_finish_and_changes_nothing(
+        self, world: World, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        generation = _receipted_generation(world)
+        monkeypatch.setenv("NX_TOOLS_DIR", str(world.tools))
+        monkeypatch.setenv("NX_BIN_DIR", str(world.bin))
+        monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
+        before = world.snapshot()
+        result = CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert generation.name in result.output and "no rebuild" in result.output
+        assert world.snapshot() == before
+
+
+class TestAFailedBuild:
+    def test_a_build_that_fails_leaves_no_generation_and_no_current(self, world: World) -> None:
+        """The index holds no wheel at the running version."""
+        _drop_wheel(world.index, _running_version())
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "generation build failed" in result.stderr
+        assert _generations(world) == []
+        assert not (world.tools / "current").exists() and not (world.tools / "current").is_symlink()
+        assert list(world.bin.iterdir()) == []
+
+    def test_a_network_failure_on_the_bootstrap_path_names_the_bootstrap_rerun(self, world: World) -> None:
+        """The index is an address nothing listens on, so uv fails the way an
+        unreachable corporate index does. The message must not talk about an
+        install that was not changed, nor tell the reader to run `nx`."""
+        result = world.run(
+            world.python, "self", "install", "--bootstrap", UV_INDEX_URL="http://127.0.0.1:9/simple",
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "re-run the same bootstrap command with UV_INDEX_URL=https://pypi.org/simple" in result.stderr
+        assert "not changed" not in result.stderr
+        assert "nx self install" not in result.stderr
+        assert _generations(world) == []
+
+
+@pytest.mark.skipif(ON_WINDOWS, reason="nexus writes no file into the bin directory on Windows")
+class TestAForeignProgramInTheBinDirectory:
+    """The shim step replaces whatever is at ``<bin>/nx``. ``--bootstrap`` runs
+    where nothing of nexus's exists, which is exactly where a pipx or npm
+    ``nx`` is most likely to be sitting, so it refuses before building."""
+
+    def _refused(self, world: World, name: str) -> None:
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 1, result.stdout + result.stderr
+        message = result.stderr.strip()
+        assert message.startswith("Error: ") and "\n" not in message, message
+        assert str(world.bin / name) in message
+        assert world.snapshot() == before
+        assert _generations(world) == []
+        assert result.stdout == ""
+
+    def test_a_foreign_script_is_refused_and_left_alone(self, world: World) -> None:
+        foreign = world.bin / "nx"
+        foreign.write_text("#!/bin/sh\necho somebody else's nx\n")
+        foreign.chmod(0o755)
+        self._refused(world, "nx")
+        assert foreign.read_text() == "#!/bin/sh\necho somebody else's nx\n"
+
+    def test_a_foreign_symlink_is_refused_and_left_alone(self, world: World) -> None:
+        elsewhere = world.root / "pipx" / "nx"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text("#!/bin/sh\n")
+        (world.bin / "nx").symlink_to(elsewhere)
+        self._refused(world, "nx")
+        assert (world.bin / "nx").is_symlink() and (world.bin / "nx").resolve() == elsewhere.resolve()
+
+    def test_a_foreign_program_under_another_shim_name_is_refused_too(self, world: World) -> None:
+        (world.bin / "nx-mcp").write_text("#!/bin/sh\n")
+        self._refused(world, "nx-mcp")
+
+    def test_a_dangling_uv_symlink_is_not_foreign(self, world: World) -> None:
+        """What `uv tool install conexus` leaves once its tree is gone: ours to replace."""
+        (world.bin / "nx").symlink_to(world.uv_tools / "conexus" / "bin" / "nx")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (world.bin / "nx").is_symlink() and (world.bin / "nx").is_file()
+
+    def test_a_stranger_file_that_is_not_a_shim_name_is_ignored(self, world: World) -> None:
+        (world.bin / "ripgrep").write_text("not a nexus command\n")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (world.bin / "ripgrep").read_text() == "not a nexus command\n"
+
 
 class TestTheFlagTakesNothingElse:
     def _invoke(self, world: World, monkeypatch: pytest.MonkeyPatch, *args: str):
@@ -371,6 +614,16 @@ class TestTheFlagTakesNothingElse:
         assert "--bootstrap" in result.output and args[0] in result.output
         assert world.snapshot() == before
 
+    def test_keep_is_accepted_and_changes_nothing_about_the_build(
+        self, world: World, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Nothing is reaped on this path, so the count has nothing to act on;
+        the flag is still accepted, because the plain command's callers pass it."""
+        plain = self._invoke(world, monkeypatch, "--dry-run")
+        kept = self._invoke(world, monkeypatch, "--keep", "7", "--dry-run")
+        assert kept.exit_code == 0, kept.output
+        assert kept.output == plain.output
+
     def test_a_dry_run_prints_the_pinned_build_and_changes_nothing(
         self, world: World, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -380,3 +633,70 @@ class TestTheFlagTakesNothingElse:
         assert "conexus" in result.output and _running_version() in result.output
         assert "--extras" not in result.output
         assert world.snapshot() == before
+
+
+class TestTheWindowsTwin:
+    """The Windows build, flip and PATH steps run through ``generation_core``;
+    their failure texts must name the bootstrap command on the bootstrap path
+    and keep today's words on the plain one."""
+
+    def _core(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        core = self_cmd._generation()
+        generation = tmp_path / "tools" / "gen-20260101T000000Z"
+        generation.mkdir(parents=True)
+        monkeypatch.setattr(core, "build_generation", lambda *a, **k: generation)
+        monkeypatch.setattr(self_cmd, "_plat", lambda: "win32")
+        monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda *_: None)
+        return core
+
+    def _fail_flip(self, core, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*_a, **_k):
+            raise core.GenerationError("boom")
+        monkeypatch.setattr(core, "flip_current", boom)
+
+    def test_a_failed_flip_on_the_bootstrap_path_names_the_bootstrap_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        core = self._core(monkeypatch, tmp_path)
+        self._fail_flip(core, monkeypatch)
+        build = self_cmd._WindowsBuild("conexus", [], "1.0.0")
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._windows_build_flip_shims(
+                build, tools=tmp_path / "tools", bin_dir=tmp_path / "bin", bootstrap=True,
+            )
+        message = exc.value.message
+        assert "re-run the same `--bootstrap` command" in message
+        assert "`nx self install`" not in message and "boom" in message
+
+    def test_a_failed_flip_on_the_plain_path_keeps_its_words(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        core = self._core(monkeypatch, tmp_path)
+        self._fail_flip(core, monkeypatch)
+        build = self_cmd._WindowsBuild("conexus", [], "1.0.0")
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._windows_build_flip_shims(build, tools=tmp_path / "tools", bin_dir=tmp_path / "bin")
+        assert exc.value.message == (
+            "flip or user PATH update failed (`nx self install` re-runs the missing steps):\nboom"
+        )
+
+    def test_a_failed_build_on_the_bootstrap_path_uses_the_bootstrap_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        core = self_cmd._generation()
+
+        def unreachable(*_a, **_k):
+            raise core.GenerationError(
+                "Failed to fetch https://example.org/simple/conexus/\n  dns error: failed to lookup address"
+            )
+        monkeypatch.setattr(core, "build_generation", unreachable)
+        monkeypatch.setattr(self_cmd, "_plat", lambda: "win32")
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        build = self_cmd._WindowsBuild("conexus", [], "1.0.0")
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._windows_build_flip_shims(
+                build, tools=tmp_path / "tools", bin_dir=tmp_path / "bin", bootstrap=True,
+            )
+        assert "re-run the same bootstrap command" in exc.value.message
+        assert "not changed" not in exc.value.message
