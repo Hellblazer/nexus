@@ -303,12 +303,13 @@ the payload's `cwd`, else `CLAUDE_PROJECT_DIR` (the rule `nx_hook_shim.py`
 uses), and for a server `CLAUDE_PROJECT_DIR`, which Claude Code sets for a
 plugin's server (measured, `nexus_rdr/228-research-17`).
 
-**What is served, decided from facts.** The launcher decides from one fact:
-does the CLI program resolve. No file the plugin writes takes part in that
-decision, so an install done by hand at any time is used at the next launch.
+**What is served, decided from facts.** The launcher decides from two facts
+about the CLI program, both read from files: does it resolve, and, when it does,
+can it start. No file the plugin writes takes part in that decision, so an
+install done by hand at any time is used at the next launch.
 
-- *The program resolves.* Run it. This holds whatever the user answered
-  earlier and whatever state a setup run was left in.
+- *The program resolves and can start.* Run it. This holds whatever the user
+  answered earlier and whatever state a setup run was left in.
 - *It does not resolve, and a hook verb was asked for.* Exit 0 with one line
   on standard error. A missing CLI never blocks a prompt or a tool call. This
   is the same outcome as the "no `nx-hook`" branch of `nx_hook_shim.py`,
@@ -319,6 +320,20 @@ decision, so an install done by hand at any time is used at the next launch.
 - *It does not resolve, and `nx-mcp-catalog` was asked for.* Serve a stand-in
   with no tools, so the application shows a connected server and the question
   is not offered twice.
+- *It resolves and cannot start* (Sam, 2026-10-14: for example a generation
+  whose Python `uv` pruned). "Cannot start" is decided from files alone, with
+  no process: the `pyvenv.cfg` of the program's virtual environment names a
+  `home` directory that is gone, or, on POSIX, the program's shebang names an
+  interpreter that is missing or not executable. It is claimed only on that
+  evidence. A hook verb gets one line on standard error and exit 0, as when the
+  CLI is missing. `nx-mcp` gets the same stand-in as for no CLI, but it says
+  "Nexus is installed but cannot start; setup repairs it" and the reason, in
+  its instructions, in both tools' descriptions and in `setup_status`;
+  `nx-mcp-catalog` gets the stand-in with no tools. A program the system
+  refuses to execute when the launcher starts it is treated the same way. The
+  build step of `setup` does not skip a CLI that cannot start, and
+  `nx self install --bootstrap` counts a `current` generation whose Python is
+  gone as not installed, so it replaces it.
 
 The stand-in exists only while there is no CLI. It does not try to swap itself
 for the real server inside one connection; when the build is done its status
@@ -371,19 +386,35 @@ surface (CA-8). If the Minimum Viable Validation finds a surface that shows
 no prompt, consent on that surface rests on the model alone, and whether the
 setup tools ship there is Sam's decision before release.
 
-**A usable service.** One definition, used by the hook, the stand-in and the
-real server. A service is *usable* when an endpoint resolves: the
-`NX_SERVICE_URL` variable, a saved `service_url`, or a live local supervisor
-lease (the file a running local service keeps). The plugin already ships a
-standard-library resolver for exactly this, `resolve_base_url` in
-`conexus/hooks/scripts/_endpoint_resolve.py`, which mirrors the CLI's own
-`resolve_service_endpoint`; the hook and the stand-in use the first and the
-real server the second. Resolving reads files and the environment and makes
-no network request. A local service is *provisioned* when `nx init` has left
-its files in the Nexus config directory (the service binary under
-`service/`). A service whose endpoint resolves but which does not answer, a
-cloud outage or a hung local service, is not a setup state: every tool
-already reports that error, and this record does not change it.
+**A usable service.** One definition, used by the hook, the setup process and
+the real server. A service is *usable* when the CLI would resolve an endpoint:
+`resolve_service_endpoint()` in `src/nexus/db/service_endpoint.py` returns and
+does not raise. It has four legs, in order: the `NX_SERVICE_URL` variable; a
+saved `service_url` (`nx config set service_url`); `NX_SERVICE_HOST` with
+`NX_SERVICE_PORT` (and `NX_SERVICE_TOKEN`); a live local supervisor lease (the
+file a running local service keeps). The two address legs need a token as well:
+a service token (`NX_SERVICE_TOKEN`, or the saved `service_token`), or the
+token of a live lease, or a mint credential. A saved address with no token is
+therefore not usable, because the CLI raises on it and the CLI is the program
+that connects. The host and port leg needs a port and a token, each from the
+environment or from a live lease, and a lease that carries no token is not
+usable. The real server calls `resolve_service_endpoint`;
+the hook, the setup process and the stand-in cannot import it, so the plugin
+restates it as `endpoint_usable` in `conexus/hooks/scripts/_endpoint_resolve.py`,
+and `tests/hooks/test_usable_service_agreement.py` holds the two to the same
+answer on one fixture set per leg (Residual nexus-9i4d4 item 9). The plugin's
+older `resolve_base_url` answers a different question, the base URL the other hooks
+use with a credential policy of their own, and is not the definition. Resolving
+reads files and the environment and makes no network request; in the hook a
+Windows lease read retries a sharing violation for at most 30 ms, where the
+registry's own retry is two seconds. One difference remains, because the plugin
+makes no network request: a lease just past its time to live is absent to the
+plugin, where the CLI keeps it while its owner process is alive and answering. A
+local service is *provisioned* when `nx init` has left its files in the Nexus
+config directory (the service binary under `service/`). A service whose
+endpoint resolves but which does not answer, a cloud outage or a hung local
+service, is not a setup state: every tool already reports that error, and this
+record does not change it.
 
 **The one question.** The choices, as the user is shown them:
 
@@ -429,26 +460,30 @@ facts above and the setup directory, and
 reports the first state that matches, in this order:
 
 1. A setup run is live (the lock's heartbeat is fresh): report its stage.
-2. The CLI resolves and a service is usable: say nothing. This holds
+2. The CLI is found and cannot start (the launcher serves the stand-in for it;
+   Sam, 2026-10-14): say that Nexus is installed but cannot start, give the
+   reason, and say that `setup` repairs it by building the CLI again, after the
+   user is asked first. A last run that failed or was interrupted is added.
+3. The CLI resolves and a service is usable: say nothing. This holds
    whatever an earlier run left in the setup directory.
-3. A setup run was interrupted (the lock's heartbeat is stale and the status
+4. A setup run was interrupted (the lock's heartbeat is stale and the status
    is not terminal): say so, name the log, and say that `setup` called again
    resumes.
-4. The last run failed (the status records a failure): report the failure
+5. The last run failed (the status records a failure): report the failure
    line and the log path. `setup` called again resumes from the failed step.
-5. No CLI: tell the model Nexus is not installed, give it the table, and ask
+6. No CLI: tell the model Nexus is not installed, give it the table, and ask
    it to put the one question to the user. The model calls `setup` with the
    answer. When the "not now" marker exists the hook does not ask; it says
    one line naming `/conexus:setup`.
-6. The CLI resolves, no service is usable and a local service is provisioned:
+7. The CLI resolves, no service is usable and a local service is provisioned:
    one line saying the service is down and that `/conexus:setup` starts it.
-7. The CLI resolves, no service is usable and none is provisioned: one line
+8. The CLI resolves, no service is usable and none is provisioned: one line
    saying no service is set up and naming `/conexus:setup`.
 
 The "not now" marker is written by `setup` with mode `not-now` and removed by
-any other `setup` call. It affects state 5 only. It never changes what the
+any other `setup` call. It affects state 6 only. It never changes what the
 launcher serves. A user who declines and later installs by hand is in
-state 2.
+state 3.
 
 **The setup directory.** One place for all of it, `setup/` under the Nexus
 config directory (`~/.config/nexus` unless `NEXUS_CONFIG_DIR` or
@@ -743,7 +778,7 @@ step is removed.
   Step 2 measures it before the Windows setup path ships.
 - **A reboot leaves the local service down.** With start at login declined,
   this is expected: the server and the hook say the service is down, and
-  `/conexus:setup` starts it (hook state 6).
+  `/conexus:setup` starts it (hook state 7).
 - **The account copy of the plugin is old** (Discovery 6). On a machine with no
   CLI the build installs the old plugin's version, which is consistent but
   stale. On a machine with a newer CLI the launcher uses the newer CLI. The
@@ -796,8 +831,12 @@ step is removed.
 - Stand-in server still running after the build: its status tool says to
   reconnect. It never serves a Nexus tool. The next launch runs the real
   server, because the CLI now resolves.
-- Setup process killed midway: its heartbeat goes stale, hook state 3 reports
+- Setup process killed midway: its heartbeat goes stale, hook state 4 reports
   it, and `setup` resumes.
+- The CLI's Python was pruned by `uv` (the pipx#146 / uv#8028 class): the CLI
+  is found and cannot start. The launcher serves the stand-in that says so,
+  hook state 2 says so, and `setup` builds a new generation and moves `current`.
+  The old generation stays until garbage collection.
 
 ## Implementation Plan
 
@@ -940,7 +979,7 @@ one. After a reconnect in Phase 1 the real server has no setup tools at all
 
 #### Step 4: The question, the hook's states and `/conexus:setup`
 
-The seven hook states over the usable-service definition, the `not-now` mode
+The eight hook states over the usable-service definition, the `not-now` mode
 and its marker, the start-at-login choice and the command.
 
 #### Step 5: The credentials page
@@ -1000,10 +1039,17 @@ None. The launcher, the hook and the stand-in server are standard library.
 - Usable service: the hook's answer and the real server's answer agree on
   the same config directory for each resolver leg (environment variable,
   saved address, local lease) and for none.
-- Setup hook: each of its seven states and the order between them, including
-  a usable service beside a failed status (state 2 wins). In no state does
-  the hook start a process or open a socket. The "not now" marker changes
-  state 5 only.
+- Setup hook: each of its eight states and the order between them, including
+  a usable service beside a failed status (state 3 wins) and a CLI that
+  cannot start beside a usable service (state 2 wins). In no state does the
+  hook start a process or open a socket. The "not now" marker changes state 6
+  only.
+- A CLI that is found and cannot start: the launcher gives a hook program one
+  line and exit 0 and a server the stand-in that says "installed but cannot
+  start", on POSIX (a shebang to a missing interpreter, and a `pyvenv.cfg`
+  whose `home` is gone) and in the Windows shape (a launcher `.exe` with no
+  shebang and a `pyvenv.cfg` whose `home` is gone); `setup`'s build step runs
+  for it and `nx self install --bootstrap` replaces the generation.
 - Until `setup` is called, a session start writes nothing under the Nexus
   config directory or the tools directory; pinned in an isolated home.
   (`uv` writes its own cache on the first launch, which is outside this pin.)
@@ -1077,6 +1123,15 @@ Sam, 2026-10-12, after gate round 1:
 7. The credentials page has no https requirement. It and the installer
    scripts stay in this record.
 8. The setup path does not prune `uv`'s package cache.
+
+Sam, 2026-10-14:
+
+9. A CLI that is found and cannot start (for example a generation whose Python
+   `uv` pruned) is its own case. The launcher serves the stand-in that says
+   "Nexus is installed but cannot start; setup repairs it"; the setup hook has
+   a state for it, checked right after a live run and before a usable
+   service; `setup` repairs it. This changes the launcher's rule from one
+   fact to two.
 
 ## Open Questions for Sam
 
@@ -1287,3 +1342,6 @@ is flagged for trimming before then.
   no hook runs on the user's machine. The setup hook now says nothing when
   `CLAUDE_CODE_REMOTE` is true ("The setup hook", "How the question reaches
   the user"); the server's tool descriptions stay the Desktop channel.
+- 2026-10-14: On Sam's word, a CLI that is found and cannot start is a case of
+  its own (Technical Design, "What is served"; hook state 2; Decisions Made 9).
+  The hook has eight states; the "not now" marker changes state 6 only.
