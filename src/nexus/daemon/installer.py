@@ -197,21 +197,27 @@ def generation_pythonw(generation: Path) -> str:
 def _current_generation_pythonw() -> str | None:
     """The interpreter of the generation ``current`` names, or None.
 
-    None when there is no generation layout (a dev checkout, a plain uv tool
-    install), when ``current`` dangles, or when the generation holds no
-    interpreter: the task must never name a file that is not there.
+    A generation is usable only when its console ``python.exe`` exists: the
+    task may run ``pythonw.exe`` (preferred, as :func:`generation_pythonw`
+    chooses), but the supervisor it starts is ``console_python_for`` that
+    interpreter, so a generation without ``python.exe`` would register a task
+    whose supervisor is not there.
+
+    None when there is no generation layout (a plain uv tool install), when
+    ``current`` dangles, when the generation holds no console interpreter, or
+    when reading any of that raises (``is_file`` can fail with EACCES on
+    Windows): the task must never name a file that is not there, and every
+    such case falls back to the running interpreter.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import — Windows-only path
 
     try:
         generation = install_layout.current_generation()
-    except Exception:  # noqa: BLE001 — no pointer, relative pointer, unreadable root: no layout
+        if not install_layout.venv_python(generation, platform="win32").is_file():
+            return None
+        return generation_pythonw(generation)
+    except Exception:  # noqa: BLE001 — no pointer, relative pointer, unreadable root or file: no layout
         return None
-    python = install_layout.venv_python(generation, platform="win32")
-    pythonw = install_layout.venv_script(generation, "pythonw", platform="win32")
-    if not (python.is_file() or pythonw.is_file()):
-        return None
-    return generation_pythonw(generation)
 
 
 def _task_pythonw() -> str:
@@ -224,6 +230,11 @@ def _task_pythonw() -> str:
     left a task the session-start gc could reap out from under (measured in the
     Windows guest, T2 ``nexus_rdr/228-research-29``). Without a generation
     layout the running interpreter is all there is.
+
+    This includes a dev checkout: run on a box that also has a generation
+    layout, it registers the installed current generation, not the checkout's
+    venv. That matches launchd and systemd, whose units name the
+    ``~/.local/bin/nx`` shim rather than the interpreter that rendered them.
     """
     from nexus.daemon.windows_autostart import pythonw_for  # noqa: PLC0415 — deferred import — Windows-only path
 

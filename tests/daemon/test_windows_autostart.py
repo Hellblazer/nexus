@@ -23,6 +23,7 @@ from nexus.commands import self_cmd
 from nexus.daemon import installer, windows_autostart
 from nexus.daemon.service_registry import ttl_for_tier
 from nexus.util import win_job
+from tests._fence_home import _link_through
 from tests._module_seam import setattr_in
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
@@ -645,21 +646,36 @@ class TestWindowsRetarget:
 # ── the task follows the CURRENT generation (nexus-50l3e) ────────────────────
 
 
-def _make_generation(tools: Path, stamp: str, *, pythonw: bool = True) -> Path:
+def _make_generation(tools: Path, stamp: str, *, pythonw: bool = True, python: bool = True) -> Path:
     """A generation directory with a Windows venv's interpreters in it."""
     gen = tools / f"gen-{stamp}"
     (gen / "Scripts").mkdir(parents=True)
-    (gen / "Scripts" / "python.exe").write_bytes(b"")
+    if python:
+        (gen / "Scripts" / "python.exe").write_bytes(b"")
     if pythonw:
         (gen / "Scripts" / "pythonw.exe").write_bytes(b"")
     return gen
 
 
 def _point_current_at(tools: Path, gen: Path) -> None:
+    """Point ``current`` at *gen*: a symlink, or on a Windows account without
+    SeCreateSymbolicLinkPrivilege (the win-release runner, WinError 1314) a
+    junction, which is what the real layout holds there."""
     link = tools / "current"
-    if link.is_symlink():
+    if link.is_junction():
+        link.rmdir()  # removes the junction, never its target
+    elif link.is_symlink():
         link.unlink()
-    link.symlink_to(gen)
+    _link_through(link, gen)
+
+
+def _point_current_at_a_reaped_generation(tools: Path) -> None:
+    """A dangling ``current`` on both platforms: link at a real directory
+    (a junction needs its target to exist when it is made), then remove it."""
+    gone = tools / "gen-gone"
+    gone.mkdir()
+    _point_current_at(tools, gone)
+    gone.rmdir()
 
 
 @pytest.fixture
@@ -705,16 +721,34 @@ class TestTaskFollowsTheCurrentGeneration:
         _point_current_at(layout, gen)
         assert Path(installer._task_pythonw()) == gen / "Scripts" / "python.exe"
 
-    @pytest.mark.parametrize("state", ["no-layout", "dangling-current", "generation-has-no-interpreter"])
+    @pytest.mark.parametrize("state", [
+        "no-layout", "dangling-current", "generation-has-no-interpreter",
+        "generation-has-only-pythonw", "is-file-raises",
+    ])
     def test_without_a_usable_generation_the_running_interpreter_is_kept(
-        self, layout: Path, legacy_python: Path, state: str,
+        self, layout: Path, legacy_python: Path, state: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A generation is usable only with its console ``python.exe``: the
+        supervisor runs ``console_python_for`` the task's interpreter, so a
+        pythonw-only generation would start a supervisor that is not there.
+        Any error reading the layout (EACCES from ``is_file`` on Windows) is
+        the same as no layout."""
         if state == "dangling-current":
-            (layout / "current").symlink_to(layout / "gen-gone")
+            _point_current_at_a_reaped_generation(layout)
+            assert not (layout / "current").exists(), "non-vacuity: the pointer dangles"
         elif state == "generation-has-no-interpreter":
             empty = layout / "gen-empty"
             empty.mkdir()
             _point_current_at(layout, empty)
+        elif state == "generation-has-only-pythonw":
+            _point_current_at(layout, _make_generation(layout, "20261014T000000Z", python=False))
+        elif state == "is-file-raises":
+            _point_current_at(layout, _make_generation(layout, "20261014T000000Z"))
+
+            def denied(self: Path) -> bool:
+                raise PermissionError(13, "Access is denied", str(self))
+
+            monkeypatch.setattr(Path, "is_file", denied)
         chosen = installer._task_pythonw()
         # pythonw_for builds a Windows path that exists only on a Windows host,
         # so a POSIX host gets the python.exe form: either names the legacy tree.
