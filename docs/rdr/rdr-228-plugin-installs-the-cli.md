@@ -766,8 +766,20 @@ step is removed.
 
 ### Failure Modes
 
-- `uv` absent: nothing in the plugin runs, as today. The application shows the
-  server as failed. Documentation is the only remedy.
+- `uv` absent: none of the plugin's local servers or command hooks runs, and
+  the application shows the servers as failed. This is wider than before
+  Phase 1: the two Nexus servers and the six `nx-hook` entries named their
+  programs directly and ran without `uv`, so a machine with the CLI installed
+  some other way (`pip`, `pipx`) and no `uv` had them and now does not.
+  `uv` is a hard requirement of the plugin (Sam, 2026-10-13). Documentation
+  is the only remedy.
+- A CLI program that is found and cannot start (a generation whose
+  interpreter was removed): a hook entry writes one line and exits 0; a
+  server entry fails and no stand-in is served, because "not installed"
+  would be untrue; the setup hook is silent, because the program resolves.
+  The application shows a failed server, as it did before this work. Accepted
+  for Phase 1 (Sam, 2026-10-13); Phase 2 Step 4 decides how a broken install
+  is reported.
 - Build killed midway: the generation has no receipt, so nothing treats it as
   an install, and the next `setup` builds a new one.
 - Stand-in server still running after the build: its status tool says to
@@ -858,7 +870,10 @@ tried by hand here.
 #### Step 3: The setup hook, the no-CLI message only
 
 The hook says nothing when the CLI resolves. With no CLI it says Nexus is
-not installed and names the manual commands. No question, no setup
+not installed and names the manual commands. It decides by whether `nx-mcp`
+resolves, the fact the launcher serves the stand-in by, and it speaks on
+every session-start event (startup, resume, clear, compact, fork), so a
+resumed or forked session can hear it twice (accepted, Sam, 2026-10-13). No question, no setup
 directory and no service check yet; those arrive in Phase 2 Step 4.
 
 #### Step 4: Entries and defects
@@ -1131,8 +1146,11 @@ Test Plan covers the "local" path without a network.
   gains one extra `uv` launch per server start and hook and one resident `uv`
   process per server, and a machine without it gets a stand-in and one true
   message in place of errors. A plugin newer than its CLI loses the `/clear`
-  and `/resume` handoff, with no message, until the CLI catches up; the
-  lockstep action upgrades it by the next session.
+  and `/resume` handoff, with no message, until the CLI catches up. For a
+  generation or a `uv tool` install the lockstep action upgrades it by the
+  next session. Any other install (`pip`, `pipx`, an editable checkout), and
+  any install whose upgrade fails, keeps the lost handoff until it is
+  upgraded by hand.
 - **Secret/credential lifecycle**: the cloud token is typed into a loopback
   page or a terminal prompt with echo off, held in memory until the CLI is
   built, saved with `nx config set` on standard input, and never logged, never placed in the status
@@ -1223,4 +1241,11 @@ is flagged for trimming before then.
   parent ("The launcher", Memory management), and the lookup change and its
   test are in Step 4 and the Test Plan. Step 2 says three manual commands,
   as the README gives them, where it said two.
+- 2026-10-13: Phase 1 review, four answers from Sam. `uv` is a hard
+  requirement of the plugin: without it the two Nexus servers no longer
+  start, where before Phase 1 they did (Failure Modes). The lockstep action
+  brings a newer plugin's CLI up only for a generation or `uv tool` install
+  (Incremental adoption). A program that is found and cannot start is
+  accepted as built for Phase 1 and goes to Phase 2 Step 4 (Failure Modes).
+  The setup hook speaks on every session-start event (Phase 1 Step 3).
 - 2026-10-13: Rebased onto develop for the push. The two gated commits were renumbered with the file unchanged, and the gate lines above now cite the new numbers; the T2 gate and fix-check records name both the old and the new.
