@@ -114,13 +114,18 @@ echo "Test 4: SIGTERM'd holder releases via its own EXIT trap"
 repo4="$WORKDIR/repo4"
 _fake_repo "$repo4"
 leasedir4="$repo4/service/.build-lease/trapped"
-bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; sleep 30" &
+# The ready marker is written AFTER the trap is installed: the lease's pid
+# file appears inside build_lease_acquire, before the trap, and a SIGTERM
+# in that gap kills the holder with nothing to release the lease
+# (nexus-n70xz, seen under a 32-worker suite).
+ready4="$WORKDIR/repo4.ready"
+bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; : > '$ready4'; sleep 30" &
 holder4=$!
 for _ in $(seq 1 50); do
-    [[ -f "$leasedir4/pid" ]] && break
+    [[ -f "$ready4" ]] && break
     sleep 0.1
 done
-if [[ ! -f "$leasedir4/pid" ]]; then
+if [[ ! -f "$ready4" || ! -f "$leasedir4/pid" ]]; then
     bad "background holder never acquired the lease (setup failure)"
 else
     # SIGTERM (not -9): catchable, so bash runs the EXIT trap before the
