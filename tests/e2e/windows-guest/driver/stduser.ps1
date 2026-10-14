@@ -38,6 +38,10 @@ param(
     # 'yes' (run-gate.sh --applocker): the administrator enforces AppLocker's default rules.
     # 'audit' (--applocker-audit): the same rules in audit only; the logs record what they would refuse.
     # 'allow' (--applocker-allow): enforced, plus path rules for this install's folders; script rules audit only.
+    # 'allow-dll-audit' (--applocker-allow-dll-audit): 'allow', plus the DLL rule collection in audit only; the
+    # logs (event 8003) name every DLL the DLL rules would refuse.
+    # 'allow-dll' (--applocker-allow-dll): 'allow', plus the DLL rules enforced, with the same folders and the
+    # extra DLL folders the audit run recorded.
     [string]$AppLocker = 'no'
 )
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
@@ -88,11 +92,29 @@ try {
             # -AppLocker allow: every folder under a profile from which this install starts a program, as the
             # audit run recorded them (8003), plus the two places an installer is downloaded to and started.
             $allow = ''
-            if ($appLocker -eq 'allow') {
-                foreach ($p in '.local\bin\*', 'AppData\Roaming\uv\*', 'AppData\Local\uv\cache\*', 'AppData\Local\Programs\Git\*', '.config\nexus\*', '.claude\downloads\*', 'AppData\Local\Temp\PortableGit.exe') {
+            $folders = @('.local\bin\*', '.local\share\nexus\*', 'AppData\Roaming\uv\*', 'AppData\Local\uv\cache\*', 'AppData\Local\Programs\Git\*', '.config\nexus\*', '.claude\downloads\*', 'AppData\Local\Temp\PortableGit.exe')
+            if ($appLocker -in 'allow', 'allow-dll-audit', 'allow-dll') {
+                foreach ($p in $folders) {
                     $allow += (& $path ([guid]::NewGuid().ToString()) "nexus install: $p" $everyone "%OSDRIVE%\Users\*\$p")
                 }
                 $xml = $xml.Replace('<RuleCollection Type="Script" EnforcementMode="Enabled">', '<RuleCollection Type="Script" EnforcementMode="AuditOnly">')
+            }
+            if ($appLocker -in 'allow-dll-audit', 'allow-dll') {
+                # AppLocker's default DLL rules, the install's folders, and (allow-dll) the folders outside them that
+                # the DLL runs of 2026-10-14 needed: the engine's tokenizer library, which it extracts under
+                # .cache\nexus\djl, ONNX Runtime, which it extracts to %TEMP%\onnxruntime-java<digits> at every start
+                # (blocked under the enforced rules; the audit run did not record it), and Defender's scanning DLL,
+                # which Defender loads into every process.
+                $dllExtra = @('.cache\nexus\*', 'AppData\Local\Temp\onnxruntime-java*')
+                $dll = '<RuleCollection Type="Dll" EnforcementMode="' + $(if ($appLocker -eq 'allow-dll') { 'Enabled' } else { 'AuditOnly' }) + '">' +
+                    (& $path 'fe64f59f-6fca-45e5-a731-0f6715327c38' 'Program Files DLLs' $everyone '%PROGRAMFILES%\*') +
+                    (& $path 'bac4b0bf-6f1b-40e8-8627-8d4b2af0a8c7' 'Windows DLLs' $everyone '%WINDIR%\*') +
+                    (& $path '3737732c-99b7-41d4-9037-9cddfb0de0d0' 'Administrators, all DLLs' $admins '*')
+                if ($appLocker -eq 'allow-dll') { $dll += (& $path '6d1f0f63-9c34-4a0e-9a54-2f2b5f0bd1c4' 'Defender platform DLLs' $everyone '%OSDRIVE%\ProgramData\Microsoft\Windows Defender\Platform\*') }
+                foreach ($p in @($folders) + $(if ($appLocker -eq 'allow-dll') { $dllExtra } else { @() })) {
+                    $dll += (& $path ([guid]::NewGuid().ToString()) "nexus install DLLs: $p" $everyone "%OSDRIVE%\Users\*\$p")
+                }
+                $xml = $xml.Replace('</AppLockerPolicy>', $dll + '</RuleCollection></AppLockerPolicy>')
             }
             $xml = $xml.Replace('@ALLOW@', $allow)
             if ($appLocker -eq 'audit') { $xml = $xml.Replace('EnforcementMode="Enabled"', 'EnforcementMode="AuditOnly"') }

@@ -251,7 +251,12 @@ while the stack kept running (nexus-ijue9.21).
 ## Removing Nexus
 
 Run these in a normal PowerShell window, in this order. Remove the plugin first
-if you added it (`/plugin uninstall conexus@nexus-plugins` inside Claude Code).
+if you added it (`/plugin uninstall conexus@nexus-plugins` inside Claude Code),
+then close every Claude Code window: a running session keeps the Nexus servers
+open, and they hold files the next two commands remove. Measured on 2026-10-14
+with a session still open, `nx uninstall` could not remove `.config\nexus`
+(`mcp.log` in use) and `uv tool uninstall conexus` failed with "Access is
+denied"; with the session closed, both completed and nothing was left.
 
 ```powershell
 nx uninstall --yes --remove-data
@@ -353,12 +358,14 @@ The Windows binaries are not Authenticode-signed. What that means in practice:
 
 ### Application control
 
-With AppLocker's default executable rules enforced, the install and the gate
-passed for a standard account once an administrator added these path rules to
-the executable collection (conexus 7.78.0, 2026-10-13):
+AppLocker needs Windows 11 Pro or above; Home has no AppLocker. With
+AppLocker's default executable rules enforced, the install and the gate passed
+for a standard account once an administrator added these path rules to the
+executable collection (conexus 7.78.0, 2026-10-13 and 2026-10-14):
 
 ```text
 %OSDRIVE%\Users\*\.local\bin\*
+%OSDRIVE%\Users\*\.local\share\nexus\*
 %OSDRIVE%\Users\*\AppData\Roaming\uv\*
 %OSDRIVE%\Users\*\AppData\Local\uv\cache\*
 %OSDRIVE%\Users\*\AppData\Local\Programs\Git\*
@@ -368,7 +375,13 @@ the executable collection (conexus 7.78.0, 2026-10-13):
 ```
 
 They cover uv and the `nx` programs, the Python that uv downloads, PortableGit,
-the engine and PostgreSQL, and the two installers. Three limits:
+the engine and PostgreSQL, and the two installers. `.local\share\nexus` is where
+`nx self install` puts each version (step 3); without that rule `nx self
+install` fails with "This program is blocked by group policy" on the new
+version's `python.exe` (measured 2026-10-14). With all eight rules, on Windows
+11 Pro as a standard user, `nx self install`, `nx upgrade`, the restart through
+the logon task onto the new version, and the removal steps below all completed
+with no AppLocker block. Three limits:
 
 - These rules let any program in those folders run, and the user can write to
   those folders. Publisher rules cannot replace them today, because the engine
@@ -377,11 +390,31 @@ the engine and PostgreSQL, and the two installers. Three limits:
   PowerShell in ConstrainedLanguage mode, where the uv installer in step 1
   fails whatever the executable rules say. Installing uv another way on such a
   machine has not been measured.
-- DLL rules, updating and removing under the policy were not measured.
+- DLL rules need three more folders than the executable rules. With the DLL
+  collection enforced, on Windows 11 Pro as a standard user (2026-10-14), the
+  engine failed to load ONNX Runtime until these were allowed for DLLs, and
+  then the gate passed: `%OSDRIVE%\Users\*\.cache\nexus\*` (the tokenizer
+  library the engine extracts), `%OSDRIVE%\Users\*\AppData\Local\Temp\onnxruntime-java*`
+  (ONNX Runtime, extracted to the temp folder at every engine start) and
+  `%OSDRIVE%\ProgramData\Microsoft\Windows Defender\Platform\*` (Defender's
+  own DLL, which it loads into every process). The first two are folders the
+  user can write to.
+
+### Smart App Control
+
+With Smart App Control on, the local stack cannot be set up. Measured on
+2026-10-14 on Windows 11 Home with it switched from evaluation to on: the
+install in steps 1 to 3 completed, and `nx init` then failed with "An
+Application Control policy has blocked this file" on the PostgreSQL bundle's
+`pg_config.exe` and `initdb.exe`. The log also named DLLs of the Python that uv
+downloads and of PortableGit, all for lacking a trusted signature. Smart App
+Control in evaluation mode, which a new Windows install starts in, blocked
+nothing. Signing the engine and the bundle would not be enough on its own,
+because uv's Python is unsigned too.
 
 ## What is not supported or not measured
 
 - Windows on ARM: not supported.
-- Smart App Control in enforcing mode, WDAC, AppLocker with enforced script
-  or DLL rules, a Home or Pro edition, a Microsoft or domain account, host
-  sleep, and the Claude Desktop install dialog: not measured.
+- Smart App Control on: the local stack cannot be set up (above).
+- WDAC, AppLocker with enforced script rules, a Microsoft or domain account,
+  host sleep, and the Claude Desktop install dialog: not measured.

@@ -392,7 +392,11 @@ RELEASE_PROPS_SNAPSHOT=""
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
   set +e
-  NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop >/dev/null 2>&1
+  # --with-pg: a plain stop leaves the supervisor's PostgreSQL running by
+  # design, and the pg_ctl fallback below needs a pg_ctl on PATH, which
+  # hellmini and chas lack. Without it the postmaster outlived the deleted
+  # datadir (hellmini, 2026-10-14, a jar-rebuild failure).
+  NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop --with-pg >/dev/null 2>&1
   # Stop the throwaway PG cluster if still up (pg_ctl from the provisioned
   # credentials; best-effort — the datadir removal below is the backstop).
   if [ -f "$SCRATCH/pg_credentials" ]; then

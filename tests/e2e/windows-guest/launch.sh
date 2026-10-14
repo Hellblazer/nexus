@@ -24,7 +24,8 @@
 # and its children hold it in their environment for the session's life, and a
 # Hyper-V checkpoint taken while the window is open stores it in saved memory,
 # so take checkpoints with the gate window closed.
-# RDR-219's inventory does not list this shape yet (nexus-pwscd).
+# RDR-219 lists this shape and the exposure it accepts (Technical Design,
+# "The Windows gate guest"; nexus-pwscd).
 #
 # Host shape (qwentescence): the ssh endpoint is elevated PowerShell; the
 # POSIX shell the helper needs is Git for Windows' bash, because WSL interop on
