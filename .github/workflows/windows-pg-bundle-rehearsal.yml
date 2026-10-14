@@ -406,12 +406,12 @@ jobs:
       # nexus-3fme8 (2026-10-14) added tests/hooks/ and the two Knowledge Map hook classes of
       # tests/test_context.py: 21 hook and plugin-structure tests had failed on native Windows with
       # nothing here to see it (test_plugin_structure.py, a content check, was fixed but is not run
-      # here). Measured on qwentescence (limited token, py3.13, NX_TEST_T2_SUBSTRATE=none, 8ede4b7fa)
-      # with test_plugin_structure.py included: 2394 passed, 92 skipped, 2 xfailed, 0 failed, so junit
-      # counts 94 skips; without it the passes are about 58 fewer and the skips no more. The floor is
-      # 2100 (about 90%) and the ceiling the 5% cap against it (2100 // 20 = 105), a margin of 11.
-      # The non-UTF-8 locale pin is named because a skip of it would hide the encoding fix.
+      # here). Measured with this exact command and floor on qwentescence (limited token, py3.13,
+      # NX_TEST_T2_SUBSTRATE=none, 3ac33ea): 2396 passed, 94 junit skips (92 skipped, 2 xfailed),
+      # 0 failed. The floor is 2150 (about 90%) and the ceiling the 5% cap against it
+      # (2150 // 20 = 107), a margin of 13. The non-UTF-8 locale pin is named because a skip of it
+      # would hide the encoding fix.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 2100 --max-skipped 105 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 2150 --max-skipped 107 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale
