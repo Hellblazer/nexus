@@ -365,7 +365,7 @@ def phase2_deferral_check(
             f"carries {PHASE2_MARKER}, so Phase 2 has shipped"
         )
     launcher_shipped = _exists_at(repo, base_tag, PHASE1_LAUNCHER)
-    guarded = list(PHASE2_GUARDED)
+    guarded: list[str] = list(PHASE2_GUARDED)
     if not launcher_shipped:
         guarded += PHASE2_GUARDED_WITHOUT_LAUNCHER
     differing = [

@@ -435,6 +435,17 @@ def _declared_paths_for(plugin: str) -> set[str]:
     }
 
 
+def _head_is(ref: str) -> bool:
+    """True when HEAD is the commit *ref* names (a tag checkout)."""
+    head = _git("rev-parse", "--verify", "HEAD^{commit}")
+    tag = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
+    return (
+        head.returncode == 0
+        and tag.returncode == 0
+        and head.stdout.strip() == tag.stdout.strip()
+    )
+
+
 def _deferred_declared_paths() -> set[str]:
     """DEFERRED entries' channel paths (nexus-2x3qy) -- exempt from the
     release-window "ledger must be empty" contract below.
@@ -514,7 +525,14 @@ def test_the_ledger_has_no_stale_entries() -> None:
                 f"test_every_drifted_file_is_declared_in_the_ledger)."
             )
             continue
-        declared |= _declared_paths_for(plugin)
+        plugin_declared = _declared_paths_for(plugin)
+        if _head_is(ref):
+            # The checkout IS the pinned tag (the tag workflow's own run). The
+            # cut held deferred paths back to the previous tag's content, so
+            # they cannot differ from the tag that held them back; they are
+            # still pending, not shipped (nexus-sv2wx.13).
+            plugin_declared -= deferred
+        declared |= plugin_declared
         drifted |= set(_drifted_paths(plugin, ref))
 
     stale = sorted(declared - drifted)
