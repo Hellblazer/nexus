@@ -23,6 +23,12 @@ hand at any time is used at the next launch.
   the application. ``uv`` is: it stays alive as the parent of what it runs, on
   every platform. On Windows the launcher starts the program with its own
   standard input and output and exits with the program's exit code.
+* The real ``nx-mcp`` is handed ``NX_SETUP_SCRIPT``, the path of ``nx_setup.py``
+  beside this file (RDR-228 Phase 2 Step 3). Its ``setup`` and ``setup_status``
+  tools start that file, so the setup process has one copy, in the plugin. It is
+  set in every state of the setup directory and the launcher reads none of it. A
+  value inherited from the environment is replaced: the variable names the file
+  this plugin ships. No other program gets it.
 * It does not resolve and a hook program was asked for: exit 0 with one line on
   standard error. A missing CLI never blocks a prompt or a tool call.
 * It does not resolve and a server was asked for: :func:`serve_stand_in`, a
@@ -66,6 +72,10 @@ HOOK_PROGRAMS = frozenset({"nx-hook", "nx-session-end-launcher"})
 
 #: Programs a server entry runs. Absent, the stand-in is served.
 SERVER_PROGRAMS = frozenset({"nx-mcp", "nx-mcp-catalog"})
+
+#: The environment variable that carries the setup process's path to the real
+#: ``nx-mcp``, which starts it from its ``setup`` tool.
+SETUP_SCRIPT_ENV = "NX_SETUP_SCRIPT"
 
 
 def serve_stand_in(name: str) -> int:
@@ -114,6 +124,12 @@ def _hook_stdin() -> tuple[BinaryIO | None, str | None]:
 def _hand_off(name: str, exe: str, args: list[str]) -> int:
     """Run *exe* in the project directory and return its exit code (POSIX: never
     returns on success)."""
+    if name == "nx-mcp":  # before the move to the project: __file__ may be relative to this directory
+        setup_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nx_setup.py")
+        if os.path.isfile(setup_script):
+            os.environ[SETUP_SCRIPT_ENV] = setup_script
+        else:
+            os.environ.pop(SETUP_SCRIPT_ENV, None)  # never hand on a path this plugin did not ship
     stdin: BinaryIO | None = None
     if name in HOOK_PROGRAMS:
         stdin, project = _hook_stdin()

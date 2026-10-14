@@ -14,6 +14,7 @@ import ast
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -42,6 +43,7 @@ sys.stdout.write(json.dumps({{
     "args": sys.argv[1:],
     "cwd": os.path.realpath(os.getcwd()),
     "stdin": data.decode("latin-1"),
+    "setup_script": os.environ.get("NX_SETUP_SCRIPT"),
 }}))
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
@@ -522,3 +524,107 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     assert len(spoke) == 1 and spoke[0].endswith("nx_setup_notice.py"), spoke
     written = sorted(str(p.relative_to(tmp_path)) for base in (config, tools) for p in base.rglob("*"))
     assert written == [], written
+
+
+# -- NX_SETUP_SCRIPT: the real nx-mcp reaches the setup process through the launcher ----------
+#
+# RDR-228 Phase 2 Step 3 (nexus-sv2wx.16). The real server's ``setup`` tool starts the
+# file this variable names, so the setup process has one copy, in the plugin. The
+# launcher sets it when it hands off to ``nx-mcp`` and reads none of the setup directory.
+
+_NX_SETUP = _ROOT / "conexus" / "launch" / "nx_setup.py"
+
+
+def _setup_dir_states(tmp_path: Path) -> dict[str, Path]:
+    """One config directory per state the setup directory can be in. Returns
+    ``{state: config dir}``."""
+    states: dict[str, Path] = {}
+    states["no directory"] = _empty(tmp_path, "cfg-none")
+    marker = _empty(tmp_path, "cfg-marker")
+    (marker / "setup").mkdir()
+    (marker / "setup" / "not-now").write_text("2026-01-01T00:00:00Z", encoding="utf-8")
+    states["a not-now marker"] = marker
+    failed = _empty(tmp_path, "cfg-failed")
+    (failed / "setup").mkdir()
+    (failed / "setup" / "status.json").write_text(json.dumps({"state": "failed", "stage": "build"}), encoding="utf-8")
+    states["a failed status"] = failed
+    stale = _empty(tmp_path, "cfg-stale")
+    (stale / "setup" / "lock").mkdir(parents=True)
+    (stale / "setup" / "lock" / "owner").write_text("a-dead-token", encoding="utf-8")
+    heartbeat = stale / "setup" / "lock" / "heartbeat"
+    heartbeat.write_text("x", encoding="utf-8")
+    os.utime(heartbeat, (1_000_000_000, 1_000_000_000))
+    (stale / "setup" / "status.json").write_text(json.dumps({"state": "running", "stage": "init"}), encoding="utf-8")
+    states["a stale lock"] = stale
+    return states
+
+
+def _tree(root: Path) -> dict[str, tuple[int, bytes | None]]:
+    out: dict[str, tuple[int, bytes | None]] = {}
+    for p in sorted(root.rglob("*")):
+        out[str(p.relative_to(root))] = (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+    return out
+
+
+@pytest.mark.parametrize("state", ["no directory", "a not-now marker", "a failed status", "a stale lock"])
+def test_the_real_nx_mcp_is_handed_the_setup_script_in_every_state_of_the_setup_directory(
+    tmp_path: Path, state: str,
+) -> None:
+    config = _setup_dir_states(tmp_path)[state]
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    before = _tree(config)
+    r = _run(["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), NEXUS_CONFIG_DIR=str(config))
+    report = _report(r)
+    assert report["marker"] == "layout", "the real program must run, not the stand-in"
+    assert report["setup_script"] is not None
+    assert os.path.samefile(report["setup_script"], _NX_SETUP)
+    assert os.path.isabs(report["setup_script"])
+    assert _tree(config) == before, "the launcher read or wrote the setup directory"
+
+
+def test_a_value_inherited_from_the_environment_is_replaced(tmp_path: Path) -> None:
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    r = _run(
+        ["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), NEXUS_CONFIG_DIR=str(_empty(tmp_path, "cfg")),
+        NX_SETUP_SCRIPT=str(tmp_path / "elsewhere.py"),
+    )
+    assert os.path.samefile(_report(r)["setup_script"], _NX_SETUP)
+
+
+def test_the_script_is_found_from_a_relative_launch_and_a_project_directory(tmp_path: Path) -> None:
+    """The launcher moves to the project before it starts the program; the path it
+    hands on is absolute and does not depend on that move."""
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    project = _empty(tmp_path, "project")
+    r = _run(
+        ["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), cwd=_LAUNCH.parent,
+        NEXUS_CONFIG_DIR=str(_empty(tmp_path, "cfg")), CLAUDE_PROJECT_DIR=str(project),
+    )
+    report = _report(r)
+    assert os.path.isabs(report["setup_script"]) and os.path.samefile(report["setup_script"], _NX_SETUP)
+    assert os.path.samefile(report["cwd"], project)
+
+
+@pytest.mark.parametrize("program", ["nx-mcp-catalog", "nx-hook", "nx-session-end-launcher"])
+def test_no_other_program_is_handed_the_setup_script(tmp_path: Path, program: str) -> None:
+    tools, _gen = _layout(tmp_path, program)
+    r = _run([program], tools=tools, path=_empty(tmp_path, "bin"), NEXUS_CONFIG_DIR=str(_empty(tmp_path, "cfg")))
+    assert _report(r)["setup_script"] is None
+
+
+def test_a_plugin_copy_without_the_script_hands_on_no_path(tmp_path: Path) -> None:
+    """The variable names a file this plugin ships. If the file is not there the
+    real server must find the variable unset, and answer with the terminal commands."""
+    plugin = tmp_path / "plugin"
+    for sub in ("hooks/scripts", "launch"):
+        shutil.copytree(_ROOT / "conexus" / sub, plugin / sub, ignore=shutil.ignore_patterns("__pycache__"))
+    (plugin / "launch" / "nx_setup.py").unlink()
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    env = scrubbed_env(
+        PATH=str(_empty(tmp_path, "bin")), NX_TOOLS_DIR=str(tools), NX_SETUP_SCRIPT=str(tmp_path / "elsewhere.py"),
+    )
+    r = subprocess.run(
+        [sys.executable, str(plugin / "launch" / "nx_launch.py"), "nx-mcp"],
+        input=b"", capture_output=True, env=env, timeout=30, check=False,
+    )
+    assert _report(r)["setup_script"] is None

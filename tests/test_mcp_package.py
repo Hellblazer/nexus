@@ -73,6 +73,10 @@ def test_core_registered_tools():
         # which was green locally and red on both CI shards.
         "hook_auto_approve",              # bead .4
         "hook_subagent_start",            # bead .18
+        # RDR-228 Phase 2 Step 3 (bead nexus-sv2wx.16): start and follow the setup
+        # process. Registered always; the plugin's stand-in server offers the same
+        # two. Both stay out of auto_approve (tests/hooks/test_permission_request_hooks.py).
+        "setup", "setup_status",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
@@ -166,7 +170,7 @@ def test_no_registered_mcp_tool_is_backed_by_a_private_function():
     (as _file_path_matches did) is exactly the failure mode this catches,
     mechanically, for every current and future tool on both servers — not
     just the one instance found by hand. Non-vacuity: the tool counts are
-    asserted well above the current registry (44 core / 10 catalog) so a
+    asserted well above the current registry (46 core / 10 catalog) so a
     collection regression (e.g. an import error silently emptying the
     registry) fails loud rather than passing on an empty set.
     """

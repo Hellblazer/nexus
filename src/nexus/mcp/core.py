@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-44 registered tools + 13 demoted (plain functions, no @mcp.tool();
+46 registered tools + 13 demoted (plain functions, no @mcp.tool();
 the ten operator_* functions were demoted at nexus-ivi4s). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
@@ -19,6 +19,7 @@ from typing import Annotated, Any
 
 import structlog
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
@@ -108,6 +109,7 @@ from nexus.tuple_directory import (
 # instance-mailbox takeover it owns. Imported as a module, not individual
 # names, so the tools below read as `_subscriptions.<fn>` next to their
 # `_t2_ctx`/`_get_t1` sibling helpers.
+from nexus.mcp import setup_tools as _setup_tools
 from nexus.mcp import subscriptions as _subscriptions
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10), rewritten under RDR-213:
 # the channel capability declaration and the lifespan waiter, which
@@ -12903,6 +12905,49 @@ def daemon_uninstall(
     return "\n".join(lines)
 
 
+# ── Setup (RDR-228 Phase 2 Step 3) ────────────────────────────────────────────
+#
+# Registered ALWAYS, with the same names, arguments and descriptions as the
+# plugin's stand-in server (conexus/launch/nx_standin.py): the stand-in is what
+# the application connects to when there is no CLI, this server when there is, and
+# a model that learned the tools from one must find them unchanged on the other.
+# ``tests/mcp/test_setup_tools.py`` pins the two equal. The tools start the setup
+# process (``NX_SETUP_SCRIPT``) and read its answer; see ``nexus.mcp.setup_tools``.
+# Neither is auto-approved (``nexus.hooks.auto_approve``). ``mode`` is a plain
+# string, not an enum, so a mode that is not offered (a managed service, until its
+# credentials page exists) gets the same sentence from both servers instead of a
+# schema validation message.
+@mcp.tool(
+    title=_setup_tools.SETUP_TITLE,
+    description=_setup_tools.SETUP_DESCRIPTION,
+    structured_output=False,
+)
+async def setup(
+    mode: Annotated[str, Field(description=_setup_tools.MODE_DESCRIPTION)],
+    autostart: Annotated[bool, Field(description=_setup_tools.AUTOSTART_DESCRIPTION)] = False,
+) -> str:
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    try:
+        return await asyncio.to_thread(_setup_tools.run_setup, mode, autostart)
+    except _setup_tools.SetupError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(
+    title=_setup_tools.SETUP_STATUS_TITLE,
+    description=_setup_tools.SETUP_STATUS_DESCRIPTION,
+    structured_output=False,
+)
+async def setup_status() -> str:
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    try:
+        return await asyncio.to_thread(_setup_tools.run_status)
+    except _setup_tools.SetupError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
@@ -13006,6 +13051,7 @@ def main():
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.mcp._first_run import (  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
         apply_embedder_notice,
+        apply_setup_notice,
         apply_stranded_notice,
     )
     from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
@@ -13081,6 +13127,10 @@ def main():
     # cannot print (stdout is JSON-RPC), so the notice rides the server
     # `instructions` delivered at initialize. Best-effort; never blocks boot.
     apply_embedder_notice(mcp)
+    # RDR-228 Phase 2: say through the same channel when no usable service is
+    # found, so a surface that never runs the plugin's session-start hook (a
+    # Desktop conversation) still learns that the setup tool fixes it.
+    apply_setup_notice(mcp)
     # The FastMCP lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
     # cases where the lifespan does not fire. Empirically, FastMCP's

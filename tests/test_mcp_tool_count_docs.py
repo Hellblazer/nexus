@@ -44,7 +44,7 @@ def _live_tool_counts() -> tuple[int, int]:
 def test_mcp_servers_doc_states_the_live_tool_counts():
     core_count, catalog_count = _live_tool_counts()
     doc = _REPO_ROOT / "docs" / "mcp-servers.md"
-    text = doc.read_text()
+    text = doc.read_text(encoding="utf-8")
 
     table_row = f"| `nexus` | `nx-mcp` | {core_count} |"
     assert table_row in text, (
@@ -84,7 +84,7 @@ def test_mcp_module_docstring_states_its_own_live_tool_count(module_path):
     core_count, catalog_count = _live_tool_counts()
     want = core_count if module_path.name == "core.py" else catalog_count
 
-    text = module_path.read_text()
+    text = module_path.read_text(encoding="utf-8")
     match = _DOCSTRING_COUNT_RE.search(text)
     assert match is not None, (
         f"{module_path.relative_to(_REPO_ROOT)}'s module docstring does not "

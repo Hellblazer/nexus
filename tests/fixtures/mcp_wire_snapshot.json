@@ -994,6 +994,35 @@
       },
       "qualname": "search_topic_scoped"
     },
+    "setup": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "autostart": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      "qualname": "setup"
+    },
+    "setup_status": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "setup_status"
+    },
     "store_get": {
       "is_async": true,
       "module": "nexus.mcp.core",

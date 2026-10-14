@@ -57,6 +57,14 @@ _SPAWN_CALLEES = frozenset({
 
 _VLS = "conexus/hooks/scripts/version_lockstep_action.py"
 
+#: Files that spawn, and need no resolution, because every spawn they make starts
+#: ``sys.executable``: an absolute path the running interpreter already knows, so
+#: there is no name for ``CreateProcess`` to search the working directory for.
+#: ``tests/hooks/test_nx_standin.py`` pins that nothing else is spawned there.
+_SPAWNS_ONLY_SYS_EXECUTABLE = {
+    "conexus/launch/nx_standin.py": "starts nx_setup.py, beside it, with its own interpreter",
+}
+
 #: (path, enclosing function, name): each list literal that names a bare launcher
 #: on purpose. ``run_cmd`` resolves ``cmd[0]`` through ``which_off_cwd`` itself;
 #: ``test_run_cmd_resolves_argv0_before_it_spawns`` pins that.
@@ -237,7 +245,8 @@ def test_every_file_that_spawns_resolves_through_the_helper() -> None:
         "conexus/launch/nx_launch.py",
     }
     assert expected <= spawners, f"the spawner census lost a known spawner: {sorted(expected - spawners)}"
-    for rel in sorted(spawners):
+    assert set(_SPAWNS_ONLY_SYS_EXECUTABLE) <= spawners, "an exempted spawner no longer spawns; drop its exemption"
+    for rel in sorted(spawners - set(_SPAWNS_ONLY_SYS_EXECUTABLE)):
         src = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert "which_off_cwd" in src or "_cli_lookup.resolve" in src, (
             f"{rel} spawns a process but never resolves through _exec_path.which_off_cwd "

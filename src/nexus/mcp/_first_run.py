@@ -9,7 +9,8 @@ service-backed install (RDR-176 Phase 1). What remains here is the notice
 plumbing that grew up around it:
 
 - the RDR-144 P5b embedder advisory (``apply_embedder_notice``), and
-- the nexus-gynt2 stranded-install redirect (``apply_stranded_notice``).
+- the nexus-gynt2 stranded-install redirect (``apply_stranded_notice``), and
+- the RDR-228 "no usable service" notice (``apply_setup_notice``).
 
 RDR-126 §3 SUPERSESSION (nexus-37jha, decided 2026-08-07): the first-run
 banner (``BannerSpec`` / ``maybe_banner`` / ``queue_banner`` /
@@ -168,6 +169,32 @@ def apply_stranded_notice(server: object) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 — never block startup on notice delivery (already logged at ERROR above)
         _log.warning("stranded_notice_apply_failed", error=f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def apply_setup_notice(server: object) -> bool:
+    """RDR-228 Phase 2: write "no usable service" into ``server``'s instructions.
+
+    The text names the ``setup`` tool and ``/conexus:setup`` and tells the model to
+    ask the user first. It is the channel a Claude Code session reads at
+    ``initialize``; a Desktop conversation is passed the tools' descriptions and not
+    this text, and those carry the same sentence. The definition of a usable
+    service is :func:`nexus.mcp.setup_tools.usable_service`. Best-effort in the
+    same sense as the other notices: any failure is logged at debug and returns
+    ``False``, and the server still starts.
+    """
+    try:
+        from nexus.mcp.setup_tools import no_service_notice  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
+
+        notice = no_service_notice()
+        if notice is None:
+            return False
+        low = server._mcp_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
+        existing = getattr(low, "instructions", None)
+        low.instructions = f"{existing}\n\n{notice}" if existing else notice
+        return True
+    except Exception as exc:  # noqa: BLE001 — never block startup on an advisory
+        _log.debug("setup_notice_apply_failed", error=f"{type(exc).__name__}: {exc}")
         return False
 
 

@@ -251,7 +251,7 @@ def _census(
         if not _in_scope(path, root):
             continue
         try:
-            lines = detect(path.read_text())
+            lines = detect(path.read_text(encoding="utf-8"))
         except (
             SyntaxError
         ):  # pragma: no cover - a syntax error is another test's failure
@@ -296,7 +296,7 @@ def test_bootstrap_safe_files_still_cannot_import_nexus() -> None:
         # layout_core legitimately has one (nexus.errors, with a plain-
         # Exception fallback), so walking the whole tree would fail on the
         # very file whose own bootstrap test passes.
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         imports_nexus = any(
             (isinstance(n, ast.Import) and any(a.name.split(".")[0] == "nexus" for a in n.names))
             or (
@@ -453,7 +453,7 @@ def test_kwargs_funnels_are_named_not_silently_skipped() -> None:
         if not _in_scope(path):
             continue
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - another test's failure
             continue
         for node in ast.walk(tree):
@@ -517,7 +517,7 @@ def test_aliases_of_subprocess_run_are_listed() -> None:
         if not _in_scope(path):
             continue
         try:
-            lines = _aliases_of_subprocess_run(path.read_text())
+            lines = _aliases_of_subprocess_run(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - another test's failure
             continue
         if lines:

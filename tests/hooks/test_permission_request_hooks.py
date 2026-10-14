@@ -83,8 +83,19 @@ def _parse_decision(output: str) -> str | None:
 # rationale on each. A tool landing here must also gain a
 # test_*_requires_manual_approval case below, so the exemption from
 # test_every_registered_conexus_tool_is_auto_approved is never silent.
+#
+# RDR-228 Phase 2 Step 3 (nexus-sv2wx.16): the two setup tools are here too, for a
+# different reason. ``setup`` downloads over a gigabyte and installs software, and
+# the model is told to ask the user first; the application's own prompt before the
+# call is the second check on consent (CA-8 in the record), and an auto-approval
+# would remove it. ``setup_status`` is read-only and is held to the same prompt on
+# purpose: the record pins both, and answers the cost of the prompts by telling the
+# model, in the answer and the description, how long to wait before asking again.
+# Auto-approving it is a change to the record, and Sam's.
 _MANUAL_APPROVAL_REQUIRED = {
     "mcp__plugin_conexus_nexus__daemon_uninstall",
+    "mcp__plugin_conexus_nexus__setup",
+    "mcp__plugin_conexus_nexus__setup_status",
 }
 
 
@@ -231,6 +242,20 @@ class TestDestructiveToolsRequireManualApproval:
             f"still approves it on PreToolUse — the allowlist exclusion "
             f"regressed."
         )
+
+    @pytest.mark.parametrize("tool_name", ["mcp__plugin_conexus_nexus__setup", "mcp__plugin_conexus_nexus__setup_status"])
+    def test_the_setup_tools_require_manual_approval(self, tool_name: str) -> None:
+        """RDR-228: on both events, and in neither allowlist, so a later edit that
+        adds them to ``_ALLOWED_TOOLS`` or ``_ALLOWED_HOOK_TOOLS`` fails here by
+        name and not only through the shared drift guard."""
+        from nexus.hooks import auto_approve
+
+        assert tool_name in _MANUAL_APPROVAL_REQUIRED
+        assert tool_name not in auto_approve._ALLOWED_TOOLS
+        assert tool_name not in auto_approve._ALLOWED_HOOK_TOOLS
+        assert _run_nx_hook(tool_name) == ""
+        assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == ""
+        assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
 
     def test_exempted_tools_are_still_actually_registered(self) -> None:
         """A name in _MANUAL_APPROVAL_REQUIRED that no longer exists on any

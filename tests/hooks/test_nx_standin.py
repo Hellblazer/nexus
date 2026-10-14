@@ -3,11 +3,13 @@
 CLI (RDR-228 Phase 1 Step 2, nexus-sv2wx.6).
 
 With ``nx-mcp`` absent the application still gets a connected server, and the
-model is told the truth: Nexus is not installed, and these commands install it.
-In this phase the stand-in installs nothing. The cases drive the launcher as a
-real stdio server with the MCP SDK's own client, the way a Claude application
-starts it. Every child environment sets ``NX_TOOLS_DIR`` and an empty ``PATH``
-directory, so the developer's own install is not found.
+model is told the truth: Nexus is not installed, and the ``setup`` tool installs
+it (Phase 2 Step 3, nexus-sv2wx.16; Phase 1 only listed the commands). The cases
+drive the launcher as a real stdio server with the MCP SDK's own client, the way a
+Claude application starts it. Every child environment sets ``NX_TOOLS_DIR`` and an
+empty ``PATH`` directory, so the developer's own install is not found. A case that
+would start a real build runs a copy of the plugin whose ``nx_setup.py`` is the
+recording script of ``tests/_setup_recorder.py``.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from pathlib import Path
 
 import pytest
 from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, scrubbed_env
+from tests._setup_recorder import Recorder
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
@@ -65,21 +68,32 @@ def _tree(dirs: dict[str, Path]) -> list[str]:
     return sorted(str(p.relative_to(base.parent)) for base in dirs.values() for p in base.rglob("*"))
 
 
-async def _session(dirs: dict[str, Path], program: str):
+async def _session(dirs: dict[str, Path], program: str, launch: Path = _LAUNCH, calls: tuple[tuple[str, dict], ...] = ()):
     """Start the launcher for *program* as a stdio server and return what an SDK
-    client learns from it: (initialize result, tool list, call results)."""
+    client learns from it: (initialize result, tool list, results of *calls*)."""
     from mcp import ClientSession  # noqa: PLC0415 -- the SDK is a test dependency only
     from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: PLC0415
 
     params = StdioServerParameters(
-        command=sys.executable, args=[str(_LAUNCH), program], env=_env(dirs), cwd=str(dirs["project"]),
+        command=sys.executable, args=[str(launch), program], env=_env(dirs), cwd=str(dirs["project"]),
     )
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             init = await session.initialize()
             tools = (await session.list_tools()).tools
-            calls = {tool.name: await session.call_tool(tool.name, {}) for tool in tools}
-            return init, tools, calls
+            results = [await session.call_tool(name, arguments) for name, arguments in calls]
+            return init, tools, results
+
+
+def _plugin_with_recorder(tmp_path: Path) -> tuple[Path, Recorder]:
+    """A copy of the plugin's launcher, its hook scripts and a recording ``nx_setup.py``."""
+    import shutil
+
+    for sub in ("hooks/scripts", "launch"):
+        shutil.copytree(_ROOT / "conexus" / sub, tmp_path / "plugin" / sub, ignore=shutil.ignore_patterns("__pycache__"))
+    (tmp_path / "plugin" / "launch" / "nx_setup.py").unlink()
+    recorder = Recorder(tmp_path / "plugin" / "launch")
+    return tmp_path / "plugin" / "launch" / "nx_launch.py", recorder
 
 
 def _not_json(constant: str) -> float:
@@ -99,15 +113,18 @@ def _text(result) -> str:
 @pytest.mark.asyncio
 async def test_no_cli_and_nx_mcp_is_a_stand_in_with_exactly_the_two_setup_tools(tmp_path: Path) -> None:
     dirs = _isolated(tmp_path)
-    init, tools, _calls = await _session(dirs, "nx-mcp")
+    init, tools, _results = await _session(dirs, "nx-mcp")
     assert sorted(tool.name for tool in tools) == ["setup", "setup_status"]
+    by_name = {tool.name: tool for tool in tools}
+    schema = by_name["setup"].inputSchema
+    assert sorted(schema["properties"]) == ["autostart", "mode"] and schema["required"] == ["mode"]
+    assert by_name["setup_status"].inputSchema.get("properties") in ({}, None)
     for tool in tools:
-        assert tool.inputSchema.get("properties") in ({}, None), f"{tool.name} takes an argument in Phase 1"
-        assert "not installed" in (tool.description or ""), tool.name
-        assert tool.annotations is None, f"{tool.name}: a hint given now would outlive Phase 1"
-    setup = next(tool for tool in tools if tool.name == "setup")
-    assert "installs nothing" in (setup.description or "")
-    assert "Do not run them yourself" in (setup.description or "")
+        assert tool.annotations is None, f"{tool.name}: Phase 1 gave no hints; the stand-in and the real server give none"
+        assert "Nexus is missing" in (tool.description or ""), tool.name
+        assert "/conexus:setup" in (tool.description or ""), tool.name
+    assert "ask the user first" in (by_name["setup"].description or "").lower()
+    assert "no sooner than" in (by_name["setup_status"].description or "")
     assert init.serverInfo.name == "nexus-not-installed"
 
 
@@ -122,22 +139,143 @@ async def test_the_instructions_say_nexus_is_not_installed_and_name_the_manual_c
 
 
 @pytest.mark.asyncio
-async def test_setup_answers_with_the_manual_commands_and_starts_nothing(tmp_path: Path) -> None:
-    """Phase 1 installs nothing. ``setup`` is text only: no process, and nothing
-    written under the config directory, the tools directory or the home."""
+@pytest.mark.parametrize(
+    ("arguments", "argv"),
+    [
+        ({"mode": "local", "autostart": True}, ["start", "--mode", "local", "--autostart"]),
+        ({"mode": "local"}, ["start", "--mode", "local"]),
+        ({"mode": "local", "autostart": False}, ["start", "--mode", "local"]),
+        ({"mode": "cli-only"}, ["start", "--mode", "cli-only"]),
+        ({"mode": "cli-only", "autostart": True}, ["start", "--mode", "cli-only"]),
+        ({"mode": "not-now"}, ["not-now"]),
+    ],
+    ids=["local+autostart", "local", "local autostart false", "cli-only", "cli-only ignores autostart", "not-now"],
+)
+async def test_setup_starts_the_setup_script_with_the_mode_and_autostart_given(
+    tmp_path: Path, arguments: dict, argv: list[str],
+) -> None:
+    launch, recorder = _plugin_with_recorder(tmp_path)
+    running = {
+        "state": "running", "live": True, "stage": "starting", "mode": arguments["mode"], "log": "/cfg/setup/setup.log",
+        "next": "Call setup_status to follow it.", "started": True,
+    }
+    recorder.views(start=running, **{"not-now": {"state": "none", "live": False, "not_now": True, "next": "x"}})
+    _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup", arguments),))
+    assert recorder.calls() == [argv]
+    assert not result.isError
+    text = _text(result)
+    if arguments["mode"] == "not-now":
+        assert "nothing was installed" in text.lower()
+    else:
+        assert "Setup started" in text and "Stage: starting" in text
+        assert "/cfg/setup/setup.log" in text
+        assert "no sooner than 10 seconds" in text, "the answer must say when to ask again"
+
+
+@pytest.mark.asyncio
+async def test_setup_status_reports_the_stage_the_log_and_the_next_step(tmp_path: Path) -> None:
+    launch, recorder = _plugin_with_recorder(tmp_path)
+    recorder.views(status={
+        "state": "running", "live": True, "stage": "init", "mode": "local", "log": "/cfg/setup/setup.log",
+        "message": "running: init", "next": "Call setup_status to follow it.",
+    })
+    _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup_status", {}),))
+    assert recorder.calls() == [["status"]]
+    text = _text(result)
+    assert "Stage: init" in text and "/cfg/setup/setup.log" in text and "Next: Call setup_status to follow it." in text
+    assert "2 to 5 minutes" in text and "no sooner than 120 seconds" in text
+
+
+@pytest.mark.asyncio
+async def test_a_finished_build_says_to_reconnect_or_start_a_new_session(tmp_path: Path) -> None:
+    """Record: the stand-in does not swap itself for the real server; when the
+    build is done its status says to reconnect the server or start a new session."""
+    launch, recorder = _plugin_with_recorder(tmp_path)
+    recorder.views(status={
+        "state": "done", "live": False, "stage": "verify", "mode": "local", "log": "/cfg/setup/setup.log",
+        "message": "Nexus is installed and nx doctor passes.", "next": "Reconnect the nexus server or start a new session.",
+    })
+    _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup_status", {}),))
+    assert "Setup is done." in _text(result) and "Reconnect the nexus server or start a new session." in _text(result)
+    assert "no sooner than" not in _text(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{"mode": "cloud"}, {"mode": "Cloud"}, {"mode": "bogus"}, {}, {"mode": 3}, {"mode": "local", "autostart": "yes"}])
+async def test_a_refused_call_is_an_error_and_starts_nothing(tmp_path: Path, arguments: dict) -> None:
+    """Until the credentials page exists the stand-in refuses a managed service,
+    and nothing it says lists one."""
+    launch, recorder = _plugin_with_recorder(tmp_path)
+    recorder.views(start={"state": "running", "live": True, "stage": "starting", "mode": "local", "next": "x"})
+    _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup", arguments),))
+    assert result.isError
+    assert recorder.calls() == []
+    if arguments.get("mode") in ("cloud", "Cloud"):
+        assert "managed service" in _text(result) or "Unknown mode" in _text(result)
+        assert "local" in _text(result) and "cli-only" in _text(result) and "not-now" in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_nothing_the_stand_in_offers_lists_cloud(tmp_path: Path) -> None:
+    _init, tools, _ = await _session(_isolated(tmp_path), "nx-mcp")
+    assert "cloud" not in json.dumps([[t.title, t.description, t.inputSchema] for t in tools]).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("views", [{"_exit": 3}, {"_raw": "not json\n"}, {"_raw": "[]\n"}, {"_raw": ""}], ids=["exit 3", "not json", "not an object", "empty"])
+async def test_a_setup_script_that_misbehaves_is_an_error_with_the_manual_commands(tmp_path: Path, views: dict) -> None:
+    launch, recorder = _plugin_with_recorder(tmp_path)
+    recorder.views(**views)
+    _init, _tools, results = await _session(
+        _isolated(tmp_path), "nx-mcp", launch, (("setup", {"mode": "local"}), ("setup_status", {})),
+    )
+    for result in results:
+        assert result.isError
+        for command in _MANUAL_COMMANDS:
+            assert command in _text(result), command
+        assert "Traceback" not in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_without_its_setup_script_answers_with_the_manual_commands(tmp_path: Path) -> None:
+    launch, recorder = _plugin_with_recorder(tmp_path)
+    recorder.path.unlink()
+    _init, _tools, results = await _session(
+        _isolated(tmp_path), "nx-mcp", launch, (("setup", {"mode": "local"}), ("setup_status", {})),
+    )
+    for result in results:
+        assert result.isError
+        for command in _MANUAL_COMMANDS:
+            assert command in _text(result), command
+
+
+@pytest.mark.asyncio
+async def test_status_through_the_real_script_in_an_empty_config_directory(tmp_path: Path) -> None:
+    """The real ``nx_setup.py``, a command that builds nothing: ``status`` reads a
+    directory that does not exist and must not create it."""
     dirs = _isolated(tmp_path)
     before = _tree(dirs)
-    _init, _tools, calls = await _session(dirs, "nx-mcp")
-    setup = _text(calls["setup"])
-    for command in _MANUAL_COMMANDS:
-        assert command in setup, command
-    assert _INSTALL_PAGE in setup
-    assert "/conexus:setup" not in setup
-    assert "do not run them yourself unless the user asks" in setup, "the result must leave the choice with the user"
-    assert not calls["setup"].isError
-    assert "not installed" in _text(calls["setup_status"])
-    assert "/conexus:setup" not in _text(calls["setup_status"])
-    assert _tree(dirs) == before, "the stand-in wrote something"
+    _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup_status", {}),))
+    assert not result.isError
+    assert "Nexus is not installed" in _text(result) and "No setup has run." in _text(result)
+    assert _tree(dirs) == before, "status wrote something"
+
+
+@pytest.mark.asyncio
+async def test_not_now_through_the_real_script_writes_only_its_marker(tmp_path: Path) -> None:
+    dirs = _isolated(tmp_path)
+    _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup", {"mode": "not-now"}),))
+    assert not result.isError and "nothing was installed" in _text(result).lower()
+    assert sorted(p.name for p in (dirs["config"] / "setup").iterdir()) == ["not-now"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_through_the_real_script_path_changes_nothing(tmp_path: Path) -> None:
+    dirs = _isolated(tmp_path)
+    before = _tree(dirs)
+    _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup", {"mode": "cloud"}),))
+    assert result.isError
+    assert _tree(dirs) == before
 
 
 @pytest.mark.asyncio
@@ -196,9 +334,14 @@ def test_the_install_page_is_the_site_s_install_guide() -> None:
     assert "<title>Installing Nexus</title>" in (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
 
-def test_no_text_the_stand_in_carries_names_the_phase_2_command() -> None:
-    """nexus-j8ebc item 2: ``/conexus:setup`` ships in Phase 2."""
-    assert "/conexus:setup" not in _STANDIN.read_text(encoding="utf-8")
+def test_the_descriptions_name_the_command_that_ships_with_the_tools() -> None:
+    """Phase 1 held ``/conexus:setup`` back; it ships in the client release that
+    carries these tools, so the descriptions name it. The instructions text is the
+    Phase 1 sentence and stays so until the question and the command land."""
+    mod = _standin()
+    for tool in mod.SETUP_TOOLS:
+        assert "/conexus:setup" in tool["description"]
+    assert "/conexus:setup" not in mod.instructions()
 
 
 def test_the_stand_in_never_writes_to_standard_error(tmp_path: Path) -> None:
@@ -281,6 +424,24 @@ async def test_a_tool_call_to_the_catalog_stand_in_is_an_error(tmp_path: Path) -
             assert init.protocolVersion
             with pytest.raises(McpError):
                 await session.call_tool("setup", {})
+
+
+def test_the_stand_in_spawns_only_its_own_interpreter() -> None:
+    """``tests/test_hooks_bare_exec_lint.py`` exempts this file from resolving a
+    program name because every spawn here starts ``sys.executable``, an absolute path
+    that nothing searches for. This keeps the exemption true: any spawn whose argv
+    does not start with it fails here."""
+    tree = ast.parse(_STANDIN.read_text(encoding="utf-8"))
+    spawns = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", getattr(n.func, "id", "")) in {"run", "Popen", "call", "check_output", "system", "execv", "run_bounded"}
+    ]
+    assert spawns, "the scan found no spawn in the stand-in; it examined nothing"
+    for call in spawns:
+        head = call.args[0] if call.args else None
+        assert isinstance(head, ast.List) and head.elts, ast.dump(call)[:200]
+        first = head.elts[0]
+        assert isinstance(first, ast.Attribute) and first.attr == "executable" and getattr(first.value, "id", "") == "sys", ast.dump(first)
 
 
 @pytest.mark.parametrize("script", [_STANDIN], ids=lambda p: p.name)
