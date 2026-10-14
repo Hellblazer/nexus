@@ -241,6 +241,17 @@ def _let_the_throwaway_import_this_checkout(world: World) -> None:
     Path(purelib, "checkout.pth").write_text("\n".join(paths) + "\n", encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_user_path(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every in-process call that reaches ``ensure_user_path`` writes a file,
+    never the registry. On Windows a test without this wrote a sandbox entry
+    into the real HKCU user PATH (nexus-sv2wx.14, native Windows run)."""
+    store = tmp_path_factory.mktemp("user-path") / "user-path"
+    monkeypatch.setenv("NX_USER_PATH_STORE", str(store))
+
+
 @pytest.fixture
 def world(tmp_path: Path) -> World:
     return _make_world(tmp_path / "w")
@@ -784,9 +795,9 @@ class TestWithoutDistributionMetadata:
 
     @pytest.fixture
     def no_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def missing(name: str):
-            raise importlib.metadata.PackageNotFoundError(name)
-        monkeypatch.setattr(importlib.metadata, "distribution", missing)
+        def missing():
+            raise importlib.metadata.PackageNotFoundError("conexus")
+        monkeypatch.setattr(self_cmd, "_conexus_entry_points", missing)
 
     def test_asked_for_the_names_it_refuses_in_one_line(self, no_metadata: None) -> None:
         with pytest.raises(click.ClickException) as exc:
@@ -801,6 +812,11 @@ class TestWithoutDistributionMetadata:
         assert names == sorted(install_layout.owned_shim_names(generation, platform=self_cmd._plat()))
         assert "nx" in names and "nx-mcp" in names
 
+    @pytest.mark.skipif(
+        ON_WINDOWS,
+        reason="Windows writes no shims into the bin directory, so it never asks "
+        "for shim names and a bootstrap there needs no conexus metadata",
+    )
     def test_a_bootstrap_with_no_metadata_refuses_in_one_line(
         self, world: World, no_metadata: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -808,6 +824,7 @@ class TestWithoutDistributionMetadata:
         monkeypatch.setenv("NX_TOOLS_DIR", str(world.tools))
         monkeypatch.setenv("NX_BIN_DIR", str(world.bin))
         monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
+        monkeypatch.setenv("NX_USER_PATH_STORE", str(world.path_store))
         before = world.snapshot()
         result = CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap"])
         assert result.exit_code == 1, result.output

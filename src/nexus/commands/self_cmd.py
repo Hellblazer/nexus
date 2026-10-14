@@ -61,11 +61,15 @@ import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import argv_off_cwd
+
+if TYPE_CHECKING:
+    from importlib.metadata import EntryPoints
 
 __all__ = ["self_group", "perform_self_install", "packaged_install_dir", "index_failure_hint"]
 
@@ -421,6 +425,15 @@ def _unfinished_generation(tools: Path, running: str) -> Path | None:
     return None
 
 
+def _conexus_entry_points() -> EntryPoints:
+    """The running program's conexus entry points; raises
+    ``importlib.metadata.PackageNotFoundError`` when it has no metadata. A seam,
+    so a test fakes this module's answer without patching the stdlib."""
+    from importlib.metadata import distribution  # noqa: PLC0415 — stdlib, deferred
+
+    return distribution("conexus").entry_points
+
+
 def _shim_names_to_write(generation: Path | None = None) -> list[str]:
     """The command names the shim step would write. For a generation that
     already exists, that generation's own answer. Otherwise asked of the running
@@ -429,12 +442,12 @@ def _shim_names_to_write(generation: Path | None = None) -> list[str]:
     minus the names nexus never shims."""
     if generation is not None:
         return _shim_names_of(generation)
-    from importlib.metadata import PackageNotFoundError, distribution  # noqa: PLC0415 — stdlib, deferred
+    from importlib.metadata import PackageNotFoundError  # noqa: PLC0415 — stdlib, deferred
 
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     try:
-        entry_points = distribution("conexus").entry_points
+        entry_points = _conexus_entry_points()
     except PackageNotFoundError as exc:
         raise click.ClickException(
             "--bootstrap cannot tell which command names it would write, because this "
