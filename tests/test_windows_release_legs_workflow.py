@@ -733,15 +733,19 @@ WINDOWS_TEST_SET = (
     "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
     "tests/test_install_generation_real_windows.py", "tests/test_session_end_real_windows.py",
     "tests/test_mcp_win_stdin.py", "tests/test_mcp_win_stdin_real_windows.py",
-    "tests/test_os_trust_store.py", "tests/hooks/test_endpoint_resolve_lease_retry.py",
+    "tests/test_os_trust_store.py",
     # Phase 4 (nexus-f9bgu.38 finding C): the desktop bootstrap and the uv hook launcher.
-    "tests/test_mcpb_bootstrap.py", "tests/hooks/test_hook_launcher_uv.py",
+    "tests/test_mcpb_bootstrap.py",
     # Phase 4 (nexus-f9bgu.37 critique S4): the bundle launcher's planted-venv cases, the plugin
     # scripts' off-cwd resolution and the nx-hook shim.
-    "tests/test_mcpb_launcher_venv.py", "tests/hooks/test_exec_off_cwd.py", "tests/hooks/test_nx_hook_shim.py",
+    "tests/test_mcpb_launcher_venv.py",
     # The P4/P5 test review's three real-Windows legs (S2, S3, S5).
     "tests/test_pg_ctl_console_isolation_real_windows.py", "tests/test_off_cwd_resolver_real_windows.py",
-    "tests/hooks/test_hook_launcher_cwd_real_windows.py",
+    # nexus-3fme8: the whole hook suite (which holds the hook files named here before), the
+    # plugin structure checks and the hooks' Knowledge Map readers; 21 of these failed on
+    # native Windows while only five hook files ran here.
+    "tests/hooks/", "tests/test_plugin_structure.py",
+    "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
 PHASE4_WINDOWS_PATHS = (
@@ -759,7 +763,10 @@ def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -
         assert module in paths, module
     assert "tests/daemon/**" in paths
     for test in WINDOWS_TEST_SET[1:]:
-        assert test in paths, test
+        # A directory triggers on everything under it, a test class on its file.
+        path = test.split("::")[0]
+        path = path + "**" if path.endswith("/") else path
+        assert path in paths, test
     # A dependency bump changes what runs on Windows (nexus-6046d / zw44w).
     assert "pyproject.toml" in paths and "uv.lock" in paths
 
