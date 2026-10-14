@@ -171,11 +171,70 @@ def test_cli_acquires_pg_bundle_by_default(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(b, "install_pg_bundle", _stub_pg)
+    extracted = []
+    monkeypatch.setattr(
+        "nexus.db.pg_bundle.extract_bundle",
+        lambda archive, root, **_k: extracted.append((archive, root)) or root / "bundle" / "bin",
+    )
     r = CliRunner().invoke(
         service_install_binary_cmd, [_TAG, "--config-dir", str(tmp_path)],
     )
     assert r.exit_code == 0, r.output
     assert calls == [_TAG]
+    # nexus-f9bgu.56: the archive is extracted where the daemon looks for it
+    assert extracted == [(tmp_path / "service" / "nexus-pg.txz", tmp_path / "pg-bundle")]
+
+
+def test_cli_extracts_the_installed_bundle_so_the_daemon_finds_it(tmp_path, monkeypatch, make_pg_bundle_txz):
+    """nexus-f9bgu.56: install-binary used to place the archive and stop there, so a box
+    whose extracted bundle was gone stayed unstartable and a restart kept the old
+    PostgreSQL. The daemon finds PostgreSQL only through extracted_bin_dir()."""
+    from click.testing import CliRunner
+
+    from nexus.commands.daemon import service_install_binary_cmd
+    from nexus.db import pg_bundle
+
+    monkeypatch.setattr(b, "install_binary", _stub_binary)
+    built = make_pg_bundle_txz(tmp_path / "release", b.pg_bundle_asset_name())
+
+    def _place(tag, config_dir, *, installed_by=""):
+        dest = b.pg_bundle_dest(config_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(built.read_bytes())
+        return dest, {"asset": dest.name, "version": "0.1.3", "sha256": "b" * 64, "source_url": "u"}
+
+    monkeypatch.setattr(b, "install_pg_bundle", _place)
+    cfg = tmp_path / "cfg"
+    assert pg_bundle.extracted_bin_dir(cfg) is None
+    r = CliRunner().invoke(service_install_binary_cmd, [_TAG, "--config-dir", str(cfg)])
+    assert r.exit_code == 0, r.output
+    assert pg_bundle.extracted_bin_dir(cfg) == pg_bundle.bundle_bin_dir(cfg / "pg-bundle")
+    assert "extracted" in r.output.lower()
+    # a second run with the same archive extracts nothing again (no swap, nothing stopped)
+    r2 = CliRunner().invoke(service_install_binary_cmd, [_TAG, "--config-dir", str(cfg)])
+    assert r2.exit_code == 0, r2.output
+
+
+def test_cli_extraction_failure_exits_2_and_keeps_the_archive(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from nexus.commands.daemon import service_install_binary_cmd
+
+    monkeypatch.setattr(b, "install_binary", _stub_binary)
+    monkeypatch.setattr(b, "install_pg_bundle", lambda tag, config_dir, *, installed_by="": (
+        config_dir / "service" / "nexus-pg.txz",
+        {"asset": "nexus-pg-x", "version": "0.1.3", "sha256": "b" * 64, "source_url": "u"},
+    ))
+
+    def _boom(archive, root, **_k):
+        raise RuntimeError("bundle tree incomplete after extract")
+
+    monkeypatch.setattr("nexus.db.pg_bundle.extract_bundle", _boom)
+    r = CliRunner().invoke(service_install_binary_cmd, [_TAG, "--config-dir", str(tmp_path)])
+    assert r.exit_code == 2
+    out = r.output.lower()
+    assert "extracting it failed" in out and "bundle tree incomplete" in out
+    assert "restart the service" not in out
 
 
 def test_cli_no_pg_bundle_skips_bundle(tmp_path, monkeypatch):
@@ -186,9 +245,10 @@ def test_cli_no_pg_bundle_skips_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "install_binary", _stub_binary)
 
     def _must_not_run(*a, **k):
-        raise AssertionError("install_pg_bundle called under --no-pg-bundle")
+        raise AssertionError("install_pg_bundle or extract_bundle called under --no-pg-bundle")
 
     monkeypatch.setattr(b, "install_pg_bundle", _must_not_run)
+    monkeypatch.setattr("nexus.db.pg_bundle.extract_bundle", _must_not_run)
     r = CliRunner().invoke(
         service_install_binary_cmd, [_TAG, "--no-pg-bundle", "--config-dir", str(tmp_path)],
     )

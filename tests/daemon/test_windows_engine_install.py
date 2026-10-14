@@ -344,8 +344,14 @@ def _stub_cli(monkeypatch, calls: list[str], *, windows: bool = False) -> None:
             "asset": b.pg_bundle_asset_name(), "sha256": "b" * 64,
         }
 
+    def _fake_extract(archive, extract_root, **_kw):
+        calls.append("extract")
+        return extract_root / "bundle" / "bin"
+
     monkeypatch.setattr(b, "install_binary", _fake_binary)
     monkeypatch.setattr(b, "install_pg_bundle", _fake_pg)
+    # nexus-f9bgu.56: install-binary extracts the bundle it installs
+    monkeypatch.setattr("nexus.db.pg_bundle.extract_bundle", _fake_extract)
     if windows:
         monkeypatch.setattr(b, "current_platform_tag", lambda **_kw: _WIN)
 
@@ -357,7 +363,7 @@ def test_install_binary_installs_the_pg_bundle_by_default(tmp_path, monkeypatch)
     result = CliRunner().invoke(
         service_install_binary_cmd, [_TAG, "--config-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    assert calls == ["binary", "pg"]
+    assert calls == ["binary", "pg", "extract"]
 
 
 def test_no_pg_bundle_flag_installs_only_the_engine(tmp_path, monkeypatch):
@@ -379,4 +385,4 @@ def test_install_binary_names_the_windows_assets(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Resolving nexus-service-windows-x64.txz" in result.output
     assert "Resolving nexus-pg-windows-x64.txz" in result.output
-    assert calls == ["binary", "pg"]
+    assert calls == ["binary", "pg", "extract"]

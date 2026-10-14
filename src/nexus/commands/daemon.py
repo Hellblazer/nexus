@@ -1159,6 +1159,32 @@ def service_install_binary_cmd(
         click.echo(f"  -> {pg_dest}")
         click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
         click.echo("  signature: verified (keyless Sigstore)")
+        # nexus-f9bgu.56: the daemon finds PostgreSQL only in the extracted tree
+        # (pg_bundle.extracted_bin_dir), so an archive that is only placed is
+        # never used: a restart kept the old PostgreSQL, and a box whose
+        # extracted tree was gone stayed unstartable. extract_bundle is a no-op
+        # for the archive already extracted; a different one is staged first
+        # and swapped in (on Windows with the stack stopped for the swap only).
+        import lzma  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        import tarfile  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+        from nexus.db import pg_bundle as _pg_bundle  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+        try:
+            pg_bin = _pg_bundle.extract_bundle(pg_dest, _pg_bundle.bundle_extract_root(config_dir))
+        except (ReplaceBlockedError, RestartAfterReplaceError) as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        except (RuntimeError, OSError, tarfile.TarError, lzma.LZMAError) as exc:
+            click.echo(
+                f"Error: the PostgreSQL bundle archive installed ({pg_dest}), but "
+                f"extracting it failed: {exc}\nRe-run `nx daemon service "
+                "install-binary <tag>` to retry; the installed PostgreSQL in use "
+                "is unchanged.",
+                err=True,
+            )
+            sys.exit(2)
+        click.echo(f"  extracted -> {pg_bin.parent.parent}")
 
     click.echo(
         "\nRestart the service to pick it up: nx daemon service stop && "

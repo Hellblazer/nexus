@@ -4097,7 +4097,7 @@ binary and the PG bundle (RDR-161).
 
 | Flag | Description |
 |------|-------------|
-| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
+| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on), and extract it into `~/.config/nexus/pg-bundle`, where the storage service finds PostgreSQL. The archive already extracted is left alone; a different one is extracted beside the running tree and swapped in (on Windows the stack stops only for the swap). Through 7.78.0 the archive was placed but not extracted, so the next start kept the old PostgreSQL (nexus-f9bgu.56). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
 | `--config-dir` | Config directory override. |
 | `--force` | Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). The gate classifies the store first: width-non-conformant rows REFUSE the install (re-index the affected collections and confirm `nx doctor` clears before swapping engines — see [migration-runbook.md](migration-runbook.md)); an unverifiable store (service/PG not up) proceeds with a loud UNVERIFIED warning — install-binary is the designated recovery tool for the will-not-boot class. Use `--force` ONLY after remediating. |
 

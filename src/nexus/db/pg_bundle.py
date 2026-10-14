@@ -360,6 +360,11 @@ def _extract_and_validate(archive: Path, dest: Path) -> None:
         )
 
 
+def bundle_extract_root(config_dir: Path) -> Path:
+    """Where the bundle is extracted under *config_dir* (``<config_dir>/pg-bundle``)."""
+    return config_dir / _CACHE_SUBDIR
+
+
 def extracted_bin_dir(config_dir: Path) -> Path | None:
     """Return the bundle ``bin/`` dir if a COMPLETE bundle is already extracted.
 
