@@ -57,7 +57,7 @@
               "nx-hook",
               "preflight"
             ],
-            "timeout": 5
+            "timeout": 10
           },
           {
             "type": "command",
