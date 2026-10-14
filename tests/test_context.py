@@ -480,9 +480,13 @@ class TestSessionHookInjection:
         context_dir.mkdir(parents=True)
         repo_hash = hashlib.sha1(str(repo_dir.resolve()).encode()).hexdigest()[:8]
         cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
-        cache_file.write_text("## Knowledge Map\n\ncode: Session Topic (77)\n")
+        cache_file.write_bytes("## Knowledge Map\n\ncode: Session Topic — résumé (77)\n".encode("utf-8"))
 
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' home for expanduser
+        # The hook reads from NEXUS_CONFIG_DIR when set, as nexus.context writes
+        # (nexus-3fme8); the suite's fence sets one, so point it here.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
         monkeypatch.chdir(repo_dir)
         # No nx/bd: the T2 and ready-beads sections are not under test.
@@ -491,7 +495,7 @@ class TestSessionHookInjection:
         result = session_context.run(None)
 
         assert result.stdout is not None
-        assert "Session Topic (77)" in result.stdout, (
+        assert "Session Topic — résumé (77)" in result.stdout, (
             f"SessionStart hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
         )
 

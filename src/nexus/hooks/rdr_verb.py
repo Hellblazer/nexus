@@ -634,7 +634,7 @@ def _rdr_dir(root: Path) -> Path:
     if config_path.exists():
         try:
             import yaml  # noqa: PLC0415 — deferred: only a repo with a .nexus.yml pays for this
-            with config_path.open() as fh:
+            with config_path.open(encoding="utf-8") as fh:  # a user file; cp1252 is the locale default on Windows
                 data = yaml.safe_load(fh) or {}
             paths = data.get("indexing", {}).get("rdr_paths", [])
             if isinstance(paths, str):  # nexus-u1jxt.10: a scalar resolved to root / its first character
