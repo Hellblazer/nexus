@@ -136,6 +136,9 @@ class World:
             "UV_TOOL_DIR": str(self.uv_tools),
             "UV_FIND_LINKS": str(self.index),
             "UV_NO_INDEX": "1",
+            # The refusal text holds an em dash; a Windows child would otherwise
+            # write it in the console code page and this test would read mojibake.
+            "PYTHONIOENCODING": "utf-8",
             "PYTHONPATH": os.pathsep.join([str(Path(nexus.__file__).resolve().parents[1]), *sorted(site)]),
         })
         return env
@@ -144,7 +147,8 @@ class World:
         """``nx <args>``, run by *python* (a program that imports this checkout)."""
         return subprocess.run(  # noqa: S603 — fixed argv
             [str(python), "-c", _DRIVER, *args],
-            capture_output=True, text=True, env=self.env(), timeout=600, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=self.env(), timeout=600, check=False,
         )
 
     def prefix_of(self, python: Path | str) -> str:
