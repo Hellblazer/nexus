@@ -137,6 +137,14 @@ def test_assertion_bodies_keep_their_deciding_clauses() -> None:
     assert "'nx-hook session-start'" in a3
     a5 = text[text.index("Run-Assertion 5 "):text.index("# -------------------------------------------------------------- verdict ----")]
     assert "a credential file appeared during the run" in a5
+    # Credential Manager (nexus-pwscd): the baseline is taken in setup, before
+    # the session, and assertion 5 fails on a new Claude or Anthropic target.
+    assert "a Claude credential appeared in Credential Manager during the run" in a5
+    assert "$_ -match 'claude|anthropic'" in a5 and "K $script:state 'cred_targets_ok'" in a5
+    setup_state = text[text.index("if ($Phase -eq 'setup')"):text.index("# P0: the precondition.")]
+    assert setup_state.index("Credential-Targets") < setup_state.index("Save-State $script:state")
+    targets = text[text.index("function Credential-Targets"):text.index("# ---------------------------------------------------------------- setup ----")]
+    assert "'Currently stored credentials'" in targets and "$LASTEXITCODE -eq 0" in targets
     setup = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
     assert "setup cannot be re-run on this box" in setup and "exit 1" in setup
 

@@ -111,7 +111,9 @@
 #       NX_HARNESS_CLAUDE_OAUTH_TOKEN and this script maps it back for its
 #       child only (RDR-219 "The nx-mcp dispatch grant"). An auth failure is
 #       reported as such, distinct from a hang. No credential file may appear
-#       under %USERPROFILE%\.claude during the run.
+#       under %USERPROFILE%\.claude during the run, and no Credential Manager
+#       target naming Claude or Anthropic may appear between setup and verify
+#       (cmdkey /list target names; other new targets are reported).
 #
 # NON-VACUITY: an assertion counts only when it executed (PASS or FAIL). A
 #   -ForceSkip'd or never-reached assertion is recorded SKIPPED, and the
@@ -140,9 +142,11 @@
 #     only; sleep is nexus-f9bgu.53.
 #   - Autostart at the next logon and the sign-out/restart path: measured by
 #     nexus-f9bgu.46, fixed by nexus-f9bgu.51, not re-asserted here.
-#   - Windows Credential Manager. Assertion 5's credential check lists file
-#     names at depth 1 under %USERPROFILE%\.claude and never reads the
-#     Credential Manager store. RDR-219 inventory; nexus-f9bgu.53.
+#   - Windows Credential Manager beyond target names. Assertion 5 lists file
+#     names at depth 1 under %USERPROFILE%\.claude and compares cmdkey /list
+#     target names between setup and verify; it reads no secret, fails only on
+#     a new target naming Claude or Anthropic, and a non-English listing reads
+#     as unmeasured. RDR-219 inventory; nexus-pwscd; nexus-f9bgu.53.
 #   - Windows on ARM. Out of scope by decision (no GraalVM windows-aarch64
 #     target, no onnxruntime Windows-ARM64 library). RDR-224 Technical
 #     Environment and Briefly Rejected; nexus-f9bgu.53.
@@ -383,6 +387,16 @@ function Credential-Files {
         Where-Object { $_.Name -match 'credential' })
 }
 
+# Target names (never secrets) in this account's Windows Credential Manager,
+# from cmdkey's English output. Ok is false when the output is not that shape,
+# so a localized or failed listing reads as unmeasured, not as empty.
+function Credential-Targets {
+    $out = @(& "$env:windir\System32\cmdkey.exe" /list 2>$null)
+    $ok = ($LASTEXITCODE -eq 0) -and (($out -join "`n") -match 'Currently stored credentials')
+    $targets = @($out | ForEach-Object { if ("$_" -match '^\s*Target:\s*(.+?)\s*$') { $Matches[1] } })
+    return @{ ok = $ok; targets = $targets }
+}
+
 # ---------------------------------------------------------------- setup ----
 if ($Phase -eq 'setup') {
     $script:state = @{
@@ -390,6 +404,9 @@ if ($Phase -eq 'setup') {
         nonce = ([guid]::NewGuid().ToString('N').Substring(0, 12)); results = @{}
         script_sha256 = $scriptSha
     }
+    $ct = Credential-Targets
+    $script:state['cred_targets_ok'] = [bool]$ct.ok
+    $script:state['cred_targets'] = @($ct.targets)
     Save-State $script:state
 
     # P0: the precondition. Not one of the five; a failure stops the run.
@@ -740,7 +757,20 @@ Run-Assertion 5 'a plain claude -p returns, with the stack up and with no endpoi
     if (-not $script:claudeNoEndpoint.ok) { Fail "no endpoint: $($script:claudeNoEndpoint.why)" }
     $new = @(Credential-Files | Where-Object { $credBefore -notcontains $_.FullName -or $_.LastWriteTimeUtc -gt $since } | ForEach-Object FullName)
     if ($new.Count -gt 0) { Fail ("a credential file appeared during the run: " + ($new -join ', ')) }
-    "stack up: $($script:claudeUp.why); no endpoint: $($script:claudeNoEndpoint.why); no credential file under .claude"
+    # Credential Manager: a new target naming Claude or Anthropic fails; any other
+    # new target is reported. Unreadable either time is reported as unmeasured.
+    $ctNow = Credential-Targets
+    if ((K $script:state 'cred_targets_ok') -and $ctNow.ok) {
+        $ctBefore = K $script:state 'cred_targets'
+        if ($null -eq $ctBefore) { $ctBefore = @() }
+        $ctNew = @($ctNow.targets | Where-Object { $ctBefore -notcontains $_ })
+        $ctBad = @($ctNew | Where-Object { $_ -match 'claude|anthropic' })
+        if ($ctBad.Count -gt 0) { Fail ("a Claude credential appeared in Credential Manager during the run: " + ($ctBad -join ', ')) }
+        $cm = "Credential Manager targets $($ctBefore.Count) before, $(@($ctNow.targets).Count) after, new: [$($ctNew -join ', ')]"
+    } else {
+        $cm = 'Credential Manager not measured (cmdkey /list unreadable)'
+    }
+    "stack up: $($script:claudeUp.why); no endpoint: $($script:claudeNoEndpoint.why); no credential file under .claude; $cm"
 }
 
 # -------------------------------------------------------------- verdict ----
