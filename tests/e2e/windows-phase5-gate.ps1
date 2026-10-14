@@ -76,7 +76,9 @@
 #       leg A: --yes                      -> the Task Scheduler launcher starts it.
 #   2   MCP store_put then search, in the live session (its sessionId, not a
 #       sidechain), returns the stored text; nx search outside the session
-#       finds it too. Session id, Claude Code version and engine tag are
+#       finds it too, and a psql query of nexus.chunks in the cluster the
+#       supervisor started, as its superuser and not through the engine, finds
+#       the row. Session id, Claude Code version, engine tag and row count are
 #       recorded (nexus-ijue9.2).
 #   3   the conexus hooks fire in the live session: nx-hook session-start
 #       succeeds WITH output (a missing nx-hook cannot produce it), the
@@ -286,6 +288,40 @@ function Invoke-Nx([string]$label, [string[]]$nxArgs) {
     $sw.Stop()
     Set-Content -Path $log -Value $out -Encoding UTF8
     return @{ code = $code; out = $out; log = $log; secs = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
+}
+
+# The rows of nexus.chunks whose text holds $needle, counted by psql in the
+# cluster the supervisor started, as that cluster's superuser: the role
+# pg_provision.windows_superuser_name derives from this account's SID, with the
+# port and password from pg_credentials. Not through the engine, so a row the
+# engine reported but never wrote is not counted (nexus-ijue9.2 deliverable 2).
+# The password reaches psql as PGPASSWORD in this process's environment only and
+# is removed after; nothing here prints or logs it. Returns the count, or throws.
+function Count-ChunkRows([string]$label, [string]$needle) {
+    if ($needle -notmatch '^[0-9a-f]+$') { throw "refusing a needle that is not lowercase hex: $needle" }
+    $credPath = Join-Path $cfg 'pg_credentials'
+    if (-not (Test-Path $credPath)) { throw "no pg_credentials at $credPath" }
+    $cred = @{}
+    foreach ($line in Get-Content -Path $credPath) {
+        if ($line -match '^\s*([A-Z_]+)=(.*)$') { $cred[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'") }
+    }
+    if (-not $cred['PG_PORT'] -or -not $cred['PG_SUPERUSER_PASS']) { throw 'pg_credentials lacks PG_PORT or PG_SUPERUSER_PASS' }
+    $psqlExe = Get-ChildItem -Path (Join-Path $cfg 'pg-bundle') -Recurse -Filter 'psql.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $psqlExe) { throw "no psql.exe under $(Join-Path $cfg 'pg-bundle')" }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $role = 'nx_' + (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sid)) | ForEach-Object { $_.ToString('x2') })).Substring(0, 16)
+    $sql = "SELECT count(*) FROM nexus.chunks WHERE strpos(chunk_text, '$needle') > 0"
+    $env:PGPASSWORD = $cred['PG_SUPERUSER_PASS']
+    try {
+        $out = Native { & $psqlExe.FullName -h 127.0.0.1 -p $cred['PG_PORT'] -U $role -d nexus -At -v ON_ERROR_STOP=1 -c $sql }
+        $code = $LASTEXITCODE
+    } finally {
+        Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+    }
+    Set-Content -Path (Join-Path $RunDir "$label.log") -Value ("role $role port $($cred['PG_PORT']) exit $code`n$out") -Encoding UTF8
+    if ($code -ne 0 -or "$out".Trim() -notmatch '^\d+$') { throw "psql exited $code (see $label.log)" }
+    return [int]"$out".Trim()
 }
 
 # '' when the stop was graceful and quick; otherwise what was wrong with it.
@@ -631,7 +667,9 @@ Run-Assertion 2 'MCP store_put then search from the live session returns the sto
     if ($hits.Count -eq 0) { Fail "no search tool_result in live session $($script:sid) contains the nonce $nonce" }
     $cli = Invoke-Nx 'nx-search-nonce' @('search', "nx phase5 gate nonce $nonce", '--corpus', 'knowledge', '-c')
     if ($cli.out -notlike "*$nonce*") { Fail "nx search outside the session does not find the nonce (exit $($cli.code), see nx-search-nonce.log)" }
-    "session $($script:sid), Claude Code $($script:view.version), engine-service-v$ExpectedEngine at $script:endpoint; store_put ok ($($okStore.Count)); search returned the nonce ($($hits.Count)); nx search finds it outside the session"
+    $rows = Count-ChunkRows 'psql-nonce' $nonce
+    if ($rows -lt 1) { Fail "nexus.chunks in the supervisor's cluster holds no row with the nonce (see psql-nonce.log)" }
+    "session $($script:sid), Claude Code $($script:view.version), engine-service-v$ExpectedEngine at $script:endpoint; store_put ok ($($okStore.Count)); search returned the nonce ($($hits.Count)); nx search finds it outside the session; psql finds $rows row(s) in nexus.chunks"
 }
 
 Run-Assertion 3 'the conexus hooks fire in the live session' {
