@@ -36,6 +36,7 @@ from nexus.daemon import service_registry as sr
 from nexus.daemon.replace_quiesce import default_ops
 from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor, service_identity
 from nexus.daemon.windows_autostart import TASK_FILENAME, task_xml
+from tests._fence_home import _link_through
 from tests._module_seam import setattr_in
 
 pytestmark = pytest.mark.usefixtures("launchd_uid", "no_explicit_artifact")
@@ -204,7 +205,9 @@ class TestUnitActive:
         ("platform", "expected"),
         [
             ("linux", ["systemctl", "--user", "start", "nexus-service.service"]),
-            ("darwin", ["launchctl", "kickstart", f"gui/{os.getuid()}/com.nexus.service"]),
+            # {uid} is filled in from launchd_uid: no os.getuid at collection
+            # on a Windows host (RDR-224, nexus-f9bgu.44).
+            ("darwin", ["launchctl", "kickstart", "gui/{uid}/com.nexus.service"]),
             ("win32", ["schtasks", "/Run", "/TN", "NexusStorageService"]),
         ],
     )
@@ -216,7 +219,9 @@ class TestUnitActive:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         alive: None,
+        launchd_uid: int,
     ) -> None:
+        expected = [part.replace("{uid}", str(launchd_uid)) for part in expected]
         units = tmp_path / "units"
         units.mkdir()
         monkeypatch.setattr(daemon_mod, "_autostart_platform", lambda: platform)
@@ -569,7 +574,9 @@ class TestUnitConfigDirMustMatch:
         """The comparison resolves both sides: a unit baked with the symlink and
         a start given the real dir (or the reverse) is the same config dir."""
         link = tmp_path / "cfg-link"
-        link.symlink_to(config_dir, target_is_directory=True)
+        # A junction on a Windows account without the symlink privilege
+        # (the win-release runner, WinError 1314).
+        _link_through(link, config_dir)
         baked, given = (link, config_dir) if unit_names_the_link else (config_dir, link)
         _write_unit_literal(
             self._platform_units(tmp_path, monkeypatch, "linux"), "linux", str(baked)
