@@ -453,10 +453,23 @@ def _script_env_case(tmp_path: Path, case: str) -> str:
         return str(other)
     if case == "relative":
         return "nx_setup.py"
+    if case == "a link named nx_setup.py to another file":
+        other = tmp_path / "tools" / "other.py"
+        other.write_text(rec.path.read_text(encoding="utf-8"), encoding="utf-8")
+        link = tmp_path / "link" / "nx_setup.py"
+        link.parent.mkdir(parents=True)
+        try:
+            link.symlink_to(other)
+        except OSError:
+            pytest.skip("this host cannot create a symbolic link")
+        return str(link)
     raise AssertionError(case)
 
 
-@pytest.mark.parametrize("case", ["wrong basename", "right basename in a directory", "case differs", "relative"])
+@pytest.mark.parametrize(
+    "case",
+    ["wrong basename", "right basename in a directory", "case differs", "relative", "a link named nx_setup.py to another file"],
+)
 def test_a_script_variable_that_is_not_an_absolute_nx_setup_py_starts_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str,
 ) -> None:
@@ -660,7 +673,11 @@ def test_a_run_that_went_wrong_is_reported_even_when_a_service_answers(
     for tool, args in (("setup_status", {}), ("setup", {"mode": "local"}), ("setup", {"mode": "not-now"})):
         text = _call(tool, **args)
         assert "nothing is missing" not in text.lower(), (tool, state, text)
-        assert view["log"] in text and view["next"] in text, (tool, state, text)
+        assert view["log"] in text, (tool, state, text)
+        # setup will not start while a service answers, so no text may send the
+        # model back to it: the next step is the log and nx doctor.
+        assert "setup again" not in text.lower() and "to resume" not in text.lower(), (tool, state, text)
+        assert "nx doctor" in text, (tool, state, text)
         if view.get("message"):
             assert view["message"] in text
         assert "started nothing" in text.lower() or tool == "setup_status", (tool, text)
@@ -953,6 +970,11 @@ def test_no_rendered_view_tells_the_model_to_call_setup_without_the_clause(
     assert _unconsented(text.split("\n")) == [], text
 
 
+def test_unsupported_is_not_offered_as_resumable() -> None:
+    """A second setup on a host that cannot detach meets the same refusal."""
+    assert "unsupported" not in setup_tools._RESUMABLE
+
+
 @pytest.mark.parametrize("server", ["real", "stand-in"])
 @pytest.mark.parametrize("state", [s for s in sorted(VIEWS) if s not in ("none", "error")])
 def test_every_view_with_a_recorded_choice_shows_the_mode_and_the_autostart(
@@ -963,7 +985,7 @@ def test_every_view_with_a_recorded_choice_shows_the_mode_and_the_autostart(
         view = {**VIEWS[state], "autostart": autostart}
         text = render(view)
         assert f"Recorded choice: mode {view['mode']}, {shown}." in text, text
-        if state in ("failed", "interrupted", "doctor-failed", "unsupported"):
+        if state in ("failed", "interrupted", "doctor-failed"):
             assert "ask the user first" in text and "same choice" in text and f"mode {view['mode']}" in text, text
             assert ("autostart true" in text) is autostart, text
 

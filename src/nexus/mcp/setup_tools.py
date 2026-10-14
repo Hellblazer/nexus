@@ -122,7 +122,7 @@ _HEADS: dict[str, str] = {
 _DOCTOR_ROWS_SHOWN = 10
 
 #: States where calling setup again would resume the recorded choice.
-_RESUMABLE: tuple[str, ...] = ("failed", "interrupted", "doctor-failed", "unsupported")
+_RESUMABLE: tuple[str, ...] = ("failed", "interrupted", "doctor-failed")
 
 
 def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
@@ -249,7 +249,11 @@ def setup_script() -> str | None:
     value = os.environ.get(SETUP_SCRIPT_ENV, "").strip()
     if not value or not os.path.isabs(value) or os.path.basename(value) != SETUP_SCRIPT_NAME:
         return None
-    return value if os.path.isfile(value) else None
+    real = os.path.realpath(value)
+    # A link named nx_setup.py that resolves to some other file is not the script.
+    if os.path.basename(real) != SETUP_SCRIPT_NAME or not os.path.isfile(real):
+        return None
+    return value
 
 
 def terminal_commands(mode: str) -> str:
@@ -321,7 +325,16 @@ def _report_for_usable_service(view: dict[str, Any]) -> str | None:
     if view.get("live") and view.get("state") == "running":
         return render(view)
     if view.get("state") in _TROUBLE:
-        return "A Nexus service answers on this machine, but the last setup run did not finish cleanly.\n" + render(view)
+        # setup starts nothing while a service answers, so neither the recorded
+        # choice's resume line nor the script's "call setup again" next step may
+        # send the model back to it: the log and nx doctor are the way on.
+        quiet = {
+            **view,
+            "mode": None,
+            "next": "Setup will not start again while a service answers. Read the log, and run "
+            "`nx doctor` in a terminal to see what is wrong.",
+        }
+        return "A Nexus service answers on this machine, but the last setup run did not finish cleanly.\n" + render(quiet)
     return None
 
 

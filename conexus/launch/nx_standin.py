@@ -220,7 +220,7 @@ _HEADS: dict[str, str] = {
 _DOCTOR_ROWS_SHOWN = 10
 
 #: States where calling setup again would resume the recorded choice.
-_RESUMABLE: tuple[str, ...] = ("failed", "interrupted", "doctor-failed", "unsupported")
+_RESUMABLE: tuple[str, ...] = ("failed", "interrupted", "doctor-failed")
 
 
 def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
