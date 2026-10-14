@@ -925,6 +925,19 @@ on the real `nx-mcp`, which reaches the setup process through
 `NX_SETUP_SCRIPT` and carries the instructions notice. The hand-kept tool
 lists and `_MANUAL_APPROVAL_REQUIRED` are updated in the same change.
 
+Phase 1 already ships `setup` and `setup_status` on the stand-in, with no
+arguments, descriptions that say the tool installs nothing, and no
+annotations. This step keeps the two names and changes the schema (`setup`
+gains `mode` and `autostart`) and the descriptions. An application that
+approved or remembered the Phase 1 tool by name now meets a different tool
+under it. What it does then is a case of the question CA-8 asks and is not
+measured here; the Minimum Viable Validation notes per surface whether the
+application asks before `setup` runs, and does not yet start from a tool
+remembered from Phase 1. Both tools stay without
+annotations, as in Phase 1, so a remembered hint cannot differ from the new
+one. After a reconnect in Phase 1 the real server has no setup tools at all
+(`nexus_rdr/228-research-18`); from this step it has both.
+
 #### Step 4: The question, the hook's states and `/conexus:setup`
 
 The seven hook states over the usable-service definition, the `not-now` mode
