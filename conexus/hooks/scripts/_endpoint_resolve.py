@@ -949,7 +949,7 @@ def _credential(name: str, env_var: str, saved: dict[str, str]) -> str:
     return value.strip()
 
 
-def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None) -> bool:
+def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None, grace: bool = True) -> bool:
     """Whether the CLI would resolve a service endpoint: the plugin's restatement
     of ``nexus.db.service_endpoint.resolve_service_endpoint()`` returning and not
     raising (RDR-228 Phase 2 Step 4, nexus-sv2wx.17; residual nexus-9i4d4 item 9).
@@ -972,12 +972,15 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None) ->
 
     No network request, no wait, nothing written. *retry_budget_s* bounds the
     Windows sharing-violation retry of the lease read (the hook passes what is left of
-    its read budget). A lease past its TTL is kept when its recorded owner process is
-    alive (:func:`_stale_owner_alive`), so a laptop that slept is not told "service
-    down". One difference from the CLI, which can probe a socket and this cannot: the CLI
-    also requires the port to answer ``/health``, so an owner that is alive and wedged
-    reads as usable here and not there (``tests/hooks/test_usable_service_agreement.py``
-    names it). Any error is "not usable".
+    its read budget). With *grace* (the default, the hook's), a lease past its TTL is kept
+    when its recorded owner process is alive (:func:`_stale_owner_alive`), so a laptop
+    that slept is not told "service down". One difference from the CLI, which can probe a
+    socket and this cannot: the CLI also requires the port to answer ``/health``, so an
+    owner that is alive and wedged reads as usable here and not there
+    (``tests/hooks/test_usable_service_agreement.py`` names it). The setup process passes
+    ``grace=False``: it decides whether to START a service, it has the time the hook has not,
+    and skipping the start on a wedged supervisor would end in a failed ``nx doctor``; a
+    lease past its TTL is then not a service. Any error is "not usable".
     """
     try:
         saved = read_config_yml_credentials(config_dir, ("service_url", "service_token", "mint_token"))
@@ -985,7 +988,7 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None) ->
         if url:
             if _credential("service_token", "NX_SERVICE_TOKEN", saved):
                 return True
-            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=True)
+            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
             if lease is not None and lease["token"]:
                 return True
             return bool(_credential("mint_token", "NX_MINT_TOKEN", saved))
@@ -995,7 +998,7 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None) ->
         port = int(port_str) if port_str else None
         token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
         if port is None or token is None:
-            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=True)
+            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
             if lease is not None:
                 port = port if port is not None else lease["port"]
                 token = token or lease["token"] or None

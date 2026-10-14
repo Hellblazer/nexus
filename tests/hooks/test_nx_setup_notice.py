@@ -759,24 +759,46 @@ def _held_files(dirs: dict[str, Path]) -> list:
     return [_hold_unreadable(dirs["config"] / "setup" / "status.json"), _hold_unreadable(lease)]
 
 
+def _held_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str):
+    """The hook module on the Windows branch (driven from POSIX) with a status file and a lease
+    both held, and every ``time.sleep`` recorded: returns ``(module, dirs, requested_sleeps)``."""
+    from tests._module_seam import setattr_in
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    mod = _load(_HOOK, name)
+    dirs = _build(_dirs(tmp_path), _cli)
+    for key, value in {"PATH": str(dirs["bin"]), "NX_TOOLS_DIR": str(dirs["tools"]), "NEXUS_CONFIG_DIR": str(dirs["config"])}.items():
+        monkeypatch.setenv(key, value)
+    for env_name in ("CLAUDE_CODE_REMOTE", "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_MINT_TOKEN"):
+        monkeypatch.delenv(env_name, raising=False)
+    mod.load_siblings()
+    monkeypatch.setattr(mod.nx_setup, "_windows", lambda: True)
+    monkeypatch.setattr(mod._endpoint_resolve, "_is_windows", lambda platform=None: True)
+    requested: list[float] = []
+    real_sleep = time.sleep
+
+    def record(seconds: float) -> None:
+        requested.append(seconds)
+        real_sleep(seconds)
+
+    setattr_in(monkeypatch, [mod.nx_setup, mod._endpoint_resolve], "time.sleep", record)  # their view of ``time`` only
+    return mod, dirs, requested
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the real Windows case is the next test; this one drives the Windows branch from POSIX")
 def test_a_held_status_file_and_lease_cannot_stretch_the_hook_past_its_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The status reads went through the retry that waits up to two seconds for a Windows
     sharing violation, the lease read through a second one, and the old hook read no file
     at all. The hook now asks for ONE bound, ``HOOK_READ_BUDGET_S`` (30 ms), spent across
     both: with both files held, the whole decision comes back in a fraction of a second
-    (unbounded it is two reads of two seconds), reading both as absent."""
-    if os.geteuid() == 0:
-        pytest.skip("root reads a mode-000 file")
-    mod = _load(_HOOK, "nx_setup_notice_budget")
-    dirs = _build(_dirs(tmp_path), _cli)
-    for key, value in {"PATH": str(dirs["bin"]), "NX_TOOLS_DIR": str(dirs["tools"]), "NEXUS_CONFIG_DIR": str(dirs["config"])}.items():
-        monkeypatch.setenv(key, value)
-    for name in ("CLAUDE_CODE_REMOTE", "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_MINT_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
-    mod.load_siblings()
-    monkeypatch.setattr(mod.nx_setup, "_windows", lambda: True)
-    monkeypatch.setattr(mod._endpoint_resolve, "_is_windows", lambda platform=None: True)
+    (unbounded it is two reads of two seconds), reading both as absent.
+
+    The bound is on the time the reads ASKED to wait, not on elapsed time, so a slow box
+    cannot make it flaky and a regression to 0.3 s cannot hide inside a loose clock bound:
+    the retries sleep ``min(10 ms, what is left)``, so together they cannot ask for more
+    than the budget."""
+    mod, dirs, requested = _held_hook(tmp_path, monkeypatch, "nx_setup_notice_budget")
     releases = _held_files(dirs)
     try:
         started = time.monotonic()
@@ -785,8 +807,43 @@ def test_a_held_status_file_and_lease_cannot_stretch_the_hook_past_its_budget(tm
     finally:
         for release in releases:
             release()
-    assert elapsed < 0.4, f"the hook took {elapsed:.2f}s with its files held; the bound is {mod.HOOK_READ_BUDGET_S}s"
+    assert requested, "the held files caused no wait at all: the test examined nothing"
+    assert sum(requested) <= mod.HOOK_READ_BUDGET_S + 1e-9, f"the reads asked to wait {sum(requested):.3f}s in all"
+    assert elapsed < 0.3, f"the hook took {elapsed:.2f}s with its files held; the bound is {mod.HOOK_READ_BUDGET_S}s"
     assert text is not None and "no Nexus service is set up" in text, "both held files read as absent"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="drives the Windows branch from POSIX")
+def test_the_read_deadline_starts_after_the_siblings_are_imported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Import time is not the reads' time. With the plugin parts slow to import (a cold start
+    on Windows), a deadline taken before the import is spent before the first read, and a
+    single sharing violation then reads a live run as no history. The retry must still have
+    its 30 ms."""
+    mod, dirs, requested = _held_hook(tmp_path, monkeypatch, "nx_setup_notice_late_deadline")
+    real_load = mod.load_siblings
+    slow_once = {"left": True}
+
+    def slow_load() -> None:
+        if slow_once["left"]:
+            slow_once["left"] = False
+            _spend(mod.HOOK_READ_BUDGET_S * 3)
+        real_load()
+
+    monkeypatch.setattr(mod, "load_siblings", slow_load)
+    releases = _held_files(dirs)
+    try:
+        mod.decide()
+    finally:
+        for release in releases:
+            release()
+    assert requested, "the budget was spent on the import, so the first sharing violation was not retried"
+
+
+def _spend(seconds: float) -> None:
+    """Burn *seconds* of wall time without going through ``time.sleep`` (which the test records)."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        pass
 
 
 @pytest.mark.skipif(os.name != "nt", reason="a file opened with no sharing is the Windows case")
@@ -808,3 +865,57 @@ def test_on_windows_a_held_status_file_and_lease_end_the_real_hook_quickly(tmp_p
 def test_the_budget_is_far_inside_the_hooks_100_ms() -> None:
     mod = _load(_HOOK, "nx_setup_notice_budget_value")
     assert 0 < mod.HOOK_READ_BUDGET_S <= 0.03
+
+
+# -- the words fit the state of the last run (review 2, N5) ---------------------------------------
+
+
+_LAST_RUNS = {
+    "interrupted": ("was interrupted", "did not finish"),
+    "failed": ("failed", "did not finish"),
+    "doctor-failed": ("finished with nx doctor problems", "did not finish"),
+    "unsupported": ("could not run on this host", "did not finish"),
+}
+
+
+@pytest.mark.parametrize("state", list(_LAST_RUNS))
+def test_the_quiet_line_for_an_unfinished_run_says_what_happened_to_it(state: str) -> None:
+    """``doctor-failed`` is a run that finished and a doctor that complained; ``unsupported``
+    is a run that never started. Neither "did not finish"."""
+    mod = _load(_HOOK, "nx_setup_notice_words")
+    mod.load_siblings()
+    words, wrong = _LAST_RUNS[state]
+    text = mod.quiet_unfinished_text({"state": state, "log": "/c/setup/setup.log"})
+    assert f"The last Nexus setup run {words}," in text and wrong not in text
+    assert "/c/setup/setup.log" in text
+
+
+@pytest.mark.parametrize("state", list(_LAST_RUNS))
+def test_the_cannot_start_text_says_what_happened_to_the_last_run(state: str) -> None:
+    mod = _load(_HOOK, "nx_setup_notice_words2")
+    mod.load_siblings()
+    words, wrong = _LAST_RUNS[state]
+    text = mod.cannot_start_text("the Python is gone", {"state": state, "log": "/c/setup/setup.log"})
+    assert f"The last setup run {words}." in text and wrong not in text
+    assert mod.nx_standin.BROKEN_PHRASE in text
+
+
+@pytest.mark.parametrize("state", ["none", "done", "failed", "interrupted", "doctor-failed", "unsupported"])
+def test_the_cannot_start_text_and_the_stand_in_poll_agree_on_every_recorded_state(
+    state: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State 2 and ``setup_status`` while the CLI still cannot start open with the same
+    statement and carry the same repair offer, whatever the record says; a ``done`` is never
+    read as a finished repair by either."""
+    mod = _load(_HOOK, "nx_setup_notice_agree")
+    mod.load_siblings()
+    standin = mod.nx_standin
+    view = {"state": state, "stage": "build", "mode": "cli-only", "log": "/c/setup/setup.log", "live": False}
+    reason = "the Python it was built with (/x/gone) is gone"
+    hook = mod.cannot_start_text(reason, view)
+    monkeypatch.setattr(standin, "cli_state", lambda: ("broken", reason))
+    monkeypatch.setattr(standin, "_call_script", lambda args, broken=None: dict(view))
+    poll = standin.run_status("the Python it was built with (/launcher-time) is gone")
+    for text in (hook, poll):
+        assert standin.broken_text(reason) in text and standin.BROKEN_REPAIR in text
+        assert "Setup is done" not in text and "Reconnect the nexus server or start" not in text

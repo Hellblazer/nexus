@@ -204,9 +204,8 @@ def test_the_catalog_stand_in_is_the_same_whether_the_cli_is_missing_or_broken()
     assert (plain.instructions, plain.tools, plain.name) == (broken.instructions, broken.tools, broken.name) == ("", (), plain.name)
 
 
-@pytest.mark.asyncio
-async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_broken_stand_in(tmp_path: Path) -> None:
-    dirs = _isolated(tmp_path)
+def _pruned_generation(dirs: dict[str, Path], tmp_path: Path) -> Path:
+    """A ``current`` generation under the tools root whose Python ``uv`` pruned."""
     gen = dirs["tools"] / "gen-20260101T000000Z"
     (gen / "bin").mkdir(parents=True)
     exe = gen / "bin" / ("nx-mcp.exe" if os.name == "nt" else "nx-mcp")
@@ -219,6 +218,13 @@ async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_b
         _winapi.CreateJunction(str(gen), str(dirs["tools"] / "current"))
     else:
         os.symlink(gen, dirs["tools"] / "current")
+    return gen
+
+
+@pytest.mark.asyncio
+async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_broken_stand_in(tmp_path: Path) -> None:
+    dirs = _isolated(tmp_path)
+    _pruned_generation(dirs, tmp_path)
     init, tools, (status,) = await _session(dirs, "nx-mcp", calls=(("setup_status", {}),))
     assert init.serverInfo.name == "nexus-installed-cannot-start"
     assert "Nexus is installed but cannot start; setup repairs it" in (init.instructions or "")
@@ -544,7 +550,9 @@ def test_it_imports_only_the_standard_library(script: Path) -> None:
             assert node.level == 0
             found.add((node.module or "").split(".")[0])
     assert found, "no imports found; the scan examined nothing"
-    assert found <= set(sys.stdlib_module_names) | {"__future__"}, found
+    # ``_cli_lookup`` is the plugin's own sibling (hooks/scripts, itself standard library only), which the
+    # poll asks again whether the CLI can start; ``cli_state`` imports it in the function.
+    assert found <= set(sys.stdlib_module_names) | {"__future__", "_cli_lookup"}, found
 
 
 def test_the_stand_in_serves_with_nexus_unimportable(tmp_path: Path) -> None:
@@ -593,6 +601,7 @@ _VIEWS: dict[str, dict] = {
     "failed": {"state": "failed", "stage": "build", "mode": "cli-only", "message": "the build exited 2.", "live": False},
     "interrupted": {"state": "interrupted", "stage": "build", "mode": "local", "live": False},
     "doctor-failed": {"state": "doctor-failed", "stage": "verify", "mode": "local", "doctor_failing": ["[✗] x"], "live": False},
+    "unsupported": {"state": "unsupported", "message": "no service manager here.", "live": False, "log": "/c/setup/setup.log"},
 }
 
 
@@ -601,26 +610,100 @@ def _status_of(mod, monkeypatch: pytest.MonkeyPatch, state: str):
     return mod
 
 
+def _cli_is(mod, monkeypatch: pytest.MonkeyPatch, kind: str, reason: str | None = None) -> None:
+    """What the poll finds when it asks the lookup again."""
+    monkeypatch.setattr(mod, "cli_state", lambda: (kind, reason))
+
+
 def test_in_broken_mode_a_machine_with_no_setup_history_gets_the_cannot_start_text_first(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _status_of(_standin(), monkeypatch, "none")
+    _cli_is(mod, monkeypatch, "broken", _REASON)
     text = mod.run_status(_REASON)
     assert text.startswith(mod.broken_text(_REASON)) and mod.BROKEN_REPAIR in text
     assert "Nexus is not installed" not in text
     assert text.endswith(mod.render(_VIEWS["none"]))
 
 
-@pytest.mark.parametrize("state", ["running", "done", "failed", "interrupted", "doctor-failed"])
-def test_in_broken_mode_a_setup_history_is_reported_as_it_is_and_never_under_the_repair_offer(
+def test_in_broken_mode_a_live_run_is_reported_as_it_is_and_never_under_the_repair_offer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stand-in is served until the user reconnects, so a poll DURING the repair must
+    say how it is going, not offer it again with 'ask first'."""
+    mod = _status_of(_standin(), monkeypatch, "running")
+    _cli_is(mod, monkeypatch, "broken", _REASON)
+    text = mod.run_status(_REASON)
+    assert text == mod.render(_VIEWS["running"])
+    assert mod.BROKEN_PHRASE not in text and "ASK THE USER FIRST" not in text
+    assert mod.run_status(None) == text, "without the broken reason the answer is the same"
+
+
+@pytest.mark.parametrize("state", ["done", "failed", "interrupted", "doctor-failed", "unsupported"])
+def test_in_broken_mode_a_recorded_history_does_not_hide_the_cannot_start_statement_while_it_still_cannot_start(
     monkeypatch: pytest.MonkeyPatch, state: str,
 ) -> None:
-    """The stand-in is served until the user reconnects, so a poll DURING or AFTER the
-    repair must say how the repair went, not offer it again with 'ask first'."""
+    """A setup record outlives the install it describes (``status.json`` is never cleared), so
+    a ``done`` from months ago says nothing about a CLI whose Python was pruned since. The
+    poll asks the lookup again: while the CLI still cannot start, the statement and the repair
+    offer come first, and the record's report after them."""
     mod = _status_of(_standin(), monkeypatch, state)
+    fresh = "the Python it was built with (/y/cpython-fresh) is gone"
+    _cli_is(mod, monkeypatch, "broken", fresh)
     text = mod.run_status(_REASON)
-    assert text == mod.render(_VIEWS[state])
-    assert mod.BROKEN_PHRASE not in text and "ASK THE USER FIRST" not in text
-    plain = mod.run_status(None)
-    assert plain == text, "without the broken reason the answer is the same for a state with a history"
+    assert text.startswith(mod.broken_text(fresh)), "the reason is the one found now"
+    assert mod.BROKEN_REPAIR in text
+    assert "Nexus is not installed" not in text
+    if state == "done":
+        assert "did not repair" in text and "Setup is done" not in text and "Reconnect" not in text
+    else:
+        assert mod.render(_VIEWS[state]) in text, "the record's report follows"
+        assert text.index(mod.BROKEN_REPAIR) < text.index(mod.render(_VIEWS[state]))
+
+
+def test_in_broken_mode_a_failed_repair_says_it_failed_and_gives_the_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _status_of(_standin(), monkeypatch, "failed")
+    monkeypatch.setattr(mod, "_call_script", lambda args, broken=None: {**_VIEWS["failed"], "log": "/c/setup/setup.log"})
+    _cli_is(mod, monkeypatch, "broken", _REASON)
+    text = mod.run_status(_REASON)
+    assert "The repair failed" in text and "Log: /c/setup/setup.log" in text and "the build exited 2." in text
+
+
+@pytest.mark.parametrize("state", ["none", "running", "done", "failed", "interrupted", "doctor-failed"])
+def test_in_broken_mode_once_the_cli_can_start_the_record_is_reported_with_the_reconnect_step(
+    monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    mod = _status_of(_standin(), monkeypatch, state)
+    _cli_is(mod, monkeypatch, "startable")
+    text = mod.run_status(_REASON)
+    assert text.startswith(mod.render(_VIEWS[state]))
+    assert mod.BROKEN_PHRASE not in text and mod.BROKEN_REPAIR not in text
+    if state != "running":
+        assert "Reconnect" in text or "reconnect" in text
+
+
+def test_in_broken_mode_a_cli_that_has_gone_is_not_installed_not_broken(monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _status_of(_standin(), monkeypatch, "done")
+    _cli_is(mod, monkeypatch, "missing")
+    assert mod.run_status(_REASON) == mod.run_status(None)
+
+
+def test_the_poll_asks_the_lookup_again_of_the_program_the_launcher_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cli_state`` resolves ``nx-mcp`` as the launcher does and asks ``cannot_start`` again: a
+    pruned generation is broken, the same tree once ``uv`` rebuilt it can start, and a CLI that
+    is no longer there is missing."""
+    mod = _standin()
+    dirs = _isolated(tmp_path)
+    gen = _pruned_generation(dirs, tmp_path)
+    monkeypatch.setenv("NX_TOOLS_DIR", str(dirs["tools"]))
+    monkeypatch.setenv("PATH", str(dirs["bin"]))
+    kind, reason = mod.cli_state()
+    assert kind == "broken" and "cpython-pruned" in (reason or "")
+    (gen / "pyvenv.cfg").unlink()  # the repair: a generation with nothing wrong in its files
+    assert mod.cli_state() == ("startable", None)
+    for entry in (gen / "bin").iterdir():
+        entry.unlink()
+    assert mod.cli_state() == ("missing", None)
 
 
 def test_without_the_broken_reason_nothing_changes(monkeypatch: pytest.MonkeyPatch) -> None:

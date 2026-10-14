@@ -255,10 +255,29 @@ def test_a_lease_past_its_ttl_is_judged_the_same_when_the_port_answers(
     config = _config()
     # The plugin first and the real resolver last: discovery REAPS a stale lease it will not
     # honour, and a plugin that read the lease afterwards would agree with "no" for no reason.
-    plugin = (endpoint.endpoint_usable(config), nx_setup._endpoint_resolves(config), notice.service_usable(config))
+    plugin = (endpoint.endpoint_usable(config), notice.service_usable(config))
     real = setup_tools.usable_service()
     assert real is usable, "the case's own expectation is wrong, or the real resolver changed"
-    assert plugin == (real, real, real), "a laptop that slept is not told 'service down'"
+    assert plugin == (real, real), "a laptop that slept is not told 'service down'"
+
+
+@pytest.mark.parametrize(
+    ("setup", "usable"), [(c[1], c[2]) for c in GRACE_CASES if c[2]], ids=[c[0] for c in GRACE_CASES if c[2]],
+)
+def test_the_setup_process_gives_a_lease_past_its_ttl_no_grace(
+    monkeypatch: pytest.MonkeyPatch, endpoint: ModuleType, nx_setup: ModuleType, healthy_port: int,
+    setup: GraceCase, usable: bool,
+) -> None:
+    """The hook keeps a stale lease whose owner is alive (it must answer in 100 ms and
+    cannot ask the port). The setup process can wait, and it decides whether to START a
+    service: a stale lease must not make it skip the start step, so it grants no grace. Every
+    True case above is True only through the grace."""
+    assert usable
+    setup(monkeypatch, healthy_port)
+    config = _config()
+    assert endpoint.endpoint_usable(config) is True, "the hook keeps it"
+    assert endpoint.endpoint_usable(config, grace=False) is False
+    assert nx_setup._endpoint_resolves(config) is False, "the setup process does not skip the start step on it"
 
 
 def test_the_owner_check_wants_a_positive_integer_pid(endpoint: ModuleType) -> None:
@@ -286,6 +305,22 @@ def test_the_named_difference_an_owner_that_is_alive_whose_port_does_not_answer(
     _stale(dead_port)
     # The plugin first: the real resolver reaps a stale lease whose port is dead.
     assert endpoint.endpoint_usable(_config()) is True
+    assert setup_tools.usable_service() is False
+
+
+def test_the_setup_process_does_not_share_the_wedged_owner_difference(
+    monkeypatch: pytest.MonkeyPatch, nx_setup: ModuleType,
+) -> None:
+    """The same wedged supervisor, seen by the process that decides whether to start the
+    service: it agrees with the CLI (not usable), so ``setup`` starts the service instead of
+    ending doctor-failed on a service that is not there."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    _stale(dead_port)
+    assert nx_setup._endpoint_resolves(_config()) is False
     assert setup_tools.usable_service() is False
 
 

@@ -43,9 +43,14 @@ server inside one connection. The launcher decides at each start from two facts,
 whether the program resolves and, when it does, whether it can start, so the next
 start after an install or a repair runs the real server.
 
+When the CLI cannot start, ``setup_status`` asks the plugin's lookup (``_cli_lookup``,
+``hooks/scripts``) again at each poll, because the setup record outlives the install it
+describes: a ``done`` from an earlier setup says nothing about a Python pruned since.
+
 Transport: MCP stdio, newline-delimited JSON-RPC 2.0 on stdin/stdout. It writes
 nothing to stderr: Claude Code records every stderr line of a stdio server as an
-``error`` entry in its MCP log. Standard library only, and no ``nexus`` import.
+``error`` entry in its MCP log. Standard library and the plugin's own ``_cli_lookup``
+(also standard library only), and no ``nexus`` import.
 """
 from __future__ import annotations
 
@@ -459,20 +464,96 @@ def run_setup(arguments: Any, broken: str | None = None) -> str:
     return _checked(view, started=bool(view.get("started")))
 
 
+#: The program the launcher judged when it served a "cannot start" stand-in: the lookup is
+#: asked about it again at each poll.
+CLI_PROGRAM: str = "nx-mcp"
+
+#: How the last setup run ended, in words that fit the sentence "The last setup run ...".
+LAST_RUN_WORDS: dict[str, str] = {
+    "interrupted": "was interrupted",
+    "failed": "failed",
+    "doctor-failed": "finished with nx doctor problems",
+    "unsupported": "could not run on this host",
+}
+
+RECONNECT: str = (
+    "The Nexus CLI can start now: the user reconnects the `nexus` server (in Claude Code: /mcp, the server, "
+    "Reconnect) or starts a new session."
+)
+
+
+def cli_state() -> tuple[str, str | None]:
+    """What the lookup says about the CLI now, asked the way the launcher asked it:
+    ``("broken", reason)`` when ``nx-mcp`` resolves and ``cannot_start`` still gives a
+    reason, ``("startable", None)`` when it resolves and nothing says it cannot start, and
+    ``("missing", None)`` when it no longer resolves. When the lookup cannot be loaded
+    (a plugin laid out without it) the answer is ``("broken", None)``: nothing is known
+    to have changed, so the launcher's reason stands."""
+    scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "scripts")
+    try:
+        sys.dont_write_bytecode = True  # the plugin directory gets no .pyc from this import
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        import _cli_lookup  # noqa: PLC0415 -- see the docstring
+
+        exe = _cli_lookup.resolve(CLI_PROGRAM)
+        if exe is None:
+            return ("missing", None)
+        reason = _cli_lookup.cannot_start(exe)
+    except Exception:  # noqa: BLE001 -- a status poll never fails because the lookup did
+        return ("broken", None)
+    return ("broken", reason) if reason is not None else ("startable", None)
+
+
+def _still_broken(view: dict[str, Any], text: str, reason: str) -> str:
+    """The poll's answer while the CLI still cannot start and no run is live: the
+    statement and the repair offer, then what the record says, in words that cannot be
+    read as a finished repair (a ``done`` on record predates the prune or did not
+    repair it)."""
+    head = f"{broken_text(reason)} {BROKEN_REPAIR}"
+    state = str(view.get("state", "none"))
+    if state == "none":
+        return f"{head}\n{text}"
+    if state == "done":
+        mode = f" (mode {view['mode']})" if view.get("mode") else ""
+        log = f" Log: {view['log']}" if view.get("log") else ""
+        return (
+            f"{head}\nA setup run is on record as done{mode}, but the CLI still cannot start, so that run did not "
+            f"repair this.{log}"
+        )
+    words = LAST_RUN_WORDS.get(state)
+    if words is None:
+        return f"{head}\nThe record of the last setup run follows.\n{text}"
+    lead = "The repair failed. " if state == "failed" else ""
+    return f"{head}\n{lead}The last setup run {words}, and the CLI still cannot start.\n{text}"
+
+
 def run_status(broken: str | None = None) -> str:
-    """The ``setup_status`` tool. With no setup history (state ``none``) the answer opens
-    with the statement of what is wrong: "not installed", or with *broken* (why a found
-    CLI cannot start) "installed but cannot start" and the repair offer. With a history
-    (running, done, failed, interrupted) it is the record's own report and nothing
-    before it: the stand-in is served until the user reconnects, so a poll during or
-    after the repair must say how the repair went, not offer it again."""
-    view = _call_script(["status"], broken)
+    """The ``setup_status`` tool. Without *broken* (the CLI was not found) the record's
+    report, opened by "not installed" when no setup has run.
+
+    With *broken* (why a found CLI cannot start) the stand-in is served until the user
+    reconnects, and the record outlives the install it describes, so the lookup is asked
+    again at each poll and the answer follows what it says now. A LIVE run is reported as
+    it is: a poll during the repair must not offer it again. While the CLI still cannot
+    start, any other state keeps the statement and the repair offer, with the record's
+    report after it. Once the CLI can start, the record and the reconnect step. If it is
+    gone, the answer is the one for a CLI that is not installed."""
+    if broken is None:
+        view = _call_script(["status"])
+        text = _checked(view)
+        return f"{NOT_INSTALLED}\n{text}" if view.get("state") == "none" else text
+    kind, fresh = cli_state()
+    if kind == "missing":
+        return run_status(None)
+    reason = fresh or broken
+    view = _call_script(["status"], reason)
     text = _checked(view)
-    if view.get("state") == "none":
-        if broken is not None:
-            return f"{broken_text(broken)} {BROKEN_REPAIR}\n{text}"
-        return f"{NOT_INSTALLED}\n{text}"
-    return text
+    if view.get("state") == "running":
+        return text
+    if kind == "startable":
+        return text if "econnect" in text else f"{text}\n{RECONNECT}"
+    return _still_broken(view, text, reason)
 
 
 class StandIn:

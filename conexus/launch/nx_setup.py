@@ -692,8 +692,12 @@ def _endpoint_resolves(config: Path) -> bool:
     """Whether a usable service is already configured: the CLI's own definition
     (``resolve_service_endpoint()`` returning), restated in ``_endpoint_resolve``. A
     saved address with no token is not usable (nexus-sv2wx.17, residual 9), so the
-    service step does not call such a machine finished."""
-    return _endpoint_resolve.endpoint_usable(config)
+    service step does not call such a machine finished. No grace for a lease past its
+    time to live: the hook keeps one whose owner process is alive because it cannot wait
+    to ask the port, but this decides whether to start the service, and a supervisor that
+    is alive and wedged would otherwise end the run in a failed ``nx doctor`` without ever
+    starting one (nexus-sv2wx.17, review 2)."""
+    return _endpoint_resolve.endpoint_usable(config, grace=False)
 
 
 # -- children: no window, their own process group, killed whole ----------------------------------

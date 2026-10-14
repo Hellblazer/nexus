@@ -355,9 +355,20 @@ install done by hand at any time is used at the next launch.
 The stand-in is served only while there is no CLI or the CLI cannot start. It
 does not try to swap itself for the real server inside one connection; when the
 build is done its status says to reconnect the server or start a new session.
-In the cannot-start mode `setup_status` reports a setup run as it is (running,
-done, failed) and puts the repair offer only over "no setup has run", so a poll
-during or after the repair does not offer it again.
+In the cannot-start mode `setup_status` asks the lookup again at each poll,
+of the same program the launcher judged, because the setup record is never
+cleared and outlives the install it describes: a `done` from a setup months
+ago says nothing about a Python `uv` pruned since. A live run is reported as it
+is, so a poll during the repair does not offer it again. While the CLI still
+cannot start, any other state keeps the statement and the repair offer, with
+the record's report after them, in words that cannot be read as a finished
+repair: a `done` on record "did not repair this", and a `failed` run says the
+repair failed and gives the log. Once the CLI can start, the answer is the
+record and the reconnect step; if it is no longer found, the answer is the one
+for a CLI that is not installed. (One limit: when the launcher fell into the
+cannot-start mode because the system refused to run a program the files say is
+fine, nothing in the files can show the problem gone, so the poll then reads the
+CLI as startable.) The hook's state 2 gives the same statement and offer.
 
 **The setup tools.** Two tools, `setup` and `setup_status`, with the same
 names, arguments and descriptions on the stand-in and on the real `nx-mcp`.
@@ -427,8 +438,8 @@ older `resolve_base_url` answers a different question, the base URL the other ho
 use with a credential policy of their own, and is not the definition. Resolving
 reads files and the environment and makes no network request; in the hook the
 file reads (the setup status and its error record, and the lease) retry a Windows
-sharing violation for at most 30 ms together, where the registry's own retry is
-two seconds. A hand-edited `config.yml` with the credentials in flow style is
+sharing violation for at most 30 ms together, counted from after the plugin
+parts are imported, where the registry's own retry is two seconds. A hand-edited `config.yml` with the credentials in flow style is
 read as the CLI reads it (a flat mapping of plain or quoted scalars, on one line
 or several); a mapping nested in a document-wide flow mapping, an anchor or a
 block scalar is not, and reads as no saved address. A lease just past its time
@@ -436,7 +447,10 @@ to live is kept while its owner process is alive (within ten times the lease's
 time to live, on a loopback host), so a laptop that slept is not told "service
 down". One difference remains, because the plugin makes no network request: the
 CLI also asks the port to answer `/health`, so an owner that is alive and wedged
-reads as usable to the hook and not to the CLI; a test names it. A
+reads as usable to the hook and not to the CLI; a test names it. The setup
+process does not share the difference: it decides whether to start the
+service, so it asks with no grace and a lease past its time to live is not a
+service there (`endpoint_usable(..., grace=False)`). A
 local service is *provisioned* when `nx init` has left its files in the Nexus
 config directory (the service binary under `service/`). A service whose
 endpoint resolves but which does not answer, a cloud outage or a hung local
@@ -1088,7 +1102,10 @@ None. The launcher, the hook and the stand-in server are standard library.
   start", on POSIX (a shebang to a missing interpreter; a `pyvenv.cfg` whose `home` is gone
   beside a dangling `bin/python`, and a gone `home` alone judged runnable) and in the Windows shape (a launcher `.exe` with no
   shebang and a `pyvenv.cfg` whose `home` is gone); `setup`'s build step runs
-  for it and `nx self install --bootstrap` replaces the generation.
+  for it and `nx self install --bootstrap` replaces the generation, and
+  repairs a legacy `uv tool` tree whose Python is gone the same way. A
+  `setup_status` poll while it still cannot start keeps the statement and the
+  repair offer over a stale `done`.
 - Until `setup` is called, a session start writes nothing under the Nexus
   config directory or the tools directory; pinned in an isolated home.
   (`uv` writes its own cache on the first launch, which is outside this pin.)
@@ -1401,7 +1418,16 @@ is flagged for trimming before then.
   `uv tool` tree and a broken `current` the same way. The usable-service check
   reads flow-style credentials and keeps a lease past its time to live while its
   owner process is alive, and the hook's reads share one 30 ms budget.
-  `setup_status` in the cannot-start mode reports a run as it is. The on-disk
-  sizes sit beside the download sizes in the tool descriptions. Failure Modes,
-  the stand-in's lifetime, Deployment, the Reuse table and Sources now say what
-  Step 4 built.
+  The on-disk sizes sit beside the download sizes in the tool descriptions.
+  Failure Modes, the stand-in's lifetime, Deployment, the Reuse table and
+  Sources now say what Step 4 built.
+- 2026-10-14: Fix round 2 on the Step 4 build (review of the first fix round).
+  `setup_status` in the cannot-start mode asked nothing of the machine and so
+  showed a stale `done` as a finished repair, which hid the repair offer and
+  told the user to reconnect, serving the stand-in again; it now asks the
+  lookup again at each poll (Technical Design, "What is served"). The setup
+  process's usable-service check grants no grace to a lease past its time to
+  live, so a wedged supervisor does not make it skip the start step. The
+  hook's 30 ms read budget starts after the plugin parts are imported. The
+  words for a run that did not end well fit the run (interrupted, failed, nx
+  doctor problems, cannot run on this host).

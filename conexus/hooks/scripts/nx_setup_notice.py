@@ -158,7 +158,7 @@ def declined_text() -> str:
 
 def quiet_unfinished_text(view: dict[str, Any]) -> str:
     """States 4 and 5 with the "not now" marker: one quiet line, no question."""
-    what = "was interrupted" if view.get("state") == "interrupted" else "did not finish"
+    what = nx_standin.LAST_RUN_WORDS.get(str(view.get("state")), "did not end well")
     log = f" The log is at {view['log']}." if view.get("log") else ""
     return (
         f"The last Nexus setup run {what}, and the user chose not to be asked about Nexus for now. "
@@ -195,7 +195,8 @@ def cannot_start_text(reason: str, view: dict[str, Any]) -> str:
         "reconnects the `nexus` server or starts a new session."
     )
     if view.get("state") in _UNFINISHED:
-        text += f" The last setup run did not finish. {nx_standin.render(view)}"
+        words = nx_standin.LAST_RUN_WORDS.get(str(view.get("state")), "did not end well")
+        text += f" The last setup run {words}. {nx_standin.render(view)}"
     return text
 
 
@@ -240,8 +241,8 @@ def decide() -> str | None:
     """The text for the model, or ``None`` for silence."""
     if in_remote_workspace():
         return None
-    deadline = time.monotonic() + HOOK_READ_BUDGET_S
     load_siblings()
+    deadline = time.monotonic() + HOOK_READ_BUDGET_S  # after the import: that time is not the reads'
     config = nx_setup.config_dir()
     view = _status(config, deadline)
     state = view.get("state")

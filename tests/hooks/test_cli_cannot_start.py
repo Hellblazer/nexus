@@ -385,3 +385,31 @@ def test_the_plugin_and_the_cli_give_the_same_verdict_on_a_generation(
     ) if windows else ((home == "gone" and link == "dangles") or shebang in ("missing", "env-missing"))
     assert plugin is expected
 
+
+
+@posix_only("a shebang names the interpreter the kernel starts")
+def test_the_one_documented_difference_the_plugin_judges_the_program_it_is_given_the_cli_judges_either(
+    lookup, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The matrix above writes one shebang into both console scripts. The plugin judges the
+    program the launcher is about to run (``nx-mcp`` for the server, ``nx-hook`` for a hook);
+    ``--bootstrap`` judges the generation by ``bin/nx-mcp`` OR ``bin/nx``, the two it always
+    has. Where only ``nx`` is bad, the server would start and ``--bootstrap`` repairs the
+    generation anyway: the difference is safe (the plugin never says "cannot start" of a
+    program that starts, and the CLI replaces a generation with a script that does not), and
+    it is pinned here so that a change on either side is seen. No launcher path builds the
+    case, since both scripts share one interpreter."""
+    from nexus.commands import self_cmd
+
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    gen = _generation_fixture(tmp_path, home="ok", link="resolves", shebang="ok")
+    bad = _script(gen / "bin" / "nx", f"#!{tmp_path / 'pruned' / 'python'}")
+    good = gen / "bin" / "nx-mcp"
+    assert lookup.cannot_start(str(good), windows=False) is None, "the program given starts"
+    assert lookup.cannot_start(str(bad), windows=False) is not None, "the program given is judged by its own line"
+    assert self_cmd._generation_interpreter_gone(gen, windows=False) is True, "the CLI judges the generation by either script"
+    # And the other way round: the server script is the bad one.
+    _script(gen / "bin" / "nx", f"#!{sys.executable}")
+    _script(good, f"#!{tmp_path / 'pruned' / 'python'}")
+    assert lookup.cannot_start(str(good), windows=False) is not None
+    assert self_cmd._generation_interpreter_gone(gen, windows=False) is True
