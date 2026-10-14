@@ -82,6 +82,16 @@ async def _session(dirs: dict[str, Path], program: str):
             return init, tools, calls
 
 
+def _not_json(constant: str) -> float:
+    raise ValueError(f"{constant} is not JSON")
+
+
+def _strict_loads(line: str):
+    """``json.loads`` as a client reads a reply: ``NaN`` and ``Infinity`` are
+    Python's extension, not JSON, and a strict parser drops the line."""
+    return json.loads(line, parse_constant=_not_json)
+
+
 def _text(result) -> str:
     return "".join(block.text for block in result.content if getattr(block, "type", "") == "text")
 
@@ -209,7 +219,7 @@ def test_the_stand_in_never_writes_to_standard_error(tmp_path: Path) -> None:
     )
     assert r.returncode == 0
     assert r.stderr == b""
-    replies = [json.loads(line) for line in r.stdout.decode("utf-8").splitlines()]
+    replies = [_strict_loads(line) for line in r.stdout.decode("utf-8").splitlines()]
     assert [reply.get("id") for reply in replies] == [1, 2, 3, 4, None]
     assert "error" in replies[2], "a Nexus tool name must not be served by the stand-in"
     assert "error" in replies[3]
@@ -236,7 +246,7 @@ def test_hostile_input_gets_a_reply_and_the_server_lives(tmp_path: Path, line: b
     )
     assert r.returncode == 0
     assert r.stderr == b""
-    replies = [json.loads(reply) for reply in r.stdout.decode("utf-8").splitlines()]
+    replies = [_strict_loads(reply) for reply in r.stdout.decode("utf-8").splitlines()]
     assert replies[-1] == {"jsonrpc": "2.0", "id": 7, "result": {}}, replies
     assert len(replies) == 2, replies
 
