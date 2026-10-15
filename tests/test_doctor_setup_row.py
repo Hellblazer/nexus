@@ -12,6 +12,7 @@ interrupted (a warning that says ``setup`` called again resumes).
 """
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import json
 import os
@@ -23,7 +24,14 @@ from typing import Any
 
 import pytest
 
-from nexus.health import _SETUP_STALE_SECONDS, HealthResult, _check_setup_status, run_health_checks
+from nexus.health import (
+    _SETUP_STALE_SECONDS,
+    HealthResult,
+    _check_setup_status,
+    _setup_directory,
+    _settle_setup_row,
+    run_health_checks,
+)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _FIXTURE_PATH = _ROOT / "tests" / "fixtures" / "setup_status_format.json"
@@ -54,6 +62,8 @@ def build_setup_dir(root: Path, case: dict[str, Any]) -> Path:
         (setup / files["error"]).write_text(body(case["error"]), encoding="utf-8")
     if case["not_now"]:
         (setup / files["marker"]).write_text("", encoding="utf-8")
+    if case.get("log_text") is not None:
+        (setup / files["log"]).write_text(case["log_text"], encoding="utf-8")
     age = case["heartbeat_age_seconds"]
     if age is not None:
         (setup / files["lock"]).mkdir()
@@ -112,7 +122,7 @@ def test_not_applicable_is_decided_after_the_failure_logic(tmp_path: Path) -> No
     verdicts = {}
     for name, case in CASES.items():
         if case["setup_dir"] and (case["status"] is not None or case["error"] is not None
-                                  or case["heartbeat_age_seconds"] is not None):
+                                  or case["heartbeat_age_seconds"] is not None or case.get("log_text") is not None):
             sub = tmp_path / name
             sub.mkdir()
             verdicts[name] = _outcome(_row(build_setup_dir(sub, case)))
@@ -198,6 +208,91 @@ def test_a_running_status_with_no_lock_is_interrupted(tmp_path: Path) -> None:
     _check_case("interrupted-no-lock", tmp_path)
 
 
+# -- a run that started and recorded nothing (critique S3) ---------------------------------------
+
+
+def test_a_fresh_lock_with_no_status_is_a_run_in_progress(tmp_path: Path) -> None:
+    row = _check_case("fresh-lock-no-status", tmp_path)
+    assert row.ok is True and not row.warn
+
+
+def test_a_stale_lock_with_no_status_warns_that_a_run_started_and_recorded_nothing(tmp_path: Path) -> None:
+    row = _check_case("stale-lock-no-status", tmp_path)
+    assert row.ok is False and row.warn is True and "not applicable" not in row.detail
+
+
+def test_a_log_with_no_status_warns_the_same(tmp_path: Path) -> None:
+    row = _check_case("log-only", tmp_path)
+    assert row.ok is False and row.warn is True and "not applicable" not in row.detail
+
+
+def test_an_empty_log_with_no_status_is_still_not_applicable(tmp_path: Path) -> None:
+    """A zero-byte log is what a launch that never ran anything leaves; it is no run to report."""
+    case = {**CASES["log-only"], "log_text": ""}
+    row = _row(build_setup_dir(tmp_path, case))
+    assert row.ok is True and "not applicable" in row.detail
+
+
+# -- the unsupported row names the log (critique observation) ------------------------------------
+
+
+def test_an_unsupported_row_names_the_log_once_even_when_the_next_step_does_not(tmp_path: Path) -> None:
+    case = json.loads(json.dumps(CASES["unsupported"]))
+    setup = build_setup_dir(tmp_path, case)
+    log = str(setup / "setup.log")
+    assert _row(setup).detail.count(log) == 1, "the script's next step already ends in the log path"
+    case["status"]["next"] = "Install Nexus in a terminal."
+    sub = tmp_path / "bare"
+    sub.mkdir()
+    setup = build_setup_dir(sub, case)
+    assert _row(setup).detail.count(str(setup / "setup.log")) == 1
+
+
+# -- the last run's warning is information when nothing else is wrong (S1) -----------------------
+
+_LAST_RUN_CASES = (
+    "failed", "failed-with-leftover-lock", "unwritable-status", "doctor-failed", "interrupted",
+    "interrupted-no-lock", "stale-lock-no-status", "log-only",
+)
+_FINE = HealthResult(label="Python", ok=True, detail="3.12")
+
+
+@pytest.mark.parametrize("name", _LAST_RUN_CASES)
+def test_a_last_run_warning_becomes_information_when_every_other_row_passes(name: str, tmp_path: Path) -> None:
+    setup = build_setup_dir(tmp_path, CASES[name])
+    row = _row(setup)
+    assert row.ok is False and row.warn is True, "premise: the row alone is a warning"
+    (settled,) = [r for r in _settle_setup_row([_FINE, row]) if r.label == _LABEL]
+    assert settled.ok is True and not settled.warn and not settled.fatal and not settled.fix_suggestions
+    assert "the last setup run ended" in settled.detail and "everything else" in settled.detail
+    assert str(setup / "setup.log") in settled.detail
+    assert settled.detail.split("ended ")[1].split(",")[0] in {"failed", "doctor-failed", "interrupted"}
+
+
+@pytest.mark.parametrize("name", _LAST_RUN_CASES)
+@pytest.mark.parametrize("other", [
+    HealthResult(label="Service", ok=False, warn=True, detail="not running"),
+    HealthResult(label="T3", ok=False, detail="unreachable"),
+    HealthResult(label="Engine", ok=False, fatal=True, detail="down"),
+])
+def test_a_last_run_warning_stays_a_warning_while_any_other_row_is_wrong(name: str, other: HealthResult, tmp_path: Path) -> None:
+    row = _row(build_setup_dir(tmp_path, CASES[name]))
+    (settled,) = [r for r in _settle_setup_row([_FINE, other, row]) if r.label == _LABEL]
+    assert settled.ok is False and settled.warn is True
+    assert settled.detail == row.detail and settled.fix_suggestions == row.fix_suggestions
+
+
+@pytest.mark.parametrize("name", ["done", "unsupported", "live", "virgin", "fresh-lock-no-status"])
+def test_a_row_that_is_not_a_last_run_warning_is_left_alone(name: str, tmp_path: Path) -> None:
+    row = _row(build_setup_dir(tmp_path, CASES[name]))
+    assert [r for r in _settle_setup_row([_FINE, row]) if r.label == _LABEL] == [row]
+
+
+def test_the_sweep_settles_the_row_after_every_row_is_known() -> None:
+    source = inspect.getsource(run_health_checks)
+    assert "return _settle_setup_row(results), _local" in source
+    assert source.index("_check_setup_status()") < source.index("_settle_setup_row(results)")
+
 # -- the format, from both sides -----------------------------------------------------------------
 
 
@@ -268,6 +363,53 @@ def test_a_virgin_config_directory_is_not_applicable_by_default(tmp_path: Path, 
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "nothing-here"))
     (row,) = _check_setup_status()
     assert row.ok is True and "not applicable" in row.detail
+
+
+def _load_setup_script() -> Any:
+    """``conexus/launch/nx_setup.py`` as ``tests/hooks/test_nx_setup.py`` loads it: by path, as a module."""
+    path = _ROOT / "conexus" / "launch" / "nx_setup.py"
+    spec = importlib.util.spec_from_file_location("nx_setup_under_test", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ENV_COMBINATIONS = {
+    "NEXUS only": {"NEXUS_CONFIG_DIR": "a-nexus"},
+    "NX only": {"NX_CONFIG_DIR": "b-nx"},
+    "both": {"NEXUS_CONFIG_DIR": "a-nexus", "NX_CONFIG_DIR": "b-nx"},
+    "neither": {},
+}
+
+
+def _set_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, which: dict[str, str]) -> None:
+    for name in ("NEXUS_CONFIG_DIR", "NX_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    for name, leaf in which.items():
+        monkeypatch.setenv(name, str(tmp_path / leaf))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+
+
+@pytest.mark.parametrize("combination", sorted(_ENV_COMBINATIONS))
+def test_the_row_reads_the_directory_the_setup_script_writes(combination: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The script resolves NEXUS_CONFIG_DIR, then NX_CONFIG_DIR, then the default; the CLI's own
+    ``nexus_config_dir`` reads only the first (an open decision, nexus-sv2wx.22), so the row resolves it
+    the script's way. Compared against the real script, not a copy of its rule."""
+    _set_config_env(monkeypatch, tmp_path, _ENV_COMBINATIONS[combination])
+    mod = _load_setup_script()
+    assert _setup_directory() == mod.setup_dir()
+
+
+def test_a_run_under_nx_config_dir_alone_is_read_not_called_not_applicable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shape the critique found: setup ran under NX_CONFIG_DIR only, and the user's own terminal
+    ``nx doctor`` looked under ``~/.config/nexus`` and said no setup had run."""
+    _set_config_env(monkeypatch, tmp_path, {"NX_CONFIG_DIR": "b-nx"})
+    mod = _load_setup_script()
+    build_setup_dir(Path(os.path.dirname(mod.setup_dir())), CASES["failed"])
+    (row,) = _check_setup_status()
+    assert row.ok is False and row.warn is True and "nx init exited 1." in row.detail
 
 
 def test_the_row_is_absent_from_the_fresh_install_mvv_allowlist() -> None:

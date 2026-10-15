@@ -696,6 +696,13 @@ def main() -> None:
     neither a generation nor a ``uv tool`` install and returned. The check comes
     before BOTH paths, the version mismatch and the ref drift. The session's
     one message about a missing CLI is ``nx_setup_notice.py``'s.
+
+    A CLI that is found and cannot start is treated as absent, so the same
+    skip also covers what the hook did for it before: the version nudge and
+    its upgrade dispatch, the ref-drift check (nexus-konsk) and its
+    dispatch, and the old repair of a pruned legacy ``uv tool`` tree through
+    ``uv tool upgrade``. ``setup`` repairs that CLI (the user is asked first);
+    a plugin-only cut waits for the repaired CLI's next session.
     """
     try:
         if not cli_present():

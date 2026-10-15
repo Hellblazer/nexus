@@ -3819,7 +3819,11 @@ its own verify step while it holds the lock; a last run that failed (`failed`, o
 rows it recorded) warns with the failure line and the log path; a run whose status says `running` but whose
 heartbeat is older than 60 seconds, or whose lock is gone, warns that it was interrupted and that calling `setup`
 again with the same mode resumes it; a finished run, and a host where setup was `unsupported`, are green. A
-`status.json` that cannot be read warns, unless a run is live. The row never fails the run (a warning at most).
+`status.json` that cannot be read warns, unless a run is live. A setup directory with a stale lock or a log with
+text in it and no `status.json` also warns (a run started and recorded nothing); a fresh lock reads as a run in
+progress. The three warnings about the last run (failed, verify failed, interrupted) are reported as information when no other row in the same `nx doctor` run is a
+failure or a warning, because nothing but another `setup` call clears them. The row reads the directory the setup
+script writes: `NEXUS_CONFIG_DIR`, then `NX_CONFIG_DIR`, then `~/.config/nexus`. The row never fails the run (a warning at most).
 The plugin script and the CLI ship separately, so `tests/fixtures/setup_status_format.json` pins the format and
 both `tests/hooks/test_nx_setup.py` and `tests/test_doctor_setup_row.py` read it.
 

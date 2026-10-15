@@ -1,5 +1,5 @@
 {
-  "comment": "The format of the setup directory, pinned from both sides. conexus/launch/nx_setup.py (a plugin script) writes it; the nx doctor row 'Plugin setup' (src/nexus/health.py) reads it; the two ship as separate release artifacts. tests/hooks/test_nx_setup.py (the writer) and tests/test_doctor_setup_row.py (the reader) both read THIS file, so neither side can change the format alone. Each case is a setup directory: status is the body of status.json (null: no file), error is the body of status.error, heartbeat_age_seconds is the age of lock/heartbeat (null: no lock), not_now makes the marker. The text {LOG} in a value stands for the path of setup.log in the directory under test. view is what nx_setup.status_view reports; row is what the doctor row reports: outcome is one of not-applicable, ok, warn, and every string in contains must appear in its detail (and in its fix suggestions when named there).",
+  "comment": "The format of the setup directory, pinned from both sides. conexus/launch/nx_setup.py (a plugin script) writes it; the nx doctor row 'Plugin setup' (src/nexus/health.py) reads it; the two ship as separate release artifacts. tests/hooks/test_nx_setup.py (the writer) and tests/test_doctor_setup_row.py (the reader) both read THIS file, so neither side can change the format alone. Each case is a setup directory: status is the body of status.json (null: no file), error is the body of status.error, heartbeat_age_seconds is the age of lock/heartbeat (null: no lock), not_now makes the marker, log_text (optional; absent means no log file) is the text of setup.log. The text {LOG} in a value stands for the path of setup.log in the directory under test. view is what nx_setup.status_view reports; row is what the doctor row reports: outcome is one of not-applicable, ok, warn, and every string in contains must appear in its detail (and in its fix suggestions when named there).",
   "stale_after_seconds": 60,
   "files": {
     "status": "status.json",
@@ -15,8 +15,10 @@
     "running": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"],
     "failed": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next", "failed_step"],
     "doctor-failed": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next", "doctor", "doctor_failing"],
-    "done": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"]
+    "done": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"],
+    "unsupported": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"]
   },
+  "writer_error_keys": ["state", "stage", "failed_step", "mode", "log", "updated_at", "message", "next"],
   "cases": {
     "virgin": {
       "setup_dir": false,
@@ -174,6 +176,34 @@
       "not_now": false,
       "view": {"state": "unsupported", "live": false},
       "row": {"outcome": "ok", "contains": ["could not run here", "Install Nexus in a terminal"]}
+    },
+    "fresh-lock-no-status": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": 5,
+      "not_now": false,
+      "view": {"state": "none", "live": true},
+      "row": {"outcome": "ok", "contains": ["in progress", "{LOG}"]}
+    },
+    "stale-lock-no-status": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": 120,
+      "not_now": false,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "warn", "contains": ["started here and recorded no status", "{LOG}", "call the `setup` tool again"]}
+    },
+    "log-only": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "log_text": "--- uv tool run\n",
+      "not_now": false,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "warn", "contains": ["started here and recorded no status", "{LOG}", "call the `setup` tool again"]}
     },
     "unreadable-status-no-run": {
       "setup_dir": true,

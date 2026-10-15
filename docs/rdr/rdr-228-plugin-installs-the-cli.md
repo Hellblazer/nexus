@@ -1485,3 +1485,6 @@ is flagged for trimming before then.
   The environment notice names `NX_MINT_TOKEN` and `NX_MINT_TENANT`. A
   browser offering to save the token is a risk measured in the Minimum Viable
   Validation.
+  A build writes the lockstep marker only after `nx --version` of the CLI it
+  left confirms the version it built; the lockstep hook treats a CLI that cannot
+  start as absent; the bootstrap build names CPU torch on Linux.

@@ -1857,10 +1857,33 @@ def lockstep_marker_path() -> Path:
     return _endpoint_resolve.default_config_dir() / "cli_lockstep_marker"
 
 
-def _record_lockstep(run: _Run, version: str) -> None:
-    """After a build, record its version as in lockstep: the build installed exactly the plugin's version, and
-    without the marker the next session's lockstep hook dispatches an upgrade that races nothing useful
-    (found by the setup journey, 2026-10-15). A failed write is logged and changes nothing else."""
+#: What the lockstep action reads out of ``nx --version`` (``version_lockstep_action._VERSION_RE``, which
+#: ``tests/hooks/test_nx_setup.py`` compares with this one). Copied, not imported: that file is a hook program
+#: that exits at import on an old Python and prints to standard error under ``NX_HOOK_DEBUG``.
+_LOCKSTEP_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?)")
+
+
+def _cli_version(run: _Run, nx: str) -> str | None:
+    """The version *nx* reports, parsed the way the lockstep action parses it; ``None`` when it will not say."""
+    try:
+        code, text = run.cmd([nx, "--version"], timeout=PROBE_TIMEOUT_SECONDS)
+    except OSError:
+        return None
+    match = _LOCKSTEP_VERSION_RE.search(text) if code == 0 else None
+    return match.group(1) if match else None
+
+
+def _record_lockstep(run: _Run, nx: str, version: str) -> None:
+    """After a build, record *version* as in lockstep, but only when *nx* (the CLI :func:`_nx_after_build`
+    returned) reports exactly that version: RDR-143's rule is a marker on confirmed lockstep, not on the intent to
+    build it. A ``PATH`` ``nx`` or a leftover generation that is not the one just built reports another version and
+    gets no marker, so the hook judges it. Without the marker for a build that did match, the next session's
+    lockstep hook dispatches an upgrade that races nothing useful (found by the setup journey, 2026-10-15). A failed
+    check or write is logged and changes nothing else."""
+    seen = _cli_version(run, nx)
+    if seen != version:
+        run.log(f"the lockstep marker was not written: `nx --version` reported {seen or 'no version'}, the build was for {version}\n")
+        return
     path = lockstep_marker_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1875,11 +1898,14 @@ def build_env(platform: str | None = None, environ: dict[str, str] | None = None
     packages and triton, about 4.5 GB that Nexus never uses (measured by the setup journey on chas, 2026-10-15;
     the generation itself already gets CPU torch from ``install_generation.sh``, nexus-mt1tj). It is set through
     ``UV_TORCH_BACKEND``, which a uv too old to know the option ignores, rather than a flag it would refuse.
-    ``NX_TORCH_BACKEND``, then an existing ``UV_TORCH_BACKEND``, win over ``cpu``, as in ``install_generation.sh``."""
+    Only ``NX_TORCH_BACKEND`` wins over ``cpu``, as in ``install_generation.sh`` (``${NX_TORCH_BACKEND:-cpu}``, passed
+    as ``--torch-backend``): an ambient ``UV_TORCH_BACKEND`` is replaced, so the throwaway environment and the
+    generation get the same torch. The CPU build comes from PyTorch's own CPU index (download.pytorch.org), a second
+    host beside the package index for the throwaway environment."""
     platform = sys.platform if platform is None else platform
     env = dict(os.environ if environ is None else environ)
     if platform.startswith("linux"):
-        env["UV_TORCH_BACKEND"] = env.get("NX_TORCH_BACKEND") or env.get("UV_TORCH_BACKEND") or "cpu"
+        env["UV_TORCH_BACKEND"] = env.get("NX_TORCH_BACKEND") or "cpu"
     return env
 
 
@@ -1911,7 +1937,7 @@ def _execute(run: _Run) -> int:
             if reason is not None:
                 return run.fail("build", f"the build finished but the `nx` it left cannot start: {reason}.")
             return run.fail("build", "the build finished but `nx` is not in the Nexus install directory or on PATH.")
-        _record_lockstep(run, version)
+        _record_lockstep(run, nx, version)
     assert nx is not None
     run.step_done("build")
     if run.mode == MODE_CLI_ONLY:

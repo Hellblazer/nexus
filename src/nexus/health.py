@@ -4752,14 +4752,70 @@ def _setup_run_is_live(setup: Path) -> bool:
     return False
 
 
+@dataclass
+class _SetupLastRun(HealthResult):
+    """A warning that is a verdict about the LAST setup run (it failed, its verify step failed, or it was
+    interrupted), which nothing but another ``setup`` call clears. ``ended`` is the state it ended in and
+    ``log`` the setup log's path: :func:`_settle_setup_row` needs both to report it as information instead
+    when nothing else in the same sweep is wrong."""
+
+    ended: str = ""
+    log: str = ""
+
+
+def _setup_last_run_warning(ended: str, log: Path, detail: str, fix_suggestions: list[str]) -> HealthResult:
+    return _SetupLastRun(
+        label=_SETUP_LABEL, ok=False, warn=True, detail=detail, fix_suggestions=fix_suggestions,
+        ended=ended, log=str(log),
+    )
+
+
+def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
+    """The "Plugin setup" warning about the last run, reported as information when nothing else in this
+    sweep is a failure or a warning (nexus-sv2wx.19 fix round, 2026-10-15).
+
+    A failed, doctor-failed or interrupted run is a verdict about that run, not about the box: a user who
+    fixed the cause by hand (``nx config init``, ``nx daemon service start``) would otherwise read the same
+    warning on every ``nx doctor`` until a model-driven ``setup`` call cleared it. While anything else is
+    wrong the warning stays, because the setup run may be why. Rows are replaced, never mutated.
+    """
+    for index, row in enumerate(results):
+        if not isinstance(row, _SetupLastRun):
+            continue
+        if all(other.ok for other in results if other is not row):
+            results[index] = HealthResult(
+                label=_SETUP_LABEL, ok=True,
+                detail=f"the last setup run ended {row.ended}, and everything else this check looked at is fine. Log: {row.log}",
+            )
+    return results
+
+
 def _setup_failed_row(status: dict, log: Path) -> HealthResult:
     mode = _setup_text(status.get("mode", "unknown"), 40)
     step = _setup_text(status.get("failed_step") or status.get("stage") or "unknown", 40)
-    return HealthResult(
-        label=_SETUP_LABEL, ok=False, warn=True,
-        detail=f"the last setup run failed at the {step} step: {_setup_text(status.get('message', ''))} Log: {log}",
-        fix_suggestions=[f"If the user agrees, call the `setup` tool again with mode {mode}: it resumes at the {step} step"],
+    return _setup_last_run_warning(
+        "failed", log,
+        f"the last setup run failed at the {step} step: {_setup_text(status.get('message', ''))} Log: {log}",
+        [f"If the user agrees, call the `setup` tool again with mode {mode}: it resumes at the {step} step"],
     )
+
+
+def _setup_started_and_recorded_nothing(setup: Path, log: Path) -> bool:
+    """A lock left behind (a fresh one is a live run, handled before this) or a log with text in it, and no
+    status file: a run started and the file that says how it went never appeared."""
+    if _exists_or_unreadable(setup / "lock"):
+        return True
+    try:
+        return log.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _exists_or_unreadable(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return True
 
 
 def _setup_row(setup: Path) -> HealthResult:
@@ -4785,6 +4841,12 @@ def _setup_row(setup: Path) -> HealthResult:
     if not isinstance(status, dict):  # no status file
         if live:
             return in_progress
+        if _setup_started_and_recorded_nothing(setup, log):
+            return _setup_last_run_warning(
+                "interrupted", log,
+                f"a setup run started here and recorded no status (a stale lock or a log is all it left). Log: {log}",
+                ["If the user agrees, call the `setup` tool again: it starts a new run and writes the status"],
+            )
         return HealthResult(label=_SETUP_LABEL, ok=True, detail="not applicable: no plugin setup has run on this machine")
     state = status["state"]
     mode = _setup_text(status.get("mode", "unknown"), 40)
@@ -4796,13 +4858,10 @@ def _setup_row(setup: Path) -> HealthResult:
                 label=_SETUP_LABEL, ok=True,
                 detail=f"setup is in progress (mode {mode}, stage {stage}): {_setup_text(status.get('message', ''))}. Log: {log}",
             )
-        return HealthResult(
-            label=_SETUP_LABEL, ok=False, warn=True,
-            detail=(
-                f"setup was interrupted at stage {stage} (mode {mode}): its process is gone and it wrote no final status. "
-                f"Log: {log}"
-            ),
-            fix_suggestions=[f"If the user agrees, {again}: it resumes at the step that was running"],
+        return _setup_last_run_warning(
+            "interrupted", log,
+            f"setup was interrupted at stage {stage} (mode {mode}): its process is gone and it wrote no final status. Log: {log}",
+            [f"If the user agrees, {again}: it resumes at the step that was running"],
         )
     if state == "failed":
         return _setup_failed_row(status, log)
@@ -4812,18 +4871,18 @@ def _setup_row(setup: Path) -> HealthResult:
         shown = [_setup_text(r, 120) for r in listed[:_SETUP_DOCTOR_ROWS]]
         more = f"; and {len(listed) - len(shown)} more" if len(listed) > len(shown) else ""
         named = f" Failing: {'; '.join(shown)}{more}." if shown else ""
-        return HealthResult(
-            label=_SETUP_LABEL, ok=False, warn=True,
-            detail=f"the last setup run finished, but its verify step failed: {_setup_text(status.get('message', ''))}{named} Log: {log}",
-            fix_suggestions=["Run `nx doctor` in a terminal for the failing rows", f"After fixing them, {again}: it verifies again"],
+        return _setup_last_run_warning(
+            "doctor-failed", log,
+            f"the last setup run finished, but its verify step failed: {_setup_text(status.get('message', ''))}{named} Log: {log}",
+            ["Run `nx doctor` in a terminal for the failing rows", f"After fixing them, {again}: it verifies again"],
         )
     if state == "unsupported":
+        # The script's next step already ends in the log path; one written by anything else may not.
+        next_step = _setup_text(status.get("next", ""))
+        named_log = "" if str(log) in next_step else f" Log: {log}"
         return HealthResult(
             label=_SETUP_LABEL, ok=True,
-            detail=(
-                f"the last setup could not run here ({_setup_text(status.get('message', ''))}). "
-                f"{_setup_text(status.get('next', ''))}"
-            ),
+            detail=f"the last setup could not run here ({_setup_text(status.get('message', ''))}). {next_step}{named_log}",
         )
     return HealthResult(
         label=_SETUP_LABEL, ok=True,
@@ -4831,11 +4890,26 @@ def _setup_row(setup: Path) -> HealthResult:
     )
 
 
+def _setup_directory() -> Path:
+    """``setup/`` under the config directory, resolved the way the setup script resolves it
+    (``conexus/launch/nx_setup.py`` ``config_dir``): ``NEXUS_CONFIG_DIR``, then ``NX_CONFIG_DIR``,
+    then ``~/.config/nexus``, made absolute. ``nexus.config.nexus_config_dir`` reads only the first and
+    stays as it is for the rest of the CLI (whether it should honour ``NX_CONFIG_DIR`` is an open
+    decision, nexus-sv2wx.22); this row must look where the script wrote, or a box set up under
+    ``NX_CONFIG_DIR`` reads "not applicable". ``tests/test_doctor_setup_row.py`` compares the two."""
+    override = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
+    if override:
+        return Path(os.path.abspath(override)) / "setup"
+    import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+    return Path(os.path.abspath(_config.nexus_config_dir())) / "setup"
+
+
 def _check_setup_status(setup_dir: Path | None = None) -> list[HealthResult]:
     """RDR-228 Day 2 (nexus-sv2wx.19): what the plugin's setup process left in ``setup/``
     under the Nexus config directory (``status.json``, the lock's heartbeat, ``setup.log``).
 
-    * no setup has run (no status, no live lock): not applicable, a pass. That is decided
+    * no setup has run (no status, no lock, no log text): not applicable, a pass. That is decided
       last, after every file has been read, so a directory with something to judge is never
       waved through; the fresh-install check allows no warning on a new box.
     * a run is live: a pass naming its mode and stage. The setup process runs ``nx doctor``
@@ -4843,7 +4917,10 @@ def _check_setup_status(setup_dir: Path | None = None) -> list[HealthResult]:
     * the last run failed (including a status the run could not write): a warning with the
       failure line and the log path.
     * a run was interrupted (status ``running``, heartbeat stale or no lock): a warning that
-      says ``setup`` called again resumes.
+      says ``setup`` called again resumes. So is a stale lock, or a log with text in it, and no
+      status file at all: a run started and recorded nothing.
+    * the three warnings above are verdicts about the last run. :func:`run_health_checks` reports
+      them as information (:func:`_settle_setup_row`) when no other row is a failure or a warning.
     * finished, or unsupported on this host: a pass saying so.
 
     The row is never a hard failure. The plugin script ships separately from this CLI and
@@ -4852,9 +4929,7 @@ def _check_setup_status(setup_dir: Path | None = None) -> list[HealthResult]:
     """
     try:
         if setup_dir is None:
-            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
-
-            setup_dir = _config.nexus_config_dir() / "setup"
+            setup_dir = _setup_directory()
         return [_setup_row(setup_dir)]
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_setup_status_check_failed", error=str(exc))
@@ -10753,4 +10828,4 @@ def run_health_checks(
             detail=f"check failed ({exc}) — could not read the plugin registry",
         ))
 
-    return results, _local
+    return _settle_setup_row(results), _local

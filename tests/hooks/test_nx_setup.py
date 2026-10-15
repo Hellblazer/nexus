@@ -483,8 +483,13 @@ def test_not_now_while_a_run_is_live_touches_nothing_else(box: Box) -> None:
     box.wait_terminal()
 
 
+def _nx_reports(version: str) -> dict[str, Any]:
+    """The rule for an ``nx`` whose ``--version`` prints the Nexus form for *version*."""
+    return {"prog": "nx", "match": ["--version"], "out": f"nx, version {version}\n"}
+
+
 def test_cli_only_builds_and_downloads_no_service_files(box: Box) -> None:
-    box.behave([box.uv_builds_nx()])
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
     box.start("cli-only")
     done = box.wait_terminal()
     assert box.argvs() == [["uv", *_BUILD]]
@@ -501,6 +506,38 @@ def test_cli_only_builds_and_downloads_no_service_files(box: Box) -> None:
     assert marker.read_text(encoding="utf-8") == _load_module().plugin_version(), (
         "a build records its version as in lockstep, so the next session dispatches no upgrade"
     )
+    assert box.probes() == [["built", "--version"]], "the marker follows one `nx --version` of the CLI the build left"
+
+
+@pytest.mark.parametrize("answer", [
+    {"out": "nx, version 7.0.0\n"},
+    {"out": "nx, version 7.0.0\n", "exit": 1},
+    {"out": "no version here\n"},
+    {"exit": 1},
+], ids=["another version", "nonzero exit", "unparsable", "silent failure"])
+def test_a_build_writes_no_lockstep_marker_unless_nx_reports_the_version_it_built(box: Box, answer: dict[str, Any]) -> None:
+    """RDR-143: the marker records a confirmed lockstep. The CLI the build left may be another one (a leftover
+    generation, a PATH ``nx``); then the hook, not the setup process, judges it."""
+    box.behave([box.uv_builds_nx(), {"prog": "nx", "match": ["--version"], **answer}])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done", "an unconfirmed marker is logged, it does not fail the run"
+    assert not (box.config / "cli_lockstep_marker").exists()
+    log = box.read_log()
+    assert "the lockstep marker was not written" in log and _PLUGIN_VERSION in log
+
+
+def test_the_lockstep_version_pattern_is_the_actions() -> None:
+    """``nx_setup`` copies ``version_lockstep_action._VERSION_RE`` (the action is a hook program and is not
+    imported); the two must read ``nx --version`` the same way."""
+    import importlib.util as importlib_util  # noqa: PLC0415
+
+    action = _ROOT / "conexus" / "hooks" / "scripts" / "version_lockstep_action.py"
+    spec = importlib_util.spec_from_file_location("version_lockstep_action_under_test", action)
+    assert spec is not None and spec.loader is not None
+    action_mod = importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(action_mod)
+    assert _load_module()._LOCKSTEP_VERSION_RE.pattern == action_mod._VERSION_RE.pattern
 
 
 def test_the_build_is_skipped_when_the_layout_has_a_complete_install(box: Box) -> None:
@@ -1564,7 +1601,11 @@ def test_a_layout_install_that_bootstrap_would_still_finish_runs_the_build_step(
     done = box.wait_terminal()
     assert done["state"] == "done", done
     assert box.argvs() == [["uv", *_BUILD]]
-    assert box.probes() == [["layout", "self", "install", "--bootstrap", "--dry-run"]]
+    assert box.probes() == [
+        ["layout", "self", "install", "--bootstrap", "--dry-run"],
+        ["layout", "--version"],  # the lockstep marker's confirmation; the stand-in says 7.0.0, so no marker
+    ]
+    assert not (box.config / "cli_lockstep_marker").exists()
 
 
 # -- a Nexus CLI that is found and cannot start (Sam, 2026-10-14) ----------------------------------
@@ -1587,7 +1628,9 @@ def test_a_layout_install_whose_interpreter_is_gone_is_not_asked_and_the_build_r
     done = box.wait_terminal()
     assert done["state"] == "done", done
     assert box.argvs() == [["uv", *_BUILD]], "the build ran"
-    assert [m for m, *_ in box.probes()] == [], "the broken nx was never started"
+    assert [m for m, *_ in box.probes()] == ["built"], (
+        "the broken nx was never started; the only probe is the new generation's version check for the lockstep marker"
+    )
     assert (box.tools / "current").resolve().name == "gen-20260202T000000Z", "current was moved to the new generation"
 
 
@@ -2060,6 +2103,8 @@ def _build_format_case(root: Path, case: dict[str, Any]) -> Path:
         (setup / files["error"]).write_text(body(case["error"]), encoding="utf-8")
     if case["not_now"]:
         (setup / files["marker"]).write_text("", encoding="utf-8")
+    if case.get("log_text") is not None:
+        (setup / files["log"]).write_text(case["log_text"], encoding="utf-8")
     if case["heartbeat_age_seconds"] is not None:
         (setup / files["lock"]).mkdir()
         (setup / files["lock"] / "owner").write_text("token", encoding="utf-8")
@@ -2091,11 +2136,20 @@ def test_the_script_names_what_the_fixture_names() -> None:
     )
 
 
+def test_the_heartbeat_file_is_where_the_fixture_says(tmp_path: Path) -> None:
+    """The script hardcodes the name; the doctor row reads ``<lock>/heartbeat`` from the fixture."""
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    setup.mkdir()
+    assert mod.acquire_lock(setup)
+    assert (setup / _FORMAT["files"]["heartbeat"]).is_file()
+
+
 def test_the_fixture_has_a_case_for_every_state_the_script_can_write() -> None:
     mod = _load_module()
     in_cases = {c["status"]["state"] for c in _FORMAT["cases"].values() if isinstance(c["status"], dict)}
     assert in_cases == set(mod.STATES)
-    assert set(_FORMAT["writer_keys"]) <= set(mod.STATES)
+    assert set(_FORMAT["writer_keys"]) == set(mod.STATES), "every state a run can write has the keys the row reads"
 
 
 def _run_to_state(box: Box, scenario: str) -> dict[str, Any]:
@@ -2133,6 +2187,51 @@ def test_a_real_run_writes_the_keys_the_doctor_row_reads(box: Box, scenario: str
     missing = [k for k in _FORMAT["writer_keys"][scenario] if k not in raw]
     assert not missing, f"a {scenario} status no longer carries {missing}; change the fixture and the doctor row together"
     assert raw["log"] == str(box.setup / _FORMAT["files"]["log"])
+    if scenario == "doctor-failed":
+        failing = raw["doctor_failing"]
+        assert isinstance(failing, list) and failing and all(isinstance(r, str) for r in failing), (
+            "the doctor row reads doctor_failing as a list of strings and treats anything else as empty"
+        )
+        case = _FORMAT["cases"]["doctor-failed"]["status"]["doctor_failing"]
+        assert isinstance(case, list) and all(isinstance(r, str) for r in case), "the fixture's own value has that shape"
+
+
+def test_a_real_unsupported_status_carries_the_keys_the_doctor_row_reads(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _in_process(box, monkeypatch)
+    box.layout()
+
+    def refuse(argv: list[str], log: Path, **kw: Any) -> None:
+        raise mod.DetachUnsupported("setup cannot detach on this host (no WMI broker yet)")
+
+    monkeypatch.setattr(mod, "detach", refuse)
+    assert mod.start("local", False)["state"] == "unsupported"
+    raw = box.status_file()
+    assert raw is not None and raw["state"] == "unsupported"
+    missing = [k for k in _FORMAT["writer_keys"]["unsupported"] if k not in raw]
+    assert not missing, f"an unsupported status no longer carries {missing}; change the fixture and the doctor row together"
+    assert raw["log"] == str(box.setup / _FORMAT["files"]["log"])
+
+
+def test_a_real_status_error_record_carries_the_keys_the_doctor_row_reads(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row prints this record's ``message`` and ``failed_step`` over the stale ``status.json``: a key renamed
+    in ``_record_write_failure`` would silently show the stale message."""
+    mod = _in_process(box, monkeypatch)
+    box.layout()
+    box.setup.mkdir(parents=True)
+    token = mod.acquire_lock(box.setup)
+    assert token
+
+    def disk_full(setup: Path, data: dict[str, Any]) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(mod, "write_status", disk_full)
+    assert mod.run_setup("cli-only", False, token) == 1
+    raw = json.loads((box.setup / _FORMAT["files"]["error"]).read_text(encoding="utf-8"))
+    missing = [k for k in _FORMAT["writer_error_keys"] if k not in raw]
+    assert not missing, f"a status.error record no longer carries {missing}; change the fixture and the doctor row together"
+    assert raw["state"] == "failed" and raw["log"] == str(box.setup / _FORMAT["files"]["log"])
+    fixture_error = _FORMAT["cases"]["unwritable-status"]["error"]
+    assert set(fixture_error) == set(_FORMAT["writer_error_keys"]), "the fixture's own record has exactly the writer's keys"
 
 
 def test_the_build_names_cpu_torch_on_linux_and_lets_the_user_choose() -> None:
@@ -2141,7 +2240,10 @@ def test_the_build_names_cpu_torch_on_linux_and_lets_the_user_choose() -> None:
     mod = _load_module()
     assert mod.build_env("linux", {"PATH": "/bin"})["UV_TORCH_BACKEND"] == "cpu"
     assert mod.build_env("linux", {"NX_TORCH_BACKEND": "cu130"})["UV_TORCH_BACKEND"] == "cu130"
-    assert mod.build_env("linux", {"UV_TORCH_BACKEND": "auto"})["UV_TORCH_BACKEND"] == "auto"
+    # install_generation.sh reads only NX_TORCH_BACKEND (${NX_TORCH_BACKEND:-cpu}, passed as --torch-backend), so an
+    # ambient UV_TORCH_BACKEND must not give the throwaway environment CUDA torch while the generation gets CPU.
+    assert mod.build_env("linux", {"UV_TORCH_BACKEND": "auto"})["UV_TORCH_BACKEND"] == "cpu"
+    assert mod.build_env("linux", {"UV_TORCH_BACKEND": "auto", "NX_TORCH_BACKEND": "cu130"})["UV_TORCH_BACKEND"] == "cu130"
     for platform in ("darwin", "win32"):
         assert "UV_TORCH_BACKEND" not in mod.build_env(platform, {"PATH": "/bin"})
     assert mod.build_env("linux", {"PATH": "/x"})["PATH"] == "/x", "the rest of the environment is kept"

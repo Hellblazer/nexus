@@ -81,7 +81,10 @@ class EndpointUnresolvable(Exception):
 
 
 def default_config_dir() -> Path:
-    """Stdlib-only mirror of ``nexus.config.nexus_config_dir``."""
+    """Stdlib-only counterpart of ``nexus.config.nexus_config_dir``, not a mirror: this also honours
+    ``NX_CONFIG_DIR`` (after ``NEXUS_CONFIG_DIR``), which the CLI's function does not. Whether the CLI should
+    is an open decision (nexus-sv2wx.22); ``nx doctor``'s "Plugin setup" row resolves its directory this
+    way, and ``tests/test_doctor_setup_row.py`` compares it with ``nx_setup.setup_dir()``."""
     config_dir = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
     if config_dir:
         return Path(config_dir)
