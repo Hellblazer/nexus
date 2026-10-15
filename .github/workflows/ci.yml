@@ -883,7 +883,9 @@ jobs:
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true'
     # 6.8 to 9.6 min measured on develop 2026-09-26; runs 36268338775 and 36273704547 hit 10.
-    timeout-minutes: 15
+    # 2026-10-14: a08876f28's run hit 15 with all 1374 tests passed (tests alone 14:40) and its
+    # rerun took 14:00, so the ceiling is 25 (nexus-2ziaz, folded in for nexus_637's ox0c0 work).
+    timeout-minutes: 25
     env:
       # nexus-wixar (2026-08-18): this job provisions NO service jar (by
       # design — see the comment block above), which made every lint-marked
