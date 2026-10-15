@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -139,7 +140,7 @@ class TestSandbox:
         assert "ambient" not in env.values()
 
     def test_the_path_holds_only_the_sandbox_and_the_system(self, tmp_path: Path) -> None:
-        parts = self._env(tmp_path)["PATH"].split(":")
+        parts = self._env(tmp_path)["PATH"].split(os.pathsep)
         assert parts == [str(tmp_path / "b"), str(tmp_path / "h" / ".local" / "bin"), "/usr/bin", "/bin"]
 
     def test_offline_means_uv_offline_and_every_proxy_variable_refuses(self, tmp_path: Path) -> None:
@@ -149,14 +150,40 @@ class TestSandbox:
             assert env[name] == "http://127.0.0.1:9"
         assert env["NO_PROXY"] == "127.0.0.1,localhost,::1"
 
-    def test_the_lockstep_marker_is_the_one_steering_variable_and_only_when_asked(self, tmp_path: Path) -> None:
-        env = self._env(tmp_path, lockstep_marker=tmp_path / "marker")
-        assert env["NX_LOCKSTEP_MARKER"] == str(tmp_path / "marker")
-        assert "NX_LOCKSTEP_MARKER" not in self._env(tmp_path)
-
     def test_the_seed_run_is_online_and_unproxied(self, tmp_path: Path) -> None:
         env = self._env(tmp_path, offline=False, proxy=None)
         assert "UV_OFFLINE" not in env and "HTTPS_PROXY" not in env
+
+
+@posix_only("the sandbox links uv into its bin directory with a symlink")
+class TestLockstep:
+    def _box(self, tmp_path: Path):
+        uv = tmp_path / "uv"
+        uv.write_text("")
+        return sj.Sandbox(name="t", root=tmp_path / "box", uv=str(uv), uv_cache=tmp_path / "c", uv_python_dir="/py",
+                          wheels=tmp_path / "w", proxy=None, offline=True)
+
+    def test_the_marker_must_hold_the_plugin_version(self, tmp_path: Path) -> None:
+        box = self._box(tmp_path)
+        with pytest.raises(sj.JourneyFailure, match="left no lockstep marker"):
+            sj.check_lockstep_marker(box)
+        box.lockstep_marker.parent.mkdir(parents=True)
+        box.lockstep_marker.write_text("0.0.1", encoding="utf-8")
+        with pytest.raises(sj.JourneyFailure, match="holds '0.0.1'"):
+            sj.check_lockstep_marker(box)
+        box.lockstep_marker.write_text(sj.plugin_version() + "\n", encoding="utf-8")
+        sj.check_lockstep_marker(box)
+
+    def test_the_marker_is_where_the_cli_and_the_hook_read_it(self, tmp_path: Path) -> None:
+        assert self._box(tmp_path).lockstep_marker == tmp_path / "box" / "home" / ".config" / "nexus" / "cli_lockstep_marker"
+
+    def test_a_nudge_in_any_hook_output_fails(self, tmp_path: Path) -> None:
+        box = self._box(tmp_path)
+        entry = sj.Entry("version_lockstep_hook.py", "uv", ("x",))
+        sj.check_no_lockstep_nudge(box, [sj.HookResult(entry, 0, "", "", 0.1)])
+        said = '{"additionalContext": "The conexus CLI (nx) may be out of lockstep with plugin v1"}'
+        with pytest.raises(sj.JourneyFailure, match="out of lockstep"):
+            sj.check_no_lockstep_nudge(box, [sj.HookResult(entry, 0, said, "", 0.1)])
 
 
 class TestPrune:

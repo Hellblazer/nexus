@@ -35,11 +35,11 @@ request fails the journey.
 A limit worth stating: the listener sees only clients that honour proxy variables. ``uv`` is also
 told it is offline. The engine and PostgreSQL are local processes and fetch nothing.
 
-OBSERVED while building this (not fixed here; see the bead comment): with a CLI present and no
-``cli_lockstep_marker``, the SessionStart hook ``version_lockstep_hook.py`` nudges the model and dispatches an
-upgrade action, also when the CLI cannot start. The first session after a fresh ``setup`` is such a session.
-Journeys B and C write the marker (``NX_LOCKSTEP_MARKER``) so that the dispatched action cannot race the
-repair they test.
+Lockstep, asserted in all three journeys (found while building this; fixed in 02105d81b): after each
+``setup`` that ends done, the config directory's ``cli_lockstep_marker`` holds the plugin's version; no
+session start after a setup carries ``version_lockstep_hook.py``'s "out of lockstep" text; and journey B
+removes the marker before its state-2 session start, which must dispatch nothing (the hook leaves a CLI that
+cannot start to setup).
 
 Pure helpers (no process, no MCP) are at the top and are what ``tests/test_setup_journey_helpers.py``
 exercises.
@@ -164,7 +164,6 @@ def run_has_ended(record: dict[str, Any] | None, mode: str, previous_pid: Any) -
 def sandbox_env(
     *, home: Path, project: Path, bin_dir: Path, tmp: Path, uv_cache: Path, uv_python_dir: str,
     plugin_root: Path, find_links: Path | None, proxy: str | None, offline: bool,
-    lockstep_marker: Path | None = None,
 ) -> dict[str, str]:
     """The environment of every process the journey starts: an allowlist, built from nothing.
 
@@ -188,10 +187,6 @@ def sandbox_env(
     }
     if find_links is not None:
         env["UV_FIND_LINKS"] = str(find_links)
-    if lockstep_marker is not None:
-        # The version-lockstep hook's own seam. Without a marker it takes every session that has a CLI for a
-        # skewed one and dispatches an upgrade (see the module docstring, "Observed").
-        env["NX_LOCKSTEP_MARKER"] = str(lockstep_marker)
     if offline:
         env["UV_OFFLINE"] = "1"
     if proxy:
@@ -317,7 +312,6 @@ class Sandbox:
     wheels: Path
     proxy: str | None
     offline: bool
-    lockstep_marker: Path | None = None
     notes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -347,14 +341,12 @@ class Sandbox:
         return sandbox_env(
             home=self.home, project=self.project, bin_dir=self.bin, tmp=self.tmp, uv_cache=self.uv_cache,
             uv_python_dir=self.uv_python_dir, plugin_root=PLUGIN, find_links=self.wheels,
-            proxy=self.proxy, offline=self.offline, lockstep_marker=self.lockstep_marker,
+            proxy=self.proxy, offline=self.offline,
         )
 
-    def confirm_lockstep(self) -> None:
-        """Record, as an earlier session's upgrade action would, that the CLI matches the plugin."""
-        version = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
-        self.lockstep_marker = self.tmp / "cli_lockstep_marker"
-        self.lockstep_marker.write_text(version + "\n", encoding="utf-8")
+    @property
+    def lockstep_marker(self) -> Path:
+        return self.config / "cli_lockstep_marker"
 
     def current(self) -> Path | None:
         link = self.tools / "current"
@@ -465,16 +457,36 @@ def check_hooks_are_quiet_without_a_cli(box: Sandbox, results: list[HookResult],
             expect(len(lines) == 1 and reason in lines[0], f"{box.name}: {r.entry.name} should give one line saying {reason!r}, gave {lines!r}")
 
 
-def quiet_hook_pass(box: Sandbox) -> str | None:
-    """Run the setup hook alone (the other entries are the CLI's own hooks, which a CLI that starts runs for real)."""
-    entry = next(e for e in hook_entries(
-        json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8")), "SessionStart", "startup",
-        str(PLUGIN), str(box.project)) if e.args[-1].endswith("nx_setup_notice.py"))
-    done = box.run([_command(entry, box), *entry.args], timeout=entry.timeout, stdin="{}")
-    expect(done.returncode == 0, f"{box.name}: the setup hook exited {done.returncode}")
-    if not done.stdout.strip():
-        return None
-    return json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"]
+LOCKSTEP_NUDGE = "out of lockstep"
+
+
+def plugin_version() -> str:
+    return json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+
+
+def check_lockstep_marker(box: Sandbox) -> None:
+    """A build records its version as in lockstep: the marker holds the plugin's version."""
+    try:
+        held = box.lockstep_marker.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        fail(f"{box.name}: the setup that just ended done left no lockstep marker at {box.lockstep_marker}: {exc}")
+    expect(held == plugin_version(), f"{box.name}: the lockstep marker holds {held!r}, the plugin is {plugin_version()!r}")
+
+
+def check_no_lockstep_nudge(box: Sandbox, results: list[HookResult]) -> None:
+    for r in results:
+        expect(LOCKSTEP_NUDGE not in r.stdout, f"{box.name}: {r.entry.name} told the model the CLI is {LOCKSTEP_NUDGE}: {r.stdout[:300]!r}")
+
+
+def session_start_after_setup(box: Sandbox) -> str | None:
+    """A full session start with a CLI that starts, the CLI's own hooks included: every entry exits 0
+    inside its timeout and none says the CLI is out of lockstep. Returns the setup hook's text."""
+    results = run_session_start(box)
+    for r in results:
+        expect(r.code == 0, f"{box.name}: {r.entry.name} exited {r.code}: {r.stderr[:300]!r}")
+    check_no_lockstep_nudge(box, results)
+    return notice_text(results)
+
 
 
 # -- the MCP client ----------------------------------------------------------------------------
@@ -626,6 +638,7 @@ def journey_a_local(box: Sandbox, proxy: RefusingProxy | None, *, seed: Path, on
     with Step("A5 setup mode local, autostart false: follow setup_status to done (build, then nx init, then nx doctor)"):
         last = follow_setup(box, "local", autostart=False, budget_s=2400, stand_in="nexus-not-installed")
         say("   " + last.splitlines()[0])
+        check_lockstep_marker(box)
     with Step("A6 what the run left: a generation built from this tree, current, shims; no login unit; no network"):
         gens = generations(box.tools)
         expect(len(gens) == 1, f"A: expected one generation, found {[g.name for g in gens]}")
@@ -643,15 +656,16 @@ def journey_a_local(box: Sandbox, proxy: RefusingProxy | None, *, seed: Path, on
         expect(not stand_in_claim(conn.server_name), f"A: after reconnect the server is still the stand-in {conn.server_name!r}")
         expect(REAL_TOOL_NAMES <= conn.tools and SETUP_TOOL_NAMES <= conn.tools, f"A: real server tools incomplete: missing {sorted((REAL_TOOL_NAMES | SETUP_TOOL_NAMES) - conn.tools)}")
         expect("journey-a" in answers[1], f"A: memory_get did not return what memory_put stored: {answers[1][:200]!r}")
-    with Step("A8 session start with a usable service: the setup hook says nothing (state 3)"):
-        expect(quiet_hook_pass(box) is None, "A: the setup hook spoke although a CLI and a service are usable")
+    with Step("A8 a full session start with a usable service: the CLI's hooks run, none says out of lockstep, the setup hook is silent (state 3)"):
+        expect(session_start_after_setup(box) is None, "A: the setup hook spoke although a CLI and a service are usable")
 
 
 def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> None:
     """Continues A's box: its generation, then pruned."""
     with Step("B1 stop the service, prune the generation's Python as uv does (home gone, python links dangling)"):
-        box.confirm_lockstep()
         box.stop_service()
+        check_lockstep_marker(box)  # A's build left it
+        box.lockstep_marker.unlink()  # so the state-2 session start below meets a skewed install: the hook must still dispatch nothing
         current = box.current()
         expect(current is not None, "B: A left no current generation")
         old = Path(os.path.realpath(current))  # type: ignore[arg-type]
@@ -662,6 +676,9 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         check_hooks_are_quiet_without_a_cli(box, results, reason="could not start")
         text = notice_text(results)
         expect(text is not None and BROKEN_PHRASE in text, f"B: state 2 text missing: {text!r}")
+        check_no_lockstep_nudge(box, results)
+        expect(not box.lockstep_marker.exists() and not (box.config / "lockstep.log").exists(),
+               "B: the state-2 session start wrote a lockstep marker or log, so an upgrade was dispatched")
     with Step("B3 the stand-in says installed but cannot start; setup_status keeps the offer over the old done"):
         conn, answers = talk(box, "nexus", [("setup_status", {})])
         expect(conn.server_name == "nexus-installed-cannot-start", f"B: server name {conn.server_name!r}")
@@ -676,14 +693,15 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         expect(old.is_dir(), "B: the pruned generation was removed instead of left beside the new one")
         expect(Path(os.path.realpath(box.current())) == new[0].resolve(), "B: current does not name the new generation")  # type: ignore[arg-type]
         tree_wheel_is_installed(new[0])
+        check_lockstep_marker(box)
         no_network_so_far(proxy)
     with Step("B5 reconnect: the real server answers"):
         conn, answers = talk(box, "nexus", [("setup_status", {})])
         expect(not stand_in_claim(conn.server_name) and REAL_TOOL_NAMES <= conn.tools, f"B: server {conn.server_name!r} tools {sorted(conn.tools)[:8]}")
         expect(answers[0].startswith("No usable Nexus service was found") and "Setup is done." in answers[0],
                f"B: the real server's setup_status after the repair: {answers[0][:300]!r}")
-    with Step("B6 session start after a cli-only run: one quiet line, no question (state 7 with the choice recorded)"):
-        text = quiet_hook_pass(box)
+    with Step("B6 a full session start after a cli-only run: one quiet line, no question (state 7 with the choice recorded)"):
+        text = session_start_after_setup(box)
         expect(text is not None and "the user chose to leave it so" in text, f"B: expected the quiet service-down line, got {text!r}")
         expect("ASK THE USER FIRST" not in text, "B: the quiet line asks")  # type: ignore[operator]
 
@@ -691,7 +709,6 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
 def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
     with Step("C1 the box: uv, no CLI"):
         precondition_no_cli(box)
-        box.confirm_lockstep()
     with Step("C2 a legacy `uv tool install conexus` tree from this tree's wheel, then its Python pruned"):
         version = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"]
         torch = ["--torch-backend", "cpu"] if sys.platform.startswith("linux") else []
@@ -706,6 +723,8 @@ def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
         check_hooks_are_quiet_without_a_cli(box, results, reason="could not start")
         text = notice_text(results)
         expect(text is not None and BROKEN_PHRASE in text, f"C: state 2 text missing: {text!r}")
+        check_no_lockstep_nudge(box, results)
+        expect(not box.lockstep_marker.exists(), "C: the state-2 session start wrote a lockstep marker, so an upgrade was dispatched")
         conn, _ = talk(box, "nexus")
         expect(conn.server_name == "nexus-installed-cannot-start" and BROKEN_PHRASE in conn.instructions, f"C: stand-in {conn.server_name!r}")
     with Step("C4 setup mode cli-only: the build runs and makes a generation (the legacy tree is not a complete install)"):
@@ -713,14 +732,15 @@ def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
         gens = generations(box.tools)
         expect(len(gens) == 1, f"C: expected one generation, found {[g.name for g in gens]}")
         tree_wheel_is_installed(gens[0])
+        check_lockstep_marker(box)
         no_network_so_far(proxy)
     with Step("C5 reconnect: the generation's server answers (the layout is searched before PATH)"):
         conn, answers = talk(box, "nexus", [("setup_status", {})])
         expect(not stand_in_claim(conn.server_name) and REAL_TOOL_NAMES <= conn.tools, f"C: server {conn.server_name!r}")
         expect(answers[0].startswith("No usable Nexus service was found") and "Setup is done." in answers[0],
                f"C: the real server's setup_status after the repair: {answers[0][:300]!r}")
-    with Step("C6 session start after a cli-only run with no service: one quiet line (state 8 with the choice recorded)"):
-        text = quiet_hook_pass(box)
+    with Step("C6 a full session start after a cli-only run with no service: one quiet line (state 8 with the choice recorded)"):
+        text = session_start_after_setup(box)
         expect(text is not None and "no Nexus service is set up, as the user chose" in text, f"C: expected the quiet no-service line, got {text!r}")
 
 
