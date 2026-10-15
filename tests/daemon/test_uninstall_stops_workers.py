@@ -74,7 +74,7 @@ def layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request) -> tuple[Pa
     monkeypatch.setattr(installer, "_stop_service_stack_best_effort", lambda: (True, None))
     install_dir = daemon_cmd._autostart_install_dir()
     install_dir.mkdir(parents=True)
-    (install_dir / daemon_cmd._autostart_filename_service()).write_text("<unit/>")
+    (install_dir / daemon_cmd._autostart_filename_service()).write_text("<unit/>", encoding="utf-8")
     return config, manager
 
 
@@ -98,7 +98,7 @@ def test_uninstall_stops_every_aspect_worker_and_removes_the_data_dir(layout) ->
     try:
         _publish_aspect(config, workers[0].pid, "default")
         _publish_aspect(config, workers[1].pid, "acme")
-        (config / "aspect_worker_daemon.crash.log").write_text("held open on Windows")
+        (config / "aspect_worker_daemon.crash.log").write_text("held open on Windows", encoding="utf-8")
 
         report = installer.uninstall_daemon(confirm=True, remove_data=True)
 
@@ -178,7 +178,7 @@ def test_the_deferred_labeling_run_is_stopped_from_its_pid_file(layout) -> None:
     config, _ = layout
     labeler = _spawn(_LABEL_ARGV)
     try:
-        (config / installer.DEFERRED_LABELING_PID_NAME).write_text(f"{labeler.pid}\n")
+        (config / installer.DEFERRED_LABELING_PID_NAME).write_text(f"{labeler.pid}\n", encoding="utf-8")
 
         report = installer.uninstall_daemon(confirm=True, remove_data=False)
 
@@ -193,7 +193,7 @@ def test_a_stale_labeling_pid_file_naming_another_program_is_left_alone(layout) 
     config, _ = layout
     stranger = _spawn(["unrelated-program"])
     try:
-        (config / installer.DEFERRED_LABELING_PID_NAME).write_text(f"{stranger.pid}\n")
+        (config / installer.DEFERRED_LABELING_PID_NAME).write_text(f"{stranger.pid}\n", encoding="utf-8")
         report = installer.uninstall_daemon(confirm=True, remove_data=False)
         assert stranger.poll() is None
         assert report.workers_stopped == ()
@@ -207,7 +207,7 @@ def test_mineru_is_stopped_through_its_verb_only_when_nexus_started_it(layout) -
     installer.uninstall_daemon(confirm=True, remove_data=False)
     assert not any(argv[-2:] == ["mineru", "stop"] for argv in manager.calls)
 
-    (config / "mineru.pid").write_text('{"pid": 999999999, "port": 1}')
+    (config / "mineru.pid").write_text('{"pid": 999999999, "port": 1}', encoding="utf-8")
     installer.uninstall_daemon(confirm=True, remove_data=False)
     assert ["/opt/conexus/bin/nx", "mineru", "stop"] in manager.calls
 

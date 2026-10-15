@@ -131,8 +131,8 @@ def test_rdr_files_selects_every_rdr_in_a_fixture_tree_and_nothing_else(
         "rdr-201-thing.md", "rdr137-legacy.md", "001-older.md",
         "README.md", "AGENTS.md", "template.md", "status-census-2026-09-01.md",
     ):
-        (rdr_dir / name).write_text("---\nstatus: draft\n---\n")
-    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("---\nstatus: closed\n---\n")
+        (rdr_dir / name).write_text("---\nstatus: draft\n---\n", encoding="utf-8")
+    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("---\nstatus: closed\n---\n", encoding="utf-8")
 
     selected = sorted(p.name for p in rdr_hook_mod._rdr_files(rdr_dir))
     assert selected == ["001-older.md", "rdr-201-thing.md", "rdr137-legacy.md"]
@@ -209,12 +209,12 @@ def test_session_start_names_rdrs_with_unchecked_fix_edits(rdr_hook_mod, tmp_pat
     root = tmp_path
     (root / "docs" / "rdr").mkdir(parents=True)
     f = root / "docs" / "rdr" / "rdr-204-example.md"
-    f.write_text("---\nstatus: draft\n---\n# x\n")
+    f.write_text("---\nstatus: draft\n---\n# x\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True)
     gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
-    f.write_text("---\nstatus: draft\n---\n# x fixed\n")
+    f.write_text("---\nstatus: draft\n---\n# x fixed\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "fix"], check=True)
 
     monkeypatch.setattr(mod, "_repo_root", lambda: root)
@@ -247,7 +247,7 @@ def test_uncommitted_rdr_file_is_not_reported(rdr_hook_mod, tmp_path) -> None:
     mod = rdr_hook_mod
     (tmp_path / "docs" / "rdr").mkdir(parents=True)
     f = tmp_path / "docs" / "rdr" / "rdr-204-example.md"
-    f.write_text("---\nstatus: draft\n---\n")
+    f.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert mod._unchecked_fix_edits(tmp_path, [f], {"204": "draft"}, {"204": "abc1234"}) == []
 
@@ -322,10 +322,10 @@ def test_indexed_document_count_matches_the_indexer_walk(rdr_hook_mod, tmp_path)
     (rdr_dir / "post-mortem").mkdir(parents=True)
     (rdr_dir / "joint").mkdir()
     for name in ("rdr-201-thing.md", "README.md", "AGENTS.md"):
-        (rdr_dir / name).write_text("x")
-    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("x")
-    (rdr_dir / "joint" / "JDR-001.md").write_text("x")
-    (rdr_dir / "notes.txt").write_text("x")
+        (rdr_dir / name).write_text("x", encoding="utf-8")
+    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("x", encoding="utf-8")
+    (rdr_dir / "joint" / "JDR-001.md").write_text("x", encoding="utf-8")
+    (rdr_dir / "notes.txt").write_text("x", encoding="utf-8")
     assert rdr_hook_mod._indexed_document_count(rdr_dir) == 5
     assert len(rdr_hook_mod._rdr_files(rdr_dir)) == 1
 
@@ -447,7 +447,7 @@ def test_resolution_failure_is_named_on_the_verdict_line_and_in_the_log(rdr_hook
     assert rdr_hook_mod._RESOLUTION_FAILURES == [
         f"catalog: ModuleNotFoundError: No module named 'nexus' [python {sys.executable}]"
     ]
-    assert "resolution failed catalog: ModuleNotFoundError" in log.read_text()
+    assert "resolution failed catalog: ModuleNotFoundError" in log.read_text(encoding="utf-8")
     rdr_hook_mod._RESOLUTION_FAILURES.clear()
 
 
@@ -455,7 +455,7 @@ def test_main_prints_the_resolution_failure_on_the_verdict_line(rdr_hook_mod, tm
     """Reverting the verdict-line print leaves this red (nexus-4ti7e)."""
     root = tmp_path / "repo"
     (root / "docs" / "rdr").mkdir(parents=True)
-    (root / "docs" / "rdr" / "rdr-001-x.md").write_text("# x\n")
+    (root / "docs" / "rdr" / "rdr-001-x.md").write_text("# x\n", encoding="utf-8")
     monkeypatch.setenv("NX_RDR_HOOK_LOG", str(tmp_path / "rdr_hook.log"))
     monkeypatch.setattr(rdr_hook_mod, "_repo_root", lambda: root)
     monkeypatch.setattr(rdr_hook_mod, "_rdr_files", lambda d: [root / "docs" / "rdr" / "rdr-001-x.md"])
@@ -521,12 +521,12 @@ def test_closed_rdr_with_no_t2_status_row_is_not_told_to_run_rdr_fix(rdr_hook_mo
     root = tmp_path
     (root / "docs" / "rdr").mkdir(parents=True)
     f = root / "docs" / "rdr" / "rdr-204-example.md"
-    f.write_text("---\nstatus: closed\n---\n# x\n")
+    f.write_text("---\nstatus: closed\n---\n# x\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True)
     gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
-    f.write_text("---\nstatus: closed\n---\n# x edited after the gate\n")
+    f.write_text("---\nstatus: closed\n---\n# x edited after the gate\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "edit"], check=True)
 
     monkeypatch.setattr(mod, "_repo_root", lambda: root)
@@ -544,9 +544,9 @@ def test_companion_notes_are_not_rdrs(rdr_hook_mod, tmp_path) -> None:
     mod = rdr_hook_mod
     rdr_dir = tmp_path / "docs" / "rdr"
     rdr_dir.mkdir(parents=True)
-    (rdr_dir / "rdr-204-example.md").write_text("---\nid: RDR-204\nstatus: draft\n---\n")
-    (rdr_dir / "rdr-204-consolidation-plan.md").write_text("---\nkind: companion\n---\n")
-    (rdr_dir / "rdr-079-calibration.md").write_text("---\nid: companion-note\n---\n")
+    (rdr_dir / "rdr-204-example.md").write_text("---\nid: RDR-204\nstatus: draft\n---\n", encoding="utf-8")
+    (rdr_dir / "rdr-204-consolidation-plan.md").write_text("---\nkind: companion\n---\n", encoding="utf-8")
+    (rdr_dir / "rdr-079-calibration.md").write_text("---\nid: companion-note\n---\n", encoding="utf-8")
     names = sorted(p.name for p in mod._rdr_files(rdr_dir))
     assert names == ["rdr-204-example.md"], names
 
@@ -559,7 +559,7 @@ def test_repo_name_reads_the_git_common_dir_in_a_linked_worktree(rdr_hook_mod, t
     repo = tmp_path / "myrepo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / "a").write_text("a")
+    (repo / "a").write_text("a", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
     wt = tmp_path / "agent-a1b2c3"
@@ -621,7 +621,7 @@ def test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout(tmp_path) -> No
     root = tmp_path / "repo"
     rdr_dir = root / "docs" / "rdr"
     rdr_dir.mkdir(parents=True)
-    (rdr_dir / "rdr-204-example.md").write_text("---\nstatus: draft\n---\n# x\n")
+    (rdr_dir / "rdr-204-example.md").write_text("---\nstatus: draft\n---\n# x\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(
@@ -709,7 +709,7 @@ def test_collection_exists_reads_one_collection_not_the_tenant_listing(
 def _rdr_tree(tmp_path):
     root = tmp_path / "repo"
     (root / "docs" / "rdr").mkdir(parents=True)
-    (root / "docs" / "rdr" / "rdr-001-x.md").write_text("---\nstatus: draft\n---\n# x\n")
+    (root / "docs" / "rdr" / "rdr-001-x.md").write_text("---\nstatus: draft\n---\n# x\n", encoding="utf-8")
     return root
 
 

@@ -229,10 +229,10 @@ def test_group_sweep_reaches_children_of_an_exited_leader(tmp_path):
     pgid = leader.pid
     leader.wait(timeout=30)
     for _ in range(50):
-        if pid_file.is_file() and pid_file.read_text().strip():
+        if pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip():
             break
         time.sleep(0.1)
-    child_pid = int(pid_file.read_text())
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
     os.kill(child_pid, 0)  # alive: the leader's os._exit abandoned it
     assert safe_killpg(leader, signal.SIGKILL) is False  # leader reaped: nothing to resolve
     assert safe_killpg_group(pgid, signal.SIGKILL) is True

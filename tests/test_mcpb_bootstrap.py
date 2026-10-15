@@ -304,7 +304,7 @@ def test_skip_env_bypasses_sync(bootstrap, monkeypatch):
 
 def _exe(directory: Path, name: str, executable: bool = True) -> Path:
     path = directory / name
-    path.write_text("")
+    path.write_text("", encoding="utf-8")
     path.chmod(0o755 if executable else 0o644)
     return path
 
@@ -573,10 +573,10 @@ def test_stdio_and_exit_code_survive_the_handoff(tmp_path, platform):
     exit code is the bootstrap's. exec on POSIX; child-with-inherited-handles
     (the Windows branch, injected) otherwise."""
     child = tmp_path / "echo_child.py"
-    child.write_text(_ECHO_CHILD)
+    child.write_text(_ECHO_CHILD, encoding="utf-8")
     driver = tmp_path / "driver.py"
     driver.write_text(
-        _DRIVER.format(bootstrap=str(BOOTSTRAP_PATH), child=str(child), platform=platform)
+        _DRIVER.format(bootstrap=str(BOOTSTRAP_PATH), child=str(child), platform=platform), encoding="utf-8"
     )
     proc = subprocess.Popen(
         [sys.executable, str(driver)],
@@ -780,14 +780,14 @@ class TestRealWindows:
         child = None
         try:
             assert assign(member.pid), "the member could not be put in the job"
-            go.write_text("go")
+            go.write_text("go", encoding="utf-8")
             deadline = time.monotonic() + 90
             while not pidfile.exists():
                 assert member.poll() is None and time.monotonic() < deadline, (
-                    "the member never spawned its child: " + err_path.read_text(errors="replace")
+                    "the member never spawned its child: " + err_path.read_text(errors="replace", encoding="utf-8")
                 )
                 time.sleep(0.1)
-            child = int(pidfile.read_text())
+            child = int(pidfile.read_text(encoding="utf-8"))
             assert self._alive(child), "the member's child was not running before the job closed"
             assert close(), "the job handle did not close"
             # Kill-on-close: the member dies with the job's last handle.

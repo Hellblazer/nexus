@@ -290,7 +290,7 @@ def test_this_module_does_not_touch_the_click_hook_group() -> None:
     ``nexus.commands.hook`` and ``Click`` in prose, which a naive substring
     check would misread as an import.
     """
-    tree = ast.parse(Path(entry.__file__).read_text())
+    tree = ast.parse(Path(entry.__file__).read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

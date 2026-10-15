@@ -168,7 +168,7 @@ def _wired_mcp_tool_timeouts() -> dict[str, float]:
 
     path = pathlib.Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
     wired: dict[str, float] = {}
-    for entries in json.loads(path.read_text())["hooks"].values():
+    for entries in json.loads(path.read_text(encoding="utf-8"))["hooks"].values():
         for group in entries:
             for entry in group.get("hooks", []):
                 if entry.get("type") != "mcp_tool":

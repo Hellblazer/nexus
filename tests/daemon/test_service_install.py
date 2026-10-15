@@ -495,7 +495,7 @@ class TestNoBackgroundProcessType:
             Path(__file__).resolve().parents[2]
             / "conexus" / "daemon" / "nexus-service.service"
         )
-        text = template.read_text()
+        text = template.read_text(encoding="utf-8")
         for directive in ("Nice=", "CPUSchedulingPolicy=", "IOSchedulingClass=", "CPUWeight="):
             assert directive not in text, (
                 f"{directive} found in the systemd unit — this would clamp "
@@ -539,7 +539,7 @@ class TestUnitRestartPolicyMatchesFencedExitContract:
             / "conexus" / "daemon" / "nexus-service.service"
         )
         active = [
-            ln.strip() for ln in template.read_text().splitlines()
+            ln.strip() for ln in template.read_text(encoding="utf-8").splitlines()
             if ln.strip() and not ln.lstrip().startswith("#")
         ]
         assert "Restart=on-failure" in active, (
@@ -604,7 +604,7 @@ class TestActivationFailure:
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
         _, rendered = installer.rendered_unit_content(tier="service")
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
         calls: list[list[str]] = []
 
         def _fake_run(cmd, *a, **k):
@@ -627,7 +627,7 @@ class TestActivationFailure:
         _stub_paths(tmp_path, monkeypatch)
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text("<plist>old definition</plist>\n")
+        dest.write_text("<plist>old definition</plist>\n", encoding="utf-8")
         calls: list[list[str]] = []
 
         def _fake_run(cmd, *a, **k):
@@ -662,7 +662,7 @@ def _fake_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, bo
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir(exist_ok=True)
     script = fake_bin / name
-    script.write_text("#!/bin/sh\n" + body)
+    script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
     script.chmod(0o755)
     monkeypatch.setenv("PATH", str(fake_bin))
     monkeypatch.setattr(installer, "_MANAGER_ABSOLUTE_PATHS", {})
@@ -712,7 +712,7 @@ class TestAutostartActivationState:
         probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
         assert probe.state is installer.ActivationState.ACTIVE and probe.detail == ""
         # unlisted labels are enabled by default
-        script.write_text("#!/bin/sh\nprintf '%s' '\tdisabled services = {\n\t}\n'\nexit 0\n")
+        script.write_text("#!/bin/sh\nprintf '%s' '\tdisabled services = {\n\t}\n'\nexit 0\n", encoding="utf-8")
         probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
         assert probe.state is installer.ActivationState.ACTIVE
 
@@ -725,7 +725,7 @@ class TestAutostartActivationState:
         script = _fake_manager(tmp_path, monkeypatch, "launchctl", "printf '%s' '\t\t\"com.nexus.service\" => true\n'\nexit 0\n")
         probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
         assert probe.state is installer.ActivationState.NOT_ACTIVE
-        script.write_text("#!/bin/sh\nprintf '%s' '\t\t\"com.nexus.service\" => maybe\n'\nexit 0\n")
+        script.write_text("#!/bin/sh\nprintf '%s' '\t\t\"com.nexus.service\" => maybe\n'\nexit 0\n", encoding="utf-8")
         probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
         assert probe.state is installer.ActivationState.UNREACHABLE
         assert "`maybe`" in probe.detail
@@ -790,7 +790,7 @@ class TestAutostartActivationState:
         assert probe.state is installer.ActivationState.NOT_ACTIVE
         assert probe.detail.endswith("reports disabled"), probe.detail
         assert probe.remedy == "nx daemon service uninstall --autostart && nx daemon service install --autostart"
-        script.write_text("#!/bin/sh\necho not-found\nexit 1\n")
+        script.write_text("#!/bin/sh\necho not-found\nexit 1\n", encoding="utf-8")
         probe = installer.autostart_activation_state(tmp_path / "nexus-service.service", tier="service")
         assert probe.state is installer.ActivationState.NOT_ACTIVE
         assert probe.detail.endswith("reports not-found"), probe.detail
@@ -873,7 +873,7 @@ class TestInstallAutostartConsultsTheManager:
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
         _, rendered = installer.rendered_unit_content(tier="service")
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
         calls: list[list[str]] = []
 
         def _fake_run(cmd, *a, **k):
@@ -899,7 +899,7 @@ class TestInstallAutostartConsultsTheManager:
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
         _, rendered = installer.rendered_unit_content(tier="service")
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
         calls: list[list[str]] = []
 
         def _fake_run(cmd, *a, **k):
@@ -923,7 +923,7 @@ class TestInstallAutostartConsultsTheManager:
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
         _, rendered = installer.rendered_unit_content(tier="service")
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
         calls: list[list[str]] = []
 
         def _fake_run(cmd, *a, **k):
@@ -948,7 +948,7 @@ class TestInstallAutostartConsultsTheManager:
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
         _, rendered = installer.rendered_unit_content(tier="service")
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
 
         def _fake_run(cmd, *a, **k):
             if cmd[1] == "print-disabled":
@@ -974,7 +974,7 @@ class TestInstallAutostartConsultsTheManager:
         dest = tmp_path / "units" / "com.nexus.service.plist"
         dest.parent.mkdir(parents=True, exist_ok=True)
         _, rendered = installer.rendered_unit_content(tier="service")
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
         calls: list[list[str]] = []
 
         def _fake_run(cmd, *a, **k):

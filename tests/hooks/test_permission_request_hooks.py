@@ -283,7 +283,7 @@ class TestSnPermissionHook:
         from auto_approve_sn_mcp import SERENA_READ_TOOLS  # noqa: PLC0415 — the hook's own module, on its own path
 
         snapshot = SN_SCRIPT.parent / "serena-tools.txt"
-        names = [l.strip() for l in snapshot.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        names = [l.strip() for l in snapshot.read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
         assert len(names) > 20 and 10 < len(SERENA_READ_TOOLS) < len(names)
         for name in names:
             output = _run_hook(SN_SCRIPT, f"mcp__plugin_sn_serena__{name}")
@@ -343,7 +343,7 @@ def _run_pretooluse(script: Path, tool_name: str) -> str:
 
 
 def _pretooluse_matchers(hooks_json: Path) -> list[str]:
-    data = json.loads(hooks_json.read_text())
+    data = json.loads(hooks_json.read_text(encoding="utf-8"))
     return [entry["matcher"] for entry in data["hooks"].get("PreToolUse", [])]
 
 
@@ -432,7 +432,7 @@ class TestPreToolUseApproval:
         entries named — the equality would hold vacuously."""
 
         def handlers(hooks_json: Path, event: str) -> set[str]:
-            data = json.loads(hooks_json.read_text())["hooks"]
+            data = json.loads(hooks_json.read_text(encoding="utf-8"))["hooks"]
             out: set[str] = set()
             for entry in data.get(event, []):
                 if not entry["matcher"].startswith("mcp__plugin_"):

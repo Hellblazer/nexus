@@ -39,7 +39,7 @@ _CREDS = {
 
 def _make_native_binary(d: Path) -> Path:
     p = d / "nexus-service"
-    p.write_text("#!/bin/sh\nexit 0\n")
+    p.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     p.chmod(0o755)
     return p
 
@@ -82,7 +82,7 @@ def test_find_binary_not_executable_fails_loud(tmp_path, monkeypatch):
     # Present but non-executable -> a chmod remedy, not a bare PermissionError
     # later from Popen.
     binary = tmp_path / "nexus-service"
-    binary.write_text("not executable")
+    binary.write_text("not executable", encoding="utf-8")
     binary.chmod(0o644)
     monkeypatch.setenv("NEXUS_SERVICE_BIN", str(binary))
     with pytest.raises(StorageServiceStartError, match="not executable"):

@@ -42,7 +42,7 @@ _CRED_READ = {
 
 
 def _launcher_entries() -> list[tuple[str, dict]]:
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     return [
         (event, hook)
         for event, groups in data["hooks"].items()
@@ -285,7 +285,7 @@ def test_uv_with_no_interpreter_exits_2_which_blocks_five_entries(tmp_path) -> N
 
 
 def test_the_readme_documents_the_blocking_failure_and_its_remedy() -> None:
-    text = (REPO_ROOT / "conexus" / "README.md").read_text()
+    text = (REPO_ROOT / "conexus" / "README.md").read_text(encoding="utf-8")
     assert "exits 2" in text and "uv python install 3.12" in text, (
         "conexus/README.md must say that uv exits 2 when it finds no Python and cannot "
         "fetch one, that this blocks, and the remedy"

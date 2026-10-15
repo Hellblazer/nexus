@@ -176,7 +176,7 @@ def test_the_dependency_is_windows_only() -> None:
     import tomllib
     from pathlib import Path
 
-    deps = tomllib.loads((Path(__file__).resolve().parent.parent / "pyproject.toml").read_text())["project"]["dependencies"]
+    deps = tomllib.loads((Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
     trust = [d for d in deps if d.split(">")[0].split("=")[0].strip() == "truststore"]
     assert trust == ["truststore>=0.10,<0.11; sys_platform == 'win32'"]
 

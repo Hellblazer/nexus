@@ -702,7 +702,7 @@ def test_strengthened_lint_catches_the_reviewer_probe(tmp_path: Path) -> None:
     probe = tmp_path / "probe_hook.py"
     probe.write_text(
         'from sqlite3 import connect\n'
-        'conn = connect("t2_local_cache.db")\n'
+        'conn = connect("t2_local_cache.db")\n', encoding="utf-8"
     )
     reasons = _python_offenders(probe)
     assert any("from sqlite3 import" in r for r in reasons), reasons

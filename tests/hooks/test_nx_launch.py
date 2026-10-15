@@ -59,7 +59,7 @@ def _install_fake(bindir: Path, name: str, marker: str) -> Path:
     source = _FAKE.format(python=sys.executable, marker=marker)
     if not IS_WINDOWS:
         fake = bindir / name
-        fake.write_text(source)
+        fake.write_text(source, encoding="utf-8")
         fake.chmod(0o755)
         return fake
     return install_windows_exe_fake(bindir, name, _FAKE.format(python=f'"{sys.executable}"', marker=marker))
@@ -251,7 +251,7 @@ def test_the_measured_mechanism_a_console_script_carries_no_current_in_sys_prefi
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(gen)], check=True, timeout=120)
     _point_current(tools, gen)
     script = gen / "bin" / "nx-mcp"
-    script.write_text(f"#!{gen}/bin/python\nimport json, sys\nprint(json.dumps([sys.prefix, *sys.path]))\n")
+    script.write_text(f"#!{gen}/bin/python\nimport json, sys\nprint(json.dumps([sys.prefix, *sys.path]))\n", encoding="utf-8")
     script.chmod(0o755)
 
     control = subprocess.run(

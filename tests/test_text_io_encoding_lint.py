@@ -47,13 +47,21 @@ import pathlib
 
 import pytest
 
+from tests.test_windows_release_legs_workflow import WINDOWS_TEST_SET
+
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Shipped Python: the package, and the plugin scripts Claude Code runs on
-# the user's machine (Windows included).
-SCAN_ROOTS: tuple[str, ...] = ("src/nexus", "conexus", "sn")
+# the user's machine (Windows included). Then the tests the Windows CI job runs,
+# read from the pin on that job's list so the two cannot drift: a test there
+# that writes a fixture in cp1252 fails against code that now reads UTF-8,
+# which is how the first push of this sweep went red on Windows (30 tests in
+# tests/daemon/, seeding unit files whose templates carry an em dash).
+SCAN_ROOTS: tuple[str, ...] = ("src/nexus", "conexus", "sn") + tuple(
+    dict.fromkeys(entry.split("::")[0].rstrip("/") for entry in WINDOWS_TEST_SET)
+)
 
 # "<repo-relative path>:<line>" -> why that call may stay encoding-less.
 _EXEMPT: dict[str, str] = {}
@@ -160,6 +168,9 @@ def unencoded_text_io(source: str) -> list[tuple[int, str]]:
             isinstance(node, ast.Attribute)
             and node.attr in _BOUND_METHODS
             and isinstance(node.ctx, ast.Load)
+            # ``Path.read_text`` itself, kept so a test can wrap the real method:
+            # its callers pass their own encoding through.
+            and ast.unparse(node.value) not in ("Path", "pathlib.Path")
         ):
             found.append((node.lineno, f"{node.attr} passed as a value"))
     return sorted(found)
@@ -172,7 +183,8 @@ def _census(repo: pathlib.Path, roots: tuple[str, ...]) -> tuple[int, dict[str, 
     files = 0
     findings: dict[str, str] = {}
     for root in roots:
-        for path in sorted((repo / root).rglob("*.py")):
+        base = repo / root
+        for path in [base] if base.is_file() else sorted(base.rglob("*.py")):
             files += 1
             rel = path.relative_to(repo).as_posix()
             for line, kind in unencoded_text_io(path.read_text(encoding="utf-8")):
@@ -250,6 +262,8 @@ _MUST_NOT_MATCH: tuple[str, ...] = (
     "RotatingFileHandler(p, 'a', 10, 5, 'utf-8')",
     "logging.StreamHandler(sys.stderr)",
     "def open(self): pass",
+    "real = Path.read_text",
+    "real = pathlib.Path.write_text",
     "self.open = True",
 )
 
@@ -269,6 +283,7 @@ def test_the_walk_finds_a_planted_file(tmp_path: pathlib.Path) -> None:
     pkg.mkdir(parents=True)
     (pkg / "clean.py").write_text("p.read_text(encoding='utf-8')\n", encoding="utf-8")
     (pkg / "dirty.py").write_text("x = 1\np.write_text(body)\n", encoding="utf-8")
-    files, findings = _census(tmp_path, ("pkg",))
-    assert files == 2
-    assert findings == {"pkg/sub/dirty.py:2": "write_text"}
+    (tmp_path / "single.py").write_text("open(p)\n", encoding="utf-8")
+    files, findings = _census(tmp_path, ("pkg", "single.py"))
+    assert files == 3
+    assert findings == {"pkg/sub/dirty.py:2": "write_text", "single.py:1": "open"}

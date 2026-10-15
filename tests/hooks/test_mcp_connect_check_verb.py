@@ -49,16 +49,16 @@ class TestSilentNoOp:
         sid = "sess-was-connected"
         (tmp_path / f"mcp_connect_marker.{sid}").write_text(json.dumps(
             {"pid": 999_999_999, "published_at": 1.0, "expires_at": 2.0}
-        ))
+        ), encoding="utf-8")
         (tmp_path / f"mcp_connect_check_state.{sid}").write_text(
-            json.dumps({"ever_connected": True, "warned_since_last_connected": False})
+            json.dumps({"ever_connected": True, "warned_since_last_connected": False}), encoding="utf-8"
         )
-        before = {p.name: p.read_text() for p in tmp_path.iterdir()}
+        before = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir()}
 
         result = run({"session_id": sid})
 
         assert not result.stdout
-        assert {p.name: p.read_text() for p in tmp_path.iterdir()} == before, (
+        assert {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir()} == before, (
             "the verb must neither create nor rewrite any state file"
         )
 
@@ -85,7 +85,7 @@ class TestSilentNoOp:
 
 class TestNotRegisteredInThePlugin:
     def test_hooks_json_has_no_mcp_connect_check_entry(self) -> None:
-        args = _walk_args(json.loads(HOOKS_JSON.read_text()))
+        args = _walk_args(json.loads(HOOKS_JSON.read_text(encoding="utf-8")))
         assert "mcp-connect-check" not in args
         # non-vacuity: the walker does see the other verb entries
         assert "mcp-connect-wait" in args

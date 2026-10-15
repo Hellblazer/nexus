@@ -59,7 +59,7 @@ def _module_scope_imports(path: Path) -> list[tuple[int, str]]:
     those, which is the entire design. ``ast.walk`` would flatten that
     distinction away, so the tree's top level is iterated directly.
     """
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: list[tuple[int, str]] = []
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -147,7 +147,7 @@ def test_importing_io_in_a_fresh_interpreter_stays_cheap() -> None:
 
 def _dispatch_probe(verb_source: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     """Run a real ``nx-hook`` dispatch against a synthetic verb in *tmp_path*."""
-    (tmp_path / "probe_verb.py").write_text(verb_source)
+    (tmp_path / "probe_verb.py").write_text(verb_source, encoding="utf-8")
     env = {
         **os.environ,
         "PYTHONPATH": str(tmp_path),
@@ -271,7 +271,7 @@ def test_a_swallowed_crash_still_reaches_the_hook_log(tmp_path: Path) -> None:
         "    raise RuntimeError('deliberate crash')",
         "",
     ])
-    (tmp_path / "probe_verb.py").write_text(verb)
+    (tmp_path / "probe_verb.py").write_text(verb, encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, "-m", "nexus._hook_runtime.entry", "probe"],
         capture_output=True,
@@ -288,7 +288,7 @@ def test_a_swallowed_crash_still_reaches_the_hook_log(tmp_path: Path) -> None:
     assert proc.returncode == 0, f"a swallowed crash must still exit 0:\n{proc.stderr}"
     log = config_dir / "logs" / "hook.log"
     assert log.exists(), f"no hook.log under {config_dir}"
-    body = log.read_text()
+    body = log.read_text(encoding="utf-8")
     assert "hook_boundary_swallowed_exception" in body, (
         f"the crash-swallow diagnostic never reached {log}; contents: {body!r}"
     )

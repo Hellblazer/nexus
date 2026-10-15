@@ -103,7 +103,7 @@ class TestMarkerFixtureIsolatesLockstepLogToo:
         mod.main(["action", "9.9.9"])
         isolated_log = Path(os.environ["NX_LOCKSTEP_LOG"])
         assert isolated_log.exists(), "log_event must have written somewhere"
-        assert "installed=1.0.1" in isolated_log.read_text()
+        assert "installed=1.0.1" in isolated_log.read_text(encoding="utf-8")
         real_mtime_after = real_log.stat().st_mtime if real_log.exists() else None
         assert real_mtime_after == real_mtime_before, (
             "must never touch the real ~/.config/nexus/lockstep.log"
@@ -160,7 +160,7 @@ class TestEditableGate:
         present under `uv tool dir`/conexus -> True."""
         tool_dir = tmp_path / "tools"
         (tool_dir / "conexus").mkdir(parents=True)
-        (tool_dir / "conexus" / "uv-receipt.toml").write_text("")
+        (tool_dir / "conexus" / "uv-receipt.toml").write_text("", encoding="utf-8")
         monkeypatch.setattr(mod, "which_off_cwd", lambda c: "/usr/bin/uv")
 
         def fake_run(args, **k):
@@ -187,7 +187,7 @@ class TestNoOpFastPath:
         )
         mod.main(["action", "9.9.9"])
         assert calls == [], "no upgrade when already at target"
-        assert marker.read_text().strip() == "9.9.9"
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
 
 
 class TestDowngradeLoopBroken:
@@ -203,7 +203,7 @@ class TestDowngradeLoopBroken:
         )
         mod.main(["action", "5.7.0"])
         assert calls == [], "no upgrade attempt when CLI is already ahead"
-        assert marker.read_text().strip() == "5.7.0", (
+        assert marker.read_text(encoding="utf-8").strip() == "5.7.0", (
             "marker must record the plugin target so the hook goes silent"
         )
 
@@ -258,7 +258,7 @@ class TestMarkerOnConfirmedSuccess:
             installed_versions=["1.0.0", "9.9.9"], run_results={},
         )
         mod.main(["action", "9.9.9"])
-        assert marker.read_text().strip() == "9.9.9"
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
 
     def test_marker_creates_parent_dir(self, mod, marker, monkeypatch) -> None:
         assert not marker.parent.exists()
@@ -302,8 +302,8 @@ class TestConfigDirFollowsNexusConfigDir:
             installed_versions=["1.0.0", "9.9.9"], run_results={},
         )
         mod.main(["action", "9.9.9"])
-        assert (cfg / "cli_lockstep_marker").read_text().strip() == "9.9.9"
-        assert "installed=" in (cfg / "lockstep.log").read_text()
+        assert (cfg / "cli_lockstep_marker").read_text(encoding="utf-8").strip() == "9.9.9"
+        assert "installed=" in (cfg / "lockstep.log").read_text(encoding="utf-8")
         assert not (Path.home() / ".config" / "nexus").exists()
 
     def test_default_is_home_config_nexus_without_env(self, mod, cfg, monkeypatch) -> None:
@@ -387,7 +387,7 @@ class TestLoudLog:
         # Prove the log is NOT gated behind NX_HOOK_DEBUG: leave it unset/0.
         monkeypatch.setattr(mod, "DEBUG", False)
         mod.main(["action", "9.9.9"])
-        lines = log.read_text().strip().splitlines()
+        lines = log.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 2, lines
         assert "lockstep_upgrade_started" in lines[0]
         assert "target=9.9.9" in lines[0]
@@ -405,7 +405,7 @@ class TestLoudLog:
             run_results={"uv tool": False},
         )
         mod.main(["action", "9.9.9"])
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "lockstep_upgrade_started" in text
         assert "outcome=uv_upgrade_failed" in text
 
@@ -418,7 +418,7 @@ class TestLoudLog:
             run_results={"nx upgrade": False},
         )
         mod.main(["action", "9.9.9"])
-        assert "outcome=nx_upgrade_failed" in log.read_text()
+        assert "outcome=nx_upgrade_failed" in log.read_text(encoding="utf-8")
 
     def test_version_still_mismatched_logs_that_outcome(
         self, mod, marker, log, monkeypatch
@@ -428,7 +428,7 @@ class TestLoudLog:
             installed_versions=["1.0.0", "1.0.1"], run_results={},
         )
         mod.main(["action", "9.9.9"])
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "outcome=version_still_mismatched" in text
         assert "installed=1.0.1" in text
 
@@ -461,16 +461,16 @@ class TestLoudLog:
         without writing a real megabyte in a unit test."""
         monkeypatch.setenv("NX_LOCKSTEP_LOG_MAX_BYTES", "10")
         mod.log_event("lockstep_upgrade_started", target="1.0.0")  # > 10 bytes already
-        first_content = log.read_text()
+        first_content = log.read_text(encoding="utf-8")
         assert first_content  # sanity: something was written
 
         mod.log_event("lockstep_upgrade_result", target="1.0.0", outcome="success")
 
         rotated = log.with_name(log.name + ".1")
         assert rotated.exists(), "log over threshold must rotate to .1"
-        assert rotated.read_text() == first_content
+        assert rotated.read_text(encoding="utf-8") == first_content
         # The active file now holds ONLY the second event, not both.
-        active_content = log.read_text()
+        active_content = log.read_text(encoding="utf-8")
         assert "lockstep_upgrade_started" not in active_content
         assert "lockstep_upgrade_result" in active_content
 
@@ -480,7 +480,7 @@ class TestLoudLog:
         mod.log_event("lockstep_upgrade_result", target="1.0.0", outcome="success")
         rotated = log.with_name(log.name + ".1")
         assert not rotated.exists()
-        content = log.read_text()
+        content = log.read_text(encoding="utf-8")
         assert "lockstep_upgrade_started" in content
         assert "lockstep_upgrade_result" in content
 
@@ -516,7 +516,7 @@ class TestRefDriftRemedyLogging:
 
         setattr_in(monkeypatch, mod, "subprocess.run", boom)
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "outcome=nx_upgrade_raised" in text
         assert "remedy=" in text
 
@@ -525,7 +525,7 @@ class TestRefDriftRemedyLogging:
             lambda *a, **k: self._FakeCompleted(returncode=1, stderr="boom"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "outcome=nx_upgrade_exit_nonzero" in text
         assert "remedy=" in text
 
@@ -534,7 +534,7 @@ class TestRefDriftRemedyLogging:
             lambda *a, **k: self._FakeCompleted(returncode=0, stdout="reinstall failed for conexus"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "outcome=ref_check_failed" in text
         assert "remedy=" in text
 
@@ -545,7 +545,7 @@ class TestRefDriftRemedyLogging:
             ),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "outcome=ref_moved" in text
         assert "remedy=" not in text
 
@@ -554,7 +554,7 @@ class TestRefDriftRemedyLogging:
             lambda *a, **k: self._FakeCompleted(returncode=0, stdout="nothing to do"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8")
         assert "outcome=ran_no_drift_confirmed" in text
         assert "remedy=" not in text
 
@@ -598,7 +598,7 @@ class TestVersionParsing:
             install_windows_exe_fake(gen / "bin", "nx", f"{WINDOWS_SHEBANG}\nprint('nx, version 9.9.9')\n")
             _winapi.CreateJunction(str(gen), str(tools / "current"))
         else:
-            (gen / "bin" / "nx").write_text("#!/bin/sh\necho 'nx, version 9.9.9'\n")
+            (gen / "bin" / "nx").write_text("#!/bin/sh\necho 'nx, version 9.9.9'\n", encoding="utf-8")
             (gen / "bin" / "nx").chmod(0o755)
             (tools / "current").symlink_to(gen)
         assert mod.resolve_nx() is not None

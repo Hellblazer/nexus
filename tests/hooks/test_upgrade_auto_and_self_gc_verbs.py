@@ -144,7 +144,7 @@ def fake_nx(tmp_path, monkeypatch):
                 "#!/bin/sh\n"
                 f'echo "$@" > "{argv_file}"\n'
                 f'echo $$ > "{pid_file}"\n'
-                + "\n".join(body) + "\n"
+                + "\n".join(body) + "\n", encoding="utf-8"
             )
             script.chmod(0o755)
             _stub_nx(monkeypatch, str(script))
@@ -157,7 +157,7 @@ def fake_nx(tmp_path, monkeypatch):
             f"sys.stdout.write({stdout!r} + '\\n') if {stdout!r} else None\n"
             f"sys.stderr.write({stderr!r} + '\\n') if {stderr!r} else None\n"
             f"time.sleep({sleep!r})\n"
-            f"sys.exit({rc})\n"
+            f"sys.exit({rc})\n", encoding="utf-8"
         )
         _stub_nx(monkeypatch, _FAKE_NX)
         monkeypatch.setattr(
@@ -175,8 +175,8 @@ def fake_nx(tmp_path, monkeypatch):
 def _wait_for(path, seconds=5.0):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if path.exists() and path.read_text().strip():
-            return path.read_text().strip()
+        if path.exists() and path.read_text(encoding="utf-8").strip():
+            return path.read_text(encoding="utf-8").strip()
         time.sleep(0.02)
     raise AssertionError(f"{path} never written")
 
@@ -199,12 +199,12 @@ def test_upgrade_auto_is_silent_on_success(fake_nx, capfd):
     assert captured.err == "", "the child's stderr never reaches the hook's own stderr"
     log = upgrade_auto._child_log_path()
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not (log.exists() and log.read_text()):
+    while time.monotonic() < deadline and not (log.exists() and log.read_text(encoding="utf-8")):
         time.sleep(0.02)
-    assert "a warning the shell form sent to /dev/null" in log.read_text(), (
+    assert "a warning the shell form sent to /dev/null" in log.read_text(encoding="utf-8"), (
         "the child outlives the hook, so its stderr goes to a log file, not the null device"
     )
-    assert "on stdout" not in log.read_text(), "stdout stays on the null device"
+    assert "on stdout" not in log.read_text(encoding="utf-8"), "stdout stays on the null device"
 
 
 def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys):
@@ -326,7 +326,7 @@ def test_an_unopenable_child_log_falls_back_to_the_null_device(monkeypatch, tmp_
     """A log problem must never stop the upgrade: the parent of the log
     directory is a FILE, so mkdir fails, and the child starts on DEVNULL."""
     blocker = tmp_path / "not-a-dir"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     monkeypatch.setattr(upgrade_auto, "_child_log_path", lambda: blocker / "logs" / "child.log")
     _stub_nx(monkeypatch, _FAKE_NX)
     seen: list[dict] = []

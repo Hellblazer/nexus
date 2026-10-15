@@ -40,7 +40,7 @@ def _write_set(dir_: Path, tag: str) -> None:
 
 
 def _read_set(dir_: Path) -> dict[str, str]:
-    return {n: (dir_ / n).read_text() for n in _NAMES if (dir_ / n).exists()}
+    return {n: (dir_ / n).read_text(encoding="utf-8") for n in _NAMES if (dir_ / n).exists()}
 
 
 def _sleeps() -> tuple[list[float], object]:
@@ -137,7 +137,7 @@ def test_a_failure_on_the_last_file_puts_the_whole_old_set_back(tmp_path):
         if Path(dst).name == WINDOWS_ENGINE_EXE and Path(src).parent == stage:
             # the DLLs are already new at this moment: the set IS half replaced
             seen_new_dlls.append(
-                all((dest / d).read_text().startswith("new:") for d in WINDOWS_RUNTIME_DLLS)
+                all((dest / d).read_text(encoding="utf-8").startswith("new:") for d in WINDOWS_RUNTIME_DLLS)
             )
             raise PermissionError(13, "exe held by antivirus")
         os.replace(src, dst)
@@ -205,7 +205,7 @@ def test_a_failed_rollback_keeps_the_old_content_and_names_where(tmp_path):
     assert first_dll in text and ".nx_old_" in text
     kept = [p for p in dest.iterdir() if p.name.startswith(".nx_old_")]
     assert len(kept) == 1
-    assert (kept[0] / first_dll).read_text() == f"old:{first_dll}"
+    assert (kept[0] / first_dll).read_text(encoding="utf-8") == f"old:{first_dll}"
 
 
 # ── stale keep directories (nexus-f9bgu.33, code review m5) ───────────────────
@@ -260,7 +260,7 @@ def test_the_sweep_touches_only_old_keep_directories(tmp_path):
     other = dest / "data"
     other.mkdir()
     a_file = dest / ".nx_old_but_a_file"
-    a_file.write_text("x")
+    a_file.write_text("x", encoding="utf-8")
     for p in (stage_dir, other):
         os.utime(p, (1, 1))
     rg.place_set_with_rollback(stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None)
@@ -484,9 +484,9 @@ class _OkChecker:
 def _serve(monkeypatch, archive: bytes) -> None:
     def _dl(url, dest, *, timeout=0):
         if url.endswith(".sha256"):
-            dest.write_text(f"{hashlib.sha256(archive).hexdigest()}  {_ASSET}\n")
+            dest.write_text(f"{hashlib.sha256(archive).hexdigest()}  {_ASSET}\n", encoding="utf-8")
         elif url.endswith(".sigstore.json"):
-            dest.write_text("{}")
+            dest.write_text("{}", encoding="utf-8")
         else:
             dest.write_bytes(archive)
 
@@ -650,7 +650,7 @@ def test_install_on_a_posix_host_does_not_stop_anything(tmp_path, monkeypatch):
         platform_tag="windows-x64", host_platform="linux",
     )
     assert fake.events == []
-    assert (tmp_path / "service" / WINDOWS_ENGINE_EXE).read_text() == f"new:{WINDOWS_ENGINE_EXE}"
+    assert (tmp_path / "service" / WINDOWS_ENGINE_EXE).read_text(encoding="utf-8") == f"new:{WINDOWS_ENGINE_EXE}"
 
 
 # ── pg_bundle swap ────────────────────────────────────────────────────────────
@@ -668,7 +668,7 @@ def _two_archives(tmp_path, make_pg_bundle_txz):
     second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz")
     root = tmp_path / "pg-bundle"
     bin_dir = pg_bundle.extract_bundle(first, root, platform=_WIN)
-    _initdb(bin_dir).write_text("FROM-FIRST-ARCHIVE\n")
+    _initdb(bin_dir).write_text("FROM-FIRST-ARCHIVE\n", encoding="utf-8")
     return first, second, root, bin_dir
 
 
@@ -683,14 +683,14 @@ def test_bundle_swap_stops_pg_after_staging_and_starts_it_on_the_new_tree(
     def stop_pg():
         fake.events.append("stop_pg")
         seen["staging_ready"] = (tmp_path / "pg-bundle.incoming").is_dir()
-        seen["tree_old_at_stop"] = _initdb(bin_dir).read_text() == "FROM-FIRST-ARCHIVE\n"
+        seen["tree_old_at_stop"] = _initdb(bin_dir).read_text(encoding="utf-8") == "FROM-FIRST-ARCHIVE\n"
 
     def start_pg():
         fake.events.append("start_pg")
-        seen["tree_new_at_start"] = _initdb(bin_dir).read_text() != "FROM-FIRST-ARCHIVE\n"
+        seen["tree_new_at_start"] = _initdb(bin_dir).read_text(encoding="utf-8") != "FROM-FIRST-ARCHIVE\n"
         seen["marked_new_at_start"] = (
             pg_bundle.is_bundle_extracted(root)
-            and (root / _MARKER).read_text() == pg_bundle._archive_identity(second)
+            and (root / _MARKER).read_text(encoding="utf-8") == pg_bundle._archive_identity(second)
         )
 
     ops.stop_pg, ops.start_pg = stop_pg, start_pg
@@ -729,14 +729,14 @@ def test_a_first_extraction_stops_nothing(tmp_path, make_pg_bundle_txz):
 
 def test_bundle_swap_refused_across_sessions_keeps_the_old_tree(tmp_path, make_pg_bundle_txz):
     _first, second, root, bin_dir = _two_archives(tmp_path, make_pg_bundle_txz)
-    marker_before = (root / _MARKER).read_text()
+    marker_before = (root / _MARKER).read_text(encoding="utf-8")
     fake = _Ops(outcome=SimpleNamespace(
         pids=(), stubborn=(5,), refused=(_refusal(5, target=2, own=1),), source="refused"))
     with pytest.raises(rg.ReplaceBlockedError, match="session 2"):
         pg_bundle.extract_bundle(second, root, platform=_WIN, quiesce=rq.quiesced(
             tmp_path, replacing="pg_bundle", platform=_WIN, ops=fake.ops()))
-    assert _initdb(bin_dir).read_text() == "FROM-FIRST-ARCHIVE\n"
-    assert (root / _MARKER).read_text() == marker_before
+    assert _initdb(bin_dir).read_text(encoding="utf-8") == "FROM-FIRST-ARCHIVE\n"
+    assert (root / _MARKER).read_text(encoding="utf-8") == marker_before
     assert pg_bundle.is_bundle_extracted(root)
     assert not (tmp_path / "pg-bundle.incoming").exists()  # staging cleaned up
     assert not (tmp_path / "pg-bundle.replaced").exists()
@@ -772,7 +772,7 @@ def test_a_failed_second_rename_puts_the_old_tree_back_and_leaves_the_marker(
     old tree must come back: the window with neither in place is one rename wide and
     recoverable (PB1)."""
     _first, second, root, bin_dir = _two_archives(tmp_path, make_pg_bundle_txz)
-    marker_before = (root / _MARKER).read_text()
+    marker_before = (root / _MARKER).read_text(encoding="utf-8")
     calls = _swap_with(
         monkeypatch,
         fail_when=lambda n, src, dst: OSError("disk full") if src == "pg-bundle.incoming" else None,
@@ -787,8 +787,8 @@ def test_a_failed_second_rename_puts_the_old_tree_back_and_leaves_the_marker(
         ("pg-bundle.incoming", "pg-bundle"),
         ("pg-bundle.replaced", "pg-bundle"),
     ]
-    assert _initdb(bin_dir).read_text() == "FROM-FIRST-ARCHIVE\n", "the OLD tree must be back in place"
-    assert (root / _MARKER).read_text() == marker_before, "the marker must still name the old archive"
+    assert _initdb(bin_dir).read_text(encoding="utf-8") == "FROM-FIRST-ARCHIVE\n", "the OLD tree must be back in place"
+    assert (root / _MARKER).read_text(encoding="utf-8") == marker_before, "the marker must still name the old archive"
     assert pg_bundle.is_bundle_extracted(root)
     assert not (tmp_path / "pg-bundle.replaced").exists()
     assert not (tmp_path / "pg-bundle.incoming").exists()
@@ -810,8 +810,8 @@ def test_a_first_rename_held_by_a_scan_is_retried_on_windows_and_the_swap_comple
         tmp_path, replacing="pg_bundle", platform=_WIN, ops=_Ops(pg_up=True).ops()))
     assert calls[:3] == [("pg-bundle", "pg-bundle.replaced")] * 3, "twice refused, then it went"
     assert slept == list(rg.RETRY_DELAYS_S[:2])
-    assert _initdb(bin_dir).read_text() != "FROM-FIRST-ARCHIVE\n", "the swap completed onto the new tree"
-    assert (root / _MARKER).read_text() == pg_bundle._archive_identity(second)
+    assert _initdb(bin_dir).read_text(encoding="utf-8") != "FROM-FIRST-ARCHIVE\n", "the swap completed onto the new tree"
+    assert (root / _MARKER).read_text(encoding="utf-8") == pg_bundle._archive_identity(second)
 
 
 # ── partial stop in quiesce ───────────────────────────────────────────────────

@@ -46,7 +46,7 @@ _DAEMON_DIR = Path(__file__).resolve().parents[2] / "src" / "nexus" / "daemon"
 
 def _daemon_imports(path: Path) -> set[str]:
     """The set of ``nexus.daemon.<X>`` submodules *path* imports (X only)."""
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("nexus.daemon."):

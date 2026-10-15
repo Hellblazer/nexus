@@ -236,7 +236,7 @@ def _hook_log(tmp_path: Path) -> str:
     crash (nexus-3lc5s): a precondition failure carries its own evidence."""
     log = tmp_path / "config" / "logs" / "hook.log"
     try:
-        return log.read_text()[-4000:]
+        return log.read_text(encoding="utf-8")[-4000:]
     except OSError:
         return "<absent>"
 
@@ -256,7 +256,7 @@ def _write_storage_lease(config_dir: Path, *, host: str, port: int) -> None:
     }
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / f"storage_service_addr.{service_identity()}"
-    path.write_text(json.dumps(record))
+    path.write_text(json.dumps(record), encoding="utf-8")
     restrict_to_owner(path)
 
 
@@ -965,7 +965,7 @@ class TestCredentialPolicy:
             "format_version": 1, "token": "lease-bearer", "tenant": "default",
             "base_url_digest": digest, "expires_at": time.time() + 60.0,
             "ttl_seconds": 3600.0, "minted_by_pid": os.getpid(),
-        }))
+        }), encoding="utf-8")
         lease.chmod(0o600)
         res = _run(tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": base_url})
         assert res.returncode == 0, res.stderr
@@ -1256,7 +1256,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
             "the pending record was cleared on a 500, so the row the engine already "
             "consumed can never be recovered"
         )
-        assert "committed then five hundred" in pending.read_text()
+        assert "committed then five hundred" in pending.read_text(encoding="utf-8")
 
     def test_a_401_on_rd_is_not_read_as_an_empty_mailbox(
         self, tmp_path, engine,
@@ -1346,7 +1346,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
             "rendered as either delivered or dropped"
         )
         assert "SKIP" in res.stderr
-        assert pending_path.read_text() == pending_body, (
+        assert pending_path.read_text(encoding="utf-8") == pending_body, (
             "the pending record must survive an unconfirmed presence check "
             "untouched, not be cleared on a guess"
         )
@@ -2017,7 +2017,7 @@ def test_run_refuses_a_result_whose_code_changed_while_the_hook_ran(tmp_path, en
     accepted, so the guard is not simply refusing everything.
     """
     watched = tmp_path / "watched_code.py"
-    watched.write_text("CONFLATE = False\n")
+    watched.write_text("CONFLATE = False\n", encoding="utf-8")
     # A fixed old mtime, so the in-run write moves it on any filesystem
     # timestamp granularity.
     os.utime(watched, ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
@@ -2029,13 +2029,13 @@ def test_run_refuses_a_result_whose_code_changed_while_the_hook_ran(tmp_path, en
     assert eng.calls, "control run never reached the engine, so it controls nothing"
 
     def _mutation_check(_route: str) -> None:
-        watched.write_text("CONFLATE = True\n")   # the mutation
-        watched.write_text("CONFLATE = False\n")  # and its revert
+        watched.write_text("CONFLATE = True\n", encoding="utf-8")   # the mutation
+        watched.write_text("CONFLATE = False\n", encoding="utf-8")  # and its revert
 
     eng.on_request = _mutation_check
     with pytest.raises(pytest.fail.Exception, match="changed on disk while the hook subprocess ran"):
         _run(tmp_path=tmp_path, watched=(watched,))
-    assert watched.read_text() == "CONFLATE = False\n"
+    assert watched.read_text(encoding="utf-8") == "CONFLATE = False\n"
 
 
 def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_others() -> None:
@@ -2060,10 +2060,10 @@ def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_other
 def test_the_watch_set_follows_a_new_sibling_import_without_a_list_to_update(tmp_path) -> None:
     """The set is computed, so a sibling import added tomorrow is watched with
     no edit here, and a file beside the script that nothing imports is not."""
-    (tmp_path / "hook.py").write_text("def f():\n    import _new_helper\n")
-    (tmp_path / "_new_helper.py").write_text("import _deeper\n")
-    (tmp_path / "_deeper.py").write_text("")
-    (tmp_path / "_unimported.py").write_text("")
+    (tmp_path / "hook.py").write_text("def f():\n    import _new_helper\n", encoding="utf-8")
+    (tmp_path / "_new_helper.py").write_text("import _deeper\n", encoding="utf-8")
+    (tmp_path / "_deeper.py").write_text("", encoding="utf-8")
+    (tmp_path / "_unimported.py").write_text("", encoding="utf-8")
     assert _import_closure((tmp_path / "hook.py",)) == {
         tmp_path / "hook.py", tmp_path / "_new_helper.py", tmp_path / "_deeper.py",
     }
@@ -2076,7 +2076,7 @@ def _plugin_copy(tmp_path: Path) -> Path:
     scripts.mkdir()
     for src in _code_under_test(_PLUGIN_ARGV):
         (scripts / src.name).write_bytes(src.read_bytes())
-    (scripts / "_unimported.py").write_text("X = 1\n")
+    (scripts / "_unimported.py").write_text("X = 1\n", encoding="utf-8")
     return scripts
 
 
@@ -2112,10 +2112,10 @@ def test_a_mid_run_edit_to_a_file_the_run_never_loads_does_not_fail_it(tmp_path,
 
     eng = engine()
     _wired(tmp_path, eng)
-    eng.on_request = lambda _route: unrelated.write_text("X = 2\n")
+    eng.on_request = lambda _route: unrelated.write_text("X = 2\n", encoding="utf-8")
     res = _run(tmp_path=tmp_path, argv=argv, env_overrides={"NX_HOOK_INTERPRETER_REEXEC": "1"})
     assert res.returncode == 0 and eng.calls, res.stderr
-    assert unrelated.read_text() == "X = 2\n", "the edit must actually have happened"
+    assert unrelated.read_text(encoding="utf-8") == "X = 2\n", "the edit must actually have happened"
 
 
 _BUDGET_DRIVER = r"""

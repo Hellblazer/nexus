@@ -79,8 +79,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     for d in (clone, clone / "relbin", tools):
         shutil.copyfile(cmd, d / f"{_NAME}.exe")
     for suffix in (".cmd", ".bat"):
-        (clone / f"{_NAME}{suffix}").write_text("@echo planted\r\n")
-    (shims / f"{_NAME}.cmd").write_text("@echo shim\r\n")
+        (clone / f"{_NAME}{suffix}").write_text("@echo planted\r\n", encoding="utf-8")
+    (shims / f"{_NAME}.cmd").write_text("@echo shim\r\n", encoding="utf-8")
     # Only the clone has this one, so a bare-name spawn that finds it found it in the cwd.
     shutil.copyfile(cmd, clone / "nxonly.exe")
 

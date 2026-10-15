@@ -28,9 +28,9 @@ def _good_download(url, dest, *, timeout=0):
     """Stub: materialise a self-consistent asset + sha256 + bundle."""
     if url.endswith(".sha256"):
         digest = hashlib.sha256(_CONTENT).hexdigest()
-        dest.write_text(f"{digest}  {b.pg_bundle_asset_name()}\n")
+        dest.write_text(f"{digest}  {b.pg_bundle_asset_name()}\n", encoding="utf-8")
     elif url.endswith(".sigstore.json"):
-        dest.write_text('{"protobuf":"bundle"}')
+        dest.write_text('{"protobuf":"bundle"}', encoding="utf-8")
     else:
         dest.write_bytes(_CONTENT)
 
@@ -46,7 +46,7 @@ def test_install_pg_bundle_places_and_writes_sidecar(tmp_path, monkeypatch):
     assert dest.parent == tmp_path / "service"
     sidecar = tmp_path / "service" / "nexus-pg.meta.json"
     assert sidecar.is_file()
-    meta = json.loads(sidecar.read_text())
+    meta = json.loads(sidecar.read_text(encoding="utf-8"))
     assert meta["version"] == "0.1.3"
     assert meta["tag"] == _TAG
     assert meta["asset"] == b.pg_bundle_asset_name()
@@ -72,9 +72,9 @@ def test_install_pg_bundle_fails_closed_on_download_error(tmp_path, monkeypatch)
 def test_install_pg_bundle_fails_closed_on_sha256_mismatch(tmp_path, monkeypatch):
     def _bad_sha(url, dest, *, timeout=0):
         if url.endswith(".sha256"):
-            dest.write_text(f"{'0' * 64}  {b.pg_bundle_asset_name()}\n")
+            dest.write_text(f"{'0' * 64}  {b.pg_bundle_asset_name()}\n", encoding="utf-8")
         elif url.endswith(".sigstore.json"):
-            dest.write_text("{}")
+            dest.write_text("{}", encoding="utf-8")
         else:
             dest.write_bytes(_CONTENT)
 
@@ -119,9 +119,9 @@ def test_pg_bundle_publish_download_select_roundtrip(tmp_path, monkeypatch, make
 
     def _serve(url, dest, *, timeout=0):
         if url.endswith(".sha256"):
-            dest.write_text(f"{hashlib.sha256(payload).hexdigest()}  {b.pg_bundle_asset_name()}\n")
+            dest.write_text(f"{hashlib.sha256(payload).hexdigest()}  {b.pg_bundle_asset_name()}\n", encoding="utf-8")
         elif url.endswith(".sigstore.json"):
-            dest.write_text('{"protobuf":"bundle"}')
+            dest.write_text('{"protobuf":"bundle"}', encoding="utf-8")
         else:
             dest.write_bytes(payload)
 

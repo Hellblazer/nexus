@@ -62,7 +62,7 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     units = tmp_path / "units"
     units.mkdir(exist_ok=True)
     (units / daemon_cmd._autostart_filename_t2()).write_text(
-        "<!-- legacy T2 unit from a pre-retirement install -->\n"
+        "<!-- legacy T2 unit from a pre-retirement install -->\n", encoding="utf-8"
     )
     _first_run.mark_shown()
     return tmp_path

@@ -62,7 +62,7 @@ def _write_lease(config_dir: Path, *, supervisor_pid: int | None, engine_pid: in
         payload={"supervisor_pid": supervisor_pid} if supervisor_pid is not None else {},
     )
     path = config_dir / f"storage_service_addr.{scope}"
-    path.write_text(record.to_json())
+    path.write_text(record.to_json(), encoding="utf-8")
     return path
 
 
@@ -109,7 +109,7 @@ class _ConsoleApi:
     def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
         self.calls.append(("send", pid))
         if self.deliver:
-            break_file_for(self.where, pid).write_text("break")
+            break_file_for(self.where, pid).write_text("break", encoding="utf-8")
         return True, 0
 
     def attach_parent_console(self) -> tuple[bool, int]:

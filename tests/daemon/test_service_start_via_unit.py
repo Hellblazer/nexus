@@ -62,7 +62,7 @@ def _write_unit(path: Path, platform: str, config_dir: Path | None) -> None:
     flagless systemd unit."""
     if config_dir is None:
         path.write_text(
-            "[Service]\nExecStart=/usr/local/bin/nx daemon service start --foreground\n"
+            "[Service]\nExecStart=/usr/local/bin/nx daemon service start --foreground\n", encoding="utf-8"
         )
         return
     _write_unit_literal(path, platform, str(config_dir.resolve()))
@@ -81,7 +81,7 @@ def _write_unit_literal(path: Path, platform: str, baked: str) -> None:
             path_env="/usr/bin:/bin",
             config_dir=baked,
         )
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
 
 @pytest.fixture
@@ -308,7 +308,7 @@ class TestUnitStartTimeoutMessage:
         def start(argv, *, timeout, **_kw):
             if err_log is not None and new_error is not None:
                 err_log.parent.mkdir(parents=True, exist_ok=True)
-                with err_log.open("a") as fh:
+                with err_log.open("a", encoding="utf-8") as fh:
                     fh.write(f"Error: {new_error}\n")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
@@ -321,7 +321,7 @@ class TestUnitStartTimeoutMessage:
     ) -> None:
         err_log = tmp_path / "unit-logs" / "nexus-service.err"
         err_log.parent.mkdir(parents=True)
-        err_log.write_text("Error: an earlier boot's failure\n")
+        err_log.write_text("Error: an earlier boot's failure\n", encoding="utf-8")
         self._never_publishes(
             config_dir, monkeypatch, err_log=err_log, new_error="pg_credentials missing; run nx init"
         )
@@ -341,7 +341,7 @@ class TestUnitStartTimeoutMessage:
         excludes it."""
         err_log = tmp_path / "unit-logs" / "nexus-service.err"
         err_log.parent.mkdir(parents=True)
-        err_log.write_text("Error: an earlier boot's failure\n")
+        err_log.write_text("Error: an earlier boot's failure\n", encoding="utf-8")
         self._never_publishes(config_dir, monkeypatch, err_log=err_log)
         result = _run_start(config_dir)
         assert result.exit_code == 2
@@ -359,7 +359,7 @@ class TestUnitStartTimeoutMessage:
         _write_unit(units / daemon_mod._autostart_filename_service(), "win32", config_dir)
         crash_log = config_dir / "logs" / "storage_service.crash.log"
         crash_log.parent.mkdir(parents=True)
-        crash_log.write_text("Error: an earlier boot's failure\n")
+        crash_log.write_text("Error: an earlier boot's failure\n", encoding="utf-8")
         self._never_publishes(
             config_dir, monkeypatch, err_log=crash_log, new_error="engine exited during start"
         )
@@ -597,7 +597,7 @@ class TestUnitConfigDirMustMatch:
     def test_a_unit_whose_config_dir_cannot_be_read_takes_todays_path_with_one_line(
         self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, today
     ) -> None:
-        self._platform_units(tmp_path, monkeypatch, "linux").write_text("[Service]\nType=simple\n")
+        self._platform_units(tmp_path, monkeypatch, "linux").write_text("[Service]\nType=simple\n", encoding="utf-8")
         manager = self._active(config_dir, monkeypatch)
         result = _run_start(config_dir)
         assert result.exit_code == 0, result.output
@@ -653,7 +653,7 @@ class TestExplicitArtifactBypassesTheUnit:
         today,
     ) -> None:
         artifact = tmp_path / "nexus-service-artifact"
-        artifact.write_text("#!/bin/sh\n")
+        artifact.write_text("#!/bin/sh\n", encoding="utf-8")
         artifact.chmod(0o755)
         monkeypatch.setenv(var, str(artifact))
         manager = FakeManager(config_dir)
@@ -712,12 +712,12 @@ class TestAutostartUnitConfigDir:
     )
     def test_the_windows_task_round_trips(self, baked: str, tmp_path: Path) -> None:
         path = tmp_path / TASK_FILENAME
-        path.write_text(task_xml(sid="S-1-5-21-1", pythonw=r"C:\Py\pythonw.exe", config_dir=baked))
+        path.write_text(task_xml(sid="S-1-5-21-1", pythonw=r"C:\Py\pythonw.exe", config_dir=baked), encoding="utf-8")
         assert str(installer.autostart_unit_config_dir(path)) == str(Path(baked))
 
     def test_an_equals_spelling_is_read(self, tmp_path: Path) -> None:
         path = tmp_path / daemon_mod._SERVICE_SERVICE_NAME
-        path.write_text("[Service]\nExecStart=/bin/nx daemon service start --foreground --config-dir=/srv/nx\n")
+        path.write_text("[Service]\nExecStart=/bin/nx daemon service start --foreground --config-dir=/srv/nx\n", encoding="utf-8")
         assert installer.autostart_unit_config_dir(path) == Path("/srv/nx")
 
     def test_no_flag_is_the_default_dir(self, tmp_path: Path) -> None:
@@ -736,7 +736,7 @@ class TestAutostartUnitConfigDir:
     )
     def test_an_unreadable_unit_is_a_value_error(self, name: str, body: str, tmp_path: Path) -> None:
         path = tmp_path / name
-        path.write_text(body)
+        path.write_text(body, encoding="utf-8")
         with pytest.raises(ValueError):
             installer.autostart_unit_config_dir(path)
 

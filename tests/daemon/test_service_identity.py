@@ -138,7 +138,7 @@ class TestPluginMirror:
         validation pattern is the same string."""
 
         def func(path: Path, name: str) -> ast.FunctionDef:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             hits = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name]
             assert len(hits) == 1, f"{path} must define exactly one {name}"
             return hits[0]
@@ -153,6 +153,6 @@ class TestPluginMirror:
         assert dump(real) == dump(mirror)
         # Non-vacuity: the compared bodies really are the Windows token lookup.
         assert "ConvertSidToStringSidW" in ast.unparse(real) and "ConvertSidToStringSidW" in ast.unparse(mirror)
-        src_real, src_mirror = Path(sr.__file__).read_text(), PLUGIN_SCRIPT.read_text()
+        src_real, src_mirror = Path(sr.__file__).read_text(encoding="utf-8"), PLUGIN_SCRIPT.read_text(encoding="utf-8")
         pattern = re.search(r'_SID_PATTERN = re\.compile\((r"[^"]+")\)', src_real)
         assert pattern and f"_SID_PATTERN = re.compile({pattern.group(1)})" in src_mirror

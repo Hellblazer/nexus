@@ -39,7 +39,7 @@ from tests._hook_wiring import HOOKS_JSON, REPO_ROOT, command_verb, launcher_scr
 #: from the file rather than written down, so this cannot drift from the
 #: wiring it claims to exercise.
 def _wired_verbs() -> dict[str, str]:
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     out: dict[str, str] = {}
     for groups in data.get("hooks", {}).values():
         for group in groups:
@@ -54,7 +54,7 @@ def _wired_argv(verb: str) -> list[str]:
     """The argv hooks.json runs for *verb*: the ``uv``-launched nx-hook shim
     when that is how it is wired (nexus-rcoze, nexus-efk2h), so the real path
     is uv, then the shim, then nx-hook."""
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     for groups in data.get("hooks", {}).values():
         for group in groups:
             for hook in group.get("hooks", []):

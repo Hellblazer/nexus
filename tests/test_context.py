@@ -91,7 +91,7 @@ class TestGenerateContextL1:
 
         assert result == out
         assert out.exists()
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
         assert "GPU Kernels" in content
         assert "BFT Consensus" in content
         assert "code:" in content
@@ -120,7 +120,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         assert "code:" in content
         assert "docs:" in content
@@ -139,7 +139,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # Should have topics 0-4 (top 5 by doc_count), not 5-7
         assert "Code Topic 0" in content
@@ -177,7 +177,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # No read-side collapse: identical rows appear up to the per-prefix cap.
         # (Assumes _TOPICS_PER_PREFIX >= 5 so all 5 inserted rows are emitted;
@@ -206,7 +206,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # Both rows survive because doc_count differs.
         assert content.count("Shared Label") == 2
@@ -225,7 +225,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         assert "Root Topic" in content
         assert "Child Topic" not in content
@@ -240,10 +240,10 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         # Write initial content
-        out.write_text("old content")
+        out.write_text("old content", encoding="utf-8")
 
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # Should have new content, not partial or old
         assert "Test Topic" in content
@@ -269,7 +269,7 @@ class TestGenerateContextL1:
         with patch("nexus.context._repo_collections", return_value={"code__myrepo-abc123", "docs__myrepo-abc123", "rdr__myrepo-abc123"}):
             out = tmp_path / "context_l1.txt"
             generate_context_l1(db.taxonomy, output_path=out, repo_path=Path("/fake/myrepo"))
-            content = out.read_text()
+            content = out.read_text(encoding="utf-8")
 
         assert "My Repo Topic" in content
         assert "Other Repo Topic" not in content
@@ -428,7 +428,7 @@ class TestSubagentHookInjection:
         repo_root = repo_dir.resolve()
         repo_hash = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
         cache_file = context_dir / f"{repo_root.name}-{repo_hash}.txt"
-        cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n")
+        cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n", encoding="utf-8")
 
         section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
 
@@ -470,7 +470,7 @@ class TestSubagentHookInjection:
         config_dir = tmp_path / ".config" / "nexus"
         config_dir.mkdir(parents=True)
         (config_dir / "context_l1.txt").write_text(
-            "## Knowledge Map\n\ncode: Global Topic (99)\n"
+            "## Knowledge Map\n\ncode: Global Topic (99)\n", encoding="utf-8"
         )
 
         # A real repo (git-common-dir must resolve for the hook to look for
@@ -580,7 +580,7 @@ class TestRefreshContextL1:
 
         result = refresh_context_l1(db_path=db_path, output_path=out)
         assert result == out
-        assert "Refresh Test" in out.read_text()
+        assert "Refresh Test" in out.read_text(encoding="utf-8")
 
 
 class TestServiceModeL1(object):
@@ -610,7 +610,7 @@ class TestServiceModeL1(object):
         ])
         out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
         assert out is not None
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         assert "Routing" in text and "Guides" in text
         assert fake.calls == [None]
 
@@ -630,7 +630,7 @@ class TestServiceModeL1(object):
             for i in range(1, 8)  # ascending — wrong order on the wire
         ])
         out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         assert "T7" in text  # highest doc_count survives the top-5 cut
         assert "T1" not in text and "T2" not in text  # lowest two cut
 
@@ -662,7 +662,7 @@ class TestServiceModeL1(object):
         ])
         out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
         assert out is not None
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         assert "rgcache:" in text
         assert "quarantine-docs__x:" in text
         assert "Bare Name Topic" in text

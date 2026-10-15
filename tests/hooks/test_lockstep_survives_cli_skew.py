@@ -38,7 +38,7 @@ _PLUGIN_LOCAL = {"_interpreter", "_exec_path", "_endpoint_resolve", "_cli_lookup
 
 
 def _session_start_entries() -> list[dict]:
-    hooks = json.loads((_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
+    hooks = json.loads((_ROOT / "conexus" / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     return [
         entry
         for group in hooks["hooks"].get("SessionStart", [])
@@ -83,7 +83,7 @@ def test_lockstep_is_a_plugin_script_not_an_nx_hook_verb() -> None:
 def test_lockstep_chain_imports_only_stdlib_at_module_scope() -> None:
     allowed = set(sys.stdlib_module_names) | _PLUGIN_LOCAL | {"__future__"}
     for name in _CHAIN:
-        tree = ast.parse((_SCRIPTS / name).read_text())
+        tree = ast.parse((_SCRIPTS / name).read_text(encoding="utf-8"))
         found: set[str] = set()
         for node in tree.body:
             for sub in ast.walk(node) if isinstance(node, (ast.Try, ast.If)) else [node]:

@@ -92,7 +92,7 @@ _MIN_NX_HOOK_ENTRIES = 9
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """``(mcp_tool names, nx-hook verbs)``, each with its event."""
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     events = data.get("hooks", data)
     tools: list[tuple[str, str]] = []
     verbs: list[tuple[str, str]] = []
@@ -159,7 +159,7 @@ README = REPO_ROOT / "conexus" / "README.md"
 def _readme_handler_cells() -> list[str]:
     """The Handler column of every row in the README's hook table."""
     cells = []
-    for line in README.read_text().splitlines():
+    for line in README.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| `"):
             continue
         # Split on unescaped pipes only. An Event cell can legitimately
@@ -178,7 +178,7 @@ def _readme_handler_cells() -> list[str]:
 
 def _declared_handlers() -> list[tuple[str, str]]:
     """``(event, handler)`` for every hooks.json entry, in its own spelling."""
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     out = []
     for event, entries in data.get("hooks", data).items():
         for entry in entries:
