@@ -22,18 +22,24 @@ C  legacy       a ``uv tool install conexus`` tree whose Python is pruned: the s
 The hook entries and the server entries are the files' own, ``${CLAUDE_PLUGIN_ROOT}`` replaced,
 started as Claude Code starts them. The client is the MCP SDK's.
 
-NO NETWORK. The journey sets ``UV_OFFLINE`` and points every proxy variable at a local listener that
-refuses and records; it fails if the listener saw one request. What it needs comes from the seed
-(``--seed-dir``): a ``uv`` cache that holds every package, the engine, the PostgreSQL bundle and
-the two models. ``--online`` is the seed run: the same journeys, the network on, the seed filled.
-It is the only run that fetches anything. A missing seed is a failure, never a skip.
+NO NETWORK, by a cut the kernel enforces or sees. The journey sets ``UV_OFFLINE`` and points every proxy
+variable at a local listener that refuses and records (the first witness, which sees only clients that honour
+proxy variables), and the wrapper runs this driver under a second one that sees every ``connect``: on Linux
+``strace -f -e trace=connect`` (this file's ``--check-trace`` fails the run on any address that is not
+loopback, a unix socket or netlink, and on a trace with no connect at all), on macOS ``sandbox-exec`` with
+outbound network denied except localhost. A host with neither tool FAILS the run; it is never skipped. Both
+witnesses have a positive control in the wrapper (``--witness-control``: a connect to 192.0.2.1 must be seen
+or refused) before the journey starts. What the journey needs comes from the seed (``--seed-dir``): a ``uv``
+cache that holds every package, the engine, the PostgreSQL bundle and the two models, and the seed must be the
+one this tree asks for (``seed_problem`` compares its tree and engine version). ``--online`` is the seed run:
+the same journeys, the network on, the seed filled. It is the only run that fetches anything. A missing or
+stale seed is a failure, never a skip.
 
-The one request tolerated is ``nx doctor``'s refused best-effort PyPI version probe (``TOLERATED_REQUESTS``),
-which the last step of ``setup`` makes and which reports "PyPI check skipped" when refused. Any other
-request fails the journey.
-
-A limit worth stating: the listener sees only clients that honour proxy variables. ``uv`` is also
-told it is offline. The engine and PostgreSQL are local processes and fetch nothing.
+The one request tolerated at the proxy is ``nx doctor``'s refused best-effort PyPI version probe
+(``TOLERATED_REQUESTS``), at most one per ``nx doctor`` run (a ``setup`` that ends done runs one). It reports
+"PyPI check skipped" when refused. Any other request, or a second request from one run, fails the journey.
+The kernel witness has no such tolerance: the probe honours the proxy variable, so it only ever connects to
+the listener on loopback.
 
 Lockstep, asserted in all three journeys (found while building this; fixed in 02105d81b): after each
 ``setup`` that ends done, the config directory's ``cli_lockstep_marker`` holds the plugin's version; no
@@ -49,17 +55,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import hashlib
+import csv
 import http.server
+import io
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -75,6 +85,9 @@ _FAILED_HEADS = (
     "Setup cannot run on this host.",
     "The last setup run was interrupted.",
 )
+
+#: The file in the setup directory that records "not now" (``nx_setup._MARKER``).
+NOT_NOW_MARKER = "not-now"
 
 #: Said by the stand-in (``nx_standin.py``) and the session-start hook (``nx_setup_notice.py``).
 BROKEN_PHRASE = "Nexus is installed but cannot start; setup repairs it"
@@ -150,12 +163,16 @@ def setup_outcome(text: str) -> str | None:
     return None
 
 
-def run_has_ended(record: dict[str, Any] | None, mode: str, previous_pid: Any) -> str | None:
-    """The terminal state in a ``status.json`` record that belongs to the run just started
-    (this mode, and not the previous run's process), else ``None``."""
+def run_has_ended(record: dict[str, Any] | None, mode: str, previous_started: Any) -> str | None:
+    """The terminal state in a ``status.json`` record that belongs to the run just started, else ``None``.
+
+    "The run just started" is this mode and a ``started_at`` other than the previous record's: ``start``
+    writes a new record, with a new ``started_at``, before it returns, so a record still carrying the previous
+    run's ``started_at`` is that run's, whatever state it holds. (An earlier guard compared a ``pid`` that the
+    record does not carry until the detached process's first update; it could never fire.)"""
     if not record or record.get("mode") != mode:
         return None
-    if previous_pid is not None and record.get("pid") == previous_pid:
+    if previous_started is not None and record.get("started_at") == previous_started:
         return None
     state = record.get("state")
     return state if state in ("done", "doctor-failed", "failed", "unsupported") else None
@@ -478,6 +495,24 @@ def check_no_lockstep_nudge(box: Sandbox, results: list[HookResult]) -> None:
         expect(LOCKSTEP_NUDGE not in r.stdout, f"{box.name}: {r.entry.name} told the model the CLI is {LOCKSTEP_NUDGE}: {r.stdout[:300]!r}")
 
 
+def check_lockstep_hook_is_silent(box: Sandbox, results: list[HookResult]) -> None:
+    """The lockstep hook printed nothing. It dispatches its detached upgrade action and prints the nudge in the
+    same branch, so an empty standard output means no action was dispatched, and it is read from the hook's own
+    run, with no race against the action. (The marker and ``lockstep.log`` are not read here: the action writes
+    them after the hook returns.)"""
+    hook = [r for r in results if any(a.endswith("version_lockstep_hook.py") for a in r.entry.args)]
+    expect(len(hook) == 1, f"{box.name}: hooks.json has {len(hook)} version_lockstep_hook.py SessionStart entries, the journey expected one")
+    expect(not hook[0].stdout.strip(), f"{box.name}: the lockstep hook spoke, so it dispatched an upgrade: {hook[0].stdout[:300]!r}")
+
+
+def check_no_lockstep_action_ran(box: Sandbox) -> None:
+    """Read at the end of a journey, minutes after the state-2 session start and a whole build later, so a
+    detached action that session start had dispatched has long had its chance to write ``lockstep.log``."""
+    log = box.config / "lockstep.log"
+    if log.exists():
+        fail(f"{box.name}: {log} exists, so a detached lockstep action ran: {log.read_text(errors='replace')[:300]!r}")
+
+
 def session_start_after_setup(box: Sandbox) -> str | None:
     """A full session start with a CLI that starts, the CLI's own hooks included: every entry exits 0
     inside its timeout and none says the CLI is out of lockstep. Returns the setup hook's text."""
@@ -542,7 +577,7 @@ async def _follow(box: Sandbox, mode: str, args: dict[str, Any], budget_s: float
     """The way a model uses the stand-in: ONE connection, ``setup``, then ``setup_status`` until the run ends.
     The connection stays the stand-in for its whole life, however the machine changes under it."""
     previous = box.status_record()
-    previous_pid = previous.get("pid") if previous else None
+    previous_started = previous.get("started_at") if previous else None
     async with _session(box, "nexus") as (session, conn):
         expect(conn.server_name == stand_in, f"{box.name}: expected the stand-in {stand_in!r} to take the call, got {conn.server_name!r}")
         started = await _call(box, session, "nexus", "setup", args, 120)
@@ -553,10 +588,11 @@ async def _follow(box: Sandbox, mode: str, args: dict[str, Any], budget_s: float
         while time.monotonic() < deadline:
             await asyncio.sleep(10)
             last = await _call(box, session, "nexus", "setup_status", {}, 120)
-            ended = run_has_ended(box.status_record(), mode, previous_pid)
+            ended = run_has_ended(box.status_record(), mode, previous_started)
             if ended is None:
                 continue
             if ended == "done" and setup_outcome(last) == "done":
+                DOCTOR_RUNS.append(box.name)  # a run that ends done ran nx doctor as its last step
                 return last
             fail(f"{box.name}: setup mode {mode} ended {ended}.\n--- setup_status said:\n{last[:800]}\n--- end of setup.log:\n{box.setup_log_tail()}")
     fail(f"{box.name}: setup mode {mode} did not end within {budget_s:.0f} s. Last answer:\n{last[:600]}\n--- end of setup.log:\n{box.setup_log_tail()}")
@@ -588,31 +624,179 @@ def precondition_no_cli(box: Sandbox) -> None:
 #: The one request the journey tolerates, refused: ``nx doctor`` (the last step of ``setup``) asks
 #: pypi.org for the newest version of conexus (``nexus.health._check_cli_version``), a best-effort probe
 #: with a 3 second timeout that reports "PyPI check skipped" when refused. Nothing is fetched or needed
-#: from it. Anything else the listener sees fails the journey.
+#: from it. Anything else the listener sees fails the journey, and so does a second request from one run.
 TOLERATED_REQUESTS = frozenset({"CONNECT pypi.org:443"})
 TOLERATED_EVIDENCE = "PyPI check skipped"
+#: The ``nx doctor`` runs so far: one per ``setup`` that ended done (the box's name, once per run).
+DOCTOR_RUNS: list[str] = []
 
 
 def unexpected_requests(seen: list[str]) -> list[str]:
     return [request for request in seen if request not in TOLERATED_REQUESTS]
 
 
+def proxy_problems(seen: list[str], doctor_runs: int) -> list[str]:
+    """What the refusing listener saw that the journey does not tolerate: any request but the doctor's probe,
+    and more probes than there were ``nx doctor`` runs (one each at most)."""
+    problems = unexpected_requests(seen)
+    probes = [request for request in seen if request in TOLERATED_REQUESTS]
+    if len(probes) > doctor_runs:
+        problems.append(f"{len(probes)} PyPI probes for {doctor_runs} nx doctor run(s): at most one per run is tolerated")
+    return problems
+
+
 def no_network_so_far(proxy: RefusingProxy | None) -> None:
     if proxy is not None:
-        expect(not unexpected_requests(proxy.seen), f"the journey tried to reach the network: {unexpected_requests(proxy.seen)[:10]}")
+        problems = proxy_problems(proxy.seen, len(DOCTOR_RUNS))
+        expect(not problems, f"the journey tried to reach the network: {problems[:10]}")
 
 
-def tree_wheel_is_installed(generation: Path) -> None:
-    """The generation was built from THIS tree's wheel, not a published one of the same version."""
-    mine = (REPO / "src" / "nexus" / "engine_version.py").read_bytes()
-    py = generation / "bin" / "python"
-    done = subprocess.run(  # noqa: S603 -- the generation's own interpreter
-        [str(py), "-I", "-c", "import nexus.engine_version as m, sys; sys.stdout.buffer.write(open(m.__file__,'rb').read())"],
-        capture_output=True, timeout=60, check=False,
-    )
-    expect(done.returncode == 0, f"cannot import nexus from {generation}: {done.stderr[:200]!r}")
-    expect(hashlib.sha256(done.stdout).digest() == hashlib.sha256(mine).digest(),
-           f"{generation.name} holds a nexus that is not this tree's (a published wheel of the same version?)")
+# -- the kernel-level witness ------------------------------------------------------------------
+
+#: Address families a connect may name without leaving the machine.
+_LOCAL_FAMILIES = frozenset({"AF_UNIX", "AF_LOCAL", "AF_NETLINK", "AF_UNSPEC"})
+_CONNECT_LINE = re.compile(r"\bconnect\(\s*\d+,\s*(?P<rest>.*)")
+_FAMILY = re.compile(r"sa_family=(AF_\w+)")
+_V4_ADDR = re.compile(r'sin_addr=inet_addr\("([^"]*)"\)')
+_V6_ADDR = re.compile(r'inet_pton\(AF_INET6, "([^"]*)"')
+
+
+#: The one non-local address the trace tolerates, and how often: the engine (``nexus-service``, which carries the
+#: AWS instance-metadata URL ``http://169.254.169.254/latest/api/token``) dials it on port 80 four times at start,
+#: on a host that is no cloud instance. A link-local address is not routed off the host, so nothing leaves the
+#: machine, and nothing is fetched or needed from it. Found by this witness on chas (2026-10-15); a bead owns the
+#: engine's side of it. A fifth connect, another port or another link-local address is foreign.
+LINK_LOCAL_PROBE = ("169.254.169.254", 80)
+LINK_LOCAL_PROBE_LIMIT = 4
+_PORT = re.compile(r"sin_port=htons\((\d+)\)")
+
+
+def _is_local(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_unspecified
+
+
+def trace_summary(trace: str) -> tuple[int, list[str], int]:
+    """``(connects, foreign, tolerated)`` of an ``strace -f -e trace=connect`` trace: how many ``connect`` calls it
+    holds, the lines among them that do not stay on the machine, and how many were the engine's link-local probe
+    (:data:`LINK_LOCAL_PROBE`, up to its limit; the rest are foreign). A connect whose address cannot be read is
+    foreign (the check fails closed); a family that is not local, IPv4 or IPv6 is foreign."""
+    connects = 0
+    tolerated = 0
+    foreign: list[str] = []
+    for line in trace.splitlines():
+        match = _CONNECT_LINE.search(line)
+        if match is None:
+            continue
+        connects += 1
+        rest = match.group("rest")
+        family = _FAMILY.search(rest)
+        if family is None:
+            foreign.append(line.strip()[:240])
+            continue
+        name = family.group(1)
+        if name in _LOCAL_FAMILIES:
+            continue
+        address = _V4_ADDR.search(rest) if name == "AF_INET" else _V6_ADDR.search(rest) if name == "AF_INET6" else None
+        if address is not None and _is_local(address.group(1)):
+            continue
+        port = _PORT.search(rest)
+        if (name == "AF_INET" and address is not None and port is not None
+                and (address.group(1), int(port.group(1))) == LINK_LOCAL_PROBE and tolerated < LINK_LOCAL_PROBE_LIMIT):
+            tolerated += 1
+            continue
+        foreign.append(line.strip()[:240])
+    return connects, foreign, tolerated
+
+
+def check_trace_command(path: Path) -> int:
+    """``--check-trace FILE``: exit 1 on any foreign connect, and on a trace with no connect at all (a witness
+    that saw nothing proves nothing). Prints ``connects=N foreign=M tolerated=T`` then the foreign lines."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"connects=0 foreign=0 tolerated=0\ncannot read the trace {path}: {exc}")  # noqa: T201 -- the harness's own output
+        return 1
+    connects, foreign, tolerated = trace_summary(text)
+    print(f"connects={connects} foreign={len(foreign)} tolerated={tolerated}")  # noqa: T201 -- the harness's own output
+    for line in foreign:
+        print(line)  # noqa: T201 -- the harness's own output
+    if connects == 0:
+        print("the trace holds no connect call at all: the witness saw nothing")  # noqa: T201 -- the harness's own output
+        return 1
+    return 1 if foreign else 0
+
+
+def witness_control() -> int:
+    """``--witness-control``: what the wrapper runs under the witness before the journey, to prove it works.
+    One connect to 192.0.2.1 (TEST-NET-1, routed nowhere) and one to a loopback listener of its own. Prints
+    ``ext=<errno> loop=<errno>``: under strace the trace must flag the first and not the second; under the
+    macOS sandbox the first must be refused (EPERM, 1) and the second succeed (0)."""
+    outside = socket.socket()
+    outside.settimeout(0.5)
+    ext = outside.connect_ex(("192.0.2.1", 9))
+    outside.close()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    inside = socket.socket()
+    loop = inside.connect_ex(("127.0.0.1", listener.getsockname()[1]))
+    inside.close()
+    listener.close()
+    print(f"ext={ext} loop={loop}")  # noqa: T201 -- the harness's own output
+    return 0
+
+
+# -- this tree's wheel, proved by its RECORD ---------------------------------------------------
+
+
+def parse_record(text: str) -> dict[str, str]:
+    """``{path: hash}`` of a wheel ``RECORD``, for the entries that carry a hash (not ``RECORD`` itself)."""
+    return {row[0]: row[1] for row in csv.reader(io.StringIO(text)) if len(row) >= 2 and row[1]}
+
+
+def record_mismatches(wheel: dict[str, str], installed: dict[str, str]) -> list[str]:
+    """Every file the built wheel lists that the installed ``RECORD`` does not hold with the same hash."""
+    problems = []
+    for path, digest in sorted(wheel.items()):
+        if ".data/" in path:  # scripts land elsewhere and are rewritten
+            continue
+        have = installed.get(path)
+        if have is None:
+            problems.append(f"{path}: not installed")
+        elif have != digest:
+            problems.append(f"{path}: hash differs")
+    return problems
+
+
+def built_wheel_record(wheels: Path) -> dict[str, str]:
+    built = sorted(wheels.glob("conexus-*.whl"))
+    expect(len(built) == 1, f"expected one conexus wheel under {wheels}, found {[w.name for w in built]}")
+    with zipfile.ZipFile(built[0]) as archive:
+        names = [n for n in archive.namelist() if n.endswith(".dist-info/RECORD")]
+        expect(len(names) == 1, f"{built[0].name} holds {len(names)} RECORD files")
+        return parse_record(archive.read(names[0]).decode("utf-8"))
+
+
+def installed_record(generation: Path) -> dict[str, str]:
+    found = sorted(generation.glob("lib/python3*/site-packages/conexus-*.dist-info/RECORD"))
+    expect(len(found) == 1, f"expected one conexus dist-info RECORD in {generation.name}, found {[str(f) for f in found]}")
+    return parse_record(found[0].read_text(encoding="utf-8"))
+
+
+def tree_wheel_is_installed(box: Sandbox, generation: Path) -> None:
+    """The generation holds THIS tree's wheel, not a published one of the same version: every file the wheel
+    the wrapper built lists is in the generation's own ``RECORD`` with the same hash, so one differing
+    file, in a module this tree changed, fails it (a version number or one release-stable file would not)."""
+    wheel = built_wheel_record(box.wheels)
+    expect(len(wheel) > 20, f"the built wheel's RECORD lists only {len(wheel)} hashed files")
+    problems = record_mismatches(wheel, installed_record(generation))
+    expect(not problems, f"{generation.name} does not hold this tree's wheel ({len(problems)} of {len(wheel)} files): {problems[:6]}")
 
 
 def journey_a_local(box: Sandbox, proxy: RefusingProxy | None, *, seed: Path, online: bool) -> None:
@@ -643,7 +827,7 @@ def journey_a_local(box: Sandbox, proxy: RefusingProxy | None, *, seed: Path, on
         gens = generations(box.tools)
         expect(len(gens) == 1, f"A: expected one generation, found {[g.name for g in gens]}")
         expect(box.current() == gens[0] or (box.current() and box.current().resolve() == gens[0].resolve()), "A: current does not name the generation")  # type: ignore[union-attr]
-        tree_wheel_is_installed(gens[0])
+        tree_wheel_is_installed(box, gens[0])
         units = [p for base in (box.home / ".config" / "systemd" / "user", box.home / "Library" / "LaunchAgents")
                  if base.is_dir() for p in base.iterdir() if "nexus" in p.name.lower()]
         expect(not units, f"A: a login unit was registered although autostart was false: {units}")
@@ -677,8 +861,7 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         text = notice_text(results)
         expect(text is not None and BROKEN_PHRASE in text, f"B: state 2 text missing: {text!r}")
         check_no_lockstep_nudge(box, results)
-        expect(not box.lockstep_marker.exists() and not (box.config / "lockstep.log").exists(),
-               "B: the state-2 session start wrote a lockstep marker or log, so an upgrade was dispatched")
+        check_lockstep_hook_is_silent(box, results)  # the marker is gone (B1): the hook meets a skewed install and dispatches nothing
     with Step("B3 the stand-in says installed but cannot start; setup_status keeps the offer over the old done"):
         conn, answers = talk(box, "nexus", [("setup_status", {})])
         expect(conn.server_name == "nexus-installed-cannot-start", f"B: server name {conn.server_name!r}")
@@ -692,7 +875,7 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         expect(len(new) == 1, f"B: expected one new generation beside {sorted(before)}, found {[g.name for g in after]}")
         expect(old.is_dir(), "B: the pruned generation was removed instead of left beside the new one")
         expect(Path(os.path.realpath(box.current())) == new[0].resolve(), "B: current does not name the new generation")  # type: ignore[arg-type]
-        tree_wheel_is_installed(new[0])
+        tree_wheel_is_installed(box, new[0])
         check_lockstep_marker(box)
         no_network_so_far(proxy)
     with Step("B5 reconnect: the real server answers"):
@@ -704,6 +887,15 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         text = session_start_after_setup(box)
         expect(text is not None and "the user chose to leave it so" in text, f"B: expected the quiet service-down line, got {text!r}")
         expect("ASK THE USER FIRST" not in text, "B: the quiet line asks")  # type: ignore[operator]
+    with Step("B7 setup mode not-now through the REAL server: the launcher's NX_SETUP_SCRIPT handoff makes the marker appear"):
+        marker = box.config / "setup" / NOT_NOW_MARKER
+        expect(not marker.exists(), f"B: the not-now marker exists before the call, so its appearance would prove nothing: {marker}")
+        conn, answers = talk(box, "nexus", [("setup", {"mode": "not-now"})])
+        expect(not stand_in_claim(conn.server_name) and REAL_TOOL_NAMES <= conn.tools, f"B: server {conn.server_name!r} is not the real one")
+        expect(marker.is_file(), f"B: setup mode not-now through the real server left no marker at {marker}: the real server did not "
+                                 f"start the setup script (NX_SETUP_SCRIPT not handed over?). It said: {answers[0][:300]!r}")
+        expect("not started by the conexus plugin's launcher" not in answers[0], f"B: the real server says it has no setup script: {answers[0][:300]!r}")
+        check_no_lockstep_action_ran(box)
 
 
 def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
@@ -724,14 +916,14 @@ def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
         text = notice_text(results)
         expect(text is not None and BROKEN_PHRASE in text, f"C: state 2 text missing: {text!r}")
         check_no_lockstep_nudge(box, results)
-        expect(not box.lockstep_marker.exists(), "C: the state-2 session start wrote a lockstep marker, so an upgrade was dispatched")
+        check_lockstep_hook_is_silent(box, results)  # no marker yet, a CLI that cannot start: the hook dispatches nothing
         conn, _ = talk(box, "nexus")
         expect(conn.server_name == "nexus-installed-cannot-start" and BROKEN_PHRASE in conn.instructions, f"C: stand-in {conn.server_name!r}")
     with Step("C4 setup mode cli-only: the build runs and makes a generation (the legacy tree is not a complete install)"):
         follow_setup(box, "cli-only", autostart=False, budget_s=1800, stand_in="nexus-installed-cannot-start")
         gens = generations(box.tools)
         expect(len(gens) == 1, f"C: expected one generation, found {[g.name for g in gens]}")
-        tree_wheel_is_installed(gens[0])
+        tree_wheel_is_installed(box, gens[0])
         check_lockstep_marker(box)
         no_network_so_far(proxy)
     with Step("C5 reconnect: the generation's server answers (the layout is searched before PATH)"):
@@ -742,6 +934,7 @@ def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
     with Step("C6 a full session start after a cli-only run with no service: one quiet line (state 8 with the choice recorded)"):
         text = session_start_after_setup(box)
         expect(text is not None and "no Nexus service is set up, as the user chose" in text, f"C: expected the quiet no-service line, got {text!r}")
+        check_no_lockstep_action_ran(box)
 
 
 # -- seed --------------------------------------------------------------------------------------
@@ -749,8 +942,19 @@ def journey_c_legacy_tree(box: Sandbox, proxy: RefusingProxy | None) -> None:
 SEED_MARK = "seed.json"
 
 
-def seed_problem(seed: Path) -> str | None:
-    """Why *seed* cannot serve an offline run, or ``None``."""
+def tree_engine_version() -> str:
+    """The engine this tree pins, ``X.Y.Z``, read from ``src/nexus/engine_version.py`` (this driver runs in a venv
+    that has no ``nexus``, so it reads the file)."""
+    text = (REPO / "src" / "nexus" / "engine_version.py").read_text(encoding="utf-8")
+    found = re.search(r"^REQUIRED_ENGINE_VERSION\b[^=\n]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", text, re.MULTILINE)
+    expect(found is not None, "src/nexus/engine_version.py has no REQUIRED_ENGINE_VERSION = (X, Y, Z) line the journey can read")
+    return ".".join(found.groups())  # type: ignore[union-attr]
+
+
+def seed_problem(seed: Path, *, tree_version: str | None = None, engine_version: str | None = None) -> str | None:
+    """Why *seed* cannot serve an offline run of THIS tree, or ``None``: a missing piece, or a seed made for
+    another tree or another engine (its ``seed.json`` and the engine's own ``.meta.json`` are compared with the
+    tree's version and ``REQUIRED_ENGINE_VERSION``)."""
     needed = {
         "the uv cache": seed / "uvcache" / "CACHEDIR.TAG",
         "the engine": seed / "service" / ("nexus-service.exe" if os.name == "nt" else "nexus-service"),
@@ -762,7 +966,31 @@ def seed_problem(seed: Path) -> str | None:
     models = seed / "models"
     if not (models / "bge-base-en-v1.5" / "onnx").is_dir() or not (models / "ms-marco-minilm-l6-v2" / "onnx").is_dir():
         missing.append("the two models")
-    return None if not missing else f"the seed at {seed} lacks {', '.join(missing)}; run the wrapper with --seed once, with a network"
+    if missing:
+        return f"the seed at {seed} lacks {', '.join(missing)}; run the wrapper with --seed once, with a network"
+    tree = tree_version if tree_version is not None else plugin_version()
+    engine = engine_version if engine_version is not None else tree_engine_version()
+    try:
+        record = json.loads((seed / SEED_MARK).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return f"the seed record {seed / SEED_MARK} cannot be read ({exc}); run the wrapper with --seed"
+    stale = []
+    if record.get("tree_version") != tree:
+        stale.append(f"it was made for conexus {record.get('tree_version')!r}, this tree is {tree!r}")
+    if record.get("engine_version") != engine:
+        stale.append(f"its record names engine {record.get('engine_version')!r}, this tree pins {engine!r}")
+    held = _seeded_engine(seed)
+    if held != engine:
+        stale.append(f"the engine it holds is {held!r}, this tree pins {engine!r}")
+    return f"the seed at {seed} is stale: {'; '.join(stale)}; run the wrapper with --seed once, with a network" if stale else None
+
+
+def _seeded_engine(seed: Path) -> str | None:
+    """The engine version the seed's own copy of the engine says it is (``nexus-service.meta.json``)."""
+    try:
+        return json.loads((seed / "service" / "nexus-service.meta.json").read_text(encoding="utf-8")).get("version")
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def place_service_files(box: Sandbox, seed: Path) -> None:
@@ -783,7 +1011,8 @@ def harvest(box: Sandbox, seed: Path) -> None:
             shutil.copy2(item, seed / "service" / item.name)
     shutil.copytree(box.home / ".cache" / "nexus" / "onnx_models", seed / "models")
     record = {
-        "tree_version": json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
+        "tree_version": plugin_version(),
+        "engine_version": _seeded_engine(seed),
         "seeded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "service_files": sorted(p.name for p in (seed / "service").iterdir()),
     }
@@ -795,6 +1024,10 @@ def harvest(box: Sandbox, seed: Path) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--check-trace"] and len(argv) == 2:
+        return check_trace_command(Path(argv[1]))
+    if argv == ["--witness-control"]:
+        return witness_control()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--seed-dir", required=True, type=Path)
     ap.add_argument("--work", required=True, type=Path)
@@ -844,13 +1077,14 @@ def main(argv: list[str]) -> int:
             if "C" in args.only:
                 journey_c_legacy_tree(new_box("c-legacy"), proxy)
             if proxy is not None:
-                stray = unexpected_requests(proxy.seen)
+                stray = proxy_problems(proxy.seen, len(DOCTOR_RUNS))
                 expect(not stray, f"the network was asked for {len(stray)} request(s): {stray[:10]}")
                 if proxy.seen:
-                    logs = " ".join(box.setup_log_tail(400) for box in boxes)
+                    logs = " ".join(box.setup_log_tail(100000) for box in boxes)
                     expect(TOLERATED_EVIDENCE in logs,
                            f"the listener saw {proxy.seen[:5]} and no setup.log shows nx doctor skipping its PyPI check")
-                say(f"   the refusing proxy saw {len(proxy.seen)} request(s), all the tolerated doctor probe: {sorted(set(proxy.seen))}")
+                say(f"   the refusing proxy saw {len(proxy.seen)} request(s) for {len(DOCTOR_RUNS)} nx doctor run(s), "
+                    f"all the tolerated probe: {sorted(set(proxy.seen))}")
         outcome = 0
     except JourneyFailure as exc:
         say(f"SETUP JOURNEY FAILED: {exc}")

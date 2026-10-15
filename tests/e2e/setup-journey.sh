@@ -24,9 +24,19 @@
 # bge-768 model (GitHub releases) and the cross-encoder (huggingface.co). A run without a complete seed
 # FAILS; it does not skip.
 #
-# The offline run sets UV_OFFLINE, a uv that cannot build without the cache, UV_PYTHON_DOWNLOADS=never
-# (it needs a Python 3.12 on the host), and points every proxy variable at a local listener that
-# refuses and records; the journey fails if the listener saw a request.
+# The offline run is a cut the kernel enforces or sees, not a hope. It sets UV_OFFLINE, a uv that cannot
+# build without the cache, UV_PYTHON_DOWNLOADS=never (it needs a Python 3.12 on the host), points every proxy
+# variable at a local listener that refuses and records, and runs the driver under a witness that sees every
+# connect():
+#   Linux   strace -f -e trace=connect; the run fails on any connect to an address that is not loopback, a
+#           unix socket or netlink. Needs strace (apt install strace; or a copy on PATH: a ptrace that the
+#           host's Yama setting allows for a process's own children is enough).
+#   macOS   sandbox-exec with outbound network denied except localhost and unix sockets.
+# A host without the tool, or where the tool cannot do its job (checked first with a connect to 192.0.2.1 that
+# the witness must flag or refuse), FAILS the run. Nothing is skipped. The proxy tolerates one request, the
+# PyPI probe nx doctor makes at the end of each setup run, at most once per run. The strace check tolerates one
+# link-local address, 169.254.169.254:80, four times: the engine's AWS metadata probe at start (setup_journey.py
+# LINK_LOCAL_PROBE; not routed off the host). Any other address, or a fifth probe, fails.
 #
 # Exit 0 and the last line "SETUP JOURNEY PASSED" is the pass.
 set -euo pipefail
@@ -96,9 +106,62 @@ ARGS=(--seed-dir "$SEED" --work "$WORK/boxes" --uv "$UV" --uv-python-dir "$UV_PY
 [ "$ONLINE" = 1 ] && ARGS+=(--online)
 [ "$KEEP" = 1 ] && ARGS+=(--keep)
 
-if env -i HOME="$BUILD_HOME" PATH="/usr/bin:/bin" TMPDIR="$WORK" NX_NO_TELEMETRY=1 PYTHONUNBUFFERED=1 \
-    "$WORK/client/bin/python" -I "$REPO_ROOT/tests/e2e/lib/setup_journey.py" "${ARGS[@]}"; then
+DRIVER="$REPO_ROOT/tests/e2e/lib/setup_journey.py"
+# One sandbox-free interpreter invocation, shared by the driver, the witness control and the trace check.
+_py() {
+    env -i HOME="$BUILD_HOME" PATH="/usr/bin:/bin" TMPDIR="$WORK" NX_NO_TELEMETRY=1 PYTHONUNBUFFERED=1 \
+        "$WORK/client/bin/python" -I "$DRIVER" "$@"
+}
+
+# -- the network witness (offline runs only): a kernel-level sight or cut, proved on a known connect first.
+WITNESS=none
+WITNESS_PREFIX=()
+TRACE="$WORK/connect.trace"
+if [ "$ONLINE" = 0 ]; then
+    case "$(uname -s)" in
+        Linux)
+            STRACE="$(command -v strace)" || _fail "strace is not installed on this host, and the offline journey needs it to see every connect (apt install strace, or put one on PATH). The journey does not skip the check."
+            STRACE_ARGS=(-f -e trace=connect -s 256)
+            strace_help="$("$STRACE" -h 2>&1)"
+            case "$strace_help" in *--seccomp-bpf*) STRACE_ARGS+=(--seccomp-bpf) ;; esac
+            "$STRACE" "${STRACE_ARGS[@]}" -o "$WORK/control.trace" \
+                env -i PATH="/usr/bin:/bin" "$WORK/client/bin/python" -I "$DRIVER" --witness-control >"$WORK/control.out" 2>&1 \
+                || _fail "strace could not trace a child process on this host ($(tr '\n' ' ' <"$WORK/control.out" | cut -c1-200)); the offline journey needs it (ptrace denied?)"
+            control="$(_py --check-trace "$WORK/control.trace")" && _fail "the witness control: strace did not flag a connect to 192.0.2.1, so it cannot see an outside connect here"
+            case "$control" in
+                *"foreign=1"*192.0.2.1*) ;;
+                *) _fail "the witness control did not flag exactly one foreign connect (192.0.2.1), the loopback one passing: $(echo "$control" | tr '\n' ' ' | cut -c1-300)" ;;
+            esac
+            WITNESS=strace
+            WITNESS_PREFIX=("$STRACE" "${STRACE_ARGS[@]}" -o "$TRACE")
+            ;;
+        Darwin)
+            [ -x /usr/bin/sandbox-exec ] || _fail "/usr/bin/sandbox-exec is not on this host, and the offline journey needs it to cut the network. The journey does not skip the check."
+            SB_PROFILE='(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (remote unix-socket))'
+            control="$(/usr/bin/sandbox-exec -p "$SB_PROFILE" env -i PATH="/usr/bin:/bin" "$WORK/client/bin/python" -I "$DRIVER" --witness-control 2>&1)" \
+                || _fail "sandbox-exec could not run the witness control: $(echo "$control" | tr '\n' ' ' | cut -c1-200)"
+            case "$control" in
+                "ext=1 loop=0") ;;
+                *) _fail "the sandbox did not cut an outside connect (wanted 'ext=1 loop=0' = EPERM, then loopback ok; got '$control')" ;;
+            esac
+            WITNESS=sandbox-exec
+            WITNESS_PREFIX=(/usr/bin/sandbox-exec -p "$SB_PROFILE")
+            ;;
+        *) _fail "no network witness for $(uname -s): the offline journey cannot prove it ran with no network. The journey does not skip the check." ;;
+    esac
+    echo "== network witness: $WITNESS (control passed)"
+fi
+
+if ${WITNESS_PREFIX[@]+"${WITNESS_PREFIX[@]}"} env -i HOME="$BUILD_HOME" PATH="/usr/bin:/bin" TMPDIR="$WORK" NX_NO_TELEMETRY=1 PYTHONUNBUFFERED=1 \
+    "$WORK/client/bin/python" -I "$DRIVER" "${ARGS[@]}"; then
+    if [ "$WITNESS" = strace ]; then
+        summary="$(_py --check-trace "$TRACE")" || { echo "$summary" >&2; _fail "the journey connected to an address outside this machine (above), or the trace is empty"; }
+        echo "== network witness: strace ${summary%%$'\n'*}: every connect was loopback, a unix socket or netlink, bar the tolerated engine probe"
+    elif [ "$WITNESS" = sandbox-exec ]; then
+        echo "== network witness: sandbox-exec refused every non-local connect; the journey ran to the end"
+    fi
     DONE=1
+    echo "SETUP JOURNEY PASSED (final: witness $WITNESS)"
 else
     exit 1
 fi
