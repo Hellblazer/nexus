@@ -408,7 +408,8 @@ _SAC_GUIDE = (
 
 
 def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[HealthResult]:
-    """The Windows Smart App Control row (nexus-f9bgu.57). No row off Windows.
+    """The Windows Smart App Control row (nexus-f9bgu.57). No row off Windows,
+    and none on a Windows that has no Smart App Control (no policy value).
 
     On blocks the unsigned PostgreSQL bundle and the unsigned Python that uv
     installs, so a local install cannot work: a failure in local mode. In cloud
@@ -420,7 +421,7 @@ def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[H
 
     current = state if state is not None else sac.state()
     label = "Smart App Control"
-    if current == sac.NOT_WINDOWS:
+    if current in (sac.NOT_WINDOWS, sac.ABSENT):
         return []
     if current == sac.OFF:
         return [HealthResult(label=label, ok=True, detail="off")]

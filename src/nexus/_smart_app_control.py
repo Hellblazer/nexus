@@ -6,7 +6,8 @@ and the unsigned Python that uv installs, so the local stack cannot be set up
 (T2 ``nexus_rdr/224-smart-app-control-on-2026-10-14``). Windows records the
 state in ``HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy``, value
 ``VerifiedAndReputablePolicyState``: 0 off, 1 on, 2 evaluation. The measured
-guest went from 2 to 1 when it was switched on.
+guest went from 2 to 1 when it was switched on. A Windows without Smart App
+Control (Windows 10, older Windows 11) has no such value: :data:`ABSENT`.
 
 Stdlib only. ``platform`` and ``read_value`` are seams, so the Windows branch
 runs under test on every host; production callers pass neither.
@@ -16,13 +17,14 @@ from __future__ import annotations
 import sys
 from typing import Callable
 
-__all__ = ["EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN", "state"]
+__all__ = ["ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN", "state"]
 
 OFF = "off"
 ON = "on"
 EVALUATION = "evaluation"
 UNKNOWN = "unknown"
 NOT_WINDOWS = "not-windows"
+ABSENT = "absent"
 
 _KEY = r"SYSTEM\CurrentControlSet\Control\CI\Policy"
 _VALUE = "VerifiedAndReputablePolicyState"
@@ -46,8 +48,9 @@ def state(
     platform: str | None = None,
     read_value: Callable[[], int | None] | None = None,
 ) -> str:
-    """One of :data:`ON`, :data:`EVALUATION`, :data:`OFF`, :data:`UNKNOWN` or
-    :data:`NOT_WINDOWS`. Never raises: a read that fails is :data:`UNKNOWN`."""
+    """One of :data:`ON`, :data:`EVALUATION`, :data:`OFF`, :data:`ABSENT`,
+    :data:`UNKNOWN` or :data:`NOT_WINDOWS`. Never raises: a read that fails is
+    :data:`UNKNOWN`; a key or value that does not exist is :data:`ABSENT`."""
     if (platform if platform is not None else sys.platform) != "win32":
         return NOT_WINDOWS
     try:
@@ -55,5 +58,5 @@ def state(
     except Exception:  # noqa: BLE001 — a failed read is "unknown", never a crash
         return UNKNOWN
     if value is None:
-        return UNKNOWN
+        return ABSENT
     return _BY_VALUE.get(value, UNKNOWN)

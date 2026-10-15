@@ -34,7 +34,7 @@ class _Tripwire(Exception):
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(0, sac.OFF), (1, sac.ON), (2, sac.EVALUATION), (7, sac.UNKNOWN), (None, sac.UNKNOWN)],
+    [(0, sac.OFF), (1, sac.ON), (2, sac.EVALUATION), (7, sac.UNKNOWN), (None, sac.ABSENT)],
 )
 def test_state_maps_the_policy_value(value: int | None, expected: str) -> None:
     assert sac.state(platform="win32", read_value=lambda: value) == expected
@@ -68,7 +68,9 @@ def test_refuse_raises_when_smart_app_control_is_on() -> None:
         refuse_smart_app_control(read_state=lambda: sac.ON)
 
 
-@pytest.mark.parametrize("state", [sac.OFF, sac.EVALUATION, sac.UNKNOWN, sac.NOT_WINDOWS])
+@pytest.mark.parametrize(
+    "state", [sac.OFF, sac.EVALUATION, sac.UNKNOWN, sac.ABSENT, sac.NOT_WINDOWS]
+)
 def test_refuse_is_silent_for_every_other_state(state: str) -> None:
     # Non-vacuity for the test above: the guard keys on the state VALUE.
     refuse_smart_app_control(read_state=lambda: state)
@@ -108,6 +110,12 @@ def test_init_refuses_before_the_bundle_download(
 
 def test_doctor_has_no_row_off_windows() -> None:
     assert health._check_smart_app_control(state=sac.NOT_WINDOWS, local=True) == []
+
+
+def test_doctor_has_no_row_where_windows_has_no_smart_app_control() -> None:
+    # Windows 10 and older Windows 11 builds write no policy value; a permanent
+    # warning there would be noise (closure critique round 3).
+    assert health._check_smart_app_control(state=sac.ABSENT, local=True) == []
 
 
 def test_doctor_row_fails_in_local_mode_when_on() -> None:
