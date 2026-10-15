@@ -21,6 +21,7 @@ import pytest
 import nexus.hooks.subagent_start as _subagent_start_mod
 from tests._platform import posix_only
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -82,7 +83,7 @@ def _run_hook(
         [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=15,
         env=env,
         cwd=cwd,
@@ -185,7 +186,7 @@ class TestSessionIdExport:
             "#!/bin/bash\n"
             'echo "NX_SESSION_ID=${NX_SESSION_ID:-<unset>}" >> "$NX_CALL_LOG"\n'
             'echo "no scratch entries"\n'
-            "exit 0\n"
+            "exit 0\n", encoding="utf-8"
         )
         nx_script.chmod(0o755)
         return fake_bin
@@ -203,7 +204,7 @@ class TestSessionIdExport:
         )
 
         assert result.returncode == 0
-        log_contents = log_file.read_text() if log_file.exists() else ""
+        log_contents = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
         assert "NX_SESSION_ID=test-session" in log_contents, log_contents
 
     @posix_only("a fake `nx` script first on PATH; on Windows the hook spawns `python -m nexus.cli` (nx_argv), never a PATH lookup")
@@ -228,7 +229,7 @@ class TestSessionIdExport:
         )
 
         assert result.returncode == 0
-        log_contents = log_file.read_text() if log_file.exists() else ""
+        log_contents = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
         assert "NX_SESSION_ID=pre-existing-ambient-value" in log_contents, log_contents
 
 
@@ -250,7 +251,7 @@ class TestNoMachineWideActiveBeadLine:
             '  echo "in_progress nexus-somepeer Some peer bead"\n'
             "  exit 0\n"
             "fi\n"
-            "exit 0\n"
+            "exit 0\n", encoding="utf-8"
         )
         bd_script.chmod(0o755)
 

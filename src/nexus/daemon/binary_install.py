@@ -195,7 +195,7 @@ def verify_sha256(asset_path: Path, sha256_sidecar: Path) -> str:
             f"sha256 sidecar {sha256_sidecar} is missing; refusing to install "
             "an unverified binary"
         )
-    raw = sha256_sidecar.read_text(errors="replace").strip()
+    raw = sha256_sidecar.read_text(errors="replace", encoding="utf-8").strip()
     m = _SHA256_LINE_RE.match(raw)
     if not m:
         raise BinaryVerificationError(
@@ -901,7 +901,7 @@ def _atomic_write_json(dest: Path, data: dict) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".nx_meta_")
     try:
-        with os.fdopen(tmp_fd, "w") as out:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as out:
             json.dump(data, out, indent=2)
         os.replace(tmp_name, dest)
     except Exception:

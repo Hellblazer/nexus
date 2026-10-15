@@ -80,7 +80,7 @@ def _plant_legacy_t2_unit(tmp_path: Path) -> Path:
     units = tmp_path / "units"
     units.mkdir(exist_ok=True)
     dest = units / daemon_cmd._autostart_filename_t2()
-    dest.write_text(_LEGACY_T2_UNIT_BODY)
+    dest.write_text(_LEGACY_T2_UNIT_BODY, encoding="utf-8")
     return dest
 
 
@@ -183,7 +183,7 @@ class TestSymlinkGuard:
         _stub_paths(tmp_path, monkeypatch)
         (tmp_path / "units").mkdir()
         real = tmp_path / "real-file"
-        real.write_text("<!-- real -->\n")
+        real.write_text("<!-- real -->\n", encoding="utf-8")
         link = tmp_path / "units" / "com.nexus.service.plist"
         try:
             link.symlink_to(real)
@@ -195,7 +195,7 @@ class TestSymlinkGuard:
         with pytest.raises(installer.SymlinkRefusedError):
             installer.install_autostart(tier="service")
         # The symlink target is left untouched.
-        assert real.read_text() == "<!-- real -->\n"
+        assert real.read_text(encoding="utf-8") == "<!-- real -->\n"
 
 
 class TestContentDiffGuard:
@@ -206,11 +206,11 @@ class TestContentDiffGuard:
         _stub_paths(tmp_path, monkeypatch)
         (tmp_path / "units").mkdir()
         dest = tmp_path / "units" / "com.nexus.service.plist"
-        dest.write_text("<!-- operator customisation -->\n")
+        dest.write_text("<!-- operator customisation -->\n", encoding="utf-8")
 
         with pytest.raises(installer.ContentDiffersError):
             installer.install_autostart(tier="service")
-        assert dest.read_text() == "<!-- operator customisation -->\n"
+        assert dest.read_text(encoding="utf-8") == "<!-- operator customisation -->\n"
 
     def test_force_overwrites_differing_content(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -219,13 +219,13 @@ class TestContentDiffGuard:
         _stub_paths(tmp_path, monkeypatch)
         (tmp_path / "units").mkdir()
         dest = tmp_path / "units" / "com.nexus.service.plist"
-        dest.write_text("<!-- old -->\n")
+        dest.write_text("<!-- old -->\n", encoding="utf-8")
 
         result = _install_service(tmp_path, force=True)
 
         assert result.status is installer.InstallStatus.NEWLY_INSTALLED
-        assert "<!-- old -->" not in dest.read_text()
-        assert "<string>/opt/conexus/bin/nx</string>" in dest.read_text()
+        assert "<!-- old -->" not in dest.read_text(encoding="utf-8")
+        assert "<string>/opt/conexus/bin/nx</string>" in dest.read_text(encoding="utf-8")
 
 
 class TestActivationFailure:
@@ -400,7 +400,7 @@ class TestManagerActionsCarryATimeout:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
         (tmp_path / "units").mkdir()
-        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n")
+        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n", encoding="utf-8")
 
         calls: list[dict[str, object]] = []
 
@@ -466,7 +466,7 @@ class TestHungManagerIsKilledAtTheBound:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
         (tmp_path / "units").mkdir()
-        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n")
+        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n", encoding="utf-8")
         monkeypatch.setattr(
             installer, "_deactivate_cmd", lambda dest, *, tier="t2": _HUNG_MANAGER
         )

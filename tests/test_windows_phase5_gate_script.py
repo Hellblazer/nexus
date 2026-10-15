@@ -473,6 +473,26 @@ def test_assertion_2_keeps_its_outside_session_check_live() -> None:
     a2 = text[text.index("Run-Assertion 2 "):text.index("Run-Assertion 3 ")]
     _live_statement(a2, """if ($cli.out -notlike "*$nonce*") { Fail "nx search outside the session does not find the nonce""")
     _live_statement(a2, "$cli = Invoke-Nx 'nx-search-nonce'")
+    # nexus-ijue9.2 deliverable 2: the row in the supervisor's cluster, outside the engine.
+    _live_statement(a2, "$pg = Count-ChunkRows 'psql-nonce' $nonce (Get-Stack)")
+    _live_statement(a2, "if ($pg.count -lt 1) { Fail")
+
+
+def test_the_psql_count_is_tied_to_the_running_cluster() -> None:
+    """The count must come from the cluster the supervisor runs, not from whatever
+    pg_credentials names (critique-3fme8-ijue92-2026-10-14, S1): the server's own
+    port and data directory must match the file, and the data directory must be
+    the -D of a running bundle postgres.exe."""
+    text = _text()
+    fn = text[text.index("function Count-ChunkRows"):text.index("function Stop-Problem")]
+    _live_statement(fn, "if ($r.port -ne $cred['PG_PORT']) { throw")
+    _live_statement(fn, "if ((& $norm $r.datadir) -ne (& $norm $cred['PG_DATA'])) { throw")
+    _live_statement(fn, "if ($owners.Count -eq 0) { throw")
+    _live_statement(fn, "if ($code -ne 0 -or \"$last\" -notmatch")
+    assert "inet_server_port()" in fn and "current_setting('data_directory')" in fn
+    # The password never reaches argv, and an earlier PGPASSWORD is restored.
+    assert "PG_SUPERUSER_PASS" not in fn.split("$env:PGPASSWORD = $cred['PG_SUPERUSER_PASS']")[1].split("} finally {")[0]
+    _live_statement(fn, "if ($hadPassword) { $env:PGPASSWORD = $previous }")
 
 
 def test_assertion_3_keeps_its_failed_hook_check_live() -> None:

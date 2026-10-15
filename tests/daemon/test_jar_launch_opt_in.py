@@ -35,7 +35,7 @@ def test_find_jar_unset_returns_none(monkeypatch):
 
 def test_find_jar_set_and_present(monkeypatch, tmp_path):
     jar = tmp_path / "nexus-service.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     assert _find_service_jar() == jar
 
@@ -59,7 +59,7 @@ def test_resolve_prefers_native_when_no_jar(monkeypatch, tmp_path):
 
 def test_resolve_jar_opt_in_wins(monkeypatch, tmp_path):
     jar = tmp_path / "svc.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     # Even if a native binary exists, the explicit opt-in is honoured.
     monkeypatch.setattr(ssd, "_find_service_binary", lambda cd: tmp_path / "native")
@@ -233,7 +233,7 @@ def test_init_service_skips_binary_acquire_with_jar(monkeypatch, tmp_path):
     from nexus.commands.init import _ensure_service_binary_step
 
     jar = tmp_path / "svc.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     # If it tried to acquire, _find_service_binary would be consulted; make it
     # explode so a regression that ignores the opt-in fails loudly.
@@ -260,7 +260,7 @@ def test_requested_none_when_neither_env_set(monkeypatch, tmp_path):
 
 def test_requested_resolves_explicit_jar(monkeypatch, tmp_path):
     jar = tmp_path / "svc.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
     # Fix round (nexus-4e96a round-1 critique): the returned path is
@@ -273,7 +273,7 @@ def test_requested_resolves_explicit_jar(monkeypatch, tmp_path):
 
 def test_requested_resolves_explicit_bin(monkeypatch, tmp_path):
     binary = tmp_path / "nexus-service"
-    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     binary.chmod(0o755)
     monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
     monkeypatch.setenv("NEXUS_SERVICE_BIN", str(binary))
@@ -302,7 +302,7 @@ def test_mismatch_noop_when_no_explicit_request(monkeypatch, tmp_path):
 
 def test_mismatch_raises_naming_both_artifacts(monkeypatch, tmp_path):
     jar = tmp_path / "svc.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
     with pytest.raises(StorageServiceStartError) as exc_info:
@@ -319,7 +319,7 @@ def test_mismatch_raises_naming_both_artifacts(monkeypatch, tmp_path):
 
 def test_mismatch_same_artifact_is_silent(monkeypatch, tmp_path):
     jar = tmp_path / "svc.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
     # Same artifact the lease already carries (canonical spelling) -> no raise.
@@ -335,7 +335,7 @@ def test_mismatch_unknown_lease_artifact_allows_with_warning(
     """A pre-fix lease predates artifact-identity tracking: allow + warn,
     never raise (one-release degrade window)."""
     jar = tmp_path / "svc.jar"
-    jar.write_text("x")
+    jar.write_text("x", encoding="utf-8")
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
 
@@ -373,7 +373,7 @@ def test_mismatch_relative_vs_absolute_same_file_no_raise(monkeypatch, tmp_path)
     treat these as the SAME artifact. Pre-fix (raw string compare) this
     would have false-positive-raised."""
     binary = tmp_path / "nexus-service"
-    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     binary.chmod(0o755)
 
     monkeypatch.chdir(tmp_path)
@@ -393,7 +393,7 @@ def test_mismatch_symlink_spelling_same_file_no_raise(monkeypatch, tmp_path):
     real_dir = tmp_path / "real"
     real_dir.mkdir()
     real_binary = real_dir / "nexus-service"
-    real_binary.write_text("#!/bin/sh\nexit 0\n")
+    real_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     real_binary.chmod(0o755)
 
     link_dir = tmp_path / "link"
@@ -431,7 +431,7 @@ def test_mismatch_genuinely_different_files_still_raises(monkeypatch, tmp_path):
     binary_a = dir_a / "nexus-service"
     binary_b = dir_b / "nexus-service"
     for b in (binary_a, binary_b):
-        b.write_text("#!/bin/sh\nexit 0\n")
+        b.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         b.chmod(0o755)
 
     monkeypatch.chdir(dir_a)
@@ -454,7 +454,7 @@ def _seed_hs_err(logs: Path, n: int) -> list[Path]:
     made = []
     for i in range(n):
         f = logs / f"hs_err_{1000 + i}.log"
-        f.write_text("# crash")
+        f.write_text("# crash", encoding="utf-8")
         os.utime(f, (1_000_000 + i, 1_000_000 + i))
         made.append(f)
     return made
@@ -463,8 +463,8 @@ def _seed_hs_err(logs: Path, n: int) -> list[Path]:
 def test_reap_old_hs_err_keeps_the_newest_five(tmp_path):
     logs = tmp_path / "logs"
     made = _seed_hs_err(logs, 8)
-    (logs / "storage_service_native.log").write_text("keep me")
-    (logs / "unrelated.log").write_text("keep me")
+    (logs / "storage_service_native.log").write_text("keep me", encoding="utf-8")
+    (logs / "unrelated.log").write_text("keep me", encoding="utf-8")
 
     reaped = ssd._reap_old_hs_err(logs)
 

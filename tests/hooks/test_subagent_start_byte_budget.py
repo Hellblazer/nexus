@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SN_SCRIPT = _REPO_ROOT / "sn" / "hooks" / "scripts" / "subagent_start.py"
@@ -181,7 +182,7 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     run_dir = cwd or os.getcwd()
     common = subprocess.run(
         ["git", "rev-parse", "--git-common-dir"],
-        cwd=run_dir, capture_output=True, text=True, check=True,
+        cwd=run_dir, capture_output=True, text=True, encoding="utf-8", check=True,
     ).stdout.strip()
     repo_root = os.path.realpath(os.path.join(run_dir, os.path.dirname(common) or "."))
     repo_hash = hashlib.sha1(repo_root.encode()).hexdigest()[:8]  # noqa: S324 — mirrors the hook's cache key
@@ -192,7 +193,15 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     )
     t2_seed = home / "t2-seed.txt"
     t2_seed.write_text(_T2_SEED, encoding="utf-8")
-    return {**os.environ, "HOME": str(home), "NX_BUDGET_T2_SEED_FILE": str(t2_seed)}
+    # USERPROFILE: Windows' home for expanduser; NEXUS_CONFIG_DIR: the
+    # directory the hook reads the cache from (nexus-3fme8).
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "NEXUS_CONFIG_DIR": str(home / ".config" / "nexus"),
+        "NX_BUDGET_T2_SEED_FILE": str(t2_seed),
+    }
 
 
 def _assert_seeds_reached(conexus_ctx: str) -> None:
@@ -214,7 +223,7 @@ def _run_conexus(
         [sys.executable, "-c", _CONEXUS_PY_DRIVER],
         input=payload,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=timeout,
         env=env,
         cwd=cwd,
@@ -230,7 +239,7 @@ def _run_sn(*, payload: str = _REAL_SHAPE_PAYLOAD, timeout: float = 15) -> str:
         [sys.executable, str(_SN_SCRIPT)],
         input=payload,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=timeout,
         env=env,
     )

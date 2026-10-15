@@ -62,7 +62,7 @@ def _collect_health_data() -> dict[str, Any]:
     mineru_pid_path = nexus_config_dir() / "mineru.pid"
     if mineru_pid_path.exists():
         try:
-            info = json.loads(mineru_pid_path.read_text())
+            info = json.loads(mineru_pid_path.read_text(encoding="utf-8"))
             pid = info.get("pid", 0)
             from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred, as the config import above
 

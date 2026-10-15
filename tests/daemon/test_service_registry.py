@@ -43,6 +43,7 @@ from nexus.daemon.service_registry import (
     storage_service_stack_matcher,
     sweep_matching_processes,
 )
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 class _FakeClock:
@@ -226,7 +227,7 @@ class TestHeartbeat:
             heartbeat_epoch=rec.heartbeat_epoch, ttl=3.0, endpoint=_endpoint(),
             version="1",
         )
-        registry._record_path("42").write_text(foreign.to_json())
+        registry._record_path("42").write_text(foreign.to_json(), encoding="utf-8")
         with pytest.raises(StaleOwnerError):
             registry.heartbeat(rec)
 
@@ -734,7 +735,7 @@ class TestStorageServiceStackMatcher:
         cfg = tmp_path / "nexus"
         dev_bin = tmp_path / "dev-checkout" / "service" / "target" / "nexus-service"
         dev_bin.parent.mkdir(parents=True)
-        dev_bin.write_text("")
+        dev_bin.write_text("", encoding="utf-8")
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(dev_bin))
         matcher = storage_service_stack_matcher(cfg)
         assert matcher(f"{dev_bin} -Xmx1g")
@@ -751,7 +752,7 @@ class TestStorageServiceStackMatcher:
         cfg = tmp_path / "nexus"
         dev_jar = tmp_path / "dev-checkout" / "service" / "target" / "nexus-service.jar"
         dev_jar.parent.mkdir(parents=True)
-        dev_jar.write_text("")
+        dev_jar.write_text("", encoding="utf-8")
         monkeypatch.setenv("NEXUS_SERVICE_JAR", str(dev_jar))
         matcher = storage_service_stack_matcher(cfg)
         assert matcher(
@@ -767,7 +768,7 @@ class TestStorageServiceStackMatcher:
         cfg = tmp_path / "nexus"
         dev_bin = tmp_path / "dev-checkout" / "service" / "target" / "nexus-service"
         dev_bin.parent.mkdir(parents=True)
-        dev_bin.write_text("")
+        dev_bin.write_text("", encoding="utf-8")
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(dev_bin))
         matcher = storage_service_stack_matcher(cfg)
         assert not matcher(f"tail -f {dev_bin}.log")
@@ -864,7 +865,7 @@ class TestSweepMatchingProcesses:
                 "import os; from nexus.daemon.service_registry import ancestor_pids;"
                 "print(os.getppid() in ancestor_pids(os.getpid()))",
             ],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=60, check=True,
         )
         assert child.stdout.strip() == "True"
 
@@ -969,7 +970,7 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
         default_dir = fake_home / ".config" / "nexus"
 
         fake_nx = tmp_path / "nx"
-        fake_nx.write_text("import time; time.sleep(30)\n")
+        fake_nx.write_text("import time; time.sleep(30)\n", encoding="utf-8")
         proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
             [
                 sys.executable, str(fake_nx),
@@ -1026,11 +1027,11 @@ class TestProcessState:
         """State is the field right after ``comm``, and ``comm`` can contain
         spaces and ``)`` — the parse must index from the LAST ``)`` (same
         discipline as ``_procfs_enumerate``)."""
-        (tmp_path / "uptime").write_text("500.00 1000.00\n")
+        (tmp_path / "uptime").write_text("500.00 1000.00\n", encoding="utf-8")
         proc = tmp_path / "1234"
         proc.mkdir()
         (proc / "stat").write_text(
-            "1234 (py (x) thing) Z " + " ".join(["0"] * 48) + "\n",
+            "1234 (py (x) thing) Z " + " ".join(["0"] * 48) + "\n", encoding="utf-8",
         )
         with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
             assert process_state(1234, platform="linux") == "Z"
@@ -1040,7 +1041,7 @@ class TestProcessState:
     ) -> None:
         """``None`` means UNKNOWN. A missing /proc entry must not be
         reported as some state a caller could act on."""
-        (tmp_path / "uptime").write_text("500.00 1000.00\n")
+        (tmp_path / "uptime").write_text("500.00 1000.00\n", encoding="utf-8")
         with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
             assert process_state(999999, platform="linux") is None
 

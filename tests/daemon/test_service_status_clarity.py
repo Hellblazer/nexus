@@ -31,7 +31,7 @@ def _write_creds(config_dir: Path, port: str = "5499") -> Path:
         "PG_DATA=/tmp/pgdata-test\n"
         "NX_DB_USER=nexus_svc\nNX_DB_PASS=pw\n"
         "NX_DB_ADMIN_USER=nexus_admin\nNX_DB_ADMIN_PASS=apw\n"
-        "NX_DB_URL=jdbc:postgresql://127.0.0.1:5499/nexus\n"
+        "NX_DB_URL=jdbc:postgresql://127.0.0.1:5499/nexus\n", encoding="utf-8"
     )
     return creds
 
@@ -233,7 +233,7 @@ class TestPgVectorPreflight:
 
     def _write_pg_config(self, bins: PgBinaries, sharedir: Path) -> None:
         pg_config = bins.bin_dir / "pg_config"
-        pg_config.write_text(f"#!/bin/sh\necho {sharedir}\n")
+        pg_config.write_text(f"#!/bin/sh\necho {sharedir}\n", encoding="utf-8")
         pg_config.chmod(0o755)
 
     @pytest.mark.skipif(
@@ -280,7 +280,7 @@ class TestPgVectorPreflight:
         sharedir = tmp_path / "share"
         (sharedir / "extension").mkdir(parents=True)
         exe = bin_dir / "pg_config.exe"
-        exe.write_text(f"#!/bin/sh\necho {sharedir}\n")
+        exe.write_text(f"#!/bin/sh\necho {sharedir}\n", encoding="utf-8")
         exe.chmod(0o755)
         assert not (bin_dir / "pg_config").exists()  # only the Windows name
         with pytest.raises(PgVectorNotInstalledError, match="vector.control"):
@@ -297,7 +297,7 @@ class TestPgVectorPreflight:
         sharedir = tmp_path / "share"
         ext = sharedir / "extension"
         ext.mkdir(parents=True)
-        (ext / "vector.control").write_text("# pgvector")
+        (ext / "vector.control").write_text("# pgvector", encoding="utf-8")
         self._write_pg_config(bins, sharedir)
         check_pgvector_available(bins)  # must not raise
 

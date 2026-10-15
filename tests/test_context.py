@@ -91,7 +91,7 @@ class TestGenerateContextL1:
 
         assert result == out
         assert out.exists()
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
         assert "GPU Kernels" in content
         assert "BFT Consensus" in content
         assert "code:" in content
@@ -120,7 +120,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         assert "code:" in content
         assert "docs:" in content
@@ -139,7 +139,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # Should have topics 0-4 (top 5 by doc_count), not 5-7
         assert "Code Topic 0" in content
@@ -177,7 +177,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # No read-side collapse: identical rows appear up to the per-prefix cap.
         # (Assumes _TOPICS_PER_PREFIX >= 5 so all 5 inserted rows are emitted;
@@ -206,7 +206,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # Both rows survive because doc_count differs.
         assert content.count("Shared Label") == 2
@@ -225,7 +225,7 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         assert "Root Topic" in content
         assert "Child Topic" not in content
@@ -240,10 +240,10 @@ class TestGenerateContextL1:
 
         out = tmp_path / "context_l1.txt"
         # Write initial content
-        out.write_text("old content")
+        out.write_text("old content", encoding="utf-8")
 
         generate_context_l1(db.taxonomy, output_path=out)
-        content = out.read_text()
+        content = out.read_text(encoding="utf-8")
 
         # Should have new content, not partial or old
         assert "Test Topic" in content
@@ -269,7 +269,7 @@ class TestGenerateContextL1:
         with patch("nexus.context._repo_collections", return_value={"code__myrepo-abc123", "docs__myrepo-abc123", "rdr__myrepo-abc123"}):
             out = tmp_path / "context_l1.txt"
             generate_context_l1(db.taxonomy, output_path=out, repo_path=Path("/fake/myrepo"))
-            content = out.read_text()
+            content = out.read_text(encoding="utf-8")
 
         assert "My Repo Topic" in content
         assert "Other Repo Topic" not in content
@@ -305,8 +305,91 @@ class TestSubagentHookInjection:
         from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root
 
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))  # Windows' home for expanduser
+        # The hook reads the cache from NEXUS_CONFIG_DIR when set, as nexus.context
+        # writes it (nexus-3fme8); the suite's fence sets one, so point it here.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(home / ".config" / "nexus"))
         monkeypatch.chdir(repo_dir)
         return _knowledge_map_section(_repo_root(dict(os.environ)))
+
+    @staticmethod
+    def _seed_cache(context_dir: Path, repo_dir: Path, body: str) -> None:
+        import hashlib
+        import subprocess
+
+        repo_dir.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo_dir), check=True, capture_output=True, text=True, encoding="utf-8")
+        repo_root = repo_dir.resolve()
+        repo_hash = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / f"{repo_root.name}-{repo_hash}.txt").write_bytes(body.encode("utf-8"))
+
+    def test_hook_reads_the_cache_as_utf8(self, tmp_path: Path, monkeypatch) -> None:
+        """nexus.context writes the cache as UTF-8. The hook read it with the
+        locale encoding, cp1252 on Windows, which garbled or dropped a map with
+        a non-ASCII label (nexus-3fme8). Fails on the old code only where the
+        locale encoding is not UTF-8."""
+        body = "## Knowledge Map\n\ncode: Résumé parsing — naïve (42)\n"
+        repo_dir = tmp_path / "utf8repo"
+        self._seed_cache(tmp_path / ".config" / "nexus" / "context", repo_dir, body)
+
+        section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
+
+        assert "Résumé parsing — naïve (42)" in section
+
+    def test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale(self, tmp_path: Path) -> None:
+        """The pins above pass on a UTF-8 locale with or without the fix. This
+        one runs both hooks' readers in a child whose locale encoding is ASCII
+        (the C locale, UTF-8 mode and locale coercion off), so a dropped
+        ``encoding="utf-8"`` fails here on POSIX as cp1252 does on Windows: the
+        read raises and the hook's handler returns no map (nexus-3fme8)."""
+        import subprocess
+        import sys
+
+        repo_dir = tmp_path / "localerepo"
+        config_dir = tmp_path / ".config" / "nexus"
+        label = "Résumé parsing — naïve (42)"
+        self._seed_cache(config_dir / "context", repo_dir, f"## Knowledge Map\n\ncode: {label}\n")
+        driver = (
+            "import os, sys, locale\n"
+            "assert sys.flags.utf8_mode == 0 and locale.getpreferredencoding(False).lower() != 'utf-8', "
+            "locale.getpreferredencoding(False)\n"
+            "from nexus.hooks import session_context\n"
+            "from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root\n"
+            "session_context.which = lambda cmd: False\n"
+            "sub = _knowledge_map_section(_repo_root(dict(os.environ)))\n"
+            "sess = session_context.run(None).stdout or ''\n"
+            "sys.stdout.buffer.write(('SUB:' + sub + '\\nSESS:' + sess).encode('utf-8'))\n"
+        )
+        env = {
+            **os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+            "HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "NEXUS_CONFIG_DIR": str(config_dir),
+            "CLAUDE_PROJECT_DIR": str(repo_dir),
+        }
+        result = subprocess.run([sys.executable, "-c", driver], cwd=str(repo_dir), env=env, capture_output=True)
+        assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+        out = result.stdout.decode("utf-8")
+        sub, _, sess = out.partition("\nSESS:")
+        assert label in sub, f"SubagentStart dropped or garbled the map: {sub[:300]!r}"
+        assert label in sess, f"SessionStart dropped or garbled the map: {sess[:300]!r}"
+
+    def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
+        """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
+        when that is set; the hook looked under ~/.config/nexus regardless, so a
+        box with the override never showed a subagent its map (nexus-3fme8)."""
+        from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root
+
+        config_dir = tmp_path / "elsewhere"
+        repo_dir = tmp_path / "cfgrepo"
+        self._seed_cache(config_dir / "context", repo_dir, "## Knowledge Map\n\ncode: Override Topic (7)\n")
+        empty_home = tmp_path / "home"
+        empty_home.mkdir()
+        monkeypatch.setenv("HOME", str(empty_home))
+        monkeypatch.setenv("USERPROFILE", str(empty_home))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.chdir(repo_dir)
+
+        assert "Override Topic (7)" in _knowledge_map_section(_repo_root(dict(os.environ)))
 
     def test_hook_emits_knowledge_map(self, tmp_path: Path, monkeypatch) -> None:
         """SubagentStart hook outputs the cached knowledge map content.
@@ -335,7 +418,7 @@ class TestSubagentHookInjection:
         repo_dir.mkdir()
         subprocess.run(
             ["git", "init", "-q"], cwd=str(repo_dir), check=True,
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
 
         # Compute expected filename the same way the hook does: basename +
@@ -345,7 +428,7 @@ class TestSubagentHookInjection:
         repo_root = repo_dir.resolve()
         repo_hash = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
         cache_file = context_dir / f"{repo_root.name}-{repo_hash}.txt"
-        cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n")
+        cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n", encoding="utf-8")
 
         section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
 
@@ -387,7 +470,7 @@ class TestSubagentHookInjection:
         config_dir = tmp_path / ".config" / "nexus"
         config_dir.mkdir(parents=True)
         (config_dir / "context_l1.txt").write_text(
-            "## Knowledge Map\n\ncode: Global Topic (99)\n"
+            "## Knowledge Map\n\ncode: Global Topic (99)\n", encoding="utf-8"
         )
 
         # A real repo (git-common-dir must resolve for the hook to look for
@@ -396,7 +479,7 @@ class TestSubagentHookInjection:
         repo_dir.mkdir()
         subprocess.run(
             ["git", "init", "-q"], cwd=str(repo_dir), check=True,
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
 
         section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
@@ -433,9 +516,13 @@ class TestSessionHookInjection:
         context_dir.mkdir(parents=True)
         repo_hash = hashlib.sha1(str(repo_dir.resolve()).encode()).hexdigest()[:8]
         cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
-        cache_file.write_text("## Knowledge Map\n\ncode: Session Topic (77)\n")
+        cache_file.write_bytes("## Knowledge Map\n\ncode: Session Topic — résumé (77)\n".encode("utf-8"))
 
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' home for expanduser
+        # The hook reads from NEXUS_CONFIG_DIR when set, as nexus.context writes
+        # (nexus-3fme8); the suite's fence sets one, so point it here.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
         monkeypatch.chdir(repo_dir)
         # No nx/bd: the T2 and ready-beads sections are not under test.
@@ -444,9 +531,35 @@ class TestSessionHookInjection:
         result = session_context.run(None)
 
         assert result.stdout is not None
-        assert "Session Topic (77)" in result.stdout, (
+        assert "Session Topic — résumé (77)" in result.stdout, (
             f"SessionStart hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
         )
+
+
+    def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
+        """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
+        when set. SessionStart looked under ~/.config/nexus regardless, so with
+        the override it showed no map (nexus-3fme8). The cache here is only
+        under the override, and home is empty."""
+        from nexus.hooks import session_context
+
+        repo_dir = tmp_path / "cfgrepo"
+        config_dir = tmp_path / "elsewhere"
+        TestSubagentHookInjection._seed_cache(
+            config_dir / "context", repo_dir, "## Knowledge Map\n\ncode: Session Override Topic (8)\n"
+        )
+        empty_home = tmp_path / "home"
+        empty_home.mkdir()
+        monkeypatch.setenv("HOME", str(empty_home))
+        monkeypatch.setenv("USERPROFILE", str(empty_home))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
+        monkeypatch.chdir(repo_dir)
+        monkeypatch.setattr(session_context, "which", lambda cmd: False)
+
+        result = session_context.run(None)
+
+        assert "Session Override Topic (8)" in (result.stdout or "")
 
 
 class TestRefreshContextL1:
@@ -467,7 +580,7 @@ class TestRefreshContextL1:
 
         result = refresh_context_l1(db_path=db_path, output_path=out)
         assert result == out
-        assert "Refresh Test" in out.read_text()
+        assert "Refresh Test" in out.read_text(encoding="utf-8")
 
 
 class TestServiceModeL1(object):
@@ -497,7 +610,7 @@ class TestServiceModeL1(object):
         ])
         out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
         assert out is not None
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         assert "Routing" in text and "Guides" in text
         assert fake.calls == [None]
 
@@ -517,7 +630,7 @@ class TestServiceModeL1(object):
             for i in range(1, 8)  # ascending — wrong order on the wire
         ])
         out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         assert "T7" in text  # highest doc_count survives the top-5 cut
         assert "T1" not in text and "T2" not in text  # lowest two cut
 
@@ -549,7 +662,7 @@ class TestServiceModeL1(object):
         ])
         out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
         assert out is not None
-        text = out.read_text()
+        text = out.read_text(encoding="utf-8")
         assert "rgcache:" in text
         assert "quarantine-docs__x:" in text
         assert "Bare Name Topic" in text

@@ -160,8 +160,7 @@ The six templates (`ledger/<session_id>`, `mailbox/<address>`,
 (`service/src/main/resources/tuples/templates/`), loaded and validated at
 boot; a breach fails boot with the file and field
 named. Changing a template's shape is an engine-release event — the same
-cadence as any other engine change (see AGENTS.md § Engine-service
-release) — never a Liquibase data changeset. Removing a template that has
+cadence as any other engine change (see `docs/agents/engine-service-release.md`) — never a Liquibase data changeset. Removing a template that has
 live rows needs an explicit data changeset with a migration note; adding
 or widening one does not.
 

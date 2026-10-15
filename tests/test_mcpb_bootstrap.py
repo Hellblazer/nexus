@@ -36,6 +36,7 @@ import pytest
 
 from nexus.util import win_job
 from tests._module_seam import setattr_in
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP_PATH = REPO_ROOT / "mcpb" / "src" / "bootstrap.py"
@@ -304,7 +305,7 @@ def test_skip_env_bypasses_sync(bootstrap, monkeypatch):
 
 def _exe(directory: Path, name: str, executable: bool = True) -> Path:
     path = directory / name
-    path.write_text("")
+    path.write_text("", encoding="utf-8")
     path.chmod(0o755 if executable else 0o644)
     return path
 
@@ -573,17 +574,17 @@ def test_stdio_and_exit_code_survive_the_handoff(tmp_path, platform):
     exit code is the bootstrap's. exec on POSIX; child-with-inherited-handles
     (the Windows branch, injected) otherwise."""
     child = tmp_path / "echo_child.py"
-    child.write_text(_ECHO_CHILD)
+    child.write_text(_ECHO_CHILD, encoding="utf-8")
     driver = tmp_path / "driver.py"
     driver.write_text(
-        _DRIVER.format(bootstrap=str(BOOTSTRAP_PATH), child=str(child), platform=platform)
+        _DRIVER.format(bootstrap=str(BOOTSTRAP_PATH), child=str(child), platform=platform), encoding="utf-8"
     )
     proc = subprocess.Popen(
         [sys.executable, str(driver)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
     )
     # A read deadline for the whole exchange. A child that never sees the
     # bytes (the mutant that gave it a PIPE stdin instead of the host's)
@@ -780,14 +781,14 @@ class TestRealWindows:
         child = None
         try:
             assert assign(member.pid), "the member could not be put in the job"
-            go.write_text("go")
+            go.write_text("go", encoding="utf-8")
             deadline = time.monotonic() + 90
             while not pidfile.exists():
                 assert member.poll() is None and time.monotonic() < deadline, (
-                    "the member never spawned its child: " + err_path.read_text(errors="replace")
+                    "the member never spawned its child: " + err_path.read_text(errors="replace", encoding="utf-8")
                 )
                 time.sleep(0.1)
-            child = int(pidfile.read_text())
+            child = int(pidfile.read_text(encoding="utf-8"))
             assert self._alive(child), "the member's child was not running before the job closed"
             assert close(), "the job handle did not close"
             # Kill-on-close: the member dies with the job's last handle.

@@ -511,7 +511,10 @@ def run(
         pg_root = sm.materialise(pg_archive, archive=True, dest=work / "pg")
         pg_bin = pg_root / "bin"
         pg_env = sm.scrubbed_env(pg_bin, platform, base_env)
-        pg_port, svc_port = ports or (sm.free_port(), sm.free_port())
+        # The engine's port is chosen once PostgreSQL holds its own: two free_port() calls in a row can
+        # return the same number, and on 2026-10-15 the engine died at startup with "Address already in
+        # use" (run 38682323262) with nothing to tell that case from another process taking the port.
+        pg_port = ports[0] if ports else sm.free_port()
         user = getpass.getuser()
 
         def tool(name: str) -> str:
@@ -536,6 +539,8 @@ def run(
         if rc != 0:
             raise SmokeError(f"createdb failed ({rc}): {out.strip()}")
         emit(f"SMOKE postgres: up on 127.0.0.1:{pg_port}, database {DB_NAME}")
+        svc_port = ports[1] if ports else sm.free_port()
+        emit(f"SMOKE engine port: 127.0.0.1:{svc_port}")
 
         env = engine_env(
             engine_dir=engine_exe.parent, platform=platform, base=base_env,

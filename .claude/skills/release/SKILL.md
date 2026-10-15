@@ -30,7 +30,7 @@ MVV and the local-service gate, behind one preflight. Steps that remain:
 ### Where to run the battery
 
 In the release worktree, on the release branch — never in the shared primary
-checkout. AGENTS.md § "Worktrees: one session, one worktree" rule 4 carries the
+checkout. `docs/agents/worktrees.md` (moved from AGENTS.md § "Worktrees: one session, one worktree") rule 4 carries the
 reason and the incident; the short version is that rule 9 fast-forwards the
 primary on every push to `develop`, and a tree that moves mid-battery changes
 what the remaining legs build and gate. Cut the worktree before Step 1's
@@ -71,7 +71,7 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 ```
 
 1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
-2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — bump `REQUIRED_ENGINE_VERSION` to it IN THIS release (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump), gate the release battery against that engine, and arm the deploy relay to fire at client-tag push, parallel with the PyPI publish (paired-release choreography; send the relay to the conexus instance DIRECTLY — tuple mailbox or cross-session `SendMessage`, both reach it — and never frame the cross-instance deploy as autonomous: a relay carries the tag, the gate evidence and what changed, never authorization. See `engine-release` SKILL.md's deploy section, which retired the older "the bus is passive, surface the relay to Hal" wording by name on 2026-09-16 for reading as "you cannot talk to conexus", which is false and cost a round trip). The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary, and it is never blocked by client-release preconditions either — those gate the DEPLOY, and pairing satisfies them the instant the client tag exists.
+2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **`docs/agents/engine-service-release.md`** — bump `REQUIRED_ENGINE_VERSION` to it IN THIS release (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump), gate the release battery against that engine, and arm the deploy relay to fire at client-tag push, parallel with the PyPI publish (paired-release choreography; send the relay to the conexus instance DIRECTLY — tuple mailbox or cross-session `SendMessage`, both reach it — and never frame the cross-instance deploy as autonomous: a relay carries the tag, the gate evidence and what changed, never authorization. See `engine-release` SKILL.md's deploy section, which retired the older "the bus is passive, surface the relay to Hal" wording by name on 2026-09-16 for reading as "you cannot talk to conexus", which is false and cost a round trip). The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary, and it is never blocked by client-release preconditions either — those gate the DEPLOY, and pairing satisfies them the instant the client tag exists.
 3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI `Java tests + jOOQ codegen drift guard` is a required check on `main` and `develop`, so a PR into either is gated on it, but a direct push to `develop` is not and a run can be cancelled or time out, so verify the tree), then the **human** pushes `engine-service-vX.Y.Z`.
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
@@ -473,9 +473,9 @@ branch applies:
   that opened both measured windows. This is a human confirmation; no script
   checks it.
 
-Authority for the protocol: AGENTS.md § Engine-service release
+Authority for the protocol: `docs/agents/engine-service-release.md`
 (nexus-1emxn refinement paragraph) — this step carries the operational
-form; on any wording conflict, AGENTS.md wins.
+form; on any wording conflict, that file wins.
 
 After Step 7's PR merges, switch to main, fetch, and tag the merge commit:
 

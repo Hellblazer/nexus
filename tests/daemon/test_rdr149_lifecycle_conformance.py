@@ -93,6 +93,7 @@ from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
 from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
 from tests._module_seam import patch_in, patch_time
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
 # places it used to assume POSIX are named once here so each platform branch is
@@ -1767,7 +1768,7 @@ class TestCrossVersionLeaseDiscovery:
         # heartbeat_epoch against time.time(), and this test is about the
         # RECORD SHAPE surviving an upgrade, not about clock injection.
         payload = dict(self._V761_LEASE, heartbeat_epoch=time.time())
-        (config_dir / "storage_service_addr.1000").write_text(json.dumps(payload))
+        (config_dir / "storage_service_addr.1000").write_text(json.dumps(payload), encoding="utf-8")
 
         registry = ServiceRegistry(dir=config_dir, tier="storage_service")
         record = registry.discover("1000")
@@ -2278,7 +2279,7 @@ class _StopFileConsoleApi(_ScriptedConsoleApi):
         self._dir = stand_in_dir
 
     def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
-        (self._dir / f"stop-{pid}").write_text("x")
+        (self._dir / f"stop-{pid}").write_text("x", encoding="utf-8")
         return super().generate_ctrl_break(pid)
 
 
@@ -2290,9 +2291,9 @@ class _Stack:
 
     def __init__(self, directory: Path, **env: str) -> None:
         self.dir = directory
-        (directory / "engine_standin.py").write_text(_ENGINE_STANDIN)
+        (directory / "engine_standin.py").write_text(_ENGINE_STANDIN, encoding="utf-8")
         script = directory / "supervisor_standin.py"
-        script.write_text(_SUPERVISOR_STANDIN)
+        script.write_text(_SUPERVISOR_STANDIN, encoding="utf-8")
         self.proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
             [sys.executable, str(script), "daemon", "service", "start", "--foreground",
              "--config-dir", str(directory)],
@@ -2306,7 +2307,7 @@ class _Stack:
                 self.close()
                 pytest.fail("the stand-in stack did not come up")
             time.sleep(0.05)
-        info = json.loads(ready.read_text())
+        info = json.loads(ready.read_text(encoding="utf-8"))
         self.supervisor: int = info["supervisor"]
         self.engine: int = info["engine"]
 
@@ -2368,8 +2369,8 @@ class TestStopReturnsAfterBothProcessesExit:
             # The property: nothing of the stack is running when stop returns.
             assert pid_running(stack.supervisor) is False
             assert pid_running(stack.engine) is False
-            engine_exit = float((directory / "engine_exit.txt").read_text())
-            supervisor_exit = float((directory / "supervisor_exit.txt").read_text())
+            engine_exit = float((directory / "engine_exit.txt").read_text(encoding="utf-8"))
+            supervisor_exit = float((directory / "supervisor_exit.txt").read_text(encoding="utf-8"))
             slack = 0.1  # clock granularity across processes
             assert t0 + 0.8 <= engine_exit, "the engine's own 1 s shutdown must have been waited for"
             assert engine_exit <= supervisor_exit + slack <= t_return + 2 * slack
@@ -2695,7 +2696,7 @@ print(json.dumps({"reads": reads, "misses": misses, "epochs": len(epochs), "erro
         procs = [
             subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
                 [sys.executable, "-c", self._READER, str(config_dir), self.SCOPE, str(stop)],
-                stdout=subprocess.PIPE, text=True,
+                stdout=subprocess.PIPE, text=True, encoding=PYTHON_CHILD_ENCODING,
             )
             for _ in range(self.PROCESS_READERS)
         ]
@@ -2735,7 +2736,7 @@ print(json.dumps({"reads": reads, "misses": misses, "epochs": len(epochs), "erro
                     writer_errors.append(traceback.format_exc())
                     break
         finally:
-            stop.write_text("x")
+            stop.write_text("x", encoding="utf-8")
             stop_threads.set()
             for t in threads:
                 t.join(timeout=30)

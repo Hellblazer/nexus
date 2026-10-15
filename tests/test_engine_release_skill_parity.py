@@ -225,8 +225,15 @@ def test_the_release_gates_are_prescribed_as_commands(flag: str) -> None:
 #
 # Prose directives depend on a reader noticing. This does not.
 
+#: nexus-2ziaz (2026-10-14): the verbatim § Engine-service release moved here
+#: and is the authority; AGENTS.md keeps the short rules, so both are pinned.
+#: Anchored on REPO_ROOT / "docs" so scripts/select_docs_reader_tests.py picks
+#: this file for a docs-only push that edits the authority.
+ENGINE_RELEASE_AUTHORITY = REPO_ROOT / "docs" / "agents" / "engine-service-release.md"
+
 GOVERNANCE_DOCS = (
     "AGENTS.md",
+    ENGINE_RELEASE_AUTHORITY.relative_to(REPO_ROOT).as_posix(),
     ".claude/skills/release/SKILL.md",
     ".claude/skills/engine-release/SKILL.md",
 )

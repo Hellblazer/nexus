@@ -75,7 +75,7 @@ def _write_creds(config_dir: Path) -> Path:
         "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
         "NX_DB_ADMIN_USER=nexus_admin\n"
         "NX_DB_ADMIN_PASS=testadminpass\n"
-        "NX_SERVICE_TOKEN=root-token-deadbeef\n"
+        "NX_SERVICE_TOKEN=root-token-deadbeef\n", encoding="utf-8"
     )
     creds.chmod(0o600)
     return creds
@@ -224,7 +224,7 @@ class TestServiceExitCodeLogged:
         sup._supervisor = object()
         report = config_dir / "logs" / "hs_err_4321.log"
         report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text("# SIGSEGV")
+        report.write_text("# SIGSEGV", encoding="utf-8")
 
         sup.heartbeat_once()
         assert rec.kwargs_for("storage_service_exit_detected").get("hs_err") == str(report)
@@ -245,7 +245,7 @@ class TestServiceExitCodeLogged:
         sup._supervisor = object()
         (config_dir / "logs").mkdir(parents=True, exist_ok=True)
         # Another process's report must not be attributed to this one.
-        (config_dir / "logs" / "hs_err_9999.log").write_text("x")
+        (config_dir / "logs" / "hs_err_9999.log").write_text("x", encoding="utf-8")
 
         sup.heartbeat_once()
         assert "hs_err" not in rec.kwargs_for("storage_service_exit_detected")
@@ -328,7 +328,7 @@ class TestSupervisorLifecycleLog:
         assert log_path.exists(), (
             "supervisor produced no log file; it is still silent"
         )
-        text = log_path.read_text()
+        text = log_path.read_text(encoding="utf-8")
         assert "storage_service_supervisor_started" in text
         assert "storage_service_supervisor_exit" in text
 
@@ -356,7 +356,7 @@ class TestSupervisorLifecycleLog:
         monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _boom)
         with pytest.raises(KeyboardInterrupt):
             ssd.run_storage_supervisor(config_dir=config_dir)
-        text = (config_dir / "logs" / "storage_service.log").read_text()
+        text = (config_dir / "logs" / "storage_service.log").read_text(encoding="utf-8")
         assert "storage_service_supervisor_started" in text
         assert "storage_service_supervisor_exit" in text
         assert fake_storage_sup.instances[-1].stopped is True, (
@@ -386,7 +386,7 @@ class TestSupervisorLifecycleLog:
         monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _boom)
         with pytest.raises(SystemExit):
             ssd.run_storage_supervisor(config_dir=config_dir)
-        text = (config_dir / "logs" / "storage_service.log").read_text()
+        text = (config_dir / "logs" / "storage_service.log").read_text(encoding="utf-8")
         assert "storage_service_supervisor_started" in text
         assert "storage_service_supervisor_exit" in text
         assert fake_storage_sup.instances[-1].stopped is True, (
@@ -401,7 +401,7 @@ class TestSupervisorLifecycleLog:
         fake_storage_sup.start_raises = RuntimeError("boom at startup")
         with pytest.raises(RuntimeError, match="boom at startup"):
             ssd.run_storage_supervisor(config_dir=config_dir)
-        text = (config_dir / "logs" / "storage_service.log").read_text()
+        text = (config_dir / "logs" / "storage_service.log").read_text(encoding="utf-8")
         assert "storage_service_supervisor_crashed" in text
         assert "boom at startup" in text
 

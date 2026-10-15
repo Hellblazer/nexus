@@ -3,7 +3,7 @@
 
 """The release battery refuses a tree a peer can move underneath it (nexus-57cvk).
 
-AGENTS.md § Worktrees rule 4 says the battery runs in the release worktree
+docs/agents/worktrees.md rule 4 says the battery runs in the release worktree
 and never the primary. Rule 9 obliges whoever pushes to ``develop`` to
 fast-forward the primary in the same breath. Both were followed on
 2026-09-22 and 7.57.0's battery died on its twelfth leg with a tree-identity

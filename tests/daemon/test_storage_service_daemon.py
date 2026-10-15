@@ -120,7 +120,7 @@ def creds_path(config_dir: Path) -> Path:
         "NX_DB_PASS=testsvcpass\n"
         "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
         "NX_DB_ADMIN_USER=nexus_admin\n"
-        "NX_DB_ADMIN_PASS=testadminpass\n"
+        "NX_DB_ADMIN_PASS=testadminpass\n", encoding="utf-8"
     )
     creds.chmod(0o600)
     return creds
@@ -912,6 +912,9 @@ class TestStuckJvmDetection:
             patch.object(
                 sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN
             ),
+            # Unpatched, /livez went to the real port 20004, and anything
+            # answering there on a shared runner reset the counter.
+            patch.object(sup, "_probe_service_liveness", return_value=False),
             patch.object(sup, "_pg_reachable", return_value=True),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -1317,7 +1320,7 @@ def _write_stale_or_fresh_lease(
         if supervisor_pid is not None
         else {},
     )
-    (config_dir / f"storage_service_addr.{scope}").write_text(record.to_json())
+    (config_dir / f"storage_service_addr.{scope}").write_text(record.to_json(), encoding="utf-8")
 
 
 class TestRunStorageSupervisorFunction:
@@ -2094,7 +2097,7 @@ class TestCredsReloadAfterBackfill:
             "NX_DB_PASS=original-pass\n"
             "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
             "NX_DB_ADMIN_USER=nexus_admin\n"
-            "NX_DB_ADMIN_PASS=testadminpass\n"
+            "NX_DB_ADMIN_PASS=testadminpass\n", encoding="utf-8"
         )
         creds_file.chmod(0o600)
 
@@ -2119,11 +2122,11 @@ class TestCredsReloadAfterBackfill:
             # DB credential on disk -- the exact class Significant-1 warns
             # about (today's backfills don't touch these keys; a future one
             # might).
-            text = creds_file.read_text().replace(
+            text = creds_file.read_text(encoding="utf-8").replace(
                 "NX_DB_PASS=original-pass",
                 "NX_DB_PASS=fresh-post-backfill-pass",
             )
-            creds_file.write_text(text)
+            creds_file.write_text(text, encoding="utf-8")
 
         monkeypatch.setattr(
             "nexus.daemon.storage_service_daemon._port_accepting",
@@ -2161,7 +2164,7 @@ class TestCredsReloadAfterBackfill:
             "NX_DB_PASS=original-pass\n"
             "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
             "NX_DB_ADMIN_USER=nexus_admin\n"
-            "NX_DB_ADMIN_PASS=testadminpass\n"
+            "NX_DB_ADMIN_PASS=testadminpass\n", encoding="utf-8"
         )
         creds_file.chmod(0o600)
 
@@ -2182,11 +2185,11 @@ class TestCredsReloadAfterBackfill:
         )
 
         def _fake_backfill_mutates_disk() -> None:
-            text = creds_file.read_text().replace(
+            text = creds_file.read_text(encoding="utf-8").replace(
                 "NX_DB_PASS=original-pass",
                 "NX_DB_PASS=fresh-post-backfill-pass",
             )
-            creds_file.write_text(text)
+            creds_file.write_text(text, encoding="utf-8")
 
         monkeypatch.setattr(
             "nexus.daemon.storage_service_daemon._port_accepting",
@@ -2578,7 +2581,7 @@ class TestExitReasonReaders:
         from nexus.daemon import storage_service_daemon as ssd
 
         log = tmp_path / "storage_service_native.log"
-        log.write_text(self._ERR + "\n")
+        log.write_text(self._ERR + "\n", encoding="utf-8")
         reason = ssd.last_engine_error_line(log, 50_000_000)
         assert reason is not None and "must be in 60..3600" in reason
 
@@ -2605,7 +2608,7 @@ class TestExitReasonReaders:
             "\tat dev.nexus.service.Main.main(Main.java:1)\n"
             "Caused by: java.lang.IllegalStateException: no PG_PORT\n"
             "\tat dev.nexus.service.db.PgSession.<clinit>(PgSession.java:9)\n"
-            "\t... 1 more\n"
+            "\t... 1 more\n", encoding="utf-8"
         )
         assert (
             ssd.last_engine_error_line(log, 0)
@@ -2622,12 +2625,12 @@ class TestExitReasonReaders:
         log = tmp_path / "storage_service_native.log"
         log.write_text(
             self._ERR + "\n"
-            "2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - retrying\n"
+            "2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - retrying\n", encoding="utf-8"
         )
         assert ssd.last_engine_error_line(log, 0) == self._ERR
         # The ERROR line's own trace, ending in a cause that repeats its
         # message, is not a second reason.
-        with log.open("a") as fh:
+        with log.open("a", encoding="utf-8") as fh:
             fh.write(
                 "java.lang.ExceptionInInitializerError\n"
                 "\tat dev.nexus.service.Main.main(Main.java:1)\n"
@@ -2636,7 +2639,7 @@ class TestExitReasonReaders:
                 "\t... 2 more\n"
             )
         assert ssd.last_engine_error_line(log, 0) == self._ERR
-        with log.open("a") as fh:
+        with log.open("a", encoding="utf-8") as fh:
             fh.write("Fatal error: java.lang.OutOfMemoryError: Java heap space\n")
         reason = ssd.last_engine_error_line(log, 0)
         assert reason is not None
@@ -2648,7 +2651,7 @@ class TestExitReasonReaders:
 
         log = tmp_path / "storage_service_native.log"
         assert ssd.last_engine_error_line(log, 0) is None
-        log.write_text(self._ERR + "\n")
+        log.write_text(self._ERR + "\n", encoding="utf-8")
         assert ssd.last_engine_error_line(log, log.stat().st_size) is None
         assert ssd.last_supervisor_error_line(tmp_path / "absent.log", 0) is None
 
@@ -2659,10 +2662,10 @@ class TestExitReasonReaders:
 
         logs = tmp_path / "logs"
         logs.mkdir()
-        (logs / "storage_service_native.log").write_text(self._ERR + " OLD\n")
+        (logs / "storage_service_native.log").write_text(self._ERR + " OLD\n", encoding="utf-8")
         marks = ssd.engine_log_marks(tmp_path)
         assert ssd.engine_exit_reason(marks) is None
-        (logs / "storage_service_jar.log").write_text(self._ERR + "\n")
+        (logs / "storage_service_jar.log").write_text(self._ERR + "\n", encoding="utf-8")
         found = ssd.engine_exit_reason(marks)
         assert found == (logs / "storage_service_jar.log", self._ERR)
 
@@ -2731,7 +2734,7 @@ class TestEnsureStorageSupervisor:
         self._publish_fresh_lease(config_dir)  # artifact="/fake/nexus-service"
 
         other_binary = tmp_path / "different-nexus-service"
-        other_binary.write_text("#!/bin/sh\nexit 0\n")
+        other_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         other_binary.chmod(0o755)
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
@@ -2779,7 +2782,7 @@ class TestEnsureStorageSupervisor:
         pre_fix_supervisor.publish_once()
 
         other_binary = tmp_path / "different-nexus-service"
-        other_binary.write_text("#!/bin/sh\nexit 0\n")
+        other_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         other_binary.chmod(0o755)
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
@@ -2878,11 +2881,11 @@ class TestEnsureStorageSupervisor:
         # start's reason and must not be reported as it.
         native_log.write_text(
             "2026-10-09 08:00:00,000 ERROR [main] d.n.service.Main - "
-            'event=stale_reason_from_an_earlier_boot error="old"\n'
+            'event=stale_reason_from_an_earlier_boot error="old"\n', encoding="utf-8"
         )
 
         def _popen_engine_refuses(*_a, **_k):
-            with native_log.open("a") as fh:
+            with native_log.open("a", encoding="utf-8") as fh:
                 fh.write("2026-10-11 02:10:02,900 INFO  [main] d.n.service.Main - boot\n")
                 fh.write(self._ENGINE_ERROR + "\n")
                 fh.write("java.lang.IllegalArgumentException: must be in 60..3600\n")
@@ -2944,10 +2947,10 @@ class TestEnsureStorageSupervisor:
         logs = config_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         crash_log = logs / "storage_service.crash.log"
-        crash_log.write_text("Error: an earlier start's failure\n")
+        crash_log.write_text("Error: an earlier start's failure\n", encoding="utf-8")
 
         def _popen_supervisor_reports(*_a, **_k):
-            with crash_log.open("a") as fh:
+            with crash_log.open("a", encoding="utf-8") as fh:
                 fh.write(
                     "Error: PostgreSQL did not start on port 15432 "
                     "(password=hunter2-not-a-real-one)\n"
@@ -3783,7 +3786,7 @@ class TestRdr175MvvSingleSupervisor:
         assert registry.discover(scope) is not None
 
         other_binary = tmp_path / "different-nexus-service"
-        other_binary.write_text("#!/bin/sh\nexit 0\n")
+        other_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         other_binary.chmod(0o755)
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
@@ -4209,13 +4212,13 @@ class TestLogTailer:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         log_path = tmp_path / "svc.log"
-        log_path.write_text("old line one\nold line two\n")
+        log_path.write_text("old line one\nold line two\n", encoding="utf-8")
         start_offset = log_path.stat().st_size
 
         tailer = ssd_mod._LogTailer(log_path, start_offset)
         assert tailer() == []  # nothing new yet
 
-        with open(log_path, "a") as fh:
+        with open(log_path, "a", encoding="utf-8") as fh:
             fh.write("new line one\nnew line two\n")
         assert tailer() == ["new line one", "new line two"]
         assert tailer() == []  # consumed; no duplicates
@@ -4227,8 +4230,8 @@ class TestLogTailer:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         log_path = tmp_path / "svc.log"
-        log_path.write_text("")
-        with open(log_path, "a") as fh:
+        log_path.write_text("", encoding="utf-8")
+        with open(log_path, "a", encoding="utf-8") as fh:
             fh.write("process A: booting\n")
             fh.write("process A: FATAL crash\n")
         offset_at_respawn = log_path.stat().st_size
@@ -4241,7 +4244,7 @@ class TestLogTailer:
         # The correct tailer, seeded at spawn time for process B.
         tailer = ssd_mod._LogTailer(log_path, offset_at_respawn)
         assert tailer() == []
-        with open(log_path, "a") as fh:
+        with open(log_path, "a", encoding="utf-8") as fh:
             fh.write("process B: booting\n")
         assert tailer() == ["process B: booting"]
 
@@ -4249,14 +4252,14 @@ class TestLogTailer:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         log_path = tmp_path / "svc.log"
-        log_path.write_text("")
+        log_path.write_text("", encoding="utf-8")
         tailer = ssd_mod._LogTailer(log_path, 0)
 
-        with open(log_path, "a") as fh:
+        with open(log_path, "a", encoding="utf-8") as fh:
             fh.write("event=schema_migration_start\nRunning Chang")
         assert tailer() == ["event=schema_migration_start"]
 
-        with open(log_path, "a") as fh:
+        with open(log_path, "a", encoding="utf-8") as fh:
             fh.write("eset: x::y::z\n")
         assert tailer() == ["Running Changeset: x::y::z"]
 
@@ -4357,7 +4360,7 @@ class TestStaleChangelogLockCleanup:
         )
 
         fake_psql = config_dir / "fake-psql-that-hangs.sh"
-        fake_psql.write_text("#!/bin/sh\nsleep 60\necho 't'\n")
+        fake_psql.write_text("#!/bin/sh\nsleep 60\necho 't'\n", encoding="utf-8")
         fake_psql.chmod(fake_psql.stat().st_mode | stat.S_IEXEC)
 
         creds = {
@@ -4548,9 +4551,9 @@ class TestWaitForServiceReadyMigrationAware:
             "2026-10-09 08:00:00,000 ERROR [main] d.n.service.Main - "
             'event=earlier_boot error="old"\n'
         )
-        sup._log_path.write_text(earlier)
+        sup._log_path.write_text(earlier, encoding="utf-8")
         sup._log_offset_at_spawn = len(earlier.encode())
-        with sup._log_path.open("a") as fh:
+        with sup._log_path.open("a", encoding="utf-8") as fh:
             fh.write(
                 "2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - "
                 'event=pg_session_env_invalid error="NX_SEARCH_PCI_SWEEP_SECONDS=10 '

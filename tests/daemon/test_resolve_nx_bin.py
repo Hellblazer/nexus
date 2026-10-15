@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX arm; win3
 
 def _executable(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\nexit 0\n")
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(0o755)
     return path
 

@@ -34,12 +34,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from nexus.mcp.hooks import DECIDING_HOOKS
 from tests._hook_wiring import HOOKS_JSON, REPO_ROOT, command_verb, launcher_script_args
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: hook name -> the nx-hook verb hooks.json actually wires it as. Read
 #: from the file rather than written down, so this cannot drift from the
 #: wiring it claims to exercise.
 def _wired_verbs() -> dict[str, str]:
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     out: dict[str, str] = {}
     for groups in data.get("hooks", {}).values():
         for group in groups:
@@ -54,7 +55,7 @@ def _wired_argv(verb: str) -> list[str]:
     """The argv hooks.json runs for *verb*: the ``uv``-launched nx-hook shim
     when that is how it is wired (nexus-rcoze, nexus-efk2h), so the real path
     is uv, then the shim, then nx-hook."""
-    data = json.loads(HOOKS_JSON.read_text())
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
     for groups in data.get("hooks", {}).values():
         for group in groups:
             for hook in group.get("hooks", []):
@@ -73,7 +74,7 @@ def _run_verb(verb: str, payload: dict, extra_env: dict[str, str] | None = None)
         _wired_argv(verb),
         input=json.dumps(payload),
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=60,
         env={**os.environ, **(extra_env or {})},
     )

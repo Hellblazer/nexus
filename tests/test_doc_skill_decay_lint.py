@@ -200,6 +200,10 @@ def _target_files() -> list[Path]:
     for d in _SKILL_DIRS:
         files.extend(sorted(d.rglob("*.md")))
     files.append(_AGENTS_MD)
+    # nexus-2ziaz (2026-10-14): AGENTS.md's reference sections moved verbatim to
+    # docs/agents/; the text moved out of the scan's reach, so the directory is
+    # scanned too rather than letting that content rot unchecked.
+    files.extend(sorted((REPO_ROOT / "docs" / "agents").glob("*.md")))
 
     seen: set[Path] = set()
     deduped: list[Path] = []

@@ -166,7 +166,7 @@ def read_mcp_connect_marker_info(session_id: str, config_dir: Path) -> ConnectMa
     """
     path = _marker_path(session_id, config_dir)
     try:
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:

@@ -199,7 +199,7 @@ def read_plugin_version() -> str | None:
         debug("CLAUDE_PLUGIN_ROOT unset")
         return None
     try:
-        data = json.loads((Path(root) / ".claude-plugin" / "plugin.json").read_text())
+        data = json.loads((Path(root) / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         version = data.get("version")
         return version if isinstance(version, str) and version else None
     except (OSError, ValueError) as exc:
@@ -291,7 +291,7 @@ def known_plugins() -> tuple[str, ...]:
         reason = "CLAUDE_PLUGIN_ROOT unset; cannot locate marketplace.json"
     else:
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             data = None
             reason = f"could not read marketplace.json at {path}: {exc}"
@@ -314,7 +314,7 @@ def known_plugins() -> tuple[str, ...]:
 def read_marker() -> str | None:
     """Return the marker's recorded version, or None when absent/unreadable."""
     try:
-        return marker_path().read_text().strip() or None
+        return marker_path().read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
 
@@ -395,7 +395,7 @@ def _our_plugin_shas() -> dict[str, tuple[str, str]]:
     the CLI-side reader uses.
     """
     try:
-        data = json.loads(_registry_path().read_text())
+        data = json.loads(_registry_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
@@ -430,7 +430,7 @@ def _marketplace_install_location(marketplace_name: str) -> Path | None:
     absent -- refuse, never guess (mirrors
     ``plugin_lockstep._marketplace_install_location``)."""
     try:
-        data = json.loads(_marketplaces_path().read_text())
+        data = json.loads(_marketplaces_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -450,7 +450,7 @@ def _pinned_ref_for_plugin(plugin_short: str, install_location: Path) -> str | N
     false negative until something else refreshes the clone, never a
     false positive). ``None`` on any unreadable/unexpected shape."""
     try:
-        data = json.loads((install_location / ".claude-plugin" / "marketplace.json").read_text())
+        data = json.loads((install_location / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     plugins = data.get("plugins") if isinstance(data, dict) else None
@@ -477,7 +477,8 @@ def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | 
             raise FileNotFoundError("git not found on PATH")
         proc = subprocess.run(
             [git, "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
-            capture_output=True, text=True, timeout=timeout,
+            # git rev-parse prints a hash; UTF-8 is git's output encoding on every platform.
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         debug(f"ref resolve failed for {ref} in {install_location}: {exc}")
@@ -601,7 +602,7 @@ def read_ref_drift_marker() -> dict[str, str]:
     unreadable, or malformed -> ``{}`` -- refuse-not-guess, the same
     posture every other reader in this file takes."""
     try:
-        data = json.loads(ref_drift_marker_path().read_text())
+        data = json.loads(ref_drift_marker_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
@@ -632,7 +633,7 @@ def write_ref_drift_marker(entries: dict[str, str]) -> None:
         current.update(entries)
         path = ref_drift_marker_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(current, sort_keys=True))
+        path.write_text(json.dumps(current, sort_keys=True), encoding="utf-8")
     except OSError as exc:
         debug(f"failed to write ref-drift marker: {exc}")
 

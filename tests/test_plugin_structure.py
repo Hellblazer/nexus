@@ -32,7 +32,7 @@ HOOKS_PATH = PLUGIN_DIR / "hooks" / "hooks.json"
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
-REGISTRY = yaml.safe_load(REGISTRY_PATH.read_text())
+REGISTRY = yaml.safe_load(REGISTRY_PATH.read_text(encoding="utf-8"))
 REGISTRY_AGENTS: dict = REGISTRY.get("agents", {})
 
 _STANDALONE_SKILLS = {
@@ -108,7 +108,7 @@ def _collect_shared_links() -> list[tuple[Path, str]]:
     for md_file in sorted(PLUGIN_DIR.rglob("*.md")):
         if "agent-shared" in md_file.parts:
             continue
-        text = md_file.read_text()
+        text = md_file.read_text(encoding="utf-8")
         for match in re.finditer(r"\[([^\]]*)\]\(([^)]*agent-shared/[^)]*)\)", text):
             results.append((md_file, match.group(2)))
     return results
@@ -131,7 +131,7 @@ def _collect_tier_discipline_links() -> list[tuple[Path, str]]:
     for md_file in sorted(PLUGIN_DIR.rglob("*.md")):
         if md_file.name == "tier-discipline.md":
             continue
-        text = md_file.read_text()
+        text = md_file.read_text(encoding="utf-8")
         for match in re.finditer(r"\[([^\]]*)\]\(([^)]*resources/tier-discipline\.md[^)]*)\)", text):
             results.append((md_file, match.group(2)))
     return results
@@ -143,7 +143,7 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
         if not src_file.is_file():
             continue
         try:
-            text = src_file.read_text()
+            text = src_file.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
         label = str(src_file.relative_to(PLUGIN_DIR))
@@ -223,7 +223,7 @@ class TestAgentStructure:
         assert len(agents) >= 10, f"only {len(agents)} agent files examined"
         offenders: list[str] = []
         for agent_path in agents:
-            text = agent_path.read_text()
+            text = agent_path.read_text(encoding="utf-8")
             for section in AGENT_REQUIRED_SECTIONS:
                 if section not in text:
                     offenders.append(f"{agent_path.name}: missing '{section}'")
@@ -246,7 +246,7 @@ class TestPlannerReviewGates:
         # wuerf: inner-axis collapse — three independent assertions over the
         # one strategic-planner.md file, formerly 3 parametrized nodes. Same
         # coverage, one file read.
-        text = (AGENTS_DIR / "strategic-planner.md").read_text()
+        text = (AGENTS_DIR / "strategic-planner.md").read_text(encoding="utf-8")
         # has-review-gates-section
         assert "### Review Gates" in text
         # gates-mention-code-review-expert
@@ -267,7 +267,7 @@ class TestRecoverProtocol:
         assert len(agents) >= 10, f"only {len(agents)} agent files examined"
         offenders: list[str] = []
         for agent_path in agents:
-            block = _extract_recover_block(agent_path.read_text())
+            block = _extract_recover_block(agent_path.read_text(encoding="utf-8"))
             if not block:
                 offenders.append(f"{agent_path.name}: no 'If validation fails' block found")
                 continue
@@ -292,7 +292,7 @@ class TestCliSyntax:
         assert len(ALL_MD_FILES) >= 40, f"only {len(ALL_MD_FILES)} plugin markdown files examined"
         offenders: list[str] = []
         for md_path in ALL_MD_FILES:
-            text = md_path.read_text()
+            text = md_path.read_text(encoding="utf-8")
             rel = md_path.relative_to(PLUGIN_DIR)
             if "pm::" in text:
                 offenders.append(f"{rel}: stale 'pm::' notation")
@@ -305,7 +305,7 @@ class TestCliSyntax:
         assert len(agents) >= 10, f"only {len(agents)} agent files examined"
         offenders: list[str] = []
         for agent_path in agents:
-            for lineno, line in enumerate(agent_path.read_text().splitlines(), 1):
+            for lineno, line in enumerate(agent_path.read_text(encoding="utf-8").splitlines(), 1):
                 if "nx store put -" not in line:
                     continue
                 stripped = line.strip()
@@ -329,7 +329,7 @@ class TestSkillStructure:
         offenders: list[str] = []
         for skill_path in skills:
             name = skill_path.parent.name
-            text = skill_path.read_text()
+            text = skill_path.read_text(encoding="utf-8")
             for section in self.REQUIRED_SECTIONS:
                 if isinstance(section, tuple):
                     if not any(alt in text for alt in section):
@@ -346,7 +346,7 @@ class TestSkillStructure:
         offenders: list[str] = []
         examined = 0
         for skill_path in skill_skill_mds():
-            text = skill_path.read_text()
+            text = skill_path.read_text(encoding="utf-8")
             if "## Relay Template" not in text:
                 continue
             examined += 1
@@ -370,7 +370,7 @@ class TestSkillDescriptionCSO:
         offenders: list[str] = []
         for skill_path in skills:
             name = skill_path.parent.name
-            fm_match = re.match(r"^---\n(.*?)\n---", skill_path.read_text(), re.DOTALL)
+            fm_match = re.match(r"^---\n(.*?)\n---", skill_path.read_text(encoding="utf-8"), re.DOTALL)
             if not fm_match:
                 offenders.append(f"{name}/SKILL.md: no YAML frontmatter")
                 continue
@@ -424,7 +424,7 @@ class TestSkillListingByteBudget:
         # Code's own lenient frontmatter reader but not strict YAML — an
         # unquoted `[` starts flow-sequence parsing and the trailing prose
         # after `]` breaks it. This test only needs one field's raw text.
-        m = re.search(r"^description:\s*(.*)$", path.read_text(), re.MULTILINE)
+        m = re.search(r"^description:\s*(.*)$", path.read_text(encoding="utf-8"), re.MULTILINE)
         return len(m.group(1).strip().encode("utf-8")) if m else 0
 
     def test_total_description_bytes_under_budget(self) -> None:
@@ -456,7 +456,7 @@ class TestCommandStructure:
         assert len(commands) >= 15, f"only {len(commands)} commands examined"
         offenders: list[str] = []
         for cmd_path in commands:
-            bad = re.findall(r'grep\s+["\']?\*\*["\']?', cmd_path.read_text())
+            bad = re.findall(r'grep\s+["\']?\*\*["\']?', cmd_path.read_text(encoding="utf-8"))
             if bad:
                 offenders.append(f"{cmd_path.name}: unescaped '**' in grep pattern: {bad}")
         assert not offenders, "\n".join(offenders)
@@ -479,7 +479,7 @@ class TestCommandStructure:
         assert len(commands) >= 15, f"only {len(commands)} commands examined"
         offenders: list[str] = []
         for cmd_path in commands:
-            text = cmd_path.read_text()
+            text = cmd_path.read_text(encoding="utf-8")
             if "!{" in text:
                 offenders.append(
                     f"{cmd_path.name}: forbidden !{{ }} brace bash form (nexus-ln9y5). "
@@ -505,7 +505,7 @@ class TestCommandStructure:
         assert len(commands) >= 15, f"only {len(commands)} commands examined"
         offenders: list[str] = []
         for cmd_path in commands:
-            text = cmd_path.read_text()
+            text = cmd_path.read_text(encoding="utf-8")
             if _command_bash_block(text) is not None:
                 offenders.append(
                     f"{cmd_path.name}: migrated command must inject via a single-line "
@@ -527,7 +527,7 @@ class TestCrossReferenceIntegrity:
         known_agents = {p.stem for p in agents}
         offenders: list[str] = []
         for agent_path in agents:
-            for ref in re.findall(r"relay to `([a-z][a-z0-9-]*)`", agent_path.read_text(), re.IGNORECASE):
+            for ref in re.findall(r"relay to `([a-z][a-z0-9-]*)`", agent_path.read_text(encoding="utf-8"), re.IGNORECASE):
                 if ref not in known_agents:
                     offenders.append(f"{agent_path.name}: references unknown agent '{ref}'")
         assert not offenders, "\n".join(offenders)
@@ -537,7 +537,7 @@ class TestHooks:
 
     def test_hooks_json_exists_and_matchers(self) -> None:
         assert HOOKS_PATH.exists()
-        hooks = json.loads(HOOKS_PATH.read_text())
+        hooks = json.loads(HOOKS_PATH.read_text(encoding="utf-8"))
         for entry in hooks.get("PostToolUse", []):
             has_matcher = "matcher" in entry
             has_filter = "grep" in entry.get("command", "") or "bd create" in entry.get("command", "")
@@ -561,7 +561,7 @@ class TestHooks:
         value), not the raw file text, so a hit inside unrelated JSON
         punctuation is not possible.
         """
-        data = json.loads(HOOKS_PATH.read_text())
+        data = json.loads(HOOKS_PATH.read_text(encoding="utf-8"))
         events = data.get("hooks", data)
         examined = 0
         for event, entries in events.items():
@@ -589,7 +589,7 @@ class TestHooks:
         Python ≥3.12 requirement is discoverable from the plugin manifest,
         not just from the runtime guards in each hook script.
         """
-        plugin_json = json.loads((PLUGIN_DIR / ".claude-plugin" / "plugin.json").read_text())
+        plugin_json = json.loads((PLUGIN_DIR / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         engines = plugin_json.get("engines") or {}
         py_req = engines.get("python", "")
         assert py_req, "plugin.json missing 'engines.python' field"
@@ -613,7 +613,7 @@ class TestHooks:
         acceptable as a SessionEnd entry; what matters is that *some*
         nexus cleanup entry is registered.
         """
-        data = json.loads(HOOKS_PATH.read_text())
+        data = json.loads(HOOKS_PATH.read_text(encoding="utf-8"))
         events = data.get("hooks", data)
         session_end = events.get("SessionEnd")
         assert session_end, "SessionEnd hook is missing -- see test docstring for why it must stay"
@@ -655,7 +655,7 @@ class TestSharedResources:
             path = SHARED_DIR / filename
             if not path.exists():
                 offenders.append(f"resources/agent-shared/{filename} missing")
-            elif len(path.read_text()) <= 100:
+            elif len(path.read_text(encoding="utf-8")) <= 100:
                 offenders.append(f"resources/agent-shared/{filename} nearly empty")
         assert not offenders, "\n".join(offenders)
 
@@ -729,7 +729,7 @@ class TestTierDisciplineLinks:
         or "widest" elsewhere would never match it."""
         offenders = [
             p for p in skill_skill_mds()
-            if "1. **Read** widest" in p.read_text()
+            if "1. **Read** widest" in p.read_text(encoding="utf-8")
         ]
         assert not offenders, (
             f"these skills re-duplicate the tier-discipline checklist inline "
@@ -752,7 +752,7 @@ class TestMarketplaceVersion:
 
     def test_marketplace_version_matches_pyproject(self) -> None:
         pv = self._pyproject_version()
-        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+        for plugin in json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8")).get("plugins", []):
             assert plugin.get("version", "") == pv, \
                 f"marketplace.json '{plugin['name']}' version != pyproject.toml {pv!r}"
 
@@ -775,7 +775,7 @@ class TestMarketplaceVersion:
         which is not the same as duplicating it).
         """
         pv = self._pyproject_version()
-        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+        for plugin in json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8")).get("plugins", []):
             source = plugin.get("source")
             assert isinstance(source, dict), (
                 f"marketplace.json {plugin['name']!r} source must be the "
@@ -787,7 +787,7 @@ class TestMarketplaceVersion:
                 f"plugin.json at {plugin_json_path} -- covered by "
                 f"test_plugin_source_path_has_plugin_json"
             )
-            plugin_json_version = json.loads(plugin_json_path.read_text()).get("version")
+            plugin_json_version = json.loads(plugin_json_path.read_text(encoding="utf-8")).get("version")
             assert plugin_json_version == pv, (
                 f"{plugin['name']}/.claude-plugin/plugin.json version "
                 f"{plugin_json_version!r} != pyproject.toml {pv!r}"
@@ -805,7 +805,7 @@ class TestMarketplaceVersion:
         partial or malformed bump can't ship.
         """
         pv = self._pyproject_version()
-        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+        for plugin in json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8")).get("plugins", []):
             source = plugin.get("source")
             assert isinstance(source, dict), (
                 f"marketplace.json '{plugin['name']}' source must be the "
@@ -827,7 +827,7 @@ class TestMarketplaceVersion:
         (Pattern from the global_directives marketplace-pinned-source-
         playbook; adopted from the parallel palinex implementation.)
         """
-        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+        for plugin in json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8")).get("plugins", []):
             source = plugin["source"]
             assert isinstance(source, dict), "covered by ref test"
             path = source.get("path", "")
@@ -841,7 +841,7 @@ class TestMarketplaceVersion:
         """Each plugin's source.path subdir must contain its own
         .claude-plugin/plugin.json. CLAUDE_PLUGIN_ROOT resolves there
         at runtime."""
-        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+        for plugin in json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8")).get("plugins", []):
             source = plugin["source"]
             assert isinstance(source, dict)
             manifest = REPO_ROOT / source.get("path", "") / ".claude-plugin" / "plugin.json"
@@ -868,7 +868,7 @@ class TestMarketplaceVersion:
             "published conexus version; it must exist."
         )
         pv = self._pyproject_version()
-        manifest_version = json.loads(mcpb_manifest.read_text()).get("version")
+        manifest_version = json.loads(mcpb_manifest.read_text(encoding="utf-8")).get("version")
         assert manifest_version == pv, (
             f"mcpb/manifest.json version {manifest_version!r} "
             f"!= pyproject.toml {pv!r}"
@@ -925,7 +925,7 @@ class TestMarketplaceVersion:
         assert mcpb_manifest.exists()
         assert mcpb_pyproject.exists()
         manifest_python = (
-            json.loads(mcpb_manifest.read_text())
+            json.loads(mcpb_manifest.read_text(encoding="utf-8"))
             .get("compatibility", {})
             .get("runtimes", {})
             .get("python")
@@ -946,7 +946,7 @@ class TestMarketplaceVersion:
         version even though CI's pytest run is green on the release SHA
         (the tag is applied after merge)."""
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
-        body = workflow.read_text()
+        body = workflow.read_text(encoding="utf-8")
         assert "mcpb/manifest.json" in body, (
             "release.yml has no step referencing mcpb/manifest.json; the "
             "release-time mcpb version-sync guard is missing."
@@ -967,7 +967,7 @@ class TestMarketplaceVersion:
         simple index AFTER the PyPI publish and BEFORE creating the
         GitHub release, so announcement never precedes installability."""
         workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
-        body = workflow.read_text()
+        body = workflow.read_text(encoding="utf-8")
         publish = body.find("gh-action-pypi-publish")
         wait = body.find("wait_pypi_simple_index.py")
         gh_release = body.find("action-gh-release")
@@ -996,7 +996,7 @@ class TestMarketplaceVersion:
         git SHA-1). Empty or absent is allowed; partial / uppercase
         / non-hex is rejected to keep the field useful as an integrity
         check."""
-        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+        for plugin in json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8")).get("plugins", []):
             source = plugin["source"]
             sha = source.get("sha")
             if not sha:
@@ -1017,7 +1017,7 @@ class TestMarketplaceVersion:
         assert uv_lock.exists()
         m = re.search(
             r'\[\[package\]\]\s+name\s*=\s*"conexus"\s+version\s*=\s*"([^"]+)"',
-            uv_lock.read_text(),
+            uv_lock.read_text(encoding="utf-8"),
         )
         assert m is not None, "conexus not found in uv.lock"
         assert m.group(1) == pv, f"uv.lock {m.group(1)!r} != pyproject.toml {pv!r}"
@@ -1469,7 +1469,7 @@ class TestOneEntryPointPerName:
         ref_re = re.compile(r"/conexus:([a-zA-Z0-9][a-zA-Z0-9-]*)")
         offenders: list[str] = []
         for md_file in ALL_MD_FILES:
-            for name in ref_re.findall(md_file.read_text()):
+            for name in ref_re.findall(md_file.read_text(encoding="utf-8")):
                 if name not in registered_names:
                     offenders.append(f"{md_file.relative_to(PLUGIN_DIR)}: /conexus:{name}")
         assert not offenders, (
@@ -1497,7 +1497,7 @@ class TestOneEntryPointPerName:
             shell_files += sorted(p for p in cc_validation_dir.rglob("*") if p.is_file())
         for path in shell_files:
             try:
-                text = path.read_text()
+                text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
             for name in _RETIRED_NAMES:
@@ -1563,8 +1563,8 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
     release body when the section was missing (that fallback is now a hard
     failure — this is the pre-tag half, which catches the omission on the
     release branch before the PR merges, where the fix is cheapest)."""
-    version = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
-    changelog = (REPO_ROOT / "CHANGELOG.md").read_text()
+    version = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=\n## \[|\Z)",
                   changelog, re.DOTALL | re.MULTILINE)
     assert m, (

@@ -70,7 +70,7 @@ class TestMarkerPrimitives:
         path = sr.write_stop_marker(cfg, TIER, SCOPE, platform="win32", clock=lambda: 1234.5)
         assert path == _marker(cfg)
         assert OPENED == [_marker(cfg)], "the marker must be created owner-only"
-        assert json.loads(path.read_text())["requested_at"] == 1234.5
+        assert json.loads(path.read_text(encoding="utf-8"))["requested_at"] == 1234.5
 
     def test_a_posix_stop_writes_no_marker(self, cfg: Path) -> None:
         assert sr.write_stop_marker(cfg, TIER, SCOPE, platform="linux") is None
@@ -86,7 +86,7 @@ class TestMarkerPrimitives:
         assert sr.stop_requested_since(cfg, TIER, SCOPE, 0.0) is False
 
     def test_an_unparseable_marker_falls_back_to_its_file_time(self, cfg: Path) -> None:
-        _marker(cfg).write_text("{not json")
+        _marker(cfg).write_text("{not json", encoding="utf-8")
         os.utime(_marker(cfg), (500.0, 500.0))
         assert sr.stop_requested_since(cfg, TIER, SCOPE, 400.0) is True
         assert sr.stop_requested_since(cfg, TIER, SCOPE, 600.0) is False

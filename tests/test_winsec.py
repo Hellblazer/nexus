@@ -125,7 +125,7 @@ class TestPosix:
     )
     def test_restrict_to_owner_is_chmod_0600(self, tmp_path: Path) -> None:
         path = tmp_path / "t"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8")
         path.chmod(0o644)
         restrict_to_owner(path, platform="linux", sid_lookup=_boom, acl_apply=_boom)
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -146,7 +146,7 @@ class TestPosix:
     )
     def test_ensure_owner_only_tightens_a_loose_file_and_leaves_a_tight_one(self, tmp_path: Path) -> None:
         path = tmp_path / "t"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8")
         path.chmod(0o644)
         ensure_owner_only(path, platform="linux")
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -163,7 +163,7 @@ class TestWindowsWrite:
         os.write(fd, b"hunter2")
         os.close(fd)
         assert fake.calls == [(str(path), SID, 0)], "exactly one ACL call, for the current SID, before the first write"
-        assert path.read_text() == "hunter2"
+        assert path.read_text(encoding="utf-8") == "hunter2"
         assert fake.acls[str(path)] == [SID]
 
     def test_a_failed_acl_closes_the_descriptor_removes_the_empty_file_and_raises(self, tmp_path: Path) -> None:
@@ -181,14 +181,14 @@ class TestWindowsWrite:
 
     def test_a_failed_acl_never_deletes_a_file_that_already_had_content(self, tmp_path: Path) -> None:
         path = tmp_path / "existing"
-        path.write_text("keep me")
+        path.write_text("keep me", encoding="utf-8")
 
         def failing(p: str, sid: str) -> None:
             raise PermissionError("no")
 
         with pytest.raises(PermissionError):
             open_private(path, os.O_CREAT | os.O_WRONLY, platform="win32", sid_lookup=lambda: SID, acl_apply=failing)
-        assert path.read_text() == "keep me"
+        assert path.read_text(encoding="utf-8") == "keep me"
 
     def test_the_sid_lookup_failing_is_a_failed_write_not_an_unprotected_one(self, tmp_path: Path) -> None:
         def no_sid() -> str:
@@ -201,7 +201,7 @@ class TestWindowsWrite:
     def test_restrict_to_owner_applies_the_acl_for_the_sid(self, tmp_path: Path, win_kw: dict[str, object]) -> None:
         fake: FakeAcl = win_kw["_fake"]  # type: ignore[assignment]
         path = tmp_path / "t"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8")
         restrict_to_owner(path, **_kw(win_kw, "platform", "sid_lookup", "acl_apply"))
         assert fake.acls == {str(path): [SID]}
 
@@ -276,7 +276,7 @@ class TestWriteThenRead:
         fd = open_private(written, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, **_kw(win_kw, "platform", "sid_lookup", "acl_apply"))
         os.close(fd)
         stranger = tmp_path / "inherited"
-        stranger.write_text("x")
+        stranger.write_text("x", encoding="utf-8")
         read_kw = {"platform": "win32", "sid_lookup": lambda: SID, "trustees_lookup": fake.trustees}
         assert owner_only_problem(written, 0o666, **read_kw) is None  # type: ignore[arg-type]
         assert owner_only_problem(stranger, 0o666, **read_kw) is not None  # type: ignore[arg-type]
@@ -286,7 +286,7 @@ class TestWriteThenRead:
     ) -> None:
         fake: FakeAcl = win_kw["_fake"]  # type: ignore[assignment]
         path = tmp_path / "f"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8")
         kw = {"platform": "win32", "sid_lookup": lambda: SID, "trustees_lookup": fake.trustees, "acl_apply": fake.apply}
         ensure_owner_only(path, **kw)  # type: ignore[arg-type]
         assert fake.acls[str(path)] == [SID]
@@ -317,7 +317,7 @@ def _assert_acl_before_secret(fake: FakeAcl, directory: Path, secret: str, *, mi
         assert sid == SID
         assert Path(path).parent == directory, f"the ACL went on {path}, not a file in {directory}"
         assert size == 0, f"{path} already held {size} bytes when its ACL was applied"
-    assert any(secret in p.read_text() for p in directory.iterdir() if p.is_file()), "the secret never reached disk"
+    assert any(secret in p.read_text(encoding="utf-8") for p in directory.iterdir() if p.is_file()), "the secret never reached disk"
 
 
 class TestEveryCredentialSite:
@@ -353,10 +353,10 @@ class TestEveryCredentialSite:
         _assert_acl_before_secret(windows, tmp_path, "svc-token-secret")
         # The backfills rewrite the file from a temp file; each must protect that temp file too.
         stripped = "\n".join(
-            line for line in creds.read_text().splitlines()
+            line for line in creds.read_text(encoding="utf-8").splitlines()
             if not line.startswith(("NX_SERVICE_TOKEN", "NX_DB_DIAG"))
         ) + "\n"
-        creds.write_text(stripped)
+        creds.write_text(stripped, encoding="utf-8")
         windows.calls.clear()
         pg._persist_service_token(creds, "backfilled-token-secret")
         _assert_acl_before_secret(windows, tmp_path, "backfilled-token-secret")
@@ -395,7 +395,7 @@ class TestEveryCredentialSite:
         _assert_acl_before_secret(windows, tmp_path, "appliance-secret")
         # A credential file already on disk with an open ACL is tightened, not trusted.
         stray = tmp_path / "appliance_mint_credential"
-        stray.write_text("mint_token=appliance-secret\nmint_tenant=t\n")
+        stray.write_text("mint_token=appliance-secret\nmint_tenant=t\n", encoding="utf-8")
         windows.calls.clear()
         ah._enforce_0600(stray)
         assert [Path(p) for p, _s, _z in windows.calls] == [stray]
@@ -417,7 +417,7 @@ def _load_mirror():
 def _live_lease(path: Path, token: str) -> None:
     path.write_text(json.dumps({
         "status": "live", "heartbeat_epoch": time.time(), "ttl": 60.0, "endpoint": {"token": token},
-    }))
+    }), encoding="utf-8")
     path.chmod(0o666)  # Windows says 0o666 for everything; the reader must not care
 
 
@@ -460,7 +460,7 @@ class TestReadersUseTheAclOnWindows:
         from nexus.hooks import mailbox_drain as md
 
         lease = tmp_path / f"storage_service_addr.{_identity()}"
-        lease.write_text("{}")
+        lease.write_text("{}", encoding="utf-8")
         lease.chmod(0o666)
         monkeypatch.setattr(_winsec, "_is_windows", lambda platform: True)
         monkeypatch.setattr(_winsec, "_windows_user_sid", lambda: SID)
@@ -481,7 +481,7 @@ class TestReadersUseTheAclOnWindows:
         from nexus.hooks import mailbox_drain as md
 
         lease = tmp_path / f"storage_service_addr.{_identity()}"
-        lease.write_text("{}")
+        lease.write_text("{}", encoding="utf-8")
         lease.chmod(0o644)
         with pytest.raises(md._Skip, match=r"group/other-accessible \(mode 0o644\)"):
             md._read_local_supervisor_token(tmp_path)
@@ -497,7 +497,7 @@ def _identity() -> str:
 
 
 def _func(path: Path, name: str) -> ast.FunctionDef:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     hits = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name]
     assert len(hits) == 1, f"{path} must define exactly one {name}"
     return hits[0]
@@ -725,7 +725,7 @@ class TestRealWindows:
         # A fresh file inherits its directory's ACL, which on a stock Windows profile adds SYSTEM and
         # Administrators; restrict_to_owner must then change what the walk reports.
         path = tmp_path / "plain"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8")
         before = _winsec._windows_dacl_trustees(str(path))
         assert before is not None and len(before) >= 1
         restrict_to_owner(path)

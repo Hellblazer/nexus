@@ -1227,13 +1227,15 @@ def _in_linked_worktree(cwd: str) -> bool | None:
         git = _exec_path.which_off_cwd("git")
         if git is None:
             return None
+        # git prints paths as UTF-8 on every platform; the locale's cp1252 would
+        # garble a non-ASCII checkout path (nexus-ikoqj).
         git_dir = subprocess.run(
             [git, "rev-parse", "--git-dir"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         common = subprocess.run(
             [git, "rev-parse", "--git-common-dir"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
     except Exception:  # noqa: BLE001 — undeterminable: fail open
         return None
@@ -1336,6 +1338,130 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
     return head
 
 
+#: The chas test host's ssh aliases (nexus-yc7fs, Sam 2026-10-14). A git write
+#: sent there runs in chas's own clone, never in the checkout this guard protects.
+_REMOTE_TEST_HOSTS: frozenset[str] = frozenset({"chas", "chas-test"})
+
+#: ssh flags that run nothing locally. Every other option is refused, since
+#: ProxyCommand, LocalCommand, -F (a config that can set either) and -J (a
+#: jump) can all start a process on this machine or route somewhere else.
+_SAFE_SSH_FLAG_LETTERS: frozenset[str] = frozenset("nqtT")
+_SAFE_SSH_O_OPTIONS: frozenset[str] = frozenset(
+    {"connecttimeout", "batchmode", "serveraliveinterval", "serveralivecountmax"}
+)
+_SAFE_SSH_O_VALUE_RE = re.compile(r"[A-Za-z0-9]+")
+
+#: The only characters accepted outside single quotes. Everything else that a
+#: shell treats specially there is refused: ``$`` (every expansion), backtick,
+#: ``( ) { } [ ] * ? ~ ^ ! #`` (substitution, brace and glob expansion, zsh
+#: flags and qualifiers, history, comments), backslash, ``; & | < >`` and line
+#: breaks. With those gone, zsh and bash both read each word literally, so the
+#: words shlex sees are exactly the words ssh receives. ``<`` is refused too
+#: (review round 3): the shell removes a redirection word, so in ``ssh chas-test
+#: </dev/null -oProxyCommand=...`` the loop below took ``</dev/null`` for the
+#: remote command while ssh received the option. ``ssh -n`` does what
+#: ``</dev/null`` did. ``=`` stays for ``-oKey=value``; zsh's word-initial
+#: ``=cmd`` only expands to a command's path, which never starts with ``-``.
+_LITERAL_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t_./:@,+-="
+)
+
+#: Remote commands that would leave chas for another host. A best-effort list:
+#: the carve-out's job is to stop a subagent's git touching this checkout, and
+#: chas reaching back to this machine is the one route to it worth naming.
+_ONWARD_HOP_WORDS: tuple[str, ...] = ("ssh", "scp", "sftp", "rsync")
+
+
+def _read_literally(command: str) -> bool:
+    """True when the shell (zsh or bash) reads every word of ``command``
+    literally: nothing outside single quotes expands, substitutes, globs or
+    chains, so no second local command can start and no word can turn into an
+    extra ssh option.
+
+    An allowlist, not a blocklist (nexus-yc7fs review round 2). The blocklist
+    draft missed words between the host and the remote command that a shell
+    rewrites into ``-oProxyCommand=...`` (an unset ``$X``, a brace or glob
+    pattern, ``$'...'``), and zsh's ``$~PWD`` glob qualifiers. Inside single
+    quotes nothing is checked: both shells treat it as literal, and it is the
+    remote command, which runs on chas. Inside double quotes the same
+    allowlist applies, plus a literal single quote.
+    """
+    state = ""  # "", "'" or '"'
+    for ch in command:
+        if state == "'":
+            if ch == "'":
+                state = ""
+        elif ch == "'" and state == "":
+            state = "'"
+        elif ch == '"':
+            state = "" if state == '"' else '"'
+        elif ch in _LITERAL_CHARS or (state == '"' and ch == "'"):
+            continue
+        else:
+            return False
+    return state == ""
+
+
+def _safe_ssh_o_value(value: str) -> bool:
+    key, sep, val = value.partition("=")
+    return bool(sep) and key.lower() in _SAFE_SSH_O_OPTIONS and bool(
+        _SAFE_SSH_O_VALUE_RE.fullmatch(val)
+    )
+
+
+def _remote_test_host_command(command: str) -> str | None:
+    """The chas host a subagent command runs on, when the WHOLE command is one
+    ssh invocation whose only work happens there; otherwise None.
+
+    nexus-yc7fs: the primary rule matches ``git`` plus a write verb anywhere
+    in the text, so ``ssh chas-test 'git -C <wt> add ...'`` was denied though
+    its git runs in chas's clone. The carve-out is deliberately narrow: the
+    shell reads the command literally (``_read_literally``), the first word is
+    ssh, every option, before or after the host (OpenSSH parses both until the
+    remote command starts), is one that runs nothing locally, the host is a
+    chas alias (``user@`` allowed), and the remote command does not name an
+    onward hop. Known limit: a remote command can still reach other hosts by
+    means this does not name; the guard protects against a subagent's git, not
+    against a hostile one.
+    """
+    if not _read_literally(command):
+        return None
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not tokens or tokens[0] not in ("ssh", "/usr/bin/ssh"):
+        return None
+
+    host: str | None = None
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            if tok.startswith("-o"):
+                if len(tok) == 2:
+                    i += 1
+                    value = tokens[i] if i < len(tokens) else ""
+                else:
+                    value = tok[2:]
+                if not _safe_ssh_o_value(value):
+                    return None
+            elif not tok[1:] or not set(tok[1:]) <= _SAFE_SSH_FLAG_LETTERS:
+                return None
+            i += 1
+            continue
+        if host is not None:
+            break  # the remote command starts here; ssh parses no options after it
+        host = tok
+        i += 1
+
+    if host is None or host.rsplit("@", 1)[-1] not in _REMOTE_TEST_HOSTS:
+        return None
+    if any(word in tok for tok in tokens[i:] for word in _ONWARD_HOP_WORDS):
+        return None
+    return host
+
+
 def body(payload: dict[str, Any]) -> None:
     agent_id = str(payload.get("agent_id") or "")
 
@@ -1344,6 +1470,17 @@ def body(payload: dict[str, Any]) -> None:
 
     command = _lib.get_bash_command(payload)
     if not command:
+        _lib.pass_through()
+
+    # The chas carve-out (nexus-yc7fs): one ssh command whose git runs on the
+    # test host. Checked before both gates because neither can tell a remote
+    # git from a local one; `_remote_test_host_command` refuses anything that
+    # could also run locally, so this admits nothing the gates exist to stop.
+    if _remote_test_host_command(command) is not None:
+        _lib.log_routing_event(
+            rule=RULE_NAME, outcome="allow_remote_test_host", tool_name="Bash",
+            command_fragment=command,
+        )
         _lib.pass_through()
 
     normalized = _normalize_for_primary_scan(command)

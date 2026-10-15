@@ -244,6 +244,9 @@
     },
     "memory_get": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -260,6 +263,9 @@
     },
     "memory_put": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -304,6 +310,9 @@
     },
     "memory_search": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -639,6 +648,9 @@
     },
     "query": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -691,6 +703,9 @@
     },
     "scratch": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -755,6 +770,9 @@
     },
     "search": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -996,6 +1014,9 @@
     },
     "store_get": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1103,6 +1124,9 @@
     },
     "store_put": {
       "is_async": true,
+      "meta": {
+        "anthropic/alwaysLoad": true
+      },
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {

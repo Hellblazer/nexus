@@ -25,6 +25,7 @@ from structlog.testing import capture_logs
 import nexus.logging_setup as logging_setup
 
 from nexus._hook_runtime import _io
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 class _TTYStream(io.StringIO):
@@ -193,7 +194,7 @@ def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
         """
     )
     proc = subprocess.run(
-        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+        [sys.executable, "-c", program], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, check=False
     )
     assert proc.returncode == 0, proc.stderr
     assert "demo_hook" in proc.stderr, proc.stderr
@@ -279,7 +280,7 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
         """
     )
     proc = subprocess.run(
-        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+        [sys.executable, "-c", program], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, check=False
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", f"hook logging leaked onto the decision channel: {proc.stdout!r}"
@@ -298,7 +299,7 @@ def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigur
         """
     )
     proc = subprocess.run(
-        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+        [sys.executable, "-c", program], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, check=False
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", f"hook logging leaked onto the decision channel: {proc.stdout!r}"

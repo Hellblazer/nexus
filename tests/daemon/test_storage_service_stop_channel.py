@@ -88,7 +88,7 @@ class _FakeJobApi:
         self.events.append(("break", pid))
         if self.break_action == "deliver":
             assert self.engine is not None and pid == self.engine.pid
-            self.engine.break_file.write_text("break")  # type: ignore[attr-defined]
+            self.engine.break_file.write_text("break", encoding="utf-8")  # type: ignore[attr-defined]
         return True  # a send returning True proves nothing about delivery
 
     def close_job(self, job: int | None) -> bool:

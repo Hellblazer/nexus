@@ -107,14 +107,14 @@ def test_a_changed_port_rewrites_the_file(tmp_path) -> None:
     target = tmp_path / "endpoint.json"
     write_handoff_if_changed(target, 29517, FIXTURE_TOKEN, FIXTURE_TENANT)
     assert write_handoff_if_changed(target, 29518, FIXTURE_TOKEN, FIXTURE_TENANT) is True
-    assert json.loads(target.read_text())["port"] == 29518
+    assert json.loads(target.read_text(encoding="utf-8"))["port"] == 29518
     _assert_private(target)
 
 
 def test_a_stale_temp_from_a_crash_is_removed(tmp_path) -> None:
     target = tmp_path / "endpoint.json"
     stale = tmp_path / f".endpoint.json.tmp.{os.getpid()}"
-    stale.write_text("torn")
+    stale.write_text("torn", encoding="utf-8")
     write_handoff_if_changed(target, 29517, FIXTURE_TOKEN, FIXTURE_TENANT)
     assert not stale.exists()
     assert [p.name for p in tmp_path.iterdir()] == ["endpoint.json"]
@@ -163,7 +163,7 @@ def test_an_issue_failure_persists_nothing(tmp_path) -> None:
 
 
 def test_a_corrupt_credential_file_refuses_rather_than_reissuing(tmp_path) -> None:
-    (tmp_path / MINT_CREDENTIAL_FILENAME).write_text("garbage\n")
+    (tmp_path / MINT_CREDENTIAL_FILENAME).write_text("garbage\n", encoding="utf-8")
     issuer = _Issuer({"token": "mint-new", "tenant": "default"})
     with pytest.raises(ValueError, match="refusing to issue a second credential"):
         ensure_mint_credential(tmp_path, issuer)
@@ -240,7 +240,7 @@ def _projector(tmp_path: Path, engine: _Engine, clock: _Clock, log: _Log) -> App
 
 
 def _file_token(tmp_path: Path) -> str:
-    return json.loads((tmp_path / "appliance" / "endpoint.json").read_text())["mint_token"]
+    return json.loads((tmp_path / "appliance" / "endpoint.json").read_text(encoding="utf-8"))["mint_token"]
 
 
 def test_classify_each_state() -> None:
@@ -389,7 +389,7 @@ def test_loose_modes_are_tightened(tmp_path) -> None:
 
 
 def test_the_fixture_port_is_the_appliance_default() -> None:
-    assert json.loads(FIXTURE.read_text())["port"] == APPLIANCE_DEFAULT_PORT
+    assert json.loads(FIXTURE.read_text(encoding="utf-8"))["port"] == APPLIANCE_DEFAULT_PORT
 
 
 def test_root_tenant_is_the_clients_default_tenant() -> None:

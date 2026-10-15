@@ -39,7 +39,7 @@ class TestReadInstalledProvenance:
     def test_reads_binary_sidecar(self, tmp_path: Path) -> None:
         sidecar = binary_sidecar_path(tmp_path)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(json.dumps({"version": "0.1.3", "tag": "engine-service-v0.1.3"}))
+        sidecar.write_text(json.dumps({"version": "0.1.3", "tag": "engine-service-v0.1.3"}), encoding="utf-8")
         prov = read_installed_provenance(tmp_path)
         assert prov is not None
         assert prov["version"] == "0.1.3"
@@ -47,7 +47,7 @@ class TestReadInstalledProvenance:
     def test_malformed_sidecar_returns_none(self, tmp_path: Path) -> None:
         sidecar = binary_sidecar_path(tmp_path)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text("{ not json")
+        sidecar.write_text("{ not json", encoding="utf-8")
         assert read_installed_provenance(tmp_path) is None
 
 
@@ -126,7 +126,7 @@ class TestStatusVersionHandshake:
         # coordinate 1.0-SNAPSHOT and is no longer the comparison field).
         sidecar = binary_sidecar_path(config_dir)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(json.dumps({"version": "2.0", "tag": "engine-service-v2.0"}))
+        sidecar.write_text(json.dumps({"version": "2.0", "tag": "engine-service-v2.0"}), encoding="utf-8")
         result, _ = self._invoke_status(tmp_path, {
             "app_version": "1.0-SNAPSHOT",
             "release_version": "1.0",

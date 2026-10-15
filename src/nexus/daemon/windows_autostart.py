@@ -325,9 +325,9 @@ def _redirect_missing_stdio(config_dir: Path) -> None:
     logs_dir = config_dir / "logs"
     try:
         logs_dir.mkdir(parents=True, exist_ok=True)
-        stream = open(logs_dir / "windows_autostart.crash.log", "a", buffering=1)  # noqa: SIM115 — lives as long as the process
+        stream = open(logs_dir / "windows_autostart.crash.log", "a", buffering=1, encoding="utf-8")  # noqa: SIM115 — lives as long as the process
     except OSError:
-        stream = open(os.devnull, "w")  # noqa: SIM115 — lives as long as the process
+        stream = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 — lives as long as the process
     if sys.stdout is None:
         sys.stdout = stream
     if sys.stderr is None:

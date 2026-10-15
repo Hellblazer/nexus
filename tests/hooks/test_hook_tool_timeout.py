@@ -33,6 +33,7 @@ import pytest
 
 from nexus._hook_runtime._io import HookResult
 from nexus.mcp import hooks as _hooks
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 pytestmark = pytest.mark.unit
 
@@ -142,7 +143,7 @@ def test_a_timed_out_hook_does_not_keep_the_process_alive() -> None:
     completed = subprocess.run(
         [sys.executable, "-c", program],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=60,
     )
     assert "RETURNED" in completed.stdout, (
@@ -168,7 +169,7 @@ def _wired_mcp_tool_timeouts() -> dict[str, float]:
 
     path = pathlib.Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
     wired: dict[str, float] = {}
-    for entries in json.loads(path.read_text())["hooks"].values():
+    for entries in json.loads(path.read_text(encoding="utf-8"))["hooks"].values():
         for group in entries:
             for entry in group.get("hooks", []):
                 if entry.get("type") != "mcp_tool":

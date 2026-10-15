@@ -229,7 +229,7 @@ class TestRealWindows:
             except subprocess.TimeoutExpired:
                 hung = True
                 helper.kill()
-                pytest.fail(f"the helper did not finish in 150 s: {helper_log.read_text(errors='replace')!r}")
+                pytest.fail(f"the helper did not finish in 150 s: {helper_log.read_text(errors='replace', encoding="utf-8")!r}")
         finally:
             if helper is not None and (hung or helper.poll() is None):
                 # The helper hung or the wait was interrupted: it cannot clean up after itself,
@@ -237,12 +237,12 @@ class TestRealWindows:
                 helper.kill()
                 written = workdir / "result.json"
                 if written.exists():
-                    for pid in json.loads(written.read_text()).get("pids", {}).values():
+                    for pid in json.loads(written.read_text(encoding="utf-8")).get("pids", {}).values():
                         _kill_pid(int(pid))
 
         result_file = workdir / "result.json"
-        assert result_file.exists(), f"the helper wrote no result: rc={helper.returncode} log={helper_log.read_text(errors='replace')!r}"
-        r = json.loads(result_file.read_text())
+        assert result_file.exists(), f"the helper wrote no result: rc={helper.returncode} log={helper_log.read_text(errors='replace', encoding="utf-8")!r}"
+        r = json.loads(result_file.read_text(encoding="utf-8"))
         report = json.dumps(r, sort_keys=True)
         assert "error" not in r, report
         assert r["send_ok"] is True, "GenerateConsoleCtrlEvent failed; nothing was sent: " + report

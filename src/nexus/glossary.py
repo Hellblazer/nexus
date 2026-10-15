@@ -42,7 +42,7 @@ def load_glossary(
         try:
             import yaml  # pyyaml is already a nexus dep  # noqa: PLC0415 — branch-local: only needed when .nexus.yml exists
 
-            data = yaml.safe_load(yml.read_text()) or {}
+            data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
         except Exception:  # noqa: BLE001 — best-effort YAML parse; malformed config degrades to empty glossary
             data = {}
         if isinstance(data, dict):
@@ -55,7 +55,7 @@ def load_glossary(
     # Priority 2: docs/glossary.md — bulleted markdown, one term per line
     md = project_root / "docs" / "glossary.md"
     if md.exists():
-        return _parse_markdown_glossary(md.read_text())
+        return _parse_markdown_glossary(md.read_text(encoding="utf-8"))
 
     return {}
 

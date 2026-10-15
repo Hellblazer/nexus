@@ -91,6 +91,9 @@ def test_battery_with_a_qualifying_python_gets_past_the_resolver(tmp_path: Path)
 #: a uv-linked python3.12), or that is the resolver's own test. Whole-file, with the reason.
 _WHOLE_FILE = {
     "hook-surface-shakeout/shakeout_in_container.sh": "runs inside the shakeout image (Dockerfile apt python3)",
+    "prefix-capture/capture_in_container.sh": "runs inside the prefix-capture image (Dockerfile apt python3)",
+    "prefix-capture/ab/ab_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
+    "prefix-capture/ab/tuplespace/ts_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
     "lib/python_test.sh": "the resolver's own test: python3 is a stub's name there",
     "lib/python.sh": "the resolver: it names python3 as a candidate",
 }

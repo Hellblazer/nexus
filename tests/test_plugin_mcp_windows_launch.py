@@ -110,9 +110,9 @@ def test_context7_is_the_hosted_http_endpoint() -> None:
 
 @pytest.mark.parametrize(
     ("server", "program", "always_load"),
-    [("nexus", "nx-mcp", True), ("nexus-catalog", "nx-mcp-catalog", False)],
+    [("nexus", "nx-mcp", None), ("nexus-catalog", "nx-mcp-catalog", False)],
 )
-def test_the_nexus_servers_start_through_the_launcher(server: str, program: str, always_load: bool) -> None:
+def test_the_nexus_servers_start_through_the_launcher(server: str, program: str, always_load: bool | None) -> None:
     """RDR-228 Phase 1 Step 4: the hardened uv form, the launcher, one program.
     With the CLI absent the launcher serves a stand-in; a bare `nx-mcp` entry
     failed to start."""
@@ -120,7 +120,7 @@ def test_the_nexus_servers_start_through_the_launcher(server: str, program: str,
     assert cfg == {
         "command": "uv",
         "args": [*SEQ_ARGS[:-1], "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py", program],
-        "alwaysLoad": always_load,
+        **({} if always_load is None else {"alwaysLoad": always_load}),
     }
     assert (REPO_ROOT / "conexus" / "launch" / "nx_launch.py").is_file()
 

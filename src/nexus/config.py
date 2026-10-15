@@ -677,7 +677,7 @@ def fastembed_cache_dir() -> Path:
     """
     path = _global_config_path()
     if path.exists():
-        data = yaml.safe_load(path.read_text()) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         configured = (data.get("local") or {}).get("fastembed_cache_path", "")
         if configured:
             # expanduser so a hand-edited ``~/models`` resolves to $HOME, not
@@ -699,7 +699,7 @@ def local_embed_model_choice() -> str | None:
     """
     path = _global_config_path()
     if path.exists():
-        data = yaml.safe_load(path.read_text()) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         value = (data.get("local") or {}).get("embed_model", "")
         return value or None
     return None
@@ -1076,7 +1076,7 @@ def _persisted_service_url() -> str:
     path = _global_config_path()
     if not path.exists():
         return ""
-    data = yaml.safe_load(path.read_text()) or {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return str(data.get("credentials", {}).get("service_url", "") or "")
 
 
@@ -1306,13 +1306,13 @@ def _load_global_config(path: Path) -> dict:
         # Unreadable/vanished between exists() and stat(): fall back to an
         # uncached parse attempt rather than serving a stale hit.
         try:
-            return _empty_none_sections(dict(yaml.safe_load(path.read_text()) or {}))
+            return _empty_none_sections(dict(yaml.safe_load(path.read_text(encoding="utf-8")) or {}))
         except OSError:
             return {}
     cached = _GLOBAL_CONFIG_CACHE
     if cached is not None and cached[0] == key:
         return dict(cached[1])
-    data = _empty_none_sections(dict(yaml.safe_load(path.read_text()) or {}))
+    data = _empty_none_sections(dict(yaml.safe_load(path.read_text(encoding="utf-8")) or {}))
     with _GLOBAL_CONFIG_LOCK:
         _GLOBAL_CONFIG_CACHE = (key, data)
     return dict(data)
@@ -1397,7 +1397,7 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
     with _config_write_lock(path):
         data: dict[str, Any] = {}
         if path.exists():
-            data = yaml.safe_load(path.read_text()) or {}
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         # Build nested dict from dotted path
         node = data
         for i, part in enumerate(parts[:-1]):
@@ -1417,7 +1417,7 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
         content = yaml.dump(data, default_flow_style=False)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
-            with os.fdopen(tmp_fd, "w") as fh:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
                 restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
                 fh.write(content)
             os.replace(tmp_path, path)
@@ -1442,13 +1442,13 @@ def set_credential(name: str, value: str) -> None:
     with _config_write_lock(path):
         data: dict[str, Any] = {}
         if path.exists():
-            data = yaml.safe_load(path.read_text()) or {}
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         data.setdefault("credentials", {})[name] = value
         content = yaml.dump(data, default_flow_style=False)
         # Atomic write: unique temp file → os.replace() (0o600 permissions).
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
-            with os.fdopen(tmp_fd, "w") as fh:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
                 restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
                 fh.write(content)
             os.replace(tmp_path, path)
@@ -1481,7 +1481,7 @@ def unset_credential(name: str) -> bool:
     if not path.exists():
         return False
     with _config_write_lock(path):
-        data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
+        data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         creds = data.get("credentials")
         if not isinstance(creds, dict) or name not in creds:
             return False
@@ -1493,7 +1493,7 @@ def unset_credential(name: str) -> bool:
         # set_credential so a torn write never leaves a half-cleared config.
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
-            with os.fdopen(tmp_fd, "w") as fh:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
                 restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
                 fh.write(content)
             os.replace(tmp_path, path)
@@ -1520,7 +1520,7 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     # Global config
     global_path = nexus_config_dir() / "config.yml"
     if global_path.exists():
-        with global_path.open() as fh:
+        with global_path.open(encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if not isinstance(data, dict):
             _log.warning("global config is not a dict, ignoring", path=str(global_path))
@@ -1530,7 +1530,7 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     # Per-repo config
     repo_config_path = (repo_root or Path.cwd()) / ".nexus.yml"
     if repo_config_path.exists():
-        with repo_config_path.open() as fh:
+        with repo_config_path.open(encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if not isinstance(data, dict):
             _log.warning("repo config is not a dict, ignoring", path=str(repo_config_path))

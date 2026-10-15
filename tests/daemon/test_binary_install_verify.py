@@ -68,7 +68,7 @@ def _sha256_sidecar(asset: Path) -> Path:
     publisher's ``sha256sum`` / ``shasum -a 256`` emits it (two-space sep)."""
     digest = hashlib.sha256(asset.read_bytes()).hexdigest()
     sidecar = asset.with_suffix(asset.suffix + ".sha256")
-    sidecar.write_text(f"{digest}  {asset.name}\n")
+    sidecar.write_text(f"{digest}  {asset.name}\n", encoding="utf-8")
     return sidecar
 
 
@@ -116,7 +116,7 @@ def test_verify_sha256_rejects_tampered_asset(tmp_path):
 def test_verify_sha256_rejects_malformed_sidecar(tmp_path):
     asset = _write_asset(tmp_path)
     sidecar = asset.with_suffix(asset.suffix + ".sha256")
-    sidecar.write_text("not-a-valid-sha256-line\n")
+    sidecar.write_text("not-a-valid-sha256-line\n", encoding="utf-8")
     with pytest.raises(binstall.BinaryVerificationError):
         binstall.verify_sha256(asset, sidecar)
 
@@ -131,7 +131,7 @@ def test_verify_sha256_rejects_missing_sidecar(tmp_path):
 def test_verify_sha256_rejects_missing_asset(tmp_path):
     asset = tmp_path / "nexus-service-linux-amd64"  # never created
     sidecar = tmp_path / "nexus-service-linux-amd64.sha256"
-    sidecar.write_text(f"{'0' * 64}  {asset.name}\n")
+    sidecar.write_text(f"{'0' * 64}  {asset.name}\n", encoding="utf-8")
     with pytest.raises(binstall.BinaryVerificationError):
         binstall.verify_sha256(asset, sidecar)
 
@@ -219,7 +219,7 @@ def test_validate_tag_accepts_namespace_then_reaches_download(tmp_path, monkeypa
 def test_verify_signature_missing_dependency_is_actionable(tmp_path):
     asset = _write_asset(tmp_path)
     bundle = asset.with_suffix(asset.suffix + ".sigstore.json")
-    bundle.write_text("{}")  # content irrelevant; the import fails first
+    bundle.write_text("{}", encoding="utf-8")  # content irrelevant; the import fails first
     with pytest.raises(binstall.BinaryVerificationError) as exc:
         binstall.verify_signature(asset, bundle)
     msg = str(exc.value).lower()
@@ -256,7 +256,7 @@ class _FakeChecker:
 def test_verify_signature_forwards_pinned_issuer_and_identity(tmp_path):
     asset = _write_asset(tmp_path)
     bundle = asset.with_suffix(asset.suffix + ".sigstore.json")
-    bundle.write_text('{"protobuf":"bundle"}')
+    bundle.write_text('{"protobuf":"bundle"}', encoding="utf-8")
     checker = _FakeChecker()
     binstall.verify_signature(asset, bundle, checker=checker)
     assert len(checker.calls) == 1
@@ -270,7 +270,7 @@ def test_verify_signature_forwards_pinned_issuer_and_identity(tmp_path):
 def test_verify_signature_fails_closed_when_checker_raises(tmp_path):
     asset = _write_asset(tmp_path)
     bundle = asset.with_suffix(asset.suffix + ".sigstore.json")
-    bundle.write_text('{"protobuf":"bundle"}')
+    bundle.write_text('{"protobuf":"bundle"}', encoding="utf-8")
     checker = _FakeChecker(raises=ValueError("signature does not verify"))
     with pytest.raises(binstall.BinaryVerificationError):
         binstall.verify_signature(asset, bundle, checker=checker)
@@ -493,7 +493,7 @@ class TestVerifyInstalledBinary:
         digest = sha if sha is not None else hashlib.sha256(payload).hexdigest()
         (svc / "nexus-service.meta.json").write_text(
             json.dumps({"version": "0.1.60", "tag": "engine-service-v0.1.60",
-                        "sha256": digest})
+                        "sha256": digest}), encoding="utf-8"
         )
         return binary
 
@@ -531,7 +531,7 @@ class TestVerifyInstalledBinary:
         svc = tmp_path / "service"
         svc.mkdir(parents=True)
         (svc / "nexus-service").write_bytes(b"engine-bytes")
-        (svc / "nexus-service.meta.json").write_text(json.dumps({"version": "0.1.60"}))
+        (svc / "nexus-service.meta.json").write_text(json.dumps({"version": "0.1.60"}), encoding="utf-8")
         verdict = binstall.verify_installed_binary(tmp_path)
         assert verdict.ok is False
         assert "no usable sha256" in verdict.reason

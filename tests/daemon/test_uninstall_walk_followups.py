@@ -222,7 +222,7 @@ class TestOrtTempSweepPredicate:
         biggest = _ort_dir(tmp_path, f"{ORT}{'9' * 20}")  # Long.toUnsignedString tops out at 20 digits
         foreign_target = tmp_path / "elsewhere"
         foreign_target.mkdir()
-        (foreign_target / "keep.txt").write_text("user data")
+        (foreign_target / "keep.txt").write_text("user data", encoding="utf-8")
         sentinels = {
             "unrelated dir": _ort_dir(tmp_path, "pip-build-xyz", files=("a.txt",)),
             "prefix not at start": _ort_dir(tmp_path, f"my-{ORT}1"),
@@ -237,7 +237,7 @@ class TestOrtTempSweepPredicate:
             "digits then text": _ort_dir(tmp_path, f"{ORT}123old"),
             "21 digits": _ort_dir(tmp_path, f"{ORT}{'9' * 21}"),
         }
-        (tmp_path / f"{ORT}.txt").write_text("a FILE with the prefix")
+        (tmp_path / f"{ORT}.txt").write_text("a FILE with the prefix", encoding="utf-8")
         nested = _ort_dir(tmp_path, f"{ORT}7")
         (nested / "sub").mkdir()
         (nested / "sub" / "deep.dll").write_bytes(b"x")
@@ -249,15 +249,15 @@ class TestOrtTempSweepPredicate:
         assert not victim.exists() and not biggest.exists()
         for label, d in sentinels.items():
             assert d.is_dir() and (d / next(iter(os.listdir(d)))).exists(), label
-        assert (tmp_path / f"{ORT}.txt").read_text() == "a FILE with the prefix"
+        assert (tmp_path / f"{ORT}.txt").read_text(encoding="utf-8") == "a FILE with the prefix"
         assert (nested / "sub" / "deep.dll").exists(), "a directory holding a subdirectory is not ORT's"
-        assert (foreign_target / "keep.txt").read_text() == "user data"
+        assert (foreign_target / "keep.txt").read_text(encoding="utf-8") == "user data"
         assert any(str(nested) in n for n in notes), notes
 
     def test_a_symbolic_link_is_never_followed(self, tmp_path: Path) -> None:
         target = tmp_path / "elsewhere"
         target.mkdir()
-        (target / "keep.txt").write_text("user data")
+        (target / "keep.txt").write_text("user data", encoding="utf-8")
         link = tmp_path / f"{ORT}55"
         try:
             link.symlink_to(target, target_is_directory=True)
@@ -270,7 +270,7 @@ class TestOrtTempSweepPredicate:
             )
         removed, notes = _sweep(tmp_path)
         assert removed == [] and link.is_symlink()
-        assert (target / "keep.txt").read_text() == "user data"
+        assert (target / "keep.txt").read_text(encoding="utf-8") == "user data"
         assert any(str(link) in n for n in notes), notes
 
     @pytest.mark.skipif(sys.platform != "win32", reason="a directory junction exists only on Windows")
@@ -379,7 +379,7 @@ class TestOrtTempSweepInUninstall:
     def _sentinels(self, box) -> dict[str, Path]:
         keep = box.temp / "someone-elses"
         keep.mkdir()
-        (keep / "doc.txt").write_text("not ours")
+        (keep / "doc.txt").write_text("not ours", encoding="utf-8")
         miss = _ort_dir(box.temp, "pytest-of-user", files=("x.log",))
         return {"dir": keep, "other": miss}
 
@@ -393,7 +393,7 @@ class TestOrtTempSweepInUninstall:
 
         assert all(not v.exists() for v in victims)
         assert young.is_dir(), "a directory an engine may be filling is left"
-        assert (sentinels["dir"] / "doc.txt").read_text() == "not ours"
+        assert (sentinels["dir"] / "doc.txt").read_text(encoding="utf-8") == "not ours"
         assert (sentinels["other"] / "x.log").exists()
         assert report.ort_temp_dirs_removed == tuple(sorted(victims))
         assert "2 onnxruntime-java temp dir(s) removed" in report.message, report.message
@@ -480,7 +480,7 @@ class TestOrtTempRoot:
     def test_predicate_constants_match_the_engines(self) -> None:
         """Tie the Python port to the Java source so a change there fails here."""
         src = (Path(__file__).resolve().parents[2] / "service" / "src" / "main" / "java" / "dev" / "nexus"
-               / "service" / "vectors" / "OrtTempSweep.java").read_text()
+               / "service" / "vectors" / "OrtTempSweep.java").read_text(encoding="utf-8")
         assert f'DIR_PREFIX = "{installer.ORT_TEMP_DIR_PREFIX}"' in src
         for lib in installer.ORT_LOADED_LIBS:
             assert f'"{lib}"' in src

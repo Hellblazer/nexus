@@ -318,7 +318,7 @@ Also expected, not anomalies:
 
 - `event=schema_migration_pending changesets=15` before the walk (the same `pending` figure).
 - `event=schema_changelog_duplicate_rows`: production carried 13 extra rows across `grants-nexus-diag-1` and `-2` on
-  2026-09-14 (AGENTS.md § Engine-service release). The count may have changed; record it.
+  2026-09-14 (`docs/agents/engine-service-release.md`). The count may have changed; record it.
 - `event=disk_preflight_skipped` (cloud has no `NX_PG_DATA_DIR`).
 
 Any other result means the cloud is behind PREV_TAG (recount from the live `release_version`), the `runAlways` set

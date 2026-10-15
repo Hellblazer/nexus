@@ -347,7 +347,7 @@ def _scan_nexus_log_errors(
         except OSError:
             continue
         try:
-            with path.open("r", errors="replace") as f:
+            with path.open("r", errors="replace", encoding="utf-8") as f:
                 for line in f:
                     hit = _parse_nexus_log_line(line)
                     if hit is None:
@@ -423,7 +423,7 @@ def _scan_mcp_log_jsonl(
     tool_failures: list[dict] = []
 
     try:
-        with path.open("r") as f:
+        with path.open("r", errors="replace", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -736,7 +736,7 @@ def _plan_library_parity(rows: list[dict[str, Any]], *, truncated: bool) -> _Par
     seen: set[str] = set()
     for path in paths:
         try:
-            template = dict(yaml.safe_load(path.read_text()) or {})
+            template = dict(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
             # The global tier stores scope:global under project='', so apply
             # the same in-memory scope_override the loader applies for this
             # directory — before deriving BOTH the key and the row, or a file
@@ -1996,7 +1996,7 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
         # immediate child process exits, independent of who else still
         # holds the file open.
         stderr_path = Path(work_dir) / "stderr.log"
-        with stderr_path.open("w") as stderr_f:
+        with stderr_path.open("w", encoding="utf-8") as stderr_f:
             proc = run_bounded(
                 [sys.executable, "-c", _MINERU_DOCTOR_PARSE_SCRIPT, str(fixture), str(result_dir)],
                 stdout=subprocess.DEVNULL,
@@ -2004,7 +2004,7 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
                 text=False,
                 timeout=timeout_s,
             )
-        stderr_text = stderr_path.read_text(errors="replace")
+        stderr_text = stderr_path.read_text(errors="replace", encoding="utf-8")
     if proc.returncode != 0:
         tail = [ln for ln in stderr_text.splitlines() if ln.strip()]
         summary = tail[-1] if tail else f"exit {proc.returncode}, no stderr captured"
@@ -3342,6 +3342,7 @@ def _count_orphan_trackers(*, platform: str | None = None) -> int | None:
         ps_output = subprocess.check_output(
             argv_off_cwd(["ps", "-ww", "-eo", "pid,ppid,etime,command"]),
             text=True,
+            encoding="utf-8",  # POSIX-only branch (win32 returned above); ps writes the locale's UTF-8
             stderr=subprocess.DEVNULL,
         )
         return len(_parse_orphan_tracker_candidates(ps_output))

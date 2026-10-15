@@ -52,13 +52,12 @@ def _install_nx_mcp(bindir: Path) -> None:
         install_windows_exe_fake(bindir, "nx-mcp", f"{WINDOWS_SHEBANG}\nprint('real')\n")
     else:
         fake = bindir / "nx-mcp"
-        fake.write_text("#!/bin/sh\necho real\n")
+        fake.write_text("#!/bin/sh\necho real\n", encoding="utf-8")
         fake.chmod(0o755)
 
 
 def _run(
     dirs: dict[str, Path], *, guarded: bool = False, hook: Path = _HOOK, remote: str | None = None,
-    **popen: object,
 ) -> subprocess.CompletedProcess[bytes]:
     env = scrubbed_env(
         PATH=str(dirs["bin"]), NX_TOOLS_DIR=str(dirs["tools"]), NEXUS_CONFIG_DIR=str(dirs["config"]),
@@ -67,12 +66,12 @@ def _run(
     if remote is not None:
         env["CLAUDE_CODE_REMOTE"] = remote
     if guarded:
-        (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS)
+        (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS, encoding="utf-8")
         env["PYTHONPATH"] = str(dirs["site"])
     return subprocess.run(
         [sys.executable, str(hook)],
         input=json.dumps({"hook_event_name": "SessionStart", "source": "startup"}).encode(),
-        capture_output=True, env=env, timeout=30, check=False, cwd=str(dirs["home"]), **popen,
+        capture_output=True, env=env, timeout=30, check=False, cwd=str(dirs["home"]),
     )
 
 
@@ -163,7 +162,7 @@ def test_it_opens_no_socket_and_starts_no_process(tmp_path: Path) -> None:
 
 def test_the_guard_in_the_test_above_really_refuses(tmp_path: Path) -> None:
     dirs = _dirs(tmp_path)
-    (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS)
+    (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS, encoding="utf-8")
     r = subprocess.run(
         [sys.executable, "-c", "import subprocess; subprocess.Popen(['x'])"],
         capture_output=True, env=scrubbed_env(PYTHONPATH=str(dirs["site"])), timeout=30, check=False,
@@ -237,7 +236,7 @@ def test_the_hook_speaks_exactly_when_the_launcher_serves_the_stand_in(tmp_path:
     if os.name == "nt":
         install_windows_exe_fake(dirs["bin"], "nx", f"{WINDOWS_SHEBANG}\nprint('nx')\n")
     else:
-        (dirs["bin"] / "nx").write_text("#!/bin/sh\necho nx\n")
+        (dirs["bin"] / "nx").write_text("#!/bin/sh\necho nx\n", encoding="utf-8")
         (dirs["bin"] / "nx").chmod(0o755)
     launch = _ROOT / "conexus" / "launch" / "nx_launch.py"
     ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"

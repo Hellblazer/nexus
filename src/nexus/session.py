@@ -80,7 +80,7 @@ def write_claude_session_id(session_id: str) -> None:
 def read_claude_session_id() -> str | None:
     """Read the Claude session ID from the flat file, or None if not set."""
     try:
-        text = claude_session_file().read_text().strip()
+        text = claude_session_file().read_text(encoding="utf-8").strip()
         return text or None
     except OSError:
         return None  # intentional: file not created yet, normal on first run
@@ -235,7 +235,7 @@ def _ppid_of(
     status_path = Path(f"/proc/{pid}/status")
     if status_path.exists():
         try:
-            for line in status_path.read_text().splitlines():
+            for line in status_path.read_text(encoding="utf-8").splitlines():
                 if line.startswith("PPid:"):
                     val = int(line.split()[1])
                     return val if val > 1 else None
@@ -247,6 +247,7 @@ def _ppid_of(
         out = subprocess.check_output(
             argv_off_cwd(["ps", "-o", "ppid=", "-p", str(pid)]),
             text=True,
+            encoding="utf-8",  # ps is POSIX-only: UTF-8 (nexus-ikoqj)
             stderr=subprocess.DEVNULL,
         ).strip()
         val = int(out)
@@ -398,6 +399,7 @@ def sweep_orphan_resource_trackers(
         ps_output = subprocess.check_output(
             argv_off_cwd(["ps", "-ww", "-eo", "pid,ppid,etime,command"]),
             text=True,
+            encoding="utf-8",
             stderr=subprocess.DEVNULL,
         )
     except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
@@ -419,6 +421,7 @@ def sweep_orphan_resource_trackers(
                 cmd = subprocess.check_output(
                     argv_off_cwd(["ps", "-ww", "-o", "command=", "-p", str(pid)]),
                     text=True,
+                    encoding="utf-8",
                     stderr=subprocess.DEVNULL,
                 ).strip()
             except (subprocess.CalledProcessError, OSError):

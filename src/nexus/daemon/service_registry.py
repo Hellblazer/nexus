@@ -575,7 +575,7 @@ class ServiceRegistry:
     def _read_record(self, scope_key: str) -> Optional[LeaseRecord]:
         path = self._record_path(scope_key)
         try:
-            text = self._retry_sharing_violation(path.read_text)
+            text = self._retry_sharing_violation(lambda: path.read_text(encoding="utf-8"))
         except OSError:
             return None
         except UnicodeDecodeError as exc:
@@ -1366,7 +1366,7 @@ def _procfs_enumerate() -> list[tuple[int, int, str]]:
     ticks since boot). A process whose files vanish mid-scan (exited between
     ``iterdir`` and ``read``) is skipped, never guessed at.
     """
-    uptime_s = float((PROCFS_ROOT / "uptime").read_text().split()[0])
+    uptime_s = float((PROCFS_ROOT / "uptime").read_text(encoding="utf-8").split()[0])
     hz = os.sysconf("SC_CLK_TCK") or 100
     out: list[tuple[int, int, str]] = []
     for entry in PROCFS_ROOT.iterdir():
@@ -1375,7 +1375,7 @@ def _procfs_enumerate() -> list[tuple[int, int, str]]:
         pid = int(entry.name)
         try:
             raw_cmdline = (entry / "cmdline").read_bytes()
-            stat = (entry / "stat").read_text()
+            stat = (entry / "stat").read_text(encoding="utf-8")
         except (OSError, ValueError):
             continue  # exited mid-scan, or not ours to read
         # Kernel threads have an empty cmdline — never a conexus process.
@@ -1697,7 +1697,7 @@ def process_state(pid: int, *, platform: str | None = None) -> str | None:
         return None
     if _procfs_available():
         try:
-            stat = (PROCFS_ROOT / str(pid) / "stat").read_text()
+            stat = (PROCFS_ROOT / str(pid) / "stat").read_text(encoding="utf-8")
         except OSError:
             return None
         try:

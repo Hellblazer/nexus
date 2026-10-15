@@ -25,6 +25,7 @@ import pytest
 from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 ON_WINDOWS = os.name == "nt"
 
@@ -46,8 +47,8 @@ class TestRealWindows:
         one, two = tmp_path / "gen-1", tmp_path / "gen-2"
         one.mkdir()
         two.mkdir()
-        (one / "who").write_text("one")
-        (two / "who").write_text("two")
+        (one / "who").write_text("one", encoding="utf-8")
+        (two / "who").write_text("two", encoding="utf-8")
         link = tmp_path / "current"
         ops = gen_core.LinkOps()
 
@@ -58,11 +59,11 @@ class TestRealWindows:
         read = lc.read_link(link)
         assert not read.startswith("\\\\?\\")
         assert lc.compare_key(read) == lc.compare_key(str(one))
-        assert (link / "who").read_text() == "one"
+        assert (link / "who").read_text(encoding="utf-8") == "one"
 
         gen_core.swap_link(str(two), link, ops)
-        assert (link / "who").read_text() == "two"
-        assert one.is_dir() and (one / "who").read_text() == "one", "the old target must survive the swap"
+        assert (link / "who").read_text(encoding="utf-8") == "two"
+        assert one.is_dir() and (one / "who").read_text(encoding="utf-8") == "one", "the old target must survive the swap"
         assert sorted(p.name for p in tmp_path.iterdir()) == ["current", "gen-1", "gen-2"]
 
     def test_a_swap_works_while_a_process_runs_through_the_junction(self, tmp_path: Path) -> None:
@@ -109,7 +110,7 @@ class TestRealWindows:
         for name in ("A", "B", "C", "D"):
             gen = tools / f"gen-{name}"
             gen.mkdir()
-            (gen / "nexus-install.json").write_text("{}\n")
+            (gen / "nexus-install.json").write_text("{}\n", encoding="utf-8")
             gens[name] = gen
         gen_core.flip_current(gens["B"], tools)
         gen_core.flip_current(gens["C"], tools)  # current -> C, previous -> B, both junctions
@@ -125,7 +126,7 @@ class TestRealWindows:
         tools = tmp_path / "tools"
         gen = tools / "gen-A"
         (gen / "Lib").mkdir(parents=True)
-        (gen / "nexus-install.json").write_text("{}\n")
+        (gen / "nexus-install.json").write_text("{}\n", encoding="utf-8")
         held = gen / "Lib" / "held.pyd"
         held.write_bytes(b"x")
         errors: list[str] = []
@@ -141,13 +142,13 @@ class TestRealWindows:
         tools.mkdir()
         target = tmp_path / "precious"
         target.mkdir()
-        (target / "data.txt").write_text("data")
+        (target / "data.txt").write_text("data", encoding="utf-8")
         pointer = tools / "gen-rogue"
         gen_core.LinkOps().create(str(target), pointer)
         assert lc.is_link(pointer)
         errors: list[str] = []
         assert gc_core._reap(pointer, errors.append) == []
-        assert (target / "data.txt").read_text() == "data"
+        assert (target / "data.txt").read_text(encoding="utf-8") == "data"
         assert any("unrecognised generation symlink" in e for e in errors)
 
 
@@ -196,7 +197,7 @@ class TestRealLauncherThroughJunction:
         current = gen.parent / "current"
         gen_core.swap_link(str(gen), current, gen_core.LinkOps())
         done = subprocess.run(
-            [str(current / "bin" / "nxdemo.exe")], check=True, capture_output=True, text=True,
+            [str(current / "bin" / "nxdemo.exe")], check=True, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING,
         )
         printed = done.stdout.strip()
         assert printed, "the launcher printed nothing"

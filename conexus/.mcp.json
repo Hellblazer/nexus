@@ -29,8 +29,7 @@
       "python",
       "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py",
       "nx-mcp"
-    ],
-    "alwaysLoad": true
+    ]
   },
   "nexus-catalog": {
     "command": "uv",

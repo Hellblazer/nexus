@@ -193,7 +193,7 @@ def _refuse_malformed(hooks_dir: Path) -> None:
     bad = [
         hooks_dir / n for n in _HOOK_NAMES
         if (hooks_dir / n).is_file()
-        and _has_unterminated_sentinel((hooks_dir / n).read_text())
+        and _has_unterminated_sentinel((hooks_dir / n).read_text(encoding="utf-8"))
     ]
     if bad:
         raise click.ClickException("\n".join(_malformed_message(p) for p in bad))
@@ -205,7 +205,7 @@ def _hook_status(hooks_dir: Path, hook_name: str) -> str:
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
         return "not installed"
-    content = hook_file.read_text()
+    content = hook_file.read_text(encoding="utf-8")
     if SENTINEL_BEGIN not in content:
         return "unmanaged"
     if _has_unterminated_sentinel(content):
@@ -251,7 +251,7 @@ def _stanza_state_in(hooks_dir: Path, hook_name: str) -> str:
     status = _hook_status(hooks_dir, hook_name)
     if status in ("not installed", "unmanaged", "malformed"):
         return status
-    installed = (hooks_dir / hook_name).read_text()
+    installed = (hooks_dir / hook_name).read_text(encoding="utf-8")
     return "armed" if stanza_body(installed) == stanza_body(_stanza_for(hook_name)) else "stale"
 
 
@@ -269,11 +269,11 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
     """Install or append nexus stanza. Returns 'created' | 'appended' | 'already installed'."""
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
-        hook_file.write_text(f"#!/bin/sh\n{_stanza_for(hook_name)}\n")
+        hook_file.write_text(f"#!/bin/sh\n{_stanza_for(hook_name)}\n", encoding="utf-8")
         hook_file.chmod(0o755)
         return "created"
 
-    content = hook_file.read_text()
+    content = hook_file.read_text(encoding="utf-8")
     if _has_unterminated_sentinel(content):
         # "already installed" would be a false success: the stanza is not
         # in a runnable state and nothing here can fix it.
@@ -282,7 +282,7 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
         return "already installed"
 
     # Append to existing hook
-    hook_file.write_text(content.rstrip("\n") + "\n" + _stanza_for(hook_name) + "\n")
+    hook_file.write_text(content.rstrip("\n") + "\n" + _stanza_for(hook_name) + "\n", encoding="utf-8")
     return "appended"
 
 
@@ -291,7 +291,7 @@ def _uninstall_hook(hooks_dir: Path, hook_name: str) -> str:
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
         return "not installed"
-    content = hook_file.read_text()
+    content = hook_file.read_text(encoding="utf-8")
     if SENTINEL_BEGIN not in content:
         return "not installed"
     if _has_unterminated_sentinel(content):
@@ -304,7 +304,7 @@ def _uninstall_hook(hooks_dir: Path, hook_name: str) -> str:
         hook_file.unlink()
         return "removed"
 
-    hook_file.write_text(new_content)
+    hook_file.write_text(new_content, encoding="utf-8")
     return "stanza removed"
 
 
@@ -405,7 +405,7 @@ def hooks_update(path: Path) -> None:
         if not hook_file.exists():
             click.echo(f"  · {name}  (not installed; skipped)")
             continue
-        content = hook_file.read_text()
+        content = hook_file.read_text(encoding="utf-8")
         if SENTINEL_BEGIN not in content:
             click.echo(f"  · {name}  (unmanaged; skipped)")
             continue
@@ -435,7 +435,7 @@ def _refresh_managed_hooks(hooks_dir: Path) -> list[tuple[str, str]]:
         if not hook_file.exists():
             results.append((name, "not installed"))
             continue
-        content = hook_file.read_text()
+        content = hook_file.read_text(encoding="utf-8")
         if SENTINEL_BEGIN not in content:
             results.append((name, "unmanaged"))
             continue

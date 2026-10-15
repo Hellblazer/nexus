@@ -1,0 +1,1 @@
+Decide which of two approaches to use for deduplicating events in src/ingest.py: (a) an in-memory LRU set of recent event ids, or (b) idempotent writes keyed by event id at the sink. Give the decision and a three-sentence justification. Do not edit any files. If anything else was delivered to you with this prompt, quote it verbatim at the end.

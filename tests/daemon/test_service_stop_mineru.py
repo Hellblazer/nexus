@@ -45,7 +45,7 @@ def _spawn(script_name: str, where: Path) -> subprocess.Popen[bytes]:
     """A sleeping child in its own session whose command classifies as
     ``script_name`` (``mineru-api`` classifies as MinerU)."""
     script = where / script_name
-    script.write_text("import time\ntime.sleep(300)\n")
+    script.write_text("import time\ntime.sleep(300)\n", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, str(script)], start_new_session=True)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not process_command(proc.pid):
@@ -66,7 +66,7 @@ def _reaped(proc: subprocess.Popen[bytes]):
 
 def _write_pid_file(config_dir: Path, pid: int) -> Path:
     path = config_dir / "mineru.pid"
-    path.write_text(json.dumps({"pid": pid, "port": 8010, "started_at": "2026-10-08T00:00:00+00:00"}))
+    path.write_text(json.dumps({"pid": pid, "port": 8010, "started_at": "2026-10-08T00:00:00+00:00"}), encoding="utf-8")
     return path
 
 
@@ -146,7 +146,7 @@ def test_a_different_config_dir_does_not_reach_the_users_mineru(
 
 def _with_postgres(config_dir: Path, monkeypatch, events: list[str], *, pg_fails: bool = False) -> None:
     """A provisioned, listening Postgres whose stop and MinerU's stop log to *events*."""
-    (config_dir / "pg_credentials").write_text(f"PG_PORT=54329\nPG_DATA={config_dir / 'pgdata'}\n")
+    (config_dir / "pg_credentials").write_text(f"PG_PORT=54329\nPG_DATA={config_dir / 'pgdata'}\n", encoding="utf-8")
     monkeypatch.setattr("nexus.daemon.storage_service_daemon._port_accepting", lambda host, port: True)
 
     class _Bins:

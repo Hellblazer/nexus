@@ -128,8 +128,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.service == 'true'
     # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-16c16g` is the owned lab pool
-    # (16 cores, 16 GB hard cap, see AGENTS.md § Self-hosted runners and fork
-    # PRs). The job peaked at 10.3 GB with 4 surefire forks (measured
+    # (16 cores, 16 GB hard cap, see docs/agents/self-hosted-runners.md). The job peaked at 10.3 GB with 4 surefire forks (measured
     # 2026-10-11 on `lab-l`); the smaller grant leaves chas room for five
     # pytest shards beside it. The Testcontainers Postgres containers run
     # through the host Docker daemon and are outside the grant.

@@ -120,7 +120,7 @@ def allowed_tools(snapshot: pathlib.Path) -> frozenset[str]:
     """Context7's two tools, plus every snapshot tool that is a read."""
     names = set(CONTEXT7_TOOLS)
     try:
-        lines = snapshot.read_text().splitlines()
+        lines = snapshot.read_text(encoding="utf-8").splitlines()
     except OSError:
         return frozenset(names)  # snapshot missing: Serena tools prompt, nothing else changes
     for line in lines:

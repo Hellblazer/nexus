@@ -1,0 +1,4 @@
+Use the conexus nexus MCP tools (full names below) to do three things in order, then report each tool's raw result:
+1. Call mcp__plugin_conexus_nexus__tuple_subscribe with subspace "mailbox/{NAME}".
+2. Call mcp__plugin_conexus_nexus__mailbox_send with to "{A2}" and body "PING-{NONCE}-agent".
+3. Call mcp__plugin_conexus_nexus__mailbox_send with to "{U3}" and body "PING-{NONCE}-session".

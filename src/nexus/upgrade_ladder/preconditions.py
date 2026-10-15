@@ -94,7 +94,7 @@ def _default_lockstep_marker() -> str | None:
         else nexus_config_dir() / "cli_lockstep_marker"
     )
     try:
-        text = marker.read_text().strip()
+        text = marker.read_text(encoding="utf-8").strip()
     except OSError:
         return None
     return text or None

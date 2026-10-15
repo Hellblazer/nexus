@@ -273,13 +273,18 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script neve
         cwd = os.getcwd()
         repo_hash = hashlib.sha1(os.path.realpath(cwd).encode()).hexdigest()[:8]
         repo_name = os.path.basename(os.path.realpath(cwd))
-        context_dir = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context")
+        # Where nexus.context writes: NEXUS_CONFIG_DIR when set (nexus-3fme8).
+        config_dir = os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".config", "nexus"
+        )
+        context_dir = os.path.join(config_dir, "context")
         context_l1_path = os.path.join(context_dir, f"{repo_name}-{repo_hash}.txt")
         # Fallback to legacy global file
         if not os.path.exists(context_l1_path):
-            context_l1_path = os.path.join(os.path.expanduser("~"), ".config", "nexus", "context_l1.txt")
+            context_l1_path = os.path.join(config_dir, "context_l1.txt")
         if os.path.exists(context_l1_path):
-            with open(context_l1_path) as f:
+            # UTF-8 as written; the locale default is cp1252 on Windows (nexus-3fme8).
+            with open(context_l1_path, encoding="utf-8") as f:
                 context_l1 = f.read().strip()
             if context_l1:
                 output_lines.append(context_l1)

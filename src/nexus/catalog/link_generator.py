@@ -289,7 +289,7 @@ def generate_rdr_filepath_links(
         if resolved is None or not resolved.is_file():
             continue
         try:
-            text = resolved.read_text(errors="replace")
+            text = resolved.read_text(errors="replace", encoding="utf-8")
         except OSError:
             continue
 
@@ -422,7 +422,7 @@ def _reads_frontmatter(cat: CatalogReader, tumbler: Tumbler) -> dict:
     if resolved is None or not resolved.is_file():
         return {}
     try:
-        text = resolved.read_text(errors="replace")
+        text = resolved.read_text(errors="replace", encoding="utf-8")
     except OSError:
         return {}
     fm, _body = parse_frontmatter(text, source=str(resolved))
@@ -773,7 +773,7 @@ def generate_prose_filepath_links(
         if resolved is None or not resolved.is_file():
             continue
         try:
-            text = resolved.read_text(errors="replace")
+            text = resolved.read_text(errors="replace", encoding="utf-8")
         except OSError:
             continue
 

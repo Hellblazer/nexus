@@ -1,0 +1,1 @@
+Jot a session-only scratch note (it should not outlive this session): try a credit window of 1024 next.

@@ -21,8 +21,10 @@ was not measured, it says so.
   administrator enforces AppLocker's default rules, a standard account can
   complete none of the steps below: the uv and Claude Code installers, the
   PortableGit archive and every program installed under your profile are
-  refused (measured 2026-10-13). An administrator has to allow them first;
-  [Application control](#application-control) lists the rules that were enough.
+  refused (measured 2026-10-13). A WDAC (App Control for Business) policy built
+  from Windows' default example refuses the same programs (2026-10-15). An
+  administrator has to allow them first; [Application control](#application-control)
+  lists the rules that were enough for each.
 - **No Visual C++ redistributable install is needed.** The engine and the
   PostgreSQL bundle carry the runtime DLLs beside their executables, and nx
   points its own Python modules (PDF extraction, local embedding) at those
@@ -350,11 +352,11 @@ The Windows binaries are not Authenticode-signed. What that means in practice:
 - A file you download with a browser (such as `conexus.mcpb`) does carry it. The
   extension is opened by Claude Desktop rather than run by Windows; what
   SmartScreen shows on that path has not been observed.
-- Smart App Control in enforcing mode blocks unsigned code, and that
-  configuration has not been tested.
+- Smart App Control in enforcing mode blocks unsigned code; see
+  [Smart App Control](#smart-app-control).
 - AppLocker with its default rules blocks the whole install for a standard
   account, signed or not, because everything installs under the user profile.
-  WDAC has not been tested.
+  A WDAC policy built from Windows' default example does the same.
 
 ### Application control
 
@@ -400,6 +402,52 @@ with no AppLocker block. Three limits:
   own DLL, which it loads into every process). The first two are folders the
   user can write to.
 
+#### WDAC (App Control for Business)
+
+A WDAC policy built from Windows' `DefaultWindows_Enforced.xml` example lets
+only code Windows itself signs run, for every account, administrators included.
+With it enforced, the install and the gate passed for a standard account on
+Windows 11 Enterprise (conexus 7.79.0, 2026-10-15) once the policy had file
+path rules for these folders in that account's profile, and two rule options
+set: 18, `Disabled:Runtime FilePath Rule Protection`, and 11,
+`Disabled:Script Enforcement`.
+
+```text
+C:\Users\<account>\.local\bin\*
+C:\Users\<account>\.local\share\nexus\*
+C:\Users\<account>\AppData\Roaming\uv\*
+C:\Users\<account>\AppData\Local\uv\cache\*
+C:\Users\<account>\AppData\Local\Programs\Git\*
+C:\Users\<account>\.config\nexus\*
+C:\Users\<account>\.claude\downloads\*
+C:\Users\<account>\AppData\Local\Temp\PortableGit.exe
+C:\Users\<account>\.cache\nexus\*
+C:\Users\<account>\AppData\Local\Temp\onnxruntime-java*
+```
+
+A run with the same policy in audit mode recorded files in these folders and
+nowhere else: uv, the `nx` programs, Claude Code and its installer, the Python
+that uv downloads, PortableGit's programs and DLLs, the engine, the PostgreSQL
+bundle, the tokenizer library and ONNX Runtime. With the rules enforced, the
+only file refused in the run was a test program outside them. What differs from
+AppLocker:
+
+- WDAC path rules take a wildcard only at the start or the end, so each rule
+  names the account's profile instead of `Users\*`.
+- Without option 18 WDAC refuses path rules for folders the user can write to,
+  which all of these are.
+- WDAC always covers DLLs, so the DLL folders from the AppLocker section are in
+  the list. Defender's DLL is signed by Windows and needs no rule.
+- PortableGit's programs are signed by the Git for Windows project, not by
+  Windows, so they need the rule like unsigned ones, and a Git installed for all
+  users under Program Files is refused too.
+- Script enforcement was off. With it on, PowerShell runs a script the policy
+  does not allow in ConstrainedLanguage mode, as AppLocker's script rules do;
+  that has not been measured with WDAC.
+- The gate does not run `nx self install`, `nx upgrade` or the removal steps,
+  so those were not measured under WDAC. The `.local\share\nexus` rule comes
+  from the AppLocker walk above.
+
 ### Smart App Control
 
 With Smart App Control on, the local stack cannot be set up. Measured on
@@ -416,5 +464,6 @@ because uv's Python is unsigned too.
 
 - Windows on ARM: not supported.
 - Smart App Control on: the local stack cannot be set up (above).
-- WDAC, AppLocker with enforced script rules, a Microsoft or domain account,
-  host sleep, and the Claude Desktop install dialog: not measured.
+- AppLocker with enforced script rules, WDAC with script enforcement on, a
+  Microsoft or domain account, host sleep, and the Claude Desktop install
+  dialog: not measured.
