@@ -41,11 +41,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.79.0)
+## Awaiting the next release or plugin cut (pinned: v7.80.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- subagent git guard exempts one ssh command to chas (nexus-yc7fs): `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` lets a subagent run `ssh chas-test '<git write>'`, whose git runs in chas's own clone. The command must be a single ssh to a chas alias; outside single quotes it may use only letters, digits, spaces and `_ . / : @ , + - =`, so nothing expands or redirects and no word can become an extra ssh option; options are limited to `-n -q -t -T` and four `-o Key=value` settings; and the remote command names no onward hop (`ssh scp sftp rsync`). Use `ssh -n` in place of `</dev/null`.
 
 
 
@@ -75,12 +73,3 @@ ONE PATH PER BULLET, on the bullet's FIRST line. These wait for the client relea
 - Cloud choice in the stand-in (nexus-sv2wx.18): `conexus/launch/nx_standin.py` gains the Cloud row in the one question's table (the session-start hook imports it), `cloud` in `MODES`, the Cloud follow-up (the model never asks for the token), the `credentials` stage wait, and the descriptions of `setup`'s mode; `CLOUD_REFUSAL` is gone and `mode_refusal` is the unknown-mode text. The real server's copy is `src/nexus/mcp/setup_tools.py` and ships in the client release.
 - session-start hook names the managed service (nexus-sv2wx.18): `conexus/hooks/scripts/nx_setup_notice.py` says in state 8 (no service is set up) that `/conexus:setup` also connects a managed service the user has an address, token and tenant for; state 6 carries the Cloud row through the stand-in's table.
 - `/conexus:setup` offers Cloud (nexus-sv2wx.18): `conexus/commands/setup.md` shows the Cloud row in the table, tells the model never to ask for the token (setup opens a page in the user's browser for it), and lists `cloud` among the modes `setup` takes.
-- lockstep hook text IO as UTF-8 (nexus-3fme8): `conexus/hooks/scripts/version_lockstep_hook.py` reads `plugin.json`, the marketplace and registry JSON and its markers, and writes its drift marker, as UTF-8. It used the locale encoding, cp1252 on Windows, where a non-ASCII marketplace description raised and the hook degraded to "no pin".
-- lockstep action text IO as UTF-8 (nexus-3fme8): `conexus/hooks/scripts/version_lockstep_action.py` writes its marker and appends its log as UTF-8.
-- endpoint resolve reads as UTF-8 (nexus-3fme8): `conexus/hooks/scripts/_endpoint_resolve.py` reads its lease and state files as UTF-8.
-- lockstep hook reads git's output as UTF-8 (nexus-ikoqj): `conexus/hooks/scripts/version_lockstep_hook.py` decodes the `git rev-parse` it runs as UTF-8 with replacement. With `text=True` alone it used the locale encoding, cp1252 on Windows.
-- lockstep action reads nx, uv and git output as UTF-8 (nexus-ikoqj): `conexus/hooks/scripts/version_lockstep_action.py` decodes the `uv tool dir`, `nx --version`, `nx upgrade` and install-command output it runs as UTF-8 with replacement.
-- subagent git-write guard reads git's output as UTF-8 (nexus-ikoqj): `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` decodes both `git rev-parse` calls that tell a linked worktree from the primary as UTF-8 with replacement, so a non-ASCII checkout path no longer garbles the comparison on Windows.
-- sn auto-approve snapshot read as UTF-8 (nexus-ox0c0): `sn/hooks/scripts/auto_approve_sn_mcp.py` reads its snapshot file as UTF-8.
-- sn worktree guard reads .git as UTF-8 (nexus-ox0c0): `sn/hooks/scripts/worktree_guard.py` reads a worktree's `.git` file as UTF-8.
-- nexus tools besides eight core ones load through tool search (nexus-fbtyl): `conexus/.mcp.json` drops the server-level `alwaysLoad: true` on `nexus`. The server now flags `search`, `query`, `memory_get`, `memory_put`, `memory_search`, `scratch`, `store_get` and `store_put` as always-loaded in their own tool metadata, so the other 36 `nexus` tools no longer sit in the first request of every session; Claude Code finds them through tool search. Measured on Claude Code 2.1.300: the same tool choice and success as all-eager, a 41% smaller first request. A server-level `false` would defer all 44 and lose the memory tasks, so the key is removed, not flipped.
