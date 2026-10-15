@@ -1988,3 +1988,55 @@ Right-sized for an Architecture record that replaces an accepted direction.
   passed, 0 failed, floor met; the parity test 26 passed (T2
   `224-win-run-091c9453e`). Also corrected: the Phase 4 "Not measured" paragraph
   now points at the 2026-10-13 host-resolution measurement.
+- 2026-10-14 to 2026-10-15: text encoding. Python on Windows opens text files
+  and decodes child output in the locale code page (cp1252 on the guests), so a
+  UTF-8 file or child output with a non-ASCII character, such as the em dash in
+  the service unit templates, failed or was garbled. Every text-mode `open`,
+  `read_text` and `write_text` in `src/nexus`, `conexus` and `sn` now names
+  `encoding="utf-8"`, and child processes that return text decode as UTF-8,
+  with `run_bounded` replacing a byte that is not UTF-8 instead of raising;
+  `schtasks` output is read in the locale code page, because that is what it
+  writes. Two lint tests allow no new unmarked call (commits `e7deb63cf`,
+  `a08876f28`, `5d606a19b`, `91181e7f7`, `c98395c30`; nexus-ox0c0,
+  nexus-ikoqj). Native Windows run of the Windows test set: 2396 passed, 0
+  failed. Not measured: `schtasks` output on a Windows whose language is not
+  English, where the ANSI and OEM code pages differ.
+- 2026-10-15: WDAC (App Control for Business), text and evidence only, on the
+  Enterprise guest with published conexus 7.79.0 and engine 0.1.160, standard
+  account, `run-gate.sh --standard-user --no-admin-git` with `--wdac-audit` or
+  `--wdac-allow` (commits `9180b12dd`, `9493e351e`). The policy is Microsoft's
+  `DefaultWindows_Enforced` example, deployed with CiTool; an unsigned program
+  built in the guest is the control that proves enforcement is on. Audit: the
+  gate PASSED 5 of 5 and 271 events named the programs the policy would block,
+  all under the account's profile (PortableGit, the uv Pythons and tool
+  environment, the PostgreSQL bundle, the engine, the DJL and ONNX Runtime
+  libraries, `.local\bin`, the Claude Code installer). Enforced with ten path
+  rules for those folders, runtime file-path protection off (option 18) and
+  script enforcement off (option 11): the gate PASSED 5 of 5 and the only
+  program blocked was the control. A first enforced run failed because the
+  driver built the rules in a form `Merge-CIPolicy` refused, so the policy went
+  out with no rules; the driver now refuses to deploy without all ten. As with
+  AppLocker, publisher rules cannot replace the path rules while the engine and
+  the PostgreSQL bundle are unsigned (P0.2). T2
+  `224-wdac-and-window-close-2026-10-15`; `docs/windows-install.md` lists the
+  rules. Not measured: script enforcement on, `nx self install`, upgrade and
+  removal under the policy, the Pro edition.
+- 2026-10-15: closing Claude Code's window, on the Pro guest with the storage
+  task running. The window was found by attaching to `claude.exe`'s console:
+  a pseudo-console owned by a one-tab Windows Terminal window, which was sent
+  `WM_CLOSE` (matching on the launch title failed, because Claude Code retitles
+  its tab). `claude.exe` exited at once; none of its 21 descendants (uv, the MCP
+  servers, the aspect worker, console hosts) were alive 30 s later; SessionEnd
+  ran, and `hook.log` records the session's scratch expiry and `session_end`;
+  the supervisor, engine and PostgreSQL kept running. The 2026-10-13 evening
+  entry had recorded no SessionEnd. T2
+  `224-wdac-and-window-close-2026-10-15`. Not measured: a Terminal window with
+  several tabs, which asks before closing; classic conhost as the default
+  terminal; signing out with a session open.
+- 2026-10-15: the Windows engine smoke on the release runner failed once with
+  `BindException: Address already in use`: it chose the engine's port before
+  PostgreSQL bound its own, and both drew the same free port. The smoke now
+  chooses the engine's port after PostgreSQL is up and logs it (commit
+  `b16a58f1c`); a test fails against the old order. The rerun of that job was
+  cancelled by a Windows Update restart of qwentescence (update service, 05:29
+  to 05:31 UTC) and passed when run again.
