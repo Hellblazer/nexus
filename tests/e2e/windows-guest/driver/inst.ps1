@@ -66,6 +66,9 @@ Step 'versions' {
         "uv: " + (uv --version)
         "nx: " + (nx --version)
         "python (tool venv): " + (& "$env:APPDATA\uv\tools\conexus\Scripts\python.exe" --version)
+        # Informational (nexus-f9bgu.57): the Smart App Control state as nx reads it, through the tool
+        # Python, which still runs where Smart App Control blocks nx.exe. Older wheels lack the module.
+        "smart app control (nx reader): " + ((& "$env:APPDATA\uv\tools\conexus\Scripts\python.exe" -c "from nexus._smart_app_control import state; print(state())" 2>&1) -join ' ')
         "claude: " + (& "$env:USERPROFILE\.local\bin\claude.exe" --version)
         "gitver: " + (& "$(GitDir)\git.exe" --version) + " at " + (GitDir)
         "ps: " + $PSVersionTable.PSVersion.ToString()
