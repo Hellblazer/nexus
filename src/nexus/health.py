@@ -3932,7 +3932,7 @@ def _run_psql(
     ]
     if psql_runner is not None:
         # Injected runner (unit tests) — does not accept env kwarg.
-        return psql_runner(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
+        return psql_runner(cmd, capture_output=True, text=True, check=False)
     # nexus-iytd3 loader guard (GH #1414 era-hop regression, 2026-07-21): the
     # published PG bundles ship psql without an RPATH, so on a minimal Linux
     # base a bare invocation exits 127 (libpq.so.5 unresolvable). pg_provision
