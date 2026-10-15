@@ -383,9 +383,12 @@ found, the real server also says so through its instructions text, the
 channel it already uses for another notice (`apply_stranded_notice`,
 `src/nexus/mcp/_first_run.py`).
 
-So "CLI only" is an ordinary state: the real server runs and says no service
-is set up. A reboot that leaves the local service down is the same state with
-a different sentence.
+So "CLI only" is an ordinary state: the real server runs, and after a
+finished CLI-only run its instructions say nothing about a service, because
+none is what the user chose (Sam, 2026-10-15; the hook says one quiet line).
+A reboot that leaves a provisioned local service down is said as that: the
+service is installed and not running, and `setup` with mode `local` starts it
+and downloads nothing (Minimum Viable Validation row 2, 2026-10-15).
 
 `setup` takes `mode` (`local`, `cloud`, `cli-only` or `not-now`) and, for
 `local`, `autostart` (true or false; false when omitted, so the login unit is
@@ -1128,7 +1131,8 @@ None. The launcher, the hook and the stand-in server are standard library.
   setup directory, including a "not now" marker, a failed status, a stale
   lock and no directory at all, and sets `NX_SETUP_SCRIPT`.
 - The real `nx-mcp` registers `setup` and `setup_status` always. With no
-  usable service its instructions text says so; with one it does not. With
+  usable service its instructions text says so, except after a finished
+  CLI-only run; with one it does not. With
   `NX_SETUP_SCRIPT` unset the tools start no process.
 - `mcp__plugin_conexus_nexus__setup` and `mcp__plugin_conexus_nexus__setup_status`
   are in `_MANUAL_APPROVAL_REQUIRED`, each with its "requires manual
@@ -1517,3 +1521,8 @@ is flagged for trimming before then.
   an `http` address to another machine. The save writes the credential before
   `service_url`; `nx config init` replaces a saved one. The status values are
   listed.
+- 2026-10-15: From the Minimum Viable Validation on Windows (nexus-sv2wx.24).
+  A provisioned local service that is not running is said as that by the
+  server's instructions and `setup_status`, and `/conexus:setup` offers to
+  start it (row 2 found both saying nothing was set up). After a finished
+  CLI-only run the server's instructions say nothing (Sam, 2026-10-15).

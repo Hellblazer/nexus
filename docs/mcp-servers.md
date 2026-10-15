@@ -150,7 +150,9 @@ so a saved `service_url` with no resolvable token is not usable. A last run that
 failed, was interrupted, ended with `nx doctor` problems or could not detach is
 reported even when a service answers. When no usable service is found the server's
 `instructions` say what is missing and that the tools fix it, and leave the decision
-to the user; `not-now` does not silence that note on this server. Neither tool is
+to the user; `not-now` does not silence that note on this server, and a finished
+`cli-only` run does. A provisioned local service that is not running is said as
+that, and `setup` with mode `local` starts it without a download. Neither tool is
 auto-approved (see Permission auto-approval below).
 
 ### Hook-tier tools (internal plumbing, RDR-215)

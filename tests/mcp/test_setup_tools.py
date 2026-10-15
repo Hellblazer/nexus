@@ -297,6 +297,32 @@ def test_a_partly_provisioned_service_is_still_missing(monkeypatch: pytest.Monke
     assert "1.3 GB" in (setup_tools.no_service_notice() or "")
 
 
+def _recorded(config: Path, **status: Any) -> None:
+    setup = config / "setup"
+    setup.mkdir(parents=True, exist_ok=True)
+    (setup / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+
+def test_a_recorded_cli_only_choice_keeps_the_instructions_quiet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Sam, 2026-10-15 (MVV row 3): after a finished CLI-only run the hook says one quiet
+    line; the server's instructions say nothing, in Desktop too."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _recorded(tmp_path, state="done", mode="cli-only", stage="build")
+    _service(monkeypatch, False)
+    assert setup_tools.no_service_notice() is None
+
+
+@pytest.mark.parametrize(("state", "mode"), [("failed", "cli-only"), ("running", "cli-only"), ("done", "local")])
+def test_only_a_finished_cli_only_run_quiets_the_instructions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str, mode: str
+) -> None:
+    """The hook's rule: a failed CLI-only run, a live one, or another mode is not a choice to stop hearing about it."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _recorded(tmp_path, state=state, mode=mode, stage="build")
+    _service(monkeypatch, False)
+    assert "no usable service" in (setup_tools.no_service_notice() or "")
+
+
 def test_status_says_a_provisioned_service_is_down_not_done(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
 ) -> None:

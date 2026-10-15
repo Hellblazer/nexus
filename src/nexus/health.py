@@ -4912,6 +4912,14 @@ def _setup_directory() -> Path:
     return Path(os.path.abspath(_config.nexus_config_dir())) / "setup"
 
 
+def setup_recorded_cli_only(setup_dir: Path | None = None) -> bool:
+    """Whether the last setup run finished in mode ``cli-only``: the user chose no service.
+    The setup hook's rule for its quiet line (``nx_setup_notice.py``); the real server's
+    instructions say nothing then (Sam, 2026-10-15). Any unreadable status counts as no."""
+    status = _read_setup_json((setup_dir or _setup_directory()) / "status.json")
+    return isinstance(status, dict) and status.get("state") == "done" and status.get("mode") == "cli-only"
+
+
 def _check_setup_status(setup_dir: Path | None = None) -> list[HealthResult]:
     """RDR-228 Day 2 (nexus-sv2wx.19): what the plugin's setup process left in ``setup/``
     under the Nexus config directory (``status.json``, the lock's heartbeat, ``setup.log``).

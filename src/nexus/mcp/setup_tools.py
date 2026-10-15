@@ -226,13 +226,24 @@ def local_service_provisioned() -> bool:
         return False
 
 
+def cli_only_chosen() -> bool:
+    """Whether the last setup run finished in mode ``cli-only`` (``health.setup_recorded_cli_only``,
+    the reader ``nx doctor`` uses). Any exception counts as no."""
+    try:
+        from nexus.health import setup_recorded_cli_only  # noqa: PLC0415 -- the check runs once per call
+
+        return setup_recorded_cli_only()
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return False
+
+
 def no_service_notice() -> str | None:
     """The instructions sentence for a server that finds no usable service, or
     ``None`` when one is usable. Passive, as the record has it: what is missing, what
     fixes it, and that the user decides. A provisioned local service that is not
     running is said as that, as the setup hook says it (its state 7): the install
     sizes would offer the user a download the fix does not make."""
-    if usable_service():
+    if usable_service() or cli_only_chosen():
         return None
     if local_service_provisioned():
         return (
