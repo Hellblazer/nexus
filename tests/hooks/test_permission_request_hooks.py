@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 NX_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "auto-approve-nx-mcp.sh"
 SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
@@ -47,7 +48,7 @@ def _run_hook(script: Path, tool_name: str) -> str:
         [sys.executable, str(script)],
         input=payload,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=10,
     )
     assert result.returncode == 0, f"Hook failed: {result.stderr}"
@@ -335,7 +336,7 @@ def _run_pretooluse(script: Path, tool_name: str) -> str:
         [sys.executable, str(script)],
         input=payload,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=10,
     )
     assert result.returncode == 0, f"Hook failed: {result.stderr}"

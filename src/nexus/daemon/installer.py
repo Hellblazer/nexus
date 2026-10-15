@@ -30,6 +30,7 @@ Design rules:
 """
 from __future__ import annotations
 
+import locale
 import ntpath
 import os
 import re
@@ -921,6 +922,16 @@ def _run_manager(
         )
     argv = [_manager_executable(cmd[0]), *cmd[1:]]
     rest = {k: v for k, v in kwargs.items() if k != "capture_output"}
+    # Decode by the manager (nexus-ikoqj). schtasks is a native Windows tool: it
+    # writes in the console/ANSI code page and localises its messages, so it is
+    # read with the locale's own encoding, never forced to UTF-8, and a byte
+    # that does not decode becomes U+FFFD because every reader of this output
+    # matches it loosely or shows it. launchctl and systemctl write UTF-8.
+    if cmd[0] in _WINDOWS_MANAGERS:
+        rest.setdefault("encoding", locale.getpreferredencoding(False))
+        rest.setdefault("errors", "replace")
+    else:
+        rest.setdefault("encoding", "utf-8")
     return run_bounded(argv, timeout=timeout, **rest)  # type: ignore[arg-type]
 
 

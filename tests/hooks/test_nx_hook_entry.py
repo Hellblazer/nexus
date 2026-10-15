@@ -26,6 +26,7 @@ import textwrap
 from pathlib import Path
 
 from nexus._hook_runtime import entry
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _ENTRY_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry"]
 
@@ -50,7 +51,7 @@ def _write_fixture_verb(tmp_path: Path, module_name: str, body: str) -> Path:
 
 def _run(argv: list[str], env: dict[str, str], stdin: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [*_ENTRY_ARGV, *argv], input=stdin, env=env, capture_output=True, text=True, timeout=30,
+        [*_ENTRY_ARGV, *argv], input=stdin, env=env, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=30,
     )
 
 

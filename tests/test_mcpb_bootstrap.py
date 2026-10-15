@@ -36,6 +36,7 @@ import pytest
 
 from nexus.util import win_job
 from tests._module_seam import setattr_in
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP_PATH = REPO_ROOT / "mcpb" / "src" / "bootstrap.py"
@@ -583,7 +584,7 @@ def test_stdio_and_exit_code_survive_the_handoff(tmp_path, platform):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
     )
     # A read deadline for the whole exchange. A child that never sees the
     # bytes (the mutant that gave it a PIPE stdin instead of the host's)

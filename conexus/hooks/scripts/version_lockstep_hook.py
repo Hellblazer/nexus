@@ -477,7 +477,8 @@ def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | 
             raise FileNotFoundError("git not found on PATH")
         proc = subprocess.run(
             [git, "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
-            capture_output=True, text=True, timeout=timeout,
+            # git rev-parse prints a hash; UTF-8 is git's output encoding on every platform.
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         debug(f"ref resolve failed for {ref} in {install_location}: {exc}")

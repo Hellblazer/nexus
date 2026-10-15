@@ -21,6 +21,7 @@ import pytest
 import nexus.hooks.subagent_start as _subagent_start_mod
 from tests._platform import posix_only
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -82,7 +83,7 @@ def _run_hook(
         [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=15,
         env=env,
         cwd=cwd,

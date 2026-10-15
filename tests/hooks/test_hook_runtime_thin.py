@@ -41,6 +41,7 @@ from pathlib import Path
 import pytest
 
 from nexus._hook_runtime.entry import VERB_TABLE
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _PKG = Path(__file__).resolve().parents[2] / "src" / "nexus" / "_hook_runtime"
 
@@ -133,7 +134,7 @@ def test_importing_io_in_a_fresh_interpreter_stays_cheap() -> None:
     proc = subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         check=False,
     )
     assert proc.returncode == 0, f"probe failed:\n{proc.stderr}"
@@ -156,7 +157,7 @@ def _dispatch_probe(verb_source: str, tmp_path: Path) -> subprocess.CompletedPro
     return subprocess.run(
         [sys.executable, "-m", "nexus._hook_runtime.entry", "probe"],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         input="{}",
         env=env,
         check=False,
@@ -275,7 +276,7 @@ def test_a_swallowed_crash_still_reaches_the_hook_log(tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "nexus._hook_runtime.entry", "probe"],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         input="{}",
         env={
             **os.environ,
@@ -341,7 +342,7 @@ def test_the_real_verb_modules_import_no_structlog() -> None:
     )
     proc = subprocess.run(
         [sys.executable, "-c", probe],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, check=False,
     )
     assert proc.returncode == 0, f"probe failed:\n{proc.stderr}"
     loaded = proc.stdout.strip()
@@ -366,7 +367,7 @@ def test_the_hooks_package_init_defers_its_two_heavy_imports() -> None:
         "if m in sys.modules))"
     )
     proc = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+        [sys.executable, "-c", probe], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, check=False
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "", (

@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from tests._hook_wiring import HOOKS_JSON, REPO_ROOT, launcher_script_args
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _PLUGIN_ROOT = str(REPO_ROOT / "conexus")
 
@@ -249,7 +250,7 @@ def test_the_uv_alias_needs_no_symlink_privilege(tmp_path) -> None:
     env = _no_interpreter_env(tmp_path, symlink=_refuse)
     alias = Path(env["PATH"]) / Path(shutil.which("uv")).name
     assert alias.is_file() and not alias.is_symlink(), alias
-    proc = subprocess.run([str(alias), "--version"], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([str(alias), "--version"], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert proc.returncode == 0 and proc.stdout.startswith("uv "), (proc.returncode, proc.stderr)
 
 
@@ -277,7 +278,7 @@ def test_uv_with_no_interpreter_exits_2_which_blocks_five_entries(tmp_path) -> N
             *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in hook["args"]),
         ]
         proc = subprocess.run(
-            argv, input="{}", capture_output=True, text=True, timeout=60,
+            argv, input="{}", capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=60,
             env=env, cwd=str(tmp_path),
         )
         assert proc.returncode == 2, (event, _script(hook), proc.returncode, proc.stderr)

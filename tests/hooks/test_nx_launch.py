@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
@@ -256,7 +257,7 @@ def test_the_measured_mechanism_a_console_script_carries_no_current_in_sys_prefi
 
     control = subprocess.run(
         [str(tools / "current" / "bin" / "python"), "-c", "import sys; print(sys.prefix)"],
-        capture_output=True, text=True, timeout=30, check=True,
+        capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=30, check=True,
     )
     assert "current" in Path(control.stdout.strip()).parts, (
         "the control did not show the leak, so this test can no longer tell a leak from none"
@@ -486,7 +487,7 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     assert entries[0]["args"][-1].endswith("/hooks/scripts/nx_setup_notice.py"), "the setup notice is the first entry"
 
     def uv_says(*args: str) -> str:
-        return subprocess.run([uv, *args], capture_output=True, text=True, check=True, timeout=60).stdout.strip()
+        return subprocess.run([uv, *args], capture_output=True, text=True, encoding="utf-8", check=True, timeout=60).stdout.strip()
 
     home, config, tools, project = (_empty(tmp_path, n) for n in ("home", "config", "tools", "project"))
     only_uv = _empty(tmp_path, "only-uv")
@@ -509,7 +510,7 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     spoke: list[str] = []
     for entry in entries:
         argv = [entry["command"], *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in entry["args"])]
-        r = subprocess.run(argv, input=payload, capture_output=True, text=True, env=env, timeout=120, check=False, cwd=str(project))
+        r = subprocess.run(argv, input=payload, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, env=env, timeout=120, check=False, cwd=str(project))
         what = " ".join(entry["args"][-2:])
         assert r.returncode == 0, (what, r.stderr)
         assert "Traceback" not in r.stderr and "not found in" not in r.stderr, (what, r.stderr)

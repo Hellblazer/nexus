@@ -23,6 +23,7 @@ import pytest
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests.daemon._children import CHILD_PYTHON, OWN_GROUP
 from tests._module_seam import delattr_in, setattr_in
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: The primitive ``safe_killpg`` signals through on this host: ``os.killpg`` where it
 #: exists, ``os.kill`` on Windows (one process, no group). A test that traces "no
@@ -245,7 +246,7 @@ def test_group_sweep_reaches_children_of_an_exited_leader(tmp_path):
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
-        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, encoding="utf-8").stdout.strip()
         return stat == "" or stat.startswith("Z")
 
     for _ in range(100):
@@ -301,7 +302,7 @@ print(json.dumps({
 def test_windows_shaped_platform_imports_and_degrades_honestly():
     proc = subprocess.run(
         [sys.executable, "-c", _WINDOWS_SHAPED_PROBE],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
     result = __import__("json").loads(proc.stdout.strip().splitlines()[-1])

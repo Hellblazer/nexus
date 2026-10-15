@@ -35,6 +35,7 @@ from nexus.daemon.service_registry import service_identity
 from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
 from tests._module_seam import setattr_in
 from tests._platform import make_group_readable
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: ``-m`` rather than the installed ``nx-hook`` console script, so these run
 #: against this checkout's code, through the same ``main()`` the shim calls.
@@ -210,7 +211,7 @@ def _run(
         argv,
         input=stdin if stdin is not None else _payload(),
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         env=_env(tmp_path, env_overrides),
         # A bound on a HANG, not on performance. The hook budgets itself at 6s
         # internally; this only stops a wedged subprocess from hanging the suite.
@@ -2167,7 +2168,7 @@ def test_a_budget_spent_before_the_first_claim_says_so(tmp_path, kind) -> None:
          str(tmp_path), SESSION_ID],
         input=json.dumps(_row("queued-1", body="seen, not yet claimed")),
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         env={**os.environ, "NX_HOOK_INTERPRETER_REEXEC": "1",
              "NEXUS_CONFIG_DIR": str(tmp_path / "config")},
         timeout=300,

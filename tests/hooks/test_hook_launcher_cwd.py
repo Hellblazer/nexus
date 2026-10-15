@@ -42,6 +42,7 @@ from pathlib import Path
 import pytest
 
 from tests._hook_wiring import REPO_ROOT, UV_LAUNCHER_ARGV
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 # The plants are POSIX shell scripts under ``.venv/bin``; a Windows venv keeps
 # ``Scripts\\python.exe`` and cannot run a shebang file, so on Windows the
@@ -132,7 +133,7 @@ def _run(args: list[str], root: Path, project: Path) -> subprocess.CompletedProc
         env["NX_TOOLS_DIR"] = str(root.parent / "no-tools")
     payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": str(project), "session_id": "cwd-test"})
     argv = ["uv", *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in args)]
-    return subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=120, env=env, cwd=str(project))
+    return subprocess.run(argv, input=payload, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=120, env=env, cwd=str(project))
 
 
 @pytest.fixture(scope="module", autouse=True)

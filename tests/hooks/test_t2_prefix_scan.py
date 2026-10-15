@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from nexus.hooks.t2_prefix_scan import _SNIPPET_LIMIT
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _TOKEN = "test-bearer-token"
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -234,7 +235,7 @@ def _run(
     result = subprocess.run(
         [sys.executable, "-c", _SCAN_PROBE, project_name],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         env=full_env,
         check=False,
         timeout=60,

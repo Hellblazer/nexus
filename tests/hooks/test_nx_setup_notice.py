@@ -58,7 +58,6 @@ def _install_nx_mcp(bindir: Path) -> None:
 
 def _run(
     dirs: dict[str, Path], *, guarded: bool = False, hook: Path = _HOOK, remote: str | None = None,
-    **popen: object,
 ) -> subprocess.CompletedProcess[bytes]:
     env = scrubbed_env(
         PATH=str(dirs["bin"]), NX_TOOLS_DIR=str(dirs["tools"]), NEXUS_CONFIG_DIR=str(dirs["config"]),
@@ -72,7 +71,7 @@ def _run(
     return subprocess.run(
         [sys.executable, str(hook)],
         input=json.dumps({"hook_event_name": "SessionStart", "source": "startup"}).encode(),
-        capture_output=True, env=env, timeout=30, check=False, cwd=str(dirs["home"]), **popen,
+        capture_output=True, env=env, timeout=30, check=False, cwd=str(dirs["home"]),
     )
 
 

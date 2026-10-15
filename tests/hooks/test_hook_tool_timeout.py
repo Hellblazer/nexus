@@ -33,6 +33,7 @@ import pytest
 
 from nexus._hook_runtime._io import HookResult
 from nexus.mcp import hooks as _hooks
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 pytestmark = pytest.mark.unit
 
@@ -142,7 +143,7 @@ def test_a_timed_out_hook_does_not_keep_the_process_alive() -> None:
     completed = subprocess.run(
         [sys.executable, "-c", program],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=60,
     )
     assert "RETURNED" in completed.stdout, (

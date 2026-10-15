@@ -1227,13 +1227,15 @@ def _in_linked_worktree(cwd: str) -> bool | None:
         git = _exec_path.which_off_cwd("git")
         if git is None:
             return None
+        # git prints paths as UTF-8 on every platform; the locale's cp1252 would
+        # garble a non-ASCII checkout path (nexus-ikoqj).
         git_dir = subprocess.run(
             [git, "rev-parse", "--git-dir"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         common = subprocess.run(
             [git, "rev-parse", "--git-common-dir"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
     except Exception:  # noqa: BLE001 — undeterminable: fail open
         return None

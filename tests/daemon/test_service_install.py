@@ -740,7 +740,7 @@ class TestAutostartActivationState:
 
         result = subprocess.run(
             ["/bin/launchctl", "print-disabled", f"gui/{os.getuid()}"],
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", check=False, timeout=10,
         )
         if result.returncode != 0:
             pytest.skip(f"no gui domain for this uid here: {result.stderr.strip()}")

@@ -43,6 +43,7 @@ from nexus.daemon.service_registry import (
     storage_service_stack_matcher,
     sweep_matching_processes,
 )
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 class _FakeClock:
@@ -864,7 +865,7 @@ class TestSweepMatchingProcesses:
                 "import os; from nexus.daemon.service_registry import ancestor_pids;"
                 "print(os.getppid() in ancestor_pids(os.getpid()))",
             ],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=60, check=True,
         )
         assert child.stdout.strip() == "True"
 

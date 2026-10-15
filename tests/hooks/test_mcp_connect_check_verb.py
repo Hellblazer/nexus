@@ -19,6 +19,7 @@ from pathlib import Path
 
 from nexus._hook_runtime import entry
 from nexus.hooks.mcp_connect_check import run
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
@@ -78,7 +79,7 @@ class TestSilentNoOp:
         )
         env = {**os.environ, "NEXUS_CONFIG_DIR": str(tmp_path)}
         out = subprocess.run(
-            [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True,
+            [sys.executable, "-c", code], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, env=env, check=True,
         ).stdout.strip()
         assert out == ""
 

@@ -41,6 +41,10 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
             nx_argv_for(nx, "self", "gc"),
             capture_output=True,
             text=True,
+            # nx writes UTF-8 to its pipes on Windows (nexus.cli reconfigures at import).
+            # The output is discarded, so a stray byte must not raise out of the hook.
+            encoding="utf-8",
+            errors="replace",
             stdin=subprocess.DEVNULL,
         )
     except OSError:

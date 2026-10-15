@@ -93,6 +93,7 @@ from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
 from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
 from tests._module_seam import patch_in, patch_time
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
 # places it used to assume POSIX are named once here so each platform branch is
@@ -2695,7 +2696,7 @@ print(json.dumps({"reads": reads, "misses": misses, "epochs": len(epochs), "erro
         procs = [
             subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
                 [sys.executable, "-c", self._READER, str(config_dir), self.SCOPE, str(stop)],
-                stdout=subprocess.PIPE, text=True,
+                stdout=subprocess.PIPE, text=True, encoding=PYTHON_CHILD_ENCODING,
             )
             for _ in range(self.PROCESS_READERS)
         ]

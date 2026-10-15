@@ -215,7 +215,7 @@ def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
     """Rendered from the release's own entry.py text, not retyped."""
     src = subprocess.run(
         ["git", "-C", str(_ROOT), "show", f"{tag}:src/nexus/_hook_runtime/entry.py"],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     if src.returncode != 0:
         pytest.fail(f"git show {tag} failed; fetch tags before trusting this pin: {src.stderr}")

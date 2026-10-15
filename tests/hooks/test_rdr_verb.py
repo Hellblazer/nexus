@@ -32,6 +32,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from nexus.hooks import rdr_verb as rdr_hook_module
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -213,7 +214,7 @@ def test_session_start_names_rdrs_with_unchecked_fix_edits(rdr_hook_mod, tmp_pat
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True)
-    gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
+    gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
     f.write_text("---\nstatus: draft\n---\n# x fixed\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "fix"], check=True)
 
@@ -227,7 +228,7 @@ def test_session_start_names_rdrs_with_unchecked_fix_edits(rdr_hook_mod, tmp_pat
     assert "/conexus:rdr-fix 204" in out
 
     # Same tree, gated commit equals the tip: no line.
-    tip = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
+    tip = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
     monkeypatch.setattr(mod, "_load_gated_commits", lambda repo: {"204": tip})
     assert "rdr-fix" not in (mod.run(None).stdout or "")
 
@@ -525,7 +526,7 @@ def test_closed_rdr_with_no_t2_status_row_is_not_told_to_run_rdr_fix(rdr_hook_mo
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True)
-    gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
+    gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
     f.write_text("---\nstatus: closed\n---\n# x edited after the gate\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "edit"], check=True)
 
@@ -600,7 +601,7 @@ def _run_hook(cwd: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]
         cwd=cwd,
         env=env,
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=30,
     )
 

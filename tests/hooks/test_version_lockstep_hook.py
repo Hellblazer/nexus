@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 from tests._module_seam import module_time, setattr_in
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -447,11 +448,11 @@ class TestPluginChannelInstallSilence:
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, encoding="utf-8")
 
 
 def _git_out(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
 def _make_marketplace_clone(tmp_path: Path, plugin_name: str = "conexus") -> tuple[Path, str, str]:
@@ -978,7 +979,7 @@ class TestRunsUnderBareInterpreter:
         env["NX_LOCKSTEP_MARKER"] = str(marker)
         r = subprocess.run(
             [sys.executable, str(SCRIPT)],
-            capture_output=True, text=True, timeout=20, env=env,
+            capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=20, env=env,
         )
         assert r.returncode == 0
         assert r.stdout.strip() == ""

@@ -25,6 +25,7 @@ import pytest
 from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 ON_WINDOWS = os.name == "nt"
 
@@ -196,7 +197,7 @@ class TestRealLauncherThroughJunction:
         current = gen.parent / "current"
         gen_core.swap_link(str(gen), current, gen_core.LinkOps())
         done = subprocess.run(
-            [str(current / "bin" / "nxdemo.exe")], check=True, capture_output=True, text=True,
+            [str(current / "bin" / "nxdemo.exe")], check=True, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING,
         )
         printed = done.stdout.strip()
         assert printed, "the launcher printed nothing"

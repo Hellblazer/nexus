@@ -34,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from nexus.mcp.hooks import DECIDING_HOOKS
 from tests._hook_wiring import HOOKS_JSON, REPO_ROOT, command_verb, launcher_script_args
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: hook name -> the nx-hook verb hooks.json actually wires it as. Read
 #: from the file rather than written down, so this cannot drift from the
@@ -73,7 +74,7 @@ def _run_verb(verb: str, payload: dict, extra_env: dict[str, str] | None = None)
         _wired_argv(verb),
         input=json.dumps(payload),
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=60,
         env={**os.environ, **(extra_env or {})},
     )

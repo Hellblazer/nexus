@@ -238,6 +238,8 @@ def run_bounded(
     input: str | bytes | None = None,  # noqa: A002 - mirrors subprocess.run's own name
     stdin: IO[Any] | int | None = None,
     text: bool = True,
+    encoding: str | None = "utf-8",
+    errors: str | None = None,
     check: bool = False,
     stdout: IO[Any] | int = subprocess.PIPE,
     stderr: IO[Any] | int = subprocess.PIPE,
@@ -269,6 +271,14 @@ def run_bounded(
     ``DETACHED_PROCESS`` and the like without giving up the group kill
     (RDR-224, nexus-f9bgu.33: the console helper must start with no console).
 
+    *encoding* and *errors* decode the child's pipes (and encode ``input=``)
+    in text mode; they are ignored when ``text=False``. The default is UTF-8,
+    not the locale's encoding, which is cp1252 on an English Windows install
+    (nexus-ikoqj): the children of every caller (git, bd, uv, nx, gh, pg_ctl,
+    psql, ps, launchctl, systemctl, osascript, the formatters) write UTF-8. A
+    caller whose child is a native Windows tool (``schtasks``) passes the
+    console code page explicitly, as ``installer._run_manager`` does.
+
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
     """
@@ -292,6 +302,10 @@ def run_bounded(
         stdout=stdout,
         stderr=stderr,
         text=text,
+        # Only in text mode: Popen turns ``encoding`` or ``errors`` alone into
+        # text mode, which would hand a ``text=False`` caller str, not bytes.
+        encoding=encoding if text else None,
+        errors=errors if text else None,
         cwd=cwd,
         env=env,
         # POSIX: start_new_session=True -- makes the child a session/group

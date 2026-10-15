@@ -3342,6 +3342,7 @@ def _count_orphan_trackers(*, platform: str | None = None) -> int | None:
         ps_output = subprocess.check_output(
             argv_off_cwd(["ps", "-ww", "-eo", "pid,ppid,etime,command"]),
             text=True,
+            encoding="utf-8",  # POSIX-only branch (win32 returned above); ps writes the locale's UTF-8
             stderr=subprocess.DEVNULL,
         )
         return len(_parse_orphan_tracker_candidates(ps_output))

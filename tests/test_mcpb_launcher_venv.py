@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MCPB = REPO_ROOT / "mcpb"
@@ -108,7 +109,7 @@ def _layout(tmp_path: Path, *, pyproject: str | None = None) -> tuple[Path, Path
 
 def _launch(args: list[str], bundle: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
     argv = ["uv", *(a.replace("${__dirname}", str(bundle)) for a in args)]
-    return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300, env=_env(), cwd=str(cwd))
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=300, env=_env(), cwd=str(cwd))
 
 
 def _manifest_args() -> list[str]:

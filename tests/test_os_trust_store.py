@@ -18,6 +18,7 @@ import types
 import pytest
 
 import nexus
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 def test_posix_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,11 +202,11 @@ class TestRealWindows:
             "platform.system(); platform.machine(); platform.release()\n"
             "print(len(hits))\n"
         )
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=True)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=120, check=True)
         assert out.stdout.strip() == "0", out.stdout + out.stderr
 
     def test_the_primed_uname_matches_the_wmi_answer(self) -> None:
         code = "import platform; u = platform.uname(); print(u.system, u.release, u.version, u.machine)"
-        wmi = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=True)
+        wmi = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=120, check=True)
         primed = platform.uname()  # this process imported nexus, so its cache was primed
         assert f"{primed.system} {primed.release} {primed.version} {primed.machine}" == wmi.stdout.strip()

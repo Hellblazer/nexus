@@ -62,7 +62,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
     try:
         repo_root = subprocess.check_output(
             argv_off_cwd(["git", "rev-parse", "--show-toplevel"]),
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",  # git prints paths as UTF-8
         ).strip()
     except Exception:  # noqa: BLE001 — best-effort cwd derivation; falls back to working dir on failure
         repo_root = str(Path.cwd())
@@ -71,7 +71,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
     try:
         common_dir = subprocess.check_output(
             argv_off_cwd(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]),
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",  # git prints paths as UTF-8
         ).strip()
         if common_dir:
             repo_name = Path(common_dir).resolve().parent.name

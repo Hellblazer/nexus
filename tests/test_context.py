@@ -318,7 +318,7 @@ class TestSubagentHookInjection:
         import subprocess
 
         repo_dir.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=str(repo_dir), check=True, capture_output=True, text=True)
+        subprocess.run(["git", "init", "-q"], cwd=str(repo_dir), check=True, capture_output=True, text=True, encoding="utf-8")
         repo_root = repo_dir.resolve()
         repo_hash = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
         context_dir.mkdir(parents=True, exist_ok=True)
@@ -418,7 +418,7 @@ class TestSubagentHookInjection:
         repo_dir.mkdir()
         subprocess.run(
             ["git", "init", "-q"], cwd=str(repo_dir), check=True,
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
 
         # Compute expected filename the same way the hook does: basename +
@@ -479,7 +479,7 @@ class TestSubagentHookInjection:
         repo_dir.mkdir()
         subprocess.run(
             ["git", "init", "-q"], cwd=str(repo_dir), check=True,
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
 
         section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)

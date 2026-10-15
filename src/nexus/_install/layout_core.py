@@ -324,6 +324,11 @@ def declared_console_scripts_detail(
         proc = subprocess.run(  # noqa: S603 -- the generation's own interpreter, fixed argv
             [str(python), "-c", _DECLARED_SCRIPTS_QUERY, dist],
             capture_output=True, text=True, timeout=30, check=False,
+            # The child is a bare Python, which writes its pipes in ITS locale encoding
+            # (cp1252 on Windows) unless told otherwise; ask for UTF-8 and read UTF-8, so
+            # a non-ASCII script name or lookup error survives (nexus-ikoqj).
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LayoutError(

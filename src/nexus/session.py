@@ -247,6 +247,7 @@ def _ppid_of(
         out = subprocess.check_output(
             argv_off_cwd(["ps", "-o", "ppid=", "-p", str(pid)]),
             text=True,
+            encoding="utf-8",  # ps is POSIX-only: UTF-8 (nexus-ikoqj)
             stderr=subprocess.DEVNULL,
         ).strip()
         val = int(out)
@@ -398,6 +399,7 @@ def sweep_orphan_resource_trackers(
         ps_output = subprocess.check_output(
             argv_off_cwd(["ps", "-ww", "-eo", "pid,ppid,etime,command"]),
             text=True,
+            encoding="utf-8",
             stderr=subprocess.DEVNULL,
         )
     except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
@@ -419,6 +421,7 @@ def sweep_orphan_resource_trackers(
                 cmd = subprocess.check_output(
                     argv_off_cwd(["ps", "-ww", "-o", "command=", "-p", str(pid)]),
                     text=True,
+                    encoding="utf-8",
                     stderr=subprocess.DEVNULL,
                 ).strip()
             except (subprocess.CalledProcessError, OSError):

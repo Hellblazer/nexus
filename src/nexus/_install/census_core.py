@@ -164,7 +164,11 @@ def ps_snapshot(
     if (platform if platform is not None else sys.platform) == "win32":
         return _windows_snapshot(win_info_api)
     try:
-        r = subprocess.run(PS_COMMAND, capture_output=True, text=True, timeout=10)  # noqa: S603
+        # ps is POSIX-only (Windows returned above): UTF-8 by locale; replace keeps a
+        # stray byte in one command line from voiding the whole snapshot.
+        r = subprocess.run(  # noqa: S603
+            PS_COMMAND, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+        )
     except (OSError, subprocess.SubprocessError):
         return ""
     return r.stdout if r.returncode == 0 else ""

@@ -26,6 +26,7 @@ import subprocess
 import sys
 
 from tests._platform import IS_WINDOWS, scrubbed_env
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _PROBE = """
 import sys, io
@@ -50,7 +51,7 @@ def _run_probe() -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-c", _PROBE],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         timeout=120,
         env=env,
     )
