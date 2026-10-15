@@ -372,3 +372,8 @@ def test_run_bounded_decodes_utf8_and_leaves_binary_mode_alone() -> None:
     assert raw.stdout == "é中".encode()
     legacy = run_bounded([sys.executable, "-c", code], timeout=30, encoding="cp1252", errors="replace")
     assert legacy.stdout != "é中"
+    # A byte that is not UTF-8 (0x97 is an em dash in cp1252) is replaced by default, not raised.
+    bad = "import sys; sys.stdout.buffer.write(b'a\\x97b')"
+    assert run_bounded([sys.executable, "-c", bad], timeout=30).stdout == "a\ufffdb"
+    with pytest.raises(UnicodeDecodeError):
+        run_bounded([sys.executable, "-c", bad], timeout=30, errors="strict")

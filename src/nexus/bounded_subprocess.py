@@ -239,7 +239,7 @@ def run_bounded(
     stdin: IO[Any] | int | None = None,
     text: bool = True,
     encoding: str | None = "utf-8",
-    errors: str | None = None,
+    errors: str | None = "replace",
     check: bool = False,
     stdout: IO[Any] | int = subprocess.PIPE,
     stderr: IO[Any] | int = subprocess.PIPE,
@@ -277,7 +277,12 @@ def run_bounded(
     (nexus-ikoqj): the children of every caller (git, bd, uv, nx, gh, pg_ctl,
     psql, ps, launchctl, systemctl, osascript, the formatters) write UTF-8. A
     caller whose child is a native Windows tool (``schtasks``) passes the
-    console code page explicitly, as ``installer._run_manager`` does.
+    console code page explicitly, as ``installer._run_manager`` does. *errors*
+    defaults to ``"replace"``: a byte that is not UTF-8 (a Python child's
+    traceback written in cp1252 before ``nexus.cli`` reconfigures its streams)
+    comes back as U+FFFD rather than raising ``UnicodeDecodeError`` out of a
+    call whose callers catch ``OSError`` and ``TimeoutExpired``. Pass
+    ``errors="strict"`` where a malformed byte must fail.
 
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
