@@ -1085,7 +1085,7 @@ def read_receipt(generation: Path) -> Receipt:
     """
     path = receipt_path(generation)
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise LayoutError(f"no receipt at {path}: {exc}") from exc
     return Receipt.from_json(text)

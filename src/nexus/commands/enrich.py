@@ -1993,7 +1993,7 @@ def _run_validation_sample(
             unverifiable += 1
         else:
             failures += 1
-        with failures_path.open("a") as f:
+        with failures_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "source_path": source_path,
                 "extracted_aspects": claim_payload,

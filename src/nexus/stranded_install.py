@@ -369,7 +369,7 @@ def write_ack_marker(config_dir: Path, artifact_paths: tuple[str, ...]) -> dict[
         "consent": ACK_CONSENT_TEXT,
     }
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / _ACK_MARKER_FILENAME).write_text(json.dumps(record, indent=2))
+    (config_dir / _ACK_MARKER_FILENAME).write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
 
 
@@ -384,7 +384,7 @@ def _has_matching_ack(config_dir: Path, artifact_paths: tuple[str, ...]) -> bool
     """
     marker = config_dir / _ACK_MARKER_FILENAME
     try:
-        data = json.loads(marker.read_text())
+        data = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
     if not isinstance(data, dict):
@@ -426,7 +426,7 @@ def _has_verified_migration_report(config_dir: Path) -> bool:
     if not candidates:
         return False
     try:
-        report = json.loads(candidates[-1].read_text())
+        report = json.loads(candidates[-1].read_text(encoding="utf-8"))
         summary = report.get("summary") or {}
         total_failed = int(summary.get("total_failed", 0))
     except (OSError, ValueError, TypeError, AttributeError):
@@ -453,7 +453,7 @@ def _read_era(config_dir: Path) -> str | None:
     gates detection.
     """
     try:
-        text = (config_dir / STAMP_FILENAME).read_text().strip()
+        text = (config_dir / STAMP_FILENAME).read_text(encoding="utf-8").strip()
     except OSError:
         return None
     if not text:

@@ -9,6 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Subagents and new sessions get the Knowledge Map on Windows, and wherever `NEXUS_CONFIG_DIR` is set** (nexus-3fme8). The SubagentStart and SessionStart hooks read the map that `nx context refresh` writes as UTF-8 with the locale encoding, cp1252 on Windows, so a label with a non-ASCII character dropped the whole map without a word. Both also looked under `~/.config/nexus` while the map is written under `NEXUS_CONFIG_DIR` when that is set. The plugin's version-lockstep and endpoint scripts, `nx`'s plugin lockstep and the RDR hook's `.nexus.yml` read now read their files as UTF-8 too.
+- **Every file `nx` and the plugin scripts read or write as text is UTF-8 on Windows too** (nexus-ox0c0). 154 calls across `src/nexus` and the sn plugin's hook scripts named no encoding, so on Windows they used the ANSI code page (cp1252 on an English install): config and `.nexus.yml` files, receipts, markers, the logon task definition and the log files. A non-ASCII character, such as one in a user's home path, was written in cp1252 or raised on read. They now name UTF-8, which changes nothing on macOS and Linux. A new lint test (`tests/test_text_io_encoding_lint.py`) fails on any new text-mode call without an encoding.
 
 ## [7.79.0] - 2026-10-14
 

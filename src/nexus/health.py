@@ -457,7 +457,7 @@ def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthRe
         except Exception:  # noqa: BLE001 — a name the template refuses is not ours to judge here
             continue
         checked += 1
-        if shim.read_text() != expected:
+        if shim.read_text(encoding="utf-8") != expected:
             mismatched.append(name)
     if not mismatched:
         # Emit the PASS too. Every other row in this group does, and a check
@@ -2007,7 +2007,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                 hdir = _effective_hooks_dir(repo_path)
                 installed = [
                     n for n in hook_names
-                    if (hdir / n).exists() and SENTINEL_BEGIN in (hdir / n).read_text()
+                    if (hdir / n).exists() and SENTINEL_BEGIN in (hdir / n).read_text(encoding="utf-8")
                 ]
                 if installed:
                     # nexus-mkj6u: drift check — compare installed stanza
@@ -3209,7 +3209,7 @@ def _check_plugin_name() -> list[HealthResult]:
     if not manifest_path.exists():
         return []
     try:
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         plugin_name = manifest.get("name")
     except (OSError, json.JSONDecodeError):
         return []
@@ -3332,7 +3332,7 @@ def _check_credential_persistence() -> list[HealthResult]:
     if cfg_path.exists():
         try:
             import yaml  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
-            data = yaml.safe_load(cfg_path.read_text()) or {}
+            data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
             file_creds = data.get("credentials", {}) or {}
         except Exception:  # noqa: BLE001 — creds-file read is best-effort; fall back to empty mapping
             file_creds = {}

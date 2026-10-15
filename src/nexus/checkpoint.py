@@ -81,7 +81,7 @@ def scan_orphaned_checkpoints(
     orphans: list[Path] = []
     for ckpt_file in CHECKPOINT_DIR.glob("*.json"):
         try:
-            raw = json.loads(ckpt_file.read_text())
+            raw = json.loads(ckpt_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             _log.debug("checkpoint_scan_unreadable", path=str(ckpt_file), error=str(exc))
             # Unreadable checkpoint — treat as orphaned

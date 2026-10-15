@@ -246,7 +246,7 @@ def _read_repos_json(registry_path: Path) -> dict[str, dict]:
     if not registry_path.exists():
         return {}
     try:
-        data = json.loads(registry_path.read_text())
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         _log.warning(
             "repos_json_malformed",
@@ -273,7 +273,7 @@ def _repos_json_is_parseable(registry_path: Path) -> bool:
     if not registry_path.exists():
         return True
     try:
-        json.loads(registry_path.read_text())
+        json.loads(registry_path.read_text(encoding="utf-8"))
         return True
     except (OSError, json.JSONDecodeError):
         return False

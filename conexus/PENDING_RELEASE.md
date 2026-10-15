@@ -49,8 +49,10 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-ONE PATH PER BULLET, on the bullet's FIRST line. These wait for the client release that carries the rest of nexus-3fme8 (the hooks' Knowledge Map reads in `src/nexus/hooks/`).
+ONE PATH PER BULLET, on the bullet's FIRST line. These wait for the client release that carries the rest of their bead: nexus-3fme8 (the hooks' Knowledge Map reads in `src/nexus/hooks/`) and nexus-ox0c0 (the text IO sweep across `src/nexus`).
 
 - lockstep hook text IO as UTF-8 (nexus-3fme8): `conexus/hooks/scripts/version_lockstep_hook.py` reads `plugin.json`, the marketplace and registry JSON and its markers, and writes its drift marker, as UTF-8. It used the locale encoding, cp1252 on Windows, where a non-ASCII marketplace description raised and the hook degraded to "no pin".
 - lockstep action text IO as UTF-8 (nexus-3fme8): `conexus/hooks/scripts/version_lockstep_action.py` writes its marker and appends its log as UTF-8.
 - endpoint resolve reads as UTF-8 (nexus-3fme8): `conexus/hooks/scripts/_endpoint_resolve.py` reads its lease and state files as UTF-8.
+- sn auto-approve snapshot read as UTF-8 (nexus-ox0c0): `sn/hooks/scripts/auto_approve_sn_mcp.py` reads its snapshot file as UTF-8.
+- sn worktree guard reads .git as UTF-8 (nexus-ox0c0): `sn/hooks/scripts/worktree_guard.py` reads a worktree's `.git` file as UTF-8.

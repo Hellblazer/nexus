@@ -310,8 +310,8 @@ def retarget_windows_task(pythonw: str) -> list[str]:
     if not dest.is_file():
         return []
     try:
-        existing = dest.read_text()
-    except OSError as exc:
+        existing = dest.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:  # ValueError: a kept copy an older nx wrote in cp1252
         return [f"the {name} logon task was not repointed: {dest} could not be read ({exc}); {remedy}"]
     match = _TASK_COMMAND_RE.search(existing)
     old = unescape(match.group(1).strip()) if match else ""
@@ -329,7 +329,7 @@ def retarget_windows_task(pythonw: str) -> list[str]:
             f"the {name} logon task was not repointed at {pythonw}: {probe.detail}{hint}, "
             f"then {remedy}"
         ]
-    dest.write_text(_windows_task_body(_daemon, pythonw=pythonw))
+    dest.write_text(_windows_task_body(_daemon, pythonw=pythonw), encoding="utf-8")
     cmd = _activate_cmd(dest)
     failure = ""
     try:
@@ -343,7 +343,7 @@ def retarget_windows_task(pythonw: str) -> list[str]:
         failure = f"`{' '.join(cmd)}` failed: {type(exc).__name__}: {exc}"
     if failure:
         try:
-            dest.write_text(existing)  # the kept copy keeps describing the registered task
+            dest.write_text(existing, encoding="utf-8")  # the kept copy keeps describing the registered task
         except OSError:
             pass
         _log.warning("service_task_retarget_failed", detail=failure)
@@ -1182,8 +1182,8 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
         )
     if dest.exists():
         try:
-            existing: str | None = dest.read_text()
-        except OSError:
+            existing: str | None = dest.read_text(encoding="utf-8")
+        except (OSError, ValueError):  # ValueError: a unit an older nx wrote in cp1252
             existing = None
         if existing == rendered and not force:
             # nexus-mac7t: identical content alone used to answer
@@ -1272,7 +1272,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
                 timeout_s=_MANAGER_ACTION_TIMEOUT_S,
             )
 
-    dest.write_text(rendered)
+    dest.write_text(rendered, encoding="utf-8")
     dest.chmod(0o644)
 
     # The unit file STAYS on every activation failure. cd1k0.4 restored the

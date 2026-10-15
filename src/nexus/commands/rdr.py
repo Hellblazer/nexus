@@ -85,7 +85,7 @@ def _preamble_rdr_dir(repo_root: str) -> str:
     rdr_dir = "docs/rdr"
     nexus_yml = Path(repo_root) / ".nexus.yml"
     if nexus_yml.exists():
-        content = nexus_yml.read_text()
+        content = nexus_yml.read_text(encoding="utf-8")
         try:
             d = yaml.safe_load(content) or {}
             paths = (d.get("indexing") or {}).get("rdr_paths", ["docs/rdr"])
@@ -125,7 +125,7 @@ def _split_frontmatter_fences(text: str) -> list[str]:
 
 def _preamble_parse_frontmatter(filepath: Path) -> tuple[dict, str]:
     """Parse YAML frontmatter from *filepath*; return (meta, full_text)."""
-    text = filepath.read_text(errors="replace")
+    text = filepath.read_text(errors="replace", encoding="utf-8")
     meta: dict = {}
     if text.startswith("---"):
         parts = _split_frontmatter_fences(text)

@@ -74,11 +74,11 @@ def record_purge_marker(result: dict[str, Any], *, older_than_days: int) -> None
         path.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []
         if path.exists():
-            lines = path.read_text().splitlines()
+            lines = path.read_text(encoding="utf-8").splitlines()
         lines.append(json.dumps(entry))
         lines = lines[-_MAX_MARKERS:]
         tmp = path.with_suffix(f".tmp{time.time_ns()}")
-        tmp.write_text("\n".join(lines) + "\n")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
         tmp.replace(path)
     except Exception as exc:  # noqa: BLE001 — best-effort local breadcrumb, must never fail the caller's purge
         _log.warning("gc_purge_marker_record_failed", error=str(exc))
@@ -95,7 +95,7 @@ def read_recent_purge_markers(*, within_days: int = 7) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except Exception as exc:  # noqa: BLE001 — best-effort read; caller degrades to "no evidence"
         _log.debug("gc_purge_marker_read_failed", error=str(exc))
         return []

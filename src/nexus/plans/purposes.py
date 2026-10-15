@@ -92,7 +92,7 @@ def _load_registry() -> dict[str, dict[str, Any]]:
                 if not PURPOSES_YML.exists():
                     _registry_cache = {}
                 else:
-                    raw = yaml.safe_load(PURPOSES_YML.read_text()) or {}
+                    raw = yaml.safe_load(PURPOSES_YML.read_text(encoding="utf-8")) or {}
                     _registry_cache = (
                         raw if isinstance(raw, dict) else {}
                     )

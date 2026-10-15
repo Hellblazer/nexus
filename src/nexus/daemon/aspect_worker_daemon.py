@@ -186,8 +186,8 @@ def _process_age_ms(
         age = winproc_core.process_age_seconds(os.getpid(), api, now=now)
         return None if age is None else round(age * 1000, 1)
     try:
-        stat = Path("/proc/self/stat").read_text()
-        uptime = Path("/proc/uptime").read_text()
+        stat = Path("/proc/self/stat").read_text(encoding="utf-8")
+        uptime = Path("/proc/uptime").read_text(encoding="utf-8")
         return _process_age_ms_from(stat, uptime, os.sysconf("SC_CLK_TCK"))
     except (OSError, ValueError):
         return None

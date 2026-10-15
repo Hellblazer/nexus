@@ -710,7 +710,7 @@ def _compute_dev_checkout_root(start: Path) -> Path | None:
         try:
             import tomllib  # noqa: PLC0415 — deferred, stdlib; avoids module-load cost on the common (non-dev) path
 
-            data = tomllib.loads(pyproject.read_text())
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001 — a malformed/foreign pyproject.toml at some unrelated ancestor is not a match, never a crash
             continue
         if data.get("project", {}).get("name") == "conexus":

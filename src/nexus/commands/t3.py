@@ -89,7 +89,7 @@ def _backfill_state_path() -> Path:
 def _load_backfill_state(path: Path) -> dict[str, list[str]]:
     """Load the backfill state file, returning an empty dict on miss/error."""
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
@@ -98,7 +98,7 @@ def _save_backfill_state(path: Path, state: dict[str, list[str]]) -> None:
     """Atomically write the backfill state file (tmp + rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 

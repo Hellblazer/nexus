@@ -664,7 +664,7 @@ def record_taxonomy_failure(marker: Any, *, now: float) -> None:
     # Temp file then rename: two runs recording at once never leave a torn
     # value (a torn one would read as "no backoff", which is safe but wrong).
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(f"{now:.0f}\n")
+    tmp.write_text(f"{now:.0f}\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -713,7 +713,7 @@ def decide_taxonomy_deferral_window(
             window - uptime,
         ))
     try:
-        failed_at = float(Path(marker).read_text().strip())
+        failed_at = float(Path(marker).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         failed_at = None
     if failed_at is not None:
@@ -4165,7 +4165,7 @@ def check_version_compatibility() -> None:
         if plugin_root:
             manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"
             try:
-                manifest = json.loads(manifest_path.read_text())
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 plugin_ver = manifest.get("version")
                 plugin_name = manifest.get("name")
             except (OSError, json.JSONDecodeError):

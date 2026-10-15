@@ -196,7 +196,7 @@ class RdrResolver:
         # alphabetically so the return is deterministic across file-
         # systems — the prior contract leaked glob order into the result.
         selected = _select_primary_rdr(candidates)
-        text = selected.read_text(errors="replace")
+        text = selected.read_text(errors="replace", encoding="utf-8")
         m = _FRONTMATTER_RE.search(text)
         if not m:
             raise ResolutionError(

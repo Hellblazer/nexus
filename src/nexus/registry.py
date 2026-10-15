@@ -102,7 +102,7 @@ class RepoRegistry:
         self._data: dict[str, dict[str, Any]] = {"repos": {}}
         if path.exists():
             try:
-                self._data = json.loads(path.read_text())
+                self._data = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as exc:
                 _log.warning("Failed to load registry; starting empty", path=str(path), error=str(exc))
                 self._data = {"repos": {}}
@@ -179,7 +179,7 @@ class RepoRegistry:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path_str = tempfile.mkstemp(dir=self._path.parent, prefix=".repos_")
         try:
-            with os.fdopen(tmp_fd, "w") as fh:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps(self._data, indent=2))
             os.replace(tmp_path_str, self._path)
         except Exception:

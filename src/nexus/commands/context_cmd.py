@@ -21,7 +21,7 @@ def refresh_cmd(global_: bool) -> None:
     repo_path = None if global_ else Path.cwd()
     result = refresh_context_l1(repo_path=repo_path)
     if result:
-        content = result.read_text()
+        content = result.read_text(encoding="utf-8")
         tokens = len(content) // 4
         click.echo(f"Context cache refreshed: {result} ({len(content)} chars, ~{tokens} tokens)")
     else:
@@ -37,6 +37,6 @@ def show_cmd() -> None:
 
     path = _context_path_for_repo(Path.cwd())
     if path.exists():
-        click.echo(path.read_text())
+        click.echo(path.read_text(encoding="utf-8"))
     else:
         click.echo("No context cache. Run `nx context refresh` to generate.")

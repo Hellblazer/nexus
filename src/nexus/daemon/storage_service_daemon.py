@@ -381,7 +381,7 @@ def _read_pg_credentials(creds_path: Path) -> dict[str, str]:
     Raises ``FileNotFoundError`` if the file is absent.
     """
     result: dict[str, str] = {}
-    for line in creds_path.read_text().splitlines():
+    for line in creds_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue

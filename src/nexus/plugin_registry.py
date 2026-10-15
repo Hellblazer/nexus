@@ -112,7 +112,7 @@ def _plugin_names(data: object) -> tuple[str, ...] | None:
 
 def _read(path: Path) -> tuple[str, ...] | None:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return _plugin_names(data)
@@ -138,7 +138,7 @@ def _installed_clone_path(marketplaces_path: Path | None = None) -> Path | None:
     on any unreadable/unexpected shape -- refuse, never guess."""
     path = marketplaces_path or _default_marketplaces_path()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):

@@ -233,7 +233,7 @@ def _append_chash_footnotes(
     if not rendered.exists():
         return
 
-    source_text = src_path.read_text(errors="replace")
+    source_text = src_path.read_text(errors="replace", encoding="utf-8")
     cites = scan_citations(source_text)
     seen: set[str] = set()
     footnotes: list[str] = []
@@ -333,7 +333,7 @@ def _append_catalog_link_footnotes(
     if not rendered.exists():
         return
 
-    source_text = src_path.read_text(errors="replace")
+    source_text = src_path.read_text(errors="replace", encoding="utf-8")
     resolved = scan_and_resolve_catalog_links(source_text, get_reader)
     if not resolved.links:
         return
@@ -421,7 +421,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
 
             try:
                 resolved = scan_and_resolve_catalog_links(
-                    path.read_text(errors="replace"),
+                    path.read_text(errors="replace", encoding="utf-8"),
                     partial(_lazy_link_reader, link_reader_holder),
                 )
             except CatalogLinkResolutionError as exc:
@@ -512,7 +512,7 @@ def check_grounding_cmd(
     any_unresolved = False
     try:
         for path in paths:
-            text = path.read_text(errors="replace")
+            text = path.read_text(errors="replace", encoding="utf-8")
             cites = scan_citations(text)
             report = grounding_report(cites)
             unresolved_here: list[tuple[int, str]] = []
@@ -643,7 +643,7 @@ def check_extensions_cmd(
 
         with taxonomy_ctx as taxonomy:
             for path in paths:
-                text = path.read_text(errors="replace")
+                text = path.read_text(errors="replace", encoding="utf-8")
                 cites = scan_citations(text)
 
                 # RDR-086 Phase 4.2: resolve each chash → ChunkRef → doc_id

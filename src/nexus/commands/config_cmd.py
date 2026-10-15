@@ -219,7 +219,7 @@ def config_list(keys_only: bool) -> None:
     path = _global_config_path()
     file_data: dict = {}
     if path.exists():
-        file_data = yaml.safe_load(path.read_text()) or {}
+        file_data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     file_creds = file_data.get("credentials", {})
 
     for cred, env_var in CREDENTIALS.items():

@@ -127,7 +127,7 @@ def _marker_names_live_pid(path: Path) -> bool:
     from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: heavier than this module's other rows
 
     try:
-        pid = int(json.loads(path.read_text())["pid"])
+        pid = int(json.loads(path.read_text(encoding="utf-8"))["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return False
     return pid_alive(pid)

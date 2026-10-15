@@ -197,7 +197,7 @@ class LinkRecord:
 
 def read_owners(path: Path) -> dict[str, OwnerRecord]:
     records: dict[str, OwnerRecord] = {}
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -221,7 +221,7 @@ def read_owners(path: Path) -> dict[str, OwnerRecord]:
 
 def read_documents(path: Path) -> dict[str, DocumentRecord]:
     records: dict[str, DocumentRecord] = {}
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -245,7 +245,7 @@ def read_documents(path: Path) -> dict[str, DocumentRecord]:
 
 def read_links(path: Path) -> dict[tuple[str, str, str], LinkRecord]:
     records: dict[tuple[str, str, str], LinkRecord] = {}
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:

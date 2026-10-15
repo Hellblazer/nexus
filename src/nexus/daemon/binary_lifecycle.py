@@ -95,7 +95,7 @@ def read_installed_provenance(config_dir: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError):
         _log.warning("service_binary_sidecar_unreadable", path=str(path))

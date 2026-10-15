@@ -218,6 +218,7 @@ def configure_logging(
         log_path,
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
+        encoding="utf-8",
     )
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
@@ -334,6 +335,7 @@ def open_run_log(name: str, config_dir: Path | None = None) -> Iterator[Path]:
         log_path,
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
+        encoding="utf-8",
     )
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     # substantive-critic (nexus-mjc9l): "per-repo, latest-run overwrite via
