@@ -10,7 +10,7 @@
 # outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll]]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -53,6 +53,18 @@
 # blocked, and the log names every DLL (event 8003) the DLL rules would refuse.
 # --applocker-allow-dll enforces those DLL rules, with the folders outside the
 # install's that the audit run recorded (driver/stduser.ps1 $dllExtra).
+# --wdac-audit (with --standard-user --no-admin-git) deploys an App Control for
+# Business (WDAC) policy built from Windows' DefaultWindows_Enforced example in
+# audit mode: the CodeIntegrity log (event 3076) names every program and DLL the
+# enforced policy would refuse. The policy trusts only code Windows signs, for
+# every account, so a Git installed for all users under Program Files would be
+# refused like anything else; hence --no-admin-git.
+# --wdac-allow enforces it, with path rules for this install's folders under the
+# account's profile, runtime file-path protection off (WDAC refuses rules for
+# user-writable folders at run time otherwise) and script enforcement off
+# (enforced, PowerShell runs in ConstrainedLanguage, as with AppLocker's script
+# rules). The stduser step stops the run unless an unsigned control program
+# started as the account is recorded (3077 blocked, 3076 in audit).
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -127,7 +139,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll]]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]" >&2
 }
 die() {
     local code="$1"; shift
@@ -143,6 +155,7 @@ keep_guest=0
 standard_user=0
 admin_git=yes
 applocker=no
+wdac=no
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) [[ $# -ge 2 ]] || { usage; exit 2; }; version="$2"; shift 2 ;;
@@ -157,6 +170,8 @@ while [[ $# -gt 0 ]]; do
         --applocker-allow) applocker=allow; shift ;;
         --applocker-allow-dll-audit) applocker=allow-dll-audit; shift ;;
         --applocker-allow-dll) applocker=allow-dll; shift ;;
+        --wdac-audit) wdac=audit; shift ;;
+        --wdac-allow) wdac=allow; shift ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -169,6 +184,8 @@ for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_G
 done
 [[ "$admin_git" == yes || $standard_user -eq 1 ]] || { usage; die 2 "--no-admin-git needs --standard-user"; }
 [[ "$applocker" == no || $standard_user -eq 1 ]] || { usage; die 2 "the --applocker modes need --standard-user"; }
+[[ "$wdac" == no || ( $standard_user -eq 1 && "$admin_git" == no ) ]] || { usage; die 2 "the --wdac modes need --standard-user --no-admin-git"; }
+[[ "$wdac" == no || "$applocker" == no ]] || { usage; die 2 "a --wdac mode and an --applocker mode are separate runs"; }
 install_doc="$repo/docs/windows-install.md"
 [[ "$STD_USER" != "$GUSER" ]] || die 2 "NX_GUEST_STD_USER must not be the administrator account"
 [[ -f "$gate" ]] || die 2 "no gate script at $gate"
@@ -406,6 +423,8 @@ if [[ "$applocker" == allow ]]; then git_note="$git_note; AppLocker default rule
 if [[ "$applocker" == audit ]]; then git_note="$git_note; AppLocker default rules in audit only (nothing is blocked)"; fi
 if [[ "$applocker" == allow-dll-audit ]]; then git_note="$git_note; AppLocker default rules enforced for programs, with allow rules for this install's folders; DLL rules and script rules audit only"; fi
 if [[ "$applocker" == allow-dll ]]; then git_note="$git_note; AppLocker default rules enforced for programs and DLLs, with allow rules for this install's folders; script rules audit only"; fi
+if [[ "$wdac" == audit ]]; then git_note="$git_note; WDAC DefaultWindows policy in audit mode (nothing is blocked)"; fi
+if [[ "$wdac" == allow ]]; then git_note="$git_note; WDAC DefaultWindows policy enforced, with path rules for this install's folders; script enforcement off"; fi
 if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); $git_note"; fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 
@@ -442,7 +461,7 @@ if [[ $standard_user -eq 1 ]]; then
     wheel_arg=''
     if [[ -n "$wheel_name" ]]; then wheel_arg="-Wheel $wheel_name"; fi
     # shellcheck disable=SC2086
-    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" -AdminGit "$admin_git" -AppLocker "$applocker" $wheel_arg
+    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" -AdminGit "$admin_git" -AppLocker "$applocker" -Wdac "$wdac" $wheel_arg
     grep -qF "std gate sha256=$gate_sha" "$out/01s-stduser.txt" || die 1 "the gate script in $STD_USER's profile does not have sha256 $gate_sha"
     if [[ -n "$wheel_name" ]]; then
         grep -qF "std wheel sha256=$wheel_sha" "$out/01s-stduser.txt" || die 1 "the wheel in $STD_USER's profile does not have sha256 $wheel_sha"

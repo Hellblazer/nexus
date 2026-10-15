@@ -24,6 +24,11 @@ if (Test-Path "$b\applocker-control.exe") {
     try { $o = & "$b\applocker-control.exe" 2>&1 | Out-String; "applocker control run: started, exit=$LASTEXITCODE out=$($o.Trim())" } catch { "applocker control run: blocked: $($_.Exception.Message)" }
     "applocker language mode: $($ExecutionContext.SessionState.LanguageMode)"
 }
+# run-gate.sh --wdac-audit / --wdac-allow: the stduser step built an unsigned program here and saw its start recorded.
+if (Test-Path "$b\wdac-control.exe") {
+    try { $o = & "$b\wdac-control.exe" 2>&1 | Out-String; "wdac control run: started, exit=$LASTEXITCODE out=$($o.Trim())" } catch { "wdac control run: blocked: $($_.Exception.Message)" }
+    "wdac language mode: $($ExecutionContext.SessionState.LanguageMode)"
+}
 function Step($n, [scriptblock]$sb) { $t0 = Get-Date; "=== $n"; & $sb 2>&1 | Out-String -Width 200 | % { $_.TrimEnd() } | Select-Object -Last 12; "--- $n took $([int]((Get-Date)-$t0).TotalSeconds)s" }
 Step 'uv' { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://astral.sh/uv/install.ps1 | iex' }
 $env:PATH = "$env:USERPROFILE\.local\bin;" + $env:PATH

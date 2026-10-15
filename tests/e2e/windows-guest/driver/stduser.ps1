@@ -21,6 +21,20 @@
 #     waits until a start of that file as the account is recorded as blocked
 #     (enforcement begins some time after the service starts), failing the step
 #     otherwise: a run under a policy not yet in effect proves nothing.
+#   - with -Wdac audit or allow, deploys an App Control for Business (WDAC)
+#     policy built from Windows' DefaultWindows_Enforced example (only code
+#     Windows itself signs runs, for every account, administrators included),
+#     with CiTool before the restart. 'audit' puts it in audit mode; 'allow'
+#     enforces it with path rules for this install's folders under the
+#     account's profile, runtime file-path protection off (the folders are
+#     user-writable, which WDAC refuses at run time otherwise) and script
+#     enforcement off (enforced, it puts PowerShell in ConstrainedLanguage).
+#     After the restart it compiles an unsigned program with the .NET
+#     Framework's csc.exe into the account's nx-gate folder as
+#     wdac-control.exe and waits until a start of it as the account is
+#     recorded in the CodeIntegrity log (3077 blocked, or 3076 in audit). A
+#     signed copy like the AppLocker control would not do: WDAC trusts a
+#     Windows signature wherever the file is.
 # The account's secret is 24 random bytes made in the guest. It is written to
 # the Winlogon key for the one restart and removed as soon as the account is
 # signed in; it is never printed, and the next restore erases the account.
@@ -42,8 +56,13 @@ param(
     # logs (event 8003) name every DLL the DLL rules would refuse.
     # 'allow-dll' (--applocker-allow-dll): 'allow', plus the DLL rules enforced, with the same folders and the
     # extra DLL folders the audit run recorded.
-    [string]$AppLocker = 'no'
+    [string]$AppLocker = 'no',
+    # 'audit' (run-gate.sh --wdac-audit): the DefaultWindows WDAC policy in audit mode; the CodeIntegrity log
+    # (event 3076) names every file it would refuse. 'allow' (--wdac-allow): the same policy enforced, with path
+    # rules for this install's folders; script enforcement off.
+    [ValidateSet('no', 'audit', 'allow')][string]$Wdac = 'no'
 )
+if ($Wdac -ne 'no' -and $AppLocker -ne 'no') { throw 'WDAC and AppLocker modes are separate runs' }
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
 if ($Wheel -and $Wheel -notmatch '^[A-Za-z0-9._+-]+\.whl$') { throw 'Wheel is not a wheel file name' }
 if ($StdUser -notmatch '^[A-Za-z0-9._-]+$' -or $StdUser -eq $GuestUser) { throw 'StdUser must be a plain account name other than GuestUser' }
@@ -56,8 +75,8 @@ $cred = New-Object PSCredential($GuestUser, $sec)
 $t0 = Get-Date
 $s = New-PSSession -VMName $VMName -Credential $cred -ErrorAction Stop
 try {
-    Invoke-Command -Session $s -ArgumentList $StdUser, $AdminGit, $AppLocker {
-        param($u, $adminGit, $appLocker)
+    $pre = Invoke-Command -Session $s -ArgumentList $StdUser, $AdminGit, $AppLocker, $Wdac {
+        param($u, $adminGit, $appLocker, $wdac)
         $git = 'C:\Program Files\Git\cmd\git.exe'
         if ($adminGit -eq 'no') { 'the administrator installs no Git (-AdminGit no)' }
         elseif (-not (Test-Path $git)) {
@@ -125,6 +144,32 @@ try {
             sc.exe config AppIDSvc start= auto | Out-Null
             "applocker: default rules set, mode=$appLocker; AppIDSvc start=auto exit=$LASTEXITCODE"
         }
+        if ($wdac -ne 'no') {
+            $ex = "$env:windir\schemas\CodeIntegrity\ExamplePolicies\DefaultWindows_Enforced.xml"
+            if (-not (Test-Path -LiteralPath $ex)) { "NXG-RESULT: FAIL no $ex on this guest"; return }
+            $x = "$env:TEMP\nxgate-wdac.xml"; $cip = "$env:TEMP\nxgate-wdac.cip"
+            Copy-Item -LiteralPath $ex -Destination $x -Force
+            if ($wdac -eq 'audit') { Set-RuleOption -FilePath $x -Option 3 }
+            else {
+                Set-RuleOption -FilePath $x -Option 18
+                Set-RuleOption -FilePath $x -Option 11
+                # The account does not exist yet; WDAC path rules take a wildcard only at the start or the end, so
+                # the folders name the account. The same folders as the AppLocker allow-dll mode.
+                $folders = @('.local\bin\*', '.local\share\nexus\*', 'AppData\Roaming\uv\*', 'AppData\Local\uv\cache\*', 'AppData\Local\Programs\Git\*', '.config\nexus\*', '.claude\downloads\*', 'AppData\Local\Temp\PortableGit.exe', '.cache\nexus\*', 'AppData\Local\Temp\onnxruntime-java*')
+                $rules = @(foreach ($p in $folders) { New-CIPolicyRule -FilePathRule "C:\Users\$u\$p" })
+                $m = "$env:TEMP\nxgate-wdac-merged.xml"
+                Merge-CIPolicy -PolicyPaths $x -OutputFilePath $m -Rules $rules | Out-Null
+                Move-Item -LiteralPath $m -Destination $x -Force
+                "wdac path rules: " + $folders.Count
+            }
+            $id = Set-CIPolicyIdInfo -FilePath $x -ResetPolicyID -PolicyName "nexus gate WDAC $wdac"
+            ConvertFrom-CIPolicy -XmlFilePath $x -BinaryFilePath $cip | Out-Null
+            $o = & "$env:windir\System32\CiTool.exe" --update-policy $cip -json 2>&1 | Out-String
+            "wdac deploy: CiTool exit=$LASTEXITCODE " + ($o -replace '\s+', ' ').Trim()
+            "wdac policy: mode=$wdac $id"
+            Remove-Item -LiteralPath $x, $cip -Force -ErrorAction SilentlyContinue
+            if ($o -notmatch '"OperationResult"\s*:\s*0' -and $LASTEXITCODE -ne 0) { "NXG-RESULT: FAIL CiTool did not deploy the WDAC policy"; return }
+        }
         if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) { "NXG-RESULT: FAIL the account $u already exists: this is not the clean baseline"; return }
         $bytes = New-Object byte[] 24; (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
         $tp = 'Aa1!' + [Convert]::ToBase64String($bytes); $bytes = $null
@@ -143,7 +188,9 @@ try {
         "restarting at " + (Get-Date).ToUniversalTime().ToString('o')
         shutdown.exe /r /t 3 /f | Out-Null
     }
+    $pre
 } finally { Remove-PSSession $s }
+if (($pre | Out-String) -match 'NXG-RESULT: FAIL') { exit 6 }
 # Wait for the restart and for the new account to own the console.
 $ok = $false
 for ($i = 0; $i -lt 60; $i++) {
@@ -158,8 +205,8 @@ if (-not $ok) { "NXG-RESULT: FAIL $StdUser did not sign in at the console"; exit
 $rc = 0
 $s = New-PSSession -VMName $VMName -Credential $cred -ErrorAction Stop
 try {
-    $info = Invoke-Command -Session $s -ArgumentList $StdUser, $Wheel, $AppLocker {
-        param($u, $Wheel, $appLocker)
+    $info = Invoke-Command -Session $s -ArgumentList $StdUser, $Wheel, $AppLocker, $Wdac {
+        param($u, $Wheel, $appLocker, $wdac)
         $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
         Remove-ItemProperty -Path $wl -Name DefaultPassword -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $wl -Name AutoAdminLogon -Value '0'
@@ -206,6 +253,26 @@ try {
             Unregister-ScheduledTask -TaskName 'nxgate-applocker-control' -Confirm:$false
             "applocker control start as the account: event $want recorded=$($hit -gt 0) after $([int]((Get-Date)-$t1).TotalSeconds)s"
         }
+        if ($wdac -ne 'no') {
+            $pol = @((& "$env:windir\System32\CiTool.exe" --list-policies -json 2>$null | Out-String | ConvertFrom-Json).Policies | Where-Object { $_.FriendlyName -eq "nexus gate WDAC $wdac" })
+            "wdac policy active: count=$($pol.Count) enforced=$(@($pol | Where-Object { $_.IsEnforced }).Count) currently=$(@($pol | Where-Object { $_.IsCurrentlyEnforced }).Count)"
+            $src = "$env:TEMP\nxgate-wdac-control.cs"
+            Set-Content -LiteralPath $src -Value 'class P { static void Main() { System.Console.WriteLine("wdac control ran"); } }' -Encoding ASCII
+            & "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /out:"$b\wdac-control.exe" $src | Out-Null
+            Remove-Item -LiteralPath $src -Force
+            "wdac control built: " + (Test-Path "$b\wdac-control.exe") + " signed=" + ((Get-AuthenticodeSignature "$b\wdac-control.exe").Status)
+            $act = New-ScheduledTaskAction -Execute "$b\wdac-control.exe"
+            Register-ScheduledTask -TaskName 'nxgate-wdac-control' -Action $act -Principal (New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited) -Force | Out-Null
+            # Enforced: a refused start is 3077. Audit mode records the same start as 3076 and lets it run.
+            $want = if ($wdac -eq 'audit') { 3076 } else { 3077 }
+            $t1 = Get-Date; $hit = 0
+            do {
+                Start-ScheduledTask -TaskName 'nxgate-wdac-control'; Start-Sleep 10
+                $hit = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-CodeIntegrity/Operational'; Id = $want; StartTime = $t1 } -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*wdac-control.exe*' }).Count
+            } while ($hit -eq 0 -and ((Get-Date) - $t1).TotalSeconds -lt 300)
+            Unregister-ScheduledTask -TaskName 'nxgate-wdac-control' -Confirm:$false
+            "wdac control start as the account: event $want recorded=$($hit -gt 0) after $([int]((Get-Date)-$t1).TotalSeconds)s"
+        }
     }
     $info
     if ($AdminGit -eq 'no') {
@@ -218,6 +285,7 @@ try {
     elseif ($text -notmatch 'in Administrators=False') { "NXG-RESULT: FAIL $StdUser is an administrator"; $rc = 8 }
     elseif ($AdminGit -ne 'no' -and $text -notmatch 'gitexe=True') { 'NXG-RESULT: FAIL Git is not installed'; $rc = 9 }
     elseif ($AppLocker -ne 'no' -and ($text -notmatch 'applocker AppIDSvc=Running' -or $text -notmatch 'applocker control for the account: Denied' -or $text -notmatch 'applocker System32 for the account: Allowed' -or $text -notmatch ('applocker control start as the account: event ' + $(if ($AppLocker -eq 'audit') { '8003' } else { '8004' }) + ' recorded=True'))) { 'NXG-RESULT: FAIL AppLocker is not in effect for the account (service, control file or System32 reading above)'; $rc = 10 }
+    elseif ($Wdac -ne 'no' -and ($text -notmatch 'wdac policy active: count=1 ' -or $text -notmatch 'wdac control built: True signed=NotSigned' -or $text -notmatch ('wdac control start as the account: event ' + $(if ($Wdac -eq 'audit') { '3076' } else { '3077' }) + ' recorded=True'))) { 'NXG-RESULT: FAIL WDAC is not in effect for the account (deploy, policy or control reading above)'; $rc = 11 }
     elseif ($AdminGit -eq 'no' -and $text -notmatch 'gitexe=False') { 'NXG-RESULT: FAIL Git is already installed for all users, so this is not a no-Git run'; $rc = 9 }
 } finally { Remove-PSSession $s }
 if ($rc -ne 0) { exit $rc }
