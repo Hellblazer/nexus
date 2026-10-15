@@ -613,7 +613,6 @@ _CHAS_ALLOWED = [
     "ssh chas-test 'W=~/src/nexus-wt/x; git -C $W add -- a b && git -C $W commit -m msg' </dev/null",
     "ssh chas-test 'cd ~/src/nexus && git worktree add ../nexus-wt/r r'",
     'ssh chas "git -C /home/nxtest/src/nexus-wt/x commit -m msg"',
-    'ssh chas-test "git -C ' + D + 'HOME/src/nexus-wt/x add f; git -C x commit -m m"',
     "ssh -o ConnectTimeout=5 chas-test 'git -C x commit -m m'",
     "ssh -oBatchMode=yes -nT chas-test 'git -C x add f'",
     "ssh nxtest@chas-test 'git -C x add f'",
@@ -659,6 +658,25 @@ _CHAS_DENIED = [
     # ANSI-C quoting: \' does not end $'...'
     "ssh chas-test " + D + "'" + BS + "'' ; git add f ''",
     "ssh chas-test 'git add f' =(git checkout -- f)",
+    # Review round 2 (nexus-yc7fs): a word between the host and the remote
+    # command that the shell rewrites into an ssh option. ssh parses options
+    # after the host too, so each hands it a local ProxyCommand.
+    "ssh chas-test " + D + "NOPE -oProxyCommand=x 'git add f'",
+    "ssh chas-test {-oProxyCommand=x,y} 'git add f'",
+    "ssh chas-test " + D + "'-oProxyCommand=x' 'git add f'",
+    "ssh chas-test * 'git add f'",
+    'ssh chas-test "' + D + 'X" \'git add f\'',
+    # zsh: $~ turns on glob qualifiers in the value, which can run code.
+    "ssh chas-test 'git add f' " + D + "~PWD",
+    # A redirection writes a local file; refused with the rest.
+    "ssh chas-test 'git add f' > out",
+    # An -o value must be one word of letters and digits.
+    "ssh -o 'ConnectTimeout=5 ProxyCommand=x' chas-test 'git add f'",
+    "ssh -oBatchMode=yes,ProxyCommand=x chas-test 'git add f'",
+    # Onward hops by name.
+    "ssh chas-test 'scp f laptop:/tmp/y; git add f'",
+    # Refused conservatively: any $ outside single quotes, even a plain one.
+    'ssh chas-test "git -C ' + D + 'HOME/src/nexus-wt/x add f"',
 ]
 
 

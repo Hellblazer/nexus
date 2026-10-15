@@ -1347,64 +1347,62 @@ _SAFE_SSH_FLAG_LETTERS: frozenset[str] = frozenset("nqtT")
 _SAFE_SSH_O_OPTIONS: frozenset[str] = frozenset(
     {"connecttimeout", "batchmode", "serveraliveinterval", "serveralivecountmax"}
 )
+_SAFE_SSH_O_VALUE_RE = re.compile(r"[A-Za-z0-9]+")
+
+#: The only characters accepted outside single quotes. Everything else that a
+#: shell treats specially there is refused: ``$`` (every expansion), backtick,
+#: ``( ) { } [ ] * ? ~ ^ ! #`` (substitution, brace and glob expansion, zsh
+#: flags and qualifiers, history, comments), backslash, ``; & | >`` and line
+#: breaks. With those gone, zsh and bash both read each word literally, so the
+#: words shlex sees are exactly the words ssh receives. ``<`` stays: it only
+#: feeds a file to ssh's stdin (``</dev/null``), and with ``>`` and ``&``
+#: refused it cannot form ``<>`` or ``<&``. ``=`` stays for ``-oKey=value``;
+#: zsh's word-initial ``=cmd`` only expands to a command's path.
+_LITERAL_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t_./:@,+-=<"
+)
+
+#: Remote commands that would leave chas for another host. A best-effort list:
+#: the carve-out's job is to stop a subagent's git touching this checkout, and
+#: chas reaching back to this machine is the one route to it worth naming.
+_ONWARD_HOP_WORDS: tuple[str, ...] = ("ssh", "scp", "sftp", "rsync")
 
 
-def _runs_nothing_locally(command: str) -> bool:
-    """True when no part of ``command`` can start a second local command.
+def _read_literally(command: str) -> bool:
+    """True when the shell (zsh or bash) reads every word of ``command``
+    literally: nothing outside single quotes expands, substitutes, globs or
+    chains, so no second local command can start and no word can turn into an
+    extra ssh option.
 
-    Walks the text with the shell's quoting states (zsh is the Bash tool's
-    shell on macOS, bash elsewhere; the rule is the stricter of the two).
-    Outside single quotes it refuses, escaped or not:
-
-    - ``( )`` and backtick: subshells, every substitution form (``$(``,
-      ``<(``, ``>(``, zsh ``=(``), zsh glob qualifiers like ``*(e:...:)`` and
-      zsh parameter flags like ``${(e)...}``, which evaluate a string as code.
-      Escaped parens are refused too: in zsh, ``"${(e):-\\$\\(cmd\\)}"``
-      rebuilds ``$(cmd)`` from escaped text and then runs it.
-    - ``${`` and ``$[``: parameter and arithmetic expansions that can
-      evaluate their contents. Plain ``$NAME`` stays allowed; it only expands.
-
-    Outside any quotes it also refuses ``; & |``, newline and CR, which start
-    or chain a command. Inside single quotes nothing is refused, since both
-    shells treat it as literal. ``$'...'`` is tracked as its own state,
-    where a backslash escapes the next character, so ``\\'`` inside it
-    cannot end the string early. A backslash outside single quotes escapes
-    the next character; missing that would read ``\\'`` as an opening quote
-    and hide what follows. Redirections (``< >``) stay allowed: they open
-    files, they run nothing.
+    An allowlist, not a blocklist (nexus-yc7fs review round 2). The blocklist
+    draft missed words between the host and the remote command that a shell
+    rewrites into ``-oProxyCommand=...`` (an unset ``$X``, a brace or glob
+    pattern, ``$'...'``), and zsh's ``$~PWD`` glob qualifiers. Inside single
+    quotes nothing is checked: both shells treat it as literal, and it is the
+    remote command, which runs on chas. Inside double quotes the same
+    allowlist applies, plus a literal single quote.
     """
-    state = ""  # "", "'" (literal), "$'" (ANSI-C) or '"'
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
+    state = ""  # "", "'" or '"'
+    for ch in command:
         if state == "'":
             if ch == "'":
                 state = ""
-        elif state == "$'":
-            if ch == "\\":
-                i += 1
-            elif ch == "'":
-                state = ""
-        elif ch in "()`":
+        elif ch == "'" and state == "":
+            state = "'"
+        elif ch == '"':
+            state = "" if state == '"' else '"'
+        elif ch in _LITERAL_CHARS or (state == '"' and ch == "'"):
+            continue
+        else:
             return False
-        elif ch == "\\":
-            if i + 1 < n and command[i + 1] in "()`":
-                return False
-            i += 1  # the escaped character is literal
-        elif command.startswith(("${", "$["), i):
-            return False
-        elif state == '"':
-            if ch == '"':
-                state = ""
-        elif command.startswith("$'", i):
-            state = "$'"
-            i += 1
-        elif ch in "'\"":
-            state = ch
-        elif ch in ";&|\n\r":
-            return False
-        i += 1
     return state == ""
+
+
+def _safe_ssh_o_value(value: str) -> bool:
+    key, sep, val = value.partition("=")
+    return bool(sep) and key.lower() in _SAFE_SSH_O_OPTIONS and bool(
+        _SAFE_SSH_O_VALUE_RE.fullmatch(val)
+    )
 
 
 def _remote_test_host_command(command: str) -> str | None:
@@ -1414,12 +1412,15 @@ def _remote_test_host_command(command: str) -> str | None:
     nexus-yc7fs: the primary rule matches ``git`` plus a write verb anywhere
     in the text, so ``ssh chas-test 'git -C <wt> add ...'`` was denied though
     its git runs in chas's clone. The carve-out is deliberately narrow: the
-    first word is ssh, every option is one that runs nothing locally, the host
-    is a chas alias (``user@`` allowed), nothing anywhere can start a second
-    local command, and the remote part does not ssh onward (a hop from chas
-    back to this machine would reach the protected checkout).
+    shell reads the command literally (``_read_literally``), the first word is
+    ssh, every option, before or after the host (OpenSSH parses both until the
+    remote command starts), is one that runs nothing locally, the host is a
+    chas alias (``user@`` allowed), and the remote command does not name an
+    onward hop. Known limit: a remote command can still reach other hosts by
+    means this does not name; the guard protects against a subagent's git, not
+    against a hostile one.
     """
-    if not _runs_nothing_locally(command):
+    if not _read_literally(command):
         return None
     try:
         tokens = shlex.split(command, posix=True)
@@ -1439,8 +1440,7 @@ def _remote_test_host_command(command: str) -> str | None:
                     value = tokens[i] if i < len(tokens) else ""
                 else:
                     value = tok[2:]
-                key = value.split("=", 1)[0].strip().lower()
-                if "=" not in value or key not in _SAFE_SSH_O_OPTIONS:
+                if not _safe_ssh_o_value(value):
                     return None
             elif not tok[1:] or not set(tok[1:]) <= _SAFE_SSH_FLAG_LETTERS:
                 return None
@@ -1453,7 +1453,7 @@ def _remote_test_host_command(command: str) -> str | None:
 
     if host is None or host.rsplit("@", 1)[-1] not in _REMOTE_TEST_HOSTS:
         return None
-    if any("ssh" in tok for tok in tokens[i:]):
+    if any(word in tok for tok in tokens[i:] for word in _ONWARD_HOP_WORDS):
         return None
     return host
 
