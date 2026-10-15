@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx init` refuses up front on a Windows machine with Smart App Control on, and `nx doctor` reports its state** (nexus-f9bgu.57). Smart App Control blocks the unsigned PostgreSQL bundle and the unsigned Python that uv installs, so a local install cannot work there. `nx init` used to download the bundle and then fail with a bare `[WinError 4551]`. It now stops before the download and says why, with a link to the install guide's Smart App Control section. A new Windows-only `nx doctor` row, "Smart App Control", reads the state from the registry: on fails in local mode and warns in cloud mode, evaluation warns because Windows can switch it on later, and off passes. On the measured Windows 11 Home machine with Smart App Control on, Windows also blocked `nx.exe` itself at install, so there neither the refusal nor the row can run. Nothing changes on macOS and Linux.
+
 ## [7.80.0] - 2026-10-15
 
 Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). Eight `nexus` MCP tools load eagerly and the rest through Claude Code's tool search, which makes a session's first request 41% smaller. On Windows, files `nx` and the plugin hooks read or write as text are UTF-8, output from the programs they run is decoded correctly, and subagents and new sessions get the Knowledge Map. The Windows install guide covers WDAC (App Control for Business).

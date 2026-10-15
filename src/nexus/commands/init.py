@@ -628,17 +628,21 @@ def _provision_postgres_step() -> None:
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         PgBinaryNotFoundError,
         PgRootUserError,
+        PgSmartAppControlError,
         provision,
         refuse_root,
+        refuse_smart_app_control,
     )
 
     # Before the bundle acquisition below, not only inside provision(): the
     # download runs FIRST here, so a guard that lived only in provision()
     # would still make a root user pay for ~100MB to reach the message
-    # (nexus-ov1oq — the guard's own first cut had exactly this gap).
+    # (nexus-ov1oq — the guard's own first cut had exactly this gap). The
+    # Smart App Control refusal sits here for the same reason (nexus-f9bgu.57).
     try:
         refuse_root()
-    except PgRootUserError as exc:
+        refuse_smart_app_control()
+    except (PgRootUserError, PgSmartAppControlError) as exc:
         click.echo(f"\n{exc}", err=True)
         raise SystemExit(1)
 

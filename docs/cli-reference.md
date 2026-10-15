@@ -3277,6 +3277,17 @@ grants only Administrators and SYSTEM) or cannot be read, so a normal session
 cannot write it. The fix it prints is an `icacls` grant to the current
 user, run from an elevated Command Prompt. The row is absent on POSIX.
 
+**Smart App Control row (Windows only, nexus-f9bgu.57).** "Smart App Control"
+reads `VerifiedAndReputablePolicyState` under
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`. On is a failure in local mode,
+because Windows then blocks the unsigned PostgreSQL bundle and the Python uv
+installs, and a warning in cloud mode, where its effect is not measured.
+Evaluation is a warning, because Windows can switch it on later. A state that
+cannot be read is a warning; off passes. `nx init` refuses local provisioning
+while the state is on. See
+[Smart App Control](windows-install.md#smart-app-control). The row is absent on
+POSIX.
+
 **Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
 authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
 password) and fails while any active line still says `trust`, which let any
