@@ -590,6 +590,7 @@ def test_a_killed_cloud_run_leaves_an_opener_that_the_next_start_deletes(tmp_pat
     _terminate(pid)
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
     assert opener.exists(), "a killed run cannot clean up: that is the case this covers"
+    _wait_for_the_build_child_to_end(box)
     _age_lock(box.setup)
     out = box.start("cli-only")
     assert out["started"] is True
@@ -1251,34 +1252,126 @@ def test_a_post_from_another_origin_is_refused_even_with_the_path(make_page: Cal
 # -- more than a few connections at once are closed at the door -------------------------------------------
 
 
-def test_connections_beyond_the_cap_are_closed_at_once_and_the_page_serves_again_after(make_page: Callable[..., Any]) -> None:
-    page = make_page()
+def test_connections_past_their_read_are_never_evicted_and_one_over_the_cap_is_closed_at_once(
+    make_page: Callable[..., Any],
+) -> None:
+    """16 submits whose requests are read and whose check is still running fill the page: the 17th is closed with no
+    answer (nothing evictable), and none of the 16 is shut down for it."""
+    mod = _load_module()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow(url: str, token: str, tenant: str = "") -> Any:
+        entered.set()
+        release.wait(30)
+        return mod.CheckResult(True, "fine", "static")
+
+    page = make_page(checker=slow)
+    page.mod.PAGE_BUSY_WAIT_SECONDS = 30.0  # the 15 submits behind the first wait on the check lock, read and held
+    path = urllib.parse.urlsplit(page.address).path
+    body = urllib.parse.urlencode({"service_url": "http://127.0.0.1:9", "service_token": "x" * 20, "tenant": ""}).encode("ascii")
     held: list[socket.socket] = []
     try:
         for _ in range(page.mod.PAGE_MAX_CONNECTIONS):
-            held.append(socket.create_connection(("127.0.0.1", page.port), timeout=5))
-        time.sleep(0.6)
+            sock = socket.create_connection(("127.0.0.1", page.port), timeout=5)
+            sock.sendall(
+                f"POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{page.port}\r\nContent-Length: {len(body)}\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n\r\n".encode("ascii") + body
+            )
+            held.append(sock)
+        assert entered.wait(10)
+        time.sleep(1.0)  # past PAGE_CONNECTION_SECONDS' first ticks and long enough for every request to be read
         extra = socket.create_connection(("127.0.0.1", page.port), timeout=5)
         extra.settimeout(3)
         try:
-            extra.sendall(f"GET {urllib.parse.urlsplit(page.address).path} HTTP/1.0\r\nHost: 127.0.0.1:{page.port}\r\n\r\n".encode("ascii"))
+            extra.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{page.port}\r\n\r\n".encode("ascii"))
             data = extra.recv(100)
         except OSError:
             data = b""
         finally:
             extra.close()
-        assert data == b"", "a connection over the cap got no answer"
+        assert data == b"", "a connection over the cap, with none evictable, got an answer"
+        for sock in held:  # and none of the 16 was shut down for it
+            sock.settimeout(0.2)
+            with pytest.raises(TimeoutError):
+                sock.recv(1)
+    finally:
+        release.set()
+        for sock in held:
+            sock.close()
+
+
+def test_a_connection_over_the_cap_takes_the_place_of_the_oldest_unread_one(make_page: Callable[..., Any]) -> None:
+    page = make_page()
+    held: list[socket.socket] = []
+    try:
+        for _ in range(page.mod.PAGE_MAX_CONNECTIONS):
+            held.append(socket.create_connection(("127.0.0.1", page.port), timeout=5))
+            time.sleep(0.02)  # a distinct age each, so "oldest" is held[0]
+        assert _request(page.address)[0] == 200, "a right request over the cap must be admitted"
+        held[0].settimeout(3)
+        try:
+            assert held[0].recv(10) == b"", "the oldest unread connection was not shut down"
+        except ConnectionResetError:
+            pass
+        for sock in held[1:]:
+            sock.settimeout(0.2)
+            with pytest.raises(TimeoutError):
+                sock.recv(1)  # the others were left alone
     finally:
         for sock in held:
             sock.close()
 
-    def served() -> bool:
-        try:
-            return _request(page.address)[0] == 200
-        except OSError:
-            return False
 
-    _wait_for(served, 15, "the page to serve again once the held connections closed")
+def test_sixteen_dripping_connections_that_reconnect_do_not_lock_the_page_out(make_page: Callable[..., Any]) -> None:
+    """Review round 2, I1: a deadline that only closes a dripper lets it reconnect into the slot it lost, so 16 of
+    them kept the page shut (5 of 55 right GETs served, measured). Over the cap the oldest unread connection is shut
+    down for the new one, so a right request, read in milliseconds, is admitted. 40 right GETs, one every 0.1 s,
+    each on its own connection: at least 36 (90%) must be served; with the eviction removed 3 to 6 of 40 were."""
+    page = make_page()
+    stop = threading.Event()
+    drippers: list[threading.Thread] = []
+
+    def drip() -> None:
+        while not stop.is_set():
+            try:
+                sock = socket.create_connection(("127.0.0.1", page.port), timeout=2)
+            except OSError:
+                time.sleep(0.01)
+                continue
+            try:
+                while not stop.is_set():
+                    sock.sendall(b"G")
+                    sock.settimeout(0.1)
+                    try:
+                        if sock.recv(1) == b"":
+                            break  # closed by the page: reconnect at once
+                    except TimeoutError:
+                        continue
+            except OSError:
+                pass  # reset: reconnect at once
+            finally:
+                sock.close()
+
+    served = 0
+    attempts = 40
+    try:
+        for _ in range(page.mod.PAGE_MAX_CONNECTIONS):
+            thread = threading.Thread(target=drip, daemon=True)
+            thread.start()
+            drippers.append(thread)
+        time.sleep(0.5)  # the drippers hold every slot
+        for _ in range(attempts):
+            try:
+                served += _request(page.address)[0] == 200
+            except (OSError, http.client.HTTPException):
+                pass
+            time.sleep(0.1)
+    finally:
+        stop.set()
+        for thread in drippers:
+            thread.join(5)
+    assert served >= 36, f"only {served} of {attempts} right GETs were served while 16 drippers reconnected"
 
 
 def test_sixteen_dripping_connections_do_not_lock_the_page_out(make_page: Callable[..., Any]) -> None:
@@ -1622,6 +1715,15 @@ def test_an_accepted_pair_lost_to_a_failed_build_is_reported_as_lost_and_the_nex
         assert good not in text
 
 
+def _wait_for_the_build_child_to_end(box: Box) -> None:
+    """A killed run's build carries on (the lock's ``child`` file names it), and a stale lock beside a live build
+    reads as a run that is still going, not as interrupted: wait for it so the view is the interrupted one."""
+    child = box.setup / "lock" / "child"
+    if child.exists():
+        pid = int(_retry(lambda: child.read_text(encoding="utf-8")).strip())
+        _wait_for(lambda: not _alive(pid), 20, "the build the killed run was waiting on to end")
+
+
 def test_a_run_killed_after_acceptance_reads_as_interrupted_with_the_credentials_lost(tmp_path: Path, service: Callable[..., FakeService]) -> None:
     box = Box(tmp_path)
     good = _token()
@@ -1635,6 +1737,7 @@ def test_a_run_killed_after_acceptance_reads_as_interrupted_with_the_credentials
     pid = box.status()["pid"]
     _terminate(pid)
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
+    _wait_for_the_build_child_to_end(box)
     _age_lock(box.setup)
     view = box.status()
     assert view["state"] == "interrupted"
@@ -1651,6 +1754,7 @@ def test_the_status_of_a_run_killed_before_acceptance_is_unchanged(tmp_path: Pat
     pid = box.status()["pid"]
     _terminate(pid)
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
+    _wait_for_the_build_child_to_end(box)
     _age_lock(box.setup)
     view = box.status()
     assert view["state"] == "interrupted" and view.get("credentials") == _SIX[0]
@@ -1844,12 +1948,33 @@ def test_an_http_address_to_another_host_gets_a_plain_warning_and_is_still_accep
     the page the user reads after the check, and still accepts (a service on a private network is a real case)."""
     mod = _load_module()
     page = make_page(checker=lambda url, token, tenant="": mod.CheckResult(accept, "fine" if accept else "refused", "static" if accept else ""))
-    assert "unencrypted" not in _request(page.address)[2].decode("utf-8"), "no address yet, so nothing to warn about"
+    assert _AFTER_CHECK_WARNING not in _request(page.address)[2].decode("utf-8"), "no address yet, so nothing to warn about"
     status, _h, body = _request(page.address, "POST", fields={"service_url": address, "service_token": "t" * 20, "tenant": ""})
     text = body.decode("utf-8")
-    assert status == 200 and ("unencrypted" in text) is warned, text
+    assert status == 200 and (_AFTER_CHECK_WARNING in text) is warned, text
     assert page.state == (_SIX[3] if accept else _SIX[2]), "the warning does not refuse the address"
     assert ("setup saves them" in text.lower()) is accept
+
+
+#: The sentence only the after-check warning carries (the static hint says "sends the token over the network").
+_AFTER_CHECK_WARNING = "travels over the network unencrypted"
+
+
+def test_the_page_says_before_any_submit_that_an_http_address_to_another_machine_sends_the_token_in_clear(
+    make_page: Callable[..., Any],
+) -> None:
+    """Review round 2, S4c: the check sends the token the moment the button is pressed, so a warning that appears
+    after the check is too late. The page carries a static note before any submit, with no address typed, and
+    keeps it (beside the after-check warning) when a check was refused."""
+    mod = _load_module()
+    page = make_page(checker=lambda url, token, tenant="": mod.CheckResult(False, "refused", ""))
+    first = _request(page.address)[2].decode("utf-8")
+    assert "starts with http://" in first and "unencrypted" in first and "before you press the button" in first.lower()
+    assert _AFTER_CHECK_WARNING not in first
+    refused = _request(
+        page.address, "POST", fields={"service_url": "http://svc.example", "service_token": "t" * 20, "tenant": ""},
+    )[2].decode("utf-8")
+    assert "before you press the button" in refused.lower() and _AFTER_CHECK_WARNING in refused
 
 
 def test_the_page_tells_the_user_to_keep_the_tab_open(make_page: Callable[..., Any]) -> None:

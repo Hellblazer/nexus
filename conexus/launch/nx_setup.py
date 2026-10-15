@@ -77,8 +77,9 @@ loaded, when the listener closes without a load, and, if the run was killed (not
 a SIGKILL), when the next run starts (``_sweep_opener`` in ``_start``). The page has three fields: a
 service address, a token (a password field, autocomplete off) and a tenant, and one button; an ``http`` address is
 accepted as well as ``https``, and one to a host that is not this machine is accepted with a warning on the page that
-the token travels unencrypted (:func:`_sends_token_in_clear`). It serves at most :data:`PAGE_MAX_CONNECTIONS` connections at once and closes the rest
-at the door; it refuses a ``POST`` whose ``Sec-Fetch-Site`` or ``Origin`` names another origin; on Windows its
+the token travels unencrypted (:func:`_sends_token_in_clear`). It serves at most :data:`PAGE_MAX_CONNECTIONS` connections at once; over that, the oldest one
+whose request is not yet read is shut down for the new one (a connection past its read is never evicted, and if every one is, the
+new one is closed at the door), and every connection must finish its request within :data:`PAGE_CONNECTION_SECONDS`; it refuses a ``POST`` whose ``Sec-Fetch-Site`` or ``Origin`` names another origin; on Windows its
 socket asks for exclusive use of its address (``SO_EXCLUSIVEADDRUSE``); and it tightens the setup directory to
 ``0o700`` on POSIX when it starts to serve.
 
@@ -629,27 +630,33 @@ def _live_pid(value: Any) -> bool:
     return _endpoint_resolve.pid_alive(value)
 
 
-def _recorded_process_alive(setup: Path, lock: Path) -> bool:
-    """Whether a stale *lock* still has a process behind it: the run itself (the ``pid`` in a ``running``
-    ``status.json``, while the heartbeat is under :data:`PID_GRACE_SECONDS` old) or the child program it was
-    waiting on (``lock/child``, while that file is under :data:`STEP_TIMEOUT_SECONDS` old). Only ever used to
-    refuse a reclaim: a heartbeat that stopped because the machine slept, or a run killed outright whose build
-    carries on, must not get a second run beside it."""
+def _recorded_holder(setup: Path, lock: Path, data: dict[str, Any] | None = None) -> str | None:
+    """Words for the process still behind a stale *lock*, or None when none is: ``process N`` for the run itself
+    (the ``pid`` in a ``running`` ``status.json``, while the heartbeat is under :data:`PID_GRACE_SECONDS` old) or
+    ``its build (process N)`` for the child program it was waiting on (``lock/child``, while that file is under
+    :data:`STEP_TIMEOUT_SECONDS` old). Refuses a reclaim, and is what :func:`status_view` and the refused start
+    both say, so the three agree: a heartbeat that stopped because the machine slept, or a run killed outright
+    whose build carries on, must not get a second run beside it. *data* is the status already read, if any."""
     age = _mtime_age(lock / "heartbeat")
     if age is None:
         age = _mtime_age(lock)
     if age is not None and age <= PID_GRACE_SECONDS:
-        data = read_status(setup) or {}
+        if data is None:
+            data = read_status(setup) or {}
         if data.get("state") == RUNNING and _live_pid(data.get("pid")):
-            return True
+            return f"process {data['pid']}"
     child_age = _mtime_age(lock / _CHILD)
     if child_age is not None and child_age <= STEP_TIMEOUT_SECONDS:
         try:
             recorded = int((lock / _CHILD).read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
-            return False
-        return _live_pid(recorded)
-    return False
+            return None
+        return f"its build (process {recorded})" if _live_pid(recorded) else None
+    return None
+
+
+def _recorded_process_alive(setup: Path, lock: Path) -> bool:
+    return _recorded_holder(setup, lock) is not None
 
 
 def _wait_gone(path: Path, seconds: float) -> bool:
@@ -874,7 +881,8 @@ OPEN_RECORD_ENV = "NX_SETUP_OPEN_RECORD"
 #: socket operation and restarts on every byte, so a service that drips bytes could otherwise hold the check, and
 #: the submit lock with it, for hours.
 CHECK_DEADLINE_SECONDS = 20.0
-#: At most this many connections to the page are served at once; the rest are closed at the door.
+#: At most this many connections to the page are served at once. Over that the oldest connection whose request is not
+#: yet read is shut down and the new one admitted; if all are past their read, the new one is closed at the door.
 PAGE_MAX_CONNECTIONS = 16
 #: A connection must have sent its whole request (headers and body) this long after it was accepted, or it is shut
 #: down. The 10 second per-recv timeout restarts on every byte and cannot bound a connection that drips.
@@ -981,6 +989,15 @@ def _normal_address(url: str) -> str:
 _CLEARTEXT_WARNING = (
     "This address starts with http:// and names a host other than this machine, so the token travels over the "
     "network unencrypted and anyone on the path can read it. Use https:// if the service offers it."
+)
+
+
+#: Said on the page before anything is submitted: the check sends the token to the address as soon as the button is
+#: pressed, so the warning above, which needs an address to look at, comes after the token has already gone.
+_CLEARTEXT_HINT = (
+    "Before you press the button: an address that starts with http:// and names a machine other than this one sends "
+    "the token over the network unencrypted, and the check does that the moment you submit. Use https:// unless you "
+    "trust the network between here and the service."
 )
 
 
@@ -1358,7 +1375,9 @@ class CredentialsPage:
             daemon_threads = True
 
             def __init__(self, *args: Any, **kwargs: Any) -> None:
-                self._slots = threading.BoundedSemaphore(PAGE_MAX_CONNECTIONS)
+                # Live connections, oldest first, each with whether its request has been read yet.
+                self._conns: dict[Any, bool] = {}
+                self._conns_lock = threading.Lock()
                 super().__init__(*args, **kwargs)
 
             def server_bind(self) -> None:
@@ -1366,20 +1385,50 @@ class CredentialsPage:
                 super().server_bind()
 
             def process_request(self, request: Any, client_address: Any) -> None:
-                if not self._slots.acquire(blocking=False):  # over the cap: closed at the door, no thread, no answer
-                    self.shutdown_request(request)
+                # Over the cap, the OLDEST connection whose request is not yet read is shut down and the new one is
+                # admitted: a real request is read in milliseconds, so what is still unread is a stall or a dripper,
+                # and a dripper that reconnects the moment it is closed gets no more than the slot it just lost. A
+                # connection past its read (a check in progress) is never evicted; if every slot is one, the new
+                # connection is closed at the door.
+                victim = None
+                with self._conns_lock:
+                    if len(self._conns) >= PAGE_MAX_CONNECTIONS:
+                        victim = next((r for r, read in self._conns.items() if not read), None)
+                        if victim is None:
+                            admit = False
+                        else:
+                            del self._conns[victim]
+                            admit = True
+                    else:
+                        admit = True
+                    if admit:
+                        self._conns[request] = False
+                if victim is not None:
+                    with contextlib.suppress(OSError):
+                        victim.shutdown(socket.SHUT_RDWR)
+                if not admit:
+                    self.shutdown_request(request)  # closed at the door: no thread, no answer
                     return
                 try:
                     super().process_request(request, client_address)
                 except BaseException:
-                    self._slots.release()
+                    self._forget(request)
                     raise
+
+            def _forget(self, request: Any) -> None:
+                with self._conns_lock:
+                    self._conns.pop(request, None)
+
+            def _mark_read(self, request: Any) -> None:
+                with self._conns_lock:
+                    if request in self._conns:
+                        self._conns[request] = True
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    self._slots.release()
+                    self._forget(request)
 
             def handle_error(self, request: Any, client_address: Any) -> None:
                 pass  # the default prints a traceback to standard error, which is the setup log
@@ -1407,6 +1456,7 @@ class CredentialsPage:
                 seconds, the reply) is bounded by the check's own deadline and the per-recv timeout."""
                 if self._expiry is not None:
                     self._expiry.cancel()
+                self.server._mark_read(self.request)  # type: ignore[attr-defined]
 
             def finish(self) -> None:
                 self._request_read()
@@ -1663,6 +1713,7 @@ class CredentialsPage:
             parts.append(f'<p class="error">{html.escape(warn)}</p>')
         if state == CRED_REJECTED:
             parts.append(f'<p class="error">{html.escape(reason)} Try again.</p>')
+        parts.append(f'<p class="hint">{html.escape(_CLEARTEXT_HINT)}</p>')
         parts.append(
             '<form method="post" action="">'
             '<label>Service address<input name="service_url" type="text" spellcheck="false" autocomplete="off" '
@@ -2451,6 +2502,10 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
     ``status.error`` record (a run that could not write its status) overrides
     them with ``failed`` and the OS error text. Also ``live`` (a fresh lock),
     ``terminal``, ``not_now`` (the marker), ``next`` and ``log``.
+
+    A stale lock whose recorded run (or build) is still alive reads as ``running`` and ``live``, with a ``holder``
+    (``process N`` or ``its build (process N)``) and a ``next`` that says to wait and ask again, because a call
+    to ``setup`` refuses to reclaim that lock and must not be suggested.
     """
     deadline = None if read_budget_s is None else time.monotonic() + read_budget_s
 
@@ -2466,7 +2521,17 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
     lock = setup / _LOCK
     live = _exists(lock) and not _lock_stale(lock)
     state = data.get("state", NONE)
-    if state == RUNNING and not live:
+    holder = _recorded_holder(setup, lock, data) if state == RUNNING and not live and _exists(lock) else None
+    if holder is not None:
+        # The heartbeat stopped (a sleeping machine does this) but the run, or the build it waits on, is still
+        # there, and a call to setup refuses to reclaim the lock for that reason: the view says the same.
+        live = True
+        data["holder"] = holder
+        data["message"] = f"{data.get('message', '')} The setup run's heartbeat stopped, but {holder} is still running.".strip()
+        data["next"] = (
+            f"Wait, then call setup_status again. Do not call setup while {holder} runs: it starts nothing. Log: {setup / _LOG}"
+        )
+    elif state == RUNNING and not live:
         state = INTERRUPTED
         data["next"] = f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. Log: {setup / _LOG}"
         if data.get("mode") == MODE_CLOUD and data.get("credentials") == CRED_ACCEPTED:
@@ -2511,13 +2576,17 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
     token = acquire_lock(setup, wait_for_finish=True)
     if token is None:
         live = status_view(setup)
-        return {
-            **live, "started": False, "requested_mode": mode,
-            "refused": (
-                f"A setup run is already in progress (mode {live.get('mode', 'unknown')}, stage "
-                f"{live.get('stage', 'unknown')}). This request for mode {mode} started nothing."
-            ),
-        }
+        refused = (
+            f"A setup run is already in progress (mode {live.get('mode', 'unknown')}, stage "
+            f"{live.get('stage', 'unknown')}). This request for mode {mode} started nothing."
+        )
+        if live.get("holder"):
+            refused = (
+                f"A setup run is still in progress: its heartbeat stopped, but {live['holder']} is still running "
+                f"(mode {live.get('mode', 'unknown')}, stage {live.get('stage', 'unknown')}). This request for mode "
+                f"{mode} started nothing. Wait, then call setup_status again."
+            )
+        return {**live, "started": False, "requested_mode": mode, "refused": refused}
     try:
         with contextlib.suppress(FileNotFoundError):  # only now: a call refused beside a live run leaves the user's marker
             marker.unlink()

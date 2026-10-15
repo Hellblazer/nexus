@@ -327,7 +327,11 @@ PHASE1_LAUNCH_FILES = frozenset({PHASE1_LAUNCHER, "conexus/launch/nx_standin.py"
 #: that holds the command back does not ship. A path that is safe alone is
 #: not listed here but in :data:`PHASE2_SAFE_ALONE`, with a reason, and
 #: ``tests/test_plugin_release_drift_ledger.py`` fails on a changed
-#: ``conexus/`` path that is in neither.
+#: ``conexus/`` path that is in neither. ``conexus/hooks/``, ``conexus/launch/``,
+#: ``conexus/commands/``, ``registry.yaml``, ``README.md``, ``hooks.json`` and
+#: ``.mcp.json`` keep the every-path rule: they are where a caller can ship
+#: without its callee. ``conexus/skills/``, ``agents/`` and ``resources/`` are
+#: safe alone by prefix, backed by a content scan in the drift-ledger test.
 PHASE2_GUARDED = (
     "conexus/launch/",
     "conexus/hooks/scripts/nx_setup_notice.py",
@@ -363,6 +367,21 @@ PHASE2_SAFE_ALONE: dict[str, str] = {
         "flag), not RDR-228's; it names no Phase 2 file. Held back by "
         "PHASE2_GUARDED_WITHOUT_LAUNCHER while the reference lacks the "
         "launcher, and by its own ledger deferral to fbtyl's client release"
+    ),
+    "conexus/skills/": (
+        "skill text is read by the model, runs nothing, and calls no Phase 2 "
+        "file; the drift-ledger test scans every file under it for the names "
+        "of the Phase 2 files and the setup command, and fails on a hit"
+    ),
+    "conexus/agents/": (
+        "agent text is read by the model, runs nothing, and calls no Phase 2 "
+        "file; the drift-ledger test scans every file under it for the names "
+        "of the Phase 2 files and the setup command, and fails on a hit"
+    ),
+    "conexus/resources/": (
+        "shared reference text, read by the model, runs nothing, and calls no "
+        "Phase 2 file; the drift-ledger test scans every file under it for "
+        "the names of the Phase 2 files and the setup command, and fails on a hit"
     ),
     "conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py": (
         "a stand-alone PreToolUse guard (nexus-yc7fs, nexus-ikoqj); it "

@@ -615,12 +615,78 @@ def _uncovered(changed: list[str], guarded: list[str], safe: object) -> list[str
     return [p for p in changed if not _covers(guarded, p) and not _covers(safe, p)]
 
 
+#: The prefixes of PHASE2_SAFE_ALONE that are text the model reads, and what the
+#: scan under them looks for (case-insensitive, any file, changed or not).
+_TEXT_PREFIXES = ("conexus/skills/", "conexus/agents/", "conexus/resources/")
+_PHASE2_NAMES = r"nx_setup|nx_launch|nx_standin|_cli_lookup|setup_status|/conexus:setup"
+
+
+def _text_prefix_hits(tree: str, repo: pathlib.Path = REPO_ROOT) -> list[str]:
+    """``path:line`` of every line under the safe-alone text prefixes in *tree* that names a Phase 2 name.
+
+    ``git grep`` over the tree, so it reads what the checkout holds (CI's is a depth-1 one) and not the
+    working copy. Exit 1 is no match; anything else above 1 is an error, not a clean scan.
+    """
+    proc = subprocess.run(
+        ["git", "grep", "-n", "-I", "-i", "-E", _PHASE2_NAMES, tree, "--", *_TEXT_PREFIXES],
+        cwd=repo, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode in (0, 1), f"git grep failed:\n{proc.stderr}"
+    return [line.removeprefix(f"{tree}:") for line in proc.stdout.splitlines()]
+
+
 def _defined_names(source: str) -> set[str]:
     """Top-level names a Python module defines, by line shape (no import)."""
     return {
         a or b
         for a, b in re.findall(r"^(?:def|class)\s+(\w+)|^(\w+)\s*[:=]", source, re.M)
     }
+
+
+def _phase2_modules(guarded: object, launch_paths: list[str]) -> dict[str, str]:
+    """Module name -> path of every Python module a safe-alone file must not call ahead of the pin: the ``.py``
+    entries of the guard and every module under ``conexus/launch/`` (the guard names that directory by prefix,
+    so a list built from its ``.py`` entries alone would miss ``nx_setup``, ``nx_launch`` and ``nx_standin``)."""
+    return {
+        pathlib.PurePosixPath(p).stem: p
+        for p in [*guarded, *launch_paths]  # type: ignore[misc]
+        if p.endswith(".py")
+    }
+
+
+def _unsafe_imports(
+    path: str, source: str, modules: dict[str, str], pin_source: object, ref: str,
+) -> list[str]:
+    """Why *path*, a file listed as safe alone, would break if shipped without the guarded modules: it imports
+    one the pin lacks, or calls a name in one that the pin's copy does not define. *pin_source* maps a module
+    path to its text at the pin, or None when the pin lacks it."""
+    problems: list[str] = []
+    for stem, module_path in modules.items():
+        from_names = {
+            n.strip()
+            for group in re.findall(rf"^\s*from\s+{re.escape(stem)}\s+import\s+([\w, ]+)", source, re.M)
+            for n in group.split(",") if n.strip()
+        }
+        if not from_names and not re.search(rf"^\s*import\s+{re.escape(stem)}\b", source, re.M):
+            continue  # a file name in a docstring is not a use
+        used = from_names | set(re.findall(rf"\b{re.escape(stem)}\.(\w+)", source))
+        if not used:
+            problems.append(f"{path} imports {stem} and uses nothing in it")
+            continue
+        at_pin = pin_source(module_path)  # type: ignore[operator]
+        if at_pin is None:
+            problems.append(
+                f"{path} is listed as safe alone but imports {stem}, and "
+                f"{module_path} is absent at {ref}: shipped alone it raises ImportError"
+            )
+            continue
+        missing = used - _defined_names(at_pin)
+        if missing:
+            problems.append(
+                f"{path} is listed as safe alone but calls {stem}.{sorted(missing)}, "
+                f"which {ref} lacks: shipped alone it raises AttributeError"
+            )
+    return problems
 
 
 def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() -> None:
@@ -687,33 +753,31 @@ def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() ->
     # The one claim a reason makes that git can check: a Python file listed as
     # safe alone calls no name of a guarded module that the pin lacks. That is
     # the failure the guard exists for (a caller shipped without its callee).
-    modules = {
-        pathlib.PurePosixPath(p).stem: p
-        for p in PHASE2_GUARDED if p.endswith(".py")
-    }
+    launch = _git("ls-tree", "-r", "--name-only", "HEAD", "--", "conexus/launch/")
+    assert launch.returncode == 0, f"git ls-tree failed:\n{launch.stderr}"
+    modules = _phase2_modules(PHASE2_GUARDED, launch.stdout.splitlines())
     for path in (p for p in changed if _covers(PHASE2_SAFE_ALONE, p) and p.endswith(".py")):
-        source = _git("show", f"HEAD:{path}").stdout
-        for stem, module_path in modules.items():
-            from_names = {
-                n.strip()
-                for group in re.findall(
-                    rf"^\s*from\s+{re.escape(stem)}\s+import\s+([\w, ]+)", source, re.M
-                )
-                for n in group.split(",") if n.strip()
-            }
-            if not from_names and not re.search(
-                rf"^\s*import\s+{re.escape(stem)}\b", source, re.M
-            ):
-                continue  # a file name in a docstring is not a use
-            used = from_names | set(re.findall(rf"\b{re.escape(stem)}\.(\w+)", source))
-            assert used, f"{path} imports {stem} and uses nothing in it"
-            at_pin = _git("show", f"{ref}:{module_path}")
-            assert at_pin.returncode == 0, f"{module_path} is absent at {ref}"
-            missing = used - _defined_names(at_pin.stdout)
-            assert not missing, (
-                f"{path} is listed as safe alone but calls {stem}.{sorted(missing)}, "
-                f"which {ref} lacks: shipped alone it raises AttributeError"
-            )
+        problems = _unsafe_imports(
+            path,
+            _git("show", f"HEAD:{path}").stdout,
+            modules,
+            lambda module_path: (r.stdout if (r := _git("show", f"{ref}:{module_path}")).returncode == 0 else None),
+            ref,
+        )
+        assert not problems, "\n".join(problems)
+
+    # The prefixes safe alone because they are text the model reads: no file
+    # under them names a Phase 2 file or the setup command. A hit means the
+    # text calls something a plugin-only cut may not ship; guard it instead.
+    prefixes = [p for p in PHASE2_SAFE_ALONE if p.startswith(_TEXT_PREFIXES)]
+    assert sorted(prefixes) == sorted(_TEXT_PREFIXES), "the text prefixes left PHASE2_SAFE_ALONE"
+    hits = _text_prefix_hits("HEAD")
+    assert not hits, (
+        "files under the safe-alone text prefixes name a Phase 2 file or the "
+        "setup command, so they are not safe alone (guard the path in "
+        "PHASE2_GUARDED in scripts/cut_plugin_release.py, or take the name "
+        "out of the text):\n  " + "\n  ".join(hits)
+    )
 
 
 def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
@@ -735,6 +799,50 @@ def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
                       list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == [
         "conexus/hooks/scripts/new_one.py"
     ]
+
+
+def test_the_import_check_covers_the_launch_modules_the_guard_names_by_prefix() -> None:
+    """The gap: the module list came from the ``.py`` entries of PHASE2_GUARDED, which names ``conexus/launch/``
+    only as a prefix, so a safe-alone file importing ``nx_setup`` was not checked at all."""
+    from cut_plugin_release import PHASE2_GUARDED
+
+    launch = ["conexus/launch/nx_launch.py", "conexus/launch/nx_setup.py", "conexus/launch/nx_standin.py"]
+    assert "nx_setup" not in _phase2_modules(PHASE2_GUARDED, [])  # the old list
+    modules = _phase2_modules(PHASE2_GUARDED, launch)
+    assert {"nx_setup", "nx_launch", "nx_standin", "_cli_lookup"} <= set(modules)
+    source = "from nx_setup import setup_dir\nx = 1\n"
+    pin = {"conexus/launch/nx_launch.py": "def main(): pass\n"}  # a pin without nx_setup.py
+    problems = _unsafe_imports("conexus/hooks/scripts/new.py", source, modules, pin.get, "v7.79.0")
+    assert len(problems) == 1 and "nx_setup.py is absent at v7.79.0" in problems[0]
+    pin["conexus/launch/nx_setup.py"] = "def other(): pass\n"  # present, without the name used
+    assert "setup_dir" in _unsafe_imports("x.py", source, modules, pin.get, "v7.79.0")[0]
+    pin["conexus/launch/nx_setup.py"] = "def setup_dir(): pass\n"
+    assert _unsafe_imports("x.py", source, modules, pin.get, "v7.79.0") == []
+
+
+def test_the_text_prefix_scan_catches_a_name_in_a_skill_and_misses_a_clean_one(tmp_path: pathlib.Path) -> None:
+    """The scan is not vacuous: in a throwaway repo a skill, an agent and a resource that name a Phase 2 name
+    are reported, a clean skill is not, and a name outside the three prefixes is not looked at."""
+    def run(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    run("init", "-q")
+    run("config", "user.email", "t@example.invalid")
+    run("config", "user.name", "t")
+    run("config", "commit.gpgsign", "false")
+    for rel, text in {
+        "conexus/skills/a/SKILL.md": "Call setup_status first.\n",
+        "conexus/skills/b/SKILL.md": "Nothing about the launcher here.\n",
+        "conexus/agents/c.md": "See /conexus:setup.\n",
+        "conexus/resources/d.md": "run nx_launch\n",
+        "conexus/commands/e.md": "setup_status is allowed here\n",
+    }.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    run("add", ".")
+    run("commit", "-q", "-m", "x")
+    hits = sorted(line.split(":")[0] for line in _text_prefix_hits("HEAD", tmp_path))
+    assert hits == ["conexus/agents/c.md", "conexus/resources/d.md", "conexus/skills/a/SKILL.md"]
 
 
 # --- the skip/require mechanism is itself tested ----------------------------

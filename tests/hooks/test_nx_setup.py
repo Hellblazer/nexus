@@ -1848,6 +1848,42 @@ def test_a_stale_lock_is_not_reclaimed_while_the_recorded_child_is_alive(tmp_pat
     assert mod.acquire_lock(setup), "a build that has ended is not waited for"
 
 
+@pytest.mark.parametrize("how", ["run", "build"])
+def test_status_and_the_refused_start_agree_when_a_live_process_holds_a_stale_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_process: Any, how: str,
+) -> None:
+    """Review S1 messaging: the reclaim is refused while the recorded run (or its build) is alive, so the view must
+    not call the run interrupted and tell the model to call setup again, which starts nothing. Both texts say the
+    heartbeat stopped but process N is still running, and to wait and call setup_status again."""
+    mod = _load_module()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, age=120.0)
+    pid = live_process.pid
+    if how == "run":
+        _write_running_status(setup, pid)
+        holder = f"process {pid}"
+    else:
+        _write_running_status(setup, None)
+        (setup / "lock" / "child").write_text(str(pid), encoding="utf-8")
+        holder = f"its build (process {pid})"
+    view = mod.status_view(setup)
+    assert view["state"] == "running" and view["live"] is True and view["terminal"] is False
+    assert "heartbeat stopped" in view["message"] and holder in view["message"]
+    assert "call setup_status again" in view["next"] and "call setup again" not in view["next"]
+    refused = mod.start("cli-only", False)
+    assert refused["started"] is False
+    assert "heartbeat stopped" in refused["refused"] and holder in refused["refused"]
+    assert "call setup_status again" in refused["refused"]
+    assert "call setup again" not in refused["refused"] and "call setup again" not in refused["next"]
+    assert refused["state"] == view["state"] and refused["next"] == view["next"], "the two answers disagree"
+    # Nothing about the process was believed beyond its liveness: once it is gone, the old reading returns.
+    live_process.kill()
+    live_process.wait(10)
+    gone = mod.status_view(setup)
+    assert gone["state"] == "interrupted" and "call setup again" in gone["next"]
+
+
 def test_a_child_record_older_than_a_step_can_run_is_not_believed(tmp_path: Path, live_process: Any) -> None:
     mod = _load_module()
     setup = tmp_path / "setup"
