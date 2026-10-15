@@ -1309,7 +1309,11 @@ def test_the_listening_socket_is_made_exclusive_before_it_binds(tmp_path: Path, 
     seen: list[tuple[Any, bool]] = []
 
     def record(sock: Any) -> None:
-        seen.append((sock, sock.getsockname()[1] == 0))  # not yet bound: the port is still 0
+        try:
+            unbound = sock.getsockname()[1] == 0  # POSIX: not yet bound, the port is still 0
+        except OSError:  # Windows refuses getsockname on a socket not yet bound (WSAEINVAL)
+            unbound = True
+        seen.append((sock, unbound))
 
     monkeypatch.setattr(mod, "_bind_exclusively", record)
     setup = tmp_path / "setup"

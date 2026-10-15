@@ -42,8 +42,11 @@ def build_setup_dir(root: Path, case: dict[str, Any]) -> Path:
     log = str(setup / files["log"])
 
     def body(value: Any) -> str:
-        text = value if isinstance(value, str) else json.dumps(value)
-        return text.replace("{LOG}", log)
+        # A JSON body gets the path JSON-escaped: a Windows path's backslashes
+        # pasted raw into JSON text are invalid escapes, and the file reads as unreadable.
+        if isinstance(value, str):
+            return value.replace("{LOG}", log)
+        return json.dumps(value).replace("{LOG}", json.dumps(log)[1:-1])
 
     if case["status"] is not None:
         (setup / files["status"]).write_text(body(case["status"]), encoding="utf-8")

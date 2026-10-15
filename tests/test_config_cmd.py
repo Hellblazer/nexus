@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -554,6 +555,12 @@ def test_config_set_from_file_reads_a_private_file(runner, fake_home, tmp_path) 
     assert _read_config(fake_home)["credentials"]["voyage_api_key"] == _SECRET
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="the mode-bit refusal is POSIX only: Windows has no group/other mode bits (os.chmod sets only the "
+    "read-only flag) and --from-file does not inspect ACLs; the Windows path, which reads and says it did not "
+    "check, is test_config_set_from_file_off_posix_reads_and_says_it_did_not_check",
+)
 def test_config_set_from_file_refuses_a_group_or_world_readable_file(runner, fake_home, tmp_path) -> None:
     secret_file = tmp_path / "voyage.key"
     secret_file.write_text(_SECRET)
@@ -569,11 +576,16 @@ def test_config_set_from_file_refuses_a_group_or_world_readable_file(runner, fak
     [
         ["voyage_api_key", "inline", "--stdin"],
         ["voyage_api_key=inline", "--stdin"],
-        ["voyage_api_key", "--stdin", "--from-file", "/dev/null"],
+        ["voyage_api_key", "--stdin", "--from-file", "{FILE}"],
     ],
     ids=["value-and-stdin", "key-equals-and-stdin", "stdin-and-file"],
 )
-def test_config_set_refuses_two_value_sources(runner, fake_home, args) -> None:
+def test_config_set_refuses_two_value_sources(runner, fake_home, tmp_path, args) -> None:
+    # A real file, not /dev/null: click's exists/dir_okay check runs before the refusal,
+    # and Windows has no /dev/null.
+    value_file = tmp_path / "value.txt"
+    value_file.write_text("x\n")
+    args = [str(value_file) if a == "{FILE}" else a for a in args]
     result = runner.invoke(main, ["config", "set", *args], input="x\n")
     assert result.exit_code != 0
     assert "Give the value one way" in result.output  # our refusal, not an unknown option
