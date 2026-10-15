@@ -18,6 +18,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -151,12 +152,14 @@ def test_the_schema_takes_a_mode_and_an_autostart_and_status_takes_nothing() -> 
     assert tools["setup_status"].inputSchema.get("properties") in ({}, None)
 
 
-def test_no_description_or_schema_text_lists_cloud() -> None:
-    for tool in _tools().values():
-        if tool.name not in ("setup", "setup_status"):
-            continue
-        text = json.dumps([tool.title, tool.description, tool.inputSchema]).lower()
-        assert "cloud" not in text, tool.name
+def test_the_setup_tool_offers_cloud_and_says_the_token_is_typed_into_a_page() -> None:
+    """The Cloud choice arrived with the credentials page (nexus-sv2wx.18). The description names it with its
+    size, and tells the model never to take the token itself."""
+    tools = _tools()
+    text = json.dumps([tools["setup"].title, tools["setup"].description, tools["setup"].inputSchema]).lower()
+    assert "cloud" in text
+    assert "never ask for the token" in tools["setup"].description
+    assert "cloud" in tools["setup"].inputSchema["properties"]["mode"]["description"]
 
 
 def test_the_descriptions_tell_the_model_to_ask_first_and_name_both_fixes() -> None:
@@ -513,6 +516,8 @@ def test_a_script_variable_that_is_not_an_absolute_nx_setup_py_starts_nothing(
     [
         ("local", True, ["start", "--mode", "local", "--autostart"]),
         ("local", False, ["start", "--mode", "local"]),
+        ("cloud", False, ["start", "--mode", "cloud"]),
+        ("cloud", True, ["start", "--mode", "cloud"]),
         ("cli-only", False, ["start", "--mode", "cli-only"]),
         ("cli-only", True, ["start", "--mode", "cli-only"]),
         ("not-now", False, ["not-now"]),
@@ -621,22 +626,25 @@ def test_a_script_that_cannot_start_is_a_tool_error(monkeypatch: pytest.MonkeyPa
 # -- cloud and bad modes ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["cloud", "Cloud", "bogus", ""])
-def test_cloud_and_unknown_modes_are_refused_and_start_nothing(
+@pytest.mark.parametrize("mode", ["Cloud", "bogus", ""])
+def test_unknown_modes_are_refused_and_start_nothing(
     monkeypatch: pytest.MonkeyPatch, recorder: Recorder, mode: str,
 ) -> None:
     _service(monkeypatch, False)
     with pytest.raises(ToolError) as caught:
         _call("setup", mode=mode)
     message = str(caught.value)
-    assert "local" in message and "cli-only" in message and "not-now" in message
+    assert "local" in message and "cloud" in message and "cli-only" in message and "not-now" in message
     assert recorder.calls() == []
 
 
-def test_the_cloud_refusal_says_the_managed_service_is_not_offered_yet(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+def test_cloud_without_the_setup_script_gives_the_terminal_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real server the launcher did not start has no setup script: cloud says `nx config init`, the wizard
+    that asks for the address and token, and starts nothing."""
     _service(monkeypatch, False)
-    with pytest.raises(ToolError, match="managed service"):
-        _call("setup", mode="cloud")
+    monkeypatch.delenv(setup_tools.SETUP_SCRIPT_ENV, raising=False)
+    text = _call("setup", mode="cloud")
+    assert "nx config init" in text and "nothing was started" in text
 
 
 # -- nothing is missing -------------------------------------------------------------
@@ -892,10 +900,35 @@ def test_not_now_through_the_real_script_writes_its_marker_and_nothing_else(real
     assert sorted(p.name for p in (real_script / "setup").iterdir()) == ["not-now"]
 
 
-def test_cloud_through_the_real_script_is_refused_before_the_script_runs(real_script: Path) -> None:
-    with pytest.raises(ToolError):
-        _call("setup", mode="cloud")
-    assert not (real_script / "setup").exists()
+def test_cloud_through_the_real_script_starts_a_run_that_serves_the_page(
+    real_script: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Mode cloud reaches the real setup process like any other. The sandbox has no ``uv``, so the run serves its
+    page, asks the system to open it (recorded: no browser starts) and fails at the build."""
+    empty, home, record = tmp_path / "empty", tmp_path / "home", tmp_path / "open.record"
+    empty.mkdir()
+    home.mkdir()
+    for name, value in (
+        ("PATH", str(empty)), ("HOME", str(home)), ("USERPROFILE", str(home)), ("NX_TOOLS_DIR", str(tmp_path / "tools")),
+        ("NX_SETUP_OPEN_RECORD", str(record)),
+    ):
+        monkeypatch.setenv(name, value)
+    text = _call("setup", mode="cloud")
+    assert "Setup started in mode cloud" in text, text
+    status = real_script / "setup" / "status.json"
+    deadline = time.monotonic() + 30
+    data: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        try:
+            data = json.loads(status.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if data.get("state") == "failed":
+            break
+        time.sleep(0.05)
+    assert data.get("state") == "failed" and data["failed_step"] == "build" and data["credentials"] == "waiting for credentials", data
+    assert record.read_text(encoding="utf-8").strip().endswith("credentials-opener.html")
+    assert not (real_script / "setup" / "credentials-opener.html").exists()
 
 
 # -- the server does not own the setup directory ---------------------------------------
@@ -1085,9 +1118,9 @@ def test_both_servers_render_every_status_the_same_way(standin_module: Any, stat
 def test_both_servers_hold_the_same_stage_table_modes_and_texts(standin_module: Any) -> None:
     assert setup_tools.STAGE_WAITS == standin_module.STAGE_WAITS
     assert setup_tools.MODES == standin_module.MODES
-    assert setup_tools.CLOUD_REFUSAL == standin_module.CLOUD_REFUSAL
+    assert not hasattr(setup_tools, "CLOUD_REFUSAL") and not hasattr(standin_module, "CLOUD_REFUSAL")
     assert setup_tools.NOT_NOW_TEXT == standin_module.NOT_NOW_TEXT
-    assert setup_tools.mode_refusal("cloud") == standin_module.mode_refusal("cloud")
+    assert "cloud" in setup_tools.MODES and setup_tools.mode_refusal("Cloud") == standin_module.mode_refusal("Cloud")
     assert setup_tools.mode_refusal("bogus") == standin_module.mode_refusal("bogus")
     assert setup_tools._DEFAULT_WAIT == standin_module._DEFAULT_WAIT
     assert setup_tools._DOCTOR_ROWS_SHOWN == standin_module._DOCTOR_ROWS_SHOWN

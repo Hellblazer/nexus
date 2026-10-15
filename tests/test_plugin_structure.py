@@ -559,7 +559,9 @@ class TestCommandStructure:
         assert re.search(r"(?m)^nx self install$", text) and re.search(r"(?m)^nx upgrade$", text)
         assert "uv tool upgrade conexus" in text and "uv tool upgrade conexus" in getting_started
         assert "ASK THE USER FIRST" in text and "Do not call `setup` before the user has answered" in text
-        assert "Cloud" not in text, "the Cloud row waits for the credentials page (nexus-sv2wx.18)"
+        assert "| Cloud |" in text and "never ask for the token" in text.lower(), (
+            "the Cloud row arrived with the credentials page (nexus-sv2wx.18), and the command never asks for the token"
+        )
 
     def test_setup_command_checks_the_server_is_connected_before_blaming_an_old_cli(self) -> None:
         """Review of 4cffeb898 (critic 8): a nexus server that is not connected offers no

@@ -633,7 +633,8 @@ later. Its requirements:
 - On submit the process checks the pair at the address given: `/health` and
   `/version` say the service answers and which version it is, and the token is
   checked against one authenticated, read-only route under `/v1` that refuses a
-  wrong token on every engine (Sam, 2026-10-15). `/health` and `/version` cannot
+  wrong token on every engine, `GET /v1/_whoami` (Sam, 2026-10-15; the call the
+  doctor's static-token row already makes). `/health` and `/version` cannot
   carry the token check: both are unauthenticated in the engine, so a local or
   self-hosted engine accepts any token there, and only the managed service's
   public edge refuses a wrong token, on `/health` alone (measured 2026-10-14,
@@ -1139,7 +1140,13 @@ None. The launcher, the hook and the stand-in server are standard library.
   accepted pair closes the listener and is saved only after the build; the
   status takes only its six listed values; "page not loaded" appears at two
   minutes and the listener closes at ten; the environment-override notice
-  appears when either variable is set.
+  appears when either variable is set; a wrong token fails the `/v1` route and
+  a right one passes on a real local engine (the engine substrate) and on a
+  small local service; the opener file is deleted when the listener closes
+  without a load and, for a killed run, at the next start; a pair accepted by a
+  run that is killed before it saves is lost, and the next `cloud` run opens a
+  new page; Cloud is offered by both servers' tools, the table in the hook and
+  `/conexus:setup` once this step is present.
 - A journey test in an isolated home with a local package index: session
   start, `setup` with `local`, the real server answers after reconnect.
 - Installer script: with a terminal it asks once before any download; with
@@ -1441,3 +1448,11 @@ is flagged for trimming before then.
   doctor problems, cannot run on this host). Its verification found the same
   stale `done` when no CLI is found at all (an install removed since), so the
   poll asks the lookup in that mode too and puts the question again.
+- 2026-10-15: Phase 2 Step 5 built (nexus-sv2wx.18). The token check is
+  `GET /v1/_whoami`, the doctor's own static-token probe (a 403 there is a live
+  mint-scoped credential, which the page refuses because it saves only a service
+  token). The managed edge answers `/health` 403 to a request with no token
+  (`nexus_rdr/228-research-36`), so the check sends the token to `/health` as
+  well as to the `/v1` route and none to `/version`; a redirect is never
+  followed. A timeout during the build lets the build finish and then ends the
+  run `failed` at step `credentials`.

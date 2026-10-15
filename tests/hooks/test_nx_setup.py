@@ -49,7 +49,7 @@ _PLUGIN_VERSION = json.loads(_PLUGIN_JSON.read_text(encoding="utf-8"))["version"
 #: name and whose ``match`` is a prefix of its arguments: ``sleep`` seconds,
 #: ``effects`` (``touch`` files, ``copytree`` a directory, ``point_current`` a
 #: ``<tools>/current`` link, ``write`` a file), ``early_out`` text written and
-#: flushed BEFORE the sleep, ``out`` text on standard output after it and ``exit``
+#: flushed BEFORE the sleep, ``echo_stdin`` the standard input it read, written after that, ``out`` text on standard output after it and ``exit``
 #: code. With no rule, an ``nx`` answers its two identity probes: ``--version`` (a
 #: Nexus form, or Nrwl's when its marker is ``foreign``) and ``self install
 #: --bootstrap --dry-run`` (exit 1: "an install already exists"). A probe is logged
@@ -82,7 +82,7 @@ def point_current(tools, gen):
 
 
 stdin_bytes = sys.stdin.buffer.read() if "--stdin" in sys.argv[1:] else b""
-log("start", stdin=len(stdin_bytes))
+log("start", stdin=len(stdin_bytes), stdin_text=stdin_bytes.decode("utf-8", "replace"))
 code = 0
 try:
     rules = json.load(open(os.environ["FAKE_BEHAVE"])) if os.environ.get("FAKE_BEHAVE") else []
@@ -111,6 +111,8 @@ try:
             os.makedirs(os.path.dirname(eff["write"][0]), exist_ok=True)
             open(eff["write"][0], "w").write(eff["write"][1])
     sys.stdout.buffer.write(rule.get("early_out", "").encode("utf-8"))
+    if rule.get("echo_stdin"):
+        sys.stdout.buffer.write(stdin_bytes)
     sys.stdout.flush()
     time.sleep(rule.get("sleep", 0))
     sys.stdout.buffer.write(rule.get("out", "").encode("utf-8"))  # bytes: a Windows console codepage cannot encode the glyphs
@@ -238,11 +240,19 @@ class Box:
     def setup(self) -> Path:
         return self.config / "setup"
 
+    @property
+    def open_record(self) -> Path:
+        """Where a run that was asked to open the credentials page writes the opener's path."""
+        return self.root / "open.record"
+
     def env(self, **extra: str) -> dict[str, str]:
         base = scrubbed_env(
             PATH=str(self.bin), NX_TOOLS_DIR=str(self.tools), NEXUS_CONFIG_DIR=str(self.config),
             HOME=str(self.home), USERPROFILE=str(self.home), FAKE_LOG=str(self.log),
             FAKE_BEHAVE=str(self.behave_file),
+            # The credentials page's "ask the system to open it" step writes the opener file's path here
+            # instead of starting a browser: no run started through this class can open a real one.
+            NX_SETUP_OPEN_RECORD=str(self.open_record),
         )
         base.update(self.extra_env)
         base.update(extra)
@@ -1813,43 +1823,29 @@ def test_the_job_query_answers_without_raising() -> None:
 # -- the interface P2.3 and P2.4 build on ---------------------------------------------------------
 
 
-def test_no_status_text_names_the_cloud_mode() -> None:
-    tree = ast.parse(_SETUP.read_text(encoding="utf-8"))
-    docstrings = {
-        id(node.body[0].value) for node in ast.walk(tree)
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef))
-        and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)
-    }
-    strings = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings]
-    assert strings, "the scan examined nothing"
-    assert [t for t in strings if "cloud" in t.lower() and t != "cloud"] == []
-
-
-def test_a_cloud_call_changes_nothing_and_says_so(box: Box) -> None:
+def test_a_cloud_call_removes_the_marker_and_starts_a_run_that_serves_the_page(box: Box) -> None:
+    """Mode cloud is a mode like local and cli-only: it removes the "not now" marker and starts a run (P2.5,
+    nexus-sv2wx.18; the first build refused it)."""
     box.layout()
-    box.behave([{"prog": "nx", "match": ["init"], "exit": 1}])
-    box.start("local")
-    assert box.wait_terminal()["state"] == "failed"
     box.start("not-now")
-    before = (box.setup / "status.json").read_bytes()
-    calls = len(box.calls())
+    assert (box.setup / "not-now").is_file()
     out = box.start("cloud")
-    assert out["started"] is False
-    assert out["refused"]
-    assert out["state"] == "failed", "the record is still the record"
-    assert (box.setup / "status.json").read_bytes() == before
-    assert (box.setup / "not-now").is_file(), "a call that does nothing does not remove the marker"
-    assert not (box.setup / "lock").exists()
-    assert len(box.calls()) == calls
-    words = out["refused"] + " " + out["next"]
-    assert "`" not in words and " nx " not in f" {words} ", "the cloud message names no CLI command"
+    assert out["started"] is True and out["mode"] == "cloud", out
+    assert "refused" not in out
+    assert not (box.setup / "not-now").exists()
+    _wait_for(lambda: (box.status_file() or {}).get("credentials") == "waiting for credentials", 30, "the page to be served")
+    assert box.open_record.read_text(encoding="utf-8").strip().endswith("credentials-opener.html")
+    _terminate(box.status()["pid"])
 
 
-def test_a_cloud_call_on_a_fresh_box_creates_nothing(box: Box) -> None:
+def test_a_cloud_call_on_a_fresh_box_starts_a_run_and_downloads_no_service(box: Box) -> None:
+    box.layout()
     out = box.start("cloud")
-    assert out["state"] == "none" and out["started"] is False and out["refused"]
-    assert list(box.config.iterdir()) == []
-    assert box.calls() == []
+    assert out["started"] is True and out["state"] == "running"
+    _wait_for(lambda: (box.status_file() or {}).get("credentials") == "waiting for credentials", 30, "the page to be served")
+    assert not (box.config / "service").exists() and not (box.config / "postgres").exists()
+    assert box.calls() == [], "the layout's nx was found, so the build was skipped, and no service step runs in mode cloud"
+    _terminate(box.status()["pid"])
 
 
 def test_a_cloud_call_while_a_run_is_live_leaves_it_alone(box: Box) -> None:

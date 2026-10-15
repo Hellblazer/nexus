@@ -25,8 +25,7 @@ were wrong (argparse's own usage message on standard error and no object)::
 ``start`` returns at once with the status and ``"started": true`` when it began a
 run. While a run is live it starts nothing and returns that run's status with
 ``"started": false`` and ``"refused"``, a sentence naming the live run's mode and
-the mode asked for. ``not-now`` is ``start --mode not-now``. Mode ``cloud`` is
-refused outright and changes nothing (below).
+the mode asked for. ``not-now`` is ``start --mode not-now``.
 
 **For code that imports this file** (the session-start hook, P2.4, nexus-sv2wx.17,
 imports it rather than spawning it, so the setup directory has one reader):
@@ -44,6 +43,7 @@ absolute)::
     status.json   the status (JSON, owner-only, replaced whole)
     status.error  written only when a run could not write status.json; says why
     setup.log     what the run's child programs printed, as they print it
+    credentials-opener.html  mode cloud only, while the page is unloaded: the one file that holds the page's address
     not-now       the "not now" marker
     lock/         the lock: a directory; ``owner`` holds the holder's token and
                   ``heartbeat`` is rewritten every 10 seconds
@@ -53,13 +53,58 @@ absolute)::
 
 **Modes.** ``not-now`` writes the marker and starts nothing. ``local`` and
 ``cli-only`` remove the marker first. ``cli-only`` stops after the build. ``local``
-goes on to the service and verifies. ``cloud`` is refused: the credentials page
-that saves a pair is P2.5 (nexus-sv2wx.18). The refusal reads the status and
-writes nothing (no status, no marker, no lock, not even the directory), so it
-cannot overwrite the record of a run. ``autostart`` is false unless given, so the
+goes on to the service and verifies. ``cloud`` (P2.5, nexus-sv2wx.18) serves the
+credentials page below from the start of the run, builds while the user fills it in,
+then saves the pair the page accepted and verifies; it downloads no service files.
+``autostart`` is false unless given (and is ignored by ``cloud``), so the
 login unit is never registered without an explicit yes. When it is given and a
 usable service is already running, the run does not register the unit and its
 final message says so and how to do it.
+
+**The credentials page** (mode ``cloud``; :class:`CredentialsPage`). A cloud token must reach the
+config file without passing through the model, the conversation or a tool argument. The run binds
+``127.0.0.1`` on a port the system picks and serves one small page at ``/<random path>``; any other
+path, and any ``Host`` but its own, gets an empty 404. The page's address is held in memory and in ONE
+file, the opener file ``credentials-opener.html`` in the setup directory, which redirects the browser to
+it. The system is asked to open that file (Windows ``os.startfile``, macOS ``/usr/bin/open``, else
+``xdg-open``), so the address is on no command line and in no log, status or tool result. The opener file
+is owner-only from the call that creates it, by the status file's mechanism (see below): POSIX
+``os.open`` with ``O_CREAT | O_EXCL`` and mode ``0o600`` (the umask can only narrow it), Windows
+``CreateFileW`` with a ``SECURITY_ATTRIBUTES`` holding the protected one-ACE descriptor
+``D:P(A;;FA;;;<user SID>)`` (``nexus._winsec``'s descriptor; that module cannot be imported here, so the
+two ctypes calls are repeated in ``_create_private_windows``). It is deleted when the page is first
+loaded, when the listener closes without a load, and, if the run was killed (nothing can clean up after
+a SIGKILL), when the next run starts (``_sweep_opener`` in ``_start``). The page has two fields, a
+service address and a token (a password field, autocomplete off), and one button; an ``http`` address is
+accepted as well as ``https``.
+
+A submitted pair is checked by :func:`check_pair`. **The token check:** ``/version`` (no token) says the
+service answers and which version it is, ``/health`` (with the token) says it is ready, and the token is
+checked against ONE authenticated read-only route, ``GET /v1/_whoami`` (:data:`TOKEN_ROUTE`; Sam,
+2026-10-15). Why that route: ``/health`` and ``/version`` are unauthenticated in the engine
+(``NexusService.java``: "unauthenticated", outside the ``AuthFilter`` block), so a local or self-hosted
+engine answers any token there, and only the managed edge refuses a wrong token, on ``/health`` alone
+(measured 2026-10-14, ``nexus_rdr/228-research-36``). ``/v1/_whoami`` sits behind ``AuthFilter`` on every
+engine, answers 401 to a token the engine does not know (403 to a live mint-scoped one, which cannot be a
+service token and is refused), is a ``GET`` whose only work is reading the tenant out of the token (a
+``SELECT current_setting``), has no side effect, and exists in the pinned engine
+(``src/nexus/engine_version.py``); the doctor's "Static service_token" row already makes this exact
+call (``nexus.health._check_static_service_token``). The managed edge's answer to a RIGHT token on it
+was not measured (no request may go to the managed service for this work); the doctor row relies on it.
+A redirect is never followed, so the token goes only to the address typed.
+
+A pair that passes is held in memory only (it is never written to disk to survive a kill: a killed run's
+next ``cloud`` call opens a new page and the status says the credentials are needed again), the page says
+so, and the listener closes. The pair is saved after the build with ``nx config set service_url <address>``
+and ``nx config set service_token --stdin``, the token on standard input, never on a command line; should the
+child echo it, it is replaced by ``***`` in the log. A pair that fails is not kept; the page says why and stays
+open. When ``NX_SERVICE_URL`` or ``NX_SERVICE_TOKEN`` is set in this process's environment the page says those
+take precedence over what it saves. The status file's ``credentials`` field takes exactly
+:data:`CREDENTIAL_STATES`; two minutes after the request to open the page with no load it is
+``page not loaded`` (and the message names ``nx config init`` in a terminal), and ten minutes after the
+listener started it is ``timed out`` and the listener closes, whatever happened; a run that times out ends
+``failed`` at step ``credentials`` (a timeout during the build lets the build finish first). The token is
+never written to the log or the status file.
 
 **Steps**, each skipped when already done, decided from facts and not from this
 file's own history alone:
@@ -158,8 +203,9 @@ cannot detach on this host instead of reporting a start. If both launches are
 refused it says the same; a WMI broker is the untried way out.
 
 Test seams, none set in normal use: ``NX_SETUP_HEARTBEAT_SECONDS`` (the 10 second
-interval) and ``NX_SETUP_RECLAIM_PAUSE`` (seconds to wait between reading a stale
-lock and removing it).
+interval), ``NX_SETUP_RECLAIM_PAUSE`` (seconds to wait between reading a stale
+lock and removing it) and ``NX_SETUP_OPEN_RECORD`` (a file the opener file's path is
+appended to instead of asking the system to open it, so no test starts a browser).
 """
 from __future__ import annotations
 
@@ -259,9 +305,7 @@ _AUTOSTART_NOTE = (
     "A usable service was already running, so the login unit was not registered. "
     "To start the service at login, run `nx daemon service install --autostart` in a terminal."
 )
-_NEXT_NONE = "Ask the user which they want (local, cli-only or not-now), then call setup with that mode."
-_REFUSED_MODE = "This build of the plugin cannot set up a managed service yet: it has no credentials page for one."
-_REFUSED_MODE_NEXT = "Ask the user to choose local or cli-only, then call setup with that mode."
+_NEXT_NONE = "Ask the user which they want (local, cloud, cli-only or not-now), then call setup with that mode."
 
 
 class DetachUnsupported(Exception):
@@ -732,6 +776,539 @@ def _kill_tree(proc: Any, windows: bool | None = None) -> None:
         proc.wait(timeout=10)
 
 
+# -- the credentials page (mode cloud) -----------------------------------------------------------
+
+CRED_WAITING = "waiting for credentials"
+CRED_NOT_LOADED = "page not loaded"
+CRED_REJECTED = "credentials rejected, waiting for another try"
+CRED_ACCEPTED = "credentials accepted"
+CRED_SAVED = "credentials saved"
+CRED_TIMED_OUT = "timed out"
+#: The only values the status file's ``credentials`` field takes (the record's list, in its order).
+CREDENTIAL_STATES: tuple[str, ...] = (
+    CRED_WAITING, CRED_NOT_LOADED, CRED_REJECTED, CRED_ACCEPTED, CRED_SAVED, CRED_TIMED_OUT,
+)
+
+#: A page not loaded this long after the request to open it is reported as such.
+PAGE_LOAD_SECONDS = 120.0
+#: The listener closes this long after it started, whatever happened.
+PAGE_LISTEN_SECONDS = 600.0
+#: One request of the check waits this long.
+CHECK_TIMEOUT_SECONDS = 10.0
+
+#: The opener file in the setup directory: the one file that holds the page's address.
+OPENER_NAME = "credentials-opener.html"
+#: Test seam, none set in normal use: a file the opener file's path is appended to INSTEAD of asking the system
+#: to open it, so no test can start a browser.
+OPEN_RECORD_ENV = "NX_SETUP_OPEN_RECORD"
+
+#: The authenticated, read-only route that checks the token (module docstring, "The token check").
+TOKEN_ROUTE = "/v1/_whoami"
+
+_PAGE_BODY_MAX = 16 * 1024
+
+
+def _clock() -> float:
+    """The page's clock (a seam: the tests replace this with one they advance)."""
+    return time.monotonic()
+
+
+def _launch_opener(path: str) -> bool:
+    """Ask the operating system to open *path* with the program that handles it (a
+    browser, for the opener file). The one place anything is started for the page.
+    ``False`` when there is nothing to ask or the request failed."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606 -- the opener file, by absolute path
+            return True
+        program = "/usr/bin/open" if sys.platform == "darwin" else _on_path("xdg-open")
+        if program is None or not os.path.isfile(program):
+            return False
+        subprocess.Popen(  # noqa: S603 -- the system's own opener, by absolute path, given the opener file
+            [program, path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
+def _ask_system_to_open(path: str) -> bool:
+    """Ask the system to open the opener file at *path*. With ``NX_SETUP_OPEN_RECORD`` set, record
+    the path there instead and start nothing (the tests' seam)."""
+    record = os.environ.get(OPEN_RECORD_ENV, "")
+    if record:
+        with open(record, "a", encoding="utf-8") as handle:
+            handle.write(path + "\n")
+        return True
+    return _launch_opener(path)
+
+
+def _remove_file(path: Path) -> None:
+    """Delete *path* if it is there. Never raises: a Windows reader may hold it for a moment (the
+    next run's start deletes what is left)."""
+    with contextlib.suppress(OSError):
+        _retry_sharing(lambda: os.unlink(path), budget_s=0.5)
+
+
+def _sweep_opener(setup: Path) -> None:
+    """Delete an opener file a killed run left behind."""
+    _remove_file(setup / OPENER_NAME)
+
+
+def _normal_address(url: str) -> str:
+    """The service address as the page uses and saves it: ``http`` or ``https``, a host, no user
+    name, no query or fragment, no trailing slash. Raises ValueError with a sentence for the user."""
+    import urllib.parse  # noqa: PLC0415 -- lazy: the session-start hook imports this file and has 100 ms
+
+    text = (url or "").strip()
+    if not text:
+        raise ValueError("Enter the service address.")
+    try:
+        parts = urllib.parse.urlsplit(text)
+        port = parts.port
+    except ValueError:
+        raise ValueError("That is not a web address with a valid port.") from None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("The service address must start with http:// or https:// and name a host.")
+    if parts.username or parts.password:
+        raise ValueError("Leave the user name and password out of the service address.")
+    del port
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
+def check_pair(url: str, token: str) -> tuple[bool, str]:
+    """Check a service address and token. Returns ``(ok, sentence)``; the sentence is for the user and
+    holds neither the token nor anything of the page's address.
+
+    ``/version`` (no token) says the service answers and which version it is; ``/health`` (with the
+    token: the managed service's edge answers 403 to a request with none, measured 2026-10-14,
+    ``nexus_rdr/228-research-36``) says it is ready; and the token is checked against
+    :data:`TOKEN_ROUTE` alone, the one authenticated read-only route that refuses a wrong token on every
+    engine, because ``/health`` and ``/version`` are unauthenticated in a local or self-hosted engine and
+    answer any token (Sam, 2026-10-15). A redirect is never followed, so the token is sent to the
+    address that was typed and to no other.
+    """
+    import http.client  # noqa: PLC0415 -- lazy, see _normal_address
+    import ssl  # noqa: PLC0415
+    import urllib.error  # noqa: PLC0415
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        base = _normal_address(url)
+    except ValueError as exc:
+        return False, str(exc)
+    if not token:
+        return False, "Enter the token."
+    if not (token.isascii() and token.isprintable() and not any(c.isspace() for c in token)):
+        return False, "The token has characters a token does not have (spaces, control characters or non-ASCII ones)."
+    host = urllib.parse.urlsplit(base).netloc
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # the 3xx answer then surfaces as an HTTPError
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+
+    def get(route: str, bearer: str | None = None) -> tuple[int, bytes]:
+        request = urllib.request.Request(
+            base + route, method="GET", headers={"Accept": "application/json", "User-Agent": "conexus-setup"},
+        )
+        if bearer is not None:
+            request.add_header("Authorization", f"Bearer {bearer}")
+        try:
+            with opener.open(request, timeout=CHECK_TIMEOUT_SECONDS) as response:
+                return response.status, response.read(65536)
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, exc.read(65536)
+            finally:
+                exc.close()
+
+    try:
+        code, body = get("/version")
+        if code != 200:
+            return False, f"The service at {host} answered /version with HTTP {code}; it does not look like a Nexus service."
+        try:
+            info = json.loads(body.decode("utf-8"))
+        except ValueError:
+            info = None
+        if not isinstance(info, dict):
+            return False, f"The service at {host} answered /version with something other than Nexus's version record."
+        version = str(info.get("release_version") or info.get("app_version") or "unknown")
+        code, _ = get("/health", token)
+        if code not in (200, 401, 403):  # a refusal here is the token route's verdict to give
+            return False, f"The service at {host} answered /health with HTTP {code}, so it is not ready."
+        code, _ = get(TOKEN_ROUTE, token)
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, ssl.SSLError):
+            return False, f"The service at {host} did not answer: its TLS certificate was not accepted."
+        return False, f"The service at {host} did not answer ({type(reason).__name__})."
+    if code == 200:
+        return True, f"The service at {host} answers (version {version}) and accepts the token."
+    if code == 401:
+        return False, f"The service at {host} refused the token (HTTP 401)."
+    if code == 403:
+        return False, (
+            f"The service at {host} knows this token, but it is a mint-scoped credential, which cannot be a "
+            "service token. Enter a tenant service token; this page saves only a service token."
+        )
+    return False, f"The service at {host} answered the token check with HTTP {code}."
+
+
+def credentials_notice(state: str, reason: str = "") -> tuple[str, str]:
+    """``(sentence, next step)`` the status carries for one of :data:`CREDENTIAL_STATES`. Neither holds the
+    page's address or a token."""
+    if state == CRED_NOT_LOADED:
+        return (
+            "The credentials page was not loaded within 2 minutes of asking the system to open it.",
+            "If no browser opened, the user can run `nx config init` in a terminal and enter the service address and "
+            "token there. Setup stops listening 10 minutes after it began; setup_status shows what happens.",
+        )
+    if state == CRED_REJECTED:
+        return (
+            f"The service address and token were refused: {reason or 'the check failed'} The page stays open for another try.",
+            "Tell the user the page refused the pair and is waiting for another try. Follow progress with setup_status.",
+        )
+    if state == CRED_ACCEPTED:
+        return (
+            "The service address and token were accepted and are held in memory; they are saved after the build.",
+            "Follow progress with setup_status.",
+        )
+    if state == CRED_SAVED:
+        return "The service address and token were saved.", ""
+    if state == CRED_TIMED_OUT:
+        return (
+            "Nobody completed the credentials page in 10 minutes, so setup stopped listening.",
+            "If the user agrees, call setup with mode cloud again: it opens a new page. Or the user runs `nx config init` "
+            "in a terminal.",
+        )
+    return (
+        "Setup asked the system to open a page in the user's browser for the service address and token; waiting for credentials.",
+        "Tell the user a page asking for the service address and token should have opened in their browser. "
+        "Follow progress with setup_status.",
+    )
+
+
+_PAGE_STYLE = (
+    "body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem}"
+    "label{display:block;margin-top:1rem}input{width:100%;box-sizing:border-box;padding:.5rem;font:inherit}"
+    "button{margin-top:1.5rem;padding:.5rem 1.2rem;font:inherit}"
+    ".note{background:#eef;padding:.75rem;border-radius:4px}.error{background:#fee;padding:.75rem;border-radius:4px}"
+)
+
+
+def _env_notice(environ: Any) -> str:
+    """A sentence when ``NX_SERVICE_URL`` or ``NX_SERVICE_TOKEN`` is set: those take precedence over what is
+    saved. Names the variables, never their values."""
+    names = [n for n in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN") if (environ.get(n) or "").strip()]
+    if not names:
+        return ""
+    verb = "is" if len(names) == 1 else "are"
+    return f"{' and '.join(names)} {verb} set in the environment of the setup process, and take precedence over what this page saves."
+
+
+class CredentialsPage:
+    """The loopback page that takes a managed service's address and token (RDR-228, "The credentials page").
+
+    :meth:`start` binds ``127.0.0.1`` on a port the system picks, writes the owner-only opener file and asks
+    the system to open it. The page's address, ``http://127.0.0.1:<port>/<random path>``, is held in memory
+    and in that one file; no log line or status field carries it, and no request without the path gets
+    anything. A request whose ``Host`` is not the page's own gets nothing either.
+
+    The caller calls :meth:`poll` as time passes (the setup process does it from its wait loops; a test
+    does it after moving its clock). ``state`` is one of :data:`CREDENTIAL_STATES`. *clock*, *opener*,
+    *checker* and *environ* are the seams the tests replace.
+    """
+
+    def __init__(
+        self, setup: Path, *, clock: Any = None, opener: Any = None, checker: Any = None, environ: Any = None,
+    ) -> None:
+        self._setup = Path(setup)
+        self._clock = clock if clock is not None else (lambda: _clock())
+        self._opener = opener if opener is not None else _ask_system_to_open
+        self._checker = checker if checker is not None else check_pair
+        self._environ = environ
+        self._lock = threading.Lock()
+        self._submit_lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._server: Any = None
+        self._thread: threading.Thread | None = None
+        self._closed = False
+        self._pair: tuple[str, str] | None = None
+        self._loaded = False
+        self._path = ""
+        self._submitted_url = ""
+        self._listening_since = 0.0
+        self._opened_at = 0.0
+        self.state = CRED_WAITING
+        self.reason = ""
+        self.port = 0
+        self.bound_host = ""
+
+    # -- read side
+
+    @property
+    def opener_path(self) -> Path:
+        return self._setup / OPENER_NAME
+
+    @property
+    def address(self) -> str:
+        """The page's address. Never log it, put it in a status or put it on a command line."""
+        return f"http://{self.bound_host}:{self.port}{self._path}"
+
+    @property
+    def accepted_pair(self) -> tuple[str, str] | None:
+        """The accepted ``(service address, token)``, held in memory until saved; ``None`` before and after."""
+        with self._lock:
+            return self._pair
+
+    @property
+    def loaded(self) -> bool:
+        with self._lock:
+            return self._loaded
+
+    @property
+    def listening(self) -> bool:
+        return self._server is not None and not self._closed
+
+    # -- life
+
+    def start(self) -> None:
+        """Bind, write the opener file, serve, ask the system to open the file. Raises OSError (nothing is left
+        bound or written)."""
+        import http.server  # noqa: PLC0415 -- lazy: the session-start hook imports this file and has 100 ms
+        import secrets  # noqa: PLC0415
+
+        page = self
+
+        class Server(http.server.ThreadingHTTPServer):
+            allow_reuse_address = False  # on Windows SO_REUSEADDR lets another process take the same port
+            daemon_threads = True
+
+            def handle_error(self, request: Any, client_address: Any) -> None:
+                pass  # the default prints a traceback to standard error, which is the setup log
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            server_version = "nx-setup"
+            sys_version = ""
+            timeout = 10.0
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 -- the request line holds the path
+                pass
+
+            def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+                self._empty(code)
+
+            def _empty(self, code: int) -> None:
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+            def _page(self, body: str) -> None:
+                data = body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+                )
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _addressed(self) -> bool:
+                """The request names the page's path and its own host and port: nothing else is answered."""
+                path = self.path.split("?", 1)[0]
+                host_ok = self.headers.get("Host") == f"{page.bound_host}:{page.port}"
+                return host_ok and secrets.compare_digest(path.encode("utf-8", "replace"), page._path.encode("ascii"))
+
+            def do_GET(self) -> None:
+                if not self._addressed():
+                    return self._empty(404)
+                page._note_load()
+                self._page(page._render())
+
+            def do_POST(self) -> None:
+                if not self._addressed():
+                    return self._empty(404)
+                try:
+                    length = int(self.headers.get("Content-Length", ""))
+                except ValueError:
+                    return self._empty(400)
+                if length < 0 or length > _PAGE_BODY_MAX:
+                    return self._empty(413)
+                import urllib.parse  # noqa: PLC0415 -- lazy, see start()
+
+                fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
+                page._note_load()
+                page._submit((fields.get("service_url") or [""])[0], (fields.get("service_token") or [""])[0])
+                self._page(page._render())
+                self.wfile.flush()
+                if page.state == CRED_ACCEPTED:
+                    threading.Thread(target=page._close_listener, name="nx-setup-page-close", daemon=True).start()
+
+            def _other(self) -> None:
+                self._empty(405 if self._addressed() else 404)
+
+            do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _other
+
+        server = Server(("127.0.0.1", 0), Handler)
+        try:
+            self.bound_host, self.port = server.server_address[0], server.server_address[1]
+            self._path = "/" + secrets.token_urlsafe(24)
+            self._write_opener()
+        except BaseException:
+            server.server_close()
+            raise
+        self._server = server
+        self._thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.05}, name="nx-setup-page", daemon=True,
+        )
+        self._thread.start()
+        self._listening_since = self._clock()
+        self._opener(str(self.opener_path))
+        self._opened_at = self._clock()
+
+    def _write_opener(self) -> None:
+        """The opener file: owner-only from the call that creates it (``_create_private``: POSIX
+        ``os.open`` with ``O_EXCL`` and mode ``0o600``; Windows ``CreateFileW`` with a protected one-ACE
+        descriptor), holding a redirect to the page."""
+        import html  # noqa: PLC0415 -- lazy, see start()
+
+        _sweep_opener(self._setup)
+        address = html.escape(self.address, quote=True)
+        text = (
+            '<!doctype html><html><head><meta charset="utf-8"><title>Nexus setup</title>'
+            f'<meta http-equiv="refresh" content="0;url={address}"></head><body>'
+            f'<p>Opening the Nexus credentials page. If nothing happens, <a href="{address}">open it here</a>.</p>'
+            "</body></html>"
+        )
+        fd = _create_private(str(self.opener_path))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(text.encode("utf-8"))
+        except BaseException:
+            _remove_file(self.opener_path)
+            raise
+
+    def poll(self) -> None:
+        """Apply the clock: ``page not loaded`` two minutes after the request to open the page, ``timed out``
+        and the listener closed ten minutes after it began (unless a pair was accepted). Cheap; call it often."""
+        now = self._clock()
+        expired = False
+        with self._lock:
+            if self.state in (CRED_ACCEPTED, CRED_SAVED, CRED_TIMED_OUT):
+                pass
+            elif now - self._listening_since >= PAGE_LISTEN_SECONDS:
+                self.state = CRED_TIMED_OUT
+                self._pair = None
+                expired = True
+            elif self.state == CRED_WAITING and not self._loaded and now - self._opened_at >= PAGE_LOAD_SECONDS:
+                self.state = CRED_NOT_LOADED
+        if expired or self.state == CRED_ACCEPTED:
+            self._close_listener()
+        if expired:
+            _remove_file(self.opener_path)
+
+    def mark_saved(self) -> None:
+        """The pair was saved: drop it from memory."""
+        with self._lock:
+            self._pair = None
+            self.state = CRED_SAVED
+
+    def _close_listener(self) -> None:
+        with self._close_lock:
+            if self._server is None or self._closed:
+                return
+            self._closed = True
+            server = self._server
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+
+    def close(self) -> None:
+        """Stop listening and delete the opener file. Idempotent; the state does not change."""
+        self._close_listener()
+        _remove_file(self.opener_path)
+
+    # -- the requests
+
+    def _note_load(self) -> None:
+        with self._lock:
+            first = not self._loaded
+            self._loaded = True
+            if self.state == CRED_NOT_LOADED:
+                self.state = CRED_WAITING
+        if first:
+            _remove_file(self.opener_path)  # the browser has the address now: the opener file has done its work
+
+    def _submit(self, url: str, token: str) -> None:
+        """Check one pair. A pair that passes is held and the listener closes; one that fails is not kept."""
+        with self._submit_lock:
+            with self._lock:
+                if self.state in (CRED_ACCEPTED, CRED_SAVED, CRED_TIMED_OUT):
+                    return
+                self._submitted_url = url.strip()
+            try:
+                address = _normal_address(url)
+                ok, text = self._checker(address, token.strip())
+            except ValueError as exc:
+                address, ok, text = "", False, str(exc)
+            with self._lock:
+                if self.state == CRED_TIMED_OUT:
+                    return
+                if ok:
+                    self._pair = (address, token.strip())
+                    self.state, self.reason = CRED_ACCEPTED, ""
+                else:
+                    self._pair = None
+                    self.state, self.reason = CRED_REJECTED, text
+
+    def _render(self) -> str:
+        import html  # noqa: PLC0415 -- lazy, see start()
+
+        with self._lock:
+            state, reason, url = self.state, self.reason, self._submitted_url
+        environ = os.environ if self._environ is None else self._environ
+        notice = _env_notice(environ)
+        parts = [
+            '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Nexus setup</title>',
+            f'<meta name="viewport" content="width=device-width, initial-scale=1"><style>{_PAGE_STYLE}</style></head><body>',
+            "<h1>Connect Nexus to a managed service</h1>",
+        ]
+        if state in (CRED_ACCEPTED, CRED_SAVED):
+            parts.append(
+                '<p class="note">The service address and token were accepted. Setup saves them when the install '
+                "finishes. You can close this tab.</p></body></html>"
+            )
+            return "".join(parts)
+        parts.append(
+            "<p>Enter the address of your Nexus service and the access token for it. They go to the setup program on "
+            "this machine and are saved by the Nexus command line. They are not shown to Claude.</p>"
+        )
+        if notice:
+            parts.append(f'<p class="note">{html.escape(notice)}</p>')
+        if state == CRED_REJECTED:
+            parts.append(f'<p class="error">{html.escape(reason)} Try again.</p>')
+        parts.append(
+            '<form method="post" action="">'
+            '<label>Service address<input name="service_url" type="text" spellcheck="false" autocomplete="off" '
+            f'value="{html.escape(url, quote=True)}"></label>'
+            '<label>Token<input name="service_token" type="password" autocomplete="off" spellcheck="false"></label>'
+            '<button type="submit">Check and use</button></form></body></html>'
+        )
+        return "".join(parts)
+
+
 # -- the run -----------------------------------------------------------------------------------
 
 
@@ -750,6 +1327,9 @@ class _Run:
         self.steps_done: list[str] = []
         self.stage = "starting"
         self.notes: list[str] = []
+        #: The credentials page, in mode cloud once it is serving.
+        self.page: CredentialsPage | None = None
+        self._page_seen: tuple[str, str] | None = None
 
     def update(self, **fields: Any) -> None:
         """Write the status. Raises :class:`_LockLost` and writes nothing when the
@@ -762,7 +1342,57 @@ class _Run:
 
     def at(self, stage: str, message: str = "") -> None:
         self.stage = stage
-        self.update(stage=stage, message=message or f"running: {stage}", steps_done=list(self.steps_done))
+        fields: dict[str, Any] = {"stage": stage, "message": message or f"running: {stage}", "steps_done": list(self.steps_done)}
+        page = self.page
+        if page is not None:
+            state, reason = page.state, page.reason
+            self._page_seen = (state, reason)
+            note, follow = credentials_notice(state, reason)
+            fields.update(credentials=state, message=f"{fields['message']}. {note}")
+            if follow:
+                fields["next"] = follow
+        self.update(**fields)
+
+    def open_page(self) -> int | None:
+        """Start the credentials page (mode cloud). ``None`` when it is serving, else the failed run's exit code:
+        a run that cannot listen fails before anything is downloaded."""
+        page = CredentialsPage(self.setup)
+        try:
+            page.start()
+        except OSError as exc:
+            page.close()
+            return self.fail("credentials", f"the credentials page could not be started: {type(exc).__name__}: {exc}")
+        self.page = page
+        return None
+
+    def close_page(self) -> None:
+        """Stop listening and delete the opener file, whatever way the run ended."""
+        if self.page is not None:
+            self.page.close()
+
+    def sync_page(self) -> None:
+        """Apply the page's clock and, when its state changed since the status was written, write the status.
+        Called from the run's own thread only, so the status has one writer."""
+        page = self.page
+        if page is None:
+            return
+        page.poll()
+        if (page.state, page.reason) != self._page_seen:
+            self.at(self.stage)
+
+    def await_credentials(self) -> tuple[str, str] | None:
+        """Wait for an accepted pair; ``None`` when the page timed out. Raises :class:`_LockLost`."""
+        assert self.page is not None
+        while True:
+            if not self.heartbeat.holds():
+                raise _LockLost
+            self.sync_page()
+            pair = self.page.accepted_pair
+            if pair is not None:
+                return pair
+            if self.page.state == CRED_TIMED_OUT:
+                return None
+            time.sleep(_POLL_SECONDS)
 
     def step_done(self, step: str) -> None:
         self.steps_done.append(step)
@@ -770,6 +1400,9 @@ class _Run:
     def end(self, state: str, message: str, next_step: str, **fields: Any) -> int:
         """Write the terminal status and return the exit code. Never raises."""
         text = " ".join([message, *self.notes])
+        if self.page is not None:
+            self.close_page()  # a terminal status means the listener is closed and the opener file is gone
+            fields.setdefault("credentials", self.page.state)
         try:
             self.update(state=state, stage=self.stage, message=text, next=next_step, steps_done=list(self.steps_done), **fields)
         except _LockLost:
@@ -820,47 +1453,84 @@ class _Run:
         except OSError:
             return ""
 
-    def cmd(self, argv: list[str], *, timeout: float | None = None) -> tuple[int | None, str]:
+    def _scrub_log(self, offset: int, secret: str) -> None:
+        """Replace *secret* in what the log holds after *offset*: a child that echoed what it was
+        given on standard input must not leave it in the log."""
+        try:
+            with open(self.log_path, "r+b") as handle:
+                handle.seek(offset)
+                data = handle.read()
+                clean = data.replace(secret.encode("utf-8"), b"***")
+                if clean != data:
+                    handle.seek(offset)
+                    handle.write(clean)
+                    handle.truncate()
+        except OSError:
+            pass
+
+    def cmd(
+        self, argv: list[str], *, timeout: float | None = None, stdin_text: str | None = None,
+    ) -> tuple[int | None, str]:
         """Run *argv* with its output going straight into the log; returns the exit
         code (``None`` after a timeout) and the output it printed (the log's tail).
         The setup directory is the working directory: uv and the CLI must not read a
         project from wherever the application started this. Raises
-        :class:`_LockLost`, after killing the child, when the lock is lost."""
+        :class:`_LockLost`, after killing the child, when the lock is lost.
+
+        *stdin_text* is written to the child's standard input (a secret: it is never logged, and
+        is replaced by ``***`` in the log and in the returned output should the child echo it);
+        without it standard input is the null device."""
         limit = STEP_TIMEOUT_SECONDS if timeout is None else timeout
         if not self.heartbeat.holds():
             raise _LockLost
         self.log(f"\n--- {_now()} {' '.join(argv)}\n")
         offset = self._log_size()
-        with open(self.log_path, "ab") as sink:
-            proc = subprocess.Popen(  # noqa: S603 -- argv[0] is an absolute path found by the lookups above
-                argv, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT, cwd=str(self.setup),
-                encoding="utf-8",  # no pipe is read here (stdout is the log file); names the codec for the encoding lint
-                **_child_kwargs(),
-            )
-            deadline = time.monotonic() + limit
-            try:
-                while True:
+
+        def shown(text: str) -> str:
+            return text if not stdin_text else text.replace(stdin_text, "***")
+
+        try:
+            with open(self.log_path, "ab") as sink:
+                proc = subprocess.Popen(  # noqa: S603 -- argv[0] is an absolute path found by the lookups above
+                    argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE, stdout=sink,
+                    stderr=subprocess.STDOUT, cwd=str(self.setup),
+                    encoding="utf-8",  # names the codec for the encoding lint and for the text written to standard input
+                    **_child_kwargs(),
+                )
+                if stdin_text is not None and proc.stdin is not None:
                     try:
-                        code = proc.wait(timeout=_POLL_SECONDS)
-                        break
-                    except subprocess.TimeoutExpired:
+                        proc.stdin.write(stdin_text)
+                        proc.stdin.close()
+                    except OSError:  # the child exited without reading it
                         pass
-                    if not self.heartbeat.holds():
+                deadline = time.monotonic() + limit
+                try:
+                    while True:
+                        try:
+                            code = proc.wait(timeout=_POLL_SECONDS)
+                            break
+                        except subprocess.TimeoutExpired:
+                            pass
+                        if not self.heartbeat.holds():
+                            _kill_tree(proc)
+                            self.log("--- killed: setup no longer holds the lock\n")
+                            raise _LockLost
+                        self.sync_page()
+                        if time.monotonic() >= deadline:
+                            _kill_tree(proc)
+                            text = self._output_since(offset)
+                            self.log(f"--- timed out after {limit:.0f} s\n")
+                            return None, shown(text)
+                except BaseException:
+                    if proc.poll() is None:
                         _kill_tree(proc)
-                        self.log("--- killed: setup no longer holds the lock\n")
-                        raise _LockLost
-                    if time.monotonic() >= deadline:
-                        _kill_tree(proc)
-                        text = self._output_since(offset)
-                        self.log(f"--- timed out after {limit:.0f} s\n")
-                        return None, text
-            except BaseException:
-                if proc.poll() is None:
-                    _kill_tree(proc)
-                raise
+                    raise
+        finally:
+            if stdin_text:
+                self._scrub_log(offset, stdin_text)
         text = self._output_since(offset)
         self.log(f"--- exit {code}\n")
-        return code, text
+        return code, shown(text)
 
 
 def _doctor_rows(text: str) -> list[str]:
@@ -921,6 +1591,10 @@ def _nx_after_build(run: _Run) -> str | None:
 
 
 def _execute(run: _Run) -> int:
+    if run.mode == MODE_CLOUD:
+        failed = run.open_page()  # at the start of the run, so the user is asked while the build goes on
+        if failed is not None:
+            return failed
     run.at("build")
     nx, build_needed = _locate_nexus_cli(run)
     if build_needed:
@@ -953,7 +1627,7 @@ def _execute(run: _Run) -> int:
         )
 
     config = config_dir()
-    code = _service(run, nx, config)
+    code = _cloud(run, nx) if run.mode == MODE_CLOUD else _service(run, nx, config)
     if code is not None:
         return code
 
@@ -974,6 +1648,36 @@ def _execute(run: _Run) -> int:
         f"Run `nx doctor` in a terminal to see the failing rows. Log: {run.log_path}",
         doctor="fail", doctor_failing=rows,
     )
+
+
+def _cloud(run: _Run, nx: str) -> int | None:
+    """The service step for mode ``cloud``: wait for the pair the credentials page accepts (it has been
+    served since the start of the run, so this waits only if the user has not finished), then save it with
+    ``nx config set``. The token goes in on standard input. No service is downloaded. ``None`` means it
+    went well."""
+    run.at("credentials")
+    pair = run.await_credentials()
+    if pair is None:
+        return run.end(
+            FAILED, "Nobody completed the credentials page within 10 minutes, so setup stopped listening.",
+            "If the user agrees, call setup with mode cloud again: it opens a new page. Or the user runs `nx config init` "
+            f"in a terminal. Log: {run.log_path}",
+            failed_step="credentials",
+        )
+    url, token = pair
+    try:
+        code, _ = run.cmd([nx, "config", "set", "service_url", url])
+        if code != 0:
+            return run.fail("credentials", "saving the service address failed.")
+        code, _ = run.cmd([nx, "config", "set", "service_token", "--stdin"], stdin_text=token)
+    except OSError as exc:
+        return run.fail("credentials", f"nx config set could not start: {exc}")
+    if code != 0:
+        return run.fail("credentials", "saving the token failed.")
+    assert run.page is not None
+    run.page.mark_saved()
+    run.step_done("credentials")
+    return None
 
 
 def _service(run: _Run, nx: str, config: Path) -> int | None:
@@ -1049,6 +1753,7 @@ def run_setup(mode: str, autostart: bool, token: str) -> int:
         except Exception as exc:  # noqa: BLE001 -- a terminal status must be written whatever went wrong
             return run.fail(run.stage, f"unexpected {type(exc).__name__}: {exc}")
     finally:
+        run.close_page()  # the listener and the opener file go with the run, whatever way it ended
         heartbeat.stop()
         release_lock(setup, token)  # a no-op unless the lock is still this run's
         for name, handler in previous.items():
@@ -1265,10 +1970,6 @@ def _error_view(message: str) -> dict[str, Any]:
 def start(mode: str, autostart: bool) -> dict[str, Any]:
     """The one way to start a run. Returns the status, with ``started``; an object
     whose ``state`` is ``error`` when the setup directory cannot be used."""
-    if mode == MODE_CLOUD:  # refused before anything is read or written
-        return {
-            **status_view(setup_dir()), "started": False, "refused": _REFUSED_MODE, "next": _REFUSED_MODE_NEXT,
-        }
     setup = setup_dir()
     try:
         return _start(setup, mode, autostart)
@@ -1296,6 +1997,7 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
         }
     try:
         _sweep_tmp(setup)
+        _sweep_opener(setup)  # a killed run cannot delete its opener file: the next run's start does
         with contextlib.suppress(FileNotFoundError):
             (setup / _ERROR_FILE).unlink()
         prior = read_status(setup) or {}

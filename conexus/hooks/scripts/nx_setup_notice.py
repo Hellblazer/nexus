@@ -213,7 +213,8 @@ def no_service_text() -> str:
     """State 8: the CLI resolves and no service is set up."""
     return (
         "Nexus is installed, but no Nexus service is set up, so the Nexus tools that need storage will "
-        "fail. /conexus:setup sets one up on this machine; ask the user first, and act only on their answer."
+        "fail. /conexus:setup sets one up on this machine, or connects a managed service the user has an address "
+        "and token for; ask the user first, and act only on their answer."
     )
 
 

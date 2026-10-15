@@ -303,7 +303,7 @@ def test_no_cli_puts_the_one_question_with_the_standins_table(tmp_path: Path) ->
     assert text is not None
     assert standin.QUESTION_TABLE in text and standin.LOCAL_FOLLOW_UP in text
     assert "ASK THE USER FIRST" in text
-    assert "Cloud" not in text and "cloud" not in text, "the Cloud row waits for the credentials page (nexus-sv2wx.18)"
+    assert "| Cloud |" in text and standin.CLOUD_FOLLOW_UP in text, "the Cloud row arrived with the credentials page (nexus-sv2wx.18)"
     for command in _MANUAL_COMMANDS:
         assert f"`{command}`" in text
     assert text.rstrip().endswith(standin.INSTALL_PAGE)

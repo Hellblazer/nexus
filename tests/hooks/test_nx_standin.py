@@ -19,10 +19,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
-from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, prune_python, scrubbed_env
+from tests._platform import IS_WINDOWS, WINDOWS_SHEBANG, install_windows_exe_fake, prune_python, scrubbed_env
 from tests._setup_recorder import Recorder
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +61,9 @@ def _env(dirs: dict[str, Path]) -> dict[str, str]:
         HOME=str(dirs["home"]),
         USERPROFILE=str(dirs["home"]),
         CLAUDE_PROJECT_DIR=str(dirs["project"]),
+        # A cloud run asks the system to open the credentials page; this records the opener's path instead, so
+        # no case here can start a browser. It sits beside the isolated directories, not in them.
+        NX_SETUP_OPEN_RECORD=str(dirs["home"].parent / "open.record"),
     )
 
 
@@ -144,21 +148,21 @@ async def test_the_instructions_say_nexus_is_not_installed_put_the_one_question_
     assert mod.QUESTION_TABLE in text and mod.LOCAL_FOLLOW_UP in text
     assert "/conexus:setup" in text
     assert "ASK THE USER FIRST" in text
-    assert "Cloud" not in text and "cloud" not in text, "the Cloud row waits for the credentials page (nexus-sv2wx.18)"
+    assert "| Cloud |" in text and mod.CLOUD_FOLLOW_UP in text, "the Cloud row arrived with the credentials page (nexus-sv2wx.18)"
+    assert "never ask for the token" in text
     assert "installed but cannot start" not in text
 
 
-def test_the_table_is_the_records_with_the_cloud_row_absent() -> None:
-    """The record's four choices with their sizes; this build offers three."""
+def test_the_table_is_the_records_four_choices() -> None:
+    """The record's four choices with their sizes, row for row."""
     record = (_ROOT / "docs" / "rdr" / "rdr-228-plugin-installs-the-cli.md").read_text(encoding="utf-8")
     rows = [line for line in record.splitlines() if line.startswith("| ") and line.count("|") == 4]
     by_choice = {row.split("|")[1].strip(): row for row in rows}
     ours = [line for line in _standin().QUESTION_TABLE.splitlines() if line.startswith("| ") and not line.startswith("| Choice")]
-    assert len(ours) == 3
+    assert [line.split("|")[1].strip() for line in ours] == ["Local", "Cloud", "CLI only", "Not now"]
     for line in ours:
         choice = line.split("|")[1].strip()
         assert by_choice[choice].strip() == line.strip(), choice
-    assert "| Cloud |" in record and not any("Cloud" in line for line in ours)
 
 
 def test_the_tool_descriptions_give_the_tables_sizes() -> None:
@@ -169,11 +173,12 @@ def test_the_tool_descriptions_give_the_tables_sizes() -> None:
     description = mod.SETUP_DESCRIPTION
     rows = {
         m.group(1): (m.group(2), m.group(3))
-        for m in re.finditer(r"\| (Local|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+) GB on disk \|", mod.QUESTION_TABLE)
+        for m in re.finditer(r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+) GB on disk \|", mod.QUESTION_TABLE)
     }
-    assert rows == {"Local": ("1.3", "2.4"), "CLI only": ("0.7", "1.6")}, rows
-    local, cli = rows["Local"], rows["CLI only"]
+    assert rows == {"Local": ("1.3", "2.4"), "Cloud": ("0.7", "1.6"), "CLI only": ("0.7", "1.6")}, rows
+    local, cloud, cli = rows["Local"], rows["Cloud"], rows["CLI only"]
     assert f"up to about {local[0]} GB to download, {local[1]} GB on disk" in description
+    assert f"up to about {cloud[0]} GB to download, {cloud[1]} GB on disk" in description
     assert f"up to about {cli[0]} GB to download, {cli[1]} GB on disk" in description
 
 
@@ -240,11 +245,16 @@ async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_b
         ({"mode": "local", "autostart": True}, ["start", "--mode", "local", "--autostart"]),
         ({"mode": "local"}, ["start", "--mode", "local"]),
         ({"mode": "local", "autostart": False}, ["start", "--mode", "local"]),
+        ({"mode": "cloud"}, ["start", "--mode", "cloud"]),
+        ({"mode": "cloud", "autostart": True}, ["start", "--mode", "cloud"]),
         ({"mode": "cli-only"}, ["start", "--mode", "cli-only"]),
         ({"mode": "cli-only", "autostart": True}, ["start", "--mode", "cli-only"]),
         ({"mode": "not-now"}, ["not-now"]),
     ],
-    ids=["local+autostart", "local", "local autostart false", "cli-only", "cli-only ignores autostart", "not-now"],
+    ids=[
+        "local+autostart", "local", "local autostart false", "cloud", "cloud ignores autostart", "cli-only",
+        "cli-only ignores autostart", "not-now",
+    ],
 )
 async def test_setup_starts_the_setup_script_with_the_mode_and_autostart_given(
     tmp_path: Path, arguments: dict, argv: list[str],
@@ -300,24 +310,25 @@ async def test_a_done_record_with_no_cli_found_is_not_reported_as_a_finished_bui
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [{"mode": "cloud"}, {"mode": "Cloud"}, {"mode": "bogus"}, {}, {"mode": 3}, {"mode": "local", "autostart": "yes"}])
+@pytest.mark.parametrize("arguments", [{"mode": "Cloud"}, {"mode": "bogus"}, {}, {"mode": 3}, {"mode": "local", "autostart": "yes"}])
 async def test_a_refused_call_is_an_error_and_starts_nothing(tmp_path: Path, arguments: dict) -> None:
-    """Until the credentials page exists the stand-in refuses a managed service,
-    and nothing it says lists one."""
+    """A mode the stand-in does not know, or an argument of the wrong type, is an error that starts nothing."""
     launch, recorder = _plugin_with_recorder(tmp_path)
     recorder.views(start={"state": "running", "live": True, "stage": "starting", "mode": "local", "next": "x"})
     _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup", arguments),))
     assert result.isError
     assert recorder.calls() == []
-    if arguments.get("mode") in ("cloud", "Cloud"):
-        assert "managed service" in _text(result) or "Unknown mode" in _text(result)
-        assert "local" in _text(result) and "cli-only" in _text(result) and "not-now" in _text(result)
+    if arguments.get("mode") == "Cloud":
+        for mode in ("local", "cloud", "cli-only", "not-now"):
+            assert mode in _text(result)
 
 
 @pytest.mark.asyncio
-async def test_nothing_the_stand_in_offers_lists_cloud(tmp_path: Path) -> None:
+async def test_the_stand_in_offers_cloud_in_both_tool_descriptions_it_carries_a_choice_in(tmp_path: Path) -> None:
     _init, tools, _ = await _session(_isolated(tmp_path), "nx-mcp")
-    assert "cloud" not in json.dumps([[t.title, t.description, t.inputSchema] for t in tools]).lower()
+    by_name = {t.name: t for t in tools}
+    assert "cloud" in json.dumps([by_name["setup"].description, by_name["setup"].inputSchema]).lower()
+    assert "never ask for the token" in by_name["setup"].description
 
 
 @pytest.mark.asyncio
@@ -369,12 +380,35 @@ async def test_not_now_through_the_real_script_writes_only_its_marker(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_cloud_through_the_real_script_path_changes_nothing(tmp_path: Path) -> None:
+async def test_cloud_through_the_real_script_path_starts_a_run_that_serves_the_page(tmp_path: Path) -> None:
+    """Mode ``cloud`` goes to the real setup process like any other. The isolated PATH has no ``uv``, so the run
+    serves its page, asks the system to open it (recorded, not started) and then fails at the build.
+
+    The session ends when this call returns, and on native Windows the host's job can end a run the session
+    started once the session is gone (the real-server twin of this case, in ``tests/mcp/test_setup_tools.py``,
+    keeps its server alive and asserts the whole run there). Here the start is asserted everywhere and the run's
+    end where the run outlives its starter."""
     dirs = _isolated(tmp_path)
-    before = _tree(dirs)
     _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup", {"mode": "cloud"}),))
-    assert result.isError
-    assert _tree(dirs) == before
+    assert not result.isError
+    assert "mode cloud" in _text(result)
+    status_file = dirs["config"] / "setup" / "status.json"
+    assert json.loads(status_file.read_text(encoding="utf-8"))["mode"] == "cloud"
+    if IS_WINDOWS:
+        return
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            if json.loads(status_file.read_text(encoding="utf-8")).get("state") == "failed":
+                break
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.05)
+    data = json.loads(status_file.read_text(encoding="utf-8"))
+    assert data["state"] == "failed" and data["failed_step"] == "build" and data["mode"] == "cloud"
+    assert data["credentials"] == "waiting for credentials"
+    assert (dirs["home"].parent / "open.record").read_text(encoding="utf-8").strip().endswith("credentials-opener.html")
+    assert not (dirs["config"] / "setup" / "credentials-opener.html").exists(), "the failed run closed its page and deleted the opener"
 
 
 @pytest.mark.asyncio

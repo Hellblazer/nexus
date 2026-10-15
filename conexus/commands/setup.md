@@ -30,19 +30,22 @@ The first builds the current version and the second converges the data. On the o
 
 ## The one question
 
-ASK THE USER FIRST, once, and act only on the answer. Show only the choices that are still open for what is missing (the CLI is installed already: no CLI-only; it cannot start: CLI only repairs it by building it again):
+ASK THE USER FIRST, once, and act only on the answer. Show only the choices that are still open for what is missing (the CLI is installed already: no CLI-only; it cannot start: CLI only repairs it by building it again, and Cloud or Local repair it and then set up a service):
 
 | Choice | What happens | Download |
 |---|---|---|
 | Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address and token for | about 0.7 GB down, 1.6 GB on disk |
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
 With Local, also ask whether the service should start when the user logs in: yes registers a login unit, and no means the user starts the service again after each reboot.
 
+With Cloud, setup opens a page in the user's browser where they type the service address and token themselves. Never ask for the token, and never put it in a message or a tool call: it must not pass through this conversation. Tell the user the page is coming and that they fill it in there.
+
 ## Step 3: call `setup` with the answer
 
-Call the `setup` tool with `mode` set to `local`, `cli-only` or `not-now`. For `local` pass `autostart` true only if the user said yes to starting at login; leave it out otherwise.
+Call the `setup` tool with `mode` set to `local`, `cloud`, `cli-only` or `not-now`. For `local` pass `autostart` true only if the user said yes to starting at login; leave it out otherwise.
 
 The call returns at once and the work continues in the background for several minutes. Tell the user it has started, then follow it with `setup_status`, not in a loop and no sooner than the interval each answer names. When the answer says setup is done, the user reconnects the `nexus` server (in Claude Code: `/mcp`, the server, Reconnect) or starts a new session before the Nexus tools appear.
 

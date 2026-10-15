@@ -102,11 +102,13 @@ NOT_INSTALLED: str = (
 #: The one question's choices, as the record gives them (RDR-228 "The one question"),
 #: with the sizes it measured. The session-start hook (``nx_setup_notice.py``) imports
 #: this text, so the hook's message and this server's instructions cannot differ. The
-#: Cloud row is not here until the credentials page exists (nexus-sv2wx.18).
+#: Cloud row arrived with the credentials page (nexus-sv2wx.18); a build without that page
+#: does not offer it.
 QUESTION_TABLE: str = (
     "| Choice | What happens | Download |\n"
     "|---|---|---|\n"
     "| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |\n"
+    "| Cloud | Install the CLI and connect it to a managed service you have an address and token for | about 0.7 GB down, 1.6 GB on disk |\n"
     "| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |\n"
     "| Not now | Nothing is installed | none |"
 )
@@ -115,6 +117,12 @@ QUESTION_TABLE: str = (
 LOCAL_FOLLOW_UP: str = (
     "With Local, also ask whether the service should start when the user logs in: yes registers a login unit, "
     "and no means the user starts the service again after each reboot."
+)
+
+#: What Cloud adds to the question: the token never passes through the conversation.
+CLOUD_FOLLOW_UP: str = (
+    "With Cloud, setup opens a page in the user's browser where they type the service address and token themselves: "
+    "never ask for the token, and never put it in a message or a tool call."
 )
 
 #: Said once to the model wherever the question is put: nothing is installed
@@ -128,17 +136,18 @@ BROKEN_PHRASE: str = "Nexus is installed but cannot start; setup repairs it"
 BROKEN_REPAIR: str = (
     "Setup repairs it by building the CLI again, up to about 0.7 GB to download and several minutes. "
     "ASK THE USER FIRST and act only on the answer: cli-only repairs the CLI, local repairs it and also sets up "
-    "or starts a service on this machine (up to about 1.3 GB), not-now leaves it."
+    "or starts a service on this machine (up to about 1.3 GB), cloud repairs it and connects it to a managed "
+    "service, not-now leaves it."
 )
 
 
 def question() -> str:
     """The one question for the model to put to the user: the table of choices, the
-    Local follow-up and what answering does."""
+    Local and Cloud follow-ups and what answering does."""
     return (
-        f"{ASK_FIRST} The choices:\n\n{QUESTION_TABLE}\n\n{LOCAL_FOLLOW_UP} "
+        f"{ASK_FIRST} The choices:\n\n{QUESTION_TABLE}\n\n{LOCAL_FOLLOW_UP} {CLOUD_FOLLOW_UP} "
         "Then, with the user's answer, call the setup tool with mode local (autostart true or false), "
-        "cli-only or not-now; the user can also run /conexus:setup."
+        "cloud, cli-only or not-now; the user can also run /conexus:setup."
     )
 
 
@@ -208,9 +217,9 @@ def setup_text(platform: str | None = None, broken: str | None = None) -> str:
 # These constants, STAGE_WAITS, the refusal and not-now texts, and ``render`` are kept
 # equal to ``nexus.mcp.setup_tools`` by tests/mcp/test_setup_tools.py. Edit both.
 
-#: What ``mode`` accepts. A managed service is not offered until its credentials
-#: page exists, so no text lists it.
-MODES: tuple[str, ...] = ("local", "cli-only", "not-now")
+#: What ``mode`` accepts. ``cloud`` is the managed service, whose credentials page is
+#: ``nx_setup.py``'s (nexus-sv2wx.18).
+MODES: tuple[str, ...] = ("local", "cloud", "cli-only", "not-now")
 
 SETUP_TITLE: str = "Set up Nexus"
 SETUP_STATUS_TITLE: str = "Nexus setup status"
@@ -220,9 +229,12 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download, 2.4 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
+    "up to about 1.3 GB to download, 2.4 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
+    "address and token for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
-    "user logs in; autostart is false unless the user says yes. Setup takes several minutes. "
+    "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
+    "where they type the service address and token themselves: never ask for the token, and never put it in a message "
+    "or a tool call. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
     "with setup_status, and do not call setup again while it runs. When nothing is missing, this starts nothing."
 )
@@ -238,8 +250,9 @@ SETUP_STATUS_DESCRIPTION: str = (
 )
 
 MODE_DESCRIPTION: str = (
-    "What the user chose: local, cli-only or not-now. local installs the CLI and a service on this machine; "
-    "cli-only installs the CLI alone; not-now installs nothing."
+    "What the user chose: local, cloud, cli-only or not-now. local installs the CLI and a service on this machine; "
+    "cloud installs the CLI and connects it to a managed service, whose address and token the user types into a page "
+    "that opens in their browser; cli-only installs the CLI alone; not-now installs nothing."
 )
 
 AUTOSTART_DESCRIPTION: str = (
@@ -295,13 +308,11 @@ STAGE_WAITS: dict[str, tuple[int, str]] = {
     "service-install": (10, "a few seconds"),
     "service-start": (15, "under a minute"),
     "init": (120, "2 to 5 minutes"),
+    "credentials": (30, "as long as the user takes to fill in the page, up to 10 minutes"),
     "verify": (30, "under a minute"),
 }
 _DEFAULT_WAIT: tuple[int, str] = (30, "a minute or so")
 
-CLOUD_REFUSAL: str = (
-    "Setting up a managed service is not offered by this build yet. Choose local, cli-only or not-now."
-)
 NOT_NOW_TEXT: str = (
     'Recorded "not now": nothing was installed. The record is read by the plugin\'s session-start check, '
     "not by this server, so any note from this server that no service is set up stays: it describes the machine. "
@@ -340,9 +351,7 @@ def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
 
 def mode_refusal(mode: str) -> str:
     """The answer to a ``mode`` the tools do not accept."""
-    if mode == "cloud":
-        return CLOUD_REFUSAL
-    return f"Unknown mode {mode!r}. Choose local, cli-only or not-now."
+    return f"Unknown mode {mode!r}. Choose local, cloud, cli-only or not-now."
 
 
 def render(view: dict[str, Any], *, started: bool | None = None) -> str:
@@ -449,7 +458,7 @@ def run_setup(arguments: Any, broken: str | None = None) -> str:
         raise SetupError("setup takes an object: mode, and for local optionally autostart.")
     mode = arguments.get("mode")
     if not isinstance(mode, str):
-        raise SetupError("setup needs a mode. Choose local, cli-only or not-now.")
+        raise SetupError("setup needs a mode. Choose local, cloud, cli-only or not-now.")
     autostart = arguments.get("autostart", False)
     if not isinstance(autostart, bool):
         raise SetupError("autostart must be true or false.")
