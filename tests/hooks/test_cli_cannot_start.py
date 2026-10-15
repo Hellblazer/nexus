@@ -75,7 +75,9 @@ def test_a_shebang_naming_a_dangling_symlink_cannot_start(lookup, tmp_path: Path
     link.parent.mkdir(parents=True)
     os.symlink(gone, link)
     exe = _script(tmp_path / "gen" / "bin" / "nx-mcp", f"#!{link}")
-    assert lookup.cannot_start(str(exe), windows=False) is not None
+    # "missing", not "not executable": a check that only follows the link through
+    # os.access would still say cannot start, for the wrong reason.
+    assert "is missing" in (lookup.cannot_start(str(exe), windows=False) or "")
 
 
 @posix_only("a shebang names the interpreter the kernel starts")
@@ -90,7 +92,7 @@ def test_a_shebang_naming_a_file_that_is_not_executable_cannot_start(lookup, tmp
     interp.write_text("not a program", encoding="utf-8")
     interp.chmod(0o644)
     exe = _script(tmp_path / "bin" / "nx-mcp", f"#!{interp}")
-    assert lookup.cannot_start(str(exe), windows=False) is not None
+    assert "not executable" in (lookup.cannot_start(str(exe), windows=False) or "")
 
 
 @posix_only("a shebang names the interpreter the kernel starts")
@@ -516,7 +518,7 @@ def test_a_polyglot_naming_a_dangling_link_cannot_start_even_while_pyvenv_cfg_ho
     os.symlink(tmp_path / "nowhere" / "python3.12", link)
     exe = write_uv_polyglot(gen / "bin" / "nx-hook", link)
     reason = lookup.cannot_start(str(exe), windows=False)
-    assert reason is not None and str(link) in reason, reason
+    assert reason is not None and str(link) in reason and "is missing" in reason, reason
 
 
 @posix_only("a polyglot's second line names the interpreter the shell execs")
