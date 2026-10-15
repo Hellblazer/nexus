@@ -160,6 +160,31 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
         click.echo(SERVICE_RESTART_HINT)
 
 
+@config_group.command("unset")
+@click.argument("key")
+def config_unset(key: str) -> None:
+    """Remove a saved credential from the config file.
+
+    Only the file is changed: an environment variable of the same name still
+    applies. Removing a key that is not saved is not an error.
+
+    \b
+      nx config unset service_token
+    """
+    key = key.strip().lower().replace("-", "_")
+    try:
+        removed = unset_credential(key)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    path = _global_config_path()
+    click.echo(f"Removed {key}  →  {path}" if removed else f"{key} was not saved in {path}; nothing to remove.")
+    env_var = CREDENTIALS[key]
+    if os.environ.get(env_var, ""):
+        click.echo(f"Note: {env_var} is set in the environment and still applies.", err=True)
+    if removed and key in RESTART_HINT_KEYS:
+        click.echo(SERVICE_RESTART_HINT)
+
+
 # ── get ───────────────────────────────────────────────────────────────────────
 
 @config_group.command("get")
@@ -325,6 +350,10 @@ def config_init() -> None:
         for key in env_token:
             click.echo(f"  Already set via environment: {CREDENTIALS[key]}")
         click.echo("  (skipping \u2014 unset the environment variable to override here)")
+        if "mint_token" in env_token and not (os.environ.get(CREDENTIALS["mint_tenant"], "") or get_credential("mint_tenant")):
+            # A mint credential needs its tenant even when the token itself comes from the environment.
+            tenant = click.prompt("\n  Tenant this mint credential is bound to", value_proc=_tenant_name, prompt_suffix=" > ")
+            set_credential("mint_tenant", tenant)
     else:
         click.echo(f"  {_SIGNUP['service_token']}")
         saved = [k for k in ("mint_token", "service_token") if get_credential(k)]

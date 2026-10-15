@@ -332,16 +332,49 @@ def test_config_init_refuses_a_tenant_with_whitespace_or_a_leading_dash_and_asks
 
 
 def test_config_init_skips_a_token_the_environment_already_holds(runner, fake_home, monkeypatch) -> None:
-    for name in ("NX_SERVICE_TOKEN", "NX_MINT_TOKEN"):
-        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
-        monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
-        monkeypatch.setenv(name, _SECRET)
-        result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\n")
-        assert result.exit_code == 0, result.output
-        assert name in result.output
-        assert _SECRET not in result.output
-        creds = _read_config(fake_home)["credentials"]
-        assert creds == {"service_url": "https://svc.example.com"}, "the environment wins; nothing about the token is saved"
+    monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
+    monkeypatch.delenv("NX_MINT_TENANT", raising=False)
+    monkeypatch.setenv("NX_SERVICE_TOKEN", _SECRET)
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\n")
+    assert result.exit_code == 0, result.output
+    assert "NX_SERVICE_TOKEN" in result.output and _SECRET not in result.output
+    creds = _read_config(fake_home)["credentials"]
+    assert creds == {"service_url": "https://svc.example.com"}, "the environment wins; nothing about the token is saved"
+
+
+def test_config_init_asks_the_tenant_of_a_mint_token_the_environment_holds(runner, fake_home, monkeypatch) -> None:
+    """A mint credential needs its tenant even when the token comes from NX_MINT_TOKEN."""
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("NX_MINT_TENANT", raising=False)
+    monkeypatch.setenv("NX_MINT_TOKEN", _SECRET)
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nacme\n")
+    assert result.exit_code == 0, result.output
+    assert "NX_MINT_TOKEN" in result.output and _SECRET not in result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com", "mint_tenant": "acme"}
+    monkeypatch.setenv("NX_MINT_TENANT", "from-env")
+    result = runner.invoke(main, ["config", "init"], input="\n")
+    assert result.exit_code == 0, result.output
+    assert "tenant this mint credential" not in result.output.lower(), "a tenant in the environment is not asked"
+
+
+def test_config_unset_removes_a_saved_credential_and_is_quiet_when_absent(runner, fake_home, monkeypatch) -> None:
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    _write_config(fake_home, {"credentials": {"service_url": "https://svc.example.com", "service_token": "old-static"}})
+    result = runner.invoke(main, ["config", "unset", "service_token"])
+    assert result.exit_code == 0, result.output
+    assert "Removed service_token" in result.output and "old-static" not in result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com"}
+    result = runner.invoke(main, ["config", "unset", "service-token"])
+    assert result.exit_code == 0 and "nothing to remove" in result.output
+
+
+def test_config_unset_refuses_an_unknown_key_and_names_an_environment_override(runner, fake_home, monkeypatch) -> None:
+    result = runner.invoke(main, ["config", "unset", "no_such_key"])
+    assert result.exit_code == 2 and "Unknown credential" in result.output
+    monkeypatch.setenv("NX_MINT_TOKEN", _SECRET)
+    _write_config(fake_home, {"credentials": {"mint_token": "saved"}})
+    result = runner.invoke(main, ["config", "unset", "mint_token"])
+    assert result.exit_code == 0 and "NX_MINT_TOKEN" in result.output and _SECRET not in result.output
 
 
 def test_config_init_skips_keys_already_in_env(runner, fake_home, monkeypatch) -> None:

@@ -1061,6 +1061,23 @@ def test_a_mint_credential_for_another_tenant_is_refused_and_the_bound_tenant_ma
     assert ok is False and "ignore the user" not in text
 
 
+def test_no_verdict_repeats_the_tenant_as_typed(service: Callable[..., FakeService]) -> None:
+    """Review N1: a token pasted into the tenant field must not reach the status file, and so the model, through
+    a verdict sentence. Every answer of the mint route is driven with a token-like tenant."""
+    mod = _load_module()
+    good = _token()
+    pasted = "pasted-" + secrets.token_urlsafe(24)
+    svc = service(good, whoami="forbidden", mint_tenant=pasted)
+    for answer in ("ok", "nobody", "ratelimit", "toolong", "other"):
+        svc.mint = answer
+        _ok, text, _kind = mod.check_pair(svc.url, good, pasted)
+        assert pasted not in text and good not in text, (answer, text)
+    svc.mint = "ok"
+    svc.mint_tenant = "acme"
+    _ok, text, _kind = mod.check_pair(svc.url, good, pasted)
+    assert pasted not in text and good not in text
+
+
 def test_a_rate_limited_mint_says_to_try_again_and_other_answers_are_reported_plainly(service: Callable[..., FakeService]) -> None:
     mod = _load_module()
     good = _token()
@@ -1548,40 +1565,84 @@ def test_the_status_of_a_run_killed_before_acceptance_is_unchanged(tmp_path: Pat
     assert "lost" not in (view.get("message", "") + view["next"]).lower()
 
 
+def _prior_status(box: Box, state: str, **extra: Any) -> None:
+    box.setup.mkdir(parents=True, exist_ok=True)
+    record = {"state": state, "mode": "cloud", "stage": "verify", "steps_done": ["build", "credentials"], **extra}
+    (box.setup / "status.json").write_text(json.dumps(record), encoding="utf-8")
+
+
 @pytest.mark.parametrize("kind", ["static", "mint"])
 def test_a_resumed_cloud_run_whose_credentials_are_saved_opens_no_page(tmp_path: Path, kind: str) -> None:
-    """Critique 6: the cloud step is skipped when the config already holds the address and a token."""
+    """Critique 6: a resume of a run that saved its credentials and then failed at a later step skips the page."""
     box = Box(tmp_path)
     box.layout()
     secret = "already-saved-" + secrets.token_urlsafe(8)
     body = f"  service_token: {secret}\n" if kind == "static" else f"  mint_token: {secret}\n  mint_tenant: acme\n"
     (box.config / "config.yml").write_text("credentials:\n  service_url: https://svc.example\n" + body, encoding="utf-8")
+    _prior_status(box, "failed", failed_step="service", cloud_saved=True)
     box.behave([{"prog": "nx", "match": ["doctor"], "out": "[✓] fine\n"}])
     assert box.start("cloud")["started"] is True
     final = box.wait_terminal(60)
     assert final["state"] == "done", (final, box.read_log())
     assert not box.open_record.exists() or not box.open_record.read_text(encoding="utf-8").strip(), "no page was opened"
     assert not (box.setup / _OPENER).exists()
-    assert [a for a in box.argvs() if a[1:3] == ["config", "set"]] == [], "nothing was saved again"
+    assert [a for a in box.argvs() if a[1:2] in (["config"],)] == [], "nothing was saved or removed again"
     assert "credentials" in final["steps_done"] and "credentials" not in final
-    assert "already saved" in final["message"].lower() and "nx config init" in final["message"]
+    assert "kept" in final["message"].lower() and "nx config init" in final["message"]
     assert secret not in json.dumps(final) and secret not in box.read_log()
 
 
-def test_a_saved_token_with_no_address_opens_no_page(tmp_path: Path) -> None:
-    """The page saves only its own kind and cannot remove the other, so any saved token skips it: a mint
-    credential saved beside an old ``service_token`` would leave the static token in force."""
+@pytest.mark.parametrize(
+    ("prior", "extra"),
+    [("done", {"cloud_saved": True}), ("doctor-failed", {"cloud_saved": True}), ("failed", {})],
+    ids=["after-a-finished-run", "after-nx-doctor-failed", "saved-by-hand-not-by-a-run"],
+)
+def test_saved_credentials_do_not_skip_the_page_outside_a_resume(tmp_path: Path, prior: str, extra: dict[str, Any]) -> None:
+    """Review N2: a new `setup cloud` call is how a user with no terminal replaces a saved credential, and a
+    doctor failure may be the credential itself; only a resume of a run that saved and failed later skips."""
     box = Box(tmp_path)
     box.layout()
-    secret = "old-static-" + secrets.token_urlsafe(8)
-    (box.config / "config.yml").write_text(f"credentials:\n  service_token: {secret}\n", encoding="utf-8")
+    (box.config / "config.yml").write_text(
+        "credentials:\n  service_url: https://svc.example\n  service_token: old\n", encoding="utf-8"
+    )
+    _prior_status(box, prior, **extra)
+    assert box.start("cloud")["started"] is True
+    _page(box)
+    _terminate(box.status()["pid"])
+
+
+def test_a_saved_token_with_no_address_opens_the_page(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    box.layout()
+    (box.config / "config.yml").write_text("credentials:\n  service_token: old\n", encoding="utf-8")
+    _prior_status(box, "failed", failed_step="service", cloud_saved=True)
+    assert box.start("cloud")["started"] is True
+    _page(box)
+    _terminate(box.status()["pid"])
+
+
+def test_saving_a_mint_credential_first_removes_a_saved_service_token(tmp_path: Path, service: Callable[..., FakeService]) -> None:
+    """Review N2: the CLI prefers a static service_token, so one left beside a new mint credential would stay in
+    force; the run removes the other kind's saved keys before saving, and only keys the file holds."""
+    box = Box(tmp_path)
+    good = _token()
+    svc = service(good, whoami="forbidden", mint_tenant="acme")
+    box.layout()
+    (box.config / "config.yml").write_text("credentials:\n  service_token: old-static\n", encoding="utf-8")
     box.behave([{"prog": "nx", "match": ["doctor"], "out": "[✓] fine\n"}])
     assert box.start("cloud")["started"] is True
+    _opener, address = _page(box)
+    _request(address)
+    _request(address, "POST", fields={"service_url": svc.url, "service_token": good, "tenant": "acme"})
     final = box.wait_terminal(60)
-    assert not (box.setup / _OPENER).exists()
-    assert [a for a in box.argvs() if a[1:3] == ["config", "set"]] == [], "nothing was saved"
-    assert "already saved" in final["message"].lower() and "nx config init" in final["message"]
-    assert secret not in json.dumps(final) and secret not in box.read_log()
+    assert final["state"] == "done", (final, box.read_log())
+    config_calls = [c["args"][1:3] for c in box.calls("nx") if c["args"][:1] == ["config"]]
+    assert config_calls[0] == ["unset", "service_token"], config_calls
+    assert ["unset", "mint_token"] not in config_calls and ["unset", "mint_tenant"] not in config_calls
+    assert [c for c in config_calls if c[0] == "set"] == [
+        ["set", "service_url"], ["set", "mint_tenant"], ["set", "mint_token"],
+    ]
+    assert box.status_file().get("cloud_saved") is True
 
 
 def test_a_saved_address_with_no_token_still_opens_the_page(tmp_path: Path) -> None:

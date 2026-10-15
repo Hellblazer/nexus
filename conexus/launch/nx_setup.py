@@ -964,7 +964,8 @@ def _bound_tenant(raw: bytes) -> str:
 
 def check_pair(url: str, token: str, tenant: str = "", *, deadline_s: float | None = None) -> CheckResult:
     """Check a service address, a token and, for a mint credential, its tenant. The sentence in the result is
-    for the user and holds neither the token nor anything of the page's address.
+    for the user and holds neither the token, nor the tenant as typed (a token pasted into the tenant field
+    would otherwise reach the status file and the model), nor anything of the page's address.
 
     ``GET /version`` (no token) must answer 200 with Nexus's version record: the service is there and says
     which version. The token then goes to :data:`TOKEN_ROUTE` alone, the one authenticated read-only route that
@@ -1062,21 +1063,21 @@ def _probe(base: str, host: str, token: str, tenant: str, end: float) -> CheckRe
         if not tenant:
             return CheckResult(
                 False,
-                f"The service at {host} knows this token and it is a mint credential, which belongs to one tenant: "
-                "enter the tenant as well.",
+                f"The service at {host} knows this token but does not take it as a service token, which is how a mint "
+                "credential answers. A mint credential belongs to one tenant: enter the tenant as well.",
             )
         code, raw = call(MINT_ROUTE, token, {"tenant": tenant, "ttl_seconds": MINT_TTL_SECONDS})
         if code == 200:
             return CheckResult(
-                True, f"The service at {host} answers (version {version}) and accepts the mint credential for tenant {tenant}.", KIND_MINT,
+                True, f"The service at {host} answers (version {version}) and accepts the mint credential with that tenant.", KIND_MINT,
             )
         if code == 403:
             bound = _bound_tenant(raw)
             named = f" The service names the tenant this token is bound to: {bound}." if bound else ""
             return CheckResult(
                 False,
-                f"The service at {host} knows this token but would not mint for tenant {tenant}: the token belongs to "
-                f"another tenant (or is not a mint credential).{named}",
+                f"The service at {host} knows this token but would not mint for the tenant entered: the token belongs "
+                f"to another tenant (or is not a mint credential).{named}",
             )
         if code == 429:
             return CheckResult(False, f"The service at {host} is limiting requests; try again in a moment.")
@@ -1839,7 +1840,7 @@ def _nx_after_build(run: _Run) -> str | None:
 
 
 def _execute(run: _Run) -> int:
-    if run.mode == MODE_CLOUD and not _credentials_saved(config_dir()):
+    if run.mode == MODE_CLOUD and not (run.data.get(CLOUD_SAVED) and _credentials_saved(config_dir())):
         failed = run.open_page()  # at the start of the run, so the user is asked while the build goes on
         if failed is not None:
             return failed
@@ -1898,17 +1899,35 @@ def _execute(run: _Run) -> int:
     )
 
 
+#: The status field a cloud run sets once it has saved what the page accepted. :func:`start` carries it into
+#: the next run only when this one failed or was interrupted at a later step (not at ``nx doctor``, which may
+#: have failed on the credential), so that resume skips the page. A new ``setup`` call with mode ``cloud`` after
+#: a finished run opens it again: the way a user without a terminal replaces a saved credential.
+CLOUD_SAVED = "cloud_saved"
+
+#: The keys each kind of credential is saved under; saving one kind removes the other's.
+_KIND_KEYS: dict[str, tuple[str, ...]] = {KIND_MINT: ("mint_token", "mint_tenant"), KIND_STATIC: ("service_token",)}
+
+
 def _credentials_saved(config: Path) -> bool:
-    """Whether the config file already holds a token of either kind (``service_token`` or ``mint_token``): what
-    an earlier run saved before it failed later, for instance at ``nx doctor``. Any saved token counts, with or
-    without an address, because the page saves only its own kind and has no verb to remove the other: saving a
-    mint credential beside an old ``service_token`` would leave the static token in force. Only the file is read;
-    the environment, which wins over it, is not what this run would have saved into."""
+    """Whether the config file holds a service address and a token of either kind (``service_token`` or
+    ``mint_token``). Only the file is read; the environment, which wins over it, is not what a run saved into."""
     try:
-        saved = _endpoint_resolve.read_config_yml_credentials(config, ("service_token", "mint_token"))
+        saved = _endpoint_resolve.read_config_yml_credentials(config, ("service_url", "service_token", "mint_token"))
     except Exception:  # noqa: BLE001 -- unreadable is "not saved": the page opens
         return False
-    return bool((saved.get("service_token") or "").strip() or (saved.get("mint_token") or "").strip())
+    return bool((saved.get("service_url") or "").strip()) and bool(
+        (saved.get("service_token") or "").strip() or (saved.get("mint_token") or "").strip()
+    )
+
+
+def _saved_keys(config: Path, keys: tuple[str, ...]) -> list[str]:
+    """The *keys* the config file holds a value for. Unreadable is none."""
+    try:
+        saved = _endpoint_resolve.read_config_yml_credentials(config, keys)
+    except Exception:  # noqa: BLE001
+        return []
+    return [k for k in keys if (saved.get(k) or "").strip()]
 
 
 def _cloud(run: _Run, nx: str) -> int | None:
@@ -1920,8 +1939,8 @@ def _cloud(run: _Run, nx: str) -> int | None:
     and a token no page was served and nothing is saved again. ``None`` means it went well."""
     if run.page is None:
         run.notes.append(
-            "A service token was already saved, so no credentials page was opened and nothing was saved again. To "
-            "replace it, the user runs `nx config init` in a terminal."
+            "The credentials an earlier run saved are kept, so no credentials page was opened. To replace them, if the "
+            "user agrees, call setup with mode cloud again once this run ends, or the user runs `nx config init` in a terminal."
         )
         run.step_done("credentials")
         return None
@@ -1934,20 +1953,31 @@ def _cloud(run: _Run, nx: str) -> int | None:
             f"in a terminal. Log: {run.log_path}",
             failed_step="credentials",
         )
-    steps: list[tuple[list[str], str | None, str]] = [(["service_url", held.url], None, "the service address")]
+    other = KIND_STATIC if held.kind == KIND_MINT else KIND_MINT
+    # The other kind's keys go first: a static service_token left beside a new mint credential would stay in
+    # force, since the CLI prefers it. Only keys the file holds are removed, so a CLI without `config unset` is
+    # asked for it only when there is something to remove.
+    steps: list[tuple[list[str], str | None, str]] = [
+        (["unset", key], None, f"removing the saved {key}") for key in _saved_keys(config_dir(), _KIND_KEYS[other])
+    ]
+    steps.append((["set", "service_url", held.url], None, "the service address"))
     if held.kind == KIND_MINT:
-        steps += [(["mint_tenant", held.tenant], None, "the tenant"), (["mint_token", "--stdin"], held.token, "the token")]
+        steps += [
+            (["set", "mint_tenant", held.tenant], None, "the tenant"),
+            (["set", "mint_token", "--stdin"], held.token, "the token"),
+        ]
     else:
-        steps += [(["service_token", "--stdin"], held.token, "the token")]
+        steps += [(["set", "service_token", "--stdin"], held.token, "the token")]
     try:
         for tail, secret, what in steps:
-            code, _ = run.cmd([nx, "config", "set", *tail], stdin_text=secret)
+            code, _ = run.cmd([nx, "config", *tail], stdin_text=secret)
             if code != 0:
-                return run.fail("credentials", f"saving {what} failed.")
+                return run.fail("credentials", f"{what} failed." if tail[0] == "unset" else f"saving {what} failed.")
     except OSError as exc:
-        return run.fail("credentials", f"nx config set could not start: {exc}")
+        return run.fail("credentials", f"nx config could not start: {exc}")
     assert run.page is not None
     run.page.mark_saved()
+    run.update(**{CLOUD_SAVED: True})
     run.step_done("credentials")
     return None
 
@@ -2289,6 +2319,13 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
         }
         if "init" in prior:
             base["init"] = prior["init"]
+        if (
+            prior.get(CLOUD_SAVED) and mode == MODE_CLOUD and prior.get("mode") == MODE_CLOUD
+            and prior.get("state") not in (DONE, DOCTOR_FAILED)
+        ):
+            # A resume keeps what the unfinished run saved. A finished run does not, and neither does one whose
+            # `nx doctor` failed, since the saved credential may be what failed: the page opens again.
+            base[CLOUD_SAVED] = True
         write_status(setup, base)
         argv = ["run", "--mode", mode, "--token", token] + (["--autostart"] if autostart else [])
         try:

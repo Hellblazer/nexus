@@ -3054,6 +3054,7 @@ nx config init
 | `list` | Show all config values (secrets masked to their first and last four characters) |
 | `get KEY` | Get single value (masked by default) |
 | `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form, or `KEY --stdin` / `KEY --from-file PATH`. |
+| `unset KEY` | Remove a saved credential from the config file. Removing a key that is not saved is not an error; an environment variable of the same name still applies, and `unset` says so. |
 
 **`get` flags:**
 
