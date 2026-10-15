@@ -383,10 +383,14 @@ def _shebang_interpreter_missing(program: Path) -> bool:
     absolute path that is missing or not executable, or ``/usr/bin/env <name>`` with
     no such ``<name>`` on the absolute ``PATH`` entries. Relative interpreters, ``env``
     with options or an assignment, and any file with no ``#!`` line are not judged.
+    ``uv``'s launcher for an interpreter path a shebang cannot hold (over 127
+    characters, or a space) is ``#!/bin/sh`` then ``'''exec' '<python>' "$0" "$@"``; the
+    interpreter named on that second line is the one judged (nexus-sv2wx.20).
     The plugin's ``_cli_lookup._shebang_problem`` states the same rule."""
     try:
         with open(program, "rb") as handle:
             head = handle.readline(_SHEBANG_BYTES)
+            second = handle.readline(_SHEBANG_BYTES) if head.startswith(b"#!") else b""
     except OSError:
         return False
     if not head.startswith(b"#!") or (len(head) >= _SHEBANG_BYTES and not head.endswith(b"\n")):
@@ -395,6 +399,16 @@ def _shebang_interpreter_missing(program: Path) -> bool:
     if not fields:
         return False
     interpreter = fields[0]
+    if os.path.basename(interpreter) == "sh" and len(fields) == 1 and os.path.isabs(interpreter):
+        if second.startswith(b"'''exec' ") and second.endswith(b"\n"):
+            import shlex  # noqa: PLC0415 — stdlib, deferred
+
+            try:
+                words = shlex.split(second.decode("utf-8", "replace"))
+            except ValueError:
+                words = []
+            if len(words) >= 2 and words[0] == "exec":
+                interpreter = words[1]
     if os.path.basename(interpreter) == "env":
         name = fields[1] if len(fields) > 1 else ""
         if not name or name.startswith("-") or "=" in name or os.path.dirname(name):

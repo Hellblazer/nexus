@@ -815,6 +815,7 @@ def test_a_missing_setup_process_in_broken_mode_says_cannot_start_not_not_instal
 def test_the_tool_call_hands_the_broken_reason_to_both_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = _standin()
     monkeypatch.setattr(mod, "setup_script", lambda: None)
+    _cli_is(mod, monkeypatch, "broken", _REASON)  # the poll asks the lookup again; without this it reads the host's own install
     server = mod.stand_in("nx-mcp", _REASON)
     for name, arguments in (("setup", {"mode": "cli-only"}), ("setup_status", {})):
         reply = mod.handle(server, {

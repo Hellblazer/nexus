@@ -25,7 +25,15 @@ from pathlib import Path
 
 import pytest
 from tests._module_seam import setattr_in
-from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
+from tests._platform import (
+    IS_WINDOWS,
+    install_windows_exe_fake,
+    long_dir,
+    posix_only,
+    prune_python,
+    scrubbed_env,
+    write_uv_polyglot,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SHIM = _ROOT / "conexus" / "hooks" / "scripts" / "nx_hook_shim.py"
@@ -126,6 +134,96 @@ def test_no_nx_hook_at_all_is_exit_0_with_a_notice(tmp_path: Path) -> None:
     assert len(r.stderr.decode().splitlines()) == 1, r.stderr
 
 
+# -- an nx-hook that is found and cannot start (nexus-sv2wx.20) ---------------------------------
+#
+# uv writes a console script as an sh polyglot when its install path is over 127 characters.
+# With the Python pruned, that script STARTS (the kernel runs the shell) and exits 126 or 127,
+# which the shim used to pass on as the hook's verdict: a failed SessionStart.
+
+
+def _shim(bindir: Path, *, tools: Path | None = None, verb: str = "mcp-connect-wait", **env: str):
+    environ = _no_cli_env(bindir) | env
+    if tools is not None:
+        environ["NX_TOOLS_DIR"] = str(tools)
+    return subprocess.run(
+        [sys.executable, str(_SHIM), verb], input=b"{}", capture_output=True, env=environ, timeout=30, check=False,
+    )
+
+
+def _assert_quiet_could_not_start(r: subprocess.CompletedProcess[bytes], *names: Path) -> None:
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert r.stdout == b""
+    lines = r.stderr.decode().splitlines()
+    assert len(lines) == 1, lines
+    assert "could not start" in lines[0] and "is not installed" not in lines[0], lines
+    for name in names:
+        assert str(name) in lines[0], (name, lines)
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+def test_a_polyglot_whose_interpreter_is_gone_is_exit_0_with_one_line(tmp_path: Path) -> None:
+    """No ``pyvenv.cfg`` near the script (a ``uv tool`` bin directory): only the polyglot's
+    second line says the interpreter is gone."""
+    gone = long_dir(tmp_path) / "bin" / "python"
+    bindir = tmp_path / "bin"
+    write_uv_polyglot(bindir / "nx-hook", gone)
+    _assert_quiet_could_not_start(_shim(bindir), gone)
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+def test_a_polyglot_in_a_pruned_generation_at_a_long_path_is_exit_0_with_one_line(tmp_path: Path) -> None:
+    """The journey's shape: the layout's generation is at a path over 127 characters, its
+    scripts are polyglots, and its Python was pruned. Through ``<tools>/current``."""
+    tools = tmp_path / "tools"
+    gen = long_dir(tools) / "gen-20260101T000000Z"
+    (gen / "bin").mkdir(parents=True)
+    gone = prune_python(gen, tmp_path / "uv" / "cpython-3.12-gone")
+    write_uv_polyglot(gen / "bin" / "nx-hook", gen / "bin" / "python")
+    os.symlink(gen, tools / "current")
+    (tmp_path / "bin").mkdir()
+    _assert_quiet_could_not_start(_shim(tmp_path / "bin", tools=tools), gone)
+
+
+@posix_only("a shebang names the interpreter the kernel starts")
+def test_a_shebang_script_whose_interpreter_is_gone_says_could_not_start_not_not_installed(tmp_path: Path) -> None:
+    """The shebang case already exited 0 (Popen's FileNotFoundError), but said the CLI
+    "is not installed", which is false and sends the user to install what is there."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "nx-hook"
+    fake.write_text(f"#!{tmp_path}/pruned/bin/python\nprint('never run')\n", encoding="utf-8")
+    fake.chmod(0o755)
+    _assert_quiet_could_not_start(_shim(bindir), tmp_path / "pruned" / "bin" / "python")
+
+
+@posix_only("an exec-format failure is a POSIX errno")
+def test_a_program_the_system_will_not_execute_is_exit_0_with_one_line(tmp_path: Path) -> None:
+    """Not judged by ``cannot_start`` (a binary has no shebang) and refused by the
+    system at the start: ``Popen`` raises ``OSError``, which used to end the shim in a
+    traceback and exit 1."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    junk = bindir / "nx-hook"
+    junk.write_bytes(b"\x7fELF" + bytes(64))
+    junk.chmod(0o755)
+    _assert_quiet_could_not_start(_shim(bindir), junk)
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+def test_a_working_polyglot_is_run_and_passes_its_stdio_through(tmp_path: Path) -> None:
+    """The decision is "cannot start", not "is a polyglot": a polyglot whose interpreter
+    is there runs, through the shell, as the entry that uv wrote."""
+    body = _FAKE.format(python="").split("\n", 1)[1]
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    write_uv_polyglot(bindir / "nx-hook", sys.executable, body)
+    r = subprocess.run(
+        [sys.executable, str(_SHIM), "mcp-connect-wait"], input=b'{"x":1}', capture_output=True,
+        env=_no_cli_env(bindir) | {"FAKE_MODE": "echo"}, timeout=30, check=False,
+    )
+    assert (r.returncode, r.stdout) == (0, b'{"x":1}'), r.stderr
+
+
 @posix_only("SIGTERM sent to the shim and forwarded to its nx-hook child; Windows has no signal delivery between processes")
 def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -> None:
     """hooks.json's timeout ends the shim with a signal; the child must not
@@ -183,6 +281,8 @@ def test_the_shim_runs_where_signal_has_no_sighup(monkeypatch: pytest.MonkeyPatc
             return b"verdict", b""
 
     setattr_in(monkeypatch, shim, "subprocess.Popen", lambda *a, **k: _Proc())
+    # A found program, not the host's own install: with none, the shim exits before the start.
+    monkeypatch.setattr(shim._cli_lookup, "resolve", lambda _name: "/fake/bin/nx-hook")
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}")))
     out = io.BytesIO()
     monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=out))

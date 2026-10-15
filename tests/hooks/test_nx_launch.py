@@ -21,7 +21,15 @@ import types
 from pathlib import Path
 
 import pytest
-from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, prune_python, scrubbed_env
+from tests._platform import (
+    IS_WINDOWS,
+    install_windows_exe_fake,
+    long_dir,
+    posix_only,
+    prune_python,
+    scrubbed_env,
+    write_uv_polyglot,
+)
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -520,6 +528,39 @@ def test_a_script_whose_shebang_interpreter_is_gone_cannot_start(tmp_path: Path,
         assert r.stdout == b"" and b"could not start" in r.stderr and str(link).encode() in r.stderr
     else:
         assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+@pytest.mark.parametrize("name", ["nx-hook", "nx-mcp"])
+def test_a_polyglot_whose_interpreter_is_gone_cannot_start(tmp_path: Path, name: str) -> None:
+    """uv writes a console script as ``#!/bin/sh`` plus an ``exec`` line when the install
+    path is over 127 characters (nexus-sv2wx.20). The kernel starts the shell, which then
+    exits 126 or 127 at its own exec, so the launcher saw a program that started and
+    failed. The generation holds no ``pyvenv.cfg``: the script's second line is the only
+    evidence, and it must read as the shebang case does."""
+    tools, gen = _layout(long_dir(tmp_path))
+    assert len(str(gen / "bin" / "python")) > 127
+    link = gen / "bin" / "python"
+    link.parent.mkdir(exist_ok=True)
+    os.symlink(tmp_path / "uv" / "cpython-3.12-pruned" / "bin" / "python3.12", link)
+    write_uv_polyglot(gen / "bin" / name, link, "print('never run')\n")
+    r = _run([name], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0, r.stderr
+    assert b"never run" not in r.stdout
+    if name == "nx-hook":
+        assert r.stdout == b"" and b"could not start" in r.stderr and str(link).encode() in r.stderr
+        assert len(r.stderr.decode().splitlines()) == 1, r.stderr
+    else:
+        assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+def test_a_polyglot_whose_interpreter_is_there_is_started(tmp_path: Path) -> None:
+    tools, gen = _layout(long_dir(tmp_path))
+    body = _FAKE.format(python="", marker="polyglot").split("\n", 1)[1]
+    write_uv_polyglot(gen / "bin" / "nx-hook", sys.executable, body)
+    r = _run(["nx-hook", "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert _report(r)["marker"] == "polyglot"
 
 
 def test_a_dangling_current_falls_through_to_path(tmp_path: Path) -> None:

@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
+import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
-from tests._platform import posix_only, prune_python
+from tests._platform import long_dir, posix_only, prune_python, uv_polyglot_script, write_uv_polyglot
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 
@@ -351,16 +354,21 @@ def _generation_fixture(root: Path, *, home: str, link: str, shebang: str) -> Pa
     first = {
         "none": None, "ok": f"#!{sys.executable}", "missing": f"#!{root / 'pruned' / 'python'}",
         "env-missing": "#!/usr/bin/env pythonx-not-here",
+        "polyglot-ok": None, "polyglot-missing": None,
     }[shebang]
+    polyglot = {"polyglot-ok": sys.executable, "polyglot-missing": str(root / "pruned" / "python")}.get(shebang)
     for name in ("nx", "nx-mcp"):
         exe = gen / "bin" / name
-        exe.write_bytes((first + "\nprint('x')\n").encode() if first else b"\x7fELF")
+        if polyglot is not None:
+            exe.write_text(uv_polyglot_script(polyglot), encoding="utf-8")
+        else:
+            exe.write_bytes((first + "\nprint('x')\n").encode() if first else b"\x7fELF")
         exe.chmod(0o755)
     return gen
 
 
 @pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
-@pytest.mark.parametrize("shebang", ["none", "ok", "missing", "env-missing"])
+@pytest.mark.parametrize("shebang", ["none", "ok", "missing", "env-missing", "polyglot-ok", "polyglot-missing"])
 @pytest.mark.parametrize("link", ["absent", "resolves", "dangles"])
 @pytest.mark.parametrize("home", ["ok", "gone", "nocfg", "nohomeline"])
 def test_the_plugin_and_the_cli_give_the_same_verdict_on_a_generation(
@@ -382,7 +390,7 @@ def test_the_plugin_and_the_cli_give_the_same_verdict_on_a_generation(
     # Not only agreement: each cell has its expected answer, so two wrong verdicts cannot agree.
     expected = (
         home == "gone"
-    ) if windows else ((home == "gone" and link == "dangles") or shebang in ("missing", "env-missing"))
+    ) if windows else ((home == "gone" and link == "dangles") or shebang in ("missing", "env-missing", "polyglot-missing"))
     assert plugin is expected
 
 
@@ -413,3 +421,172 @@ def test_the_one_documented_difference_the_plugin_judges_the_program_it_is_given
     _script(good, f"#!{tmp_path / 'pruned' / 'python'}")
     assert lookup.cannot_start(str(good), windows=False) is not None
     assert self_cmd._generation_interpreter_gone(gen, windows=False) is True
+
+
+# -- uv's sh polyglot launcher (nexus-sv2wx.20) -----------------------------------------------------
+#
+# ``uv`` writes a console script as ``#!/bin/sh`` plus a ``'''exec' '<python>' "$0" "$@"`` line when
+# the interpreter's path will not fit a shebang (over 127 characters, or a space). The kernel then
+# starts the shell, so the start succeeds and the shell fails at its own ``exec`` with 126 or 127:
+# not an OSError, and not a failure a caller can tell from the program's own. Found by the setup
+# journey on macOS, where a short TMPDIR hid it.
+
+
+def _wheel(dest: Path) -> Path:
+    """A wheel of one package with one console script, built by hand: ``uv pip install
+    --offline`` needs nothing from the network for it."""
+    dist = "tinypkg-0.1.0.dist-info"
+    files = {
+        "tinypkg/__init__.py": "def main():\n    return 0\n",
+        f"{dist}/METADATA": "Metadata-Version: 2.1\nName: tinypkg\nVersion: 0.1.0\n",
+        f"{dist}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        f"{dist}/entry_points.txt": "[console_scripts]\ntiny-hook = tinypkg:main\n",
+    }
+    files[f"{dist}/RECORD"] = "".join(f"{name},,\n" for name in [*files, f"{dist}/RECORD"])
+    whl = dest / "tinypkg-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(whl, "w") as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+    return whl
+
+
+@pytest.fixture
+def uv_installed_venv(tmp_path: Path) -> Path:
+    """A venv at a path over 127 characters with ``tiny-hook`` installed by the real ``uv``."""
+    uv = shutil.which("uv")
+    assert uv, "uv is not on PATH; it writes the script under test, so this is a failure, not a skip"
+    root = long_dir(tmp_path / "venvs")
+    env = {**os.environ, "UV_CACHE_DIR": str(tmp_path / "uv-cache"), "UV_NO_CONFIG": "1"}
+    wheel = _wheel(tmp_path)
+    for argv in (
+        [uv, "venv", "--allow-existing", "--python", sys.executable, str(root)],
+        [uv, "pip", "install", "--offline", "--python", str(root / "bin" / "python"), str(wheel)],
+    ):
+        done = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120, check=False)
+        assert done.returncode == 0, (argv[1:3], done.stderr[-400:])
+    return root
+
+
+@posix_only("uv writes the sh polyglot for POSIX shebangs; Windows has launcher executables")
+def test_the_polyglot_the_tests_build_is_the_one_uv_writes(uv_installed_venv: Path) -> None:
+    """Pins the fixture to the tool: the first three lines (the part that names the
+    interpreter) are the same text, so the other tests build what uv builds."""
+    real = (uv_installed_venv / "bin" / "tiny-hook").read_text(encoding="utf-8").splitlines()
+    mine = uv_polyglot_script(uv_installed_venv / "bin" / "python").splitlines()
+    assert real[:3] == mine[:3], real[:3]
+    assert real[0] == "#!/bin/sh" and real[1].startswith("'''exec' '"), real[:2]
+
+
+@posix_only("uv writes the sh polyglot for POSIX shebangs; Windows has launcher executables")
+def test_a_pruned_venv_with_a_script_uv_wrote_for_a_long_path_cannot_start_and_does_not_start_either(
+    lookup, uv_installed_venv: Path, tmp_path: Path,
+) -> None:
+    """Real uv, a venv path over 127 characters, its Python pruned (``prune_python``).
+    The script runs the shell, which exits 126 or 127; ``cannot_start`` says so first."""
+    script = uv_installed_venv / "bin" / "tiny-hook"
+    assert lookup.cannot_start(str(script), windows=False) is None, "a working venv starts"
+    assert subprocess.run([str(script)], capture_output=True, timeout=60, check=False).returncode == 0
+    gone = prune_python(uv_installed_venv, tmp_path / "uv" / "cpython-gone")
+    started = subprocess.run([str(script)], capture_output=True, timeout=60, check=False)
+    assert started.returncode in (126, 127), started.returncode  # not an OSError: the shell ran and failed
+    reason = lookup.cannot_start(str(script), windows=False)
+    assert reason is not None and str(gone) in reason, reason
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+def test_a_polyglot_naming_a_missing_interpreter_cannot_start(lookup, tmp_path: Path) -> None:
+    """The script sits in a directory with no ``pyvenv.cfg`` around it (a ``uv tool``
+    bin directory), so the script's own second line is the whole of the evidence."""
+    gone = long_dir(tmp_path) / "bin" / "python"
+    exe = write_uv_polyglot(tmp_path / "tool-bin" / "nx-hook", gone)
+    reason = lookup.cannot_start(str(exe), windows=False)
+    assert reason is not None and str(gone) in reason, reason
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+def test_a_polyglot_naming_a_dangling_link_cannot_start_even_while_pyvenv_cfg_home_is_there(
+    lookup, tmp_path: Path,
+) -> None:
+    """The state the journey found: the venv's ``home`` exists, so ``pyvenv.cfg`` says
+    nothing, and ``bin/python`` dangles. Only the polyglot's line can say it."""
+    home = tmp_path / "uv" / "cpython-3.12"
+    home.mkdir(parents=True)
+    gen = _venv(long_dir(tmp_path / "gens"), home=home)
+    link = gen / "bin" / "python"
+    os.symlink(tmp_path / "nowhere" / "python3.12", link)
+    exe = write_uv_polyglot(gen / "bin" / "nx-hook", link)
+    reason = lookup.cannot_start(str(exe), windows=False)
+    assert reason is not None and str(link) in reason, reason
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+def test_a_polyglot_naming_an_interpreter_that_exists_can_start(lookup, tmp_path: Path) -> None:
+    exe = write_uv_polyglot(long_dir(tmp_path) / "bin" / "nx-hook", sys.executable)
+    assert lookup.cannot_start(str(exe), windows=False) is None
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+def test_a_polyglot_naming_a_file_that_is_not_executable_cannot_start(lookup, tmp_path: Path) -> None:
+    interp = tmp_path / "python"
+    interp.write_text("not a program", encoding="utf-8")
+    interp.chmod(0o644)
+    exe = write_uv_polyglot(tmp_path / "bin" / "nx-hook", interp)
+    assert "not executable" in (lookup.cannot_start(str(exe), windows=False) or "")
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+def test_a_polyglot_path_with_a_space_and_a_quote_is_read_back_whole(lookup, tmp_path: Path) -> None:
+    """uv writes an embedded quote as ``'"'"'``; a path with a space is the other reason
+    uv writes a polyglot at all."""
+    alive_dir = tmp_path / "it's a dir"
+    alive_dir.mkdir()
+    alive = alive_dir / "python"
+    alive.symlink_to(Path(sys.executable))
+    assert "'\"'\"'" in uv_polyglot_script(alive), "the fixture quotes the way uv does"
+    assert lookup.cannot_start(str(write_uv_polyglot(tmp_path / "bin" / "a", alive)), windows=False) is None
+    dead = alive_dir / "pruned" / "python"
+    reason = lookup.cannot_start(str(write_uv_polyglot(tmp_path / "bin" / "b", dead)), windows=False)
+    assert reason is not None and str(dead) in reason, reason
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+def test_a_polyglot_written_with_double_quotes_the_way_pip_does_is_read_too(lookup, tmp_path: Path) -> None:
+    dead = tmp_path / "pruned" / "python"
+    exe = tmp_path / "bin" / "nx-hook"
+    exe.parent.mkdir()
+    exe.write_text(f"#!/bin/sh\n'''exec' \"{dead}\" \"$0\" \"$@\"\n' '''\nimport sys\n", encoding="utf-8")
+    exe.chmod(0o755)
+    assert str(dead) in (lookup.cannot_start(str(exe), windows=False) or "")
+
+
+@posix_only("a polyglot's second line names the interpreter the shell execs")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "#!/bin/sh\necho hi\n",                                    # a plain sh script
+        "#!/bin/sh\n",                                              # no second line
+        "#!/bin/sh\n'''exec' '/nowhere/python\n' '''\n",            # an unterminated quote
+        "#!/bin/sh\n'''exec' python3 \"$0\" \"$@\"\n' '''\n",         # relative: not judged
+        "#!/bin/sh\n'''exec' \n' '''\n",                            # no interpreter word
+        "#!/bin/sh\n'''exec' '/nowhere/python' \"$0\"",             # the line never ends
+        "#!/bin/sh -e\n'''exec' '/nowhere/python' \"$0\" \"$@\"\n",  # an sh with an option is not uv's launcher
+    ],
+    ids=["plain-sh", "one-line", "unterminated", "relative", "no-word", "no-newline", "sh-with-option"],
+)
+def test_an_sh_script_that_is_not_the_polyglot_is_not_judged(lookup, tmp_path: Path, text: str) -> None:
+    exe = tmp_path / "bin" / "nx-hook"
+    exe.parent.mkdir()
+    exe.write_text(text, encoding="utf-8")
+    exe.chmod(0o755)
+    assert lookup.cannot_start(str(exe), windows=False) is None
+
+
+@posix_only("links and a polyglot")
+def test_a_polyglot_in_a_pruned_generation_at_a_long_path_cannot_start(lookup, tmp_path: Path) -> None:
+    """The whole journey shape: a generation at a path over 127 characters whose scripts
+    are polyglots, its Python pruned the way ``prune_python`` prunes it."""
+    gen = _venv(long_dir(tmp_path / "tools") / "gen-20260101T000000Z", home=None, with_cfg=False)
+    gone = prune_python(gen, tmp_path / "uv" / "cpython-3.12-gone")
+    exe = write_uv_polyglot(gen / "bin" / "nx-hook", gen / "bin" / "python")
+    reason = lookup.cannot_start(str(exe), windows=False)
+    assert reason is not None and str(gone) in reason, reason

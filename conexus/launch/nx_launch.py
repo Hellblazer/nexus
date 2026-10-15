@@ -106,7 +106,7 @@ def _cannot_start(name: str, exe: str, reason: str) -> int:
     program fails with one line."""
     if name in SERVER_PROGRAMS:
         return serve_stand_in(name, reason)
-    sys.stderr.write(f"conexus: could not start {exe}: {reason}\n")
+    sys.stderr.write(_cli_lookup.cannot_start_note(exe, reason))
     return 0 if name in HOOK_PROGRAMS else 1
 
 

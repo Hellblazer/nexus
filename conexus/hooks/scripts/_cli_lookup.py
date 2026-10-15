@@ -179,6 +179,49 @@ def _venv_problem(exe: str, windows: bool) -> str | None:
     return None
 
 
+def _polyglot_interpreter(second: bytes) -> str | None:
+    """The interpreter named by line 2 of an ``sh`` polyglot launcher, or ``None``.
+
+    ``uv`` writes a console script's first line as ``#!/bin/sh`` instead of naming the
+    interpreter when the interpreter's path will not fit a shebang (longer than 127
+    characters, or holding a space; nexus-sv2wx.20, measured with uv 0.8.0)::
+
+        #!/bin/sh
+        '''exec' '/path/to/venv/bin/python' "$0" "$@"
+        ' '''
+
+    ``pip`` (distlib) writes the same shape with the path in double quotes. The shell
+    runs line 2 as ``exec <python> "$0" "$@"``, and Python reads the same line as an
+    empty string, a name and a string, so the file is both. The path is one shell word
+    in either quoting, which ``shlex`` reads back (``uv`` writes an embedded quote as
+    ``'"'"'``). A line that does not have that shape is not judged.
+    """
+    if not second.startswith(b"'''exec' ") or not second.endswith(b"\n"):
+        return None
+    import shlex  # noqa: PLC0415 -- lazy: only an sh polyglot needs it, and the session-start hook has 100 ms
+
+    try:
+        words = shlex.split(second.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    return words[1] if len(words) >= 2 and words[0] == "exec" else None
+
+
+def _interpreter_problem(interpreter: str) -> str | None:
+    """Why the interpreter path *interpreter* cannot be started, or ``None``.
+
+    It must exist and be executable; a dangling symlink, which is how ``uv`` leaves a
+    pruned interpreter, does not exist. A relative path is not judged.
+    """
+    if not os.path.isabs(interpreter):
+        return None
+    if not os.path.exists(interpreter):
+        return f"its interpreter ({interpreter}) is missing"
+    if not os.access(interpreter, os.X_OK):
+        return f"its interpreter ({interpreter}) is not executable"
+    return None
+
+
 def _shebang_problem(exe: str) -> str | None:
     """Why the script *exe* cannot be started, from its ``#!`` line, or ``None``.
 
@@ -188,10 +231,18 @@ def _shebang_problem(exe: str) -> str | None:
     name must be on ``PATH``). A relative interpreter, ``env`` with options or an
     assignment, and any file that does not start with ``#!`` are not judged. The
     whole line is read, up to :data:`_SHEBANG_BYTES`.
+
+    ``#!/bin/sh`` followed by the ``'''exec'`` line is ``uv``'s launcher for an
+    interpreter path a shebang cannot hold (:func:`_polyglot_interpreter`). The kernel
+    starts the shell, which succeeds; the shell then fails at its own ``exec`` with 126
+    or 127, after the caller has already started a process and cannot tell the failure
+    from the program's own. The interpreter on line 2 is judged by the same rule as a
+    shebang's, so a pruned one reads as "cannot start" behind either launcher.
     """
     try:
         with open(exe, "rb") as handle:
             head = handle.readline(_SHEBANG_BYTES)
+            second = handle.readline(_SHEBANG_BYTES) if head.startswith(b"#!") else b""
     except OSError:
         return None
     if not head.startswith(b"#!"):
@@ -207,13 +258,11 @@ def _shebang_problem(exe: str) -> str | None:
         if not name or name.startswith("-") or "=" in name or os.path.dirname(name):
             return None
         return None if _exec_path.which_off_cwd(name) else f"it needs `{name}`, which is not on PATH"
-    if not os.path.isabs(interpreter):
-        return None
-    if not os.path.exists(interpreter):
-        return f"its interpreter ({interpreter}) is missing"
-    if not os.access(interpreter, os.X_OK):
-        return f"its interpreter ({interpreter}) is not executable"
-    return None
+    if os.path.basename(interpreter) == "sh" and len(fields) == 1 and os.path.isabs(interpreter):
+        named = _polyglot_interpreter(second)
+        if named is not None:
+            return _interpreter_problem(named)
+    return _interpreter_problem(interpreter)
 
 
 def cannot_start(exe: str, *, windows: bool | None = None) -> str | None:
@@ -232,9 +281,10 @@ def cannot_start(exe: str, *, windows: bool | None = None) -> str | None:
     matrix, so they cannot disagree). Windows: ``pyvenv.cfg``'s ``home`` is not a
     directory. POSIX: ``home`` is not a directory AND a ``python*`` link in the venv
     dangles (:func:`_venv_problem`), or the program's own shebang names an
-    interpreter that is missing (:func:`_shebang_problem`). The path is checked as
-    given and, when it is a link, as it resolves. *windows* selects the Windows
-    branch (no shebang, no links) for a test.
+    interpreter that is missing (:func:`_shebang_problem`; for ``uv``'s ``sh``
+    polyglot, the interpreter on its second line, nexus-sv2wx.20). The path is
+    checked as given and, when it is a link, as it resolves. *windows* selects the
+    Windows branch (no shebang, no links) for a test.
     """
     windows = (os.name == "nt") if windows is None else windows
     try:
@@ -257,6 +307,13 @@ def missing_note(program: str, what: str) -> str:
         f"conexus: `{program}` is not installed (not in the Nexus install "
         f"directory, not on PATH), so {what} is skipped.\n"
     )
+
+
+def cannot_start_note(exe: str, reason: str) -> str:
+    """The one line written when the program at *exe* is found and cannot start for
+    *reason*, and what it would have done is skipped. The launcher and the hook shim
+    say it the same way."""
+    return f"conexus: could not start {exe}: {reason}\n"
 
 
 def project_dir(payload: bytes) -> str | None:

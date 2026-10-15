@@ -36,7 +36,15 @@ from pathlib import Path
 
 import pytest
 
-from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake, prune_python, scrubbed_env
+from tests._platform import (
+    WINDOWS_SHEBANG,
+    install_windows_exe_fake,
+    long_dir,
+    posix_only,
+    prune_python,
+    scrubbed_env,
+    write_uv_polyglot,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _HOOK = _ROOT / "conexus" / "hooks" / "scripts" / "nx_setup_notice.py"
@@ -326,6 +334,22 @@ def test_a_cli_that_cannot_start_beats_a_usable_service(tmp_path: Path) -> None:
     make Nexus work."""
     text = _says(_run(_build(_dirs(tmp_path), _cli_cannot_start, _service_usable)))
     assert text is not None and _BROKEN_PHRASE in text
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+def test_a_polyglot_cli_whose_interpreter_is_gone_is_state_2(tmp_path: Path) -> None:
+    """The setup journey's miss (nexus-sv2wx.20): uv writes the generation's scripts as sh
+    polyglots when its path is over 127 characters, and the hook read the script as a
+    working program. No ``pyvenv.cfg`` is near it, so the second line is the evidence."""
+    dirs = _dirs(tmp_path)
+    gen = long_dir(dirs["tools"]) / "gen-20260101T000000Z"
+    (gen / "bin").mkdir(parents=True)
+    link = gen / "bin" / "python"
+    os.symlink(tmp_path / "uv" / "cpython-3.12-pruned" / "bin" / "python3.12", link)
+    write_uv_polyglot(gen / "bin" / "nx-mcp", link, "print('real')\n")
+    _point_current(dirs["tools"], gen)
+    text = _says(_run(dirs))
+    assert text is not None and _BROKEN_PHRASE in text, text
 
 
 def test_a_cli_that_cannot_start_also_reports_a_failed_or_interrupted_last_run(tmp_path: Path) -> None:
