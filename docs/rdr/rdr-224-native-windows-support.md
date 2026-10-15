@@ -157,9 +157,14 @@ and blocks unsigned code that has no cloud reputation, with no override.
 We could not reproduce that: on two clean Windows 11 installs with Smart App
 Control on, nothing unsigned was blocked, including a program downloaded by a
 browser (§ Key Discoveries). The exposure is therefore documented but
-unmeasured, not disproven: other builds and physical hardware were not tested. Enterprise application-control
-policies (WDAC, AppLocker) need a trusted signature or an administrator
-allowlist regardless. Signing is the only mitigation for all of these. Phase 0
+unmeasured, not disproven: other builds and physical hardware were not tested.
+Enterprise application-control policies (WDAC, AppLocker) were measured on
+2026-10-13 and 2026-10-15: with their default rules enforced the install fails,
+and with an administrator's path rules for the install's folders under the
+user's profile the gate passes 5 of 5 with nothing signed (§ Key Discoveries;
+`docs/windows-install.md` lists the rules). Path rules trust whatever is placed
+in those folders, and an administrator who wants publisher rules instead needs
+signed binaries. Signing is the only mitigation that covers all of these. Phase 0
 Step 0.2 settled it on 2026-10-05: signing is deferred (nexus-dj01b), no route
 is chosen and no identity validation has started, so the first Windows release
 ships unsigned and Gap 6 is an accepted open risk (T2 `224-decisions`).
@@ -417,10 +422,16 @@ bundle, the Python client, the plugin, and the release workflow.
   group, and `GenerateConsoleCtrlEvent` requires the caller to share the
   console of the target process group (Microsoft Learn, as summarised by the
   spike, not re-fetched). T2 `224-research-23`.
-- **Assumed** — Enterprise policies (WDAC, AppLocker) need a trusted signature
-  or an administrator allowlist; Defender's machine-learning checks may flag
-  an unsigned native binary that extracts DLLs. Neither is tested. T2
-  `224-research-12`.
+- **Verified** (spike, 2026-10-13 and 2026-10-15, clean guests, standard
+  account): Enterprise policies (AppLocker, WDAC) block the unsigned install
+  under their default rules, and an administrator allowlist of path rules for
+  the install's folders is enough: the gate passed 5 of 5 under enforced
+  AppLocker executable rules and under WDAC's `DefaultWindows_Enforced` policy,
+  with nothing signed. Not measured: script enforcement on, DLL rules, update
+  and removal under the policy. T2 `224-research-34`, which supersedes the
+  policy half of `224-research-12`.
+- **Assumed** — Defender's machine-learning checks may flag an unsigned native
+  binary that extracts DLLs. Not tested. T2 `224-research-12`.
 
 Measured at implementation, 2026-10-05, on qwentescence (native Windows 11, hand
 runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
@@ -2040,3 +2051,8 @@ Right-sized for an Architecture record that replaces an accepted direction.
   `b16a58f1c`); a test fails against the old order. The rerun of that job was
   cancelled by a Windows Update restart of qwentescence (update service, 05:29
   to 05:31 UTC) and passed when run again.
+- 2026-10-15: Gap 6 and Key Discoveries brought in line with the AppLocker
+  and WDAC measurements: the research-round-2 claim that these policies need a
+  signature or an allowlist is now Verified for the allowlist (path rules
+  suffice, nothing signed; T2 `224-research-34`), and only the Defender
+  machine-learning question stays Assumed (T2 `224-research-12`).
