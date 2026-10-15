@@ -171,6 +171,23 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "container's own bundled PG/engine; its mailbox_send writes go to "
            "that engine's tuple space and nowhere else.",
     ),
+    # nexus-ly9c2 / nexus-4mptw: the tool-loading A/B on chas. seed.sh runs
+    # inside the capture container against the engine `nx init --no-autostart`
+    # made there, before the image is committed; the two .py sites are tool
+    # names in string sets (a scorer's expectations, an in-container patch).
+    "tests/e2e/prefix-capture/ab/seed.sh": (
+        4, "CONTAINER: run inside the A/B capture container to seed the engine "
+           "its own `nx init` provisioned, before `docker commit`; no other "
+           "engine is reachable from there.",
+    ),
+    "tests/e2e/prefix-capture/ab/score.py": (
+        1, "READ-ONLY: `store_put` is a tool name in the scorer's expected-call "
+           "sets; it reads proxy logs and writes nothing.",
+    ),
+    "tests/e2e/prefix-capture/ab/tuplespace/arm_c8_core_meta.py": (
+        1, "CONTAINER: `store_put` is a tool name in the always-load set this "
+           "file patches into the container's installed core.py; it calls no tool.",
+    ),
     "tests/e2e/migration-rehearsal/rehearse_acquire.sh": (
         3, "CONTAINER: runs INSIDE the container (own header comment: "
            "\"PUBLISHED-ARTIFACT acquire gate\"); provisions its own bundled "

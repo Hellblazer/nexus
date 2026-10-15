@@ -1,0 +1,1 @@
+Read the aurora project memory entry titled db-pool-sizing-decision and tell me the pool size it records.

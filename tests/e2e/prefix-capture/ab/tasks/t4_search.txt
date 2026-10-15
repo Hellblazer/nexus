@@ -1,0 +1,1 @@
+Search the stored knowledge for how the stream processor treats events that arrive after the watermark. What is the allowed lateness?

@@ -1,0 +1,5 @@
+Do exactly these steps, one after another, never in parallel, and nothing else.
+1. Use the Agent tool with subagent_type "conexus:code-review-expert" and the prompt: "Report the first line of README.md in the current directory. Read only that file. Reply with the line and nothing else." Wait for its result.
+2. Use the Agent tool with subagent_type "conexus:code-review-expert" and the prompt: "Report the first line of AGENTS.md in the current directory. Read only that file. Reply with the line and nothing else." Wait for its result.
+3. Use the Agent tool with subagent_type "Explore" and the prompt: "Report the first line of CHANGELOG.md in the current directory. Read only that file. Reply with the line and nothing else." Wait for its result.
+4. Reply with the single word: done

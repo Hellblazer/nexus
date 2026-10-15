@@ -1,0 +1,1 @@
+Use the Agent tool to dispatch exactly one general-purpose subagent with this task: "Count the lines in src/cli.py and report the number." Then tell me the number it reported. Do not do the count yourself.

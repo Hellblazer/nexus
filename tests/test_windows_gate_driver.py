@@ -450,11 +450,11 @@ case "$cmd" in
         if [[ "$cmd" == *" -Inner "* ]]; then
           i="${cmd#* -Inner }"; i="${i%% *}"
           echo "$i" >> "$FAKE_ROOT/inner.log"
-          if [[ "${FAKE_SLOW_INNER:-}" == "$i" ]]; then touch "$FAKE_ROOT/slow-started"; sleep "${FAKE_SLEEP:-60}"; fi
+          if [[ "${FAKE_SLOW_INNER:-}" == "$i" ]]; then sh -c 'touch "$1"; exec sleep "$2"' _ "$FAKE_ROOT/slow-started" "${FAKE_SLEEP:-60}"; fi
           if [[ "${FAKE_FAIL_STEP:-}" == "$i" ]]; then echo "NXG-RESULT: FAIL $i broke"; else echo "NXG-RESULT: ok"; fi
         fi
         if [[ "$cmd" == *" -Collect yes"* ]]; then
-          if [[ "$cmd" != *" -Inner "* && -n "${FAKE_COLLECT_SLEEP:-}" ]]; then touch "$FAKE_ROOT/collecting"; sleep "$FAKE_COLLECT_SLEEP"; fi
+          if [[ "$cmd" != *" -Inner "* && -n "${FAKE_COLLECT_SLEEP:-}" ]]; then sh -c 'touch "$1"; exec sleep "$2"' _ "$FAKE_ROOT/collecting" "$FAKE_COLLECT_SLEEP"; fi
           mkdir -p "$rundir/out"
           if [[ -n "${FAKE_VERDICT_FILE:-}" ]]; then cp "$FAKE_VERDICT_FILE" "$rundir/out/verdict.txt"; fi
           echo "collected verdict.txt"

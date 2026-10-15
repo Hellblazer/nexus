@@ -1,0 +1,1 @@
+Read the full knowledge document titled exactly-once-sinks and summarize it in one sentence.

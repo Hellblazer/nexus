@@ -1,0 +1,1 @@
+Save a permanent knowledge note under the stream-processing subject, titled checkpoint-interval, with this text: Checkpoint every 30 seconds; longer intervals broke the recovery-time objective.
