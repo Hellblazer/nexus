@@ -630,9 +630,15 @@ later. Its requirements:
   is in no other file, not in the log and not in a tool result.
 - The page has two fields, service address and token, and one button. The
   token field is a password field with autocomplete off.
-- On submit the process checks the pair against the service's `/health` and
-  `/version` routes at the address given. An `http` address is accepted as
-  well as `https` (Sam, 2026-10-12: no https requirement).
+- On submit the process checks the pair at the address given: `/health` and
+  `/version` say the service answers and which version it is, and the token is
+  checked against one authenticated, read-only route under `/v1` that refuses a
+  wrong token on every engine (Sam, 2026-10-15). `/health` and `/version` cannot
+  carry the token check: both are unauthenticated in the engine, so a local or
+  self-hosted engine accepts any token there, and only the managed service's
+  public edge refuses a wrong token, on `/health` alone (measured 2026-10-14,
+  T2 `nexus_rdr/228-research-36`). An `http` address is accepted as well as
+  `https` (Sam, 2026-10-12: no https requirement).
 - A pair that passes is held in the setup process's memory, the page says
   it was accepted, and the process stops listening. The pair is saved in
   step 3, after the build, because saving needs the CLI. The token goes to
