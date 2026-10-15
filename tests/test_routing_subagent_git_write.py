@@ -610,7 +610,7 @@ def test_a_hostile_300kb_command_is_scanned_in_linear_time(shared_repo):
 #: Each runs its git on chas only.
 _CHAS_ALLOWED = [
     "ssh chas-test 'git -C ~/src/nexus-wt/x add -- tests/e2e/prefix-capture/proxy.py'",
-    "ssh chas-test 'W=~/src/nexus-wt/x; git -C $W add -- a b && git -C $W commit -m msg' </dev/null",
+    "ssh -n chas-test 'W=~/src/nexus-wt/x; git -C $W add -- a b && git -C $W commit -m msg'",
     "ssh chas-test 'cd ~/src/nexus && git worktree add ../nexus-wt/r r'",
     'ssh chas "git -C /home/nxtest/src/nexus-wt/x commit -m msg"',
     "ssh -o ConnectTimeout=5 chas-test 'git -C x commit -m m'",
@@ -677,6 +677,14 @@ _CHAS_DENIED = [
     "ssh chas-test 'scp f laptop:/tmp/y; git add f'",
     # Refused conservatively: any $ outside single quotes, even a plain one.
     'ssh chas-test "git -C ' + D + 'HOME/src/nexus-wt/x add f"',
+    # Review round 3 (nexus-yc7fs): the shell removes a redirection word, so an
+    # option after it reached ssh unchecked. Every < is refused; use ssh -n.
+    "ssh chas-test </dev/null -o'ProxyCommand=x' 'git add f'",
+    "ssh chas-test < /dev/null -oProxyCommand=x 'git add f'",
+    "ssh chas-test <<< hi -oProxyCommand=x 'git add f'",
+    "ssh -n chas-test 0</dev/null -F x 'git add f'",
+    "ssh chas-test 'git add f' </dev/tcp/127.0.0.1/1",
+    "ssh chas-test 'git add f' </dev/null",
 ]
 
 

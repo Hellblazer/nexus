@@ -1352,14 +1352,16 @@ _SAFE_SSH_O_VALUE_RE = re.compile(r"[A-Za-z0-9]+")
 #: The only characters accepted outside single quotes. Everything else that a
 #: shell treats specially there is refused: ``$`` (every expansion), backtick,
 #: ``( ) { } [ ] * ? ~ ^ ! #`` (substitution, brace and glob expansion, zsh
-#: flags and qualifiers, history, comments), backslash, ``; & | >`` and line
+#: flags and qualifiers, history, comments), backslash, ``; & | < >`` and line
 #: breaks. With those gone, zsh and bash both read each word literally, so the
-#: words shlex sees are exactly the words ssh receives. ``<`` stays: it only
-#: feeds a file to ssh's stdin (``</dev/null``), and with ``>`` and ``&``
-#: refused it cannot form ``<>`` or ``<&``. ``=`` stays for ``-oKey=value``;
-#: zsh's word-initial ``=cmd`` only expands to a command's path.
+#: words shlex sees are exactly the words ssh receives. ``<`` is refused too
+#: (review round 3): the shell removes a redirection word, so in ``ssh chas-test
+#: </dev/null -oProxyCommand=...`` the loop below took ``</dev/null`` for the
+#: remote command while ssh received the option. ``ssh -n`` does what
+#: ``</dev/null`` did. ``=`` stays for ``-oKey=value``; zsh's word-initial
+#: ``=cmd`` only expands to a command's path, which never starts with ``-``.
 _LITERAL_CHARS: frozenset[str] = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t_./:@,+-=<"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t_./:@,+-="
 )
 
 #: Remote commands that would leave chas for another host. A best-effort list:
