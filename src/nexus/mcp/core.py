@@ -11552,7 +11552,7 @@ async def nx_answer(
             # nexus-nyry9.5 review-fix (code-review IMPORTANT, T2
             # review-nexus-nyry9.5): clamp to the same ceiling every
             # other paging/query-result path in this codebase honours
-            # (AGENTS.md § External service limits) -- a plan-supplied
+            # (.claude/rules/external-service-limits.md § External service limits) -- a plan-supplied
             # or caller-influenced ``limit`` must not bypass it just
             # because this path skips ``plan_run``.
             limit = max(1, min(limit, MAX_QUERY_RESULTS))

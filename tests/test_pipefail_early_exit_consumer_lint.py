@@ -811,7 +811,7 @@ def test_scope_precondition_a_script_with_the_hazard_shape_but_no_pipefail_is_no
 # Code session) to safely verify the fix did not change behavior --
 # blind-editing pipefail-gated control flow in the release-battery
 # rehearsal scripts (tests/e2e/migration-rehearsal/*.sh, the pre-tag
-# REQUIRED gate per AGENTS.md "Engine-service release") without executing
+# REQUIRED gate per .claude/rules/releases-and-engine.md "Engine-service release") without executing
 # the actual harness risks silently breaking a release gate, which is a
 # worse outcome than a tracked, rationale-carrying exemption. Follow-up:
 # nexus-wbeyi itself already tracked the two since-deleted local-index gate
@@ -917,7 +917,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
         # this exemption set).
         ("service/linux-native-verify.sh", ('set -e', 'echo "=== container: $(native-image --version | head -1) ==="')),
         # --- tests/e2e/fresh-install-mvv.sh (2 entries): release-battery
-        # gate (AGENTS.md "Cutting a release" step 1b); needs a real
+        # gate (.claude/rules/releases-and-engine.md "Cutting a release" step 1b); needs a real
         # fresh-HOME wheel install to safely verify a rewrite of its
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no

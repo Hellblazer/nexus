@@ -59,10 +59,17 @@ _NAMED_POLICIES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+#: Project instructions Claude Code loads: AGENTS.md plus the path-scoped
+#: rules its situational sections moved to (2026-10-15), e.g. CI Cost
+#: Discipline in .claude/rules/ci-and-runners.md.
+RULES_DIR = REPO_ROOT / ".claude" / "rules"
+
+
 def _headings() -> list[str]:
     return [
         line.strip()
-        for line in AGENTS_MD.read_text().splitlines()
+        for doc in (AGENTS_MD, *sorted(RULES_DIR.glob("*.md")))
+        for line in doc.read_text().splitlines()
         if line.startswith("##")
     ]
 

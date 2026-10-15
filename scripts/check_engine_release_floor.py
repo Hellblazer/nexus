@@ -1061,7 +1061,7 @@ def check_floor(
             print(
                 f"PAIRED MODE: cloud reports release_version {deployed!r}, behind floor v"
                 f"{floor}. Expected pre-deploy under the paired-release choreography -- "
-                "the deploy fires at client-tag push (AGENTS.md § Cutting a release, step "
+                "the deploy fires at client-tag push (.claude/rules/releases-and-engine.md § Cutting a release, step "
                 "0), not before this tag exists. Pairing named via --paired-deploy.\n"
                 "POST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy "
                 "once the deploy lands, to confirm the cloud engine actually converged -- "

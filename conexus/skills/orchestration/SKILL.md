@@ -156,7 +156,7 @@ dispatch below.
 - Design gate first: when a plan marks an item DESIGN DECISION FIRST, the orchestrator locks the design-of-record in T1 before any code dispatch; deviations from a plan's recommendation need the human's nod, named fallbacks do not.
 - Review at every seam: each arc gets the stacked dual review independently; cross-arc integration points get named in reviewer briefs.
 - Commit order: arcs commit pathspec-limited in dependency order (lib contract before doc text referencing it), one arc per commit.
-- service/ builds: one builder at a time. Share a mutable build-output directory across agents and serialize around it, the way you would a database migration or a generated-code directory — parallelizing it corrupts the build mid-way, it doesn't just race harmlessly. This repo's own mechanics (a build-lease script, the exact env vars, which lint enforces coverage) are nexus-specific and live in this repo's own AGENTS.md § Engine-service release, not restated here.
+- service/ builds: one builder at a time. Share a mutable build-output directory across agents and serialize around it, the way you would a database migration or a generated-code directory — parallelizing it corrupts the build mid-way, it doesn't just race harmlessly. This repo's own mechanics (a build-lease script, the exact env vars, which lint enforces coverage) are nexus-specific and live in this repo's own .claude/rules/releases-and-engine.md § Engine-service release, not restated here.
 
 ## Quick Routing
 
