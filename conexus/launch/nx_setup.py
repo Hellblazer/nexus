@@ -1840,6 +1840,14 @@ def _nx_after_build(run: _Run) -> str | None:
     return hit if hit is not None and _is_nexus_cli(run, hit) else None
 
 
+#: Added to a failed ``nx doctor``'s next step in mode cloud: the saved credential may be what failed, and a new
+#: run opens the page again (only a resume of an unfinished run skips it), which a user with no terminal needs.
+_CLOUD_DOCTOR_NOTE = (
+    " If the user agrees and the service address, token or tenant may be wrong, call setup with mode cloud "
+    "again: it opens the credentials page again."
+)
+
+
 def lockstep_marker_path() -> Path:
     """The version-lockstep hook's marker, the CLI version last confirmed to match the plugin (the same path
     ``version_lockstep_hook.marker_path`` and ``version_lockstep_action.marker_path`` read and write)."""
@@ -1931,7 +1939,8 @@ def _execute(run: _Run) -> int:
     rows = _doctor_rows(text)
     return run.end(
         DOCTOR_FAILED, "nx doctor reported problems." if code is not None else "nx doctor timed out.",
-        f"Run `nx doctor` in a terminal to see the failing rows. Log: {run.log_path}",
+        f"Run `nx doctor` in a terminal to see the failing rows.{_CLOUD_DOCTOR_NOTE if run.mode == MODE_CLOUD else ''} "
+        f"Log: {run.log_path}",
         doctor="fail", doctor_failing=rows,
     )
 

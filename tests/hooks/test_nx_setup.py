@@ -63,7 +63,7 @@ MARKER = {marker!r}
 
 def log(event, **extra):
     rec = {{"ev": event, "prog": PROG, "marker": MARKER, "args": sys.argv[1:], "pid": os.getpid(),
-            "t": time.time(), "cwd": os.getcwd(),
+            "t": time.time(), "cwd": os.getcwd(), "torch": os.environ.get("UV_TORCH_BACKEND"),
             "probe": PROG == "nx" and sys.argv[1:] in (["--version"], ["self", "install", "--bootstrap", "--dry-run"])}}
     rec.update(extra)
     with open(os.environ["FAKE_LOG"], "a") as f:
@@ -488,6 +488,9 @@ def test_cli_only_builds_and_downloads_no_service_files(box: Box) -> None:
     box.start("cli-only")
     done = box.wait_terminal()
     assert box.argvs() == [["uv", *_BUILD]]
+    build = box.calls("uv")[0]
+    # The build is given CPU torch on Linux (UV_TORCH_BACKEND) and nothing about torch elsewhere.
+    assert build["torch"] == ("cpu" if sys.platform.startswith("linux") else None), build
     assert done["state"] == "done"
     assert done["mode"] == "cli-only"
     assert not (box.config / "service").exists()

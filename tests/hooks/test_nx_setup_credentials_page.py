@@ -1615,6 +1615,21 @@ def test_saved_credentials_do_not_skip_the_page_outside_a_resume(tmp_path: Path,
     _terminate(box.status()["pid"])
 
 
+def test_a_failed_nx_doctor_in_cloud_mode_says_a_new_run_reopens_the_page(tmp_path: Path) -> None:
+    """The saved credential may be what nx doctor failed on; a user with no terminal needs the page route."""
+    box = Box(tmp_path)
+    box.layout()
+    (box.config / "config.yml").write_text(
+        "credentials:\n  service_url: https://svc.example\n  service_token: old\n", encoding="utf-8"
+    )
+    _prior_status(box, "failed", failed_step="verify", cloud_saved=True)
+    box.behave([{"prog": "nx", "match": ["doctor"], "out": "[✗] Managed service token: refused\n", "exit": 1}])
+    assert box.start("cloud")["started"] is True
+    final = box.wait_terminal(60)
+    assert final["state"] == "doctor-failed", (final, box.read_log())
+    assert "opens the credentials page again" in final["next"] and "if the user agrees" in final["next"].lower()
+
+
 def test_a_saved_token_with_no_address_opens_the_page(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.layout()
