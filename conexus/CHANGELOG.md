@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.80.0] - 2026-10-15
+
+Plugin version aligned with conexus 7.80.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied):
+
+- **`nexus` tools besides eight core ones load through tool search** (nexus-fbtyl). `.mcp.json` drops the server-level `alwaysLoad: true` on `nexus`; the server flags `search`, `query`, `memory_get`, `memory_put`, `memory_search`, `scratch`, `store_get` and `store_put` as always-loaded in their own tool metadata, so the other 36 no longer sit in every session's first request. Measured on Claude Code 2.1.300: the same tool choice and success as all-eager, a 41% smaller first request.
+- **Hook text IO as UTF-8** (nexus-3fme8, nexus-ox0c0). `hooks/scripts/version_lockstep_hook.py`, `version_lockstep_action.py`, `_endpoint_resolve.py`, and the sn plugin's `auto_approve_sn_mcp.py` and `worktree_guard.py` read and write their files as UTF-8, not the locale encoding (cp1252 on Windows).
+- **Hook subprocess output as UTF-8** (nexus-ikoqj). The lockstep hook and action and the subagent git-write guard decode the `git`, `uv` and `nx` output they read as UTF-8 with replacement.
+- **Subagent ssh to chas** (nexus-yc7fs). `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` lets a subagent run one `ssh chas-test '<git write>'` command, whose git runs in chas's clone, under a literal-character allowlist.
+
 ## [7.79.0] - 2026-10-14
 
 Plugin version aligned with conexus 7.79.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied), all from RDR-228 Phase 1 and the Windows work:
