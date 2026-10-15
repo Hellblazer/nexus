@@ -464,7 +464,7 @@ record does not change it.
 | Choice | What happens | Download |
 |---|---|---|
 | Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address and token for | about 0.7 GB down, 1.6 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 1.6 GB on disk |
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
@@ -607,9 +607,10 @@ each skipped when already done:
    `nx init --yes --no-autostart` if not. When one is provisioned and down:
    `nx daemon service install --autostart` first if `autostart` is true,
    then `nx daemon service start`.
-3. *Service, mode `cloud`.* Save the pair the credentials page accepted
-   (below), with `nx config set service_url` and
-   `nx config set service_token --stdin`. No service download.
+3. *Service, mode `cloud`.* Save what the credentials page accepted
+   (below) with `nx config set`: `service_url`, then for a mint credential
+   `mint_token` on standard input and `mint_tenant`, and for a static token
+   `service_token` on standard input. Never both kinds. No service download.
 4. *Verify.* `nx doctor`; record pass or the failing rows, and write a
    terminal status.
 
@@ -628,29 +629,40 @@ later. Its requirements:
   directory that sends the browser on to the address, asks the system to
   open that file, and deletes it when the page is first loaded. The address
   is in no other file, not in the log and not in a tool result.
-- The page has two fields, service address and token, and one button. The
-  token field is a password field with autocomplete off.
-- On submit the process checks the pair at the address given: `/health` and
-  `/version` say the service answers and which version it is, and the token is
-  checked against one authenticated, read-only route under `/v1` that refuses a
-  wrong token on every engine, `GET /v1/_whoami` (Sam, 2026-10-15; the call the
-  doctor's static-token row already makes). `/health` and `/version` cannot
-  carry the token check: both are unauthenticated in the engine, so a local or
-  self-hosted engine accepts any token there, and only the managed service's
-  public edge refuses a wrong token, on `/health` alone (measured 2026-10-14,
-  T2 `nexus_rdr/228-research-36`). An `http` address is accepted as well as
-  `https` (Sam, 2026-10-12: no https requirement).
+- The page has three fields, service address, token and tenant, and one
+  button. The token field is a password field with autocomplete off. The
+  tenant is required for a mint credential and unused for a static token.
+- A managed user holds a mint credential: a token bound to one tenant that
+  mints short-lived data tokens, which the CLI does for every request
+  (`mint_token` and `mint_tenant`; conexus, 2026-10-15). A static service
+  token is the self-hosted case. The page takes both kinds (Sam, 2026-10-15).
+- On submit the process checks what was typed at the address given.
+  `/version` says the service answers and which version it is. The token is
+  then sent to one authenticated, read-only route under `/v1`, `GET
+  /v1/_whoami` (Sam, 2026-10-15): 401 refuses it; 200 is a working static
+  token; 403 is a live mint credential, which the process proves with its
+  tenant by minting one data token, `POST /v1/data-tokens/mint` with that
+  tenant and a 60-second lifetime, the call the CLI itself makes. A 200 there
+  accepts; a 403 says the token belongs to another tenant; a 429 says to try
+  again in a moment. `/health` is not used: it is unauthenticated in the
+  engine, and the managed edge answers it 401 for a mint credential (measured
+  2026-10-15, T2 `nexus_rdr/228-research-37`). A redirect is never followed.
+  An `http` address is accepted as well as `https` (Sam, 2026-10-12: no https
+  requirement).
 - A pair that passes is held in the setup process's memory, the page says
   it was accepted, and the process stops listening. The pair is saved in
   step 3, after the build, because saving needs the CLI. The token goes to
   `nx config set` on standard input, never on a command line.
 - A pair that fails is not kept; the page says why and stays open for
   another try.
-- When `NX_SERVICE_URL` or `NX_SERVICE_TOKEN` is set in the setup process's
-  environment, the page says that those take precedence over what it saves.
+- When `NX_SERVICE_URL`, `NX_SERVICE_TOKEN`, `NX_MINT_TOKEN` or
+  `NX_MINT_TENANT` is set in the setup process's environment, the page says
+  that those take precedence over what it saves.
 - Whether a browser opened cannot be known in advance. If the page has not
   been loaded two minutes after the request to open it, the status says so
-  and names `nx config init` in a terminal as the other route. The process
+  and names `nx config init` in a terminal as the other route; that wizard
+  offers the same two kinds of credential and hides the token as it is typed
+  (Phase 2 Step 5). The process
   stops listening ten minutes after it started listening, whatever happened.
 - The status file's values for this step are exactly: "waiting for
   credentials", "page not loaded", "credentials rejected, waiting for another
@@ -862,6 +874,11 @@ step is removed.
   address (Sam, 2026-10-12), and the check sends the token to whatever
   address the user typed. A wrong or hostile address receives it. This is
   the same exposure as typing the pair into `nx config init`.
+- **The browser saves the token.** Browsers commonly offer to save a
+  password field's value whatever its `autocomplete` says, and a mint token
+  does not expire and mints tokens of its own. Which markup suppresses the
+  offer in Chrome, Safari and Edge is measured in the Minimum Viable
+  Validation and the page takes the markup that does.
 - **The browser does not open** (a headless box, a remote session). The page
   is served and never loaded; after two minutes the status says so and names
   `nx config init`, and the listener closes at ten minutes. The installer
@@ -1047,7 +1064,8 @@ and its marker, the start-at-login choice and the command.
 #### Step 5: The credentials page
 
 The loopback page for mode `cloud`, with every requirement in "The
-credentials page" as a test. The Cloud choice is not offered by a build that
+credentials page" as a test, and `nx config init` taking both kinds of
+credential with the token hidden as it is typed. The Cloud choice is not offered by a build that
 lacks this step.
 
 ### Phase 3: Installer script
@@ -1315,8 +1333,9 @@ Test Plan covers the "local" path without a network.
   next session. Any other install (`pip`, `pipx`, an editable checkout), and
   any install whose upgrade fails, keeps the lost handoff until it is
   upgraded by hand.
-- **Secret/credential lifecycle**: the cloud token is typed into a loopback
-  page or a terminal prompt with echo off, held in memory until the CLI is
+- **Secret/credential lifecycle**: the cloud token, a mint credential for a
+  managed user or a static token for a self-hosted engine, is typed into a
+  loopback page or a terminal prompt with echo off, held in memory until the CLI is
   built, saved with `nx config set` on standard input, and never logged, never placed in the status
   file and never passed through the model. The page's address is in one
   owner-only file that is deleted on first load. An `http` service address is accepted, so the token can travel in
@@ -1456,3 +1475,13 @@ is flagged for trimming before then.
   well as to the `/v1` route and none to `/version`; a redirect is never
   followed. A timeout during the build lets the build finish and then ends the
   run `failed` at step `credentials`.
+- 2026-10-15: The credentials page takes a mint credential (Sam, 2026-10-15).
+  Every managed user holds one (conexus, 2026-10-15), and the page as built
+  refused it. The page asks for address, token and tenant; the check is
+  `/version`, then `GET /v1/_whoami`, then for a 403 one mint of a 60-second
+  data token with the tenant; `/health` is dropped. A mint credential is saved
+  as `mint_token` and `mint_tenant`, a static token as `service_token`, never
+  both. `nx config init` gains the same two kinds and a hidden token prompt.
+  The environment notice names `NX_MINT_TOKEN` and `NX_MINT_TENANT`. A
+  browser offering to save the token is a risk measured in the Minimum Viable
+  Validation.
