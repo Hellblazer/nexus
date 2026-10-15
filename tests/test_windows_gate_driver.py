@@ -1141,7 +1141,9 @@ def test_the_wdac_run_cannot_pass_under_a_policy_that_is_not_in_effect() -> None
     assert "ExamplePolicies\\DefaultWindows_Enforced.xml" in std
     assert "if ($wdac -eq 'audit') { Set-RuleOption -FilePath $x -Option 3 }" in std
     assert "Set-RuleOption -FilePath $x -Option 18" in std and "Set-RuleOption -FilePath $x -Option 11" in std
-    assert 'New-CIPolicyRule -FilePathRule "C:\\Users\\$u\\$p"' in std
+    assert '$rules += New-CIPolicyRule -FilePathRule "C:\\Users\\$u\\$p"' in std
+    # the deploy stops unless every path rule is in the policy file (a refused merge once deployed none)
+    assert 'if ($have -ne $folders.Count) { "NXG-RESULT: FAIL the WDAC policy has $have of $($folders.Count) path rules"; return }' in std
     # the control is an UNSIGNED program built in the guest: a Windows-signed copy is trusted wherever it is
     assert "csc.exe\" /nologo /out:\"$b\\wdac-control.exe\"" in std
     assert "$want = if ($wdac -eq 'audit') { 3076 } else { 3077 }" in std

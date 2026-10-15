@@ -156,11 +156,16 @@ try {
                 # The account does not exist yet; WDAC path rules take a wildcard only at the start or the end, so
                 # the folders name the account. The same folders as the AppLocker allow-dll mode.
                 $folders = @('.local\bin\*', '.local\share\nexus\*', 'AppData\Roaming\uv\*', 'AppData\Local\uv\cache\*', 'AppData\Local\Programs\Git\*', '.config\nexus\*', '.claude\downloads\*', 'AppData\Local\Temp\PortableGit.exe', '.cache\nexus\*', 'AppData\Local\Temp\onnxruntime-java*')
-                $rules = @(foreach ($p in $folders) { New-CIPolicyRule -FilePathRule "C:\Users\$u\$p" })
+                # += flattens: each New-CIPolicyRule returns an array, and an array of those is refused by
+                # Merge-CIPolicy ("Cannot convert Rule to Rule", 2026-10-15), which then left the policy with
+                # no path rules at all.
+                $rules = @(); foreach ($p in $folders) { $rules += New-CIPolicyRule -FilePathRule "C:\Users\$u\$p" }
                 $m = "$env:TEMP\nxgate-wdac-merged.xml"
-                Merge-CIPolicy -PolicyPaths $x -OutputFilePath $m -Rules $rules | Out-Null
-                Move-Item -LiteralPath $m -Destination $x -Force
-                "wdac path rules: " + $folders.Count
+                Merge-CIPolicy -PolicyPaths $x -OutputFilePath $m -Rules $rules -ErrorAction Stop | Out-Null
+                Move-Item -LiteralPath $m -Destination $x -Force -ErrorAction Stop
+                $have = @(([xml](Get-Content -Raw -LiteralPath $x)).SiPolicy.FileRules.Allow | Where-Object { $_.FilePath -like "C:\Users\$u\*" }).Count
+                "wdac path rules: $have of $($folders.Count) in the policy"
+                if ($have -ne $folders.Count) { "NXG-RESULT: FAIL the WDAC policy has $have of $($folders.Count) path rules"; return }
             }
             $id = Set-CIPolicyIdInfo -FilePath $x -ResetPolicyID -PolicyName "nexus gate WDAC $wdac"
             ConvertFrom-CIPolicy -XmlFilePath $x -BinaryFilePath $cip | Out-Null
