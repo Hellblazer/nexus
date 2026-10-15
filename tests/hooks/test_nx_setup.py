@@ -2017,3 +2017,107 @@ def test_status_view_spends_one_read_budget_across_its_reads(tmp_path: Path, mon
             (setup / name).chmod(0o600)
     assert view["state"] == "none", "unreadable reads as no record"
     assert elapsed < 0.2, f"two files held took {elapsed:.2f}s against a 0.03s budget for the pair"
+
+
+# -- the format, pinned from the writer's side (nexus-sv2wx.19) ------------------------------------
+#
+# ``tests/fixtures/setup_status_format.json`` is read by this file and by
+# ``tests/test_doctor_setup_row.py``: the plugin script writes the setup directory, the CLI's
+# ``nx doctor`` row reads it, and they ship separately. A change to what either side writes or
+# accepts that is not made in the fixture fails one of the two.
+
+_FORMAT_PATH = _ROOT / "tests" / "fixtures" / "setup_status_format.json"
+_FORMAT: dict[str, Any] = json.loads(_FORMAT_PATH.read_text(encoding="utf-8"))
+
+
+def _build_format_case(root: Path, case: dict[str, Any]) -> Path:
+    """The fixture case as a setup directory under *root*."""
+    setup = root / "setup"
+    if not case["setup_dir"]:
+        return setup
+    setup.mkdir(parents=True)
+    files = _FORMAT["files"]
+    log = str(setup / files["log"])
+
+    def body(value: Any) -> str:
+        return (value if isinstance(value, str) else json.dumps(value)).replace("{LOG}", log)
+
+    if case["status"] is not None:
+        (setup / files["status"]).write_text(body(case["status"]), encoding="utf-8")
+    if case["error"] is not None:
+        (setup / files["error"]).write_text(body(case["error"]), encoding="utf-8")
+    if case["not_now"]:
+        (setup / files["marker"]).write_text("", encoding="utf-8")
+    if case["heartbeat_age_seconds"] is not None:
+        (setup / files["lock"]).mkdir()
+        (setup / files["lock"] / "owner").write_text("token", encoding="utf-8")
+        beat = setup / files["heartbeat"]
+        beat.write_text("0", encoding="utf-8")
+        then = time.time() - case["heartbeat_age_seconds"]
+        os.utime(beat, (then, then))
+    return setup
+
+
+@pytest.mark.parametrize("name", sorted(_FORMAT["cases"]))
+def test_the_script_reads_every_fixture_directory_as_the_fixture_says(name: str, tmp_path: Path) -> None:
+    mod = _load_module()
+    case = _FORMAT["cases"][name]
+    view = mod.status_view(_build_format_case(tmp_path, case))
+    assert view["state"] == case["view"]["state"], (name, view)
+    assert view["live"] is case["view"]["live"], (name, view)
+    assert view["not_now"] is case["not_now"], (name, view)
+
+
+def test_the_script_names_what_the_fixture_names() -> None:
+    mod = _load_module()
+    assert mod.STALE_SECONDS == _FORMAT["stale_after_seconds"]
+    assert list(mod.STATES) == _FORMAT["states"]
+    assert list(mod.TERMINAL_STATES) == _FORMAT["terminal_states"]
+    files = _FORMAT["files"]
+    assert (mod._STATUS, mod._ERROR_FILE, mod._LOG, mod._MARKER, mod._LOCK) == (
+        files["status"], files["error"], files["log"], files["marker"], files["lock"],
+    )
+
+
+def test_the_fixture_has_a_case_for_every_state_the_script_can_write() -> None:
+    mod = _load_module()
+    in_cases = {c["status"]["state"] for c in _FORMAT["cases"].values() if isinstance(c["status"], dict)}
+    assert in_cases == set(mod.STATES)
+    assert set(_FORMAT["writer_keys"]) <= set(mod.STATES)
+
+
+def _run_to_state(box: Box, scenario: str) -> dict[str, Any]:
+    """Drive a real run to *scenario* and return the raw ``status.json`` it wrote."""
+    if scenario == "running":
+        box.layout()
+        box.behave([{"prog": "nx", "match": ["init"], "sleep": 5, "effects": box.init_effects()}])
+        box.start("local")
+        box.wait_call("nx", "init")
+        raw = box.status_file()
+        assert raw is not None
+        box.wait_terminal()
+        return raw
+    if scenario == "failed":
+        box.behave([box.uv_builds_nx(), {"prog": "nx", "match": ["init"], "exit": 1, "out": "boom\n"}])
+    elif scenario == "doctor-failed":
+        box.layout()
+        box.provision()
+        box.behave([{"prog": "nx", "match": ["doctor"], "exit": 1, "out": "[✓] T2: ok\n[✗] T3: vector store unreachable\n"}])
+    else:
+        box.hook_site(_NO_LISTEN)
+        box.behave([
+            box.uv_builds_nx(),
+            {"prog": "nx", "match": ["init"], "effects": box.init_effects()},
+            {"prog": "nx", "match": ["doctor"], "out": "[✓] T3: reachable\n"},
+        ])
+    box.start("local")
+    return box.wait_terminal()
+
+
+@pytest.mark.parametrize("scenario", ["running", "failed", "doctor-failed", "done"])
+def test_a_real_run_writes_the_keys_the_doctor_row_reads(box: Box, scenario: str) -> None:
+    raw = _run_to_state(box, scenario)
+    assert raw["state"] == scenario
+    missing = [k for k in _FORMAT["writer_keys"][scenario] if k not in raw]
+    assert not missing, f"a {scenario} status no longer carries {missing}; change the fixture and the doctor row together"
+    assert raw["log"] == str(box.setup / _FORMAT["files"]["log"])

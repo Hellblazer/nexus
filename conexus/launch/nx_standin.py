@@ -71,15 +71,17 @@ SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-06-18", "2025-03-26", "202
 INSTALL_PAGE: str = "https://hellblazer.github.io/nexus/"
 
 
-def manual_commands(platform: str | None = None) -> tuple[str, ...]:
+def manual_commands(platform: str | None = None, mode: str | None = None) -> tuple[str, ...]:
     """The first install for this machine, as README.md and the install page
     give it. On Linux the first command names the CPU build of torch; without
-    it uv installs the GPU build on x86-64, 4.3 GB that Nexus never uses."""
+    it uv installs the GPU build on x86-64, 4.3 GB that Nexus never uses. The
+    third command sets up the local service; for *mode* ``cloud`` it is the
+    wizard that asks for a managed service's address, token and tenant."""
     platform = sys.platform if platform is None else platform
     first = "uv tool install conexus --python 3.12"
     if platform.startswith("linux"):
         first += " --torch-backend cpu"
-    return (first, "nx self install", "nx init")
+    return (first, "nx self install", "nx config init" if mode == "cloud" else "nx init")
 
 
 def platform_note(platform: str | None = None) -> str:
@@ -108,7 +110,7 @@ QUESTION_TABLE: str = (
     "| Choice | What happens | Download |\n"
     "|---|---|---|\n"
     "| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |\n"
-    "| Cloud | Install the CLI and connect it to a managed service you have an address and token for | about 0.7 GB down, 1.6 GB on disk |\n"
+    "| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 1.6 GB on disk |\n"
     "| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |\n"
     "| Not now | Nothing is installed | none |"
 )
@@ -121,8 +123,9 @@ LOCAL_FOLLOW_UP: str = (
 
 #: What Cloud adds to the question: the token never passes through the conversation.
 CLOUD_FOLLOW_UP: str = (
-    "With Cloud, setup opens a page in the user's browser where they type the service address and token themselves: "
-    "never ask for the token, and never put it in a message or a tool call."
+    "With Cloud, setup opens a page in the user's browser where they type the service address, token and tenant themselves: "
+    "never ask for the token, and never put it in a message or a tool call. Tell the user to keep that page open until it "
+    "says the credentials were accepted."
 )
 
 #: Said once to the model wherever the question is put: nothing is installed
@@ -179,11 +182,12 @@ def instructions(platform: str | None = None, broken: str | None = None) -> str:
 REPAIR_COMMAND: str = "uv tool run --python 3.12 --from conexus nx self install --bootstrap"
 
 
-def setup_text(platform: str | None = None, broken: str | None = None) -> str:
+def setup_text(platform: str | None = None, broken: str | None = None, mode: str | None = None) -> str:
     """What the tools answer when the setup process (``nx_setup.py``) is missing
     from the plugin: the commands, for the user to run. With *broken* (why a found CLI
     cannot start) the text says Nexus is installed and cannot start, and gives the
-    command that repairs it, not the commands of a first install."""
+    command that repairs it, not the commands of a first install. With *mode* ``cloud``
+    the last command is the wizard for a managed service, not the local install."""
     if broken is not None:
         return (
             f"{broken_text(broken)}\n\n"
@@ -196,16 +200,25 @@ def setup_text(platform: str | None = None, broken: str | None = None) -> str:
             "session.\n\n"
             f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
         )
+    if mode == "cloud":
+        third = (
+            "third asks for the managed service's address, token and tenant (the tenant for a mint credential) and saves them, "
+            "and downloads no service. Together they download about 0.7 GB and take several minutes."
+        )
+    else:
+        third = (
+            "third downloads and starts the local service and asks whether to start it at login. "
+            "Together they download more than a gigabyte and take several minutes."
+        )
     return (
         f"{NOT_INSTALLED}\n\n"
         "The plugin's setup process is missing, so this tool installed nothing. "
         "Show the user the commands below and let them decide. "
         "They are for the user to run in a terminal, in order; do not run them yourself "
         "unless the user asks you to.\n\n"
-        + "".join(f"    {command}\n" for command in manual_commands(platform))
+        + "".join(f"    {command}\n" for command in manual_commands(platform, mode))
         + "\nThe first installs the CLI, the second moves it to its permanent place, and the "
-        "third downloads and starts the local service and asks whether to start it at login. "
-        f"Together they download more than a gigabyte and take several minutes.{platform_note(platform)} Afterwards the "
+        f"{third}{platform_note(platform)} Afterwards the "
         "user reconnects the `nexus` server (in Claude Code: /mcp, the server, Reconnect) or "
         "starts a new session.\n\n"
         f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
@@ -230,10 +243,10 @@ SETUP_DESCRIPTION: str = (
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
     "up to about 1.3 GB to download, 2.4 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address and token for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
+    "address, token and tenant for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
-    "where they type the service address and token themselves: never ask for the token, and never put it in a message "
+    "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "
     "or a tool call. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
     "with setup_status, and do not call setup again while it runs. When nothing is missing, this starts nothing."
@@ -251,7 +264,7 @@ SETUP_STATUS_DESCRIPTION: str = (
 
 MODE_DESCRIPTION: str = (
     "What the user chose: local, cloud, cli-only or not-now. local installs the CLI and a service on this machine; "
-    "cloud installs the CLI and connects it to a managed service, whose address and token the user types into a page "
+    "cloud installs the CLI and connects it to a managed service, whose address, token and tenant the user types into a page "
     "that opens in their browser; cli-only installs the CLI alone; not-now installs nothing."
 )
 
@@ -415,11 +428,12 @@ def setup_script() -> str | None:
     return path if os.path.isfile(path) else None
 
 
-def _call_script(args: list[str], broken: str | None = None) -> dict[str, Any]:
+def _call_script(args: list[str], broken: str | None = None, mode: str | None = None) -> dict[str, Any]:
     """Run one ``nx_setup.py`` command and return its JSON object. *broken* is why a
-    found CLI cannot start (``None``: it was not found); a failure says which."""
+    found CLI cannot start (``None``: it was not found); a failure says which. *mode*
+    is the choice being started, so a fallback for ``cloud`` names the cloud wizard."""
     script = setup_script()
-    fallback = setup_text(broken=broken)
+    fallback = setup_text(broken=broken, mode=mode)
     if script is None or not sys.executable:
         raise SetupError(fallback)
     try:
@@ -469,7 +483,7 @@ def run_setup(arguments: Any, broken: str | None = None) -> str:
         if view.get("state") == "error":
             return _checked(view)
         return NOT_NOW_TEXT + (("\n" + render(view)) if view.get("live") else "")
-    view = _call_script(["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []), broken)
+    view = _call_script(["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []), broken, mode)
     return _checked(view, started=bool(view.get("started")))
 
 

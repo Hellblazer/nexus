@@ -7,7 +7,8 @@ version", and the token is checked against one authenticated, read-only route un
 ``/v1`` that refuses a wrong token on every engine. The route is ``GET /v1/_whoami``
 (``WhoamiHandler``; the engine's ``AuthFilter`` fronts it): it is the call the doctor's
 "Static service_token" row already makes, it is a read, and it answers 401 to a token
-the engine does not know and 403 to a live mint-scoped one.
+the engine does not know and 403 to a live mint-scoped one, which the page then proves
+with its tenant by one data-token mint.
 
 This file proves it on the engine substrate (the PG and jar every substrate test uses),
 not on a fake: the engine answers ``/health`` and ``/version`` to ANY bearer, and
@@ -45,20 +46,21 @@ def test_a_wrong_token_fails_the_v1_route_and_a_right_one_passes_on_a_real_engin
     mod = _load_module()
     wrong = secrets.token_urlsafe(24)
     with minted_test_tenant(engine) as (_tenant, token):
-        ok, text = mod.check_pair(engine["base_url"], token)
-        assert ok is True, text
+        ok, text, kind = mod.check_pair(engine["base_url"], token)
+        assert ok is True and kind == "static", text
         assert "version" in text.lower() and token not in text
-        bad_ok, bad_text = mod.check_pair(engine["base_url"], wrong)
+        bad_ok, bad_text, _bad_kind = mod.check_pair(engine["base_url"], wrong)
         assert bad_ok is False and "refus" in bad_text.lower()
         assert wrong not in bad_text and token not in bad_text
         # The same engine, the same address: only the token differs.
-        ok_again, _ = mod.check_pair(engine["base_url"] + "/", token)
+        ok_again, _text, _kind = mod.check_pair(engine["base_url"] + "/", token)
         assert ok_again is True
 
 
-def test_a_live_mint_scoped_token_is_known_to_the_engine_and_still_refused_by_the_page(engine: dict) -> None:
-    """The engine answers 403 to a live mint-locked bearer on a data route (a dead token is a 401). The page
-    saves only ``service_token``, which a mint credential cannot serve, so it says so and accepts nothing."""
+def test_a_live_mint_credential_is_accepted_with_its_own_tenant_and_refused_with_another(engine: dict) -> None:
+    """The engine answers 403 to a live mint-locked bearer on ``/v1/_whoami`` (a dead token is a 401). The page then
+    proves it with its tenant by one mint (``POST /v1/data-tokens/mint``), which the engine answers 200 for the bound
+    tenant and 403 for any other."""
     mod = _load_module()
     with minted_test_tenant(engine) as (tenant, _token):
         with HttpTokenStore(base_url=engine["base_url"], _token=engine["bearer"]) as admin:
@@ -66,5 +68,10 @@ def test_a_live_mint_scoped_token_is_known_to_the_engine_and_still_refused_by_th
         assert httpx.get(
             engine["base_url"] + "/v1/_whoami", headers={"Authorization": f"Bearer {mint_locked}"}, timeout=30,
         ).status_code == 403
-        ok, text = mod.check_pair(engine["base_url"], mint_locked)
-        assert ok is False and "mint" in text.lower() and mint_locked not in text
+        ok, text, kind = mod.check_pair(engine["base_url"], mint_locked, tenant)
+        assert ok is True and kind == "mint", text
+        assert mint_locked not in text
+        ok, text, kind = mod.check_pair(engine["base_url"], mint_locked, "not-" + tenant)
+        assert ok is False and kind == "" and "another tenant" in text.lower() and mint_locked not in text
+        ok, text, _kind = mod.check_pair(engine["base_url"], mint_locked, "")
+        assert ok is False and "tenant" in text.lower()

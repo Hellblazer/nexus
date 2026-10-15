@@ -857,11 +857,12 @@ token per `(base_url, tenant)` (`POST /v1/data-tokens/mint`, cached and
 refreshed below a 20%-of-TTL threshold or on a 401) and every client
 presents THAT instead — a client-held resolution seam, not a per-call-site
 change. This is the client half of RDR-005's staged cutover: conexus's edge
-today still JIT-injects a shared per-tenant credential and strips whatever
-`Authorization` the client sends (RDR-005 2a's variant-3 posture); once the
-edge flips to pure pass-through, a `mint_token`-configured client presents
-its OWN credential's data token end-to-end instead of riding the edge's
-injected one. Unconfigured installs (the default, local mode included) see
+forwards the client's `Authorization` header on `/v1` unvalidated (conexus
+`conexus-qomd`, reported 2026-10-15), so a `mint_token`-configured
+client presents its OWN credential's data token end to end and the engine
+validates it. The edge's earlier posture, stripping the header and injecting a
+shared per-tenant credential (RDR-005 2a's variant-3 posture), is no longer what a
+`/v1` call meets. Unconfigured installs (the default, local mode included) see
 zero behavior change. A mint failure with `mint_token` configured never
 falls back silently to the static token — it fails loud
 (`DataTokenMintError`), since a half-provisioned install must surface.

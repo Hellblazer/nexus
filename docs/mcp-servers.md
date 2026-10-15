@@ -136,7 +136,7 @@ with the same names, arguments and descriptions; a test pins the two copies equa
 
 | Tool | Purpose |
 |---|---|
-| `setup` | Install the Nexus CLI and, for `mode` `local`, a service for it (`autostart` true also starts the service at login; false is the default). `mode` is `local`, `cli-only` or `not-now`; a managed service is not offered yet. Returns at once with the current stage; the work continues in a background process. When nothing is missing it starts nothing. The tool description tells the model to ask the user first and act only on the answer |
+| `setup` | Install the Nexus CLI and, for `mode` `local`, a service for it (`autostart` true also starts the service at login; false is the default). `mode` is `local`, `cloud`, `cli-only` or `not-now`; `cloud` connects a managed service and opens a page in the user's browser for the service address, token and tenant (the token never passes through the conversation). Returns at once with the current stage; the work continues in a background process. When nothing is missing it starts nothing. The tool description tells the model to ask the user first and act only on the answer |
 | `setup_status` | Report the stage, the log path and the next step of the last or current run, how long the stage usually takes and the earliest time to ask again, or that nothing is missing |
 
 Both start `conexus/launch/nx_setup.py`, the file the launcher names in the

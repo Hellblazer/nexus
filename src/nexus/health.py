@@ -3401,13 +3401,13 @@ def _check_mint_token() -> list[HealthResult]:
         (``DataTokenMintError``): soft warning naming the failure.
       - configured and reachable: reports whether the round trip MINTED a
         fresh token or REUSED the manager's cached live one, plus the
-        granted TTL (critic S1/S3, nexus-ssqk9). IMPORTANT: on the managed
-        CLOUD path, pre-cutover, the edge strips client ``Authorization``
-        and injects its own credential (RDR-005 2a staged cutover -- T2
-        ``conexus/conexus-06`` answer, 2026-08-15). A mint succeeding
-        THROUGH the edge does not yet prove THIS credential's own
-        authority, so the success line is worded neutrally rather than
-        claiming credential-specific proof.
+        granted TTL (critic S1/S3, nexus-ssqk9). IMPORTANT: the managed
+        edge forwards the client's ``Authorization`` on ``/v1`` unvalidated
+        (conexus ``conexus-qomd``, edge sha 72d2238, 2026-10-15), so the
+        engine validates this credential itself. An earlier answer
+        (``conexus/conexus-06``, 2026-08-15) had the edge strip the header and
+        inject its own credential; the success line is still worded neutrally
+        rather than claiming credential-specific proof.
     """
     from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -3473,11 +3473,8 @@ def _check_mint_token() -> list[HealthResult]:
         label=label,
         ok=True,
         detail=(
-            f"{verb} data token via {host} ({ttl_detail}). Pre-cutover on "
-            "the managed cloud path this does NOT yet prove this "
-            "credential's own authority (the edge still strips/injects "
-            "Authorization until the RDR-005 2a cutover) — treat as "
-            "reachability, not proof."
+            f"{verb} data token via {host} ({ttl_detail}); the engine "
+            "checked this credential and its tenant to mint it."
         ),
     )]
 
@@ -4699,6 +4696,169 @@ def _check_config_dir_user_access(
             f'from an elevated Command Prompt: icacls "{config_dir}" /grant "%USERDOMAIN%\\%USERNAME%:(OI)(CI)F" /T',
         ],
     )]
+
+
+_SETUP_LABEL = "Plugin setup"
+#: A setup lock whose heartbeat is older than this is dead. The plugin script
+#: (``conexus/launch/nx_setup.py``, ``STALE_SECONDS``) owns the number and ships as
+#: a separate artifact; ``tests/fixtures/setup_status_format.json`` pins the two together.
+_SETUP_STALE_SECONDS = 60.0
+#: What ``status.json`` may hold in ``state`` (the script's ``STATES``; same fixture).
+_SETUP_STATES = ("running", "done", "doctor-failed", "failed", "unsupported")
+_SETUP_TEXT_CHARS = 300
+_SETUP_DOCTOR_ROWS = 3
+_SETUP_UNREADABLE = object()
+
+
+def _setup_text(value: object, limit: int = _SETUP_TEXT_CHARS) -> str:
+    """One bounded printable line from a field of a file another program wrote."""
+    text = "".join(ch for ch in " ".join(str(value).split()) if ch.isprintable())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _read_setup_json(path: Path) -> object:
+    """The JSON object in *path*; ``None`` when there is no such file; ``_SETUP_UNREADABLE``
+    for a file that cannot be read or is not a JSON object. A Windows sharing violation
+    (the run replacing ``status.json`` as this reads it) is retried briefly."""
+    for attempt in range(5):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if sys.platform == "win32" and attempt < 4:
+                time.sleep(0.1)
+                continue
+            return _SETUP_UNREADABLE
+        except (OSError, ValueError):
+            return _SETUP_UNREADABLE
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return _SETUP_UNREADABLE
+        return data if isinstance(data, dict) else _SETUP_UNREADABLE
+    return _SETUP_UNREADABLE
+
+
+def _setup_run_is_live(setup: Path) -> bool:
+    """A lock whose heartbeat is fresh (or, before the first beat, whose directory is young)."""
+    lock = setup / "lock"
+    for probe in (lock / "heartbeat", lock):
+        try:
+            age = time.time() - probe.stat().st_mtime
+        except OSError:
+            continue
+        return age <= _SETUP_STALE_SECONDS
+    return False
+
+
+def _setup_failed_row(status: dict, log: Path) -> HealthResult:
+    mode = _setup_text(status.get("mode", "unknown"), 40)
+    step = _setup_text(status.get("failed_step") or status.get("stage") or "unknown", 40)
+    return HealthResult(
+        label=_SETUP_LABEL, ok=False, warn=True,
+        detail=f"the last setup run failed at the {step} step: {_setup_text(status.get('message', ''))} Log: {log}",
+        fix_suggestions=[f"If the user agrees, call the `setup` tool again with mode {mode}: it resumes at the {step} step"],
+    )
+
+
+def _setup_row(setup: Path) -> HealthResult:
+    log = setup / "setup.log"
+    live = _setup_run_is_live(setup)
+    status = _read_setup_json(setup / "status.json")
+    recorded = _read_setup_json(setup / "status.error")
+    in_progress = HealthResult(
+        label=_SETUP_LABEL, ok=True,
+        detail=f"a setup run is in progress; its status is not readable just now. Log: {log}",
+    )
+    # A run that could not write its own status says why in status.error; that overrides the status.
+    if isinstance(recorded, dict) and recorded.get("state") == "failed":
+        return _setup_failed_row({**(status if isinstance(status, dict) else {}), **recorded}, log)
+    if status is _SETUP_UNREADABLE or (isinstance(status, dict) and status.get("state") not in _SETUP_STATES):
+        if live:
+            return in_progress
+        return HealthResult(
+            label=_SETUP_LABEL, ok=False, warn=True,
+            detail=f"{setup / 'status.json'} could not be read or holds a state this version does not know. Log: {log}",
+            fix_suggestions=["If the user agrees, call the `setup` tool again: it starts a new run and rewrites the status"],
+        )
+    if not isinstance(status, dict):  # no status file
+        if live:
+            return in_progress
+        return HealthResult(label=_SETUP_LABEL, ok=True, detail="not applicable: no plugin setup has run on this machine")
+    state = status["state"]
+    mode = _setup_text(status.get("mode", "unknown"), 40)
+    stage = _setup_text(status.get("stage", "unknown"), 40)
+    again = f"call the `setup` tool again with mode {mode}"
+    if state == "running":
+        if live:
+            return HealthResult(
+                label=_SETUP_LABEL, ok=True,
+                detail=f"setup is in progress (mode {mode}, stage {stage}): {_setup_text(status.get('message', ''))}. Log: {log}",
+            )
+        return HealthResult(
+            label=_SETUP_LABEL, ok=False, warn=True,
+            detail=(
+                f"setup was interrupted at stage {stage} (mode {mode}): its process is gone and it wrote no final status. "
+                f"Log: {log}"
+            ),
+            fix_suggestions=[f"If the user agrees, {again}: it resumes at the step that was running"],
+        )
+    if state == "failed":
+        return _setup_failed_row(status, log)
+    if state == "doctor-failed":
+        rows = status.get("doctor_failing")
+        listed = rows if isinstance(rows, list) else []
+        shown = [_setup_text(r, 120) for r in listed[:_SETUP_DOCTOR_ROWS]]
+        more = f"; and {len(listed) - len(shown)} more" if len(listed) > len(shown) else ""
+        named = f" Failing: {'; '.join(shown)}{more}." if shown else ""
+        return HealthResult(
+            label=_SETUP_LABEL, ok=False, warn=True,
+            detail=f"the last setup run finished, but its verify step failed: {_setup_text(status.get('message', ''))}{named} Log: {log}",
+            fix_suggestions=["Run `nx doctor` in a terminal for the failing rows", f"After fixing them, {again}: it verifies again"],
+        )
+    if state == "unsupported":
+        return HealthResult(
+            label=_SETUP_LABEL, ok=True,
+            detail=(
+                f"the last setup could not run here ({_setup_text(status.get('message', ''))}). "
+                f"{_setup_text(status.get('next', ''))}"
+            ),
+        )
+    return HealthResult(
+        label=_SETUP_LABEL, ok=True,
+        detail=f"the last setup run finished (mode {mode}, {_setup_text(status.get('updated_at', 'time unknown'), 40)}). Log: {log}",
+    )
+
+
+def _check_setup_status(setup_dir: Path | None = None) -> list[HealthResult]:
+    """RDR-228 Day 2 (nexus-sv2wx.19): what the plugin's setup process left in ``setup/``
+    under the Nexus config directory (``status.json``, the lock's heartbeat, ``setup.log``).
+
+    * no setup has run (no status, no live lock): not applicable, a pass. That is decided
+      last, after every file has been read, so a directory with something to judge is never
+      waved through; the fresh-install check allows no warning on a new box.
+    * a run is live: a pass naming its mode and stage. The setup process runs ``nx doctor``
+      as its verify step while it holds the lock, so this row must never be what fails it.
+    * the last run failed (including a status the run could not write): a warning with the
+      failure line and the log path.
+    * a run was interrupted (status ``running``, heartbeat stale or no lock): a warning that
+      says ``setup`` called again resumes.
+    * finished, or unsupported on this host: a pass saying so.
+
+    The row is never a hard failure. The plugin script ships separately from this CLI and
+    cannot be imported; ``tests/fixtures/setup_status_format.json`` is the format both sides
+    are tested against.
+    """
+    try:
+        if setup_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+            setup_dir = _config.nexus_config_dir() / "setup"
+        return [_setup_row(setup_dir)]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_setup_status_check_failed", error=str(exc))
+        return [HealthResult(label=_SETUP_LABEL, ok=True, detail=f"could not be checked ({type(exc).__name__})")]
 
 
 def _check_local_pg_auth(config_dir: Path | None = None) -> list[HealthResult]:
@@ -10516,6 +10676,7 @@ def run_health_checks(
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
+    results.extend(_check_setup_status())  # nexus-sv2wx.19; not applicable where no setup has run
     results.extend(_check_local_pg_auth())  # nexus-ja4pq
     results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
     results.extend(_check_migration_state())

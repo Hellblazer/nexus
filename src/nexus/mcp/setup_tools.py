@@ -60,10 +60,10 @@ SETUP_DESCRIPTION: str = (
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
     "up to about 1.3 GB to download, 2.4 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address and token for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
+    "address, token and tenant for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
-    "where they type the service address and token themselves: never ask for the token, and never put it in a message "
+    "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "
     "or a tool call. Setup takes several minutes. "
     "This call returns at once with the current stage and the work continues in the background: follow it "
     "with setup_status, and do not call setup again while it runs. When nothing is missing, this starts nothing."
@@ -81,7 +81,7 @@ SETUP_STATUS_DESCRIPTION: str = (
 
 MODE_DESCRIPTION: str = (
     "What the user chose: local, cloud, cli-only or not-now. local installs the CLI and a service on this machine; "
-    "cloud installs the CLI and connects it to a managed service, whose address and token the user types into a page "
+    "cloud installs the CLI and connects it to a managed service, whose address, token and tenant the user types into a page "
     "that opens in their browser; cli-only installs the CLI alone; not-now installs nothing."
 )
 
@@ -226,8 +226,8 @@ def no_service_notice() -> str | None:
         "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
         "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software "
         "(a local service: up to about 1.3 GB to download, 2.4 GB on disk; the CLI alone: up to about 0.7 GB to "
-        "download, 1.6 GB on disk) or connects a managed service the user has an address and token for (no service "
-        "download; the user types the address and token into a page that opens in their browser), so act only on the user's answer."
+        "download, 1.6 GB on disk) or connects a managed service the user has an address, token and tenant for (no service "
+        "download; the user types them into a page that opens in their browser), so act only on the user's answer."
     )
 
 
@@ -272,7 +272,7 @@ def terminal_commands(mode: str) -> str:
         return (
             "Setup cannot be started from this server (it was not started by the conexus plugin's launcher), "
             "so nothing was started. In a terminal the user runs `nx config init`, which asks for the service "
-            "address and token and saves them."
+            "address, the token and, for a mint credential, the tenant, and saves them."
         )
     if mode == "cli-only":
         return "The Nexus CLI is already installed (this server is part of it). There is nothing to install."

@@ -12914,9 +12914,8 @@ def daemon_uninstall(
 # ``tests/mcp/test_setup_tools.py`` pins the two equal. The tools start the setup
 # process (``NX_SETUP_SCRIPT``) and read its answer; see ``nexus.mcp.setup_tools``.
 # Neither is auto-approved (``nexus.hooks.auto_approve``). ``mode`` is a plain
-# string, not an enum, so a mode that is not offered (a managed service, until its
-# credentials page exists) gets the same sentence from both servers instead of a
-# schema validation message.
+# string, not an enum, so a mode that is not offered gets the same sentence from both
+# servers instead of a schema validation message.
 @mcp.tool(
     title=_setup_tools.SETUP_TITLE,
     description=_setup_tools.SETUP_DESCRIPTION,

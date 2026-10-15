@@ -19,7 +19,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     for key in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "MXBAI_API_KEY",
                 "CHROMA_TENANT", "CHROMA_DATABASE",
-                "NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+                "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN", "NX_MINT_TENANT"):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
 
@@ -258,11 +258,12 @@ def test_config_list_shows_mint_tenant_unmasked(runner, fake_home) -> None:
 def test_config_init_writes_service_credentials(runner, fake_home) -> None:
     # 6.0 managed onboarding: the wizard collects the service endpoint + token
     # (RDR-166), not Chroma credentials.
-    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\nstatic\n")
     assert result.exit_code == 0, result.output
     creds = _read_config(fake_home).get("credentials", {})
     assert creds.get("service_url") == "https://svc.example.com"
     assert creds.get("service_token") == "bearer-tok"
+    assert "mint_token" not in creds and "mint_tenant" not in creds
 
 
 def test_config_init_does_not_provision_chroma(runner, fake_home) -> None:
@@ -271,7 +272,7 @@ def test_config_init_does_not_provision_chroma(runner, fake_home) -> None:
     # Assert on output rather than a mock: config_init no longer imports the
     # provisioning helpers, so a patch on them would pass vacuously. The output
     # guards are real tripwires — they fail if provisioning is reintroduced.
-    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\nstatic\n")
     assert result.exit_code == 0, result.output
     assert "chromadb" not in result.output.lower()
     assert "provision" not in result.output.lower()
@@ -284,6 +285,63 @@ def test_config_init_shows_service_endpoint_hint(runner, fake_home) -> None:
     assert "service" in output
     # No stale Chroma/Voyage signup pointers in the managed wizard.
     assert "trychroma.com" not in output
+
+
+def test_config_init_saves_a_mint_credential_with_its_tenant_and_no_service_token(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nmint-tok\nmint\nacme\n")
+    assert result.exit_code == 0, result.output
+    creds = _read_config(fake_home).get("credentials", {})
+    assert creds == {"service_url": "https://svc.example.com", "mint_token": "mint-tok", "mint_tenant": "acme"}
+
+
+def test_config_init_hides_the_token_as_it_is_typed(runner, fake_home) -> None:
+    """The record's secret-lifecycle line says the terminal prompt has echo off; a visible prompt would echo it here."""
+    for kind, extra in (("static", ""), ("mint", "acme\n")):
+        result = runner.invoke(main, ["config", "init"], input=f"https://svc.example.com\ntyped-secret-{kind}\n{kind}\n{extra}")
+        assert result.exit_code == 0, result.output
+        assert f"typed-secret-{kind}" not in result.output
+        # ...and the visible answers do echo, so the check above is not blind.
+        assert "https://svc.example.com" in result.output
+
+
+def test_config_init_replaces_the_other_kind_so_the_config_never_holds_both(runner, fake_home) -> None:
+    _write_config(fake_home, {"credentials": {"service_url": "https://svc.example.com", "service_token": "old-static"}})
+    result = runner.invoke(main, ["config", "init"], input="\nmint-tok\nmint\nacme\n")
+    assert result.exit_code == 0, result.output
+    creds = _read_config(fake_home)["credentials"]
+    assert creds == {"service_url": "https://svc.example.com", "mint_token": "mint-tok", "mint_tenant": "acme"}
+    assert "service_token" in result.output, "the wizard says it removed the other kind"
+    assert "old-static" not in result.output
+    result = runner.invoke(main, ["config", "init"], input="\nnew-static\nstatic\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com", "service_token": "new-static"}
+
+
+def test_config_init_keeps_what_is_saved_when_the_token_is_left_blank_and_asks_no_kind(runner, fake_home) -> None:
+    _write_config(fake_home, {"credentials": {"service_url": "https://svc.example.com", "mint_token": "keep-me", "mint_tenant": "acme"}})
+    result = runner.invoke(main, ["config", "init"], input="\n\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com", "mint_token": "keep-me", "mint_tenant": "acme"}
+    assert "keep-me" not in result.output and "mint or static" not in result.output.lower()
+
+
+def test_config_init_refuses_a_tenant_with_whitespace_or_a_leading_dash_and_asks_again(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nmint-tok\nmint\n-x\na b\nacme\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"]["mint_tenant"] == "acme"
+
+
+def test_config_init_skips_a_token_the_environment_already_holds(runner, fake_home, monkeypatch) -> None:
+    for name in ("NX_SERVICE_TOKEN", "NX_MINT_TOKEN"):
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
+        monkeypatch.setenv(name, _SECRET)
+        result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\n")
+        assert result.exit_code == 0, result.output
+        assert name in result.output
+        assert _SECRET not in result.output
+        creds = _read_config(fake_home)["credentials"]
+        assert creds == {"service_url": "https://svc.example.com"}, "the environment wins; nothing about the token is saved"
 
 
 def test_config_init_skips_keys_already_in_env(runner, fake_home, monkeypatch) -> None:

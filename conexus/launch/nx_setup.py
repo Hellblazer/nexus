@@ -74,37 +74,46 @@ is owner-only from the call that creates it, by the status file's mechanism (see
 ``D:P(A;;FA;;;<user SID>)`` (``nexus._winsec``'s descriptor; that module cannot be imported here, so the
 two ctypes calls are repeated in ``_create_private_windows``). It is deleted when the page is first
 loaded, when the listener closes without a load, and, if the run was killed (nothing can clean up after
-a SIGKILL), when the next run starts (``_sweep_opener`` in ``_start``). The page has two fields, a
-service address and a token (a password field, autocomplete off), and one button; an ``http`` address is
-accepted as well as ``https``.
+a SIGKILL), when the next run starts (``_sweep_opener`` in ``_start``). The page has three fields: a
+service address, a token (a password field, autocomplete off) and a tenant, and one button; an ``http`` address is
+accepted as well as ``https``. It serves at most :data:`PAGE_MAX_CONNECTIONS` connections at once and closes the rest
+at the door; it refuses a ``POST`` whose ``Sec-Fetch-Site`` or ``Origin`` names another origin; on Windows its
+socket asks for exclusive use of its address (``SO_EXCLUSIVEADDRUSE``); and it tightens the setup directory to
+``0o700`` on POSIX when it starts to serve.
 
-A submitted pair is checked by :func:`check_pair`. **The token check:** ``/version`` (no token) says the
-service answers and which version it is, ``/health`` (with the token) says it is ready, and the token is
-checked against ONE authenticated read-only route, ``GET /v1/_whoami`` (:data:`TOKEN_ROUTE`; Sam,
-2026-10-15). Why that route: ``/health`` and ``/version`` are unauthenticated in the engine
-(``NexusService.java``: "unauthenticated", outside the ``AuthFilter`` block), so a local or self-hosted
-engine answers any token there, and only the managed edge refuses a wrong token, on ``/health`` alone
-(measured 2026-10-14, ``nexus_rdr/228-research-36``). ``/v1/_whoami`` sits behind ``AuthFilter`` on every
-engine, answers 401 to a token the engine does not know (403 to a live mint-scoped one, which cannot be a
-service token and is refused), is a ``GET`` whose only work is reading the tenant out of the token (a
-``SELECT current_setting``), has no side effect, and exists in the pinned engine
-(``src/nexus/engine_version.py``); the doctor's "Static service_token" row already makes this exact
-call (``nexus.health._check_static_service_token``). The managed edge's answer to a RIGHT token on it
-was not measured (no request may go to the managed service for this work); the doctor row relies on it.
-A redirect is never followed, so the token goes only to the address typed.
+**Two kinds of credential.** A managed user holds a MINT credential: a token bound to one tenant that mints
+short-lived data tokens, which the CLI does for every request (``mint_token`` and ``mint_tenant``; conexus,
+2026-10-15). A static service token (``service_token``) is the self-hosted case. The page takes both (Sam,
+2026-10-15). The tenant is required for a mint credential and unused for a static token.
 
-A pair that passes is held in memory only (it is never written to disk to survive a kill: a killed run's
-next ``cloud`` call opens a new page and the status says the credentials are needed again), the page says
-so, and the listener closes. The pair is saved after the build with ``nx config set service_url <address>``
-and ``nx config set service_token --stdin``, the token on standard input, never on a command line; should the
-child echo it, it is replaced by ``***`` in the log. A pair that fails is not kept; the page says why and stays
-open. When ``NX_SERVICE_URL`` or ``NX_SERVICE_TOKEN`` is set in this process's environment the page says those
-take precedence over what it saves. The status file's ``credentials`` field takes exactly
-:data:`CREDENTIAL_STATES`; two minutes after the request to open the page with no load it is
-``page not loaded`` (and the message names ``nx config init`` in a terminal), and ten minutes after the
-listener started it is ``timed out`` and the listener closes, whatever happened; a run that times out ends
-``failed`` at step ``credentials`` (a timeout during the build lets the build finish first). The token is
-never written to the log or the status file.
+A submitted set is checked by :func:`check_pair`. **The check:** ``GET /version`` (no token) must answer 200: the
+service is there. ``/health`` is not used (it is unauthenticated in the engine, and the managed edge answers it 401
+to a mint credential, measured 2026-10-15, ``nexus_rdr/228-research-37``). The token goes to ONE authenticated
+read-only route, ``GET /v1/_whoami`` (:data:`TOKEN_ROUTE`; Sam, 2026-10-15), which sits behind ``AuthFilter`` on
+every engine (the doctor's "Static service_token" row makes the same call): 401 refuses the token, 200 is a working
+static token, and 403 is a live mint credential. A mint credential is then proved with its tenant by minting ONE
+data token, ``POST /v1/data-tokens/mint`` (:data:`MINT_ROUTE`) with ``{"tenant", "ttl_seconds": 60}``, the call
+``nexus.db.data_token.DataTokenManager`` makes: 200 accepts, 403 says the token belongs to another tenant, 429 says to
+try again in a moment, anything else is refused with its status. What the managed edge does with these routes beyond
+what research-37 measured is not asserted here. A redirect is never followed and no proxy is used, so the token
+goes only to the address typed; the whole check ends after :data:`CHECK_DEADLINE_SECONDS`.
+
+What passes is held in memory only (it is never written to disk to survive a kill: a killed run's next ``cloud`` call
+opens a new page, and a status that read the pair as accepted is reported as lost), the page says so, and the
+listener closes. It is saved after the build with ``nx config set service_url <address>`` and then, for a mint
+credential, ``nx config set mint_tenant <tenant>`` and ``nx config set mint_token --stdin``, or, for a static token,
+``nx config set service_token --stdin``; never both kinds. A token goes on standard input, never on a command line;
+should the child echo it, it is replaced by ``***`` in the log. A set that fails is not kept; the page says why and
+stays open. When ``NX_SERVICE_URL``, ``NX_SERVICE_TOKEN``, ``NX_MINT_TOKEN`` or ``NX_MINT_TENANT`` is set in this
+process's environment the page says those take precedence over what it saves. When the config already holds a
+service address and a token of either kind, no page is served and nothing is saved again (a run that failed at
+``nx doctor`` resumes without asking for the token twice). The status file's ``credentials`` field takes exactly
+:data:`CREDENTIAL_STATES`; two minutes after the request to open the page with no load, or at once when the request
+is known to have failed, it is ``page not loaded``, and ten minutes after the listener started it is ``timed out``
+and the listener closes, whatever happened; a run that times out ends ``failed`` at step ``credentials`` (a timeout
+during the build lets the build finish first, and until then the status says to wait for the run to end, because a
+``setup`` call while a run is live starts nothing). A run that ends with credentials accepted and not saved drops the
+field and says they are discarded. The token is never written to the log or the status file.
 
 **Steps**, each skipped when already done, decided from facts and not from this
 file's own history alone:
@@ -223,7 +232,7 @@ import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any  # noqa: E402
+from typing import Any, NamedTuple  # noqa: E402
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "scripts"),
@@ -802,8 +811,24 @@ OPENER_NAME = "credentials-opener.html"
 #: to open it, so no test can start a browser.
 OPEN_RECORD_ENV = "NX_SETUP_OPEN_RECORD"
 
+#: The whole check (every request together) gives up after this long. ``CHECK_TIMEOUT_SECONDS`` bounds one
+#: socket operation and restarts on every byte, so a service that drips bytes could otherwise hold the check, and
+#: the submit lock with it, for hours.
+CHECK_DEADLINE_SECONDS = 20.0
+#: At most this many connections to the page are served at once; the rest are closed at the door.
+PAGE_MAX_CONNECTIONS = 16
+#: A second submit waits this long for a check that is running, then is told so.
+PAGE_BUSY_WAIT_SECONDS = 1.0
+
 #: The authenticated, read-only route that checks the token (module docstring, "The token check").
 TOKEN_ROUTE = "/v1/_whoami"
+#: The route a mint credential proves itself on, with its tenant (``nexus.db.data_token.DataTokenManager`` calls it).
+MINT_ROUTE = "/v1/data-tokens/mint"
+#: The lifetime asked of the one data token the check mints.
+MINT_TTL_SECONDS = 60
+
+KIND_MINT = "mint"
+KIND_STATIC = "static"
 
 _PAGE_BODY_MAX = 16 * 1024
 
@@ -844,6 +869,18 @@ def _ask_system_to_open(path: str) -> bool:
     return _launch_opener(path)
 
 
+def _bind_exclusively(sock: Any, option: int | None = None) -> None:
+    """Before the bind, ask that no other process may bind this socket's address and port, whatever options it
+    sets (``SO_EXCLUSIVEADDRUSE``, which exists on Windows only; ``allow_reuse_address=False`` only stops THIS
+    socket sharing it). *option* is the constant; ``None`` looks it up, and a system without it asks for nothing."""
+    import socket  # noqa: PLC0415 -- lazy, see CredentialsPage.start
+
+    if option is None:
+        option = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+    if option is not None:
+        sock.setsockopt(socket.SOL_SOCKET, option, 1)
+
+
 def _remove_file(path: Path) -> None:
     """Delete *path* if it is there. Never raises: a Windows reader may hold it for a moment (the
     next run's start deletes what is left)."""
@@ -877,48 +914,125 @@ def _normal_address(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
-def check_pair(url: str, token: str) -> tuple[bool, str]:
-    """Check a service address and token. Returns ``(ok, sentence)``; the sentence is for the user and
-    holds neither the token nor anything of the page's address.
+class CheckResult(NamedTuple):
+    """The verdict of :func:`check_pair`. ``text`` is a sentence for the user (no token, nothing of the page's
+    address). ``kind`` is :data:`KIND_MINT` or :data:`KIND_STATIC` when ``ok`` and ``""`` when not."""
 
-    ``/version`` (no token) says the service answers and which version it is; ``/health`` (with the
-    token: the managed service's edge answers 403 to a request with none, measured 2026-10-14,
-    ``nexus_rdr/228-research-36``) says it is ready; and the token is checked against
-    :data:`TOKEN_ROUTE` alone, the one authenticated read-only route that refuses a wrong token on every
-    engine, because ``/health`` and ``/version`` are unauthenticated in a local or self-hosted engine and
-    answer any token (Sam, 2026-10-15). A redirect is never followed, so the token is sent to the
-    address that was typed and to no other.
+    ok: bool
+    text: str
+    kind: str = ""
+
+
+class Accepted(NamedTuple):
+    """What the page accepted and holds in memory until the build ends: the kind of credential, the service
+    address, the token and, for a mint credential, its tenant (``""`` for a static token)."""
+
+    kind: str
+    url: str
+    token: str
+    tenant: str = ""
+
+
+#: A tenant name the service itself may put in an error body, which is the only kind the check shows back.
+_SLUG = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def _normal_tenant(tenant: str) -> str:
+    """The tenant as typed, trimmed. ``""`` when empty. Raises ValueError with a sentence for the user."""
+    text = (tenant or "").strip()
+    if not text:
+        return ""
+    if len(text) > 128 or text.startswith("-") or not (text.isascii() and text.isprintable() and not any(c.isspace() for c in text)):
+        raise ValueError("The tenant has characters a tenant name does not have (spaces, a leading dash, control characters or non-ASCII ones).")
+    return text
+
+
+def _bound_tenant(raw: bytes) -> str:
+    """The tenant a service names in a 403 body, only when it is a plain slug, else ``""``. Used to say which
+    tenant the token belongs to and never to choose one."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return ""
+    if isinstance(data, dict):
+        for key in ("tenant", "bound_tenant"):
+            value = data.get(key)
+            if isinstance(value, str) and _SLUG.fullmatch(value):
+                return value
+    return ""
+
+
+def check_pair(url: str, token: str, tenant: str = "", *, deadline_s: float | None = None) -> CheckResult:
+    """Check a service address, a token and, for a mint credential, its tenant. The sentence in the result is
+    for the user and holds neither the token nor anything of the page's address.
+
+    ``GET /version`` (no token) must answer 200 with Nexus's version record: the service is there and says
+    which version. The token then goes to :data:`TOKEN_ROUTE` alone, the one authenticated read-only route that
+    refuses a wrong token on every engine (``/health`` and ``/version`` are unauthenticated in the engine and
+    answer any token; ``/health`` is not used at all, because the managed edge answers it 401 to a mint
+    credential, measured 2026-10-15, ``nexus_rdr/228-research-37``). 401 refuses the token; 200 is a working
+    static service token; 403 is a live mint credential, which cannot be a service token, and is proved with
+    its tenant by minting ONE data token (``POST`` :data:`MINT_ROUTE`, the call the CLI itself makes, with a
+    :data:`MINT_TTL_SECONDS` lifetime; the minted token is dropped unread): 200 accepts it as a mint credential,
+    403 says the token belongs to another tenant, 429 says to try again in a moment. A redirect is never
+    followed, so the token goes only to the address typed, and no proxy is used. The whole check gives up after
+    *deadline_s* (default :data:`CHECK_DEADLINE_SECONDS`), however slowly the service answers.
     """
-    import http.client  # noqa: PLC0415 -- lazy, see _normal_address
-    import ssl  # noqa: PLC0415
-    import urllib.error  # noqa: PLC0415
-    import urllib.parse  # noqa: PLC0415
-    import urllib.request  # noqa: PLC0415
+    import urllib.parse  # noqa: PLC0415 -- lazy, see _normal_address
 
     try:
         base = _normal_address(url)
+        want = _normal_tenant(tenant)
     except ValueError as exc:
-        return False, str(exc)
+        return CheckResult(False, str(exc))
     if not token:
-        return False, "Enter the token."
+        return CheckResult(False, "Enter the token.")
     if not (token.isascii() and token.isprintable() and not any(c.isspace() for c in token)):
-        return False, "The token has characters a token does not have (spaces, control characters or non-ASCII ones)."
+        return CheckResult(False, "The token has characters a token does not have (spaces, control characters or non-ASCII ones).")
     host = urllib.parse.urlsplit(base).netloc
+    limit = CHECK_DEADLINE_SECONDS if deadline_s is None else deadline_s
+    outcome: list[CheckResult] = []
+
+    def work() -> None:
+        try:
+            outcome.append(_probe(base, host, token, want, time.monotonic() + limit))
+        except Exception as exc:  # noqa: BLE001 -- the thread must always leave a verdict
+            outcome.append(CheckResult(False, f"The service at {host} did not answer ({type(exc).__name__})."))
+
+    worker = threading.Thread(target=work, name="nx-setup-check", daemon=True)
+    worker.start()
+    worker.join(limit)
+    if outcome:
+        return outcome[0]
+    return CheckResult(False, f"The service at {host} did not answer in time ({limit:g} seconds).")
+
+
+def _probe(base: str, host: str, token: str, tenant: str, end: float) -> CheckResult:
+    """The requests of :func:`check_pair`, each with whatever is left of the deadline *end* as its timeout."""
+    import http.client  # noqa: PLC0415 -- lazy, see _normal_address
+    import ssl  # noqa: PLC0415
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
 
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # the 3xx answer then surfaces as an HTTPError
             return None
 
-    opener = urllib.request.build_opener(NoRedirect)
+    # An empty ProxyHandler: the token goes to the address typed, never to a proxy the environment names.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 
-    def get(route: str, bearer: str | None = None) -> tuple[int, bytes]:
-        request = urllib.request.Request(
-            base + route, method="GET", headers={"Accept": "application/json", "User-Agent": "conexus-setup"},
-        )
+    def call(route: str, bearer: str | None = None, body: dict[str, Any] | None = None) -> tuple[int, bytes]:
+        headers = {"Accept": "application/json", "User-Agent": "conexus-setup"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(base + route, data=data, method="GET" if body is None else "POST", headers=headers)
         if bearer is not None:
             request.add_header("Authorization", f"Bearer {bearer}")
+        timeout = max(0.1, min(CHECK_TIMEOUT_SECONDS, end - time.monotonic()))
         try:
-            with opener.open(request, timeout=CHECK_TIMEOUT_SECONDS) as response:
+            with opener.open(request, timeout=timeout) as response:
                 return response.status, response.read(65536)
         except urllib.error.HTTPError as exc:
             try:
@@ -927,69 +1041,113 @@ def check_pair(url: str, token: str) -> tuple[bool, str]:
                 exc.close()
 
     try:
-        code, body = get("/version")
+        code, raw = call("/version")
         if code != 200:
-            return False, f"The service at {host} answered /version with HTTP {code}; it does not look like a Nexus service."
+            return CheckResult(False, f"The service at {host} answered /version with HTTP {code}; it does not look like a Nexus service.")
         try:
-            info = json.loads(body.decode("utf-8"))
+            info = json.loads(raw.decode("utf-8"))
         except ValueError:
             info = None
         if not isinstance(info, dict):
-            return False, f"The service at {host} answered /version with something other than Nexus's version record."
+            return CheckResult(False, f"The service at {host} answered /version with something other than Nexus's version record.")
         version = str(info.get("release_version") or info.get("app_version") or "unknown")
-        code, _ = get("/health", token)
-        if code not in (200, 401, 403):  # a refusal here is the token route's verdict to give
-            return False, f"The service at {host} answered /health with HTTP {code}, so it is not ready."
-        code, _ = get(TOKEN_ROUTE, token)
+        code, _ = call(TOKEN_ROUTE, token)
+        if code == 200:
+            return CheckResult(True, f"The service at {host} answers (version {version}) and accepts the token.", KIND_STATIC)
+        if code == 401:
+            return CheckResult(False, f"The service at {host} refused the token (HTTP 401).")
+        if code != 403:
+            return CheckResult(False, f"The service at {host} answered the token check with HTTP {code}.")
+        # 403: a live credential that is not a service token, which is what a mint credential is.
+        if not tenant:
+            return CheckResult(
+                False,
+                f"The service at {host} knows this token and it is a mint credential, which belongs to one tenant: "
+                "enter the tenant as well.",
+            )
+        code, raw = call(MINT_ROUTE, token, {"tenant": tenant, "ttl_seconds": MINT_TTL_SECONDS})
+        if code == 200:
+            return CheckResult(
+                True, f"The service at {host} answers (version {version}) and accepts the mint credential for tenant {tenant}.", KIND_MINT,
+            )
+        if code == 403:
+            bound = _bound_tenant(raw)
+            named = f" The service names the tenant this token is bound to: {bound}." if bound else ""
+            return CheckResult(
+                False,
+                f"The service at {host} knows this token but would not mint for tenant {tenant}: the token belongs to "
+                f"another tenant (or is not a mint credential).{named}",
+            )
+        if code == 429:
+            return CheckResult(False, f"The service at {host} is limiting requests; try again in a moment.")
+        if code == 401:
+            return CheckResult(False, f"The service at {host} refused the token when it was asked to mint (HTTP 401).")
+        if code == 400:
+            return CheckResult(False, f"The service at {host} refused the mint request as malformed (HTTP 400).")
+        return CheckResult(False, f"The service at {host} answered the mint request with HTTP {code}.")
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
         reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
         if isinstance(reason, ssl.SSLError):
-            return False, f"The service at {host} did not answer: its TLS certificate was not accepted."
-        return False, f"The service at {host} did not answer ({type(reason).__name__})."
-    if code == 200:
-        return True, f"The service at {host} answers (version {version}) and accepts the token."
-    if code == 401:
-        return False, f"The service at {host} refused the token (HTTP 401)."
-    if code == 403:
-        return False, (
-            f"The service at {host} knows this token, but it is a mint-scoped credential, which cannot be a "
-            "service token. Enter a tenant service token; this page saves only a service token."
-        )
-    return False, f"The service at {host} answered the token check with HTTP {code}."
+            return CheckResult(False, f"The service at {host} did not answer: its TLS certificate was not accepted.")
+        if isinstance(reason, TimeoutError):
+            return CheckResult(False, f"The service at {host} did not answer in time.")
+        return CheckResult(False, f"The service at {host} did not answer ({type(reason).__name__}).")
 
 
-def credentials_notice(state: str, reason: str = "") -> tuple[str, str]:
+def credentials_notice(state: str, reason: str = "", *, open_failed: bool = False) -> tuple[str, str]:
     """``(sentence, next step)`` the status carries for one of :data:`CREDENTIAL_STATES`. Neither holds the
-    page's address or a token."""
+    page's address or a token. Every one of these is written while the run is LIVE (the terminal statuses carry
+    their own words), and a ``setup`` call while a run is live starts nothing, so none of them tells the model to
+    make one. *open_failed*: the request to open the page is known to have failed."""
     if state == CRED_NOT_LOADED:
+        what = (
+            "The system could not be asked to open the credentials page (there is no program to open it with), so no page opened."
+            if open_failed else
+            "The credentials page was not loaded within 2 minutes of asking the system to open it."
+        )
         return (
-            "The credentials page was not loaded within 2 minutes of asking the system to open it.",
-            "If no browser opened, the user can run `nx config init` in a terminal and enter the service address and "
-            "token there. Setup stops listening 10 minutes after it began; setup_status shows what happens.",
+            what,
+            "Setup is still running; do not call setup again while it runs, because that starts nothing. If a page did open, "
+            "the user can still use it: setup stops listening 10 minutes after it began. A user with a terminal can run "
+            "`nx config init` once the CLI is built (the build stage has ended) and type the service address, token and tenant there. "
+            "A user with no terminal waits for the run to end (setup_status), then, if the user agrees, calls setup with mode cloud "
+            "again: it opens a new page. Follow progress with setup_status.",
         )
     if state == CRED_REJECTED:
         return (
-            f"The service address and token were refused: {reason or 'the check failed'} The page stays open for another try.",
-            "Tell the user the page refused the pair and is waiting for another try. Follow progress with setup_status.",
+            f"The service address, token and tenant were refused: {reason or 'the check failed'} The page stays open for another try.",
+            "Tell the user the page refused what they typed and is waiting for another try. Follow progress with setup_status.",
         )
     if state == CRED_ACCEPTED:
         return (
-            "The service address and token were accepted and are held in memory; they are saved after the build.",
+            "The service credentials were accepted and are held in memory; they are saved after the build, and are lost "
+            "if the run ends before then.",
             "Follow progress with setup_status.",
         )
     if state == CRED_SAVED:
-        return "The service address and token were saved.", ""
+        return "The service credentials were saved.", ""
     if state == CRED_TIMED_OUT:
         return (
             "Nobody completed the credentials page in 10 minutes, so setup stopped listening.",
-            "If the user agrees, call setup with mode cloud again: it opens a new page. Or the user runs `nx config init` "
-            "in a terminal.",
+            "Setup is still running (the install carries on) and will end failed at the credentials step. Wait for the run to "
+            "end (setup_status shows a terminal state); do not call setup again while it runs, because that starts nothing. "
+            "Then, if the user agrees, call setup with mode cloud again: it opens a new page. A user with a terminal can "
+            "run `nx config init` once the CLI is built.",
         )
     return (
-        "Setup asked the system to open a page in the user's browser for the service address and token; waiting for credentials.",
-        "Tell the user a page asking for the service address and token should have opened in their browser. "
-        "Follow progress with setup_status.",
+        "Setup asked the system to open a page in the user's browser for the service address, token and tenant; waiting for credentials.",
+        "Tell the user a page asking for the service address, token and tenant should have opened in their browser, and to keep "
+        "that tab open until it says the credentials were accepted. Follow progress with setup_status.",
     )
+
+
+#: Said when a run ends with a pair the page accepted and nothing saved (a build that failed, a kill, a signal).
+_LOST_NOTE = "The service credentials the page accepted were not saved and are discarded."
+_LOST_NEXT = (
+    "The credentials must be entered again: calling setup with mode cloud again opens a new page. A user with a terminal "
+    "can run `nx config init` instead."
+)
+_LOST_INTERRUPTED = "The service credentials the page accepted were held in memory only and are lost."
 
 
 _PAGE_STYLE = (
@@ -997,21 +1155,26 @@ _PAGE_STYLE = (
     "label{display:block;margin-top:1rem}input{width:100%;box-sizing:border-box;padding:.5rem;font:inherit}"
     "button{margin-top:1.5rem;padding:.5rem 1.2rem;font:inherit}"
     ".note{background:#eef;padding:.75rem;border-radius:4px}.error{background:#fee;padding:.75rem;border-radius:4px}"
+    ".hint{font-size:.9rem;margin:.25rem 0 0}"
 )
+
+#: The variables that take precedence over what the page saves.
+_ENV_NAMES = ("NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN", "NX_MINT_TENANT")
 
 
 def _env_notice(environ: Any) -> str:
-    """A sentence when ``NX_SERVICE_URL`` or ``NX_SERVICE_TOKEN`` is set: those take precedence over what is
-    saved. Names the variables, never their values."""
-    names = [n for n in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN") if (environ.get(n) or "").strip()]
+    """A sentence when ``NX_SERVICE_URL``, ``NX_SERVICE_TOKEN``, ``NX_MINT_TOKEN`` or ``NX_MINT_TENANT`` is set:
+    those take precedence over what is saved. Names the variables, never their values."""
+    names = [n for n in _ENV_NAMES if (environ.get(n) or "").strip()]
     if not names:
         return ""
     verb = "is" if len(names) == 1 else "are"
-    return f"{' and '.join(names)} {verb} set in the environment of the setup process, and take precedence over what this page saves."
+    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return f"{joined} {verb} set in the environment of the setup process, and take precedence over what this page saves."
 
 
 class CredentialsPage:
-    """The loopback page that takes a managed service's address and token (RDR-228, "The credentials page").
+    """The loopback page that takes a managed service's address, token and tenant (RDR-228, "The credentials page").
 
     :meth:`start` binds ``127.0.0.1`` on a port the system picks, writes the owner-only opener file and asks
     the system to open it. The page's address, ``http://127.0.0.1:<port>/<random path>``, is held in memory
@@ -1037,14 +1200,17 @@ class CredentialsPage:
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._closed = False
-        self._pair: tuple[str, str] | None = None
+        self._accepted: Accepted | None = None
         self._loaded = False
         self._path = ""
         self._submitted_url = ""
+        self._submitted_tenant = ""
         self._listening_since = 0.0
         self._opened_at = 0.0
         self.state = CRED_WAITING
         self.reason = ""
+        #: The request to open the page is known to have failed (the opener answered ``False``).
+        self.open_failed = False
         self.port = 0
         self.bound_host = ""
 
@@ -1060,10 +1226,17 @@ class CredentialsPage:
         return f"http://{self.bound_host}:{self.port}{self._path}"
 
     @property
-    def accepted_pair(self) -> tuple[str, str] | None:
-        """The accepted ``(service address, token)``, held in memory until saved; ``None`` before and after."""
+    def accepted(self) -> Accepted | None:
+        """What the page accepted (kind, service address, token, tenant), held in memory until saved; ``None``
+        before and after."""
         with self._lock:
-            return self._pair
+            return self._accepted
+
+    @property
+    def accepted_pair(self) -> tuple[str, str] | None:
+        """The accepted ``(service address, token)``; ``None`` before and after."""
+        held = self.accepted
+        return None if held is None else (held.url, held.token)
 
     @property
     def loaded(self) -> bool:
@@ -1083,10 +1256,37 @@ class CredentialsPage:
         import secrets  # noqa: PLC0415
 
         page = self
+        if os.name == "posix":  # the log holds the service address: a directory made wider earlier is tightened
+            with contextlib.suppress(OSError):
+                os.chmod(self._setup, 0o700)
 
         class Server(http.server.ThreadingHTTPServer):
             allow_reuse_address = False  # on Windows SO_REUSEADDR lets another process take the same port
             daemon_threads = True
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self._slots = threading.BoundedSemaphore(PAGE_MAX_CONNECTIONS)
+                super().__init__(*args, **kwargs)
+
+            def server_bind(self) -> None:
+                _bind_exclusively(self.socket)
+                super().server_bind()
+
+            def process_request(self, request: Any, client_address: Any) -> None:
+                if not self._slots.acquire(blocking=False):  # over the cap: closed at the door, no thread, no answer
+                    self.shutdown_request(request)
+                    return
+                try:
+                    super().process_request(request, client_address)
+                except BaseException:
+                    self._slots.release()
+                    raise
+
+            def process_request_thread(self, request: Any, client_address: Any) -> None:
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    self._slots.release()
 
             def handle_error(self, request: Any, client_address: Any) -> None:
                 pass  # the default prints a traceback to standard error, which is the setup log
@@ -1136,9 +1336,25 @@ class CredentialsPage:
                 page._note_load()
                 self._page(page._render())
 
+            def _same_origin(self) -> bool:
+                """The browser says this form post comes from the page itself. ``Sec-Fetch-Site`` is the browser's own
+                word for it; ``Origin`` is checked when it is sent (``null`` is what the page's own post carries under
+                its no-referrer policy, so it counts only beside a same-origin ``Sec-Fetch-Site``)."""
+                site = self.headers.get("Sec-Fetch-Site")
+                if site is not None and site not in ("same-origin", "none"):
+                    return False
+                origin = self.headers.get("Origin")
+                if origin is None:
+                    return True
+                if origin == "null":
+                    return site == "same-origin"
+                return origin == f"http://{page.bound_host}:{page.port}"
+
             def do_POST(self) -> None:
                 if not self._addressed():
                     return self._empty(404)
+                if not self._same_origin():
+                    return self._empty(403)
                 try:
                     length = int(self.headers.get("Content-Length", ""))
                 except ValueError:
@@ -1149,8 +1365,11 @@ class CredentialsPage:
 
                 fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
                 page._note_load()
-                page._submit((fields.get("service_url") or [""])[0], (fields.get("service_token") or [""])[0])
-                self._page(page._render())
+                busy = page._submit(
+                    (fields.get("service_url") or [""])[0], (fields.get("service_token") or [""])[0],
+                    (fields.get("tenant") or [""])[0],
+                )
+                self._page(page._render(busy))
                 self.wfile.flush()
                 if page.state == CRED_ACCEPTED:
                     threading.Thread(target=page._close_listener, name="nx-setup-page-close", daemon=True).start()
@@ -1174,8 +1393,13 @@ class CredentialsPage:
         )
         self._thread.start()
         self._listening_since = self._clock()
-        self._opener(str(self.opener_path))
+        opened = self._opener(str(self.opener_path))
         self._opened_at = self._clock()
+        if opened is False:  # a failure known at once is reported at once, not after two minutes
+            with self._lock:
+                self.open_failed = True
+                if self.state == CRED_WAITING and not self._loaded:
+                    self.state = CRED_NOT_LOADED
 
     def _write_opener(self) -> None:
         """The opener file: owner-only from the call that creates it (``_create_private``: POSIX
@@ -1209,7 +1433,7 @@ class CredentialsPage:
                 pass
             elif now - self._listening_since >= PAGE_LISTEN_SECONDS:
                 self.state = CRED_TIMED_OUT
-                self._pair = None
+                self._accepted = None
                 expired = True
             elif self.state == CRED_WAITING and not self._loaded and now - self._opened_at >= PAGE_LOAD_SECONDS:
                 self.state = CRED_NOT_LOADED
@@ -1219,9 +1443,9 @@ class CredentialsPage:
             _remove_file(self.opener_path)
 
     def mark_saved(self) -> None:
-        """The pair was saved: drop it from memory."""
+        """The credentials were saved: drop them from memory."""
         with self._lock:
-            self._pair = None
+            self._accepted = None
             self.state = CRED_SAVED
 
     def _close_listener(self) -> None:
@@ -1246,38 +1470,47 @@ class CredentialsPage:
         with self._lock:
             first = not self._loaded
             self._loaded = True
+            self.open_failed = False
             if self.state == CRED_NOT_LOADED:
                 self.state = CRED_WAITING
         if first:
             _remove_file(self.opener_path)  # the browser has the address now: the opener file has done its work
 
-    def _submit(self, url: str, token: str) -> None:
-        """Check one pair. A pair that passes is held and the listener closes; one that fails is not kept."""
-        with self._submit_lock:
+    def _submit(self, url: str, token: str, tenant: str = "") -> str:
+        """Check what was typed. A pair that passes is held and the listener closes; one that fails is not kept.
+        Returns ``""``, or a sentence when another check is running and this one was not made."""
+        if not self._submit_lock.acquire(timeout=PAGE_BUSY_WAIT_SECONDS):
+            return "A check of the credentials is already running; wait for its answer."
+        try:
             with self._lock:
                 if self.state in (CRED_ACCEPTED, CRED_SAVED, CRED_TIMED_OUT):
-                    return
+                    return ""
                 self._submitted_url = url.strip()
+                self._submitted_tenant = tenant.strip()
             try:
                 address = _normal_address(url)
-                ok, text = self._checker(address, token.strip())
+                ok, text, kind = self._checker(address, token.strip(), tenant.strip())
             except ValueError as exc:
-                address, ok, text = "", False, str(exc)
+                address, ok, text, kind = "", False, str(exc), ""
             with self._lock:
                 if self.state == CRED_TIMED_OUT:
-                    return
+                    return ""
                 if ok:
-                    self._pair = (address, token.strip())
+                    held_tenant = tenant.strip() if kind == KIND_MINT else ""
+                    self._accepted = Accepted(kind, address, token.strip(), held_tenant)
                     self.state, self.reason = CRED_ACCEPTED, ""
                 else:
-                    self._pair = None
+                    self._accepted = None
                     self.state, self.reason = CRED_REJECTED, text
+            return ""
+        finally:
+            self._submit_lock.release()
 
-    def _render(self) -> str:
+    def _render(self, busy: str = "") -> str:
         import html  # noqa: PLC0415 -- lazy, see start()
 
         with self._lock:
-            state, reason, url = self.state, self.reason, self._submitted_url
+            state, reason, url, tenant = self.state, self.reason, self._submitted_url, self._submitted_tenant
         environ = os.environ if self._environ is None else self._environ
         notice = _env_notice(environ)
         parts = [
@@ -1287,16 +1520,20 @@ class CredentialsPage:
         ]
         if state in (CRED_ACCEPTED, CRED_SAVED):
             parts.append(
-                '<p class="note">The service address and token were accepted. Setup saves them when the install '
-                "finishes. You can close this tab.</p></body></html>"
+                '<p class="note">The service credentials were accepted. Setup saves them when the install finishes; if the '
+                "install fails they are discarded and setup asks again. You can close this tab.</p></body></html>"
             )
             return "".join(parts)
         parts.append(
-            "<p>Enter the address of your Nexus service and the access token for it. They go to the setup program on "
-            "this machine and are saved by the Nexus command line. They are not shown to Claude.</p>"
+            "<p>Enter the address of your Nexus service, the access token for it and, for a mint credential, its tenant. "
+            "They go to the setup program on this machine and are saved by the Nexus command line. They are not shown to "
+            "Claude. Keep this tab open until it says the credentials were accepted: if you close it, setup waits until it "
+            "stops listening, 10 minutes after it began, before it can open a new one.</p>"
         )
         if notice:
             parts.append(f'<p class="note">{html.escape(notice)}</p>')
+        if busy:
+            parts.append(f'<p class="note">{html.escape(busy)}</p>')
         if state == CRED_REJECTED:
             parts.append(f'<p class="error">{html.escape(reason)} Try again.</p>')
         parts.append(
@@ -1304,6 +1541,10 @@ class CredentialsPage:
             '<label>Service address<input name="service_url" type="text" spellcheck="false" autocomplete="off" '
             f'value="{html.escape(url, quote=True)}"></label>'
             '<label>Token<input name="service_token" type="password" autocomplete="off" spellcheck="false"></label>'
+            '<label>Tenant<input name="tenant" type="text" spellcheck="false" autocomplete="off" '
+            f'value="{html.escape(tenant, quote=True)}"></label>'
+            '<p class="hint">The tenant is needed for a mint credential, the kind a managed service issues. Leave it empty '
+            "for a static service token, the kind a self-hosted service uses.</p>"
             '<button type="submit">Check and use</button></form></body></html>'
         )
         return "".join(parts)
@@ -1347,7 +1588,7 @@ class _Run:
         if page is not None:
             state, reason = page.state, page.reason
             self._page_seen = (state, reason)
-            note, follow = credentials_notice(state, reason)
+            note, follow = credentials_notice(state, reason, open_failed=page.open_failed)
             fields.update(credentials=state, message=f"{fields['message']}. {note}")
             if follow:
                 fields["next"] = follow
@@ -1380,16 +1621,16 @@ class _Run:
         if (page.state, page.reason) != self._page_seen:
             self.at(self.stage)
 
-    def await_credentials(self) -> tuple[str, str] | None:
-        """Wait for an accepted pair; ``None`` when the page timed out. Raises :class:`_LockLost`."""
+    def await_credentials(self) -> Accepted | None:
+        """Wait for accepted credentials; ``None`` when the page timed out. Raises :class:`_LockLost`."""
         assert self.page is not None
         while True:
             if not self.heartbeat.holds():
                 raise _LockLost
             self.sync_page()
-            pair = self.page.accepted_pair
-            if pair is not None:
-                return pair
+            held = self.page.accepted
+            if held is not None:
+                return held
             if self.page.state == CRED_TIMED_OUT:
                 return None
             time.sleep(_POLL_SECONDS)
@@ -1402,7 +1643,14 @@ class _Run:
         text = " ".join([message, *self.notes])
         if self.page is not None:
             self.close_page()  # a terminal status means the listener is closed and the opener file is gone
-            fields.setdefault("credentials", self.page.state)
+            if self.page.state == CRED_ACCEPTED and state != DONE:
+                # The pair lives in this process's memory only, and the run is over: it is gone. The six values
+                # have none that says so, so the field goes and the words say it.
+                self.data.pop("credentials", None)
+                text = f"{text} {_LOST_NOTE}"
+                next_step = f"{next_step} {_LOST_NEXT}"
+            else:
+                fields.setdefault("credentials", self.page.state)
         try:
             self.update(state=state, stage=self.stage, message=text, next=next_step, steps_done=list(self.steps_done), **fields)
         except _LockLost:
@@ -1591,7 +1839,7 @@ def _nx_after_build(run: _Run) -> str | None:
 
 
 def _execute(run: _Run) -> int:
-    if run.mode == MODE_CLOUD:
+    if run.mode == MODE_CLOUD and not _credentials_saved(config_dir()):
         failed = run.open_page()  # at the start of the run, so the user is asked while the build goes on
         if failed is not None:
             return failed
@@ -1650,30 +1898,54 @@ def _execute(run: _Run) -> int:
     )
 
 
+def _credentials_saved(config: Path) -> bool:
+    """Whether the config file already holds a token of either kind (``service_token`` or ``mint_token``): what
+    an earlier run saved before it failed later, for instance at ``nx doctor``. Any saved token counts, with or
+    without an address, because the page saves only its own kind and has no verb to remove the other: saving a
+    mint credential beside an old ``service_token`` would leave the static token in force. Only the file is read;
+    the environment, which wins over it, is not what this run would have saved into."""
+    try:
+        saved = _endpoint_resolve.read_config_yml_credentials(config, ("service_token", "mint_token"))
+    except Exception:  # noqa: BLE001 -- unreadable is "not saved": the page opens
+        return False
+    return bool((saved.get("service_token") or "").strip() or (saved.get("mint_token") or "").strip())
+
+
 def _cloud(run: _Run, nx: str) -> int | None:
-    """The service step for mode ``cloud``: wait for the pair the credentials page accepts (it has been
-    served since the start of the run, so this waits only if the user has not finished), then save it with
-    ``nx config set``. The token goes in on standard input. No service is downloaded. ``None`` means it
-    went well."""
+    """The service step for mode ``cloud``: wait for the credentials the page accepts (it has been served since
+    the start of the run, so this waits only if the user has not finished), then save them with ``nx config set``:
+    ``service_url``, and for a mint credential ``mint_tenant`` then ``mint_token`` (the token last, so a save that
+    stops half way never leaves a token without its tenant) or for a static token ``service_token``. Never both
+    kinds. A token goes in on standard input. No service is downloaded. When the config already holds an address
+    and a token no page was served and nothing is saved again. ``None`` means it went well."""
+    if run.page is None:
+        run.notes.append(
+            "A service token was already saved, so no credentials page was opened and nothing was saved again. To "
+            "replace it, the user runs `nx config init` in a terminal."
+        )
+        run.step_done("credentials")
+        return None
     run.at("credentials")
-    pair = run.await_credentials()
-    if pair is None:
+    held = run.await_credentials()
+    if held is None:
         return run.end(
             FAILED, "Nobody completed the credentials page within 10 minutes, so setup stopped listening.",
             "If the user agrees, call setup with mode cloud again: it opens a new page. Or the user runs `nx config init` "
             f"in a terminal. Log: {run.log_path}",
             failed_step="credentials",
         )
-    url, token = pair
+    steps: list[tuple[list[str], str | None, str]] = [(["service_url", held.url], None, "the service address")]
+    if held.kind == KIND_MINT:
+        steps += [(["mint_tenant", held.tenant], None, "the tenant"), (["mint_token", "--stdin"], held.token, "the token")]
+    else:
+        steps += [(["service_token", "--stdin"], held.token, "the token")]
     try:
-        code, _ = run.cmd([nx, "config", "set", "service_url", url])
-        if code != 0:
-            return run.fail("credentials", "saving the service address failed.")
-        code, _ = run.cmd([nx, "config", "set", "service_token", "--stdin"], stdin_text=token)
+        for tail, secret, what in steps:
+            code, _ = run.cmd([nx, "config", "set", *tail], stdin_text=secret)
+            if code != 0:
+                return run.fail("credentials", f"saving {what} failed.")
     except OSError as exc:
         return run.fail("credentials", f"nx config set could not start: {exc}")
-    if code != 0:
-        return run.fail("credentials", "saving the token failed.")
     assert run.page is not None
     run.page.mark_saved()
     run.step_done("credentials")
@@ -1952,6 +2224,14 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
     if state == RUNNING and not live:
         state = INTERRUPTED
         data["next"] = f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. Log: {setup / _LOG}"
+        if data.get("mode") == MODE_CLOUD and data.get("credentials") == CRED_ACCEPTED:
+            # The accepted pair was in the dead run's memory only: the field is dropped and the words say it.
+            data.pop("credentials")
+            data["message"] = f"{data.get('message', '')} {_LOST_INTERRUPTED}".strip()
+            data["next"] = (
+                f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. {_LOST_NEXT} "
+                f"Log: {setup / _LOG}"
+            )
     data.setdefault("next", _NEXT_NONE)
     data.update(state=state, live=live, terminal=state in TERMINAL_STATES, not_now=(setup / _MARKER).exists())
     if setup.exists():
