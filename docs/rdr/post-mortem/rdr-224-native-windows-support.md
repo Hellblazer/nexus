@@ -97,6 +97,12 @@ not supported.
 - Sleep, physical hardware, Microsoft and domain accounts, script enforcement
   under WDAC or AppLocker, and install, upgrade and removal under WDAC:
   accepted as unmeasured at close.
+- The first session after an install can lose its SessionStart hooks to their
+  time limits: three Home gate runs in a row failed assertion 3 that way on the
+  evening of the close, the published 7.80.0 included, after two passes the
+  same day. The cause is not known; Sam accepted it as a known limit
+  (nexus-3ya9d). Another session's guest runs shared the host at the time, and
+  the guests download everything on each restore (caching: nexus-bpzt7).
 
 ## Drift classification
 
