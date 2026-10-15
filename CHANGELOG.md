@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Eight `nexus` MCP tools load eagerly in Claude Code and the other 36 are found through tool search** (nexus-fbtyl). `nx-mcp` marks `search`, `query`, `memory_get`, `memory_put`, `memory_search`, `scratch`, `store_get` and `store_put` with `_meta["anthropic/alwaysLoad"]: true` in `tools/list` (`ALWAYS_LOAD_TOOLS` in `nexus.mcp.core`), and `conexus/.mcp.json` no longer sets `alwaysLoad` on `nexus`. A server-level `alwaysLoad: false` would override the per-tool flags and defer everything, so the key is removed. Measured on Claude Code 2.1.300 (T2 `nexus/nexus-tools-eager-vs-deferred-ab-2026-10-14`): the same tool choice and success as all-eager with a 41% smaller first request; all-deferred lost the memory tasks. `scripts/mcp_wire_snapshot.py` now records each tool's `_meta`.
+
 ### Fixed
 
 - **Subagents and new sessions get the Knowledge Map on Windows, and wherever `NEXUS_CONFIG_DIR` is set** (nexus-3fme8). The SubagentStart and SessionStart hooks read the map that `nx context refresh` writes as UTF-8 with the locale encoding, cp1252 on Windows, so a label with a non-ASCII character dropped the whole map without a word. Both also looked under `~/.config/nexus` while the map is written under `NEXUS_CONFIG_DIR` when that is set. The plugin's version-lockstep and endpoint scripts, `nx`'s plugin lockstep and the RDR hook's `.nexus.yml` read now read their files as UTF-8 too.
