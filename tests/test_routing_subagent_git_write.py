@@ -647,6 +647,18 @@ _CHAS_DENIED = [
     "cd /tmp && ssh chas-test 'git add f'",
     "ssh " + D + "H 'git add f'",
     "ssh chas-test " + D + "'" + BS + "x27'; git add f",
+    # zsh's (e) flag evaluates its text: both run `git add f` locally
+    # (confirmed with `zsh -fc` during nexus-yc7fs; the first draft admitted them).
+    'ssh chas-test "' + D + "{(e):-" + BS + D + '(git add f)}"',
+    "ssh chas-test " + D + "{(e):-" + BS + D + "(git add f)}",
+    'ssh chas-test "' + D + "{(e):-" + BS + D + BS + "(git add f" + BS + ')}"',
+    'ssh chas-test "' + D + '{x}" git add f',
+    "ssh chas-test " + D + "[a[1]] git add f",
+    # zsh glob qualifier e runs code
+    "ssh chas-test *(e:'git add f':)",
+    # ANSI-C quoting: \' does not end $'...'
+    "ssh chas-test " + D + "'" + BS + "'' ; git add f ''",
+    "ssh chas-test 'git add f' =(git checkout -- f)",
 ]
 
 
@@ -665,6 +677,7 @@ def test_the_chas_carve_out_is_not_vacuous(shared_repo):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("guard", SCRIPT)
+    assert spec is not None and spec.loader is not None
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
     for cmd in _CHAS_ALLOWED:

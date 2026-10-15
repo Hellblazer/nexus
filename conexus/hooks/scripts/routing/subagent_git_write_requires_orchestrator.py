@@ -1352,32 +1352,56 @@ _SAFE_SSH_O_OPTIONS: frozenset[str] = frozenset(
 def _runs_nothing_locally(command: str) -> bool:
     """True when no part of ``command`` can start a second local command.
 
-    Walks the text with bash's own quoting states. Outside quotes it refuses
-    the operators that start or chain a command (``; & |``, newline, ``( )``
-    for subshells and substitutions, backtick); inside double quotes it
-    refuses the two that still execute there (backtick and ``$(``). Single
-    quotes are literal to bash, so nothing inside them is refused. A
-    backslash outside single quotes escapes the next character, as in bash;
-    missing that would read ``\\'`` as an opening quote and hide what follows.
-    Redirections (``< >``) stay allowed: they open files, they run nothing.
+    Walks the text with the shell's quoting states (zsh is the Bash tool's
+    shell on macOS, bash elsewhere; the rule is the stricter of the two).
+    Outside single quotes it refuses, escaped or not:
+
+    - ``( )`` and backtick: subshells, every substitution form (``$(``,
+      ``<(``, ``>(``, zsh ``=(``), zsh glob qualifiers like ``*(e:...:)`` and
+      zsh parameter flags like ``${(e)...}``, which evaluate a string as code.
+      Escaped parens are refused too: in zsh, ``"${(e):-\\$\\(cmd\\)}"``
+      rebuilds ``$(cmd)`` from escaped text and then runs it.
+    - ``${`` and ``$[``: parameter and arithmetic expansions that can
+      evaluate their contents. Plain ``$NAME`` stays allowed; it only expands.
+
+    Outside any quotes it also refuses ``; & |``, newline and CR, which start
+    or chain a command. Inside single quotes nothing is refused, since both
+    shells treat it as literal. ``$'...'`` is tracked as its own state,
+    where a backslash escapes the next character, so ``\\'`` inside it
+    cannot end the string early. A backslash outside single quotes escapes
+    the next character; missing that would read ``\\'`` as an opening quote
+    and hide what follows. Redirections (``< >``) stay allowed: they open
+    files, they run nothing.
     """
-    state = ""  # "", "'" or '"'
+    state = ""  # "", "'" (literal), "$'" (ANSI-C) or '"'
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if state == "'":
             if ch == "'":
                 state = ""
+        elif state == "$'":
+            if ch == "\\":
+                i += 1
+            elif ch == "'":
+                state = ""
+        elif ch in "()`":
+            return False
         elif ch == "\\":
+            if i + 1 < n and command[i + 1] in "()`":
+                return False
             i += 1  # the escaped character is literal
+        elif command.startswith(("${", "$["), i):
+            return False
         elif state == '"':
             if ch == '"':
                 state = ""
-            elif ch == "`" or command.startswith("$(", i):
-                return False
+        elif command.startswith("$'", i):
+            state = "$'"
+            i += 1
         elif ch in "'\"":
             state = ch
-        elif ch in ";&|\n\r()`":
+        elif ch in ";&|\n\r":
             return False
         i += 1
     return state == ""
