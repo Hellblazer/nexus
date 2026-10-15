@@ -1,0 +1,1 @@
+Decide which of two approaches to use for retrying failed batch writes in src/ingest.py: (a) exponential backoff with jitter inside ingest, or (b) a dead-letter queue drained by a separate worker. Think it through step by step with your sequential thinking tool, then give the decision and a three-sentence justification. Do not edit any files.

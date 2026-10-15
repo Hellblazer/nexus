@@ -1,0 +1,1 @@
+Record this in the aurora project's memory so later sessions can find it: the nightly export job fails when the data disk is above 90% full. Choose a sensible title.

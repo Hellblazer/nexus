@@ -1,0 +1,5 @@
+out/
+ab/out/
+ab/tuplespace/out/
+pilot-*/
+__pycache__/

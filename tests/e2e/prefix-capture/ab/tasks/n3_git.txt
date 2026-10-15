@@ -1,0 +1,1 @@
+What is the message of the most recent git commit in this repository?
