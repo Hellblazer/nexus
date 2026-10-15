@@ -1719,6 +1719,7 @@ class _Run:
 
     def cmd(
         self, argv: list[str], *, timeout: float | None = None, stdin_text: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> tuple[int | None, str]:
         """Run *argv* with its output going straight into the log; returns the exit
         code (``None`` after a timeout) and the output it printed (the log's tail).
@@ -1728,7 +1729,7 @@ class _Run:
 
         *stdin_text* is written to the child's standard input (a secret: it is never logged, and
         is replaced by ``***`` in the log and in the returned output should the child echo it);
-        without it standard input is the null device."""
+        without it standard input is the null device. *env* replaces the child's environment when given."""
         limit = STEP_TIMEOUT_SECONDS if timeout is None else timeout
         if not self.heartbeat.holds():
             raise _LockLost
@@ -1742,7 +1743,7 @@ class _Run:
             with open(self.log_path, "ab") as sink:
                 proc = subprocess.Popen(  # noqa: S603 -- argv[0] is an absolute path found by the lookups above
                     argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE, stdout=sink,
-                    stderr=subprocess.STDOUT, cwd=str(self.setup),
+                    stderr=subprocess.STDOUT, cwd=str(self.setup), env=env,
                     encoding="utf-8",  # names the codec for the encoding lint and for the text written to standard input
                     **_child_kwargs(),
                 )
@@ -1839,6 +1840,41 @@ def _nx_after_build(run: _Run) -> str | None:
     return hit if hit is not None and _is_nexus_cli(run, hit) else None
 
 
+def lockstep_marker_path() -> Path:
+    """The version-lockstep hook's marker, the CLI version last confirmed to match the plugin (the same path
+    ``version_lockstep_hook.marker_path`` and ``version_lockstep_action.marker_path`` read and write)."""
+    override = os.environ.get("NX_LOCKSTEP_MARKER")
+    if override:
+        return Path(override)
+    return _endpoint_resolve.default_config_dir() / "cli_lockstep_marker"
+
+
+def _record_lockstep(run: _Run, version: str) -> None:
+    """After a build, record its version as in lockstep: the build installed exactly the plugin's version, and
+    without the marker the next session's lockstep hook dispatches an upgrade that races nothing useful
+    (found by the setup journey, 2026-10-15). A failed write is logged and changes nothing else."""
+    path = lockstep_marker_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(version, encoding="utf-8")
+    except OSError as exc:
+        run.log(f"the lockstep marker could not be written: {exc}\n")
+
+
+def build_env(platform: str | None = None, environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment of the build step. On Linux it names the CPU build of torch for the throwaway environment
+    ``uv tool run`` makes to run ``--bootstrap``: without it uv installs PyPI's CUDA torch there, 14 ``nvidia-*``
+    packages and triton, about 4.5 GB that Nexus never uses (measured by the setup journey on chas, 2026-10-15;
+    the generation itself already gets CPU torch from ``install_generation.sh``, nexus-mt1tj). It is set through
+    ``UV_TORCH_BACKEND``, which a uv too old to know the option ignores, rather than a flag it would refuse.
+    ``NX_TORCH_BACKEND``, then an existing ``UV_TORCH_BACKEND``, win over ``cpu``, as in ``install_generation.sh``."""
+    platform = sys.platform if platform is None else platform
+    env = dict(os.environ if environ is None else environ)
+    if platform.startswith("linux"):
+        env["UV_TORCH_BACKEND"] = env.get("NX_TORCH_BACKEND") or env.get("UV_TORCH_BACKEND") or "cpu"
+    return env
+
+
 def _execute(run: _Run) -> int:
     if run.mode == MODE_CLOUD and not (run.data.get(CLOUD_SAVED) and _credentials_saved(config_dir())):
         failed = run.open_page()  # at the start of the run, so the user is asked while the build goes on
@@ -1855,7 +1891,7 @@ def _execute(run: _Run) -> int:
             return run.fail("build", "the plugin's version could not be read from its plugin.json.")
         build = [uv, "tool", "run", "--python", "3.12", "--from", f"conexus=={version}", "nx", "self", "install", "--bootstrap"]
         try:
-            code, _ = run.cmd(build)
+            code, _ = run.cmd(build, env=build_env())
         except OSError as exc:
             return run.fail("build", f"the build could not start: {exc}")
         if code != 0:
@@ -1867,6 +1903,7 @@ def _execute(run: _Run) -> int:
             if reason is not None:
                 return run.fail("build", f"the build finished but the `nx` it left cannot start: {reason}.")
             return run.fail("build", "the build finished but `nx` is not in the Nexus install directory or on PATH.")
+        _record_lockstep(run, version)
     assert nx is not None
     run.step_done("build")
     if run.mode == MODE_CLI_ONLY:

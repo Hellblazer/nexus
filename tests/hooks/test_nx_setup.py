@@ -494,6 +494,10 @@ def test_cli_only_builds_and_downloads_no_service_files(box: Box) -> None:
     assert "init" not in [a[1] for a in box.argvs() if len(a) > 1]
     assert done["next"], "a terminal status names the next step"
     assert not (box.setup / "lock").exists()
+    marker = box.config / "cli_lockstep_marker"
+    assert marker.read_text(encoding="utf-8") == _load_module().plugin_version(), (
+        "a build records its version as in lockstep, so the next session dispatches no upgrade"
+    )
 
 
 def test_the_build_is_skipped_when_the_layout_has_a_complete_install(box: Box) -> None:
@@ -501,6 +505,7 @@ def test_the_build_is_skipped_when_the_layout_has_a_complete_install(box: Box) -
     box.start("cli-only")
     done = box.wait_terminal()
     assert box.calls() == []
+    assert not (box.config / "cli_lockstep_marker").exists(), "no build, no marker: the hook judges that CLI"
     assert done["state"] == "done"
     assert box.probes() == [["layout", "self", "install", "--bootstrap", "--dry-run"]], (
         "the layout's nx is asked whether --bootstrap would still act; it says no"
@@ -2121,3 +2126,15 @@ def test_a_real_run_writes_the_keys_the_doctor_row_reads(box: Box, scenario: str
     missing = [k for k in _FORMAT["writer_keys"][scenario] if k not in raw]
     assert not missing, f"a {scenario} status no longer carries {missing}; change the fixture and the doctor row together"
     assert raw["log"] == str(box.setup / _FORMAT["files"]["log"])
+
+
+def test_the_build_names_cpu_torch_on_linux_and_lets_the_user_choose() -> None:
+    """The setup journey on chas (2026-10-15) found the bootstrap's throwaway uv environment pulling PyPI's CUDA
+    torch on Linux, about 4.5 GB; the build step names the CPU build through UV_TORCH_BACKEND."""
+    mod = _load_module()
+    assert mod.build_env("linux", {"PATH": "/bin"})["UV_TORCH_BACKEND"] == "cpu"
+    assert mod.build_env("linux", {"NX_TORCH_BACKEND": "cu130"})["UV_TORCH_BACKEND"] == "cu130"
+    assert mod.build_env("linux", {"UV_TORCH_BACKEND": "auto"})["UV_TORCH_BACKEND"] == "auto"
+    for platform in ("darwin", "win32"):
+        assert "UV_TORCH_BACKEND" not in mod.build_env(platform, {"PATH": "/bin"})
+    assert mod.build_env("linux", {"PATH": "/x"})["PATH"] == "/x", "the rest of the environment is kept"

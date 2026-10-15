@@ -676,9 +676,14 @@ def dispatch_ref_drift_action() -> None:
 
 
 def cli_present() -> bool:
-    """True when ``nx`` resolves by the launcher's lookup: the generation
-    layout, then ``PATH`` (``_cli_lookup.resolve``)."""
-    return _cli_lookup.resolve("nx") is not None
+    """True when ``nx`` resolves by the launcher's lookup (the generation
+    layout, then ``PATH``; ``_cli_lookup.resolve``) and can start. A CLI that
+    cannot start (a pruned interpreter, RDR-228 Phase 2 Step 4) is setup's to
+    repair, and the upgrade this hook would dispatch would race that repair
+    (found by the setup journey, 2026-10-15); ``nx_setup_notice.py`` gives the
+    session's one message about it."""
+    exe = _cli_lookup.resolve("nx")
+    return exe is not None and _cli_lookup.cannot_start(exe) is None
 
 
 def main() -> None:
@@ -694,7 +699,7 @@ def main() -> None:
     """
     try:
         if not cli_present():
-            debug("no Nexus CLI resolves; nothing to keep in lockstep")
+            debug("no Nexus CLI resolves, or it cannot start; nothing to keep in lockstep")
             return
         plugin_version = read_plugin_version()
         version_mismatch = bool(plugin_version) and read_marker() != plugin_version

@@ -276,6 +276,12 @@ class TestNoCli:
             (gen / "bin" / "nx").chmod(0o755)
             (tmp_path / "tools" / "current").symlink_to(gen)
         assert module.cli_present() is True
+        # A CLI that cannot start is setup's to repair: the hook dispatches no upgrade that would race it
+        # (found by the setup journey, 2026-10-15).
+        from tests._platform import prune_python  # noqa: PLC0415
+
+        prune_python(gen, tmp_path / "uv" / "cpython-gone")
+        assert module.cli_present() is False
 
 
 class TestDispatchIsNonBlocking:
