@@ -2,7 +2,8 @@
 title: "Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client"
 id: RDR-224
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-15
 priority: high
 author: Sam
 reviewed-by: self
