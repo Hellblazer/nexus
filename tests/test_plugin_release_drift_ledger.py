@@ -602,6 +602,141 @@ def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them(
     phase2_deferral_check(REPO_ROOT, ref, "HEAD", _ledger_text())
 
 
+def _covers(entries: object, path: str) -> bool:
+    """*path* is an entry, or under an entry that ends in ``/``."""
+    return any(
+        path == entry or (entry.endswith("/") and path.startswith(entry))
+        for entry in entries  # type: ignore[attr-defined]
+    )
+
+
+def _uncovered(changed: list[str], guarded: list[str], safe: object) -> list[str]:
+    """Changed paths the Phase 2 guard neither holds nor lists as safe alone."""
+    return [p for p in changed if not _covers(guarded, p) and not _covers(safe, p)]
+
+
+def _defined_names(source: str) -> set[str]:
+    """Top-level names a Python module defines, by line shape (no import)."""
+    return {
+        a or b
+        for a, b in re.findall(r"^(?:def|class)\s+(\w+)|^(\w+)\s*[:=]", source, re.M)
+    }
+
+
+def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() -> None:
+    """The Phase 2 guard names every shared file Phase 2 changes (nexus-sv2wx.22).
+
+    The guard holds a path back only if it is on the list, and the deferral
+    entry in the ledger is the only other thing between a plugin-only cut and
+    a Phase 2 file shipping alone: move a bullet to "Awaiting" and the cut
+    ships ``nx_hook_shim.py`` without the ``_cli_lookup.cannot_start`` it
+    calls. So while Phase 2 is in the tree and the pinned tag lacks it,
+    every ``conexus/`` path that differs from the pin is computed from git
+    here and must be guarded (``PHASE2_GUARDED``, plus the launcher's callers
+    while the pin lacks the launcher) or named in ``PHASE2_SAFE_ALONE`` with
+    a reason. A new plugin file on develop in that window fails until someone
+    decides which; that is the rule, not a defect.
+
+    The pin is the reference, as in the test above, and a missing pin fails
+    (or skips on a genuinely tagless checkout, under the file's one
+    taglessness rule, `_require_or_skip`).
+    """
+    _require_or_skip()
+    from cut_plugin_release import (
+        PHASE2_GUARDED,
+        PHASE2_SAFE_ALONE,
+        phase2_guarded_paths,
+        phase2_in_play,
+    )
+
+    ref = _pinned_refs()["conexus"]
+    if plugin_in_release_window("conexus", ref):
+        return  # the pin IS this branch's content; nothing differs from it
+    assert _git("rev-parse", "--verify", "-q", ref).returncode == 0, (
+        f"the pinned ref {ref!r} does not resolve, so which conexus/ paths "
+        "changed is UNKNOWN, not none"
+    )
+    if not phase2_in_play(REPO_ROOT, ref, "HEAD"):
+        return  # Phase 2 is not in the tree, or the pin already carries it
+    proc = _git("diff", "--name-only", "--no-renames", ref, "HEAD", "--", "conexus/")
+    assert proc.returncode == 0, f"git diff against {ref} failed:\n{proc.stderr}"
+    changed = sorted(p for p in proc.stdout.splitlines() if p.strip())
+    assert "conexus/launch/nx_setup.py" in changed, (
+        "Phase 2 is in play (the marker is in HEAD, absent from the pin) yet "
+        "the diff does not list it: the diff is not measuring what the guard does"
+    )
+
+    guarded = phase2_guarded_paths(REPO_ROOT, ref)
+    uncovered = _uncovered(changed, guarded, PHASE2_SAFE_ALONE)
+    assert not uncovered, (
+        "these conexus/ paths differ from the pin and are neither on "
+        "PHASE2_GUARDED nor in PHASE2_SAFE_ALONE (scripts/cut_plugin_release.py), "
+        "so a plugin-only cut could ship them without the Phase 2 files they "
+        "need. Guard each, or list it with the reason it stands alone:\n  "
+        + "\n  ".join(uncovered)
+    )
+
+    # A safe-alone entry is a decision with a stated reason, never a path the
+    # guard also holds (the list would then mean nothing).
+    for path, reason in PHASE2_SAFE_ALONE.items():
+        assert reason.strip() and len(reason.split()) >= 5, f"{path}: no real reason"
+        assert not _covers(PHASE2_GUARDED, path), (
+            f"{path} is on PHASE2_GUARDED and in PHASE2_SAFE_ALONE"
+        )
+
+    # The one claim a reason makes that git can check: a Python file listed as
+    # safe alone calls no name of a guarded module that the pin lacks. That is
+    # the failure the guard exists for (a caller shipped without its callee).
+    modules = {
+        pathlib.PurePosixPath(p).stem: p
+        for p in PHASE2_GUARDED if p.endswith(".py")
+    }
+    for path in (p for p in changed if _covers(PHASE2_SAFE_ALONE, p) and p.endswith(".py")):
+        source = _git("show", f"HEAD:{path}").stdout
+        for stem, module_path in modules.items():
+            from_names = {
+                n.strip()
+                for group in re.findall(
+                    rf"^\s*from\s+{re.escape(stem)}\s+import\s+([\w, ]+)", source, re.M
+                )
+                for n in group.split(",") if n.strip()
+            }
+            if not from_names and not re.search(
+                rf"^\s*import\s+{re.escape(stem)}\b", source, re.M
+            ):
+                continue  # a file name in a docstring is not a use
+            used = from_names | set(re.findall(rf"\b{re.escape(stem)}\.(\w+)", source))
+            assert used, f"{path} imports {stem} and uses nothing in it"
+            at_pin = _git("show", f"{ref}:{module_path}")
+            assert at_pin.returncode == 0, f"{module_path} is absent at {ref}"
+            missing = used - _defined_names(at_pin.stdout)
+            assert not missing, (
+                f"{path} is listed as safe alone but calls {stem}.{sorted(missing)}, "
+                f"which {ref} lacks: shipped alone it raises AttributeError"
+            )
+
+
+def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
+    """The rule above is not vacuous: removing one guarded path reports it."""
+    from cut_plugin_release import PHASE2_GUARDED, PHASE2_SAFE_ALONE
+
+    changed = [
+        "conexus/hooks/scripts/_cli_lookup.py",
+        "conexus/hooks/scripts/nx_hook_shim.py",
+        "conexus/launch/nx_setup.py",
+        "conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
+    ]
+    assert _uncovered(changed, list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == []
+    without = [p for p in PHASE2_GUARDED if not p.endswith("/_cli_lookup.py")]
+    assert _uncovered(changed, without, PHASE2_SAFE_ALONE) == [
+        "conexus/hooks/scripts/_cli_lookup.py"
+    ]
+    assert _uncovered(changed + ["conexus/hooks/scripts/new_one.py"],
+                      list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == [
+        "conexus/hooks/scripts/new_one.py"
+    ]
+
+
 # --- the skip/require mechanism is itself tested ----------------------------
 
 

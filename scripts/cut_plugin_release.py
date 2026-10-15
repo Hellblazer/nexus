@@ -317,20 +317,82 @@ PHASE1_LAUNCH_FILES = frozenset({PHASE1_LAUNCHER, "conexus/launch/nx_standin.py"
 #: Keyed on the DIRECTORY, not on file names: the stand-in's file and the
 #: credentials page's module were not named when this guard was written, and
 #: a list of guessed names would pass without covering them.
+#:
+#: Every other ``conexus/`` file Phase 2 changes is listed by name, because a
+#: partial list is a hole: the hook shim calls ``_cli_lookup.cannot_start``,
+#: so a cut that ships the shim without the lookup raises ``AttributeError``
+#: on every hook it runs, and the lockstep hook skips the upgrade dispatch
+#: for a CLI that cannot start with no setup process to repair it. The
+#: README and the command registry describe ``/conexus:setup``, which a cut
+#: that holds the command back does not ship. A path that is safe alone is
+#: not listed here but in :data:`PHASE2_SAFE_ALONE`, with a reason, and
+#: ``tests/test_plugin_release_drift_ledger.py`` fails on a changed
+#: ``conexus/`` path that is in neither.
 PHASE2_GUARDED = (
     "conexus/launch/",
     "conexus/hooks/scripts/nx_setup_notice.py",
     "conexus/hooks/scripts/_endpoint_resolve.py",
+    "conexus/hooks/scripts/_cli_lookup.py",
+    "conexus/hooks/scripts/_exec_path.py",
+    "conexus/hooks/scripts/nx_hook_shim.py",
+    "conexus/hooks/scripts/version_lockstep_hook.py",
     "conexus/commands/setup.md",
+    "conexus/registry.yaml",
+    "conexus/README.md",
 )
 #: Added while the reference lacks the launcher: these call it (the two
-#: server entries and the hook entries) or are deferred with the file that
-#: does (the lockstep hook, which shares a deferral with the hook entries).
+#: server entries and the hook entries), so they cannot ship ahead of it.
 PHASE2_GUARDED_WITHOUT_LAUNCHER = (
     "conexus/hooks/hooks.json",
     "conexus/.mcp.json",
-    "conexus/hooks/scripts/version_lockstep_hook.py",
 )
+#: Changed on the Phase 2 branch against the release reference, yet safe to
+#: ship in a plugin-only cut ahead of the client release: path (exact, or a
+#: ``/``-ending prefix) -> why. Each reason is a claim about the file, and
+#: the drift-ledger test checks the one it can: that a Python file here
+#: calls no name of a guarded module that the reference lacks. An entry is
+#: never a way to make the coverage test pass; it is a decision that the
+#: path stands alone.
+PHASE2_SAFE_ALONE: dict[str, str] = {
+    "conexus/PENDING_RELEASE.md": (
+        "the ledger declares what ships; it runs nothing, and a cut rewrites "
+        "it for the cut itself"
+    ),
+    "conexus/.mcp.json": (
+        "its change is nexus-fbtyl's (dropping the server-level alwaysLoad "
+        "flag), not RDR-228's; it names no Phase 2 file. Held back by "
+        "PHASE2_GUARDED_WITHOUT_LAUNCHER while the reference lacks the "
+        "launcher, and by its own ledger deferral to fbtyl's client release"
+    ),
+    "conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py": (
+        "a stand-alone PreToolUse guard (nexus-yc7fs, nexus-ikoqj); it "
+        "imports no Phase 2 module"
+    ),
+    "conexus/hooks/scripts/version_lockstep_action.py": (
+        "UTF-8 text IO only (nexus-3fme8, nexus-ikoqj); it imports "
+        "_cli_lookup, _endpoint_resolve and _exec_path but calls only names "
+        "the reference already has, which the test checks"
+    ),
+}
+
+
+def phase2_in_play(repo: Path, reference: str, source_ref: str) -> bool:
+    """True when Phase 2 is in *source_ref* and *reference* has not shipped it.
+
+    The state :func:`phase2_deferral_check` guards; the drift-ledger test
+    uses it to know when the coverage rule applies.
+    """
+    return _phase2_armed_by(repo, source_ref) is not None and not _exists_at(
+        repo, reference, PHASE2_MARKER
+    )
+
+
+def phase2_guarded_paths(repo: Path, reference: str) -> list[str]:
+    """The paths :func:`phase2_deferral_check` holds to deferral for *reference*."""
+    guarded = list(PHASE2_GUARDED)
+    if not _exists_at(repo, reference, PHASE1_LAUNCHER):
+        guarded += PHASE2_GUARDED_WITHOUT_LAUNCHER
+    return guarded
 
 
 def _exists_at(repo: Path, ref: str, path: str) -> bool:
@@ -399,9 +461,7 @@ def phase2_deferral_check(
             f"{PHASE2_MARKER}, so Phase 2 has shipped"
         )
     launcher_shipped = _exists_at(repo, reference, PHASE1_LAUNCHER)
-    guarded: list[str] = list(PHASE2_GUARDED)
-    if not launcher_shipped:
-        guarded += PHASE2_GUARDED_WITHOUT_LAUNCHER
+    guarded = phase2_guarded_paths(repo, reference)
     # --no-renames: a rename lists only its new name by default, and the
     # old name's deletion reaches installs through a cut like any edit.
     differing = [
@@ -435,8 +495,7 @@ def phase2_deferral_check(
                 "Phase 1 and 'Deferred' for Phase 2: deferring holds the "
                 "whole file back. Phase 1 and Phase 2 then ship in the same "
                 "client release, and every path of both -- including "
-                "hooks.json, .mcp.json and the lockstep hook -- sits under "
-                "'Deferred'."
+                "hooks.json and .mcp.json -- sits under 'Deferred'."
             )
         raise CutRefused(message)
     return (
