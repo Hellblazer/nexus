@@ -4782,12 +4782,19 @@ def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
     for index, row in enumerate(results):
         if not isinstance(row, _SetupLastRun):
             continue
-        if all(other.ok for other in results if other is not row):
+        if all(other.ok or _benign_warning(other) for other in results if other is not row):
             results[index] = HealthResult(
                 label=_SETUP_LABEL, ok=True,
-                detail=f"the last setup run ended {row.ended}, and everything else this check looked at is fine. Log: {row.log}",
+                detail=f"the last setup run ended {row.ended}, and every other row of this sweep is fine. Log: {row.log}",
             )
     return results
+
+
+def _benign_warning(row: HealthResult) -> bool:
+    """A soft warning that says nothing is wrong: the managed deployment's storage row, which cannot be probed
+    from a client by design (nexus-y3wuu) and so warns on every cloud box. Without this a cloud box never
+    reaches the "every other row is fine" that lets the setup row stand down."""
+    return row.warn and not row.ok and row.detail == _MANAGED_DEPLOYMENT_SKIP_DETAIL
 
 
 def _setup_failed_row(status: dict, log: Path) -> HealthResult:

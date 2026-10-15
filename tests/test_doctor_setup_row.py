@@ -264,7 +264,7 @@ def test_a_last_run_warning_becomes_information_when_every_other_row_passes(name
     assert row.ok is False and row.warn is True, "premise: the row alone is a warning"
     (settled,) = [r for r in _settle_setup_row([_FINE, row]) if r.label == _LABEL]
     assert settled.ok is True and not settled.warn and not settled.fatal and not settled.fix_suggestions
-    assert "the last setup run ended" in settled.detail and "everything else" in settled.detail
+    assert "the last setup run ended" in settled.detail and "every other row of this sweep is fine" in settled.detail
     assert str(setup / "setup.log") in settled.detail
     assert settled.detail.split("ended ")[1].split(",")[0] in {"failed", "doctor-failed", "interrupted"}
 
@@ -286,6 +286,27 @@ def test_a_last_run_warning_stays_a_warning_while_any_other_row_is_wrong(name: s
 def test_a_row_that_is_not_a_last_run_warning_is_left_alone(name: str, tmp_path: Path) -> None:
     row = _row(build_setup_dir(tmp_path, CASES[name]))
     assert [r for r in _settle_setup_row([_FINE, row]) if r.label == _LABEL] == [row]
+
+
+@pytest.mark.parametrize("name", _LAST_RUN_CASES)
+def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I1: in cloud mode the storage row always warns that it cannot probe the managed store, so a
+    rule that every other row be ok never let a cloud box's setup warning stand down. The row comes from the
+    real check in managed mode, not a copy of its text."""
+    import nexus.config  # noqa: PLC0415
+    import nexus.health as health  # noqa: PLC0415
+
+    empty = tmp_path / "config-without-pg-credentials"
+    empty.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(empty))
+    monkeypatch.setattr(nexus.config, "is_local_mode", lambda: False)
+    storage = health._check_storage_service_health()
+    assert storage and all(r.warn and not r.ok for r in storage), "premise: the managed storage row warns"
+    row = _row(build_setup_dir(tmp_path, CASES[name]))
+    (settled,) = [r for r in _settle_setup_row([_FINE, *storage, row]) if r.label == _LABEL]
+    assert settled.ok is True, settled.detail
 
 
 def test_the_sweep_settles_the_row_after_every_row_is_known() -> None:

@@ -41,6 +41,7 @@ their own subprocess work.
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import signal
@@ -52,6 +53,10 @@ import sys
 # project's cwd runs as the hook's verdict on Windows.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cli_lookup  # noqa: E402 -- must follow the sys.path insert
+
+#: The start errors that mean the CLI cannot start (gone, not a directory on the way, not executable, not a
+#: program the system runs), as against the machine's own trouble.
+_CANNOT_START_ERRNOS: frozenset[int] = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOEXEC})
 
 #: What ``nx-hook`` prints for an unregistered verb in every release that exits
 #: 2 on one (7.55.0 through 7.57.x), from ``main()`` in
@@ -90,7 +95,12 @@ def main(argv: list[str]) -> int:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=_cli_lookup.project_dir(payload),
         )
-    except OSError as exc:  # reaped between the lookup and the start, or a file the system will not execute
+    except OSError as exc:
+        # Reaped between the lookup and the start, or a file the system will not execute: the CLI cannot
+        # start, which is setup's to repair, so one line and exit 0. Anything else (no file descriptors, no
+        # memory, a fork that failed) is the machine's trouble, not the install's, and surfaces as before.
+        if exc.errno not in _CANNOT_START_ERRNOS:
+            raise
         sys.stderr.write(_cli_lookup.cannot_start_note(exe, str(exc)))
         return 0
 
