@@ -265,6 +265,76 @@ def test_the_notice_gives_the_sizes_a_choice_takes(monkeypatch: pytest.MonkeyPat
     assert "1.3 GB" in text and "2.4 GB on disk" in text and "0.7 GB" in text and "1.6 GB on disk" in text, text
 
 
+def _provision(config: Path, *, files: int = 3) -> None:
+    """The files ``nx init`` leaves for a local service, the first *files* of the three."""
+    from nexus.daemon.binary_lifecycle import well_known_binary_path
+
+    for path in [config / "pg_credentials", config / "postgres" / "PG_VERSION", well_known_binary_path(config)][:files]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+
+
+def test_a_provisioned_local_service_that_is_down_is_not_called_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Found in the Windows MVV (nexus-sv2wx.24, row 2): after a reboot with no start at
+    login the hook said the installed service was down, and this notice said nothing was
+    set up and quoted the 1.3 GB install. In Desktop this text is all the model sees."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    text = setup_tools.no_service_notice() or ""
+    assert "not running" in text and "/conexus:setup" in text and "setup tool" in text, text
+    assert "act only on the user's answer" in text and "ask the user" not in text.lower()
+    assert "no service address is configured" not in text and "1.3 GB" not in text, text
+
+
+def test_a_partly_provisioned_service_is_still_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Provisioned means all three files (the record, "A usable service")."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path, files=2)
+    _service(monkeypatch, False)
+    assert "1.3 GB" in (setup_tools.no_service_notice() or "")
+
+
+def test_status_says_a_provisioned_service_is_down_not_done(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    """Found in the Windows MVV (nexus-sv2wx.24, row 2): with no start at login and a
+    reboot, /conexus:setup read "Setup is done ... Next: Reconnect" from setup_status and
+    started nothing. The answer must say the installed service is not running and that
+    setup with mode local starts it, with start at login a choice again."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    recorder.views(status=DONE)
+    text = _call("setup_status")
+    assert "not running" in text and "mode local" in text and "start at login" in text, text
+    assert "downloads nothing" in text and "Reconnect" not in text and "Setup is done" not in text, text
+
+
+def test_status_keeps_a_failed_run_ahead_of_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    """A failed or interrupted last run still names its failure and resume step."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    recorder.views(status=FAILED)
+    text = _call("setup_status")
+    assert "the build exited 1." in text and "resumes at the build step" in text, text
+
+
+@pytest.mark.parametrize("files", [0, 1, 2, 3])
+def test_the_cli_and_the_plugin_agree_on_provisioned(tmp_path: Path, files: int) -> None:
+    """Two copies of one test (the plugin runs with no nexus package): the server's
+    notice and the setup hook must call the same machine provisioned."""
+    from nexus.db.pg_provision import local_service_files_present
+
+    _provision(tmp_path, files=files)
+    assert local_service_files_present(tmp_path) is NX_SETUP.provisioned(tmp_path) is (files == 3)
+
+
 def test_the_notice_does_not_start_or_read_the_setup_process(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
     """Item 5: the not-now marker is not routed through the server start. The
     notice is built from the endpoint alone, so it starts nothing, and not-now says

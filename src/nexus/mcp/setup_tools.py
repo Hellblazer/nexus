@@ -215,12 +215,32 @@ def usable_service() -> bool:
     return True
 
 
+def local_service_provisioned() -> bool:
+    """Whether ``nx init`` left a local service on this machine
+    (``pg_provision.local_service_files_present``). Any exception counts as no."""
+    try:
+        from nexus.db.pg_provision import local_service_files_present  # noqa: PLC0415 -- the check runs once per call
+
+        return local_service_files_present()
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return False
+
+
 def no_service_notice() -> str | None:
     """The instructions sentence for a server that finds no usable service, or
     ``None`` when one is usable. Passive, as the record has it: what is missing, what
-    fixes it, and that the user decides."""
+    fixes it, and that the user decides. A provisioned local service that is not
+    running is said as that, as the setup hook says it (its state 7): the install
+    sizes would offer the user a download the fix does not make."""
     if usable_service():
         return None
+    if local_service_provisioned():
+        return (
+            "Nexus is installed, but its local service is not running on this machine (it was stopped, or the "
+            "machine restarted), so the Nexus tools that need storage will fail. The setup tool with mode local, "
+            "or the user running /conexus:setup, starts it and downloads nothing, and setup_status says what is "
+            "already done, so act only on the user's answer."
+        )
     return (
         "Nexus has no usable service on this machine: no service address is configured and no local service "
         "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
@@ -317,6 +337,16 @@ def _checked(view: dict[str, Any], *, started: bool | None = None) -> str:
     return text
 
 
+#: setup_status when the last run finished, no service answers, and a local service is
+#: provisioned: it was stopped, or the machine restarted with no start at login.
+SERVICE_DOWN: str = (
+    "No usable Nexus service was found on this machine: the Nexus CLI and a local Nexus service are "
+    "installed, but the service is not running, so the Nexus tools that need storage fail.\n"
+    "The setup tool with mode local starts it and downloads nothing; with autostart true it also "
+    "makes it start at login. Ask the user whether to start it and whether it should start at login, "
+    "then call setup with mode local and their answer."
+)
+
 NOTHING_MISSING: str = (
     "Nothing is missing: the Nexus CLI is installed and a Nexus service is set up. Setup started nothing."
 )
@@ -395,4 +425,8 @@ def run_status() -> str:
         )
     if view.get("live") and view.get("state") == "running":
         return render(view)
+    if view.get("state") == "done" and local_service_provisioned():
+        # The last run finished, so its "done ... reconnect" is history: what is missing
+        # now is a running service (nexus-sv2wx.24, row 2), and setup starts one.
+        return SERVICE_DOWN + (f"\nLog: {view['log']}" if view.get("log") else "")
     return "No usable Nexus service was found on this machine.\n" + _checked(view)

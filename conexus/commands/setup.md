@@ -25,6 +25,7 @@ The first builds the current version and the second converges the data. On the o
 
 - **Nothing is missing.** Say so and stop. Do not call `setup`.
 - **A setup run is in progress.** Report its stage and when to ask again. Do not call `setup`. Follow it with `setup_status`, no sooner than the interval the answer names.
+- **The local service is installed and not running.** Say so, in the answer's words. Ask whether to start it and whether it should start when the user logs in; do not show the table, because starting it downloads nothing. If the user agrees, call `setup` with `mode` `local` and `autostart` as they answered.
 - **Something is missing.** Say what, in the answer's words, and put the one question below. Do not call `setup` before the user has answered.
 - **The last run failed or was interrupted.** Show the failure line and the log path from the answer. Ask the user first; if they agree, call `setup` again with the same choice the answer names, and it resumes from the failed step.
 

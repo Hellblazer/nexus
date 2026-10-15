@@ -3373,6 +3373,24 @@ def _provision_impl(
     return result
 
 
+def local_service_files_present(config_dir: Path | None = None) -> bool:
+    """Whether ``nx init`` left a local service under *config_dir*: the credentials
+    file, ``postgres/PG_VERSION`` and the service binary, all three (RDR-228's
+    "provisioned", the same test as the plugin's ``nx_setup.provisioned``). Files
+    only: it never probes a port, so a service that is down still counts."""
+    from nexus.daemon.binary_lifecycle import well_known_binary_path  # noqa: PLC0415 — deferred, keeps this module's import light
+
+    if config_dir is None:
+        from nexus import config as _config  # noqa: PLC0415 — deferred, as in is_provisioned
+
+        config_dir = _config.nexus_config_dir()
+    return (
+        (config_dir / CREDENTIALS_FILENAME).is_file()
+        and (config_dir / "postgres" / _PG_VERSION_MARKER).is_file()
+        and well_known_binary_path(config_dir).is_file()
+    )
+
+
 def is_provisioned(config_dir: Path | None = None) -> bool:
     """Return True when the local cluster appears to be provisioned and running.
 
