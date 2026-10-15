@@ -623,6 +623,16 @@ def _age_lock(setup: Path) -> None:
     os.utime(heartbeat, (old, old))
 
 
+def _reap_orphaned_child(box: Box) -> None:
+    """End the child program a SIGKILLed run left running (its pid is in ``lock/child``) and wait for it."""
+    try:
+        pid = int((box.setup / "lock" / "child").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    _terminate(pid)
+    _wait_for(lambda: not _alive(pid), 15, "the orphaned child to end")
+
+
 def _credentials(box: Box) -> str | None:
     data = box.status_file()
     return None if data is None else data.get("credentials")
@@ -913,6 +923,7 @@ def test_a_run_killed_after_acceptance_loses_the_pair_and_the_next_cloud_run_ope
         assert good not in text, "an accepted pair is not written to disk to survive a kill"
     assert [c for c in box.calls("nx") if c["args"][:1] == ["config"]] == []
     _age_lock(box.setup)
+    _reap_orphaned_child(box)  # a killed run's build carries on, and a new run waits for it (review S2)
     box.open_record.write_text("", encoding="utf-8")
     box.behave([box.uv_builds_nx(sleep=0.0)])
     out = box.start("cloud")
@@ -1270,6 +1281,83 @@ def test_connections_beyond_the_cap_are_closed_at_once_and_the_page_serves_again
     _wait_for(served, 15, "the page to serve again once the held connections closed")
 
 
+def test_sixteen_dripping_connections_do_not_lock_the_page_out(make_page: Callable[..., Any]) -> None:
+    """Review I1: the per-recv timeout restarts on every byte, so 16 sockets that send one byte every half second
+    held all 16 slots for ever. A total deadline per connection (from accept to the end of the request) frees
+    them, and a right request gets in. Fails without the deadline: the page never answers in the window."""
+    page = make_page()
+    page.mod.PAGE_CONNECTION_SECONDS = 2.0
+    stop = threading.Event()
+    held: list[socket.socket] = []
+    drippers: list[threading.Thread] = []
+
+    def drip(sock: socket.socket) -> None:
+        while not stop.is_set():
+            try:
+                sock.sendall(b"G")
+            except OSError:
+                return  # the page closed it, which is what the deadline is for
+            stop.wait(0.5)
+
+    try:
+        for _ in range(page.mod.PAGE_MAX_CONNECTIONS):
+            held.append(socket.create_connection(("127.0.0.1", page.port), timeout=5))
+        for sock in held:
+            thread = threading.Thread(target=drip, args=(sock,), daemon=True)
+            thread.start()
+            drippers.append(thread)
+
+        def served() -> bool:
+            try:
+                return _request(page.address)[0] == 200
+            except (OSError, http.client.HTTPException):
+                return False
+
+        _wait_for(served, 8, "a right request to be served while 16 connections drip")
+    finally:
+        stop.set()
+        for thread in drippers:
+            thread.join(5)
+        for sock in held:
+            sock.close()
+
+
+def test_the_connection_deadline_ends_a_body_that_never_finishes_and_does_not_cut_a_slow_check(
+    make_page: Callable[..., Any],
+) -> None:
+    """The deadline runs to the end of the request. A body that stops short is not submitted; a check that takes
+    longer than the deadline still answers, because the timer is cancelled once the request is read."""
+    mod = _load_module()
+    calls: list[str] = []
+
+    def slow(url: str, token: str, tenant: str = "") -> Any:
+        calls.append(url)
+        time.sleep(1.5)
+        return mod.CheckResult(True, "fine", "static")
+
+    page = make_page(checker=slow)
+    page.mod.PAGE_CONNECTION_SECONDS = 0.5
+    path = urllib.parse.urlsplit(page.address).path
+    with socket.create_connection(("127.0.0.1", page.port), timeout=5) as sock:
+        sock.settimeout(3)  # the per-recv timeout is 10 s: only the connection deadline ends this in time
+        sock.sendall(
+            f"POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{page.port}\r\nContent-Length: 200\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n\r\nservice_url=http".encode("ascii")
+        )
+        try:
+            sock.recv(100)  # a 400 or the close
+        except TimeoutError:
+            pytest.fail("the page still waited for a body that stopped 3 seconds ago")
+        except OSError:
+            pass  # reset: the page ended it
+    assert calls == [] and page.state == _SIX[0], "a body cut short by the deadline was submitted"
+    status, _h, _body = _request(
+        page.address, "POST", fields={"service_url": "http://127.0.0.1:9", "service_token": "x" * 20, "tenant": ""},
+    )
+    assert status == 200 and page.state == _SIX[3], "a check slower than the connection deadline must still answer"
+    assert len(calls) == 1
+
+
 def test_a_second_submit_while_a_check_runs_is_told_so_and_changes_nothing(make_page: Callable[..., Any]) -> None:
     mod = _load_module()
     release = threading.Event()
@@ -1526,7 +1614,7 @@ def test_an_accepted_pair_lost_to_a_failed_build_is_reported_as_lost_and_the_nex
     final = box.wait_terminal(60)
     assert final["state"] == "failed" and final["failed_step"] == "build"
     assert final.get("credentials") != _SIX[3], "the status must not say the credentials are accepted"
-    assert "not saved" in final["message"].lower() and "discard" in final["message"].lower()
+    assert "not completely saved" in final["message"].lower() and "discard" in final["message"].lower()
     follow = final["next"].lower()
     assert "call setup" in follow and "new page" in follow and "again" in follow
     assert [c for c in box.calls("nx") if c["args"][:1] == ["config"]] == []
@@ -1602,8 +1690,10 @@ def test_a_resumed_cloud_run_whose_credentials_are_saved_opens_no_page(tmp_path:
     ids=["after-a-finished-run", "after-nx-doctor-failed", "saved-by-hand-not-by-a-run"],
 )
 def test_saved_credentials_do_not_skip_the_page_outside_a_resume(tmp_path: Path, prior: str, extra: dict[str, Any]) -> None:
-    """Review N2: a new `setup cloud` call is how a user with no terminal replaces a saved credential, and a
-    doctor failure may be the credential itself; only a resume of a run that saved and failed later skips."""
+    """Review N2, restated by review I2: the skip is a resume of a run that saved and failed later, and nothing
+    else. A doctor failure may be the credential itself. This process, started directly (the stand-in does), opens
+    the page for the rest; the real server's setup starts nothing while a service answers, so replacing a saved
+    credential is `nx config init` in a terminal and no text says otherwise."""
     box = Box(tmp_path)
     box.layout()
     (box.config / "config.yml").write_text(
@@ -1615,8 +1705,10 @@ def test_saved_credentials_do_not_skip_the_page_outside_a_resume(tmp_path: Path,
     _terminate(box.status()["pid"])
 
 
-def test_a_failed_nx_doctor_in_cloud_mode_says_a_new_run_reopens_the_page(tmp_path: Path) -> None:
-    """The saved credential may be what nx doctor failed on; a user with no terminal needs the page route."""
+def test_a_failed_nx_doctor_in_cloud_mode_names_nx_config_init_and_promises_no_new_page(tmp_path: Path) -> None:
+    """The saved credential may be what nx doctor failed on. Review I2: setup starts nothing while a service
+    answers and a saved address with a token resolves as one, so the words name `nx config init` and do not tell
+    the model to call setup again (the call would start nothing)."""
     box = Box(tmp_path)
     box.layout()
     (box.config / "config.yml").write_text(
@@ -1627,7 +1719,9 @@ def test_a_failed_nx_doctor_in_cloud_mode_says_a_new_run_reopens_the_page(tmp_pa
     assert box.start("cloud")["started"] is True
     final = box.wait_terminal(60)
     assert final["state"] == "doctor-failed", (final, box.read_log())
-    assert "opens the credentials page again" in final["next"] and "if the user agrees" in final["next"].lower()
+    follow = final["next"]
+    assert "nx config init" in follow and "terminal" in follow
+    assert "call setup" not in follow.lower() and "opens the credentials page again" not in follow
 
 
 def test_a_saved_token_with_no_address_opens_the_page(tmp_path: Path) -> None:
@@ -1659,9 +1753,33 @@ def test_saving_a_mint_credential_first_removes_a_saved_service_token(tmp_path: 
     assert config_calls[0] == ["unset", "service_token"], config_calls
     assert ["unset", "mint_token"] not in config_calls and ["unset", "mint_tenant"] not in config_calls
     assert [c for c in config_calls if c[0] == "set"] == [
-        ["set", "service_url"], ["set", "mint_tenant"], ["set", "mint_token"],
-    ]
+        ["set", "mint_tenant"], ["set", "mint_token"], ["set", "service_url"],
+    ], "the address is saved LAST: a token with no address is inert"
     assert box.status_file().get("cloud_saved") is True
+
+
+@pytest.mark.parametrize("kind", ["static", "mint"])
+def test_a_save_that_fails_at_the_token_never_saved_the_address_and_says_not_completely_saved(
+    tmp_path: Path, service: Callable[..., FakeService], kind: str,
+) -> None:
+    """Review S3: with the address saved first, a failure at the token left an address with no token, and the
+    words said nothing was saved. The address goes last, so a save that stops at the token leaves it unsaved (the
+    CLI would otherwise read an old local token against the new cloud address), and the words say "not completely"."""
+    box = Box(tmp_path)
+    good = _token()
+    svc = service(good, whoami="ok" if kind == "static" else "forbidden", mint_tenant="acme")
+    box.layout()
+    key = "service_token" if kind == "static" else "mint_token"
+    box.behave([{"prog": "nx", "match": ["config", "set", key], "exit": 1}])
+    assert box.start("cloud")["started"] is True
+    _opener, address = _page(box)
+    _request(address)
+    _request(address, "POST", fields={"service_url": svc.url, "service_token": good, "tenant": "acme" if kind == "mint" else ""})
+    final = box.wait_terminal(60)
+    assert final["state"] == "failed" and final["failed_step"] == "credentials", (final, box.read_log())
+    sets = [c["args"][2] for c in box.calls("nx") if c["args"][:2] == ["config", "set"]]
+    assert "service_url" not in sets, sets
+    assert "not completely saved" in final["message"].lower() and "discard" in final["message"].lower()
 
 
 def test_a_saved_address_with_no_token_still_opens_the_page(tmp_path: Path) -> None:
@@ -1690,6 +1808,48 @@ def test_the_credentials_notice_gives_a_next_step_that_is_true_where_it_is_shown
     for state in _SIX:
         text = " ".join(mod.credentials_notice(state, "why."))
         assert "address and token" not in text, state
+
+
+def test_no_text_promises_a_second_credentials_page_after_a_finished_run_or_a_failed_doctor() -> None:
+    """Review I2: the real server's `setup` starts nothing while a service answers, and a saved address with a token
+    resolves as one, so after a finished cloud run or a failed `nx doctor` a second `setup cloud` call opens no
+    page. The script, the release note and the changelog say `nx config init` in a terminal instead."""
+    stale = (
+        "opens the credentials page again", "replaces a saved credential", "reopens the page", "opens it again",
+        "call setup with mode cloud again once this run ends", "opens again",
+    )
+    pending = (_ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+    pending_line = next(ln for ln in pending.splitlines() if "credentials page for mode cloud (nexus-sv2wx.18)" in ln)
+    changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog_line = next(ln for ln in changelog.splitlines() if ln.startswith("- **Mode `cloud` of `setup` opens a local credentials page"))
+    for name, text in (("nx_setup.py", _SETUP.read_text(encoding="utf-8")), ("PENDING_RELEASE.md", pending_line), ("CHANGELOG.md", changelog_line)):
+        for phrase in stale:
+            assert phrase not in text.lower(), f"{name} still says {phrase!r}"
+    assert "nx config init" in pending_line and "nx config init" in changelog_line
+
+
+@pytest.mark.parametrize(
+    ("address", "warned"),
+    [
+        ("http://svc.example", True), ("http://10.1.2.3:8080/base", True), ("HTTP://Svc.Example", True),
+        ("https://svc.example", False), ("http://127.0.0.1:9", False), ("http://localhost:9", False),
+        ("http://[::1]:9", False),
+    ],
+)
+@pytest.mark.parametrize("accept", [True, False], ids=["accepted", "rejected"])
+def test_an_http_address_to_another_host_gets_a_plain_warning_and_is_still_accepted(
+    make_page: Callable[..., Any], address: str, warned: bool, accept: bool,
+) -> None:
+    """Review S4: the bearer token goes in clear to an http:// address that is not this machine. The page says so on
+    the page the user reads after the check, and still accepts (a service on a private network is a real case)."""
+    mod = _load_module()
+    page = make_page(checker=lambda url, token, tenant="": mod.CheckResult(accept, "fine" if accept else "refused", "static" if accept else ""))
+    assert "unencrypted" not in _request(page.address)[2].decode("utf-8"), "no address yet, so nothing to warn about"
+    status, _h, body = _request(page.address, "POST", fields={"service_url": address, "service_token": "t" * 20, "tenant": ""})
+    text = body.decode("utf-8")
+    assert status == 200 and ("unencrypted" in text) is warned, text
+    assert page.state == (_SIX[3] if accept else _SIX[2]), "the warning does not refuse the address"
+    assert ("setup saves them" in text.lower()) is accept
 
 
 def test_the_page_tells_the_user_to_keep_the_tab_open(make_page: Callable[..., Any]) -> None:

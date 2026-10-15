@@ -709,6 +709,27 @@ def test_a_run_that_went_wrong_is_reported_even_when_a_service_answers(
     assert all(call[0] == "status" for call in recorder.calls()), "setup must start nothing while a service answers"
 
 
+def test_a_failed_cloud_doctor_with_a_usable_service_starts_nothing_and_names_no_second_page(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder,
+) -> None:
+    """Review I2: a saved address with a token is a usable service, so ``setup`` with mode cloud starts nothing
+    after a cloud run whose ``nx doctor`` failed. The doctor note the run wrote says the replacement is
+    ``nx config init`` in a terminal, and nothing the model is shown says a second call reopens the page."""
+    _service(monkeypatch, True)
+    view = _view(
+        state="doctor-failed", stage="verify", mode="cloud", autostart=False, log="/cfg/setup/setup.log",
+        message="nx doctor reported problems.", credentials="credentials saved",
+        next=f"Run `nx doctor` in a terminal to see the failing rows.{NX_SETUP._CLOUD_DOCTOR_NOTE} Log: /cfg/setup/setup.log",
+    )
+    recorder.views(status=view, start=view)
+    text = _call("setup", mode="cloud")
+    assert "started nothing" in text.lower()
+    assert all(call[0] == "status" for call in recorder.calls()), "setup must start nothing while a service answers"
+    for said in (text, view["next"]):
+        assert "mode cloud again" not in said.lower() and "opens the credentials page again" not in said, said
+    assert "nx config init" in view["next"]
+
+
 @pytest.mark.parametrize("state", ["done", "none"])
 def test_a_clean_last_run_is_nothing_missing_when_a_service_answers(
     monkeypatch: pytest.MonkeyPatch, recorder: Recorder, state: str,

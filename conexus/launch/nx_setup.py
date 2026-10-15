@@ -76,7 +76,8 @@ two ctypes calls are repeated in ``_create_private_windows``). It is deleted whe
 loaded, when the listener closes without a load, and, if the run was killed (nothing can clean up after
 a SIGKILL), when the next run starts (``_sweep_opener`` in ``_start``). The page has three fields: a
 service address, a token (a password field, autocomplete off) and a tenant, and one button; an ``http`` address is
-accepted as well as ``https``. It serves at most :data:`PAGE_MAX_CONNECTIONS` connections at once and closes the rest
+accepted as well as ``https``, and one to a host that is not this machine is accepted with a warning on the page that
+the token travels unencrypted (:func:`_sends_token_in_clear`). It serves at most :data:`PAGE_MAX_CONNECTIONS` connections at once and closes the rest
 at the door; it refuses a ``POST`` whose ``Sec-Fetch-Site`` or ``Origin`` names another origin; on Windows its
 socket asks for exclusive use of its address (``SO_EXCLUSIVEADDRUSE``); and it tightens the setup directory to
 ``0o700`` on POSIX when it starts to serve.
@@ -100,14 +101,17 @@ goes only to the address typed; the whole check ends after :data:`CHECK_DEADLINE
 
 What passes is held in memory only (it is never written to disk to survive a kill: a killed run's next ``cloud`` call
 opens a new page, and a status that read the pair as accepted is reported as lost), the page says so, and the
-listener closes. It is saved after the build with ``nx config set service_url <address>`` and then, for a mint
-credential, ``nx config set mint_tenant <tenant>`` and ``nx config set mint_token --stdin``, or, for a static token,
-``nx config set service_token --stdin``; never both kinds. A token goes on standard input, never on a command line;
+listener closes. It is saved after the build, for a mint credential with ``nx config set mint_tenant <tenant>`` and
+``nx config set mint_token --stdin``, or, for a static token, with ``nx config set service_token --stdin``, and then
+``nx config set service_url <address>`` LAST (a token with no address is inert, so a save that stops half way never
+points a working service at a new address); never both kinds. A token goes on standard input, never on a command line;
 should the child echo it, it is replaced by ``***`` in the log. A set that fails is not kept; the page says why and
 stays open. When ``NX_SERVICE_URL``, ``NX_SERVICE_TOKEN``, ``NX_MINT_TOKEN`` or ``NX_MINT_TENANT`` is set in this
-process's environment the page says those take precedence over what it saves. When the config already holds a
-service address and a token of either kind, no page is served and nothing is saved again (a run that failed at
-``nx doctor`` resumes without asking for the token twice). The status file's ``credentials`` field takes exactly
+process's environment the page says those take precedence over what it saves. When this run resumes one that saved
+its credentials and then failed at a step other than ``nx doctor`` (:data:`CLOUD_SAVED`), and the config holds a
+service address and a token of either kind, no page is served and nothing is saved again, so the token is not asked
+for twice. Replacing a saved credential is ``nx config init`` in a terminal: the real server's ``setup`` starts
+nothing while a service answers, and a saved address with a token resolves as one. The status file's ``credentials`` field takes exactly
 :data:`CREDENTIAL_STATES`; two minutes after the request to open the page with no load, or at once when the request
 is known to have failed, it is ``page not loaded``, and ten minutes after the listener started it is ``timed out``
 and the listener closes, whatever happened; a run that times out ends ``failed`` at step ``credentials`` (a timeout
@@ -169,8 +173,8 @@ the run: its child is killed and it writes no status again (every status write
 re-checks ownership), and it leaves the new holder's lock alone. The lock is
 removed on every way out the process can catch: success, failure, an exception and
 SIGTERM. A kill it cannot catch (SIGKILL, TerminateProcess) leaves the lock to go
-stale: sixty seconds without a heartbeat. Liveness is the heartbeat, never a
-process id, because the standard library has no reliable process test on Windows.
+stale: sixty seconds without a heartbeat. Liveness is the heartbeat; a process id only ever
+REFUSES a reclaim (below), because a recorded pid can be reused and the heartbeat cannot.
 ``os.mkdir`` is the atomic claim. Reclaiming a stale lock takes a second
 ``mkdir``, of ``lock.reclaim``, and re-reads the lock under it: the lock must
 still be stale and still carry the owner token that was read stale. So of any
@@ -179,6 +183,14 @@ report the run as live. A reclaimer that dies holding the guard leaves it for
 sixty seconds, and after that the guard is removed the same way; two callers racing
 for the removal of a dead guard at the same instant remain a hole too narrow to
 close without a process test.
+
+A stale heartbeat is read together with two process ids, because a heartbeat's clock stops when
+the machine sleeps. The reclaim is refused while the ``pid`` in ``status.json`` (a run whose state is
+``running``) names a live process and the heartbeat is under :data:`PID_GRACE_SECONDS` old, and while
+``lock/child`` (the pid of the child program the run was waiting on, written by ``_Run.cmd``) names a live
+process and is under :data:`STEP_TIMEOUT_SECONDS` old: a run killed outright (SIGKILL) leaves its child
+running, and a second bootstrap beside it is what the lock exists to prevent. The age bounds are what keep a pid
+the system reused for another program from refusing for ever. A dead pid, or none, changes nothing.
 
 **The status file** is owner-only from the call that creates it. POSIX:
 ``os.open(..., O_CREAT | O_EXCL, 0o600)``, so the umask can only narrow it. Windows:
@@ -211,10 +223,13 @@ without breakaway would be killed when the job closes, so the status says setup
 cannot detach on this host instead of reporting a start. If both launches are
 refused it says the same; a WMI broker is the untried way out.
 
-Test seams, none set in normal use: ``NX_SETUP_HEARTBEAT_SECONDS`` (the 10 second
-interval), ``NX_SETUP_RECLAIM_PAUSE`` (seconds to wait between reading a stale
-lock and removing it) and ``NX_SETUP_OPEN_RECORD`` (a file the opener file's path is
-appended to instead of asking the system to open it, so no test starts a browser).
+Test seams, for tests only; none is set in normal use and none is a setting.
+``NX_SETUP_HEARTBEAT_SECONDS`` (the 10 second interval; read as at most
+:data:`HEARTBEAT_SECONDS_MAX`, so a run cannot beat more slowly than the 60 second stale
+limit allows), ``NX_SETUP_RECLAIM_PAUSE`` (seconds to wait between reading a stale lock
+and removing it; read as at most :data:`RECLAIM_PAUSE_MAX`) and ``NX_SETUP_OPEN_RECORD``
+(a file the opener file's path is appended to instead of asking the system to open it, so
+no test starts a browser; it appends to whatever file it names).
 """
 from __future__ import annotations
 
@@ -274,6 +289,13 @@ MODES: tuple[str, ...] = (MODE_LOCAL, MODE_CLOUD, MODE_CLI_ONLY, MODE_NOT_NOW)
 STALE_SECONDS = 60.0
 #: How often the run rewrites its heartbeat.
 HEARTBEAT_SECONDS = 10.0
+#: The test seam ``NX_SETUP_HEARTBEAT_SECONDS`` is read as at most this (well under :data:`STALE_SECONDS`).
+HEARTBEAT_SECONDS_MAX = 20.0
+#: The test seam ``NX_SETUP_RECLAIM_PAUSE`` is read as at most this many seconds.
+RECLAIM_PAUSE_MAX = 5.0
+#: A stale heartbeat older than this is no longer refused on the strength of the pid in ``status.json``: after this
+#: long a "live" pid is far more likely a pid the system reused than a run that cannot beat.
+PID_GRACE_SECONDS = 600.0
 #: A beat that cannot read the owner or write the heartbeat tries this many times...
 HEARTBEAT_ATTEMPTS = 3
 #: ...this many seconds apart, then waits for the next beat.
@@ -303,6 +325,7 @@ _LOG = "setup.log"
 _MARKER = "not-now"
 _LOCK = "lock"
 _GUARD = "lock.reclaim"
+_CHILD = "child"  # in the lock directory: the pid of the child program the run is waiting on
 
 _DOCTOR_ROWS_MAX = 20
 _DOCTOR_ROW_CHARS = 300
@@ -587,6 +610,8 @@ def _reclaim(setup: Path, lock: Path, seen_owner: str | None) -> bool:
             return True
         if not _lock_stale(lock) or _lock_owner(lock) != seen_owner:
             return False
+        if _recorded_process_alive(setup, lock):
+            return False
         try:
             shutil.rmtree(lock)
         except OSError:
@@ -595,6 +620,36 @@ def _reclaim(setup: Path, lock: Path, seen_owner: str | None) -> bool:
     finally:
         with contextlib.suppress(OSError):
             os.rmdir(guard)
+
+
+def _live_pid(value: Any) -> bool:
+    """*value* is a pid (a positive integer) of a process that has not exited, and not this process."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0 or value == os.getpid():
+        return False
+    return _endpoint_resolve.pid_alive(value)
+
+
+def _recorded_process_alive(setup: Path, lock: Path) -> bool:
+    """Whether a stale *lock* still has a process behind it: the run itself (the ``pid`` in a ``running``
+    ``status.json``, while the heartbeat is under :data:`PID_GRACE_SECONDS` old) or the child program it was
+    waiting on (``lock/child``, while that file is under :data:`STEP_TIMEOUT_SECONDS` old). Only ever used to
+    refuse a reclaim: a heartbeat that stopped because the machine slept, or a run killed outright whose build
+    carries on, must not get a second run beside it."""
+    age = _mtime_age(lock / "heartbeat")
+    if age is None:
+        age = _mtime_age(lock)
+    if age is not None and age <= PID_GRACE_SECONDS:
+        data = read_status(setup) or {}
+        if data.get("state") == RUNNING and _live_pid(data.get("pid")):
+            return True
+    child_age = _mtime_age(lock / _CHILD)
+    if child_age is not None and child_age <= STEP_TIMEOUT_SECONDS:
+        try:
+            recorded = int((lock / _CHILD).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return False
+        return _live_pid(recorded)
+    return False
 
 
 def _wait_gone(path: Path, seconds: float) -> bool:
@@ -626,17 +681,19 @@ def acquire_lock(setup: Path, *, wait_for_finish: bool = False) -> str | None:
                 continue
             return None
         seen_owner = _lock_owner(lock)
-        with contextlib.suppress(ValueError):
-            time.sleep(float(os.environ.get("NX_SETUP_RECLAIM_PAUSE", "0") or 0))
+        with contextlib.suppress(ValueError):  # a test seam, clamped: it must not be a way to sleep in a tool call
+            time.sleep(min(max(float(os.environ.get("NX_SETUP_RECLAIM_PAUSE", "0") or 0), 0.0), RECLAIM_PAUSE_MAX))
         if not _reclaim(setup, lock, seen_owner):
             return None
     return None
 
 
 def release_lock(setup: Path, token: str) -> None:
-    """Remove the lock if it is still this holder's."""
+    """Remove the lock unless it is positively someone else's (or gone). An owner file that cannot be read now
+    (a Windows sharing violation) is not another owner: leaving the lock would refuse every call for 60 seconds
+    beside a terminal status."""
     lock = setup / _LOCK
-    if _lock_owner(lock) == token:
+    if _owner_check(lock, token) is not False:
         shutil.rmtree(lock, ignore_errors=True)
 
 
@@ -649,9 +706,11 @@ class _Heartbeat(threading.Thread):
         self._token = token
         self._stop_event = threading.Event()
         self.lost = threading.Event()
-        try:
-            self._interval = float(os.environ.get("NX_SETUP_HEARTBEAT_SECONDS", "") or HEARTBEAT_SECONDS)
+        try:  # a test seam; clamped so a value over the stale limit cannot make a healthy run reclaimable
+            self._interval = min(float(os.environ.get("NX_SETUP_HEARTBEAT_SECONDS", "") or HEARTBEAT_SECONDS), HEARTBEAT_SECONDS_MAX)
         except ValueError:
+            self._interval = HEARTBEAT_SECONDS
+        if not self._interval > 0:  # zero, negative or nan would spin
             self._interval = HEARTBEAT_SECONDS
 
     def holds(self) -> bool:
@@ -817,6 +876,9 @@ OPEN_RECORD_ENV = "NX_SETUP_OPEN_RECORD"
 CHECK_DEADLINE_SECONDS = 20.0
 #: At most this many connections to the page are served at once; the rest are closed at the door.
 PAGE_MAX_CONNECTIONS = 16
+#: A connection must have sent its whole request (headers and body) this long after it was accepted, or it is shut
+#: down. The 10 second per-recv timeout restarts on every byte and cannot bound a connection that drips.
+PAGE_CONNECTION_SECONDS = 5.0
 #: A second submit waits this long for a check that is running, then is told so.
 PAGE_BUSY_WAIT_SECONDS = 1.0
 
@@ -912,6 +974,35 @@ def _normal_address(url: str) -> str:
         raise ValueError("Leave the user name and password out of the service address.")
     del port
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
+#: Said on the page when the address is ``http://`` to a host that is not this machine. The page still accepts it:
+#: a self-hosted service on a private network is a real case, and the choice is the user's.
+_CLEARTEXT_WARNING = (
+    "This address starts with http:// and names a host other than this machine, so the token travels over the "
+    "network unencrypted and anyone on the path can read it. Use https:// if the service offers it."
+)
+
+
+def _sends_token_in_clear(url: str) -> bool:
+    """Whether *url* is ``http://`` to a host that is not loopback (``localhost``, ``127.0.0.0/8``, ``::1``).
+    An address that does not parse is not (the check refuses it with its own sentence)."""
+    import ipaddress  # noqa: PLC0415 -- lazy, see _normal_address
+    import urllib.parse  # noqa: PLC0415
+
+    try:
+        parts = urllib.parse.urlsplit((url or "").strip())
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme != "http" or not host:
+        return False
+    if host.lower() == "localhost" or host.lower().endswith(".localhost"):
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True  # a name, not an address: it resolves to wherever DNS says
 
 
 class CheckResult(NamedTuple):
@@ -1143,7 +1234,7 @@ def credentials_notice(state: str, reason: str = "", *, open_failed: bool = Fals
 
 
 #: Said when a run ends with a pair the page accepted and nothing saved (a build that failed, a kill, a signal).
-_LOST_NOTE = "The service credentials the page accepted were not saved and are discarded."
+_LOST_NOTE = "The service credentials the page accepted were not completely saved and are discarded."
 _LOST_NEXT = (
     "The credentials must be entered again: calling setup with mode cloud again opens a new page. A user with a terminal "
     "can run `nx config init` instead."
@@ -1255,6 +1346,7 @@ class CredentialsPage:
         bound or written)."""
         import http.server  # noqa: PLC0415 -- lazy: the session-start hook imports this file and has 100 ms
         import secrets  # noqa: PLC0415
+        import socket  # noqa: PLC0415
 
         page = self
         if os.name == "posix":  # the log holds the service address: a directory made wider earlier is tightened
@@ -1295,7 +1387,30 @@ class CredentialsPage:
         class Handler(http.server.BaseHTTPRequestHandler):
             server_version = "nx-setup"
             sys_version = ""
-            timeout = 10.0
+            timeout = 10.0  # per recv; it restarts on every byte, so PAGE_CONNECTION_SECONDS is the bound that holds
+            _expiry: threading.Timer | None = None
+
+            def setup(self) -> None:
+                super().setup()
+                # A connection that has not finished its request this long after accept is shut down. Without
+                # it 16 sockets that send a byte every few seconds hold every slot for the page's whole life.
+                self._expiry = threading.Timer(PAGE_CONNECTION_SECONDS, self._expire)
+                self._expiry.daemon = True
+                self._expiry.start()
+
+            def _expire(self) -> None:
+                with contextlib.suppress(OSError):
+                    self.connection.shutdown(socket.SHUT_RDWR)
+
+            def _request_read(self) -> None:
+                """The request is in: the deadline has done its job. What follows (a check that may take 20
+                seconds, the reply) is bounded by the check's own deadline and the per-recv timeout."""
+                if self._expiry is not None:
+                    self._expiry.cancel()
+
+            def finish(self) -> None:
+                self._request_read()
+                super().finish()
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 -- the request line holds the path
                 pass
@@ -1304,6 +1419,7 @@ class CredentialsPage:
                 self._empty(code)
 
             def _empty(self, code: int) -> None:
+                self._request_read()
                 self.send_response(code)
                 self.send_header("Content-Length", "0")
                 self.send_header("Connection", "close")
@@ -1332,6 +1448,7 @@ class CredentialsPage:
                 return host_ok and secrets.compare_digest(path.encode("utf-8", "replace"), page._path.encode("ascii"))
 
             def do_GET(self) -> None:
+                self._request_read()
                 if not self._addressed():
                     return self._empty(404)
                 page._note_load()
@@ -1364,7 +1481,11 @@ class CredentialsPage:
                     return self._empty(413)
                 import urllib.parse  # noqa: PLC0415 -- lazy, see start()
 
-                fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
+                raw = self.rfile.read(length)
+                self._request_read()
+                if len(raw) != length:  # the connection deadline (or the peer) ended the body early: nothing to submit
+                    return self._empty(400)
+                fields = urllib.parse.parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
                 page._note_load()
                 busy = page._submit(
                     (fields.get("service_url") or [""])[0], (fields.get("service_token") or [""])[0],
@@ -1519,7 +1640,10 @@ class CredentialsPage:
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><style>{_PAGE_STYLE}</style></head><body>',
             "<h1>Connect Nexus to a managed service</h1>",
         ]
+        warn = _CLEARTEXT_WARNING if _sends_token_in_clear(url) else ""
         if state in (CRED_ACCEPTED, CRED_SAVED):
+            if warn:
+                parts.append(f'<p class="error">{html.escape(warn)}</p>')
             parts.append(
                 '<p class="note">The service credentials were accepted. Setup saves them when the install finishes; if the '
                 "install fails they are discarded and setup asks again. You can close this tab.</p></body></html>"
@@ -1535,6 +1659,8 @@ class CredentialsPage:
             parts.append(f'<p class="note">{html.escape(notice)}</p>')
         if busy:
             parts.append(f'<p class="note">{html.escape(busy)}</p>')
+        if warn:
+            parts.append(f'<p class="error">{html.escape(warn)}</p>')
         if state == CRED_REJECTED:
             parts.append(f'<p class="error">{html.escape(reason)} Try again.</p>')
         parts.append(
@@ -1717,6 +1843,18 @@ class _Run:
         except OSError:
             pass
 
+    def _record_child(self, pid: int) -> None:
+        """Write the pid of the child program into the lock directory, so a reclaimer that finds this run dead
+        can tell its build is still going. Only while the lock is this run's; a failed write changes nothing."""
+        if self.heartbeat.holds():
+            with contextlib.suppress(OSError):
+                (self.setup / _LOCK / _CHILD).write_text(str(pid), encoding="utf-8")
+
+    def _clear_child(self) -> None:
+        if self.heartbeat.holds():
+            with contextlib.suppress(OSError):
+                (self.setup / _LOCK / _CHILD).unlink()
+
     def cmd(
         self, argv: list[str], *, timeout: float | None = None, stdin_text: str | None = None,
         env: dict[str, str] | None = None,
@@ -1747,6 +1885,7 @@ class _Run:
                     encoding="utf-8",  # names the codec for the encoding lint and for the text written to standard input
                     **_child_kwargs(),
                 )
+                self._record_child(proc.pid)
                 if stdin_text is not None and proc.stdin is not None:
                     try:
                         proc.stdin.write(stdin_text)
@@ -1776,6 +1915,7 @@ class _Run:
                         _kill_tree(proc)
                     raise
         finally:
+            self._clear_child()
             if stdin_text:
                 self._scrub_log(offset, stdin_text)
         text = self._output_since(offset)
@@ -1840,11 +1980,12 @@ def _nx_after_build(run: _Run) -> str | None:
     return hit if hit is not None and _is_nexus_cli(run, hit) else None
 
 
-#: Added to a failed ``nx doctor``'s next step in mode cloud: the saved credential may be what failed, and a new
-#: run opens the page again (only a resume of an unfinished run skips it), which a user with no terminal needs.
+#: Added to a failed ``nx doctor``'s next step in mode cloud: the saved credential may be what failed. Setup does not
+#: start while a service answers (a saved address with a token resolves as one), so it cannot open the page again;
+#: replacing the credential is ``nx config init`` in a terminal.
 _CLOUD_DOCTOR_NOTE = (
-    " If the user agrees and the service address, token or tenant may be wrong, call setup with mode cloud "
-    "again: it opens the credentials page again."
+    " If the service address, token or tenant may be wrong, the user replaces the saved credential with "
+    "`nx config init` in a terminal; setup does not open the credentials page again while a service answers."
 )
 
 
@@ -1973,8 +2114,9 @@ def _execute(run: _Run) -> int:
 
 #: The status field a cloud run sets once it has saved what the page accepted. :func:`start` carries it into
 #: the next run only when this one failed or was interrupted at a later step (not at ``nx doctor``, which may
-#: have failed on the credential), so that resume skips the page. A new ``setup`` call with mode ``cloud`` after
-#: a finished run opens it again: the way a user without a terminal replaces a saved credential.
+#: have failed on the credential), so that resume skips the page. Replacing a saved credential is ``nx config init``
+#: in a terminal: the real server's ``setup`` starts nothing while a service answers, and a saved address with a
+#: token resolves as one.
 CLOUD_SAVED = "cloud_saved"
 
 #: The keys each kind of credential is saved under; saving one kind removes the other's.
@@ -2005,14 +2147,15 @@ def _saved_keys(config: Path, keys: tuple[str, ...]) -> list[str]:
 def _cloud(run: _Run, nx: str) -> int | None:
     """The service step for mode ``cloud``: wait for the credentials the page accepts (it has been served since
     the start of the run, so this waits only if the user has not finished), then save them with ``nx config set``:
-    ``service_url``, and for a mint credential ``mint_tenant`` then ``mint_token`` (the token last, so a save that
-    stops half way never leaves a token without its tenant) or for a static token ``service_token``. Never both
-    kinds. A token goes in on standard input. No service is downloaded. When the config already holds an address
-    and a token no page was served and nothing is saved again. ``None`` means it went well."""
+    for a mint credential ``mint_tenant`` then ``mint_token`` or for a static token ``service_token``, and
+    ``service_url`` LAST: a token with no address is inert, so a save that stops half way never points a working
+    local service at the new address. Never both kinds. A token goes in on standard input. No service is
+    downloaded. On the resume that skipped the page (:data:`CLOUD_SAVED`) nothing is saved again. ``None`` means it
+    went well."""
     if run.page is None:
         run.notes.append(
-            "The credentials an earlier run saved are kept, so no credentials page was opened. To replace them, if the "
-            "user agrees, call setup with mode cloud again once this run ends, or the user runs `nx config init` in a terminal."
+            "The credentials an earlier run saved are kept, so no credentials page was opened. To replace them, the "
+            "user runs `nx config init` in a terminal."
         )
         run.step_done("credentials")
         return None
@@ -2032,7 +2175,6 @@ def _cloud(run: _Run, nx: str) -> int | None:
     steps: list[tuple[list[str], str | None, str]] = [
         (["unset", key], None, f"removing the saved {key}") for key in _saved_keys(config_dir(), _KIND_KEYS[other])
     ]
-    steps.append((["set", "service_url", held.url], None, "the service address"))
     if held.kind == KIND_MINT:
         steps += [
             (["set", "mint_tenant", held.tenant], None, "the tenant"),
@@ -2040,6 +2182,7 @@ def _cloud(run: _Run, nx: str) -> int | None:
         ]
     else:
         steps += [(["set", "service_token", "--stdin"], held.token, "the token")]
+    steps.append((["set", "service_url", held.url], None, "the service address"))  # last: a token with no address is inert
     try:
         for tail, secret, what in steps:
             code, _ = run.cmd([nx, "config", *tail], stdin_text=secret)
@@ -2365,8 +2508,6 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
     if mode == MODE_NOT_NOW:
         marker.write_text(_now(), encoding="utf-8")
         return {**status_view(setup), "started": False}
-    with contextlib.suppress(FileNotFoundError):
-        marker.unlink()
     token = acquire_lock(setup, wait_for_finish=True)
     if token is None:
         live = status_view(setup)
@@ -2378,6 +2519,8 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
             ),
         }
     try:
+        with contextlib.suppress(FileNotFoundError):  # only now: a call refused beside a live run leaves the user's marker
+            marker.unlink()
         _sweep_tmp(setup)
         _sweep_opener(setup)  # a killed run cannot delete its opener file: the next run's start does
         with contextlib.suppress(FileNotFoundError):
@@ -2395,8 +2538,10 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
             prior.get(CLOUD_SAVED) and mode == MODE_CLOUD and prior.get("mode") == MODE_CLOUD
             and prior.get("state") not in (DONE, DOCTOR_FAILED)
         ):
-            # A resume keeps what the unfinished run saved. A finished run does not, and neither does one whose
-            # `nx doctor` failed, since the saved credential may be what failed: the page opens again.
+            # A resume keeps what the unfinished run saved. A finished run does not carry the mark, and neither
+            # does one whose `nx doctor` failed, since the saved credential may be what failed. That decides what
+            # this process does when it is started (the stand-in can start it); the real server's `run_setup`
+            # starts nothing while a service answers, so replacing a saved credential is `nx config init`.
             base[CLOUD_SAVED] = True
         write_status(setup, base)
         argv = ["run", "--mode", mode, "--token", token] + (["--autostart"] if autostart else [])

@@ -13,7 +13,6 @@ interrupted (a warning that says ``setup`` called again resumes).
 from __future__ import annotations
 
 import importlib.util
-import inspect
 import json
 import os
 import re
@@ -309,10 +308,36 @@ def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning
     assert settled.ok is True, settled.detail
 
 
-def test_the_sweep_settles_the_row_after_every_row_is_known() -> None:
-    source = inspect.getsource(run_health_checks)
-    assert "return _settle_setup_row(results), _local" in source
-    assert source.index("_check_setup_status()") < source.index("_settle_setup_row(results)")
+def test_the_real_sweep_carries_the_setup_row_and_settles_it_after_every_row_is_known(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review S7: one call of the real ``run_health_checks`` on a seeded directory (no service, so every row
+    degrades; it takes about a second), where two source-text asserts used to stand. The row is in the sweep exactly
+    once, read from ``<config dir>/setup``, and ``_settle_setup_row`` is called once, with every row the sweep
+    returns already in the list: a call moved under a condition, ahead of a later check or dropped fails here."""
+    import nexus.health as health  # noqa: PLC0415
+
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+    monkeypatch.chdir(tmp_path)
+    setup = build_setup_dir(config, CASES["failed"])
+    seen: list[list[str]] = []
+    real = health._settle_setup_row
+
+    def spy(results: list[HealthResult]) -> list[HealthResult]:
+        seen.append([r.label for r in results])
+        return real(results)
+
+    monkeypatch.setattr(health, "_settle_setup_row", spy)
+    results, _local = run_health_checks()
+    assert len(seen) == 1, "the sweep settles the row exactly once"
+    assert seen[0] == [r.label for r in results], "a row was added after the setup row was settled"
+    assert len(results) > 20, "premise: this is the whole sweep, not a stub"
+    (row,) = [r for r in results if r.label == _LABEL]
+    assert "the last setup run" in row.detail and str(setup / "setup.log") in row.detail
+    others_fine = all(r.ok or health._benign_warning(r) for r in results if r is not row)
+    assert row.ok is others_fine, "the row stands down only when every other row of the sweep is fine"
 
 # -- the format, from both sides -----------------------------------------------------------------
 
@@ -365,10 +390,6 @@ def test_the_log_path_is_the_directorys_own_not_the_status_files(tmp_path: Path)
 
 
 # -- registration --------------------------------------------------------------------------------
-
-
-def test_the_row_is_in_the_default_sweep() -> None:
-    assert "_check_setup_status()" in inspect.getsource(run_health_checks)
 
 
 def test_the_default_setup_directory_is_setup_under_the_config_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

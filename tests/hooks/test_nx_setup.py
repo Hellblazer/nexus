@@ -1784,6 +1784,156 @@ def test_a_young_guard_is_respected(tmp_path: Path) -> None:
     assert (setup / "lock").is_dir() and guard.is_dir()
 
 
+# -- the lock: a stale heartbeat beside a live process (review S1, S2) ---------------------------
+
+
+@pytest.fixture
+def live_process() -> Any:
+    """A process that stays alive until the test ends."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])  # noqa: S603
+    yield proc
+    proc.kill()
+    proc.wait(10)
+
+
+def _write_running_status(setup: Path, pid: int | None, state: str = "running") -> None:
+    record: dict[str, Any] = {"state": state, "stage": "build", "mode": "cli-only"}
+    if pid is not None:
+        record["pid"] = pid
+    (setup / "status.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_a_stale_lock_is_not_reclaimed_while_the_pid_in_the_status_is_alive(tmp_path: Path, live_process: Any) -> None:
+    """Review S1: a heartbeat's clock stops when the machine sleeps; a run that is alive and about to beat must not
+    lose its lock (and its accepted credentials) to a call in that window. Without the check the call reclaims."""
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, age=120.0)
+    _write_running_status(setup, live_process.pid)
+    assert mod.acquire_lock(setup) is None, "a live run's lock was reclaimed"
+    assert (setup / "lock" / "owner").read_text(encoding="utf-8") == "dead-owner"
+    live_process.kill()
+    live_process.wait(10)
+    assert mod.acquire_lock(setup), "a run that is gone is reclaimed as before"
+
+
+@pytest.mark.parametrize(
+    ("how", "age", "state"),
+    [("a heartbeat older than the grace", 700.0, "running"), ("a status that is not running", 120.0, "failed")],
+)
+def test_a_live_pid_does_not_refuse_a_reclaim_past_the_grace_or_beside_a_terminal_status(
+    tmp_path: Path, live_process: Any, how: str, age: float, state: str,
+) -> None:
+    """The pid may be one the system reused: past the grace, or beside a status that says the run ended, it counts
+    for nothing, or a stale lock would refuse for as long as that pid lives."""
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, age=age)
+    _write_running_status(setup, live_process.pid, state)
+    assert mod.acquire_lock(setup), how
+
+
+def test_a_stale_lock_is_not_reclaimed_while_the_recorded_child_is_alive(tmp_path: Path, live_process: Any) -> None:
+    """Review S2: a run killed outright (SIGKILL) leaves its build running; a second bootstrap beside it is what the
+    lock exists to prevent. The run records the child's pid in ``lock/child``."""
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, age=120.0)
+    _write_running_status(setup, None)
+    child = setup / "lock" / "child"
+    child.write_text(str(live_process.pid), encoding="utf-8")
+    assert mod.acquire_lock(setup) is None, "the reclaim went ahead beside a running build"
+    live_process.kill()
+    live_process.wait(10)
+    assert mod.acquire_lock(setup), "a build that has ended is not waited for"
+
+
+def test_a_child_record_older_than_a_step_can_run_is_not_believed(tmp_path: Path, live_process: Any) -> None:
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, age=120.0)
+    child = setup / "lock" / "child"
+    child.write_text(str(live_process.pid), encoding="utf-8")
+    old = time.time() - mod.STEP_TIMEOUT_SECONDS - 60
+    os.utime(child, (old, old))
+    assert mod.acquire_lock(setup)
+
+
+def test_a_run_records_its_child_pid_in_the_lock_while_the_child_runs(box: Box) -> None:
+    box.behave([box.uv_builds_nx(sleep=3.0)])
+    assert box.start("cli-only")["started"] is True
+    child = box.setup / "lock" / "child"
+    _wait_for(child.exists, 20, "the run to record its child")
+    pid = int(_retry(lambda: child.read_text(encoding="utf-8")).strip())
+    assert pid > 0 and pid != box.status_file()["pid"] and _alive(pid)
+    box.wait_terminal()
+
+
+# -- the lock: release, the seams, the not-now marker (review S5, S6, S8) --------------------------
+
+
+@pytest.mark.parametrize("owner_file", ["", "   \n"], ids=["empty", "blank"])
+def test_release_removes_the_lock_when_its_owner_cannot_be_read_now(tmp_path: Path, owner_file: str) -> None:
+    """Review S6: an owner file that cannot be read (a sharing violation reads as empty here) is not another owner,
+    and leaving the lock refuses every call for a minute beside a terminal status."""
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup)
+    (setup / "lock" / "owner").write_text(owner_file, encoding="utf-8")
+    mod.release_lock(setup, "my-token")
+    assert not (setup / "lock").exists()
+
+
+def test_release_leaves_a_lock_that_is_positively_someone_elses(tmp_path: Path) -> None:
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, owner="the-new-holder")
+    mod.release_lock(setup, "my-token")
+    assert (setup / "lock").is_dir()
+    mod.release_lock(tmp_path / "nowhere", "my-token")  # no lock at all: nothing to do, nothing raised
+
+
+def test_the_reclaim_pause_seam_is_clamped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review S5: ``NX_SETUP_RECLAIM_PAUSE`` is a test seam, and an unbounded value is a sleep inside a tool call."""
+    mod = _load_module()
+    setup = tmp_path / "setup"
+    _make_stale_lock(setup, age=120.0)
+    slept: list[float] = []
+    setattr_in(monkeypatch, mod, "time.sleep", lambda seconds: slept.append(seconds))
+    monkeypatch.setenv("NX_SETUP_RECLAIM_PAUSE", "99999")
+    assert mod.acquire_lock(setup)
+    assert slept == [mod.RECLAIM_PAUSE_MAX]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("1000", "max"), ("20", "max"), ("0.4", 0.4), ("0", "default"), ("-3", "default"), ("nan", "default"), ("x", "default")],
+)
+def test_the_heartbeat_seam_is_clamped_under_the_stale_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str, expected: Any,
+) -> None:
+    """Review S5: a value over the 60 second stale limit would make a healthy run reclaimable."""
+    mod = _load_module()
+    monkeypatch.setenv("NX_SETUP_HEARTBEAT_SECONDS", value)
+    beat = mod._Heartbeat(tmp_path / "lock", "token")
+    want = {"max": mod.HEARTBEAT_SECONDS_MAX, "default": mod.HEARTBEAT_SECONDS}.get(expected, expected)
+    assert beat._interval == want
+    assert mod.HEARTBEAT_SECONDS_MAX < mod.STALE_SECONDS / 2
+
+
+def test_a_call_refused_beside_a_live_run_leaves_the_not_now_marker(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review S8: the marker is the user's "not now"; a refused call started nothing and must not delete it."""
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    token = mod.acquire_lock(box.setup)
+    assert token
+    (box.setup / "not-now").write_text("then", encoding="utf-8")
+    out = mod.start("cli-only", False)
+    assert out["started"] is False and "already in progress" in out["refused"]
+    assert (box.setup / "not-now").exists(), "a refused call deleted the user's marker"
+    mod.release_lock(box.setup, token)
+
+
 # -- the plugin version, a corrupt status file ---------------------------------------------------
 
 
