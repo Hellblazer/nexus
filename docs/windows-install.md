@@ -496,6 +496,12 @@ that the bundle, uv's Python or `nx.exe` are blocked at the next start. The
 - The `conexus.mcpb` Desktop Extension: not a working route on Windows; chat
   and Cowork get conexus from the plugin marketplace instead
   ([Claude Desktop](#5-claude-desktop-chat-and-cowork)).
+- The first Claude Code session after the install can lose the plugin's
+  SessionStart hooks: on 2026-10-15 the end-to-end test failed three times in a
+  row because Claude Code stopped them at their 5 and 10 second time limits while
+  `uv` prepared the hook environment for the first time. Later sessions were not
+  affected. The cause is not known (nexus-3ya9d). If a first session shows no
+  nexus context, start a new session.
 - AppLocker with enforced script rules, WDAC with script enforcement on, a
   Microsoft or domain account, host sleep, and the Claude Desktop install
   dialog: not measured.
