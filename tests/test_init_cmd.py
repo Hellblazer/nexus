@@ -1267,6 +1267,7 @@ class TestManagedOnboardingP12:
         monkeypatch.setenv("NX_LOCAL", "0")  # force MANAGED
         monkeypatch.delenv("NX_SERVICE_URL", raising=False)
         monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
         provisioned: list[str] = []
         probed: list[str | None] = []
         monkeypatch.setattr(
@@ -1279,7 +1280,7 @@ class TestManagedOnboardingP12:
         )
 
         result = CliRunner().invoke(
-            init_cmd, [], input="https://m.example\ntoken123\n"
+            init_cmd, [], input="https://m.example\ntoken123\nstatic\n"
         )
 
         assert result.exit_code == 0, result.output
