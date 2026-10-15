@@ -48,3 +48,5 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 
 ## Deferred to the next client release
+
+- orchestration skill cites the moved engine rules (nexus-2ziaz): `conexus/skills/orchestration/SKILL.md` names `.claude/rules/releases-and-engine.md § Engine-service release` in place of the AGENTS.md section that moved there. Deferred because the same bead touches a `src/` comment.
