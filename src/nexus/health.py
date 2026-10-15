@@ -7559,7 +7559,7 @@ def _channel_waiter_engine_fix_suggestions() -> list[str]:
     if is_dev_checkout_process():
         fixes.append(
             "this process is a dev checkout — rebuild the local engine's cached build "
-            "(see AGENTS.md's Engine-service release section for the exact script) if "
+            "(see docs/agents/engine-service-release.md for the exact script) if "
             "you are iterating on service/ code locally",
         )
     return fixes
@@ -7687,7 +7687,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         # tests/daemon/test_rdr161_native_only_gate.py's inverse-grep for
         # JVM-launch identifiers would flag it outside its own sanctioned
         # module, and this is a doctor-row fix suggestion, not a launch
-        # path -- see AGENTS.md's Engine-service release section for the
+        # path -- see docs/agents/engine-service-release.md for the
         # exact script name and invocation.
         rebuild_fix = _channel_waiter_engine_fix_suggestions()
         restart_fix = ["Restart the MCP server: /mcp"]

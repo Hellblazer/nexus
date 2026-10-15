@@ -748,8 +748,7 @@ _CODE_UPSERT_CHUNK_CAP = 300
 #: half (Phase 2, a separate `engine-service` release) adds a typed 400 +
 #: adaptive-halving backstop; THIS constant has no such backstop, because a
 #: client shipped ahead of that engine tag can and does reach engines that
-#: predate it (decoupled release lifecycles — AGENTS.md §Engine-service
-#: release). Equal sizing to the engine's 120,000-token ceiling would
+#: predate it (decoupled release lifecycles — docs/agents/engine-service-release.md). Equal sizing to the engine's 120,000-token ceiling would
 #: leave a skewed (new-client/old-engine) user with no margin at all —
 #: "the worst of both worlds: no headroom where there is no backstop"
 #: (RDR-195). So the layer without a safety net is the more conservative

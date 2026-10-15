@@ -282,7 +282,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    ```
    Non-zero exit = STOP. Do not proceed with the PyPI release: cut, deploy,
    and cloud-gate a fresh `engine-service-v*` tag first (the `engine-release`
-   skill / AGENTS.md § Engine-service release), bump
+   skill / `docs/agents/engine-service-release.md`), bump
    `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py` to that tag
    (this alone also moves the fresh-install pin, `PINNED_SERVICE_TAG`), then
    re-run the script until it exits 0. This is a command gate, not an
@@ -557,9 +557,9 @@ without a client release. It moves the changed plugin's `source.ref` in
 `plugin-v{X.Y.Z}-{n}` (the current released client version plus a
 sequence number derived from git's tag list at cut time; no counter
 file exists). It publishes nothing to PyPI and moves no version field.
-Usage discipline and the sunset trigger live in AGENTS.md's
-"Independent plugin release channel" section; check them before
-cutting.
+Usage discipline and the sunset trigger live in
+`docs/agents/plugin-release-channel.md` (AGENTS.md carries the short
+rules); check them before cutting.
 
 Command sequence (the script does the work; the human pushes):
 
@@ -639,7 +639,7 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 
 **PyPI yank for a bad full release** (distinct from Step 11's pre-release-version yank above). PyPI yanking marks a release as yanked; it does not delete it. Effect: `pip install conexus` (unpinned, or a range) stops resolving to the yanked version; an exact pin (`conexus==X.Y.Z`) still installs it, with a warning. It does **not** un-install it from any box that already ran `pip install`/`uv tool install` before the yank, and it does **not** touch `.claude-plugin/marketplace.json`'s `source.ref` on `main` — if the bad release's plugin-side commit already landed and got tagged, `source.ref` still points new `/plugin install` users at that content until a NEW release supersedes it. To yank: https://pypi.org/manage/project/conexus/release/X.Y.Z/ → "Yank release", with a reason. A yank is a signal, not a recall; the actual fix is always a new release.
 
-**Engine-deploy revert.** The engine-service cloud deployment is conexus-managed infrastructure this repo does not drive directly (AGENTS.md § T1 sub-agent contract's "Hal relays the cross-instance bus" convention applies here too). A revert is **relay-mediated**, with real limits:
+**Engine-deploy revert.** The engine-service cloud deployment is conexus-managed infrastructure this repo does not drive directly (`docs/agents/t1-sub-agent-contract.md`'s "Hal relays the cross-instance bus" convention applies here too). A revert is **relay-mediated**, with real limits:
 - There is no button here to press; surface an explicit relay naming the target tag to redeploy (normally the previous `engine-service-v*` identity), never frame it as autonomous.
 - For a migration-carrying tag, redeploying an older BINARY does not undo an already-committed schema change — the schema and the binary are two different things to revert, and a `CREATE INDEX CONCURRENTLY`-style migration (see "Schema/data-migration releases" above) has no free rollback once committed. "Revert the engine" without "revert the schema" can leave an old binary talking to a new schema shape.
 - Local-mode installs are unaffected by any cloud revert — they pull whatever `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) pins on the client side. Walking local installs back to a prior engine identity requires a NEW client release that moves the pin backward, not a cloud-side action.

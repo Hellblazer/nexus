@@ -460,8 +460,7 @@ jobs:
 
   test:
     # RUNNER (nexus-480wm, Sam 2026-10-10): `lab-6c18g` is the owned lab pool
-    # (6 cores, 18 GB hard cap, see AGENTS.md § Self-hosted runners and fork
-    # PRs). The class is shaped for this job: six of them fit on chas at once
+    # (6 cores, 18 GB hard cap, see docs/agents/self-hosted-runners.md). The class is shaped for this job: six of them fit on chas at once
     # (118 GB allocatable). The test step runs 4 xdist workers there. Five fit
     # in memory, but each worker also drives an engine JVM and a Postgres, and
     # at five on six CPUs three runs each lost a different timing-sensitive

@@ -227,6 +227,9 @@ def test_the_release_gates_are_prescribed_as_commands(flag: str) -> None:
 
 GOVERNANCE_DOCS = (
     "AGENTS.md",
+    # nexus-2ziaz (2026-10-14): the verbatim § Engine-service release moved here
+    # and is the authority; AGENTS.md keeps the short rules, so both are pinned.
+    "docs/agents/engine-service-release.md",
     ".claude/skills/release/SKILL.md",
     ".claude/skills/engine-release/SKILL.md",
 )

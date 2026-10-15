@@ -26,8 +26,7 @@ incompatible / drift, ``2`` unverifiable (network, git or gh could not
 answer -- "could not verify" is never treated as "must be fine").
 
 **Paired-release mode** (``--paired-deploy engine-service-vX.Y.Z``,
-nexus-k1c08): under the paired-release choreography (AGENTS.md § Engine-service
-release) a client release bumps ``REQUIRED_ENGINE_VERSION`` to an engine tag
+nexus-k1c08): under the paired-release choreography (``docs/agents/engine-service-release.md``) a client release bumps ``REQUIRED_ENGINE_VERSION`` to an engine tag
 whose deploy fires AT client-tag push, so PRE-tag a cloud behind the floor is
 the EXPECTED state. The flag is never a default: it names the tag, and
 accepts a below-floor cloud only when ALL of these verify independently:
@@ -114,7 +113,7 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _REMEDY = (
     "Remedy: cut + deploy + cloud-gate a fresh engine-service via the "
-    "`engine-release` skill (AGENTS.md § Engine-service release), then "
+    "`engine-release` skill (docs/agents/engine-service-release.md), then "
     "re-run this check before cutting the PyPI release."
 )
 
@@ -472,7 +471,7 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
             "The floor is version-CURRENT but SOURCE-STALE: a pin equal to the newest "
             "published tag can still predate shipped engine source (nexus-ajlz5). Cut "
             "a fresh engine tag carrying this source (or re-pin to a tag that already "
-            "does) before releasing -- see AGENTS.md § Engine-service release, "
+            "does) before releasing -- see docs/agents/engine-service-release.md, "
             "paired-release choreography.",
             file=sys.stderr,
         )
@@ -1153,7 +1152,7 @@ _PRECONDITION_REMEDY = (
     "tree is green (a tag gates delivery, not work). Pair the deploy with the "
     "conexus release that carries the listed commit(s) AND bumps the floor to "
     "this tag: deploy fires at client-tag push, in parallel with the PyPI "
-    "publish (AGENTS.md § Engine-service release, paired-release "
+    "publish (docs/agents/engine-service-release.md, paired-release "
     "choreography). Then re-run this check."
 )
 

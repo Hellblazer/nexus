@@ -56,7 +56,7 @@
 # Those are proven only by a workflow_dispatch run of engine-service-release.yml on
 # develop, with the switch on, before the first Windows-carrying cut (a non-tag ref
 # runs everything except sign, upload and promote); the engine-release skill's pre-cut
-# steps name it, and AGENTS.md § Self-hosted runners and fork PRs repeats it.
+# steps name it, and docs/agents/self-hosted-runners.md repeats it.
 #
 # Post-merge code execution. A push to develop runs the scripts and the build of the
 # merged tree on the release-boundary runner under the MERGER's actor, so the actor

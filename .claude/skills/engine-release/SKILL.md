@@ -1,6 +1,6 @@
 ---
 name: engine-release
-description: Use when cutting or deploying the Java engine-service binary (engine-service-vX.Y.Z), refreshing the cloud engine, or validating develop's engine tip in the cloud. This is the SECOND release lifecycle — separate from, and not gated by, the conexus PyPI release (use the `release` skill for that). Authority: AGENTS.md § Engine-service release.
+description: Use when cutting or deploying the Java engine-service binary (engine-service-vX.Y.Z), refreshing the cloud engine, or validating develop's engine tip in the cloud. This is the SECOND release lifecycle — separate from, and not gated by, the conexus PyPI release (use the `release` skill for that). Authority: docs/agents/engine-service-release.md (AGENTS.md § Engine-service release keeps the short rules and links it).
 ---
 
 # Engine-service Release Checklist
@@ -69,8 +69,8 @@ ship pinned to a pre-fence engine — its own flagship feature inert on fresh
 local installs). A tag gates DELIVERY, not work, and not even publication:
 cut the engine tag whenever the tree is green. On a red exit here, the tag
 still cuts; the DEPLOY waits for the client tag that carries the listed
-commits. The paired-release choreography (AGENTS.md § Engine-service
-release) closes the gap: the client release bumps the floor to this tag IN
+commits. The paired-release choreography (`docs/agents/engine-service-release.md`)
+closes the gap: the client release bumps the floor to this tag IN
 the same release, and the deploy fires at client-tag push, in parallel with
 the PyPI publish — satisfied the instant the client tag exists, live before
 any user can install the client that requires it.
@@ -109,7 +109,7 @@ gh variable get NX_WINDOWS_RELEASE_LEGS      # 'on' for a cut that must carry Wi
 
 A cut meant to carry Windows (the paired release's P5.0a cut, nexus-f9bgu.42) needs
 `on`. A mismatch with intent stops the cut and goes to Sam: the variable and the
-runner are his, agents flip neither (AGENTS.md § Self-hosted runners and fork PRs).
+runner are his, agents flip neither (`docs/agents/self-hosted-runners.md`).
 Two more things must hold, and neither can be read from the variable:
 
 - The `win-release` runner is online. With the switch on and the runner offline,
@@ -147,8 +147,8 @@ uv run python scripts/check_release_holds.py --root "$TAG_TREE"   # exit 0 = REL
 Releaser is **human, every time** (AI preps + validates; the human pushes the
 tag). Not "human by default": that wording drifted in here and widened an
 absolute rule into one with a self-assessed exception, since the AI is the
-party deciding whether it heard an authorization. AGENTS.md § Engine-service
-release says "The human pushes the tag" with no carve-out, and the user-level
+party deciding whether it heard an authorization. `docs/agents/engine-service-release.md`
+says "The human pushes the tag" with no carve-out, and the user-level
 CLAUDE.md § Releases says "Releaser is human, every time."
 
 ```bash
