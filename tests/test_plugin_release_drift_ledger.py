@@ -618,7 +618,10 @@ def _uncovered(changed: list[str], guarded: list[str], safe: object) -> list[str
 #: The prefixes of PHASE2_SAFE_ALONE that are text the model reads, and what the
 #: scan under them looks for (case-insensitive, any file, changed or not).
 _TEXT_PREFIXES = ("conexus/skills/", "conexus/agents/", "conexus/resources/")
-_PHASE2_NAMES = r"nx_setup|nx_launch|nx_standin|_cli_lookup|setup_status|/conexus:setup"
+_PHASE2_NAMES = (
+    r"nx_setup|nx_launch|nx_standin|_cli_lookup|_exec_path|nx_hook_shim|version_lockstep_hook|setup_status"
+    r"|/conexus:setup|__setup\b"
+)
 
 
 def _text_prefix_hits(tree: str, repo: pathlib.Path = REPO_ROOT) -> list[str]:

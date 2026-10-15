@@ -2529,7 +2529,8 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
         data["holder"] = holder
         data["message"] = f"{data.get('message', '')} The setup run's heartbeat stopped, but {holder} is still running.".strip()
         data["next"] = (
-            f"Wait, then call setup_status again. Do not call setup while {holder} runs: it starts nothing. Log: {setup / _LOG}"
+            f"Wait, then call setup_status again. Do not call setup while {holder} runs: it starts nothing. If it still "
+            f"reads this way after about ten minutes, tell the user setup seems stuck and name the log. Log: {setup / _LOG}"
         )
     elif state == RUNNING and not live:
         state = INTERRUPTED
