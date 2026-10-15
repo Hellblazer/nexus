@@ -2,7 +2,9 @@
 
 Native Windows 11 on x64 runs the full local stack: the `nx` client, the
 nexus engine, PostgreSQL with pgvector, and the conexus plugin in Claude Code.
-Windows is **tested but not yet declared supported**. The steps below are the
+Windows 11 x64 is supported, within the limits in
+[What is not supported or not measured](#what-is-not-supported-or-not-measured).
+The steps below are the
 ones the RDR-224 Phase 5 gate ran on a clean Windows 11 machine with published
 conexus 7.72.1 (T2 `nexus_rdr/224-gate-run-7.72.1-2026-10-07`); where a step
 was not measured, it says so.
@@ -450,20 +452,50 @@ AppLocker:
 
 ### Smart App Control
 
-With Smart App Control on, the local stack cannot be set up. Measured on
-2026-10-14 on Windows 11 Home with it switched from evaluation to on: the
+Smart App Control on is not supported. In both measured installs with it on,
+the local stack could not be set up, and the two failed at different points.
+On 2026-10-14, on Windows 11 Home with it switched from evaluation to on, the
 install in steps 1 to 3 completed, and `nx init` then failed with "An
 Application Control policy has blocked this file" on the PostgreSQL bundle's
 `pg_config.exe` and `initdb.exe`. The log also named DLLs of the Python that uv
-downloads and of PortableGit, all for lacking a trusted signature. Smart App
-Control in evaluation mode, which a new Windows install starts in, blocked
-nothing. Signing the engine and the bundle would not be enough on its own,
-because uv's Python is unsigned too.
+downloads and of PortableGit, all for lacking a trusted signature. On
+2026-10-15, on the same machine, Windows blocked `nx.exe` itself during the
+install with the same message, so `nx` could not report the problem. In a
+second run that day `nx.exe` ran, and `nx init` stopped with the refusal
+described below. Why the runs differ is not known. In both, files that nexus does not ship were
+blocked (uv's Python, the `nx.exe` launcher), so signing the engine and the
+bundle would not have been enough on its own.
+
+In releases after conexus 7.80.0, where `nx` does run, `nx init` refuses with
+a message that links here when Smart App Control is on (measured on the Home
+machine on 2026-10-15), and `nx doctor` has a
+Smart App Control row (a failure when it is on in local mode, a warning in
+evaluation). Where Windows has no Smart App Control (the setting does not
+exist, as on Windows 10 and older Windows 11), there is no row.
+
+A new Windows install starts in evaluation mode. On the same Home machine in
+evaluation mode (state value 2), the install and the end-to-end test passed and
+nothing they ran was blocked. Windows can later switch evaluation to on. What
+that does to an installed nexus has not been measured; the expected result is
+that the bundle, uv's Python or `nx.exe` are blocked at the next start. The
+`nx doctor` warning can only speak before that switch.
 
 ## What is not supported or not measured
 
 - Windows on ARM: not supported.
-- Smart App Control on: the local stack cannot be set up (above).
+- Windows 10: not supported and not measured. Every measured machine ran
+  Windows 11 x64.
+- Smart App Control on: not supported; the local stack could not be set up in
+  either measured install (above).
+- Smart App Control switching from evaluation to on after the install: expected
+  to block, not measured (nexus-f9bgu.58).
+- Unsigned binaries: the engine and the PostgreSQL bundle are not code-signed
+  (nexus-dj01b).
+- AppLocker and WDAC: the install needs an administrator's path rules
+  ([Application control](#application-control)).
+- The `conexus.mcpb` Desktop Extension: not a working route on Windows; chat
+  and Cowork get conexus from the plugin marketplace instead
+  ([Claude Desktop](#5-claude-desktop-chat-and-cowork)).
 - AppLocker with enforced script rules, WDAC with script enforcement on, a
   Microsoft or domain account, host sleep, and the Claude Desktop install
   dialog: not measured.

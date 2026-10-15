@@ -3286,7 +3286,8 @@ Evaluation is a warning, because Windows can switch it on later. A state that
 cannot be read is a warning; off passes. `nx init` refuses local provisioning
 while the state is on. See
 [Smart App Control](windows-install.md#smart-app-control). The row is absent on
-POSIX.
+POSIX, and also on a Windows that has no Smart App Control (the registry value
+does not exist, as on Windows 10 and older Windows 11).
 
 **Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
 authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
