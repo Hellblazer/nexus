@@ -398,7 +398,7 @@ class TestSeedIsThisTrees:
         (seed / "uvcache").mkdir(parents=True)
         (seed / "uvcache" / "CACHEDIR.TAG").write_text("")
         (seed / "service").mkdir()
-        (seed / "service" / "nexus-service").write_text("")
+        (seed / "service" / ("nexus-service.exe" if os.name == "nt" else "nexus-service")).write_text("", encoding="utf-8")
         (seed / "service" / "nexus-pg-linux-amd64.txz").write_text("")
         (seed / "service" / "nexus-service.meta.json").write_text(json.dumps({"version": held}), encoding="utf-8")
         for model in ("bge-base-en-v1.5", "ms-marco-minilm-l6-v2"):
