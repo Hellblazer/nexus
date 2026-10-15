@@ -118,7 +118,7 @@ def is_linked_worktree(cwd: str | pathlib.Path) -> bool:
             return False
         if dot_git.is_file():
             try:
-                head = dot_git.read_text(errors="replace").strip()
+                head = dot_git.read_text(errors="replace", encoding="utf-8").strip()
             except OSError:
                 return False
             if not head.startswith("gitdir:"):

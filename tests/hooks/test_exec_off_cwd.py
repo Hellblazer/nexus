@@ -70,7 +70,7 @@ def _plant(directory: Path, *names: str, mode: int = 0o755) -> dict[str, Path]:
     out = {}
     for n in names:
         p = directory / n
-        p.write_text("planted")
+        p.write_text("planted", encoding="utf-8")
         p.chmod(mode)
         out[n] = p
     return out
@@ -155,7 +155,7 @@ def test_posix_requires_the_exec_bit(exec_path, tmp_path: Path) -> None:
 def test_the_helper_imports_only_the_standard_library() -> None:
     import ast
 
-    tree = ast.parse((_SCRIPTS / "_exec_path.py").read_text())
+    tree = ast.parse((_SCRIPTS / "_exec_path.py").read_text(encoding="utf-8"))
     found: set[str] = set()
     for n in tree.body:
         if isinstance(n, ast.Import):

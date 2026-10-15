@@ -114,14 +114,14 @@ def render_file(
         emit: When False, the output is computed but NOT written to
             disk — the ``nx doc validate`` mode.
     """
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     out, resolved_count, misses = render_text(
         text, registry, allow_unresolved=allow_unresolved,
     )
     if emit:
         dest = _rendered_sibling(path, out_dir, source_root)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(out)
+        dest.write_text(out, encoding="utf-8")
     return RenderResult(output=out, resolved=resolved_count, unresolved=misses)
 
 

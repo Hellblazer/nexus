@@ -72,7 +72,7 @@ def _plant(directory: Path, marker: Path) -> None:
         check=True, env=_hook_env(os.environ, sys.platform), timeout=300,
     )
     (_site_packages(venv) / "zz_plant.pth").write_text(
-        f"import os; open({str(marker)!r}, 'a').write('ran from ' + {str(directory)!r} + chr(10))\n"
+        f"import os; open({str(marker)!r}, 'a').write('ran from ' + {str(directory)!r} + chr(10))\n", encoding="utf-8"
     )
 
 
@@ -174,7 +174,7 @@ class TestRealWindows:
         self, plugin: str, event: str, hook: dict, clean: SimpleNamespace,
     ) -> None:
         proc = _run(clean, hook["args"], plugin)
-        planted = clean.marker.read_text() if clean.marker.exists() else ""
+        planted = clean.marker.read_text(encoding="utf-8") if clean.marker.exists() else ""
         assert planted == "", (
             f"{plugin} {event} {hook['args'][-1]}: uv ran a planted interpreter ({planted!r}); stderr={proc.stderr!r}"
         )
@@ -187,16 +187,16 @@ class TestRealWindows:
         assert proc.returncode == 0, proc.stderr
         verdict = json.loads(proc.stdout)["hookSpecificOutput"]
         assert verdict["permissionDecision"] == "deny", proc.stdout
-        assert not clean.marker.exists(), clean.marker.read_text()
+        assert not clean.marker.exists(), clean.marker.read_text(encoding="utf-8")
 
     def test_the_plant_is_live_when_uv_run_discovers_from_the_project(self, clean: SimpleNamespace) -> None:
         """Control: ``uv run`` with the project as its discovery origin runs the plant."""
         _run(clean, [*_RUN_FROM_CWD, *_tail(_a_conexus_entry())], "conexus")
         assert clean.marker.exists(), "the plant did not run under `uv run` from the project; it is inert"
-        assert str(clean.project) in clean.marker.read_text()
+        assert str(clean.project) in clean.marker.read_text(encoding="utf-8")
 
     def test_the_plant_is_live_when_uv_run_discovers_from_the_plugin_root(self, clean: SimpleNamespace) -> None:
         """Control: ``uv run --directory <plugin root>`` still walks up into the home."""
         _run(clean, [*_RUN_FROM_PLUGIN_ROOT, *_tail(_a_conexus_entry())], "conexus")
         assert clean.marker.exists(), "the home plant did not run under `uv run --directory`; it is inert"
-        assert str(clean.home) in clean.marker.read_text()
+        assert str(clean.home) in clean.marker.read_text(encoding="utf-8")

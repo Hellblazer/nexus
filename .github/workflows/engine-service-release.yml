@@ -1147,8 +1147,7 @@ jobs:
   #
   # Host: `win-release`, the self-hosted runner on qwentescence's native Windows
   # side (P0.1, Sam 2026-10-05). Release legs only, never pull_request, inside the
-  # release trust boundary, like hellmini; see AGENTS.md § Self-hosted runners and
-  # fork PRs. A bare custom label (no 'self-hosted' in runs-on).
+  # release trust boundary, like hellmini; see docs/agents/self-hosted-runners.md. A bare custom label (no 'self-hosted' in runs-on).
   #
   # SWITCH: the repo variable NX_WINDOWS_RELEASE_LEGS. Unset or anything but
   # 'on', this job is skipped and promote-release neither waits for it nor expects

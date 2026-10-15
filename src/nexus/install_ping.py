@@ -140,21 +140,21 @@ def install_id(config_dir: Path | None = None) -> str:
     """The random per-install UUID, minted on first use and kept in the config dir."""
     path = (config_dir or _config.nexus_config_dir()) / INSTALL_ID_FILENAME
     try:
-        existing = path.read_text().strip()
+        existing = path.read_text(encoding="utf-8").strip()
         uuid.UUID(existing)
         return existing
     except (OSError, ValueError):
         pass
     fresh = str(uuid.uuid4())
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(fresh + "\n")
+    path.write_text(fresh + "\n", encoding="utf-8")
     return fresh
 
 
 def last_ping_at(config_dir: Path | None = None) -> float | None:
     path = (config_dir or _config.nexus_config_dir()) / LAST_PING_FILENAME
     try:
-        return float(path.read_text().strip())
+        return float(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
 
@@ -167,7 +167,7 @@ def due(now: float, config_dir: Path | None = None) -> bool:
 def _mark_pinged(now: float, config_dir: Path | None) -> None:
     path = (config_dir or _config.nexus_config_dir()) / LAST_PING_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{now:.0f}\n")
+    path.write_text(f"{now:.0f}\n", encoding="utf-8")
 
 
 def install_mode() -> str:

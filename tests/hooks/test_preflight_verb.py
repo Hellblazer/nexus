@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from nexus.hooks import preflight_verb
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: A child process, not an in-process call: these tests vary PATH per case,
 #: and ``os.environ`` is process-global.
@@ -47,7 +48,7 @@ def _run_preflight(env_path: str | None = None) -> tuple[int, str]:
         env["PATH"] = env_path
     result = subprocess.run(
         [sys.executable, "-c", _PY_DRIVER],
-        capture_output=True, text=True, timeout=20, env=env,
+        capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=20, env=env,
     )
     return result.returncode, result.stdout
 
@@ -120,7 +121,7 @@ class TestPreflightVerbDoesNotReadStdin:
         """A closed/empty stdin must not hang or crash the verb."""
         result = subprocess.run(
             [sys.executable, "-c", _PY_DRIVER],
-            input="", capture_output=True, text=True, timeout=20,
+            input="", capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=20,
         )
         assert result.returncode == 0
 

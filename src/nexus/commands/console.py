@@ -74,7 +74,7 @@ def _check_stale_pid_file(path: Path) -> None:
     if not path.exists():
         return
     try:
-        info = json.loads(path.read_text())
+        info = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         # Corrupt file — reap it so we can write a fresh one.
         path.unlink(missing_ok=True)

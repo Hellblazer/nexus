@@ -95,7 +95,7 @@ def _warming_marker_path() -> Path:
 
 def _read_warming_marker() -> dict | None:
     try:
-        data = json.loads(_warming_marker_path().read_text())
+        data = json.loads(_warming_marker_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     # nexus-cd1k0.6 finding (11): the parse above only proves the marker is
@@ -115,7 +115,7 @@ def _stamp_warming_marker(
 ) -> None:
     try:
         _warming_marker_path().write_text(
-            json.dumps({"pid": pid, "ts": wall_time()}),
+            json.dumps({"pid": pid, "ts": wall_time()}), encoding="utf-8",
         )
     except OSError:
         pass  # marker is an optimization; never let it break the spawn

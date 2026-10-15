@@ -35,20 +35,23 @@ from nexus.daemon.service_registry import service_identity
 from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
 from tests._module_seam import setattr_in
 from tests._platform import make_group_readable
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: ``-m`` rather than the installed ``nx-hook`` console script, so these run
 #: against this checkout's code, through the same ``main()`` the shim calls.
 _VERB_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "mailbox-drain"]
 
 #: The PLUGIN copy (RDR-208 Phase 3 close gate, nexus-galkv.27): hooks.json
-#: launches this exact script under a bare ``python3`` -- PATH decides the
-#: interpreter, not ``sys.executable`` -- with no ``-m`` and no args, matching
-#: the exec-form entry ``conexus/hooks/hooks.json`` declares for
-#: ``UserPromptSubmit``. This is the copy that actually runs in production;
-#: every test in this module besides :class:`TestPluginEntryPointParity`
-#: exercises only the wheel copy above.
+#: launches this exact script with no ``-m`` and no args, matching the entry
+#: ``conexus/hooks/hooks.json`` declares for ``UserPromptSubmit``. Since RDR-228
+#: Phase 1 that entry is ``uv tool run ... --python >=3.12 python <script>``, so
+#: the interpreter is one uv chose, not a bare ``python3`` off ``PATH``; this
+#: test stands in for it with the interpreter running the suite. A bare
+#: ``python3`` was also absent on the Windows runner's account (nexus-3fme8).
+#: This is the copy that actually runs in production; every test in this module
+#: besides :class:`TestPluginEntryPointParity` exercises only the wheel copy above.
 _PLUGIN_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
-_PLUGIN_ARGV = ["python3", str(_PLUGIN_SCRIPT)]
+_PLUGIN_ARGV = [sys.executable, str(_PLUGIN_SCRIPT)]
 
 SESSION_ID = "sess-mailbox-drain"
 
@@ -208,7 +211,7 @@ def _run(
         argv,
         input=stdin if stdin is not None else _payload(),
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         env=_env(tmp_path, env_overrides),
         # A bound on a HANG, not on performance. The hook budgets itself at 6s
         # internally; this only stops a wedged subprocess from hanging the suite.
@@ -234,7 +237,7 @@ def _hook_log(tmp_path: Path) -> str:
     crash (nexus-3lc5s): a precondition failure carries its own evidence."""
     log = tmp_path / "config" / "logs" / "hook.log"
     try:
-        return log.read_text()[-4000:]
+        return log.read_text(encoding="utf-8")[-4000:]
     except OSError:
         return "<absent>"
 
@@ -254,7 +257,7 @@ def _write_storage_lease(config_dir: Path, *, host: str, port: int) -> None:
     }
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / f"storage_service_addr.{service_identity()}"
-    path.write_text(json.dumps(record))
+    path.write_text(json.dumps(record), encoding="utf-8")
     restrict_to_owner(path)
 
 
@@ -777,7 +780,7 @@ class TestPluginEntryPointParity:
     """RDR-208 Phase 3 close gate (bead nexus-galkv.27, test-validator gap).
 
     ``hooks.json`` runs ``conexus/hooks/scripts/mailbox_drain.py`` -- a stdlib
-    plugin script, launched under exec-form ``python3`` with no ``-m`` and no
+    plugin script, launched by ``uv tool run ... python`` with no ``-m`` and no
     args -- in PRODUCTION. Every other test in this module drives only the
     wheel copy, ``src/nexus/hooks/mailbox_drain.py``, through ``nx-hook``'s own
     ``-m nexus._hook_runtime.entry`` dispatch. The two copies are written
@@ -790,13 +793,9 @@ class TestPluginEntryPointParity:
     still drained -- run against BOTH entry points, parametrized rather than
     duplicated (independent signal: the argv, not the assertions), so a
     regression in one copy fails its own parametrize id while the other stays
-    green. The plugin script is launched exactly as ``hooks.json`` launches
-    it (:data:`_PLUGIN_ARGV`): ``python3`` resolved off ``PATH`` (this
-    module's ``_env`` sets ``PATH=/usr/bin:/bin`` for both entry points
-    already, unchanged from the wheel-only tests above), the script's own
-    path, and no other args -- the script re-execs itself into a capable
-    interpreter internally (``_interpreter.reexec_if_needed``) exactly as it
-    does under the real harness.
+    green. The plugin script is launched as ``hooks.json`` launches it
+    (:data:`_PLUGIN_ARGV`): a capable interpreter, the script's own path, and
+    no other args.
     """
 
     @_ENTRY_POINTS
@@ -967,7 +966,7 @@ class TestCredentialPolicy:
             "format_version": 1, "token": "lease-bearer", "tenant": "default",
             "base_url_digest": digest, "expires_at": time.time() + 60.0,
             "ttl_seconds": 3600.0, "minted_by_pid": os.getpid(),
-        }))
+        }), encoding="utf-8")
         lease.chmod(0o600)
         res = _run(tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": base_url})
         assert res.returncode == 0, res.stderr
@@ -1258,7 +1257,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
             "the pending record was cleared on a 500, so the row the engine already "
             "consumed can never be recovered"
         )
-        assert "committed then five hundred" in pending.read_text()
+        assert "committed then five hundred" in pending.read_text(encoding="utf-8")
 
     def test_a_401_on_rd_is_not_read_as_an_empty_mailbox(
         self, tmp_path, engine,
@@ -1348,7 +1347,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
             "rendered as either delivered or dropped"
         )
         assert "SKIP" in res.stderr
-        assert pending_path.read_text() == pending_body, (
+        assert pending_path.read_text(encoding="utf-8") == pending_body, (
             "the pending record must survive an unconfirmed presence check "
             "untouched, not be cleared on a guess"
         )
@@ -2019,7 +2018,7 @@ def test_run_refuses_a_result_whose_code_changed_while_the_hook_ran(tmp_path, en
     accepted, so the guard is not simply refusing everything.
     """
     watched = tmp_path / "watched_code.py"
-    watched.write_text("CONFLATE = False\n")
+    watched.write_text("CONFLATE = False\n", encoding="utf-8")
     # A fixed old mtime, so the in-run write moves it on any filesystem
     # timestamp granularity.
     os.utime(watched, ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
@@ -2031,13 +2030,13 @@ def test_run_refuses_a_result_whose_code_changed_while_the_hook_ran(tmp_path, en
     assert eng.calls, "control run never reached the engine, so it controls nothing"
 
     def _mutation_check(_route: str) -> None:
-        watched.write_text("CONFLATE = True\n")   # the mutation
-        watched.write_text("CONFLATE = False\n")  # and its revert
+        watched.write_text("CONFLATE = True\n", encoding="utf-8")   # the mutation
+        watched.write_text("CONFLATE = False\n", encoding="utf-8")  # and its revert
 
     eng.on_request = _mutation_check
     with pytest.raises(pytest.fail.Exception, match="changed on disk while the hook subprocess ran"):
         _run(tmp_path=tmp_path, watched=(watched,))
-    assert watched.read_text() == "CONFLATE = False\n"
+    assert watched.read_text(encoding="utf-8") == "CONFLATE = False\n"
 
 
 def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_others() -> None:
@@ -2062,10 +2061,10 @@ def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_other
 def test_the_watch_set_follows_a_new_sibling_import_without_a_list_to_update(tmp_path) -> None:
     """The set is computed, so a sibling import added tomorrow is watched with
     no edit here, and a file beside the script that nothing imports is not."""
-    (tmp_path / "hook.py").write_text("def f():\n    import _new_helper\n")
-    (tmp_path / "_new_helper.py").write_text("import _deeper\n")
-    (tmp_path / "_deeper.py").write_text("")
-    (tmp_path / "_unimported.py").write_text("")
+    (tmp_path / "hook.py").write_text("def f():\n    import _new_helper\n", encoding="utf-8")
+    (tmp_path / "_new_helper.py").write_text("import _deeper\n", encoding="utf-8")
+    (tmp_path / "_deeper.py").write_text("", encoding="utf-8")
+    (tmp_path / "_unimported.py").write_text("", encoding="utf-8")
     assert _import_closure((tmp_path / "hook.py",)) == {
         tmp_path / "hook.py", tmp_path / "_new_helper.py", tmp_path / "_deeper.py",
     }
@@ -2078,7 +2077,7 @@ def _plugin_copy(tmp_path: Path) -> Path:
     scripts.mkdir()
     for src in _code_under_test(_PLUGIN_ARGV):
         (scripts / src.name).write_bytes(src.read_bytes())
-    (scripts / "_unimported.py").write_text("X = 1\n")
+    (scripts / "_unimported.py").write_text("X = 1\n", encoding="utf-8")
     return scripts
 
 
@@ -2114,10 +2113,10 @@ def test_a_mid_run_edit_to_a_file_the_run_never_loads_does_not_fail_it(tmp_path,
 
     eng = engine()
     _wired(tmp_path, eng)
-    eng.on_request = lambda _route: unrelated.write_text("X = 2\n")
+    eng.on_request = lambda _route: unrelated.write_text("X = 2\n", encoding="utf-8")
     res = _run(tmp_path=tmp_path, argv=argv, env_overrides={"NX_HOOK_INTERPRETER_REEXEC": "1"})
     assert res.returncode == 0 and eng.calls, res.stderr
-    assert unrelated.read_text() == "X = 2\n", "the edit must actually have happened"
+    assert unrelated.read_text(encoding="utf-8") == "X = 2\n", "the edit must actually have happened"
 
 
 _BUDGET_DRIVER = r"""
@@ -2169,7 +2168,7 @@ def test_a_budget_spent_before_the_first_claim_says_so(tmp_path, kind) -> None:
          str(tmp_path), SESSION_ID],
         input=json.dumps(_row("queued-1", body="seen, not yet claimed")),
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         env={**os.environ, "NX_HOOK_INTERPRETER_REEXEC": "1",
              "NEXUS_CONFIG_DIR": str(tmp_path / "config")},
         timeout=300,

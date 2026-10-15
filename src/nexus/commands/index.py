@@ -1795,7 +1795,7 @@ def index_repo_cmd(
                 hdir = _effective_hooks_dir(path)
                 hook_names = ("post-commit", "post-merge", "post-rewrite")
                 any_managed = any(
-                    SENTINEL_BEGIN in (hdir / n).read_text()
+                    SENTINEL_BEGIN in (hdir / n).read_text(encoding="utf-8")
                     for n in hook_names
                     if (hdir / n).exists()
                 )

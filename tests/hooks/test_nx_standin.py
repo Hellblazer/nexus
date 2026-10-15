@@ -584,7 +584,7 @@ def test_a_cli_that_resolves_is_run_and_the_stand_in_is_not(tmp_path: Path) -> N
         install_windows_exe_fake(dirs["bin"], "nx-mcp", f"{WINDOWS_SHEBANG}\nprint('real')\n")
     else:
         fake = dirs["bin"] / "nx-mcp"
-        fake.write_text("#!/bin/sh\necho real\n")
+        fake.write_text("#!/bin/sh\necho real\n", encoding="utf-8")
         fake.chmod(0o755)
     r = subprocess.run(
         [sys.executable, str(_LAUNCH), "nx-mcp"],

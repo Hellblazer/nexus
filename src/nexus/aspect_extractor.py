@@ -1989,6 +1989,9 @@ def _run_claude_isolated(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # The claude CLI is a Node program and writes UTF-8 whatever the locale
+                # (cp1252 by default on Windows; nexus-ikoqj).
+                encoding="utf-8",
                 env=child_env,
                 preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
                 **isolation_popen_kwargs(),

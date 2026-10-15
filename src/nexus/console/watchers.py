@@ -58,7 +58,7 @@ class JSONLTailWatcher:
         if stat.st_size == self._offset:
             return
 
-        with open(self._path, "r") as f:
+        with open(self._path, "r", encoding="utf-8") as f:
             f.seek(self._offset)
             data = f.read()
             self._offset = f.tell()

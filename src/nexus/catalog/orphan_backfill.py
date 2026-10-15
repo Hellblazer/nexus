@@ -524,7 +524,7 @@ def dump_csvs(
     low_path = target / "low_confidence.csv"
     unmatched_path = target / "unmatched.csv"
 
-    with matched_path.open("w", newline="") as f:
+    with matched_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["title", "dt_uuid", "dt_name", "score", "chunk_count"])
         for m in matched:
@@ -532,7 +532,7 @@ def dump_csvs(
                 m.title, m.dt_uuid, m.dt_name,
                 f"{m.score:.3f}", len(m.chunks),
             ])
-    with low_path.open("w", newline="") as f:
+    with low_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([
             "title", "candidate_dt_uuid", "candidate_dt_name",
@@ -543,7 +543,7 @@ def dump_csvs(
                 m.title, m.dt_uuid, m.dt_name,
                 f"{m.score:.3f}", len(m.chunks), "",
             ])
-    with unmatched_path.open("w", newline="") as f:
+    with unmatched_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["title", "chunk_count", "operator_dt_uuid"])
         for g in unmatched:
@@ -572,7 +572,7 @@ def apply_csv(
     """
     docs = 0
     links = 0
-    with csv_path.open() as f:
+    with csv_path.open(encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             title = row.get("title", "").strip()

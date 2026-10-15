@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 from tests._module_seam import module_time, setattr_in
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -61,7 +62,7 @@ def plugin_root(tmp_path: Path) -> Path:
     """A fake CLAUDE_PLUGIN_ROOT with a plugin.json carrying a version."""
     pj = tmp_path / ".claude-plugin"
     pj.mkdir(parents=True)
-    (pj / "plugin.json").write_text(json.dumps({"name": "conexus", "version": "9.9.9"}))
+    (pj / "plugin.json").write_text(json.dumps({"name": "conexus", "version": "9.9.9"}), encoding="utf-8")
     return tmp_path
 
 
@@ -89,7 +90,7 @@ class TestReadPluginVersion:
     def test_malformed_json_returns_none(self, mod, tmp_path, monkeypatch) -> None:
         pj = tmp_path / ".claude-plugin"
         pj.mkdir()
-        (pj / "plugin.json").write_text("{not json")
+        (pj / "plugin.json").write_text("{not json", encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
         assert mod.read_plugin_version() is None
 
@@ -115,7 +116,7 @@ class TestMarker:
 
     def test_read_marker_strips_whitespace(self, mod, tmp_path, monkeypatch) -> None:
         m = tmp_path / "marker"
-        m.write_text("5.7.0\n")
+        m.write_text("5.7.0\n", encoding="utf-8")
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(m))
         assert mod.read_marker() == "5.7.0"
 
@@ -137,7 +138,7 @@ class TestMainOrchestration:
     ) -> None:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
         marker = tmp_path / "marker"
-        marker.write_text("9.9.9")
+        marker.write_text("9.9.9", encoding="utf-8")
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
@@ -152,7 +153,7 @@ class TestMainOrchestration:
     ) -> None:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
         marker = tmp_path / "marker"
-        marker.write_text("1.0.0")  # stale
+        marker.write_text("1.0.0", encoding="utf-8")  # stale
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
@@ -271,7 +272,7 @@ class TestNoCli:
             install_windows_exe_fake(gen / "bin", "nx", f"{WINDOWS_SHEBANG}\nprint('nx')\n")
             _winapi.CreateJunction(str(gen), str(tmp_path / "tools" / "current"))
         else:
-            (gen / "bin" / "nx").write_text("#!/bin/sh\n")
+            (gen / "bin" / "nx").write_text("#!/bin/sh\n", encoding="utf-8")
             (gen / "bin" / "nx").chmod(0o755)
             (tmp_path / "tools" / "current").symlink_to(gen)
         assert module.cli_present() is True
@@ -385,13 +386,13 @@ class TestPluginChannelInstallSilence:
                         }
                     ],
                 }
-            )
+            ), encoding="utf-8"
         )
         plugin_root = repo_root / "conexus"
         pj_dir = plugin_root / ".claude-plugin"
         pj_dir.mkdir(parents=True)
         (pj_dir / "plugin.json").write_text(
-            json.dumps({"name": "conexus", "version": "7.15.0"})
+            json.dumps({"name": "conexus", "version": "7.15.0"}), encoding="utf-8"
         )
         return plugin_root
 
@@ -403,7 +404,7 @@ class TestPluginChannelInstallSilence:
         must attempt no upgrade."""
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_channel_install))
         marker = tmp_path / "marker"
-        marker.write_text("7.15.0")  # already in lockstep with plugin.json
+        marker.write_text("7.15.0", encoding="utf-8")  # already in lockstep with plugin.json
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
@@ -429,7 +430,7 @@ class TestPluginChannelInstallSilence:
         suite)."""
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_channel_install))
         marker = tmp_path / "marker"
-        marker.write_text("7.14.0")  # stale -- plugin.json says 7.15.0
+        marker.write_text("7.14.0", encoding="utf-8")  # stale -- plugin.json says 7.15.0
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
@@ -447,11 +448,11 @@ class TestPluginChannelInstallSilence:
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, encoding="utf-8")
 
 
 def _git_out(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
 def _make_marketplace_clone(tmp_path: Path, plugin_name: str = "conexus") -> tuple[Path, str, str]:
@@ -474,7 +475,7 @@ def _make_marketplace_clone(tmp_path: Path, plugin_name: str = "conexus") -> tup
         (cp_dir / "marketplace.json").write_text(json.dumps({"plugins": [
             {"name": plugin_name, "version": "9.9.9",
              "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
-                        "path": plugin_name, "ref": ref}}]}))
+                        "path": plugin_name, "ref": ref}}]}), encoding="utf-8")
 
     write_marketplace("v9.9.9")
     _git(repo, "add", "-A")
@@ -495,13 +496,13 @@ def _write_registry(tmp_path: Path, plugin_id: str, sha: str | None) -> Path:
     entry: dict = {"version": "9.9.9", "scope": "user"}
     if sha is not None:
         entry["gitCommitSha"] = sha
-    p.write_text(json.dumps({"version": 2, "plugins": {plugin_id: [entry]}}))
+    p.write_text(json.dumps({"version": 2, "plugins": {plugin_id: [entry]}}), encoding="utf-8")
     return p
 
 
 def _write_known_marketplaces(tmp_path: Path, marketplace_name: str, install_location: Path) -> Path:
     p = tmp_path / "known_marketplaces.json"
-    p.write_text(json.dumps({marketplace_name: {"installLocation": str(install_location)}}))
+    p.write_text(json.dumps({marketplace_name: {"installLocation": str(install_location)}}), encoding="utf-8")
     return p
 
 
@@ -563,7 +564,7 @@ class TestRefDriftDetection:
         (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps({"plugins": [
             {"name": "conexus", "version": "9.9.9",
              "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
-                        "path": "conexus", "ref": "v0.0.0-does-not-exist"}}]}))
+                        "path": "conexus", "ref": "v0.0.0-does-not-exist"}}]}), encoding="utf-8")
         registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_before)
         known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
         monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
@@ -575,7 +576,7 @@ class TestRefDriftDetection:
         p = tmp_path / "installed_plugins.json"
         p.write_text(json.dumps({"version": 2, "plugins": {
             "beads@beads-marketplace": [{"version": "1.2.3", "gitCommitSha": "e" * 40}],
-        }}))
+        }}), encoding="utf-8")
         monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(p))
         monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
 
@@ -633,7 +634,7 @@ class TestRefDriftOrchestration:
         monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(tmp_path / "ref-drift-marker"))
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))  # plugin.json version 9.9.9
         marker = tmp_path / "marker"
-        marker.write_text("1.0.0")  # stale -> version-mismatch path also fires
+        marker.write_text("1.0.0", encoding="utf-8")  # stale -> version-mismatch path also fires
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
         version_dispatched: list[str] = []
         ref_dispatched: list[str] = []
@@ -789,7 +790,7 @@ class TestMarkersFollowNexusConfigDir:
         assert mod.marker_path() == action.marker_path()
         assert mod.marker_path().parent == nexus_config_dir()
         (cfg).mkdir(parents=True, exist_ok=True)
-        (cfg / "cli_lockstep_marker").write_text("9.9.9")
+        (cfg / "cli_lockstep_marker").write_text("9.9.9", encoding="utf-8")
         assert preconditions._default_lockstep_marker() == "9.9.9"
 
     def test_read_missing_marker_returns_empty(self, mod, tmp_path, monkeypatch) -> None:
@@ -798,7 +799,7 @@ class TestMarkersFollowNexusConfigDir:
 
     def test_read_malformed_marker_returns_empty(self, mod, tmp_path, monkeypatch) -> None:
         p = tmp_path / "ref-drift-marker"
-        p.write_text("not json")
+        p.write_text("not json", encoding="utf-8")
         monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(p))
         assert mod.read_ref_drift_marker() == {}
 
@@ -867,7 +868,7 @@ class TestRefDriftBoundedRetry:
         (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps({"plugins": [
             {"name": "conexus", "version": "9.9.9",
              "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
-                        "path": "conexus", "ref": "plugin-v9.9.9-2"}}]}))
+                        "path": "conexus", "ref": "plugin-v9.9.9-2"}}]}), encoding="utf-8")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "second plugin-only cut")
         _git(repo, "tag", "-a", "plugin-v9.9.9-2", "-m", "plugin-v9.9.9-2")
@@ -972,13 +973,13 @@ class TestRunsUnderBareInterpreter:
         import os
 
         marker = tmp_path / "marker"
-        marker.write_text("9.9.9")
+        marker.write_text("9.9.9", encoding="utf-8")
         env = os.environ.copy()
         env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
         env["NX_LOCKSTEP_MARKER"] = str(marker)
         r = subprocess.run(
             [sys.executable, str(SCRIPT)],
-            capture_output=True, text=True, timeout=20, env=env,
+            capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=20, env=env,
         )
         assert r.returncode == 0
         assert r.stdout.strip() == ""

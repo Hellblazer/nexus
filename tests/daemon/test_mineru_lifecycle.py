@@ -254,7 +254,7 @@ class TestEnsureSpawns:
         monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
         # Stale marker: pid 1111, stamped far outside any budget.
         (tmp_path / "mineru_warming.json").write_text(
-            json.dumps({"pid": 1111, "ts": time.time() - 10_000}),
+            json.dumps({"pid": 1111, "ts": time.time() - 10_000}), encoding="utf-8",
         )
         # Live pid file names a DIFFERENT server (9999) that turns healthy
         # on the second probe — inside the fresh budget, far outside the
@@ -296,7 +296,7 @@ class TestReadWarmingMarker:
     @staticmethod
     def _write(tmp_path, monkeypatch, content: str) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        (tmp_path / "mineru_warming.json").write_text(content)
+        (tmp_path / "mineru_warming.json").write_text(content, encoding="utf-8")
 
     def test_valid_dict_marker_round_trips(self, tmp_path, monkeypatch):
         self._write(tmp_path, monkeypatch, '{"pid": 4242, "ts": 100.0}')

@@ -1096,6 +1096,68 @@ def test_applocker_allow_enforces_programs_and_names_the_installs_folders(harnes
     assert "'nx-gate" not in std
 
 
+# ---- --wdac-audit / --wdac-allow ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("flag", "mode", "note"),
+    [
+        ("--wdac-audit", "audit", "WDAC DefaultWindows policy in audit mode (nothing is blocked)"),
+        ("--wdac-allow", "allow", "WDAC DefaultWindows policy enforced, with path rules for this install's folders; script enforcement off"),
+    ],
+)
+def test_wdac_modes_need_a_standard_user_with_no_admin_git(harness: Harness, flag: str, mode: str, note: str) -> None:
+    # The policy trusts only code Windows signs, for administrators too, so an all-users Git is refused.
+    res = harness.run(*_BASE, flag)
+    assert res.returncode == 2 and "the --wdac modes need --standard-user --no-admin-git" in res.stderr
+    res = harness.run(*_BASE, "--standard-user", flag)
+    assert res.returncode == 2 and not (harness.root / "ssh.log").exists()
+    res = harness.run(*_BASE, "--standard-user", "--no-admin-git", flag, "--applocker-allow")
+    assert res.returncode == 2 and "separate runs" in res.stderr
+    shutil.copytree(REPO / "docs", harness.tree / "docs", ignore=lambda d, names: [n for n in names if n != "windows-install.md"])
+    res = harness.run(*_BASE, "--standard-user", "--no-admin-git", flag, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    line = next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert f"-Wdac {mode}" in line and "-AppLocker no" in line
+    assert note in res.stdout
+
+
+def test_a_run_without_a_wdac_flag_deploys_no_policy(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-Wdac no" in next(ln for ln in harness.ssh_lines() if "stduser.ps1" in ln)
+    assert "WDAC" not in res.stdout
+    std = _read("stduser.ps1")
+    assert "[ValidateSet('no', 'audit', 'allow')][string]$Wdac = 'no'" in std
+    # every WDAC statement sits behind the flag
+    assert std.count("if ($wdac -ne 'no') {") == 2
+    assert std.index("if ($wdac -ne 'no') {") < std.index("CiTool.exe\" --update-policy")
+
+
+def test_the_wdac_run_cannot_pass_under_a_policy_that_is_not_in_effect() -> None:
+    std = _read("stduser.ps1")
+    # the base is Windows' own enforced example; audit is option 3; allow turns off runtime file-path
+    # protection (18) and script enforcement (11) and adds path rules naming the account
+    assert "ExamplePolicies\\DefaultWindows_Enforced.xml" in std
+    assert "if ($wdac -eq 'audit') { Set-RuleOption -FilePath $x -Option 3 }" in std
+    assert "Set-RuleOption -FilePath $x -Option 18" in std and "Set-RuleOption -FilePath $x -Option 11" in std
+    assert '$rules += New-CIPolicyRule -FilePathRule "C:\\Users\\$u\\$p"' in std
+    # the deploy stops unless every path rule is in the policy file (a refused merge once deployed none)
+    assert 'if ($have -ne $folders.Count) { "NXG-RESULT: FAIL the WDAC policy has $have of $($folders.Count) path rules"; return }' in std
+    # the control is an UNSIGNED program built in the guest: a Windows-signed copy is trusted wherever it is
+    assert "csc.exe\" /nologo /out:\"$b\\wdac-control.exe\"" in std
+    assert "$want = if ($wdac -eq 'audit') { 3076 } else { 3077 }" in std
+    assert "LogName = 'Microsoft-Windows-CodeIntegrity/Operational'; Id = $want; StartTime = $t1" in std
+    fail = next(ln for ln in std.splitlines() if "NXG-RESULT: FAIL WDAC is not in effect" in ln)
+    for needed in ("wdac policy active: count=1 ", "wdac control built: True signed=NotSigned"):
+        assert f"$text -notmatch '{needed}'" in fail
+    assert "'wdac control start as the account: event ' + $(if ($Wdac -eq 'audit') { '3076' } else { '3077' }) + ' recorded=True'" in fail
+    # a failed deploy stops the step before the restart wait
+    assert "if (($pre | Out-String) -match 'NXG-RESULT: FAIL') { exit 6 }" in std
+    inst = _read("inst.ps1")
+    assert 'if (Test-Path "$b\\wdac-control.exe") {' in inst and "wdac language mode:" in inst
+
+
 @pytest.mark.parametrize(
     ("flag", "mode", "note"),
     [

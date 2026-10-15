@@ -96,6 +96,11 @@ def build_snapshot() -> dict[str, dict[str, dict[str, Any]]]:
                 "is_async": bool(tool.is_async),
                 "parameters": _strip_prose(copy.deepcopy(tool.parameters)),
             }
+            # nexus-fbtyl: the tool's wire ``_meta`` (Claude Code reads
+            # ``anthropic/alwaysLoad`` from it). Only present when set, so a
+            # tool without meta keeps its prior entry byte for byte.
+            if tool.meta:
+                tools[name]["meta"] = copy.deepcopy(tool.meta)
         result[server_name] = tools
     return result
 

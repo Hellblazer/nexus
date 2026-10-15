@@ -41,7 +41,7 @@ def lookup():
 
 def _script(path: Path, first_line: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(first_line + "\nprint('hi')\n")
+    path.write_text(first_line + "\nprint('hi')\n", encoding="utf-8")
     path.chmod(0o755)
     return path
 
@@ -50,7 +50,7 @@ def _venv(root: Path, *, home: Path | None, with_cfg: bool = True) -> Path:
     """A venv-shaped generation: ``pyvenv.cfg`` (naming *home*) and ``bin/``."""
     (root / "bin").mkdir(parents=True)
     if with_cfg and home is not None:
-        (root / "pyvenv.cfg").write_text(f"home = {home}\ninclude-system-site-packages = false\nversion = 3.12.1\n")
+        (root / "pyvenv.cfg").write_text(f"home = {home}\ninclude-system-site-packages = false\nversion = 3.12.1\n", encoding="utf-8")
     return root
 
 
@@ -84,7 +84,7 @@ def test_a_shebang_naming_an_interpreter_that_exists_can_start(lookup, tmp_path:
 @posix_only("a shebang names the interpreter the kernel starts")
 def test_a_shebang_naming_a_file_that_is_not_executable_cannot_start(lookup, tmp_path: Path) -> None:
     interp = tmp_path / "python"
-    interp.write_text("not a program")
+    interp.write_text("not a program", encoding="utf-8")
     interp.chmod(0o644)
     exe = _script(tmp_path / "bin" / "nx-mcp", f"#!{interp}")
     assert lookup.cannot_start(str(exe), windows=False) is not None
@@ -172,7 +172,7 @@ def test_a_generation_with_no_pyvenv_cfg_is_not_judged(lookup, tmp_path: Path, w
 
 def test_a_pyvenv_cfg_without_a_home_line_is_not_judged(lookup, tmp_path: Path) -> None:
     gen = _venv(tmp_path / "gen", home=None, with_cfg=False)
-    (gen / "pyvenv.cfg").write_text("version = 3.12.1\n")
+    (gen / "pyvenv.cfg").write_text("version = 3.12.1\n", encoding="utf-8")
     exe = gen / "bin" / "nx-mcp"
     exe.write_bytes(b"x")
     assert lookup.cannot_start(str(exe), windows=True) is None
@@ -203,7 +203,7 @@ def _real_venv(root: Path) -> Path:
 
     venv.EnvBuilder(with_pip=False, symlinks=True).create(root)
     script = root / "bin" / "nx-mcp"
-    script.write_text(f"#!{root / 'bin' / 'python'}\nprint('real server')\n")
+    script.write_text(f"#!{root / 'bin' / 'python'}\nprint('real server')\n", encoding="utf-8")
     script.chmod(0o755)
     return root
 
@@ -310,7 +310,7 @@ def test_a_first_line_that_never_ends_is_not_judged(lookup, tmp_path: Path) -> N
 def test_a_home_that_is_a_file_cannot_start(lookup, tmp_path: Path) -> None:
     """``home`` must be a directory; a file at that path is no interpreter directory."""
     home = tmp_path / "home-file"
-    home.write_text("x")
+    home.write_text("x", encoding="utf-8")
     gen = _venv(tmp_path / "gen", home=home)
     exe = gen / "bin" / "nx-mcp.exe"
     exe.write_bytes(b"MZ")
@@ -342,7 +342,7 @@ def _generation_fixture(root: Path, *, home: str, link: str, shebang: str) -> Pa
         "ok": f"home = {root}\n", "gone": f"home = {gone}\n", "nocfg": None, "nohomeline": "version = 3.12.1\n",
     }[home]
     if cfg is not None:
-        (gen / "pyvenv.cfg").write_text(cfg)
+        (gen / "pyvenv.cfg").write_text(cfg, encoding="utf-8")
     if os.name != "nt":
         if link == "resolves":
             (gen / "bin" / "python").symlink_to(Path(sys.executable))

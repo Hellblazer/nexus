@@ -115,7 +115,7 @@ def _read_template(name: str) -> str:
 
     resource = files("nexus") / "_resources" / "daemon" / name
     with as_file(resource) as resolved:
-        return Path(resolved).read_text()
+        return Path(resolved).read_text(encoding="utf-8")
 
 
 _PLIST_NX_BIN_LINE_RE = re.compile(
@@ -345,7 +345,7 @@ def _crashloop_sentinel_path(config_dir: Path) -> Path:
 
 def _read_crashloop(config_dir: Path) -> dict:
     try:
-        data = json.loads(_crashloop_sentinel_path(config_dir).read_text())
+        data = json.loads(_crashloop_sentinel_path(config_dir).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"timestamps": [], "tripped_logged": False}
     if not isinstance(data, dict):

@@ -203,7 +203,7 @@ def _entries_named(
     resolved after the file parses."""
     path = registry_path or default_registry_path()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -403,7 +403,7 @@ def _marketplace_install_location(marketplace_name: str, marketplaces_path: Path
     ``installLocation`` -- always "cannot tell", never an error."""
     path = marketplaces_path or default_marketplaces_path()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -433,7 +433,7 @@ def _pinned_ref_for_plugin(plugin_short_name: str, install_location: Path) -> st
     *plugin_short_name*, read from ``<install_location>/.claude-plugin/
     marketplace.json``. ``None`` on any unreadable/unexpected shape."""
     try:
-        data = json.loads((install_location / ".claude-plugin" / "marketplace.json").read_text())
+        data = json.loads((install_location / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     plugins = data.get("plugins") if isinstance(data, dict) else None

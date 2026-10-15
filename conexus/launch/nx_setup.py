@@ -834,6 +834,7 @@ class _Run:
         with open(self.log_path, "ab") as sink:
             proc = subprocess.Popen(  # noqa: S603 -- argv[0] is an absolute path found by the lookups above
                 argv, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT, cwd=str(self.setup),
+                encoding="utf-8",  # no pipe is read here (stdout is the log file); names the codec for the encoding lint
                 **_child_kwargs(),
             )
             deadline = time.monotonic() + limit

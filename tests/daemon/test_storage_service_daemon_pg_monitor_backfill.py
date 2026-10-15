@@ -78,7 +78,7 @@ def _query(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
     result = subprocess.run(
         [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     )
     return result.stdout.strip()
 

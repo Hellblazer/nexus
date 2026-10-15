@@ -387,7 +387,7 @@ def read_lease_text(
     treat any ``OSError`` as "no lease", so a miss during a replace no longer
     reads as a stopped service.
     """
-    do_read = read if read is not None else (lambda p: p.read_text())
+    do_read = read if read is not None else (lambda p: p.read_text(encoding="utf-8"))
     if not _is_windows(platform):
         return do_read(path)
     deadline = monotonic() + (_WINDOWS_SHARING_RETRY_BUDGET_S if budget_s is None else budget_s)
@@ -829,7 +829,7 @@ def read_data_token_lease(
         candidates = []
     for path in candidates:
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("format_version") != DATA_TOKEN_LEASE_FORMAT_VERSION:
                 continue
             lease_tenant = str(data["tenant"])

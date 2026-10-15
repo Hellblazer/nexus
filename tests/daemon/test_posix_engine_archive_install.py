@@ -74,10 +74,10 @@ def _release(monkeypatch, files: dict[str, bytes], *, urls: list[str],
                 return
             if name == f"{asset}.sha256":
                 digest = sha_override.get(asset) or hashlib.sha256(data).hexdigest()
-                dest.write_text(f"{digest}  {asset}\n")
+                dest.write_text(f"{digest}  {asset}\n", encoding="utf-8")
                 return
             if name == f"{asset}.sigstore.json":
-                dest.write_text('{"protobuf":"bundle"}')
+                dest.write_text('{"protobuf":"bundle"}', encoding="utf-8")
                 return
         raise b.BinaryAssetAbsentError(f"404 {url}")
 
@@ -126,7 +126,7 @@ def test_archive_release_installs_the_binary_from_the_txz(tmp_path, monkeypatch,
     assert prov["installed_sha256"] == hashlib.sha256(_BIN).hexdigest()
     assert prov["support_files"] == {}
     assert prov["source_url"] == f"{_BASE}/{raw}.txz"
-    on_disk = json.loads((tmp_path / "service" / "nexus-service.meta.json").read_text())
+    on_disk = json.loads((tmp_path / "service" / "nexus-service.meta.json").read_text(encoding="utf-8"))
     assert on_disk["installed_sha256"] == prov["installed_sha256"]
     assert b.verify_installed_binary(tmp_path, platform_tag=ptag).ok is True
     assert not [n for n in _service_files(tmp_path) if n.startswith(".nx_")]
@@ -209,7 +209,7 @@ def test_a_404_on_the_archive_after_its_sha256_fails_closed(tmp_path, monkeypatc
     def _dl(url, dest, *, timeout=0):
         if url.endswith(".txz.sha256"):
             urls.append(url)
-            dest.write_text(f"{'a' * 64}  nexus-service-linux-amd64.txz\n")
+            dest.write_text(f"{'a' * 64}  nexus-service-linux-amd64.txz\n", encoding="utf-8")
             return
         orig(url, dest, timeout=timeout)
 

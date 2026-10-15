@@ -141,7 +141,7 @@ def ensure_artifact() -> Path:
 
     download = download_path()
     download.mkdir(parents=True, exist_ok=True)
-    with (download / _LOCK_FILENAME).open("a+") as lock_fh:
+    with (download / _LOCK_FILENAME).open("a+", encoding="utf-8") as lock_fh:
         lock_file(lock_fh, blocking=True)
         try:
             if _artifact_complete(artifact):

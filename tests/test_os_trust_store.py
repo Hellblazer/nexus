@@ -18,6 +18,7 @@ import types
 import pytest
 
 import nexus
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 def test_posix_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,7 +177,7 @@ def test_the_dependency_is_windows_only() -> None:
     import tomllib
     from pathlib import Path
 
-    deps = tomllib.loads((Path(__file__).resolve().parent.parent / "pyproject.toml").read_text())["project"]["dependencies"]
+    deps = tomllib.loads((Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
     trust = [d for d in deps if d.split(">")[0].split("=")[0].strip() == "truststore"]
     assert trust == ["truststore>=0.10,<0.11; sys_platform == 'win32'"]
 
@@ -201,11 +202,11 @@ class TestRealWindows:
             "platform.system(); platform.machine(); platform.release()\n"
             "print(len(hits))\n"
         )
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=True)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=120, check=True)
         assert out.stdout.strip() == "0", out.stdout + out.stderr
 
     def test_the_primed_uname_matches_the_wmi_answer(self) -> None:
         code = "import platform; u = platform.uname(); print(u.system, u.release, u.version, u.machine)"
-        wmi = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=True)
+        wmi = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=120, check=True)
         primed = platform.uname()  # this process imported nexus, so its cache was primed
         assert f"{primed.system} {primed.release} {primed.version} {primed.machine}" == wmi.stdout.strip()

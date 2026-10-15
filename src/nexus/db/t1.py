@@ -797,7 +797,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
         _locking.lock_fd(lock_fd, blocking=True)  # lifecycle-gate-allow: one-shot idempotent file-create mutex, not a lifecycle election
         try:
             try:
-                existing = path.read_text().strip()
+                existing = path.read_text(encoding="utf-8").strip()
             except OSError:
                 existing = ""
             if existing:
@@ -949,7 +949,7 @@ def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
     """
     path = _t1_session_lease_path(session_id, config_dir)
     try:
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
@@ -1073,7 +1073,7 @@ def clear_t1_session_lease_if_matches(
         try:
             path = _t1_session_lease_path(session_id, config_dir)
             try:
-                raw = path.read_text()
+                raw = path.read_text(encoding="utf-8")
             except OSError:
                 return False  # already gone -- nothing to do
             try:

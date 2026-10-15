@@ -407,7 +407,7 @@ def _clear_stale_lock(lock_path: Path) -> None:
     if not lock_path.exists():
         return
     try:
-        pid = int(lock_path.read_text().strip())
+        pid = int(lock_path.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
         # No readable PID — check file age.  A just-opened lock will be
         # younger than _LOCK_STALE_SECONDS; an orphan from a crashed
@@ -2392,7 +2392,7 @@ def index_repository(
         # winner still held; the next arrival's stale-lock sweep then saw
         # ESRCH on that dead PID and unlinked the live holder's lock.
         raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        lock_fd = os.fdopen(raw_fd, "r+")  # noqa: SIM115  (must stay open while locked)
+        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
         try:
             lock_file(lock_fd, blocking=(on_locked == "wait"))
         except BlockingIOError:

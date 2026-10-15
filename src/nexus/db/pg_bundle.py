@@ -234,7 +234,7 @@ def extract_bundle(
     marker = extract_root / _EXTRACT_MARKER
     identity = _archive_identity(archive)
     if is_bundle_extracted(extract_root):
-        recorded = marker.read_text() if marker.is_file() else ""
+        recorded = marker.read_text(encoding="utf-8") if marker.is_file() else ""
         if recorded == identity:
             _log.debug("pg_bundle_already_extracted", extract_root=str(extract_root))
             return bin_dir
@@ -303,7 +303,7 @@ def _write_marker(extract_root: Path, identity: str) -> None:
     """Atomic marker: write to a temp file then rename, so a kill mid-write never
     leaves a truncated marker that a re-run would trust."""
     tmp = extract_root / (_EXTRACT_MARKER + ".tmp")
-    tmp.write_text(identity)
+    tmp.write_text(identity, encoding="utf-8")
     tmp.replace(extract_root / _EXTRACT_MARKER)
 
 

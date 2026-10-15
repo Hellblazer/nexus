@@ -13008,6 +13008,52 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
         return {"mode": "unknown", "error": str(exc)}
 
 
+#: The tools Claude Code loads eagerly (nexus-fbtyl). Claude Code reads
+#: ``_meta["anthropic/alwaysLoad"]`` on each entry of ``tools/list``; a tool
+#: flagged ``True`` has its schema in the first request and every other tool
+#: is found through tool search. Measured on Claude Code 2.1.300 (T2
+#: ``nexus/nexus-tools-eager-vs-deferred-ab-2026-10-14``): these eight matched
+#: an all-eager server on tool choice and success with a 41% smaller first
+#: request, while an all-deferred server lost the memory tasks.
+#:
+#: This only works while ``conexus/.mcp.json`` carries NO server-level
+#: ``alwaysLoad`` key for ``nexus``: ``false`` overrides every flag below and
+#: defers all tools. Pinned by ``tests/test_mcp_always_load.py``.
+ALWAYS_LOAD_TOOLS: frozenset[str] = frozenset(
+    {
+        "search",
+        "query",
+        "memory_get",
+        "memory_put",
+        "memory_search",
+        "scratch",
+        "store_get",
+        "store_put",
+    }
+)
+
+_ALWAYS_LOAD_META_KEY = "anthropic/alwaysLoad"
+
+
+def _apply_always_load(server: FastMCP, names: frozenset[str]) -> None:
+    """Flag each tool in *names* ``alwaysLoad`` in its wire ``_meta``.
+
+    Runs once, after every ``@mcp.tool()`` has registered. A name that is not
+    a registered tool raises: a renamed core tool must fail at import, not
+    silently drop out of the eager set.
+    """
+    tools = {t.name: t for t in server._tool_manager.list_tools()}
+    missing = sorted(names - tools.keys())
+    if missing:
+        raise RuntimeError(f"ALWAYS_LOAD_TOOLS names unregistered tools: {missing}")
+    for name in names:
+        tool = tools[name]
+        tool.meta = {**(tool.meta or {}), _ALWAYS_LOAD_META_KEY: True}
+
+
+_apply_always_load(mcp, ALWAYS_LOAD_TOOLS)
+
+
 def main():
     # nexus-jg99b: on Windows, take the stdio protocol off fd 0 before anything
     # can load a DLL that inspects stdin (OpenBLAS hangs under the loader lock

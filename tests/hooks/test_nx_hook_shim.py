@@ -74,7 +74,7 @@ def _install_fake(bindir: Path, source: str) -> dict[str, str]:
     env = _no_cli_env(bindir)
     if not IS_WINDOWS:
         fake = bindir / "nx-hook"
-        fake.write_text(source.format(python=sys.executable))
+        fake.write_text(source.format(python=sys.executable), encoding="utf-8")
         fake.chmod(0o755)
         return env
     install_windows_exe_fake(bindir, "nx-hook", source.format(python=f'"{sys.executable}"'))
@@ -135,7 +135,7 @@ def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -
     bindir = tmp_path / "bin"
     bindir.mkdir()
     fake = bindir / "nx-hook"
-    fake.write_text(_FAKE.format(python=sys.executable))
+    fake.write_text(_FAKE.format(python=sys.executable), encoding="utf-8")
     fake.chmod(0o755)
     pidfile = tmp_path / "child.pid"
     env = _no_cli_env(bindir) | {"FAKE_MODE": "sleep", "FAKE_PIDFILE": str(pidfile)}
@@ -144,10 +144,10 @@ def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -
     shim.stdin.write(b"{}")
     shim.stdin.close()
     deadline = time.monotonic() + 20
-    while not pidfile.exists() or not pidfile.read_text().strip():
+    while not pidfile.exists() or not pidfile.read_text(encoding="utf-8").strip():
         assert time.monotonic() < deadline, "the fake nx-hook never started"
         time.sleep(0.05)
-    child = int(pidfile.read_text())
+    child = int(pidfile.read_text(encoding="utf-8"))
     shim.send_signal(signal.SIGTERM)
     assert shim.wait(timeout=20) == 128 + signal.SIGTERM
     deadline = time.monotonic() + 10
@@ -193,7 +193,7 @@ def test_the_shim_runs_where_signal_has_no_sighup(monkeypatch: pytest.MonkeyPatc
 
 
 def test_the_shim_imports_only_the_standard_library() -> None:
-    tree = ast.parse(_SHIM.read_text())
+    tree = ast.parse(_SHIM.read_text(encoding="utf-8"))
     found: set[str] = set()
     for n in tree.body:
         if isinstance(n, ast.Import):
@@ -215,7 +215,7 @@ def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
     """Rendered from the release's own entry.py text, not retyped."""
     src = subprocess.run(
         ["git", "-C", str(_ROOT), "show", f"{tag}:src/nexus/_hook_runtime/entry.py"],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     if src.returncode != 0:
         pytest.fail(f"git show {tag} failed; fetch tags before trusting this pin: {src.stderr}")

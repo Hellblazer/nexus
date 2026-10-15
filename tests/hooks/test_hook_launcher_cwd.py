@@ -42,6 +42,7 @@ from pathlib import Path
 import pytest
 
 from tests._hook_wiring import REPO_ROOT, UV_LAUNCHER_ARGV
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 # The plants are POSIX shell scripts under ``.venv/bin``; a Windows venv keeps
 # ``Scripts\\python.exe`` and cannot run a shebang file, so on Windows the
@@ -64,7 +65,7 @@ _RUN_FROM_PLUGIN_ROOT = ("run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-pr
 def _uv_entries() -> list[tuple[str, str, dict]]:
     out = []
     for plugin in _PLUGINS:
-        data = json.loads((REPO_ROOT / plugin / "hooks" / "hooks.json").read_text())
+        data = json.loads((REPO_ROOT / plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         for event, groups in data["hooks"].items():
             for group in groups:
                 for hook in group.get("hooks", []):
@@ -78,9 +79,9 @@ def _plant(directory: Path, marker: Path) -> None:
     bindir.mkdir(parents=True)
     for name in _NAMES:
         exe = bindir / name
-        exe.write_text(f'#!/bin/sh\necho "{name} from {directory}" >> "{marker}"\nexit 1\n')
+        exe.write_text(f'#!/bin/sh\necho "{name} from {directory}" >> "{marker}"\nexit 1\n', encoding="utf-8")
         exe.chmod(0o755)
-    (directory / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\nversion_info = 3.12.0\n")
+    (directory / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\nversion_info = 3.12.0\n", encoding="utf-8")
 
 
 def _layout(plugin: str, tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -132,7 +133,7 @@ def _run(args: list[str], root: Path, project: Path) -> subprocess.CompletedProc
         env["NX_TOOLS_DIR"] = str(root.parent / "no-tools")
     payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": str(project), "session_id": "cwd-test"})
     argv = ["uv", *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in args)]
-    return subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=120, env=env, cwd=str(project))
+    return subprocess.run(argv, input=payload, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=120, env=env, cwd=str(project))
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -168,7 +169,7 @@ def test_a_planted_interpreter_never_runs(plugin: str, event: str, hook: dict, t
     proc = _run(hook["args"], root, project)
     assert not marker.exists(), (
         f"{plugin} {event} {hook['args'][-1]}: uv ran a planted interpreter "
-        f"({marker.read_text()!r}); stderr={proc.stderr!r}"
+        f"({marker.read_text(encoding="utf-8")!r}); stderr={proc.stderr!r}"
     )
 
 
@@ -181,7 +182,7 @@ def test_the_plant_is_live_when_uv_run_discovers_from_the_project(tmp_path: Path
     root, project, marker = _layout("conexus", tmp_path)
     _run([*_RUN_FROM_CWD, *_tail(_a_conexus_entry())], root, project)
     assert marker.exists(), "the plant did not run under `uv run` from the project; it is inert"
-    assert str(project) in marker.read_text()
+    assert str(project) in marker.read_text(encoding="utf-8")
 
 
 def test_the_plant_is_live_when_uv_run_discovers_from_the_plugin_root(tmp_path: Path) -> None:
@@ -189,4 +190,4 @@ def test_the_plant_is_live_when_uv_run_discovers_from_the_plugin_root(tmp_path: 
     root, project, marker = _layout("conexus", tmp_path)
     _run([*_RUN_FROM_PLUGIN_ROOT, *_tail(_a_conexus_entry())], root, project)
     assert marker.exists(), "the home plant did not run under `uv run --directory`; it is inert"
-    assert str(tmp_path / "home") in marker.read_text()
+    assert str(tmp_path / "home") in marker.read_text(encoding="utf-8")

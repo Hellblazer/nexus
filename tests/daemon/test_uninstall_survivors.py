@@ -42,7 +42,7 @@ def installed_unit(tmp_path: Path):
     install_dir = tmp_path / "LaunchAgents"
     install_dir.mkdir(parents=True)
     dest = install_dir / installer._autostart_filename_for("service")
-    dest.write_text("<plist/>")
+    dest.write_text("<plist/>", encoding="utf-8")
     with patch(
         "nexus.commands.daemon._autostart_install_dir", return_value=install_dir,
     ), patch_in("nexus.daemon.installer", "subprocess.run",
@@ -195,7 +195,7 @@ class TestPostgresProbeAgainstARealSocket:
     alive (the precise failure being fixed)."""
 
     def _creds_at(self, tmp_path: Path, port: int):
-        (tmp_path / "pg_credentials").write_text(f"PG_PORT={port}\n")
+        (tmp_path / "pg_credentials").write_text(f"PG_PORT={port}\n", encoding="utf-8")
         return patch.dict(os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)})
 
     def test_detects_a_live_listener(self, tmp_path: Path) -> None:

@@ -989,7 +989,7 @@ def _uv_install_source() -> str:
 
     receipt = uv_conexus_venv() / "uv-receipt.toml"
     try:
-        data = tomllib.loads(receipt.read_text())
+        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
         return "unknown (no readable uv receipt)"
     reqs = (data.get("tool") or {}).get("requirements") or data.get("requirements") or []
@@ -2428,7 +2428,7 @@ def _probe_service_autostart_drift() -> AutostartDriftProbe | None:
     from nexus.daemon import installer  # noqa: PLC0415 — deferred, CLI startup cost
 
     _, rendered = installer.rendered_unit_content(tier="service")
-    existing = dest.read_text()
+    existing = dest.read_text(encoding="utf-8")
     activation = (
         installer.autostart_activation_state(dest, tier="service")
         if existing == rendered
@@ -2554,7 +2554,7 @@ def _write_collision_proof_backup(dest: Path, content: str) -> Path:
             last_exc = exc
             continue
         try:
-            with os.fdopen(fd, "w") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(content)
         except OSError:
             try:
@@ -3114,7 +3114,7 @@ def check_version_transition(
         return None
     stamp = config_dir / STAMP_FILENAME
     try:
-        seen = stamp.read_text().strip()
+        seen = stamp.read_text(encoding="utf-8").strip()
     except OSError:
         seen = ""
     if seen == version:
@@ -3180,7 +3180,7 @@ def check_version_transition(
             except FileExistsError:
                 return None
             try:
-                stamp.write_text(version + "\n")
+                stamp.write_text(version + "\n", encoding="utf-8")
             finally:
                 try:
                     lock.unlink()

@@ -925,7 +925,7 @@ class DataTokenManager:
         """
         path = _data_token_lease_path(base_url, tenant, self._resolve_config_dir())
         try:
-            raw = path.read_text()
+            raw = path.read_text(encoding="utf-8")
             data = json.loads(raw)
             if data.get("format_version") != _LEASE_FORMAT_VERSION:
                 return None
@@ -1010,7 +1010,7 @@ class DataTokenManager:
         path = _data_token_lease_path(base_url, tenant, self._resolve_config_dir())
         try:
             if expected_token is not None:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("token") != expected_token:
                     return
             path.unlink()

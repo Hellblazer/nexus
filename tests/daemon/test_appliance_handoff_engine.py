@@ -82,11 +82,11 @@ def test_the_handoff_carries_a_working_mint_locked_credential_never_the_root(
     sup = _supervisor(config_dir, root)
     sup._project_appliance_handoff(port)
 
-    obj = json.loads(handoff.read_text())
+    obj = json.loads(handoff.read_text(encoding="utf-8"))
     assert obj["schema"] == 1 and obj["host"] == "127.0.0.1" and obj["port"] == port
     mint_token, mint_tenant = obj["mint_token"], obj["mint_tenant"]
     assert mint_tenant == ROOT_TENANT
-    assert mint_token != root and root not in handoff.read_text(), "the root bearer never leaves the distro"
+    assert mint_token != root and root not in handoff.read_text(encoding="utf-8"), "the root bearer never leaves the distro"
     assert "token" not in obj
 
     issued = [r for r in _labelled(base_url, root)
@@ -153,7 +153,7 @@ def test_a_revoked_credential_takes_the_handoff_down_and_is_not_reissued(
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
 
     _supervisor(config_dir, root)._project_appliance_handoff(port)
-    mint_token = json.loads(handoff.read_text())["mint_token"]
+    mint_token = json.loads(handoff.read_text(encoding="utf-8"))["mint_token"]
     before = len(_labelled(base_url, root))
     revoked = httpx.post(
         base_url + "/v1/service-tokens/revoke",

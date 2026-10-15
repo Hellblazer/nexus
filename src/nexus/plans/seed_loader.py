@@ -470,7 +470,7 @@ def load_seed_directory(
     for path in yaml_paths:
         source = str(path)
         try:
-            template = yaml.safe_load(path.read_text()) or {}
+            template = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             if not isinstance(template, dict):
                 raise PlanTemplateSchemaError(
                     f"YAML root is {type(template).__name__}, expected mapping"

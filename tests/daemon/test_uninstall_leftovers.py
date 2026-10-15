@@ -55,7 +55,7 @@ def _layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str) -> t
     monkeypatch.setattr(installer, "_probe_survivors", lambda *, tier: ())
     install_dir = daemon_cmd._autostart_install_dir()
     install_dir.mkdir(parents=True)
-    (install_dir / daemon_cmd._autostart_filename_service()).write_text("<unit/>")
+    (install_dir / daemon_cmd._autostart_filename_service()).write_text("<unit/>", encoding="utf-8")
     return install_dir, daemon_cmd._autostart_log_dir()
 
 
@@ -80,13 +80,13 @@ class TestWindowsAutostartDirIsRemoved:
         install_dir, _ = _layout(monkeypatch, tmp_path, "win32")
         root = install_dir.parent
         keep = root / "someone-elses.txt"
-        keep.write_text("not ours")
+        keep.write_text("not ours", encoding="utf-8")
         monkeypatch.setattr(installer, "_stop_service_stack_best_effort", lambda: (True, None))
 
         report = installer.uninstall_daemon(confirm=True, remove_data=True)
 
         assert not install_dir.exists()
-        assert keep.read_text() == "not ours", "a file uninstall did not create is never touched"
+        assert keep.read_text(encoding="utf-8") == "not ours", "a file uninstall did not create is never touched"
         assert any(str(root) in w and "someone-elses.txt" in w for w in report.warnings), report.warnings
 
     def test_dirs_not_named_for_nexus_are_never_pruned(
@@ -125,7 +125,7 @@ class TestPosixSharedUnitDirsAreKept:
         _, log_dir = _layout(monkeypatch, tmp_path, "linux")
         assert log_dir == tmp_path / "home" / ".local" / "state" / "nexus"
         log_dir.mkdir(parents=True)
-        (log_dir / installer.AUTOSTART_SERVICE_LOG_NAME).write_text("log\n")
+        (log_dir / installer.AUTOSTART_SERVICE_LOG_NAME).write_text("log\n", encoding="utf-8")
         monkeypatch.setattr(installer, "_stop_service_stack_best_effort", lambda: (True, None))
 
         installer.uninstall_daemon(confirm=True, remove_data=True)
@@ -139,7 +139,7 @@ class TestPosixSharedUnitDirsAreKept:
         _, log_dir = _layout(monkeypatch, tmp_path, "linux")
         log_dir.mkdir(parents=True)
         log = log_dir / installer.AUTOSTART_SERVICE_LOG_NAME
-        log.write_text("log\n")
+        log.write_text("log\n", encoding="utf-8")
         monkeypatch.setattr(installer, "_stop_service_stack_best_effort", lambda: (True, None))
 
         installer.uninstall_daemon(confirm=True, remove_data=False)
@@ -151,7 +151,7 @@ class TestPosixSharedUnitDirsAreKept:
     ) -> None:
         _, log_dir = _layout(monkeypatch, tmp_path, "darwin")
         log_dir.mkdir(parents=True)
-        (log_dir / installer.AUTOSTART_SERVICE_LOG_NAME).write_text("log\n")
+        (log_dir / installer.AUTOSTART_SERVICE_LOG_NAME).write_text("log\n", encoding="utf-8")
         monkeypatch.setattr(installer, "_stop_service_stack_best_effort", lambda: (True, None))
 
         installer.uninstall_daemon(confirm=True, remove_data=True)

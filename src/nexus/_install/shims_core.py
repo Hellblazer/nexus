@@ -140,7 +140,7 @@ def _write_one(bin_dir: Path, name: str, body: str) -> None:
     depends on.
     """
     tmp = bin_dir / f".{name}.tmp.{os.getpid()}"
-    tmp.write_text(body)
+    tmp.write_text(body, encoding="utf-8")
     tmp.chmod(0o755)
     os.replace(tmp, bin_dir / name)
 
@@ -162,7 +162,7 @@ def _is_ours(path: Path, pointer: Path) -> bool:
     if not path.is_file() or path.is_symlink():
         return False
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(errors="replace", encoding="utf-8")
     except OSError:
         return False
     first = text.split("\n", 2)

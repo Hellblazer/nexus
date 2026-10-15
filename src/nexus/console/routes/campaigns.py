@@ -36,7 +36,7 @@ def _load_campaign_summary(links_path: Path) -> dict[str, dict[str, Any]]:
     })
 
     try:
-        for line in links_path.read_text().splitlines():
+        for line in links_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -108,7 +108,7 @@ async def campaign_detail(request: Request, created_by: str, scope: str = "proje
     links: list[dict[str, Any]] = []
     if links_path.exists():
         try:
-            for line in links_path.read_text().splitlines():
+            for line in links_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue
@@ -127,7 +127,7 @@ async def campaign_detail(request: Request, created_by: str, scope: str = "proje
     docs: list[dict[str, Any]] = []
     if docs_path.exists():
         try:
-            for line in docs_path.read_text().splitlines():
+            for line in docs_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue

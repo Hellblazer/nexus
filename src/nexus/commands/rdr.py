@@ -62,7 +62,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
     try:
         repo_root = subprocess.check_output(
             argv_off_cwd(["git", "rev-parse", "--show-toplevel"]),
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",  # git prints paths as UTF-8
         ).strip()
     except Exception:  # noqa: BLE001 — best-effort cwd derivation; falls back to working dir on failure
         repo_root = str(Path.cwd())
@@ -71,7 +71,7 @@ def _preamble_resolve_repo() -> tuple[str, str]:
     try:
         common_dir = subprocess.check_output(
             argv_off_cwd(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]),
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",  # git prints paths as UTF-8
         ).strip()
         if common_dir:
             repo_name = Path(common_dir).resolve().parent.name
@@ -85,7 +85,7 @@ def _preamble_rdr_dir(repo_root: str) -> str:
     rdr_dir = "docs/rdr"
     nexus_yml = Path(repo_root) / ".nexus.yml"
     if nexus_yml.exists():
-        content = nexus_yml.read_text()
+        content = nexus_yml.read_text(encoding="utf-8")
         try:
             d = yaml.safe_load(content) or {}
             paths = (d.get("indexing") or {}).get("rdr_paths", ["docs/rdr"])
@@ -125,7 +125,7 @@ def _split_frontmatter_fences(text: str) -> list[str]:
 
 def _preamble_parse_frontmatter(filepath: Path) -> tuple[dict, str]:
     """Parse YAML frontmatter from *filepath*; return (meta, full_text)."""
-    text = filepath.read_text(errors="replace")
+    text = filepath.read_text(errors="replace", encoding="utf-8")
     meta: dict = {}
     if text.startswith("---"):
         parts = _split_frontmatter_fences(text)

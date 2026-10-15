@@ -103,7 +103,7 @@ def test_rdr_verb_git_probes_spawn_off_the_cwd(windows_box, spawned, tmp_path: P
     assert rdr_verb._repo_root() is not None
     rdr_verb._repo_name(tmp_path)
     rdr = tmp_path / "rdr-001-x.md"
-    rdr.write_text("---\nstatus: draft\n---\n")
+    rdr.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
     rdr_verb._unchecked_fix_edits(tmp_path, [rdr], {"001": "draft"}, {"1": "abcdef0"})
     assert _heads(spawned) == [GIT, GIT, GIT], spawned
 
@@ -114,7 +114,7 @@ def test_rdr_verb_with_only_a_planted_git_degrades_as_not_found(windows_box, spa
     assert rdr_verb._repo_root() is None
     assert rdr_verb._repo_name(tmp_path) == tmp_path.name
     rdr = tmp_path / "rdr-001-x.md"
-    rdr.write_text("---\nstatus: draft\n---\n")
+    rdr.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
     assert rdr_verb._unchecked_fix_edits(tmp_path, [rdr], {"001": "draft"}, {"1": "abcdef0"}) == []
     assert spawned == []
 

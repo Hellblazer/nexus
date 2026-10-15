@@ -370,7 +370,7 @@ class TestWindowsInstall:
         result = installer.install_autostart(tier="service")
         assert result.status is installer.InstallStatus.NEWLY_INSTALLED
         assert result.dest == tmp_path / "autostart" / windows_autostart.TASK_FILENAME
-        body = result.dest.read_text()
+        body = result.dest.read_text(encoding="utf-8")
         assert body.startswith('<?xml version="1.0"?>')
         assert SID in body and PYTHONW in body
         assert str((tmp_path / "cfg").resolve()) in body
@@ -407,7 +407,7 @@ class TestWindowsInstall:
 
     def test_a_drifted_definition_is_refused_without_force_and_replaced_with_it(self, win: _FakeSchtasks) -> None:
         first = installer.install_autostart(tier="service")
-        first.dest.write_text("<Task>hand edited</Task>")
+        first.dest.write_text("<Task>hand edited</Task>", encoding="utf-8")
         with pytest.raises(installer.ContentDiffersError):
             installer.install_autostart(tier="service")
         win.calls.clear()
@@ -415,7 +415,7 @@ class TestWindowsInstall:
         assert forced.status is installer.InstallStatus.NEWLY_INSTALLED
         # End the running launcher and drop the old definition before the re-create.
         assert win.verbs() == ["end", "delete", "create", "run"]
-        assert SID in forced.dest.read_text()
+        assert SID in forced.dest.read_text(encoding="utf-8")
 
     def test_a_task_that_cannot_be_started_now_is_a_warning_not_a_failure(self, win: _FakeSchtasks) -> None:
         win.run_rc = 1
@@ -582,7 +582,7 @@ class TestWindowsRetarget:
     def test_the_task_is_repointed_without_stopping_or_starting_anything(self, win: _FakeSchtasks) -> None:
         dest = self._installed(win)
         lines = installer.retarget_windows_task(NEW_PYTHONW)
-        body = dest.read_text()
+        body = dest.read_text(encoding="utf-8")
         assert f"<Command>{NEW_PYTHONW}</Command>" in body and PYTHONW not in body
         assert win.verbs() == ["query", "create"], "no /End, no /Delete, no /Run: the running stack is left alone"
         assert win.calls[-1][-3:] == ["/XML", str(dest), "/F"]
@@ -605,19 +605,19 @@ class TestWindowsRetarget:
 
     def test_a_hand_edited_or_drifted_definition_is_not_overwritten(self, win: _FakeSchtasks) -> None:
         dest = self._installed(win)
-        edited = dest.read_text().replace("<Priority>7</Priority>", "<Priority>4</Priority>")
-        dest.write_text(edited)
+        edited = dest.read_text(encoding="utf-8").replace("<Priority>7</Priority>", "<Priority>4</Priority>")
+        dest.write_text(edited, encoding="utf-8")
         lines = installer.retarget_windows_task(NEW_PYTHONW)
-        assert dest.read_text() == edited
+        assert dest.read_text(encoding="utf-8") == edited
         assert "create" not in win.verbs()
         assert len(lines) == 1 and "nx daemon restart-stale" in lines[0]
 
     def test_a_disabled_task_is_not_re_enabled(self, win: _FakeSchtasks) -> None:
         dest = self._installed(win)
-        before = dest.read_text()
+        before = dest.read_text(encoding="utf-8")
         win.enabled = False
         lines = installer.retarget_windows_task(NEW_PYTHONW)
-        assert dest.read_text() == before
+        assert dest.read_text(encoding="utf-8") == before
         assert "create" not in win.verbs()
         assert len(lines) == 1 and "disabled" in lines[0]
 
@@ -625,7 +625,7 @@ class TestWindowsRetarget:
         self, win: _FakeSchtasks, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         dest = self._installed(win)
-        before = dest.read_text()
+        before = dest.read_text(encoding="utf-8")
 
         def refuse_create(argv: list[str], *, timeout: float, **kw: object) -> subprocess.CompletedProcess[str]:
             if argv[1].lower() == "/create":
@@ -635,7 +635,7 @@ class TestWindowsRetarget:
 
         monkeypatch.setattr(installer, "run_bounded", refuse_create)
         lines = installer.retarget_windows_task(NEW_PYTHONW)
-        assert dest.read_text() == before, "the kept copy must keep describing the registered task"
+        assert dest.read_text(encoding="utf-8") == before, "the kept copy must keep describing the registered task"
         assert len(lines) == 1 and "Access is denied" in lines[0] and "nx daemon restart-stale" in lines[0]
 
     def test_off_windows_nothing_happens(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -763,7 +763,7 @@ class TestTaskFollowsTheCurrentGeneration:
         gen = _make_generation(layout, "20261014T000000Z")
         _point_current_at(layout, gen)
         result = installer.install_autostart(tier="service")
-        body = result.dest.read_text()
+        body = result.dest.read_text(encoding="utf-8")
         assert f"<Command>{gen / 'Scripts' / 'pythonw.exe'}</Command>" in body
         assert win.verbs() == ["create", "run"], "non-vacuity: the task was registered"
 

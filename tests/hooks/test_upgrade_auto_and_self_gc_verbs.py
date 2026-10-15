@@ -52,6 +52,7 @@ from nexus.hooks import self_gc, upgrade_auto
 from nexus.util.nx_argv import nx_argv
 from tests._module_seam import setattr_in
 from tests._platform import IS_WINDOWS, posix_only
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 class _FakeCompleted:
@@ -109,8 +110,16 @@ _FAKE_NX = str(Path(os.path.abspath(os.sep)) / "gen" / "bin" / "nx")
 
 
 def _which(found):
-    """A ``shutil.which`` stand-in; ``which_off_cwd`` also passes ``path=``."""
+    """A lookup stand-in that answers *found* whatever it is asked."""
     return lambda *_a, **_k: found
+
+
+def _stub_nx(monkeypatch, found):
+    """Make both hooks' ``nx`` lookup answer *found*. They call
+    ``nexus.util.nx_argv.which_off_cwd``, which on Windows walks ``PATH``
+    itself and never consults ``shutil.which``; stubbing ``shutil.which``
+    there let a real ``nx`` on the host's ``PATH`` through (nexus-3fme8)."""
+    monkeypatch.setattr("nexus.util.nx_argv.which_off_cwd", _which(found))
 
 
 @pytest.fixture
@@ -136,10 +145,10 @@ def fake_nx(tmp_path, monkeypatch):
                 "#!/bin/sh\n"
                 f'echo "$@" > "{argv_file}"\n'
                 f'echo $$ > "{pid_file}"\n'
-                + "\n".join(body) + "\n"
+                + "\n".join(body) + "\n", encoding="utf-8"
             )
             script.chmod(0o755)
-            setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(str(script)))
+            _stub_nx(monkeypatch, str(script))
             return argv_file, pid_file
         script = tmp_path / "nx_fake.py"
         script.write_text(
@@ -149,9 +158,9 @@ def fake_nx(tmp_path, monkeypatch):
             f"sys.stdout.write({stdout!r} + '\\n') if {stdout!r} else None\n"
             f"sys.stderr.write({stderr!r} + '\\n') if {stderr!r} else None\n"
             f"time.sleep({sleep!r})\n"
-            f"sys.exit({rc})\n"
+            f"sys.exit({rc})\n", encoding="utf-8"
         )
-        setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+        _stub_nx(monkeypatch, _FAKE_NX)
         monkeypatch.setattr(
             "nexus.util.nx_argv.nx_argv_for",
             # The base interpreter, not a venv's python.exe: that is a launcher
@@ -167,8 +176,8 @@ def fake_nx(tmp_path, monkeypatch):
 def _wait_for(path, seconds=5.0):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if path.exists() and path.read_text().strip():
-            return path.read_text().strip()
+        if path.exists() and path.read_text(encoding="utf-8").strip():
+            return path.read_text(encoding="utf-8").strip()
         time.sleep(0.02)
     raise AssertionError(f"{path} never written")
 
@@ -191,12 +200,12 @@ def test_upgrade_auto_is_silent_on_success(fake_nx, capfd):
     assert captured.err == "", "the child's stderr never reaches the hook's own stderr"
     log = upgrade_auto._child_log_path()
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not (log.exists() and log.read_text()):
+    while time.monotonic() < deadline and not (log.exists() and log.read_text(encoding="utf-8")):
         time.sleep(0.02)
-    assert "a warning the shell form sent to /dev/null" in log.read_text(), (
+    assert "a warning the shell form sent to /dev/null" in log.read_text(encoding="utf-8"), (
         "the child outlives the hook, so its stderr goes to a log file, not the null device"
     )
-    assert "on stdout" not in log.read_text(), "stdout stays on the null device"
+    assert "on stdout" not in log.read_text(encoding="utf-8"), "stdout stays on the null device"
 
 
 def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys):
@@ -217,7 +226,7 @@ def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys
 def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, capsys):
     """`nx` absent was exit 127 under the shell, which fired the same `||`."""
     spawned: list[object] = []
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(None))
+    _stub_nx(monkeypatch, None)
     setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", lambda *a, **k: spawned.append(a))
     result = upgrade_auto.run(None)
     captured = capsys.readouterr()
@@ -228,7 +237,7 @@ def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, cap
 
 def test_upgrade_auto_swallows_a_spawn_failure(monkeypatch, capsys, emitted):
     """An OSError from the spawn itself is still a hook that must not fail."""
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+    _stub_nx(monkeypatch, _FAKE_NX)
 
     def _boom(cmd, **kwargs):
         raise OSError("no fork for you")
@@ -318,9 +327,9 @@ def test_an_unopenable_child_log_falls_back_to_the_null_device(monkeypatch, tmp_
     """A log problem must never stop the upgrade: the parent of the log
     directory is a FILE, so mkdir fails, and the child starts on DEVNULL."""
     blocker = tmp_path / "not-a-dir"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     monkeypatch.setattr(upgrade_auto, "_child_log_path", lambda: blocker / "logs" / "child.log")
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+    _stub_nx(monkeypatch, _FAKE_NX)
     seen: list[dict] = []
 
     def _popen(argv, **kwargs):
@@ -390,7 +399,7 @@ def test_windows_spawn_raises_when_both_attempts_fail(monkeypatch):
 
 def test_self_gc_spawns_nx_self_gc(spy, monkeypatch):
     calls, _ = spy
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+    _stub_nx(monkeypatch, _FAKE_NX)
     result = self_gc.run(None)
     # Windows spawns the interpreter form, never the looked-up path (nx_argv_for).
     assert calls == [nx_argv("self", "gc") if IS_WINDOWS else [_FAKE_NX, "self", "gc"]]
@@ -404,7 +413,7 @@ def test_self_gc_is_silent_on_every_exit_code(spy, monkeypatch, capsys, rc):
     state["rc"] = rc
     state["stdout"] = "reclaimed 3 generations"
     state["stderr"] = "could not stat gen-20260101"
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+    _stub_nx(monkeypatch, _FAKE_NX)
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert result.stdout is None
@@ -415,7 +424,7 @@ def test_self_gc_is_silent_on_every_exit_code(spy, monkeypatch, capsys, rc):
 def test_self_gc_is_silent_when_nx_is_not_on_path(spy, monkeypatch, capsys):
     """Unlike upgrade-auto, self-gc has no guidance to emit: it was `|| true`."""
     calls, _ = spy
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(None))
+    _stub_nx(monkeypatch, None)
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert calls == []
@@ -425,7 +434,7 @@ def test_self_gc_is_silent_when_nx_is_not_on_path(spy, monkeypatch, capsys):
 
 
 def test_self_gc_swallows_a_spawn_failure(monkeypatch, capsys):
-    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", _which(_FAKE_NX))
+    _stub_nx(monkeypatch, _FAKE_NX)
 
     def _boom(cmd, **kwargs):
         raise OSError("no fork for you")
@@ -460,7 +469,7 @@ def test_the_verb_dispatches_through_nx_hook_without_nx_present(verb, tmp_path):
     proc = subprocess.run(
         [sys.executable, "-c", "from nexus._hook_runtime.entry import main; main()", verb],
         capture_output=True,
-        text=True,
+        text=True, encoding=PYTHON_CHILD_ENCODING,
         env={"PATH": str(tmp_path), "HOME": str(tmp_path)},
         stdin=subprocess.DEVNULL,
         timeout=60,

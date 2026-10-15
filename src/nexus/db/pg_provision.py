@@ -1309,7 +1309,7 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
     macOS 104-char socket-path limit that motivated dropping ``-k``. (nexus-6laob)
     """
     conf_path = pgdata / "postgresql.conf"
-    conf_text = conf_path.read_text() if conf_path.exists() else ""
+    conf_text = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
     # Drop the entire prior nexus-managed block so re-running is idempotent.
     # The block is delimited by BEGIN/END sentinels — filtering only the comment
     # lines (the old behaviour) left the value lines to accumulate on every
@@ -1346,7 +1346,7 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
         f"unix_socket_directories = ''",
         end,
     ]
-    conf_path.write_text("\n".join(lines) + "\n")
+    conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class PgStartError(RuntimeError):
@@ -2411,7 +2411,7 @@ def _write_credentials(
     # left in a half-written state.
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        with os.fdopen(tmp_fd, "w") as fh:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
@@ -2439,13 +2439,13 @@ def _persist_service_token(creds_path: Path, service_token: str) -> None:
     if "NX_SERVICE_TOKEN" in _read_credentials(creds_path):
         _log.info("pg_service_token_backfill_noop", path=str(creds_path))
         return
-    existing = creds_path.read_text()
+    existing = creds_path.read_text(encoding="utf-8")
     if not existing.endswith("\n"):
         existing += "\n"
     content = existing + f"NX_SERVICE_TOKEN={service_token}\n"
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        with os.fdopen(tmp_fd, "w") as fh:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
@@ -2469,7 +2469,7 @@ def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
     if "NX_DB_DIAG_PASS" in _read_credentials(creds_path):
         _log.info("pg_diag_credentials_backfill_noop", path=str(creds_path))
         return
-    existing = creds_path.read_text()
+    existing = creds_path.read_text(encoding="utf-8")
     if not existing.endswith("\n"):
         existing += "\n"
     content = (
@@ -2478,7 +2478,7 @@ def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
     )
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        with os.fdopen(tmp_fd, "w") as fh:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
@@ -2499,7 +2499,7 @@ def _write_secret_file(path: Path, content: str) -> None:
     """
     tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".pg_creds_")
     try:
-        with os.fdopen(tmp_fd, "w") as fh:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             restrict_to_owner(tmp_path)
             fh.write(content)
         os.replace(tmp_path, path)
@@ -2519,7 +2519,7 @@ def _persist_superuser_password(creds_path: Path, password: str) -> None:
     if creds_path.exists():
         if _read_credentials(creds_path).get(SUPERUSER_PASS_KEY):
             return
-        existing = creds_path.read_text()
+        existing = creds_path.read_text(encoding="utf-8")
         if existing and not existing.endswith("\n"):
             existing += "\n"
     else:
@@ -2916,7 +2916,7 @@ def _backfill_svc_noinherit(bins: PgBinaries, port: int, os_user: str) -> None:
 def _read_credentials(creds_path: Path) -> dict[str, str]:
     """Parse an existing credentials file into a {key: value} dict."""
     result: dict[str, str] = {}
-    for line in creds_path.read_text().splitlines():
+    for line in creds_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue

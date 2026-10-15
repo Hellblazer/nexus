@@ -1042,7 +1042,7 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
         lock = _worker_lock_path(locks_dir)
         lock.parent.mkdir(parents=True, exist_ok=True)
         _sweep_dead_worker_locks(lock.parent)
-        lock.write_text(str(os.getpid()))
+        lock.write_text(str(os.getpid()), encoding="utf-8")
     except Exception:  # noqa: BLE001 — lock-file write is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_write_failed", exc_info=True)
 

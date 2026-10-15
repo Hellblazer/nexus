@@ -73,9 +73,9 @@ def _serve(monkeypatch, archive: bytes, *, urls: list[str] | None = None,
             urls.append(url)
         if url.endswith(".sha256"):
             digest = sha_override or hashlib.sha256(archive).hexdigest()
-            dest.write_text(f"{digest}  {_ASSET}\n")
+            dest.write_text(f"{digest}  {_ASSET}\n", encoding="utf-8")
         elif url.endswith(".sigstore.json"):
-            dest.write_text('{"protobuf":"bundle"}')
+            dest.write_text('{"protobuf":"bundle"}', encoding="utf-8")
         else:
             dest.write_bytes(archive)
 
@@ -162,7 +162,7 @@ def test_receipt_records_archive_digest_and_installed_file_digests(tmp_path, mon
     assert prov["support_files"] == {
         dll: hashlib.sha256(_PAYLOADS[dll]).hexdigest() for dll in WINDOWS_RUNTIME_DLLS
     }
-    on_disk = json.loads((tmp_path / "service" / "nexus-service.meta.json").read_text())
+    on_disk = json.loads((tmp_path / "service" / "nexus-service.meta.json").read_text(encoding="utf-8"))
     assert on_disk["installed_sha256"] == prov["installed_sha256"]
 
 

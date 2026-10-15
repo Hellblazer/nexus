@@ -213,7 +213,7 @@ def log_event(event: str, **fields: str) -> None:
                 path.replace(path.with_name(path.name + ".1"))
         except FileNotFoundError:
             pass
-        with path.open("a") as f:
+        with path.open("a", encoding="utf-8") as f:
             f.write(line)
     except OSError as exc:
         debug(f"log_event failed (non-fatal): {exc}")
@@ -280,7 +280,8 @@ def uv_receipt_present() -> bool:
     try:
         out = subprocess.run(
             [uv, "tool", "dir"],
-            capture_output=True, text=True, timeout=10, check=True,
+            # uv prints the directory as UTF-8 on every platform (nexus-ikoqj).
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, check=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"`uv tool dir` failed: {exc}")
@@ -301,7 +302,8 @@ def installed_nx_version() -> str | None:
     try:
         out = subprocess.run(
             [nx, "--version"],
-            capture_output=True, text=True, timeout=15, check=True,
+            # nx writes UTF-8 to its pipes on Windows (nexus.cli reconfigures at import).
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"`nx --version` failed: {exc}")
@@ -353,7 +355,9 @@ def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
         return False
     try:
         result = subprocess.run(
-            [exe, *cmd[1:]], capture_output=True, text=True, timeout=timeout,
+            # exe is nx, uv or git: all write UTF-8 on every platform (nexus-ikoqj).
+            [exe, *cmd[1:]], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
         )
         if DEBUG and result.stdout:
             debug(f"{cmd[0]} stdout: {result.stdout[:500]}")
@@ -370,7 +374,7 @@ def write_marker(version: str) -> None:
     """Record *version* as the confirmed-in-lockstep CLI version."""
     path = marker_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(version)
+    path.write_text(version, encoding="utf-8")
     debug(f"wrote marker {path} = {version}")
 
 
@@ -388,7 +392,8 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
         if nx is None:
             raise FileNotFoundError("nx not found")
         result = subprocess.run(
-            [nx, "upgrade"], capture_output=True, text=True, timeout=timeout,
+            [nx, "upgrade"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"nx upgrade raised for ref-drift reinstall: {exc}")

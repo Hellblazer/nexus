@@ -35,6 +35,7 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.util import nx_argv
+from tests._child_encoding import NATIVE_TOOL_ENCODING
 
 ON_WINDOWS = sys.platform == "win32"
 
@@ -79,8 +80,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     for d in (clone, clone / "relbin", tools):
         shutil.copyfile(cmd, d / f"{_NAME}.exe")
     for suffix in (".cmd", ".bat"):
-        (clone / f"{_NAME}{suffix}").write_text("@echo planted\r\n")
-    (shims / f"{_NAME}.cmd").write_text("@echo shim\r\n")
+        (clone / f"{_NAME}{suffix}").write_text("@echo planted\r\n", encoding="utf-8")
+    (shims / f"{_NAME}.cmd").write_text("@echo shim\r\n", encoding="utf-8")
     # Only the clone has this one, so a bare-name spawn that finds it found it in the cwd.
     shutil.copyfile(cmd, clone / "nxonly.exe")
 
@@ -101,7 +102,7 @@ class TestRealWindows:
     ) -> None:
         monkeypatch.setenv("PATH", str(world.tools))
         done = subprocess.run(
-            ["nxonly", "/c", "echo", "ran-from-cwd"], capture_output=True, text=True, timeout=30,
+            ["nxonly", "/c", "echo", "ran-from-cwd"], capture_output=True, text=True, encoding=NATIVE_TOOL_ENCODING, timeout=30,
         )
         assert done.returncode == 0 and done.stdout.strip() == "ran-from-cwd", (done.returncode, done.stdout, done.stderr)
 
@@ -155,7 +156,7 @@ class TestRealWindows:
         monkeypatch.setenv("PATH", os.pathsep.join([".", world.clone, str(world.tools)]))
         argv = nx_argv.argv_off_cwd([_NAME, "/c", "echo", "via-path"])
         assert _same_file(argv[0], world.real)
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        done = subprocess.run(argv, capture_output=True, text=True, encoding=NATIVE_TOOL_ENCODING, timeout=30)
         assert done.returncode == 0 and done.stdout.strip() == "via-path", (done.returncode, done.stdout, done.stderr)
 
     def test_a_name_with_a_directory_part_is_returned_as_written_and_never_searched(

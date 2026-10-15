@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from nexus._hook_runtime import entry
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 # -- run(): field extraction, mirroring session_start_cmd -------------------
@@ -167,7 +168,7 @@ _REAL_PAYLOAD = json.dumps({"session_id": "x-nexus-q02nx-5-parity", "source": "s
 
 def _spawn(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     return subprocess.run(
-        argv, input=_REAL_PAYLOAD, env=env, capture_output=True, text=True, timeout=30,
+        argv, input=_REAL_PAYLOAD, env=env, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=30,
     )
 
 

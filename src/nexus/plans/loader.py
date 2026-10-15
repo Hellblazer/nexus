@@ -99,7 +99,7 @@ def _load_tier(
             continue
 
         try:
-            template = yaml.safe_load(path.read_text()) or {}
+            template = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except Exception:  # noqa: BLE001 - best-effort template parse; skips malformed entry
             continue
         if not isinstance(template, dict):
@@ -261,7 +261,7 @@ def _load_registered_dimensions(plugin_root: Path) -> set[str] | None:
     if not path.exists():
         return None
     try:
-        doc = yaml.safe_load(path.read_text()) or {}
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:  # noqa: BLE001 - best-effort doc parse; degrades to None
         return None
     if not isinstance(doc, dict):
@@ -313,7 +313,7 @@ def ci_validate_plan_tree(
             if not path.is_file() or path.suffix not in (".yml", ".yaml"):
                 continue
             try:
-                template = yaml.safe_load(path.read_text()) or {}
+                template = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             except Exception as exc:  # noqa: BLE001 - per-file YAML error collected; loading continues
                 errors.append(_CIError(str(path), f"YAML error: {exc}"))
                 continue

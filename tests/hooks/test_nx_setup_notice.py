@@ -74,7 +74,7 @@ def _install_nx_mcp(bindir: Path) -> None:
         install_windows_exe_fake(bindir, "nx-mcp", f"{WINDOWS_SHEBANG}\nprint('real')\n")
     else:
         fake = bindir / "nx-mcp"
-        fake.write_text("#!/bin/sh\necho real\n")
+        fake.write_text("#!/bin/sh\necho real\n", encoding="utf-8")
         fake.chmod(0o755)
 
 
@@ -99,13 +99,13 @@ def _run(
         env["CLAUDE_CODE_REMOTE"] = remote
     env.update(extra_env or {})
     if guarded:
-        (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS)
+        (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS, encoding="utf-8")
         env["PYTHONPATH"] = str(dirs["site"])
         env["NX_REFUSED_MARK"] = str(dirs["site"] / "refused.mark")
     return subprocess.run(
         [sys.executable, str(hook)],
         input=json.dumps({"hook_event_name": "SessionStart", "source": "startup"}).encode(),
-        capture_output=True, env=env, timeout=30, check=False, cwd=str(dirs["home"]), **popen,
+        capture_output=True, env=env, timeout=30, check=False, cwd=str(dirs["home"]),
     )
 
 
@@ -151,11 +151,11 @@ def _load(path: Path, name: str):
 
 def _service_usable(dirs: dict[str, Path]) -> None:
     """A saved address and token: a usable service, with nothing running."""
-    (dirs["config"] / "config.yml").write_text("credentials:\n  service_url: https://svc.example\n  service_token: tok\n")
+    (dirs["config"] / "config.yml").write_text("credentials:\n  service_url: https://svc.example\n  service_token: tok\n", encoding="utf-8")
 
 
 def _address_without_a_token(dirs: dict[str, Path]) -> None:
-    (dirs["config"] / "config.yml").write_text("credentials:\n  service_url: https://svc.example\n")
+    (dirs["config"] / "config.yml").write_text("credentials:\n  service_url: https://svc.example\n", encoding="utf-8")
 
 
 def _setup_dir(dirs: dict[str, Path]) -> Path:
@@ -204,9 +204,9 @@ def _provisioned(dirs: dict[str, Path]) -> None:
     config = dirs["config"]
     (config / "postgres").mkdir()
     (config / "service").mkdir()
-    (config / "pg_credentials").write_text("x")
-    (config / "postgres" / "PG_VERSION").write_text("17")
-    (config / "service" / ("nexus-service.exe" if os.name == "nt" else "nexus-service")).write_text("x")
+    (config / "pg_credentials").write_text("x", encoding="utf-8")
+    (config / "postgres" / "PG_VERSION").write_text("17", encoding="utf-8")
+    (config / "service" / ("nexus-service.exe" if os.name == "nt" else "nexus-service")).write_text("x", encoding="utf-8")
 
 
 def _cli_cannot_start(dirs: dict[str, Path]) -> None:
@@ -532,7 +532,7 @@ def test_in_no_state_does_it_open_a_socket_or_start_a_process(tmp_path: Path, st
 
 def test_the_guard_in_the_test_above_really_refuses(tmp_path: Path) -> None:
     dirs = _dirs(tmp_path)
-    (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS)
+    (dirs["site"] / "sitecustomize.py").write_text(_NO_SIDE_EFFECTS, encoding="utf-8")
     r = subprocess.run(
         [sys.executable, "-c", "import subprocess; subprocess.Popen(['x'])"],
         capture_output=True,
@@ -631,7 +631,7 @@ def test_the_hook_speaks_exactly_when_the_launcher_serves_the_stand_in(tmp_path:
     if os.name == "nt":
         install_windows_exe_fake(dirs["bin"], "nx", f"{WINDOWS_SHEBANG}\nprint('nx')\n")
     else:
-        (dirs["bin"] / "nx").write_text("#!/bin/sh\necho nx\n")
+        (dirs["bin"] / "nx").write_text("#!/bin/sh\necho nx\n", encoding="utf-8")
         (dirs["bin"] / "nx").chmod(0o755)
     launch = _LAUNCH / "nx_launch.py"
     ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"

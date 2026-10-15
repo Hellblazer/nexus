@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, prune_python, scrubbed_env
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LAUNCH = _ROOT / "conexus" / "launch" / "nx_launch.py"
@@ -61,7 +62,7 @@ def _install_fake(bindir: Path, name: str, marker: str) -> Path:
     source = _FAKE.format(python=sys.executable, marker=marker)
     if not IS_WINDOWS:
         fake = bindir / name
-        fake.write_text(source)
+        fake.write_text(source, encoding="utf-8")
         fake.chmod(0o755)
         return fake
     return install_windows_exe_fake(bindir, name, _FAKE.format(python=f'"{sys.executable}"', marker=marker))
@@ -253,12 +254,12 @@ def test_the_measured_mechanism_a_console_script_carries_no_current_in_sys_prefi
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(gen)], check=True, timeout=120)
     _point_current(tools, gen)
     script = gen / "bin" / "nx-mcp"
-    script.write_text(f"#!{gen}/bin/python\nimport json, sys\nprint(json.dumps([sys.prefix, *sys.path]))\n")
+    script.write_text(f"#!{gen}/bin/python\nimport json, sys\nprint(json.dumps([sys.prefix, *sys.path]))\n", encoding="utf-8")
     script.chmod(0o755)
 
     control = subprocess.run(
         [str(tools / "current" / "bin" / "python"), "-c", "import sys; print(sys.prefix)"],
-        capture_output=True, text=True, timeout=30, check=True,
+        capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=30, check=True,
     )
     assert "current" in Path(control.stdout.strip()).parts, (
         "the control did not show the leak, so this test can no longer tell a leak from none"
@@ -510,7 +511,7 @@ def test_a_script_whose_shebang_interpreter_is_gone_cannot_start(tmp_path: Path,
     link.parent.mkdir(exist_ok=True)
     os.symlink(gone, link)
     script = gen / "bin" / name
-    script.write_text(f"#!{link}\nprint('never run')\n")
+    script.write_text(f"#!{link}\nprint('never run')\n", encoding="utf-8")
     script.chmod(0o755)
     r = _run([name], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
     assert r.returncode == 0
@@ -605,7 +606,7 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     assert entries[0]["args"][-1].endswith("/hooks/scripts/nx_setup_notice.py"), "the setup notice is the first entry"
 
     def uv_says(*args: str) -> str:
-        return subprocess.run([uv, *args], capture_output=True, text=True, check=True, timeout=60).stdout.strip()
+        return subprocess.run([uv, *args], capture_output=True, text=True, encoding="utf-8", check=True, timeout=60).stdout.strip()
 
     home, config, tools, project = (_empty(tmp_path, n) for n in ("home", "config", "tools", "project"))
     only_uv = _empty(tmp_path, "only-uv")
@@ -628,7 +629,7 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     spoke: list[str] = []
     for entry in entries:
         argv = [entry["command"], *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in entry["args"])]
-        r = subprocess.run(argv, input=payload, capture_output=True, text=True, env=env, timeout=120, check=False, cwd=str(project))
+        r = subprocess.run(argv, input=payload, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, env=env, timeout=120, check=False, cwd=str(project))
         what = " ".join(entry["args"][-2:])
         assert r.returncode == 0, (what, r.stderr)
         assert "Traceback" not in r.stderr and "not found in" not in r.stderr, (what, r.stderr)

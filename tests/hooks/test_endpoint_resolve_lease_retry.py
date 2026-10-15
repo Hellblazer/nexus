@@ -77,7 +77,7 @@ def test_the_pause_sequence_and_give_up_point_match_the_registry(tmp_path: Path)
     each gives up, must be identical."""
     mirror = _load()
     lease = tmp_path / "lease"
-    lease.write_text("{}")
+    lease.write_text("{}", encoding="utf-8")
 
     real_clock = _Clock()
     registry = sr.ServiceRegistry(
@@ -146,7 +146,7 @@ def _live_lease(path: Path) -> None:
     path.write_text(json.dumps({
         "status": "live", "heartbeat_epoch": time.time(), "ttl": 60.0,
         "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "t0k3n"},
-    }))
+    }), encoding="utf-8")
     path.chmod(0o600)
 
 

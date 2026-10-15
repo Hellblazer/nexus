@@ -224,10 +224,14 @@ def test_the_placeholder_check_would_have_caught_the_original() -> None:
 #: conexus 4.34.4 (3cd9e7d12) set alwaysLoad on every server because sessions
 #: stopped invoking tools whose schemas Claude Code defers behind tool search;
 #: bf134131a (nexus-ivi4s) turned it off for nexus-catalog only, whose ten
-#: tools load on first use. nexus and sequential-thinking carry the tools
-#: sessions use most, so flipping either off stops those tools being invoked.
+#: tools load on first use. sequential-thinking carries a tool sessions use
+#: most, so flipping it off stops that tool being invoked.
+#:
+#: nexus (nexus-fbtyl) carries NO server-level key: eight of its tools are
+#: flagged per tool in their ``_meta`` instead (tests/test_mcp_always_load.py),
+#: and a server-level ``false`` would override those flags and defer all 44.
 _EXPECTED_ALWAYS_LOAD = {
-    "nexus": True,
+    "nexus": None,
     "sequential-thinking": True,
     "nexus-catalog": False,
 }
@@ -238,6 +242,6 @@ def test_always_load_values_are_pinned() -> None:
     actual = {name: cfg.get("alwaysLoad") for name, cfg in mcp_json.items()}
     assert actual == _EXPECTED_ALWAYS_LOAD, (
         "conexus/.mcp.json alwaysLoad drifted: deferred schemas are not "
-        "invoked, so nexus and sequential-thinking must stay true and "
-        f"nexus-catalog false; got {actual!r}"
+        "invoked, so sequential-thinking must stay true, nexus-catalog false "
+        f"and nexus unset (per-tool flags); got {actual!r}"
     )

@@ -26,6 +26,7 @@ import textwrap
 from pathlib import Path
 
 from nexus._hook_runtime import entry
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _ENTRY_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry"]
 
@@ -50,7 +51,7 @@ def _write_fixture_verb(tmp_path: Path, module_name: str, body: str) -> Path:
 
 def _run(argv: list[str], env: dict[str, str], stdin: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [*_ENTRY_ARGV, *argv], input=stdin, env=env, capture_output=True, text=True, timeout=30,
+        [*_ENTRY_ARGV, *argv], input=stdin, env=env, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, timeout=30,
     )
 
 
@@ -290,7 +291,7 @@ def test_this_module_does_not_touch_the_click_hook_group() -> None:
     ``nexus.commands.hook`` and ``Click`` in prose, which a naive substring
     check would misread as an import.
     """
-    tree = ast.parse(Path(entry.__file__).read_text())
+    tree = ast.parse(Path(entry.__file__).read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

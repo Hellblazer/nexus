@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 from tests._module_seam import setattr_in
 from tests._platform import (
     IS_WINDOWS,
@@ -157,7 +158,7 @@ class Box:
         self.behave_file = root / "behave.json"
         for d in (self.bin, self.config, self.home, self.stage, self.site):
             d.mkdir(parents=True, exist_ok=True)
-        self.log.write_text("")
+        self.log.write_text("", encoding="utf-8")
         self.behave([])
         self.extra_env: dict[str, str] = {}
         self.install(self.bin, "uv")
@@ -170,7 +171,7 @@ class Box:
             script = _FAKE.format(shebang=WINDOWS_SHEBANG, name=name, marker=marker)
             return install_windows_exe_fake(directory, name, script)
         fake = directory / name
-        fake.write_text(_FAKE.format(shebang=f"#!{sys.executable}", name=name, marker=marker))
+        fake.write_text(_FAKE.format(shebang=f"#!{sys.executable}", name=name, marker=marker), encoding="utf-8")
         fake.chmod(0o755)
         return fake
 
@@ -217,7 +218,7 @@ class Box:
         return rule
 
     def behave(self, rules: list[dict[str, Any]]) -> None:
-        self.behave_file.write_text(json.dumps(rules))
+        self.behave_file.write_text(json.dumps(rules), encoding="utf-8")
 
     def provision(self) -> None:
         """The files ``nx init`` leaves for a local service: no lease, no URL."""
@@ -225,7 +226,7 @@ class Box:
         for rel in ("pg_credentials", f"service/{binary}", "postgres/PG_VERSION"):
             target = self.config / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("x")
+            target.write_text("x", encoding="utf-8")
 
     def init_effects(self) -> list[dict[str, Any]]:
         binary = "nexus-service.exe" if IS_WINDOWS else "nexus-service"
@@ -249,13 +250,13 @@ class Box:
 
     def hook_site(self, code: str) -> None:
         """Run every interpreter in the chain with *code* at start-up."""
-        (self.site / "sitecustomize.py").write_text(code)
+        (self.site / "sitecustomize.py").write_text(code, encoding="utf-8")
         self.extra_env["PYTHONPATH"] = str(self.site)
 
     def cli(self, *args: str, timeout: float = 60, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(_SETUP), *args], capture_output=True, text=True, env=self.env(**extra),
-            timeout=timeout, check=False,
+            timeout=timeout, check=False, encoding=PYTHON_CHILD_ENCODING
         )
 
     def start(self, mode: str, autostart: bool | None = None, **extra: str) -> dict[str, Any]:
@@ -292,7 +293,7 @@ class Box:
 
     def events(self) -> list[dict[str, Any]]:
         out = []
-        for line in self.log.read_text().splitlines():
+        for line in self.log.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 out.append(json.loads(line))
         return out
@@ -322,7 +323,7 @@ class Box:
 
     def read_log(self) -> str:
         path = self.setup / "setup.log"
-        return path.read_text(errors="replace") if path.exists() else ""
+        return path.read_text(errors="replace", encoding="utf-8") if path.exists() else ""
 
 
 @pytest.fixture
@@ -390,9 +391,9 @@ def _terminate(pid: int) -> None:
 def _make_stale_lock(setup: Path, *, age: float = 120.0, owner: str = "dead-owner") -> None:
     lock = setup / "lock"
     lock.mkdir(parents=True)
-    (lock / "owner").write_text(owner)
+    (lock / "owner").write_text(owner, encoding="utf-8")
     heartbeat = lock / "heartbeat"
-    heartbeat.write_text("0")
+    heartbeat.write_text("0", encoding="utf-8")
     old = time.time() - age
     os.utime(heartbeat, (old, old))
 
@@ -513,25 +514,25 @@ def test_the_build_names_the_plugins_own_version_and_has_no_fallback(tmp_path: P
     def run() -> dict[str, Any]:
         r = subprocess.run(
             [sys.executable, str(script), "start", "--mode", "cli-only"], capture_output=True, text=True,
-            env=box.env(), timeout=60, check=False,
+            env=box.env(), timeout=60, check=False, encoding=PYTHON_CHILD_ENCODING
         )
         assert r.returncode == 0, r.stderr
         return box.wait_terminal()
 
-    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "conexus", "version": "9.9.9"}))
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "conexus", "version": "9.9.9"}), encoding="utf-8")
     box.behave([box.uv_builds_nx()])
     assert run()["state"] == "done"
     assert f"conexus==9.9.9" in box.calls("uv")[0]["args"]
 
     shutil.rmtree(box.tools)
-    box.log.write_text("")
-    (root / ".claude-plugin" / "plugin.json").write_text("{not json")
+    box.log.write_text("", encoding="utf-8")
+    (root / ".claude-plugin" / "plugin.json").write_text("{not json", encoding="utf-8")
     done = run()
     assert done["state"] == "failed"
     assert done["failed_step"] == "build"
     assert box.calls() == [], "no fallback command is run"
 
-    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "conexus"}))
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "conexus"}), encoding="utf-8")
     done = run()
     assert done["state"] == "failed"
     assert box.calls() == [], "a manifest with no version is not a version"
@@ -671,7 +672,7 @@ def test_a_second_call_during_a_fresh_heartbeat_starts_nothing_and_returns_the_s
 def test_a_stale_heartbeat_is_removed_and_the_run_resumes(box: Box) -> None:
     box.layout()
     _make_stale_lock(box.setup)
-    (box.setup / "status.json").write_text(json.dumps({"state": "running", "stage": "init", "mode": "local"}))
+    (box.setup / "status.json").write_text(json.dumps({"state": "running", "stage": "init", "mode": "local"}), encoding="utf-8")
     assert box.status()["state"] == "interrupted"
     out = box.start("local")
     assert out["started"] is True
@@ -745,7 +746,7 @@ def test_a_run_killed_inside_nx_init_resumes_with_nx_init(box: Box) -> None:
     os.utime(box.setup / "lock" / "heartbeat", (old, old))
     assert box.status()["state"] == "interrupted"
     box.behave([{"prog": "nx", "match": ["init"]}])
-    box.log.write_text("")
+    box.log.write_text("", encoding="utf-8")
     out = box.start("local")
     assert out["started"] is True
     done = box.wait_terminal()
@@ -795,14 +796,14 @@ def test_two_processes_that_find_a_stale_lock_together_leave_one_holder(box: Box
     running at the same moment, not exit codes: a loser that exits 0 and a winner
     that exits 0 look the same."""
     _make_stale_lock(box.setup)
-    (box.setup / "status.json").write_text(json.dumps({"state": "running", "stage": "build", "mode": "cli-only"}))
+    (box.setup / "status.json").write_text(json.dumps({"state": "running", "stage": "build", "mode": "cli-only"}), encoding="utf-8")
     box.behave([box.uv_builds_nx(sleep=2.0)])
     env = box.env(NX_SETUP_RECLAIM_PAUSE="0.9")
     procs = []
     for _ in range(2):  # 0.3 s apart: both read the stale lock before either removes it (0.9 s pause)
         procs.append(subprocess.Popen(
             [sys.executable, str(_SETUP), "start", "--mode", "cli-only"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=env,
+            text=True, env=env, encoding=PYTHON_CHILD_ENCODING
         ))
         time.sleep(0.3)
     outs = [p.communicate(timeout=60) for p in procs]
@@ -823,9 +824,9 @@ def test_a_finishing_run_does_not_swallow_the_next_call(box: Box) -> None:
     setup.mkdir(parents=True)
     lock = setup / "lock"
     lock.mkdir()
-    (lock / "owner").write_text("finishing")
-    (lock / "heartbeat").write_text("0")
-    (setup / "status.json").write_text(json.dumps({"state": "done", "stage": "verify", "mode": "local"}))
+    (lock / "owner").write_text("finishing", encoding="utf-8")
+    (lock / "heartbeat").write_text("0", encoding="utf-8")
+    (setup / "status.json").write_text(json.dumps({"state": "done", "stage": "verify", "mode": "local"}), encoding="utf-8")
     threading.Timer(0.4, lambda: shutil.rmtree(lock)).start()
     token = mod.acquire_lock(setup, wait_for_finish=True)
     assert token is not None
@@ -887,7 +888,7 @@ def test_the_command_that_starts_a_run_returns_before_the_run_ends_and_holds_no_
     began = time.monotonic()
     proc = subprocess.Popen(
         [sys.executable, str(_SETUP), "start", "--mode", "local"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.PIPE, text=True, env=box.env(),
+        stdin=subprocess.PIPE, text=True, env=box.env(), encoding=PYTHON_CHILD_ENCODING
     )
     out, err = proc.communicate(timeout=60)
     assert time.monotonic() - began < 5, "the caller's pipes stayed open until the run ended"
@@ -927,7 +928,7 @@ def test_the_status_file_is_created_owner_only_in_the_creating_call(tmp_path: Pa
     finally:
         os.umask(old_umask)
     status = setup / "status.json"
-    assert json.loads(status.read_text())["n"] == 2
+    assert json.loads(status.read_text(encoding="utf-8"))["n"] == 2
     assert_owner_only(status)
     if not IS_WINDOWS:
         creating = [(p, f, m) for p, f, m in opened if str(setup) in p]
@@ -1202,7 +1203,7 @@ def test_an_unreadable_owner_file_is_not_a_lost_lock(tmp_path: Path, monkeypatch
         time.sleep(0.6)  # a dozen beats over the unreadable file
         assert hb.is_alive(), "an owner read that raised ValueError ended the heartbeat"
         assert not hb.lost.is_set()
-        owner.write_text(token)
+        owner.write_text(token, encoding="utf-8")
         _age_heartbeat(setup)
         _wait_for(lambda: (mod._mtime_age(setup / "lock" / "heartbeat") or 999) < 5, what="a heartbeat once the owner file reads again")
     finally:
@@ -1216,7 +1217,7 @@ def test_the_lock_is_lost_when_its_owner_is_someone_else_or_it_is_gone(tmp_path:
     hb.start()
     try:
         if how == "foreign owner":
-            (setup / "lock" / "owner").write_text("someone-else")
+            (setup / "lock" / "owner").write_text("someone-else", encoding="utf-8")
         else:
             shutil.rmtree(setup / "lock")
         _wait_for(hb.lost.is_set, what="the loss")
@@ -1228,7 +1229,7 @@ def test_holds_is_false_the_moment_the_owner_changes(tmp_path: Path, monkeypatch
     mod, setup, token = _held_lock(tmp_path, monkeypatch)
     hb = mod._Heartbeat(setup / "lock", token)  # not started: no beat to notice it
     assert hb.holds() is True
-    (setup / "lock" / "owner").write_text("another")
+    (setup / "lock" / "owner").write_text("another", encoding="utf-8")
     assert hb.holds() is False
     assert hb.lost.is_set()
 
@@ -1238,14 +1239,14 @@ def test_update_end_and_fail_write_nothing_when_the_lock_is_not_ours(tmp_path: P
     run = mod._Run(setup, "local", False, mod._Heartbeat(setup / "lock", token))
     run.at("build")
     before = (setup / "status.json").read_bytes()
-    (setup / "lock" / "owner").write_text("another")
+    (setup / "lock" / "owner").write_text("another", encoding="utf-8")
     with pytest.raises(mod._LockLost):
         run.update(stage="x")
     assert run.end(mod.DONE, "m", "n") == 1
     assert run.fail("init", "m") == 1
     assert (setup / "status.json").read_bytes() == before
     assert not (setup / "status.error").exists()
-    assert (setup / "lock" / "owner").read_text() == "another", "a displaced run does not touch the new holder's lock"
+    assert (setup / "lock" / "owner").read_text(encoding="utf-8") == "another", "a displaced run does not touch the new holder's lock"
 
 
 def test_a_run_that_loses_its_lock_kills_its_child_and_writes_nothing_more(box: Box) -> None:
@@ -1256,11 +1257,11 @@ def test_a_run_that_loses_its_lock_kills_its_child_and_writes_nothing_more(box: 
     before = box.status_file()
     assert before is not None and before["stage"] == "init"
     owner = box.setup / "lock" / "owner"
-    _retry(lambda: owner.write_text("someone-else"))
+    _retry(lambda: owner.write_text("someone-else", encoding="utf-8"))
     _wait_for(lambda: not _alive(init["pid"]), 30, "the child's death")
     _wait_for(lambda: not _alive(before["pid"]), 30, "the run's exit")
     assert box.status_file() == before, "a displaced run wrote a status"
-    assert owner.read_text() == "someone-else"
+    assert owner.read_text(encoding="utf-8") == "someone-else"
     assert (box.setup / "lock").is_dir()
     assert "no longer holds the lock" in box.read_log()
 
@@ -1294,7 +1295,7 @@ def test_a_status_that_cannot_be_written_still_releases_the_lock_and_says_why(bo
 def test_the_next_start_clears_a_leftover_error_record(box: Box) -> None:
     box.layout()
     box.setup.mkdir(parents=True)
-    (box.setup / "status.error").write_text(json.dumps({"state": "failed", "message": "old"}))
+    (box.setup / "status.error").write_text(json.dumps({"state": "failed", "message": "old"}), encoding="utf-8")
     assert box.status()["state"] == "failed"
     box.start("cli-only")
     assert box.wait_terminal()["state"] == "done"
@@ -1345,7 +1346,7 @@ def test_a_step_that_times_out_is_killed_with_everything_it_started(box: Box, mo
     pids = box.root / "pids"
     code, _ = run.cmd([sys.executable, "-c", _GRANDCHILD, str(pids)])
     assert code is None, "a timeout is reported as None"
-    child, grandchild = (int(x) for x in pids.read_text().split())
+    child, grandchild = (int(x) for x in pids.read_text(encoding="utf-8").split())
     _wait_for(lambda: not _alive(child) and not _alive(grandchild), 10, "the death of the child and its child")
     assert "timed out" in box.read_log()
 
@@ -1388,7 +1389,7 @@ def test_the_windows_tree_kill_is_taskkill_by_pid_without_a_window(monkeypatch: 
 
 def test_a_config_directory_that_cannot_exist_gives_json_and_no_traceback(box: Box) -> None:
     blocker = box.root / "blocker"
-    blocker.write_text("a file where a directory is needed")
+    blocker.write_text("a file where a directory is needed", encoding="utf-8")
     for args in (["start", "--mode", "cli-only"], ["start", "--mode", "local"], ["not-now"], ["status"]):
         r = box.cli(*args, NEXUS_CONFIG_DIR=str(blocker / "sub"))
         assert r.returncode == 0, (args, r.stderr)
@@ -1471,8 +1472,8 @@ def test_an_orphaned_status_temp_file_is_swept_at_the_next_start(box: Box) -> No
     box.setup.mkdir(parents=True)
     old = box.setup / "status.json.4242.dead.tmp"
     fresh = box.setup / "status.json.4243.live.tmp"
-    old.write_text("x")
-    fresh.write_text("x")
+    old.write_text("x", encoding="utf-8")
+    fresh.write_text("x", encoding="utf-8")
     stale = time.time() - 300
     os.utime(old, (stale, stale))
     box.start("cli-only")
@@ -1610,7 +1611,7 @@ def test_a_build_that_leaves_an_nx_that_cannot_start_fails_the_build_step_and_sa
 def test_a_healthy_layout_install_is_still_asked_and_still_skipped(box: Box) -> None:
     """The cannot-start check must not turn a working install into a rebuild."""
     box.layout()
-    (box.tools / "gen-20260101T000000Z" / "pyvenv.cfg").write_text(f"home = {box.root}\n")  # a directory that exists
+    (box.tools / "gen-20260101T000000Z" / "pyvenv.cfg").write_text(f"home = {box.root}\n", encoding="utf-8")  # a directory that exists
     box.start("cli-only")
     done = box.wait_terminal()
     assert done["state"] == "done" and box.calls() == []
@@ -1747,7 +1748,7 @@ def _plugin_copy(tmp_path: Path) -> tuple[Path, Path]:
 )
 def test_the_plugin_version_is_accepted_only_when_it_looks_like_a_version(tmp_path: Path, version: Any, ok: bool) -> None:
     manifest, script = _plugin_copy(tmp_path)
-    manifest.write_text(json.dumps({"name": "conexus", "version": version}))
+    manifest.write_text(json.dumps({"name": "conexus", "version": version}), encoding="utf-8")
     mod = _load_module(script)
     assert mod.plugin_version() == (version if ok else None)
 
@@ -1884,7 +1885,7 @@ def test_provisioned_is_the_three_file_test(box: Box, monkeypatch: pytest.Monkey
         target = box.config / rel
         target.unlink()
         assert mod.provisioned(box.config) is False, f"{rel} missing"
-        target.write_text("x")
+        target.write_text("x", encoding="utf-8")
 
 
 def test_the_whole_state_set_is_public_and_status_view_stays_inside_it(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1894,7 +1895,7 @@ def test_the_whole_state_set_is_public_and_status_view_stays_inside_it(box: Box,
     assert mod.INTERRUPTED == "interrupted" and mod.NONE == "none"
     assert mod.status_view(box.setup)["state"] == "none"
     box.setup.mkdir(parents=True)
-    (box.setup / "status.json").write_text(json.dumps({"state": "running"}))
+    (box.setup / "status.json").write_text(json.dumps({"state": "running"}), encoding="utf-8")
     assert mod.status_view(box.setup)["state"] == "interrupted"
     for name in ("provisioned", "status_view", "config_dir", "setup_dir", "read_status"):
         assert callable(getattr(mod, name)) and getattr(mod, name).__doc__, name
@@ -1948,7 +1949,7 @@ def test_a_relative_config_directory_reaches_the_detached_run(box: Box) -> None:
     box.behave([box.uv_builds_nx()])
     r = subprocess.run(
         [sys.executable, str(_SETUP), "start", "--mode", "cli-only"], capture_output=True, text=True,
-        env=box.env(NEXUS_CONFIG_DIR=box.config.name), cwd=str(box.config.parent), timeout=60, check=False,
+        env=box.env(NEXUS_CONFIG_DIR=box.config.name), cwd=str(box.config.parent), timeout=60, check=False, encoding=PYTHON_CHILD_ENCODING
     )
     assert r.returncode == 0 and json.loads(r.stdout)["started"] is True, r.stdout + r.stderr
     done = box.wait_terminal()

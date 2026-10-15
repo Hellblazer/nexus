@@ -937,7 +937,7 @@ def _build_flip_shims(
     if isinstance(build, _WindowsBuild):
         return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
     built = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        argv_off_cwd(build), capture_output=True, text=True, check=False, env=_script_env(),
+        argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
     )
     if built.returncode != 0:
         detail = built.stderr.strip()
@@ -1269,7 +1269,7 @@ def _converge_legacy_install(
 
     tools.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        argv_off_cwd(build), capture_output=True, text=True, check=False, env=_script_env(),
+        argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
     )
     if r.returncode != 0:
         raise click.ClickException(
@@ -1372,7 +1372,7 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
          f'. "{install_dir}/layout.sh"; . "{install_dir}/flip.sh"; '
          f'. "{install_dir}/shims.sh"; . "{install_dir}/census.sh"; '
          f'. "{install_dir}/gc.sh"; . "{install_dir}/legacy.sh"; {snippet}']),
-        capture_output=True, text=True, check=False, env=_script_env(),
+        capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
     )
     if check and r.returncode != 0:
         raise click.ClickException(f"{snippet.split()[0]} failed:\n{r.stderr.strip()}")

@@ -204,7 +204,7 @@ standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` (
   `taxonomy_centroids` partitioned by model only, so their tenant-level pruning
   is not yet shown; the Test Plan pins it.
 
-#### Registered research findings (T2 `nexus_rdr/225-research-1` to `-16`)
+#### Registered research findings (T2 `nexus_rdr/225-research-1` to `-17`)
 
 - **✅ Verified** (source search), research-1. The two 1024-d models share one column and one HNSW index across all tenants.
   *Source: vectors-004 lines 269 and 326; `requireHomogeneousModel`.*
@@ -238,6 +238,8 @@ standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` (
   *Source: T2 `nexus/rdr225-step2-local-feasibility-2026-10-05`; ~/nexus-evidence/rdr225-2026-10-05/step2/ (SHA256SUMS).*
 - **⚠️ Documented** (docs only), research-16. The literature crossover points (Veda, Compass) were measured warm, and VADER finds query-filter correlation.
   *Source: knowledge__dt-papers.*
+- **⚠️ Documented** (docs only), research-17. pg_vectorsearch (Timescale) adds PRISM, an IVF-style ANN index that indexes existing pgvector `vector` and `halfvec` columns in place. Its README claims HNSW-level recall faster and in a quarter of the memory at 100M vectors; that is its own benchmark, not measured here. Not adopted: it needs PostgreSQL 18 (the bundle and T3 are on PG17), it is alpha with no promised upgrade path, it would be another native extension in every platform's PG bundle (its README does not mention Windows) and on the managed provider, and it has no keyword or hybrid ranking. Memory already matters on small instances (F3), but this design's per-model, per-tenant leaves shrink each graph, and the recall losses in F2 and F4 are filter-driven, which an IVF index is not shown to fix. Revisit only if one leaf outgrows memory for its HNSW graph, after pgvector's own options (halfvec, quantization, IVFFlat).
+  *Source: https://github.com/timescale/pg_vectorsearch README, read 2026-10-14.*
 
 ### Evaluation Protocol (pre-registered, revision 6, frozen, 2026-10-05)
 
@@ -973,3 +975,4 @@ steps on a fork of its own and does not run the real changeset. Both are in scop
 - 2026-10-06: Test-suite teardown (nexus-3wh8d.7, Sam's decision): `nexus.drop_tenant_partitions(tenant)` added to `vectors-030-1`, and the Python engine substrate calls it for each minted test tenant when the test ends. Reason: one tenant per test, never removed, took a worker's PG past 2,000 tenants and the token insert past its bound (503 `tenant_creation_busy` on 6,106 tests). No design decision changed.
 - 2026-10-07: Phase 2 read path (nexus-3wh8d.15) and checks (.16) built; fix round after their code review and critique (nexus-3wh8d.17, .18). Recorded, with no change to a decision of Sam's: the read-path changesets `vectors-031-1` and `-2` (Phase 2 Step 2); the walk's expected counts (3 new, 15 pending); the unvacuumed-leaf state after the walk and the post-boot VACUUM; the local-only scope of the doctor rows (Day 2).
 - 2026-10-12: TS2's 2x rule amended on Sam's decision: it fails a family only when the 300-tenant p95 is also more than 2 ms above the 2-tenant p95 (Step-2 results, TS2). One row had failed at 2.05x on a 0.6 ms baseline. The 25 ms cap is unchanged.
+- 2026-10-14: Research finding 17 (pg_vectorsearch's PRISM index) recorded as documented, not adopted, on Sam's request. No change to a decision.

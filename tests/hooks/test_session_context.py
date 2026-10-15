@@ -33,7 +33,7 @@ from nexus.hooks import session_context, t2_prefix_scan
 class TestHygieneBlockCarried:
     def test_silent_when_cache_fresh(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache.txt"
-        cache.write_text("## Knowledge Map\nfresh\n")
+        cache.write_text("## Knowledge Map\nfresh\n", encoding="utf-8")
         lines: list[str] = []
         session_context._emit_hygiene_block(lines, str(cache))
         assert lines == []
@@ -50,7 +50,7 @@ class TestHygieneBlockCarried:
 
     def test_emits_warning_when_cache_stale(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache.txt"
-        cache.write_text("## Knowledge Map\nstale\n")
+        cache.write_text("## Knowledge Map\nstale\n", encoding="utf-8")
         ten_days_ago = _time.time() - (10 * 86400)
         os.utime(cache, (ten_days_ago, ten_days_ago))
 
@@ -65,7 +65,7 @@ class TestHygieneBlockCarried:
 
     def test_threshold_is_exactly_7_days(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache.txt"
-        cache.write_text("x\n")
+        cache.write_text("x\n", encoding="utf-8")
 
         seven = _time.time() - (7 * 86400)
         os.utime(cache, (seven, seven))
@@ -81,7 +81,7 @@ class TestHygieneBlockCarried:
 
     def test_block_appends_to_existing_output(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache.txt"
-        cache.write_text("x\n")
+        cache.write_text("x\n", encoding="utf-8")
         old = _time.time() - (15 * 86400)
         os.utime(cache, (old, old))
 

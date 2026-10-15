@@ -362,7 +362,8 @@ def _modules(engine_dir: Path, *, msvcp: bool = True, foreign: bool = False) -> 
 
 
 def _run(tmp_path: Path, *, windows: bool, http: FakeHttp | None = None, launcher: FakeLauncher | None = None,
-         runner: FakeRunner | None = None, engine: Path | None = None, **kw):
+         runner: FakeRunner | None = None, engine: Path | None = None,
+         ports: tuple[int, int] | None = (55001, 55002), **kw):
     out: list[str] = []
     launcher = launcher or FakeLauncher()
     http = http or FakeHttp(version=GOOD_VERSION, embed=GOOD_EMBED)
@@ -374,7 +375,7 @@ def _run(tmp_path: Path, *, windows: bool, http: FakeHttp | None = None, launche
         model_root=_model(tmp_path), changelog_dir=_changelog(tmp_path), workdir=tmp_path / "work",
         platform=sm.Platform(windows=windows), runner=runner, launcher=launcher, http=http,
         base_env={"SystemRoot": r"C:\Windows", "TEMP": str(tmp_path), "PATH": r"C:\Program Files\Microsoft Visual Studio\bin"},
-        emit=out.append, sleep=lambda s: None, ports=(55001, 55002), keep=False, **kw,
+        emit=out.append, sleep=lambda s: None, ports=ports, keep=False, **kw,
     )
     return out, launcher, http, runner
 
@@ -416,6 +417,28 @@ def test_the_happy_path_runs_every_stage_in_order(tmp_path: Path, windows: bool)
     assert (len([c for c in runner.calls if "powershell" in str(c[0]).lower()]) == 1) is windows
     text = "\n".join(out)
     assert "changesets 3/3" in text and "768" in text
+
+
+def test_the_engine_port_is_chosen_after_postgres_holds_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two free_port() calls in a row can return the same number; then PostgreSQL takes it and the engine
+    # dies with "Address already in use" (run 38682323262, 2026-10-15). The engine's port is asked for
+    # only once PostgreSQL is listening, and the run says which port it is.
+    launcher = FakeLauncher()
+    runner = _ListingRunner(launcher)
+    seen: list[list[str]] = []
+    numbers = iter([55011, 55012])
+
+    def free_port() -> int:
+        seen.append([Path(c[0]).name for c in runner.calls if "powershell" not in str(c[0]).lower()])
+        return next(numbers)
+
+    monkeypatch.setattr(es.sm, "free_port", free_port)
+    out, launcher, http, runner = _run(tmp_path, windows=True, launcher=launcher, runner=runner, ports=None)
+    assert out[-1] == "SMOKE PASSED"
+    assert seen == [[], ["initdb.exe", "pg_ctl.exe", "createdb.exe"]]
+    assert "SMOKE postgres: up on 127.0.0.1:55011, database nexus" in out
+    assert "SMOKE engine port: 127.0.0.1:55012" in out
+    assert all(":55012/" in u for _, u in http.calls)
 
 
 def test_the_engine_starts_from_the_extracted_archive_with_the_four_dlls_beside_it(tmp_path: Path) -> None:

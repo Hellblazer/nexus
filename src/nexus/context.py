@@ -200,17 +200,6 @@ def generate_context_l1(
     return output_path
 
 
-def read_context_l1(repo_path: Path | None = None) -> str:
-    """Read the cached L1 context for a repo. Returns empty string if missing."""
-    path = _context_path_for_repo(repo_path)
-    if path.exists():
-        return path.read_text().strip()
-    # Fallback to legacy global file
-    if CONTEXT_L1_PATH.exists():
-        return CONTEXT_L1_PATH.read_text().strip()
-    return ""
-
-
 def refresh_context_l1(
     *,
     db_path: Path | None = None,
