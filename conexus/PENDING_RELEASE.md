@@ -45,6 +45,8 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- subagent git guard exempts one ssh command to chas (nexus-yc7fs): `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` lets a subagent run `ssh chas-test '<git write>'`, whose git runs in chas's own clone. The command must be a single ssh to a chas alias with only options that run nothing locally, no operator or substitution that could start a local command, and no onward ssh.
+
 
 
 ## Deferred to the next client release

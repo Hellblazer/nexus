@@ -597,3 +597,75 @@ def test_a_hostile_300kb_command_is_scanned_in_linear_time(shared_repo):
     elapsed = time.monotonic() - t0
     assert out.get("permissionDecision") == "deny"
     assert elapsed < 10, f"scan of a {len(big)}-byte command took {elapsed:.1f}s"
+
+
+# --- The chas carve-out (nexus-yc7fs) ---------------------------------------
+#
+# A subagent's ONE ssh command to the chas test host runs its git on chas, so
+# it cannot touch the shared checkout this guard protects. The carve-out must
+# not admit anything that runs locally: a shell operator after the ssh, a
+# command or process substitution (both expand on the laptop before ssh
+# starts), an ssh option that runs a local command, or a hop back out of chas.
+
+#: Each runs its git on chas only.
+_CHAS_ALLOWED = [
+    "ssh chas-test 'git -C ~/src/nexus-wt/x add -- tests/e2e/prefix-capture/proxy.py'",
+    "ssh chas-test 'W=~/src/nexus-wt/x; git -C $W add -- a b && git -C $W commit -m msg' </dev/null",
+    "ssh chas-test 'cd ~/src/nexus && git worktree add ../nexus-wt/r r'",
+    'ssh chas "git -C /home/nxtest/src/nexus-wt/x commit -m msg"',
+    'ssh chas-test "git -C ' + D + 'HOME/src/nexus-wt/x add f; git -C x commit -m m"',
+    "ssh -o ConnectTimeout=5 chas-test 'git -C x commit -m m'",
+    "ssh -oBatchMode=yes -nT chas-test 'git -C x add f'",
+    "ssh nxtest@chas-test 'git -C x add f'",
+    "ssh chas-test git -C x add f",
+    "/usr/bin/ssh chas-test 'git -C x reset --hard'",
+]
+
+#: Each runs git (or something that could) on the laptop, or leaves chas.
+_CHAS_DENIED = [
+    "ssh chas-test 'true'; git checkout -- f",
+    "ssh chas-test 'true' && git add f",
+    "ssh chas-test 'true' || git add f",
+    "ssh chas-test 'true' & git add f",
+    "ssh chas-test true | git commit -m m",
+    "ssh chas-test 'git add f'\ngit checkout -- f",
+    'ssh chas-test "' + D + '(git checkout -- f)"',
+    "ssh chas-test " + D + "(git checkout -- f)",
+    'ssh chas-test "' + BT + "git add f" + BT + '"',
+    "ssh chas-test " + BS + "' ; git checkout -- f " + BS + "'",
+    "ssh chas-test <(git add f)",
+    "ssh -o ProxyCommand='git checkout -- f' chas-test true",
+    "ssh -oProxyCommand=git" + BS + " checkout chas-test true",
+    "ssh chas-test -o ProxyCommand='git add f' true",
+    "ssh -o LocalCommand='git add f' -o PermitLocalCommand=yes chas-test true",
+    "ssh -F cfg chas-test 'git add f'",
+    "ssh -J jump chas-test 'git add f'",
+    "ssh chas-test.evil 'git add f'",
+    "ssh other-host 'git add f'",
+    "ssh chas-test 'ssh laptop git -C ~/git/nexus checkout -- f'",
+    "X=1 ssh chas-test 'git add f'",
+    "cd /tmp && ssh chas-test 'git add f'",
+    "ssh " + D + "H 'git add f'",
+    "ssh chas-test " + D + "'" + BS + "x27'; git add f",
+]
+
+
+def test_a_subagent_ssh_to_chas_is_allowed(shared_repo):
+    assert _denied_among(_CHAS_ALLOWED, shared_repo) == []
+
+
+def test_a_command_that_can_run_git_locally_is_not_carved_out(shared_repo):
+    assert _not_denied(_CHAS_DENIED, shared_repo) == []
+
+
+def test_the_chas_carve_out_is_not_vacuous(shared_repo):
+    """Without the carve-out every allowed command above contains git and a
+    write verb, so the primary rule would deny it: the allow test proves the
+    carve-out fired, not that the scan missed the text."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("guard", SCRIPT)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    for cmd in _CHAS_ALLOWED:
+        assert guard._primary_match(guard._normalize_for_primary_scan(cmd)), cmd

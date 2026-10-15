@@ -1336,6 +1336,104 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
     return head
 
 
+#: The chas test host's ssh aliases (nexus-yc7fs, Sam 2026-10-14). A git write
+#: sent there runs in chas's own clone, never in the checkout this guard protects.
+_REMOTE_TEST_HOSTS: frozenset[str] = frozenset({"chas", "chas-test"})
+
+#: ssh flags that run nothing locally. Every other option is refused, since
+#: ProxyCommand, LocalCommand, -F (a config that can set either) and -J (a
+#: jump) can all start a process on this machine or route somewhere else.
+_SAFE_SSH_FLAG_LETTERS: frozenset[str] = frozenset("nqtT")
+_SAFE_SSH_O_OPTIONS: frozenset[str] = frozenset(
+    {"connecttimeout", "batchmode", "serveraliveinterval", "serveralivecountmax"}
+)
+
+
+def _runs_nothing_locally(command: str) -> bool:
+    """True when no part of ``command`` can start a second local command.
+
+    Walks the text with bash's own quoting states. Outside quotes it refuses
+    the operators that start or chain a command (``; & |``, newline, ``( )``
+    for subshells and substitutions, backtick); inside double quotes it
+    refuses the two that still execute there (backtick and ``$(``). Single
+    quotes are literal to bash, so nothing inside them is refused. A
+    backslash outside single quotes escapes the next character, as in bash;
+    missing that would read ``\\'`` as an opening quote and hide what follows.
+    Redirections (``< >``) stay allowed: they open files, they run nothing.
+    """
+    state = ""  # "", "'" or '"'
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if state == "'":
+            if ch == "'":
+                state = ""
+        elif ch == "\\":
+            i += 1  # the escaped character is literal
+        elif state == '"':
+            if ch == '"':
+                state = ""
+            elif ch == "`" or command.startswith("$(", i):
+                return False
+        elif ch in "'\"":
+            state = ch
+        elif ch in ";&|\n\r()`":
+            return False
+        i += 1
+    return state == ""
+
+
+def _remote_test_host_command(command: str) -> str | None:
+    """The chas host a subagent command runs on, when the WHOLE command is one
+    ssh invocation whose only work happens there; otherwise None.
+
+    nexus-yc7fs: the primary rule matches ``git`` plus a write verb anywhere
+    in the text, so ``ssh chas-test 'git -C <wt> add ...'`` was denied though
+    its git runs in chas's clone. The carve-out is deliberately narrow: the
+    first word is ssh, every option is one that runs nothing locally, the host
+    is a chas alias (``user@`` allowed), nothing anywhere can start a second
+    local command, and the remote part does not ssh onward (a hop from chas
+    back to this machine would reach the protected checkout).
+    """
+    if not _runs_nothing_locally(command):
+        return None
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not tokens or tokens[0] not in ("ssh", "/usr/bin/ssh"):
+        return None
+
+    host: str | None = None
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            if tok.startswith("-o"):
+                if len(tok) == 2:
+                    i += 1
+                    value = tokens[i] if i < len(tokens) else ""
+                else:
+                    value = tok[2:]
+                key = value.split("=", 1)[0].strip().lower()
+                if "=" not in value or key not in _SAFE_SSH_O_OPTIONS:
+                    return None
+            elif not tok[1:] or not set(tok[1:]) <= _SAFE_SSH_FLAG_LETTERS:
+                return None
+            i += 1
+            continue
+        if host is not None:
+            break  # the remote command starts here; ssh parses no options after it
+        host = tok
+        i += 1
+
+    if host is None or host.rsplit("@", 1)[-1] not in _REMOTE_TEST_HOSTS:
+        return None
+    if any("ssh" in tok for tok in tokens[i:]):
+        return None
+    return host
+
+
 def body(payload: dict[str, Any]) -> None:
     agent_id = str(payload.get("agent_id") or "")
 
@@ -1344,6 +1442,17 @@ def body(payload: dict[str, Any]) -> None:
 
     command = _lib.get_bash_command(payload)
     if not command:
+        _lib.pass_through()
+
+    # The chas carve-out (nexus-yc7fs): one ssh command whose git runs on the
+    # test host. Checked before both gates because neither can tell a remote
+    # git from a local one; `_remote_test_host_command` refuses anything that
+    # could also run locally, so this admits nothing the gates exist to stop.
+    if _remote_test_host_command(command) is not None:
+        _lib.log_routing_event(
+            rule=RULE_NAME, outcome="allow_remote_test_host", tool_name="Bash",
+            command_fragment=command,
+        )
         _lib.pass_through()
 
     normalized = _normalize_for_primary_scan(command)
