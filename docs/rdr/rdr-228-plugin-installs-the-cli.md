@@ -454,7 +454,9 @@ process does not share the difference: it decides whether to start the
 service, so it asks with no grace and a lease past its time to live is not a
 service there (`endpoint_usable(..., grace=False)`). A
 local service is *provisioned* when `nx init` has left its files in the Nexus
-config directory (the service binary under `service/`). A service whose
+config directory: `pg_credentials`, `postgres/PG_VERSION` and the service
+binary under `service/`, all three. A run that began `nx init` and did not
+finish runs it again. A service whose
 endpoint resolves but which does not answer, a cloud outage or a hung local
 service, is not a setup state: every tool already reports that error, and this
 record does not change it.
@@ -545,7 +547,14 @@ marker. It holds the status file (JSON, owner-only), the log, the "not now"
 marker and the lock. The lock is a directory made with an atomic create, as
 the generation builder claims a stamp, holding a heartbeat file that the
 setup process rewrites every ten seconds. A lock whose heartbeat is more
-than sixty seconds old is stale and the next `setup` removes it. The
+than sixty seconds old is stale and the next `setup` removes it, unless the
+run's recorded process or its build is still alive, up to ten minutes after
+the last heartbeat. The status file and the file that opens the credentials
+page are created owner-only (mode 0600 on POSIX, an owner-only ACL on
+Windows), and the setup directory is made 0700 on POSIX while the page is
+served. The status file holds one of `running`, `done`, `doctor-failed`,
+`failed` and `unsupported`; `setup_status` reports `interrupted` for a stale
+lock beside a status that is not terminal. The
 heartbeat is new here: the generation builder has no liveness test, and a
 process-id test is avoided because the standard library has no reliable one
 on Windows. `${CLAUDE_PLUGIN_DATA}` is not used.
@@ -600,17 +609,23 @@ each skipped when already done:
    plugin by construction, and a plugin that carries the setup process is
    never older than the CLI release that carries the flag. There is no
    fallback to the two documented commands: they would run the prune and
-   leave two copies. Mode `cli-only` stops here.
+   leave two copies. After the build the CLI is looked up in the generation
+   layout first, then on `PATH`. Mode `cli-only` stops here.
 2. *Service, mode `local`.* When no local service is provisioned:
    `nx init --yes` if `autostart` is true, which registers the login unit
    (`_decide_autostart` in `src/nexus/commands/init.py`), and
    `nx init --yes --no-autostart` if not. When one is provisioned and down:
    `nx daemon service install --autostart` first if `autostart` is true,
-   then `nx daemon service start`.
+   then `nx daemon service start`. Both `nx init` forms pass
+   `--no-beads-prime`: setup does not install the user-level beads file.
 3. *Service, mode `cloud`.* Save what the credentials page accepted
-   (below) with `nx config set`: `service_url`, then for a mint credential
-   `mint_token` on standard input and `mint_tenant`, and for a static token
-   `service_token` on standard input. Never both kinds. No service download.
+   (below) with `nx config set`: for a mint credential `mint_tenant` and
+   `mint_token` on standard input, for a static token `service_token` on
+   standard input, and `service_url` last, so a save that stops half way
+   leaves no address pointing at an unsaved credential. A saved credential of
+   the other kind is removed first. Never both kinds. No service download.
+   Replacing a saved credential is `nx config init`: a later `setup` call
+   starts nothing while a service answers.
 4. *Verify.* `nx doctor`; record pass or the failing rows, and write a
    terminal status.
 
@@ -648,7 +663,11 @@ later. Its requirements:
   engine, and the managed edge answers it 401 for a mint credential (measured
   2026-10-15, T2 `nexus_rdr/228-research-37`). A redirect is never followed.
   An `http` address is accepted as well as `https` (Sam, 2026-10-12: no https
-  requirement).
+  requirement). For an `http` address to another machine the page says the
+  token then travels unencrypted.
+- A connection that has not sent its request within five seconds is closed.
+  Over the connection cap, the oldest such connection is closed to admit a
+  new one.
 - A pair that passes is held in the setup process's memory, the page says
   it was accepted, and the process stops listening. The pair is saved in
   step 3, after the build, because saving needs the CLI. The token goes to
@@ -1488,3 +1507,13 @@ is flagged for trimming before then.
   A build writes the lockstep marker only after `nx --version` of the CLI it
   left confirms the version it built; the lockstep hook treats a CLI that cannot
   start as absent; the bootstrap build names CPU torch on Linux.
+- 2026-10-15: The text follows the code as built (nexus-9i4d4; no behaviour
+  change). A provisioned local service is three files, and an unfinished
+  `nx init` runs again. `nx init` gets `--no-beads-prime`. After the build the
+  CLI is looked up in the generation layout first. A stale lock is not removed
+  while its run or build lives; the status and opener files are owner-only and
+  the setup directory is 0700 while the page is served. The page closes a
+  connection idle five seconds and evicts the oldest over the cap, and warns of
+  an `http` address to another machine. The save writes the credential before
+  `service_url`; `nx config init` replaces a saved one. The status values are
+  listed.
