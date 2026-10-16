@@ -77,6 +77,29 @@ class TestEmbedderStartupNotice:
         _pin(monkeypatch, local=True, choice=choice, active=active)
         assert embedder_startup_notice() is None
 
+    def test_a_recorded_cli_only_choice_gets_no_notice(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Sam, 2026-10-16 (nexus-sv2wx.24 macOS row 3): after the user chose CLI only
+        the server says nothing, and "Run `nx init` to upgrade" points at the very
+        provisioning they declined. `nx doctor`, which the user runs, still shows it."""
+        setup = tmp_path / "setup"
+        setup.mkdir()
+        (setup / "status.json").write_text('{"state": "done", "mode": "cli-only"}', encoding="utf-8")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)
+        assert embedder_startup_notice() is None
+
+    def test_a_finished_local_setup_record_keeps_the_notice(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        setup = tmp_path / "setup"
+        setup.mkdir()
+        (setup / "status.json").write_text('{"state": "done", "mode": "not-now"}', encoding="utf-8")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)
+        assert embedder_startup_notice() is not None
+
     def test_notice_is_single_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Server instructions notice must be compact — one line, no newlines.
         _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)

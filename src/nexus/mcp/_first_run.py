@@ -91,6 +91,14 @@ def embedder_startup_notice() -> str | None:
     if (_config.nexus_config_dir() / CREDENTIALS_FILENAME).exists():
         return None
 
+    # Sam, 2026-10-16 (nexus-sv2wx.24): after a finished CLI-only setup the server
+    # says nothing; "run `nx init`" would offer the provisioning the user declined.
+    # `nx doctor` still reports the advisory when the user asks for it.
+    from nexus.health import setup_recorded_cli_only  # noqa: PLC0415 — branch-local; only reached in local mode
+
+    if setup_recorded_cli_only():
+        return None
+
     from nexus.db.local_ef import _resolve_local_model  # noqa: PLC0415 — branch-local; only reached in local mode
     from nexus.health import local_embedder_advisory  # noqa: PLC0415 — branch-local; only reached in local mode
 
