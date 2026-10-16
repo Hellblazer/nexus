@@ -19,7 +19,11 @@ denies with exit 2 still denies. When there is no ``nx-hook`` at all (a CLI
 older than 7.55.0, or none), the shim also exits 0 with a note: a missing CLI
 must not block a session either. The note is the launcher's line
 (``_cli_lookup.missing_note``); it names no upgrade command, because with no CLI
-there is nothing to upgrade (RDR-228).
+there is nothing to upgrade (RDR-228). An ``nx-hook`` that is found and cannot start
+(``_cli_lookup.cannot_start``: its interpreter is gone, as ``uv`` leaves it when it
+prunes a Python, whether the script names it in a shebang or in the ``sh`` polyglot
+``uv`` writes for a long install path) gets one line and exit 0 too, decided before
+the start (nexus-sv2wx.20).
 
 Standard library only, and no ``nexus`` import: it has to run under whatever
 CLI is installed, including none. ``nx-hook`` is found by the lookup the
@@ -37,6 +41,7 @@ their own subprocess work.
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import signal
@@ -48,6 +53,10 @@ import sys
 # project's cwd runs as the hook's verdict on Windows.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cli_lookup  # noqa: E402 -- must follow the sys.path insert
+
+#: The start errors that mean the CLI cannot start (gone, not a directory on the way, not executable, not a
+#: program the system runs), as against the machine's own trouble.
+_CANNOT_START_ERRNOS: frozenset[int] = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOEXEC})
 
 #: What ``nx-hook`` prints for an unregistered verb in every release that exits
 #: 2 on one (7.55.0 through 7.57.x), from ``main()`` in
@@ -68,16 +77,31 @@ def main(argv: list[str]) -> int:
     verb = argv[0]
     payload = sys.stdin.buffer.read()
     exe = _cli_lookup.resolve("nx-hook")
+    if exe is None:
+        sys.stderr.write(_cli_lookup.missing_note("nx-hook", f"the {verb} hook"))
+        return 0
+    # Found, and the files say it cannot start (an interpreter uv pruned): decided
+    # before the start, as the launcher does. A console script uv wrote as an sh
+    # polyglot (an install path over 127 characters) STARTS, because the kernel runs
+    # the shell, and then exits 126 or 127 at the shell's own exec; that code would be
+    # passed through as the hook's verdict (nexus-sv2wx.20).
+    reason = _cli_lookup.cannot_start(exe)
+    if reason is not None:
+        sys.stderr.write(_cli_lookup.cannot_start_note(exe, reason))
+        return 0
     try:
-        if exe is None:
-            raise FileNotFoundError("nx-hook")
         proc = subprocess.Popen(
             [exe, verb],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=_cli_lookup.project_dir(payload),
         )
-    except FileNotFoundError:
-        sys.stderr.write(_cli_lookup.missing_note("nx-hook", f"the {verb} hook"))
+    except OSError as exc:
+        # Reaped between the lookup and the start, or a file the system will not execute: the CLI cannot
+        # start, which is setup's to repair, so one line and exit 0. Anything else (no file descriptors, no
+        # memory, a fork that failed) is the machine's trouble, not the install's, and surfaces as before.
+        if exc.errno not in _CANNOT_START_ERRNOS:
+            raise
+        sys.stderr.write(_cli_lookup.cannot_start_note(exe, str(exc)))
         return 0
 
     def _forward(signum: int, _frame: object) -> None:

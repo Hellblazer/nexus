@@ -48,7 +48,7 @@ uv run python scripts/check_engine_release_floor.py
 
 If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fails in TWO directions and the remedy differs:
 
-- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see AGENTS.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state ONLY on the non-additive branch — when every wire-ledger `## Unshipped` entry leads with `[additive]`, prefer deploying the engine BEFORE the client tag (nexus-1emxn; Step 9 carries the branch decision) and this state never arises. Otherwise mechanized via `--paired-deploy` (nexus-k1c08):
+- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see .claude/rules/releases-and-engine.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state ONLY on the non-additive branch — when every wire-ledger `## Unshipped` entry leads with `[additive]`, prefer deploying the engine BEFORE the client tag (nexus-1emxn; Step 9 carries the branch decision) and this state never arises. Otherwise mechanized via `--paired-deploy` (nexus-k1c08):
   ```bash
   uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
   ```
@@ -253,7 +253,7 @@ Update any drift before bumping version. Doc audit is what catches "we changed t
 ### 3. Bump version in ALL EIGHT bump targets
 
 CI enforces parity on all but one of these (`conexus/PENDING_RELEASE.md` is a drift
-ledger, not a version field — see `AGENTS.md` § Release cadence policy rule 6 and
+ledger, not a version field — see `.claude/rules/releases-and-engine.md` § Release cadence policy rule 6 and
 `docs/contributing.md` § Release Process Step 7 for the exact enumeration these
 agree on, nexus-smsau 2026-09-27). Missing any one of the seven CI-enforced ones
 fails the marketplace-version-matches-pyproject test, the
@@ -631,7 +631,7 @@ nx --version                 # must print X.Y.Z
 
 ## See also
 
-- `AGENTS.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
+- `.claude/rules/releases-and-engine.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
 - `docs/contributing.md#release-process` (long form — Step-by-step checklist, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)

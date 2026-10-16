@@ -2,7 +2,8 @@
 title: "Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client"
 id: RDR-224
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-15
 priority: high
 author: Sam
 reviewed-by: self
@@ -103,8 +104,17 @@ through a supervisor in `src/nexus/daemon/`. It assumes POSIX throughout:
   refuses both. Measured at implementation: `os.replace` of the lease under
   concurrent readers raised `WinError 5` within 0.9 s, and `os.replace` over a
   running engine executable raised `WinError 5` (T2 `224-f9bgu19-conformance`,
-  `224-f9bgu20-upgrade-stop`). The PostgreSQL bundle directory swap with a live
-  `postgres.exe` was not run.
+  `224-f9bgu20-upgrade-stop`). The PostgreSQL bundle swap over a running stack
+  was measured later, on 2026-10-14. Until then `install-binary` placed the
+  bundle archive but never extracted it, so the runs of 2026-10-12 and the
+  earlier engine swap of 2026-10-14 left the running PostgreSQL in place (nexus-f9bgu.56,
+  fixed in `38c0c035d`). With the fix, on the Home guest, `install-binary` went
+  from `engine-service-v0.1.160` to `v0.1.159` and back over the running stack:
+  each step re-extracted the bundle (the `postgres.exe` creation time moved),
+  the stack was healthy 1.2 s and 1.1 s afterwards, and PostgreSQL ran no crash
+  recovery (T2 `224-dll-rules-and-install-binary-proof-2026-10-14`). The two
+  tags carry the same `postgres.exe`, so a swap to a different PostgreSQL
+  binary is not measured.
 
 #### Gap 4: The engine has no graceful stop on Windows
 
@@ -154,22 +164,52 @@ whole PostgreSQL bundle, and four third-party DLLs the engine extracts at
 runtime (§ Research Findings). Microsoft documents that Smart App Control (a
 Windows 11 feature) checks every executable and DLL the operating system loads
 and blocks unsigned code that has no cloud reputation, with no override.
-We could not reproduce that: on two clean Windows 11 installs with Smart App
-Control on, nothing unsigned was blocked, including a program downloaded by a
-browser (§ Key Discoveries). The exposure is therefore documented but
-unmeasured, not disproven: other builds and physical hardware were not tested.
+Measured on 2026-10-14 on Windows 11 Home build 26300 with Smart App Control on
+(T2 `224-research-35`): the install steps completed, and `nx init --service`
+then failed with `WinError 4551` ("An Application Control policy has blocked
+this file"). CodeIntegrity blocked the unsigned PostgreSQL bundle
+(`pg_config.exe`, `initdb.exe`), two `.pyd` files of the unsigned CPython that
+uv installs, and PortableGit DLLs during its self-extraction. The engine was
+never reached. On 2026-10-15, on the same Home checkpoint with Smart App
+Control on, Windows blocked `nx.exe` itself at install, while uv, its Python,
+Claude Code and Git ran (T2 `224-sac-detection-guest-runs-2026-10-15`). Two
+earlier runs in September saw no block. So three runs with Smart App Control on
+gave three different outcomes, and the cause is not known (§ Key Discoveries).
+A machine with Smart App Control on is an unsupported configuration (Sam's
+decision). In the two runs that blocked, the blocked files included files nexus
+does not ship (uv's Python, the `nx.exe` launcher), so signing nexus's own
+binaries alone would not have helped there.
+
+Since nexus-f9bgu.57 nexus detects the state: `nx init` refuses with the
+install guide's message before it downloads the PostgreSQL bundle when Smart
+App Control is on, and `nx doctor` has a Smart App Control row. Where Windows
+has no Smart App Control (the registry value does not exist), the state is
+absent and `nx doctor` shows no row. The detection is on develop and ships in
+the next client release after 7.80.0, not in 7.80.0. On the 2026-10-15 run with
+Smart App Control on, Windows blocked `nx.exe` before nx could run, so neither
+the refusal nor the row could report there. With Smart App Control in
+evaluation the candidate passed the gate 5 of 5, so the guard does not refuse
+there. In a second run that day `nx.exe` ran, the reader (through the tool environment's Python) returned `on`, and `nx init` refused with the new message within a second, with no download; on the evaluation checkpoint the reader returned `evaluation`.
+
 Enterprise application-control policies (WDAC, AppLocker) were measured on
 2026-10-13 and 2026-10-15: with their default rules enforced the install fails,
 and with an administrator's path rules for the install's folders under the
 user's profile the gate passes 5 of 5 with nothing signed (§ Key Discoveries;
 `docs/windows-install.md` lists the rules). Path rules trust whatever is placed
 in those folders, and an administrator who wants publisher rules instead needs
-signed binaries. Signing is the only mitigation that covers all of these. Phase 0
-Step 0.2 settled it on 2026-10-05: signing is deferred (nexus-dj01b), no route
-is chosen and no identity validation has started, so the first Windows release
-ships unsigned and Gap 6 is an accepted open risk (T2 `224-decisions`).
+signed binaries. Phase 0 Step 0.2 settled it on 2026-10-05: signing is deferred
+(nexus-dj01b), no route is chosen and no identity validation has started, so the
+first Windows release ships unsigned and Gap 6 is an accepted open risk (T2
+`224-decisions`). Sam confirmed that on 2026-10-14, after the Smart App Control
+result: no signing until a user requires it (nexus-dj01b comment; Step 0.2
+amendment).
 
 #### Gap 7: No gate on real Windows hardware
+
+Decided at close, 2026-10-15 (Sam): a clean Hyper-V guest satisfies this gap's
+clean-machine gate (Phase 0 Step 0.5). Physical hardware and host sleep are
+accepted residuals (T2 `nexus_rdr/224-close-decisions-2026-10-15`, item 3;
+nexus-f9bgu.53 comment of 2026-10-15).
 
 RDR-218's Gap 6 carries over: declaring Windows supported obliges a
 check that runs on Windows. GitHub's hosted Windows runners can build and run a
@@ -179,6 +219,13 @@ real Windows box. RDR-218's version of that check ran
 `tests/e2e/post-publish-dispatch-check.sh`, which no longer exists: it was
 deleted with the RDR-184 ledger (`CHANGELOG.md:87`, nexus-0r1uz; T2
 `224-research-26`). Phase 5 redefines the check against what exists.
+
+Every Phase 5 gate run so far was on a Hyper-V guest on one host,
+qwentescence: Windows 11 Enterprise Evaluation, an unactivated consumer Pro and
+a consumer Home. Phase 0 Step 0.5 chose a Hyper-V guest as the clean-machine
+host. What that leaves unmeasured: host sleep (a Hyper-V guest offers no sleep
+state, nexus-f9bgu.53 item 4), physical hardware, and Microsoft and domain
+accounts (all runs used local accounts).
 
 ## Relationship to Prior RDRs
 
@@ -213,7 +260,10 @@ nmake. The WSL2-only ruling came first; the spike never ran. It ran on
   workflow).
 - Client: Python 3.12+, `uv`, the `conexus` wheel; plugin hooks run by Claude
   Code.
-- Windows target: Windows 10/11 x64. Windows on ARM is out of scope: GraalVM
+- Windows target: Windows 11 x64. Every measured guest is Windows 11 x64
+  (builds 26100 to 26300). Windows 10 is not measured and not supported; it has
+  no Smart App Control, so `nx doctor` shows no Smart App Control row there.
+  Windows on ARM is out of scope: GraalVM
   native-image has no windows-aarch64 target and onnxruntime ships no
   Windows-ARM64 native library (09-18 research).
 - Build host available: qwentescence (Windows 11 Pro, Ryzen AI MAX+ 395, 64 GB),
@@ -341,28 +391,67 @@ bundle, the Python client, the plugin, and the release workflow.
 - **Verified** (spike) — Smart App Control is off on qwentescence, so no spike
   on that host says anything about how it treats our binaries. T2
   `224-research-8`.
-- **Verified** (spike, 2026-09-30) — Smart App Control did not block any
-  unsigned binary in our tests. On a clean Windows 11 Pro install (build
-  26300, Microsoft's consumer ISO, Hyper-V VM `sac-pro`) Sam turned it On in
-  Windows Security; code integrity then logged the enforcing policy
-  (`VerifiedAndReputableDesktop`) as activated and user-mode enforcement went
-  from audit to enforced. After that, launched by double-click from the
-  desktop, all of these ran: a byte-tampered `whoami.exe` carrying a Mark of
-  the Web, the same file without the mark, the unsigned `psql.exe`, and the
-  unsigned `nexus-service.exe`. With the guest's network disabled, so that no
-  cloud verdict was possible, fresh-hash unsigned copies also ran, marked and
-  unmarked. No code-integrity block or reputation events were logged. An
-  earlier run on the Enterprise Evaluation edition (build 26200, Smart App
-  Control forced On through the registry) gave the same outcome. This
-  contradicts the documented behaviour for these configurations. A real
-  browser download was then tested in the same VM: a new unsigned program
-  (104 KB, never seen before) downloaded by Edge, which wrote a genuine Mark of
-  the Web on it (`ZoneId=3`), ran when double-clicked, again with no
-  code-integrity events. Not tested: physical hardware, other builds, a
-  download from a public internet host over https, and signed binaries. A
-  Smart App Control run in these configurations therefore cannot tell a signed
-  install from an unsigned one. T2 `224-research-14`, `224-research-15`,
-  `224-research-16`.
+- **Verified** (gate run, 2026-10-14): with Smart App Control on, local-mode
+  nexus could not be set up on this run. On the Home guest `nx-home-win11` (Windows 11 Home
+  build 26300), Smart App Control was set on through
+  `VerifiedAndReputablePolicyState` (2 to 1) and `CiTool --refresh`; two cold
+  starts both read state 1, `SmartAppControlState` read On, and CodeIntegrity
+  event 3099 logged `VerifiedAndReputableDesktop` as activated. A standard user
+  followed `docs/windows-install.md` with a 7.79.0 candidate wheel. The install
+  steps completed. `nx init --service` then failed: "Postgres provisioning
+  failed: [WinError 4551] An Application Control policy has blocked this file".
+  CodeIntegrity events 3033 and 3077 recorded 8 blocks: `pg_config.exe` and
+  `initdb.exe` of the unsigned PostgreSQL bundle, started by uv's `python.exe`;
+  `_multiprocessing.pyd` and `_elementtree.pyd` of the unsigned CPython uv
+  installs, loaded by that `python.exe`; and PortableGit DLLs loaded by its
+  `ln.exe` during self-extraction (its install still finished). The unsigned
+  engine was never reached. On this run, signing the engine and the bundle
+  (nexus-dj01b) would not have been enough, because uv's interpreter is
+  unsigned too and was blocked as well. T2
+  `224-research-35`, `224-smart-app-control-on-2026-10-14`.
+- **Verified** (spike, 2026-09-30), and not explained by the result above:
+  Earlier runs saw no block. On a clean Windows 11 Pro guest (build 26300,
+  Hyper-V VM `sac-pro`, since removed) Sam turned Smart App Control on in
+  Windows Security; CodeIntegrity logged 3099 and user-mode enforcement status
+  went from 1 to 2. Then an unsigned `nexus-service.exe`, an unsigned
+  `psql.exe` and a tampered `whoami.exe`, each double-clicked from the desktop
+  or started from a remote session with the network off, all ran, and an
+  unsigned program downloaded by Edge with a real Mark of the Web ran too. No
+  CodeIntegrity block events were logged. The Enterprise Evaluation build 26200,
+  with Smart App Control forced on through the registry, gave the same outcome.
+  T2 `224-research-14`, `224-research-15`, `224-research-16`. The cause of the
+  difference from 2026-10-14 is not known. What is measured about evaluation
+  mode: the Home guest's normal checkpoint (`clean-baseline-home-2026-10-14`),
+  where `VerifiedAndReputablePolicyState` is 2 (evaluation), logged no
+  CodeIntegrity block events in the 7.78.0 runs (T2 `224-home-guest-2026-10-14`)
+  and passed the gate 5 of 5 on published 7.79.0 and 7.80.0, so nothing the gate
+  ran was blocked there (T2 `224-published-7.79.0-gate-2026-10-14`,
+  `224-published-7.80.0-gate-2026-10-15`, Home row). Whether the September runs were in evaluation mode is inferred, not
+  measured: the 2026-10-14 record calls them "probably evaluation mode", but
+  3099 was logged and the enforcement status read 2 in September too. The two
+  runs differ in edition (Pro and Enterprise
+  Evaluation, against Home), in how Smart App Control was turned on (Windows
+  Security or a registry value, against `VerifiedAndReputablePolicyState` plus
+  `CiTool --refresh` and two cold starts), in what was blocked or not (a
+  program started by double-click or a remote session, against processes
+  started by, and DLLs loaded into, uv's `python.exe`), and in date. Research-15
+  is superseded by research-35 as the record of what Smart App Control does to
+  a nexus install.
+- **Verified** (gate run, 2026-10-15): a third run with Smart App Control on
+  gave a third outcome. Same Home guest and Smart App Control checkpoint as
+  2026-10-14 (`clean-baseline-home-sac-on-2026-10-14`), standard user, a
+  candidate wheel (7.80.0 plus the Smart App Control detection, nexus-f9bgu.57).
+  The install step failed: uv 0.13.1, the tool environment's Python 3.12.15,
+  Claude Code 2.1.301 and Git ran, but `nx --version` failed with "Program
+  'nx.exe' failed to run: An Application Control policy has blocked this file".
+  So `nx init` and `nx doctor` never ran. On 2026-10-14 `nx.exe` ran on the same
+  checkpoint and the block came inside `nx init`. Three runs with Smart App
+  Control on therefore had three different outcomes: in September nothing was
+  blocked, on 2026-10-14 the block came inside `nx init`, on 2026-10-15
+  `nx.exe` was blocked at install. Why they differ is not known (not measured
+  candidates for the last two: a different launcher layout, or the reputation of
+  new launcher bytes). On the evaluation checkpoint the same candidate passed the
+  gate 5 of 5. In a second run that day `nx.exe` ran, the reader (through the tool environment's Python) returned `on`, and `nx init` refused with the new message within a second, with no download; on the evaluation checkpoint the reader returned `evaluation`. T2 `224-sac-detection-guest-runs-2026-10-15`.
 - **Verified** (spike) — ONNX Runtime's Java loader extracts its DLLs into a new
   `%TEMP%\onnxruntime-java<random>` directory on every engine start and never
   removes it (5 left behind after 5 starts). T2 `224-research-9`.
@@ -427,9 +516,12 @@ bundle, the Python client, the plugin, and the release workflow.
   under their default rules, and an administrator allowlist of path rules for
   the install's folders is enough: the gate passed 5 of 5 under enforced
   AppLocker executable rules and under WDAC's `DefaultWindows_Enforced` policy,
-  with nothing signed. Not measured: script enforcement on, DLL rules, update
-  and removal under the policy. T2 `224-research-34`, which supersedes the
-  policy half of `224-research-12`.
+  with nothing signed. Under AppLocker, DLL rules enforced and `nx self
+  install`, upgrade and removal were also measured and passed with added path
+  rules, and enforced script rules stop the uv installer (nexus-f9bgu.53 item
+  9). Not measured under WDAC: script enforcement on, DLL rules, update and
+  removal. T2 `224-research-34`, which supersedes the policy half of
+  `224-research-12`.
 - **Assumed** — Defender's machine-learning checks may flag an unsigned native
   binary that extracts DLLs. Not tested. T2 `224-research-12`.
 
@@ -441,7 +533,8 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   changelog rows, the next boot applied all 508. During a changeset (255 of
   508): exit 149 in 0.013 s, 254 rows, `databasechangeloglock` left locked
   (`locked=t`), and the next boot was still waiting on the lock at the probe's
-  45 s cap (nexus-8sph2 tracks it). Serving: exit 149 in 0.076 s, logging
+  45 s cap (fixed later by nexus-8sph2, live since `engine-service-v0.1.156`;
+  Failure Modes). Serving: exit 149 in 0.076 s, logging
   `shutdown_signal`, `service_stopped` and `own_backends_terminated count=10`;
   the next boot applied no new changeset and was ready in 0.97 s. PostgreSQL
   logged no crash recovery in any phase. The engine never logged
@@ -517,8 +610,9 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   The PG bundle needs the same four DLLs in its `bin` (it fails with DLL not
   found without them). The packaged engine archive's smoke on qwentescence
   loaded all four from the engine directory (T2 `224-f9bgu9-windows-engine-leg`);
-  that host has the runtime system-wide, so the packaged artifacts have not met
-  a machine without it (Phase 5; § Test Plan). Microsoft's redistribution terms
+  that host has the runtime system-wide. The published packaged archives then
+  ran on the clean guest with no runtime installed (the packaged-archive
+  assumption below; T2 `224-gate-run-7.72.1-2026-10-07`). Microsoft's redistribution terms
   were read in full and signed off by Sam on 2026-10-05 (Phase 0 Step 0.6; T2
   `224-vcruntime-terms`, `224-vcruntime-terms-signoff`): app-local deployment is
   permitted beside the exe and in the PG bundle's `bin`, under eight conditions
@@ -530,21 +624,22 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   Control ignores the Mark of the Web (Gap 6), and whether signing gates the
   first release is Phase 0 Step 0.2. An earlier revision of this record drew
   the wrong conclusion; see Revision History.
-- [ ] Signing is deferred (Phase 0 Step 0.2, nexus-dj01b), so this stays open.
-  If signing is adopted: signing every PE file we ship (our
-  exe, the PG bundle, and the
-  third-party DLLs, signed before they are embedded) makes nexus run on a
-  Windows 11 machine with Smart App Control enforcing, and the signed
-  GraalVM exe still runs — **Status**: Unverified — **Method**: Spike, which
-  needs a real certificate from a trusted root (a self-signed certificate
-  proves only that signing does not break the exe) and a test machine with
-  Smart App Control on. This cannot be verified as stated, because unsigned
-  binaries were not blocked in the first place on either clean install we
-  tried (Key Discoveries): there is no failing case for signing to fix. What
-  remains checkable once a certificate exists is that signing does not break
-  the GraalVM exe or the embedded-library extraction. A Smart App Control run
-  is not evidence that signing works, because unsigned binaries pass it too
-  (Test Plan).
+- [deferred: nexus-dj01b] Signing is deferred (Phase 0 Step 0.2 and its
+  2026-10-14 amendment, nexus-dj01b). If signing is adopted: signing every PE
+  file we ship (our exe, the PG bundle, and the third-party DLLs, signed before
+  they are embedded) makes nexus run on a Windows 11 machine with Smart App
+  Control enforcing, and the signed GraalVM exe still runs. **Status**:
+  Falsified for Smart App Control, unverified for the exe. **Method**: gate run
+  with Smart App Control on (T2 `224-research-35`). Signing our files would not
+  have been enough on the runs that blocked: on 2026-10-14 Smart App Control
+  also blocked `.pyd` files of the unsigned CPython that uv installs, and on
+  2026-10-15 it blocked the `nx.exe` launcher, so an install that signed every
+  file nexus ships would still have failed there. The blocking behaviour varied
+  between runs (§ Key Discoveries; the September runs saw no block). A machine
+  with Smart App Control on is an unsupported configuration. What remains
+  checkable once a certificate exists is that signing does not break the GraalVM exe or the embedded-library
+  extraction; that needs a real certificate from a trusted root (a
+  self-signed certificate proves only that signing does not break the exe).
 - [x] `CTRL_BREAK` stops a native-image engine on Windows once `BREAK` is a
   handled signal (Windows only, Technical Design), while serving and in the
   migration window before the changelog lock — **Status**: Verified —
@@ -553,13 +648,15 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   changeset exits but leaves the changelog lock held (Failure Modes). The probe
   driver is in the repository (`scripts/engine_windows_stop_probe.py`), and the
   release-leg smoke asserts the serving-phase stop (Phase 1 Step 2).
-- [ ] A same-session CLI can stop a supervisor, and through it an engine, with
+- [waived: accepted at close 2026-10-15, see Delivered versus the Problem Statement]
+  A same-session CLI can stop a supervisor, and through it an engine, with
   `CTRL_BREAK` under the topology in § Technical Design — **Status**: Partially
   verified — **Method**: Spike with stand-ins (T2 `224-research-20`, `-21`,
   `-22`), then the real client, supervisor and engine (T2 `224-f9bgu17-round1`,
   `224-f9bgu17round2`). Verified: the plain stop and `--with-pg` from a session-1
   launcher, the cross-session refusal, and a stand-in engine that ignores the
-  break. Not covered, so the box stays open:
+  break. The shapes below that stay open were accepted at close as residuals
+  (T2 `nexus_rdr/224-close-decisions-2026-10-15`):
   (a) a stop from a visible-console `cmd.exe` or Windows Terminal window. Round 2
   ran the stop CLI under `pythonw` with a `CREATE_NO_WINDOW` console and stdout
   to files, so `AttachConsole(ATTACH_PARENT_PROCESS)` had no console parent to
@@ -573,7 +670,11 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   helper process (`python -m nexus.util.win_console`, `DETACHED_PROCESS`), so the
   CLI never detaches its own console. Covered with a stand-in supervisor only;
   (b) a real engine that ignores the break (stand-in only);
-  (c) a logon trigger that actually fires;
+  (c) a logon trigger that actually fires. Measured on 2026-10-06 on the clean
+  guest: after each sign-out and restart, automatic sign-in and the logon task
+  brought the full stack back (nexus-f9bgu.46, T2
+  `224-f9bgu46-session-end-measurement`), and since nexus-f9bgu.51 the stack
+  stops cleanly at that sign-out or restart (T2 `224-f9bgu51-guest-verification`);
   (d) a same-session denial (an elevated target stopped from a non-elevated
   shell, or another user's service). Measured in round A for a High-integrity
   session-0 target stopped from a Medium visible console: REFUSED on stderr with
@@ -602,9 +703,11 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   the 3 s bound is unmeasured (forcing the bound short overlaps exit with
   initialisation for 30 to 400 ms, not 3 s); one start on a fresh model path
   took 0.61 s, a proxy, not a cold disk read; `shutdown_signal` is not logged on
-  the timeout rows, because the process was gone before the hook wrote it; the
-  `-O2` release exe and the 5 s supervisor grace against the 3 s bound are
-  unmeasured.
+  the timeout rows, because the process was gone before the hook wrote it; these
+  probes ran on the `-Ob` exe, and the initialisation-phase stop of the `-O2`
+  release exe and the 5 s supervisor grace against the 3 s bound are unmeasured.
+  The `-O2` release exe's serving-phase stop is asserted by the release-leg smoke
+  and by gate assertion 4 on every published run (Test Plan).
 - [x] Claude Code on native Windows runs the conexus plugin's hooks once they
   are launched by something present on stock Windows (`uv run` or the `py`
   launcher, per nexus-efk2h's proposed fix) — **Status**: Verified (2026-10-07)
@@ -621,8 +724,11 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   form: a real Claude Code 2.1.292 session on the clean guest, all hooks
   succeeded and a planted `.venv` ran 0 times (T2 `224-phase4-fix-C-windows`);
   and `tests/hooks/test_hook_launcher_uv.py` runs natively in the Windows
-  rehearsal job. The Phase 5 gate has not been run on the shipped form
-  (nexus-f9bgu.26).
+  rehearsal job. The Phase 5 gate has since passed 5 of 5 on the shipped form,
+  on published conexus 7.78.0, 7.79.0 and 7.80.0 (T2
+  `224-gate-run-7.78.0-2026-10-12`, `224-published-7.79.0-gate-2026-10-14`,
+  `224-published-7.80.0-gate-2026-10-15`); since 7.79.0 the hooks start through
+  RDR-228's `launch/nx_launch.py` under uv.
 - [x] The packaged engine archive and PG bundle run on a clean Windows machine
   with no VC++ redistributable — **Status**: Verified (2026-10-06/07) —
   **Method**: the clean guest `nx-clean-win11` (Phase 0 Step 0.5): the
@@ -641,17 +747,20 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   `engine-service-v0.1.149` tag ran them: its published, non-draft release
   carries `nexus-service-windows-x64.txz` and `nexus-pg-windows-x64.txz` with
   their `.sha256` and `.sigstore.json` files, and `nx init --service` on the
-  clean guest downloaded and signature-verified both (gate assertion 1). Earlier
-  method: a `workflow_dispatch` run of the release workflow before the first cut
-  (Phase 0 Step 0.5). No workflow
-  step has run on that runner; the scripts they call ran by hand.
-- [ ] A host shutdown, logoff or sleep with PostgreSQL running recovers cleanly
+  clean guest downloaded and signature-verified both (gate assertion 1; T2
+  `224-engine-cut-v0.1.149`, release run 37428611456). The method first planned
+  was a `workflow_dispatch` run of the release workflow before the first cut
+  (Phase 0 Step 0.5).
+- [waived: accepted at close 2026-10-15, see Delivered versus the Problem Statement]
+  A host shutdown, logoff or sleep with PostgreSQL running recovers cleanly
   on the next start — **Status**: Partially verified — **Method**: measured on
   the clean guest (nexus-f9bgu.46, fixed by nexus-f9bgu.51; T2
   `224-f9bgu51-guest-verification`): sign-out and restart with the stack running
   stop the engine and PostgreSQL cleanly (`database system is shut down`,
   `postmaster.pid` removed), and the next boot starts with no crash recovery.
-  Sleep is unmeasured, so the box stays open (T2 `224-research-32`).
+  Sleep is unmeasured (T2 `224-research-32`): a Hyper-V guest offers no sleep
+  state, so it needs a physical machine (nexus-f9bgu.53 item 4). Sam accepted it
+  at close as a residual (T2 `nexus_rdr/224-close-decisions-2026-10-15`).
 
 ## Proposed Solution
 
@@ -776,8 +885,10 @@ check in `scripts/engine_windows_smoke.py`). The assertion is a proxy: it proves
 the shipped copies were used, not that Visual Studio or a system-wide runtime is
 absent. As built, the relocation smoke passed from the packaged archive on
 qwentescence (build prefix removed, `vector` 0.8.2, `pg_trgm` 1.6, an HNSW index
-used, 6 s; T2 `224-f9bgu12-windows-pg-bundle`), and the clean-guest run of the
-packaged archives has not happened. The smoke must extract the bundle the way the
+used, 6 s; T2 `224-f9bgu12-windows-pg-bundle`), and the published packaged
+archives ran on the clean guest with no VC++ runtime installed in every Phase 5
+gate run since 2026-10-07 (precondition P0 and assertion 1; T2
+`224-gate-run-7.72.1-2026-10-07`). The smoke must extract the bundle the way the
 client does (with the user-tree ACL grant of Key Discoveries), or it can fail
 for a reason the client path does not share, or pass without proving it.
 
@@ -788,7 +899,7 @@ suite, per the daemon-lifecycle hot rule), never one tier's copy:
 | POSIX assumption | Windows replacement |
 | --- | --- |
 | `os.getuid()` scoping, 21 code sites in 11 files (Phase 3 Step 2) | the user's SID, through one function, `service_identity()` in `service_registry.py`: `str(os.getuid())` on POSIX, unchanged, and the SID string on Windows (anything that is not `S-1-...` raises `ServiceIdentityError`). The SID, not the login name, because it is stable across account renames, cannot be set through an environment variable, and its characters are safe in file, lock and endpoint names. `tests/test_service_identity_lint.py` fails on any other `os.getuid()` |
-| `os.kill(pid, 0)` liveness | `OpenProcess` + exit-code query (ctypes), or psutil if added as a Windows-only dependency |
+| `os.kill(pid, 0)` liveness | `OpenProcess` + `WaitForSingleObject(handle, 0)` through ctypes, no psutil (`pid_alive` in `service_registry.py`, nexus-f9bgu.25) |
 | SIGTERM / `killpg` stop | `CTRL_BREAK` to the supervisor, and `CTRL_BREAK` from the supervisor to the engine (stop channel above, as built); the engine-only Job Object kill as the backstop; PostgreSQL is left running by default, as on POSIX (`commands/daemon.py:909-915`), and stopped with `pg_ctl stop -m fast` under `--with-pg` |
 | `ps` / `/proc` identity | process creation time + image path via the Win32 API (done, through one stdlib-only core at every `ps` and `/proc` site) |
 | launchd / systemd autostart | a per-user Task Scheduler task at logon, run only while the user is logged on (`/IT`, the configuration spiked, T2 `224-research-21`), with restart on failure and no execution time limit, and the task's `Hidden` flag left false; the settings are not read from any source (inferred, not read, T2 `224-research-32`). Measured at implementation (nexus-f9bgu.23, 2026-10-05, T2 `224-f9bgu23-autostart`): the task's restart-on-failure fires only when the task's program fails to launch, never on a non-zero exit (exit codes 1, 3, 255, 0x80070005, 0xC0000005 and 0xFFFFFFFF did not restart), so the task runs a launcher that stays as the task's process and respawns the supervisor 30 s after any non-zero exit; no window opens because the launcher runs under `pythonw` and spawns with `CREATE_NO_WINDOW`; the task's `Hidden` flag only hides the task in the Task Scheduler UI, and the XML sets it false |
@@ -822,8 +933,14 @@ four, which is why an exe-only check is not enough (T2
 `224-f9bgu9-windows-engine-leg`).
 
 **Signing (Gap 6), deferred.** Phase 0 Step 0.2 deferred signing on 2026-10-05
-(nexus-dj01b); the first Windows release ships unsigned and this is the design for
-when it is adopted. Every PE file (Windows
+(nexus-dj01b), and Sam confirmed on 2026-10-14 that there is no signing until a
+user requires it (Step 0.2 amendment). The first Windows release ships unsigned
+and this is the design for when signing is adopted. It covers the files nexus
+ships and nothing else, so it would not have made the measured Smart App
+Control runs work: on 2026-10-14 the unsigned CPython that uv installs was
+blocked too, and on 2026-10-15 the `nx.exe` launcher (T2 `224-research-35`,
+`224-sac-detection-guest-runs-2026-10-15`). What it would serve is an administrator who wants publisher
+rules instead of path rules under AppLocker or WDAC. Every PE file (Windows
 executable or DLL) we ship is Authenticode-signed with an RFC 3161 timestamp, so
 the signature outlives the certificate: the engine exe, every PG bundle
 executable and extension DLL, and the unsigned third-party DLLs the engine
@@ -907,8 +1024,9 @@ handoff, the cache restore on the self-hosted runner or promotion against a real
 27-asset release, and its path filter omits `engine-service-release.yml` and
 `pg-bundle-cache-seed.yml`. Those are covered by the pre-cut `workflow_dispatch`
 run of the release workflow in the cut checklist (T2 `224-decisions-amendments`;
-T2 `224-review-p1p2-critique`, S6). No workflow step has run on `win-release`
-yet.
+T2 `224-review-p1p2-critique`, S6). The release workflow's Windows jobs first ran
+on `win-release` for the `engine-service-v0.1.149` cut on 2026-10-06, which
+published all 27 assets (T2 `224-engine-cut-v0.1.149`).
 
 ### Existing Infrastructure Audit
 
@@ -932,10 +1050,12 @@ changes. What remains is ordinary porting in the client, and the client has
 Windows groundwork already. Native also removes the costs the appliance could
 not: the VM boundary, the per-boot keep-alive, the clock freeze on host sleep,
 WAL recovery after every VM teardown, a 1.5 GB image as a fourth artifact
-class, and a dependency on WSL behaviour Microsoft does not contract. It does
-not remove crash recovery for every host shutdown: what a user-launched
-`postgres.exe` receives at logoff, reboot and sleep-kill, and whether the next
-start then recovers, was not measured (T2 `224-research-32`). Engine stops
+class, and a dependency on WSL behaviour Microsoft does not contract. Native
+did not by itself remove crash recovery at session end: measured on the clean
+guest, sign-out and restart killed the engine and crashed PostgreSQL
+(nexus-f9bgu.46). The supervisor now stops both cleanly at sign-out and restart,
+and the next boot runs no crash recovery (nexus-f9bgu.51, T2
+`224-f9bgu51-guest-verification`). Sleep is unmeasured (T2 `224-research-32`). Engine stops
 measured so far left no crash recovery (T2 `224-research-19`), and neither did a
 plain or `--with-pg` CLI stop of the real stack (T2 `224-f9bgu17round2`).
 
@@ -1054,13 +1174,32 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
 
 ### Risks and Mitigations
 
-- **Risk**: Smart App Control, or an enterprise application-control policy,
-  blocks unsigned code on some user machines. Documented by Microsoft; not
-  reproduced in our tests on two clean Windows 11 installs.
-  **Mitigation**: none in the first release. Phase 0 Step 0.2 deferred signing
-  (nexus-dj01b), so this is an accepted open risk. When signing is adopted, sign
-  every shipped PE file (Gap 6). Because the block could not be reproduced,
-  signing is not shown to be a precondition for a working install.
+- **Risk**: Smart App Control blocks unsigned code on user machines where it is
+  on. Measured 2026-10-14: `nx init --service` fails, and the blocks include the
+  unsigned CPython that uv installs as well as the PostgreSQL bundle (T2
+  `224-research-35`).
+  **Mitigation**: detection, not a fix (nexus-f9bgu.57). `nx init` reads the
+  state (`VerifiedAndReputablePolicyState` under
+  `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`) and, when it is on, refuses
+  with the install guide's message before it downloads the PostgreSQL bundle.
+  `nx doctor` has a Smart App Control row on Windows: on is a failure in local
+  mode and a warning in cloud mode (its effect there is not measured);
+  evaluation is a warning, because Windows can switch it on later (expected,
+  not observed; the warning can only speak before the switch, nexus-f9bgu.58);
+  a state that cannot be read is a warning; off passes; where the registry
+  value does not exist (Windows 10, older Windows 11) there is no row. The
+  detection is on develop and ships in the next client release after 7.80.0,
+  not in 7.80.0. On the Home guest on 2026-10-15, with Smart App Control on,
+  Windows blocked `nx.exe` at install, so neither the refusal nor the row could
+  report there (T2 `224-sac-detection-guest-runs-2026-10-15`); on 2026-10-14
+  `nx.exe` still ran and the block came inside `nx init`, and why the two runs
+  differ is not known. With Smart App Control in evaluation the candidate passed
+  the gate 5 of 5, so the guard does not refuse there. In a second pair of runs the same day, the reader, run through the tool environment's Python, returned `on` on the Smart App Control checkpoint and `evaluation` on the other. On the Smart App Control checkpoint `nx.exe` ran that time, and `nx init` refused with the new message within a second, with no download and no `WinError 4551`. So the refusal and the reader work on real Windows, and whether Windows blocks `nx.exe` itself varied between two runs on the same checkpoint. A machine
+  with Smart App Control on stays an unsupported configuration, and
+  `docs/windows-install.md` says so. Signing nexus's binaries alone would not
+  have fixed the measured runs, and Sam decided on 2026-10-14 that
+  there is no signing until a user requires it (Phase 0 Step 0.2 amendment,
+  nexus-dj01b).
 - **Risk**: when signing is adopted, the signing identity takes weeks to
   validate and is on the critical path.
   **Mitigation**: choose the route and start validation when signing is adopted;
@@ -1070,14 +1209,18 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
   **Mitigation**: the supported path (`nx daemon service install-binary`) writes
   no Mark of the Web, so SmartScreen does not screen it; keep the publisher identity
   stable across releases so reputation accumulates.
-- **Risk**: enterprise application-control policies block nexus regardless.
-  **Mitigation**: document the publisher to allowlist; not otherwise
-  solvable.
+- **Risk**: enterprise application-control policies (AppLocker, WDAC) block
+  nexus under their default rules (measured, T2 `224-research-34`).
+  **Mitigation**: an administrator adds path rules for the install's folders
+  under the user's profile; with them the gate passed 5 of 5 under both, with
+  nothing signed. `docs/windows-install.md` lists the rules. Publisher rules
+  would need signed binaries (nexus-dj01b).
 - **Risk**: VC++ runtime missing on user machines.
   **Mitigation**: the four app-local DLLs beside the exe, in one archive (Critical
   Assumption 4, verified; Phase 0 Step 0.4), with a dependency check that covers
-  the embedded native libraries, since those import two of the four. The packaged
-  archives have not run on a machine without the runtime.
+  the embedded native libraries, since those import two of the four. The
+  published archives ran on the clean guest with no VC++ runtime in every Phase 5
+  gate run (precondition P0; T2 `224-gate-run-7.72.1-2026-10-07`).
 - **Risk**: an engine tag cut with `NX_WINDOWS_RELEASE_LEGS` off publishes 21
   assets and no Windows asset, becomes immutable, and gives a Windows client
   nothing to install; the recovery is another engine cut.
@@ -1130,8 +1273,10 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
   `224-research-31`). Re-measured on the release-shaped engine alone: a break at
   changeset 255 of 508 exits 149 in 0.013 s, leaves 254 changelog rows and the
   lock held, and the next boot was still waiting on the lock at the probe's 45 s
-  cap (T2 `224-p1.1-stop-probe`). Fixing it is outside RDR-224; tracked
-  separately (nexus-8sph2).
+  cap (T2 `224-p1.1-stop-probe`). It was fixed outside RDR-224 by nexus-8sph2,
+  closed and live since `engine-service-v0.1.156`: the engine's schema migrator
+  holds a session-level advisory lock for the walk and releases a stale
+  `databasechangeloglock` row it finds under that lock (`ebd9c4deb`).
 - The supervisor exits non-zero or is killed under the logon task: the task's
   own restart-on-failure does not fire on an exit code, so the launcher the task
   runs respawns the supervisor 30 s later (longer than the 15 s lease TTL, pinned
@@ -1142,9 +1287,21 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
   unreplaceable file raises `ReplaceBlockedError` after 6 attempts over about
   3.9 s, with all five files restored to the old set and the service restarted if
   the upgrade stopped it (T2 `224-f9bgu20-upgrade-stop`).
-- The host shuts down, the user logs off or sleeps with PostgreSQL running: a
-  user-launched `postgres.exe` may get no `pg_ctl stop`, and the next start may
-  run crash recovery. Not measured (T2 `224-research-32`).
+- The host restarts or the user signs out with the stack running: measured on
+  the clean guest, this killed the engine and crashed PostgreSQL, and the next
+  start ran crash recovery after a stall of about 33 s (nexus-f9bgu.46). The
+  supervisor now handles `WM_ENDSESSION`, stops the engine and stops PostgreSQL
+  fast in-process, and the next boot runs no crash recovery (sign-out 0.46 s,
+  restart 0.20 s; nexus-f9bgu.51, T2 `224-f9bgu51-guest-verification`). Host
+  sleep is unmeasured (T2 `224-research-32`).
+- Windows switches Smart App Control from evaluation to on after nexus is
+  installed: expected, not observed (bead nexus-f9bgu.58 measures it). The
+  expected effect, from the 2026-10-14 and 2026-10-15 runs with it on (T2
+  `224-research-35`, `224-sac-detection-guest-runs-2026-10-15`), is that the
+  unsigned PostgreSQL bundle, uv's unsigned Python or `nx.exe` itself are
+  blocked at the next start, so the local stack stops working. `nx doctor` warns
+  while the state is evaluation (nexus-f9bgu.57), so the warning can only speak
+  before the switch; after it, `nx.exe` may not run at all.
 
 ## Implementation Plan
 
@@ -1173,7 +1330,8 @@ store-then-search round trip returns the stored text, and
 supervisor, engine or postgres process behind, confirmed by process exit, and no
 WAL recovery on the next start. A plain `nx daemon service stop` leaves PostgreSQL
 running (`commands/daemon.py:909-915`). The next-start check covers a CLI stop
-only; host shutdown is unmeasured (T2 `224-research-32`).
+only. Sign-out and restart were measured apart from it (nexus-f9bgu.46, .51; no
+crash recovery since .51); host sleep is unmeasured (T2 `224-research-32`).
 
 ### Phase 0: Decisions and RDR-218 disposition
 
@@ -1191,10 +1349,9 @@ registers the runner himself (T2 `224-decisions`, `224-decisions-amendments`).
 #### Step 0.2: Signing route
 
 Decide whether signing gates the first supported Windows release or follows
-it: the documented Smart App Control block was not reproduced (Key
-Discoveries), so an unsigned install is measured to work on the machines we
-tested, and signing protects against configurations we could not test and
-against enterprise policies. Either way, choose the route: Microsoft Artifact Signing (if
+it. At the time of the decision the documented Smart App Control block had not
+been reproduced (T2 `224-research-15`); it was reproduced on 2026-10-14 (see
+the amendment below). Either way, choose the route: Microsoft Artifact Signing (if
 Sam, as an individual in the US or Canada, or a nexus organization in a
 supported country qualifies), SignPath Foundation (if its open-source terms
 fit), or an OV certificate held in a cloud HSM. Start identity validation
@@ -1207,6 +1364,27 @@ conditional on it.
 chosen and identity validation has not started. The signing steps are not in the
 first release and carry to nexus-dj01b (deferred); the two Phase 1 and Phase 2
 signing beads were closed to it. Gap 6 is an accepted open risk.
+
+**Amendment, 2026-10-14 (Sam):** no signing until a user actually requires it
+(nexus-dj01b comment, 2026-10-14). The comment's basis has three parts. Smart
+App Control on blocks uv's unsigned Python whatever nexus signs, so signing
+would not make such a machine work: measured (T2 `224-research-35`). "Evaluation
+mode blocks nothing": this rests on the Home guest's evaluation-state runs. The
+state value on its normal checkpoint is 2. Before the comment, the 7.78.0 runs
+there logged no CodeIntegrity block events (T2 `224-home-guest-2026-10-14`) and
+a candidate wheel passed the gate 5 of 5 (nexus-f9bgu.53 item 2); since then the
+gate passed there 5 of 5 on published 7.79.0 and 7.80.0 (T2
+`224-published-7.79.0-gate-2026-10-14`, `224-published-7.80.0-gate-2026-10-15`,
+Home row). That the September runs were in evaluation mode is inferred, not
+measured (Key Discoveries). AppLocker works
+with path rules: measured (T2 `224-research-34`). A
+signature matters only for publisher-rule allow lists, which were not measured,
+so signing is revisited when a user reports needing one. (The comment also named
+WDAC as unmeasured; WDAC was measured the next day and passed with path rules and
+nothing signed, T2 `224-research-34`.) A machine with Smart App
+Control on is an unsupported configuration. Its blocking behaviour varied
+between runs (Key Discoveries), and in the runs that blocked, signing nexus's
+binaries alone would not have fixed it. nexus-dj01b stays deferred.
 
 #### Step 0.3: RDR-218 beads
 
@@ -1272,8 +1450,11 @@ modelled on `mac-signing-rehearsal.yml`, on a develop push for path-filtered
 inputs plus `workflow_dispatch`, never `pull_request`
 (`.github/workflows/windows-pg-bundle-rehearsal.yml`). (b) Clean-machine host: a
 hand-run clean Windows 11 Hyper-V guest on qwentescence at release time, plus a CI
-proxy that asserts app-local module resolution. Neither (b) half has covered the
-packaged archives yet (Critical Assumptions).
+proxy that asserts app-local module resolution. The guest half has covered the
+published packaged archives in every Phase 5 gate run since 2026-10-07 (Critical
+Assumptions). Later gate runs added two more Hyper-V guests on the same host,
+consumer Pro and consumer Home (T2 `224-pro-guest-gate-2026-10-13`,
+`224-home-guest-2026-10-14`).
 
 #### Step 0.6: VC++ redistribution terms
 
@@ -1336,7 +1517,9 @@ Python client probes. A hand run on qwentescence passed: 8 binaries in the
 dependency check, an archive of 33,687,976 bytes with VC++ redistributable
 14.44.35112, health after 3.0 s, 508 of 508 changesets, a 768-dimension embedding
 and the four DLLs from the engine directory (T2 `224-f9bgu9-windows-engine-leg`).
-The workflow itself has not run.
+The workflow job ran on `win-release` for the `engine-service-v0.1.149` cut and
+published the archive, 39.6 MiB against the 55 MiB ceiling (T2
+`224-engine-cut-v0.1.149`).
 
 Authenticode signing is not in the first release (Phase 0 Step 0.2, nexus-dj01b).
 When it is adopted: sign the DJL tokenizer DLLs before the native build and the
@@ -1357,7 +1540,9 @@ script>`. The four VC++ DLLs are not a key input, so a cache-restored prefix run
 ninja and win_flex_bison versions on the one persistent runner also change
 without changing the key. The full build took 100 s at `ninja -j8` on
 qwentescence, the archive is 7,407,044 bytes, and the relocation smoke passed from
-it in 6 s. The cache restore has never run. Authenticode signing of the bundle is
+it in 6 s. The release job ran on `win-release` for the `engine-service-v0.1.149`
+cut and published `nexus-pg-windows-x64.txz` (T2 `224-engine-cut-v0.1.149`);
+whether that job restored the prefix from the cache is not recorded. Authenticode signing of the bundle is
 not in the first release (Phase 0 Step 0.2).
 
 #### Step 2: Release and cache-seed legs
@@ -1366,16 +1551,26 @@ Add `windows-x64` to the PG-bundle release and to `pg-bundle-cache-seed.yml`
 (as a job of its own on `win-release`, behind the variable), and to the release
 promotion per Step 0.4. As built, with the variable on, promotion expects 27
 assets and the Windows jobs must succeed; with it off, 21 and neither is required.
-The workflow YAML is covered by `actionlint` and parsing tests only; no run exists
-(T2 `224-f9bgu14-windows-release-legs`).
+The workflow YAML is covered by `actionlint` and parsing tests (T2
+`224-f9bgu14-windows-release-legs`). The release legs first ran for
+`engine-service-v0.1.148`, whose Windows PG job failed in the cosign installer
+(left a draft), and then for `engine-service-v0.1.149`, which published all 27
+assets and was promoted (T2 `224-engine-cut-v0.1.149`). A run of
+`pg-bundle-cache-seed.yml`'s Windows job is not recorded in the sources cited
+here.
 
 ### Phase 3: Client (Gap 3)
 
 #### Step 1: Platform tag and binary install
 
 `current_platform_tag()` returns `windows-x64` (done); `nx init --service` and
-`nx daemon service install-binary` fetch the Windows assets. No Windows release
-is published, so that fetch has not run end to end on Windows.
+`nx daemon service install-binary` fetch the Windows assets. `engine-service-v0.1.149`
+published the first Windows assets on 2026-10-06 (T2 `224-engine-cut-v0.1.149`),
+and every Phase 5 gate run since installs them through `nx init --service`.
+`install-binary` with the published assets was measured on the guest on
+2026-10-12 and 2026-10-14 (nexus-f9bgu.53 item 1). Those runs found that it
+never extracted the PostgreSQL bundle it installed (nexus-f9bgu.56); since the
+fix it does, including over a running stack (Gap 3).
 
 #### Step 2: Supervisor port
 
@@ -1416,10 +1611,11 @@ only. The port covers:
   have exited, and the lease file is replaced under concurrent readers;
 - an upgrade that stops the service before it replaces the installed executable
   or the PostgreSQL bundle directory (`binary_install.py:574-576`,
-  `pg_bundle.py:235-244`). Run against a stand-in executable only (T2
-  `224-f9bgu20-upgrade-stop`): the real bundle swap with a live `postgres.exe`
-  was not run (Gap 3), and a placement that succeeds sweeps the `.nx_old_*` keep
-  directories earlier blocked upgrades left behind;
+  `pg_bundle.py:235-244`). At implementation this ran against a stand-in
+  executable only (T2 `224-f9bgu20-upgrade-stop`); the real bundle swap over a
+  running stack was measured on 2026-10-14, after the nexus-f9bgu.56 fix (Gap
+  3). A placement that succeeds sweeps the `.nx_old_*` keep directories earlier
+  blocked upgrades left behind;
 - the aspect-worker daemon, which the Phase 3 critique found nobody had ported
   (T2 `224-review-p3-critique` S4, `224-review-p3-fixes-b`). The store path starts
   it, so the Phase 5 round trip spawns it. It is spawned with the supervisor's
@@ -1445,10 +1641,11 @@ supervisor that exits non-zero (Key Discoveries), so the task's process is a
 launcher that respawns the supervisor 30 s after any non-zero exit and ends on
 exit 0. Verified by hand on qwentescence with a stand-in supervisor: install,
 idempotent re-install, uninstall, out-of-band disable and delete caught by the
-doctor row, a stop from a hidden session-1 task (T2 `224-f9bgu23-autostart`). Not
-run: a logon trigger that actually fires (`schtasks /Run` stood in), a standard
-(non-administrator) account, behaviour at sleep and logoff, and the real engine and
-PostgreSQL under the launcher.
+doctor row, a stop from a hidden session-1 task (T2 `224-f9bgu23-autostart`). Measured
+later on the clean guests: the logon trigger firing after sign-out and restart, and
+the clean stop at both (nexus-f9bgu.46, .51); the real engine and PostgreSQL under
+the launcher (gate assertions 1, leg A, and 4); a standard account (T2
+`224-gate-run-standard-user-7.78.0-2026-10-13`). Not measured: behaviour at sleep.
 
 ### Phase 4: Plugin and desktop (Gap 5)
 
@@ -1482,8 +1679,10 @@ evidence only; no status change.
   1.24012.9.0 (MSIX), measured 2026-10-11, a double-click on `conexus.mcpb` does
   nothing, because the package registers no `.mcpb` file type, and the Plugins
   upload dialog hides `.mcpb` files. Chat and Cowork get conexus from the
-  claude.ai account marketplace, and the nexus servers connected that way with 44
-  tools (T2 `nexus/desktop-install-friction-qwent-2026-10-11`; `bf3f12180`). So
+  claude.ai account marketplace, and the nexus server connected that way with 44
+  tools, in cloud mode (T2 `nexus/desktop-install-friction-qwent-2026-10-11`;
+  `bf3f12180`). In the same run `plugin:sn:serena` failed to connect
+  ("Connection closed"), and the cause was not found. So
   the Windows bundle code is correct and tested, and no Windows user reaches it
   through Desktop today. A Windows run of the shipped bundle form is not
   recorded; the headless walk used the earlier `uv run` manifest (T2
@@ -1532,9 +1731,18 @@ path is tested against a job that does).
 A hand-run, release-time gate on a real Windows box, outside CI, modelled on
 `tests/e2e/mac-signed-binary-gate.sh` and on the journey of
 `tests/e2e/fresh-install-mvv.sh` (install, init, store, search; T2
-`224-research-26`). No Windows script exists yet. ijue9.16 is rewritten for it;
-the script `post-publish-dispatch-check.sh` is gone. In a native Windows Claude
-Code session it asserts:
+`224-research-26`). The script is `tests/e2e/windows-phase5-gate.ps1`, driven
+unattended from the Mac by `tests/e2e/windows-guest/run-gate.sh`. ijue9.16 is
+rewritten for it; the script `post-publish-dispatch-check.sh` is gone. Every run
+was on a Hyper-V guest on qwentescence (Enterprise Evaluation, an unactivated
+consumer Pro, consumer Home), the clean-machine host Phase 0 Step 0.5 chose, so
+host sleep, physical hardware and Microsoft and domain accounts are unmeasured.
+Sam decided at close, on 2026-10-15, that a clean Hyper-V guest satisfies the
+clean-machine gate, with physical hardware and sleep as accepted residuals (T2
+`nexus_rdr/224-close-decisions-2026-10-15`, item 3). It passed 5 of 5 on published conexus 7.72.1, 7.78.0, 7.79.0 and 7.80.0 (T2
+`224-gate-run-7.72.1-2026-10-07`, `224-gate-run-7.78.0-2026-10-12`,
+`224-published-7.79.0-gate-2026-10-14`, `224-published-7.80.0-gate-2026-10-15`).
+In a native Windows Claude Code session it asserts:
 
 1. `nx init --service` installs the published `windows-x64` assets and the
    supervisor starts the engine and PostgreSQL;
@@ -1542,8 +1750,13 @@ Code session it asserts:
    stored text. This is the link ijue9.2 records as unproven (T2
    `224-research-27`);
 3. the hook launcher chosen under nexus-efk2h runs when Claude Code invokes it.
-   What the gate observes to know a hook fired is chosen with that launcher: no
-   file in the repository names one for Windows (inferred, not read);
+   As built, the gate reads the session's hook records and counts the conexus
+   hook runs by what they launch (an `nx-hook` verb, directly or through
+   `launch/nx_launch.py`, the shim, a script under `hooks/scripts`,
+   `nx-session-end-launcher`, or an MCP tool hook), not by how uv launches them
+   (`$HOOK_OURS_RE` in the script). It passes when `nx-hook session-start` and
+   the `nx_hook_shim.py` launcher each succeed with output and no conexus hook
+   run failed;
 4. `nx daemon service stop --with-pg` from the same Windows session leaves no
    supervisor, engine or postgres process, confirmed by process exit, and the
    next start's `pg.log` shows no crash recovery;
@@ -1560,7 +1773,7 @@ skipped assertion fails; it does not pass.
 | --- | --- | --- | --- | --- | --- |
 | Windows engine + PG bundle assets | In scope (release) | In scope | N/A (immutable tags) | In scope (cosign) | N/A |
 | Autostart task | In scope (`nx daemon`) | In scope | In scope (uninstall) | In scope (`nx doctor`) | N/A |
-| PostgreSQL after a host shutdown | N/A | In scope (`pg.log`) | N/A | Deferred (unmeasured, T2 `224-research-32`) | N/A |
+| PostgreSQL after a host shutdown | N/A | In scope (`pg.log`) | N/A | Sign-out and restart measured clean (nexus-f9bgu.46, .51); sleep deferred (unmeasured, T2 `224-research-32`) | N/A |
 | Windows build host (`win-release`) | Deferred | Deferred | N/A | In scope (the rehearsal workflow on develop pushes, and the pre-cut `workflow_dispatch` run of the release workflow; the runner isolation probes were deleted on 2026-10-03) | N/A |
 
 ### New Dependencies
@@ -1593,30 +1806,37 @@ skipped assertion fails; it does not pass.
   Uncertain, as the reading records: whether a notice file in an archive satisfies
   "require end users to agree", and whether a stricter reader sees the standalone
   PG bundle as distributing the runtime apart from our program.
-- Possibly psutil as a Windows-only client dependency (Phase 3 decides).
+- No psutil: Phase 3 used ctypes for Windows liveness (`pid_alive`,
+  nexus-f9bgu.25).
 
 ## Test Plan
 
 - **Scenario**: Windows release leg builds the engine — **Verify**: dependency
   check allows only VC++ runtime and system DLLs; embedded-resources check
   passes with one origin per native library. Status: both passed by hand on
-  qwentescence at `-Ob`; the release leg builds at `-O2`, the pom default, and no
-  `-O2` Windows build has been measured.
+  qwentescence at `-Ob`, and in the release leg at `-O2`, the pom default, for
+  the `engine-service-v0.1.149` cut, which published the archive (T2
+  `224-engine-cut-v0.1.149`). A hand `-O2` build was timed on 2026-10-05
+  (Performance Expectations).
 - **Scenario**: Windows PG bundle relocation — **Verify**: build prefix
   removed, `initdb`, `CREATE EXTENSION vector` and `pg_trgm`, HNSW query rows.
   Status: passed by hand from the packaged archive.
 - **Scenario**: a stop, sent as `CTRL_BREAK`, in each engine phase on Windows.
   Measured outcome per phase, first with the 09-29 engine and a patched copy
   (T2 `224-research-18`, `-19`), then with the release-shaped native exe built at
-  `-Ob` (T2 `224-p1.1-stop-probe`, `224-p1.1-ort-init-timeout-probe`); the
-  `-O2` release exe is unmeasured:
+  `-Ob` (T2 `224-p1.1-stop-probe`, `224-p1.1-ort-init-timeout-probe`). For the
+  `-O2` release exe, only the serving stop is measured (the release-leg smoke and
+  gate assertion 4); the migration and initialisation phases are not:
   - migration, before the changelog lock is taken: the engine exits at once
     (149 in 0.011 s), the changelog has 0 rows, and the next boot applies every
     changeset in the changelog (508 at 2026-10-05);
   - migration, during a changeset: the engine exits at once and leaves
     `databasechangeloglock` locked. This is not a clean stop: the next boot
     waited about 300 s and failed (T2 `224-research-19`; Failure Modes). The test
-    records that outcome and does not assert a clean one;
+    records that outcome and does not assert a clean one. The held lock is
+    released at the next boot since nexus-8sph2 (`engine-service-v0.1.156`),
+    pinned by `SchemaMigratorStaleChangelogLockIntegrationTest`; a re-run of this
+    Windows probe against the fix is not recorded;
   - ONNX Runtime initialisation: the exit is deferred until initialisation ends
     (135 to 444 ms measured, inside the `OrtInitGate` wait of 3 s) and the engine
     exits 149 with no crash evidence; with the wait forced to 50 ms or 1 ms the
@@ -1633,8 +1853,9 @@ skipped assertion fails; it does not pass.
 - **Scenario**: clean Windows machine without the VC++ redistributable —
   **Verify**: the engine starts from the release asset. The host is a hand-run
   clean Hyper-V guest (Phase 0 Step 0.5); a loaded-module assertion on a host with
-  Visual Studio is a proxy and does not prove the redistributable is absent. Not
-  yet run on the packaged archives.
+  Visual Studio is a proxy and does not prove the redistributable is absent.
+  Status: passed on the published archives in every Phase 5 gate run since
+  2026-10-07 (precondition P0, assertion 1).
 - **Scenario**: supervisor conformance suite on Windows — **Verify**: the same
   lifecycle assertions pass as on Linux and macOS, plus stop returning only once
   the supervisor and the engine have exited, and the lease file replaced under
@@ -1643,7 +1864,10 @@ skipped assertion fails; it does not pass.
   Windows, repeated.
 - **Scenario**: Windows smoke in the release leg — **Verify**: the exe boots
   against the Windows PG bundle built in the same workflow run and handed over as
-  an artifact. Status: passed by hand; the workflow has not run.
+  an artifact. Status: passed by hand, then in the release workflow on
+  `win-release` for the `engine-service-v0.1.149` cut (T2
+  `224-engine-cut-v0.1.149`). One later run failed with a port collision, fixed
+  in `b16a58f1c` (Revision History, 2026-10-15).
 - **Scenario**: Phase 4, the hook launcher and the desktop bundle's launch on
   Windows (row added 2026-10-12) — **Verify**: in the rehearsal workflow's
   conformance job, `tests/hooks/test_hook_launcher_uv.py` passes (every uv hook
@@ -1662,14 +1886,29 @@ skipped assertion fails; it does not pass.
   in the job: the planted `.venv` cases.
 - **Scenario**: the Phase 5 gate on a real Windows box — **Verify**: its five
   assertions pass and its executed-assertion count equals the declared count.
+  Status: passed 5 of 5 on published conexus 7.72.1, 7.78.0, 7.79.0 and 7.80.0,
+  on Hyper-V guests (Phase 5).
 - **Scenario**: Windows 11 machine with Smart App Control enforcing, fresh
-  `nx init --service` — **Verify**: the engine, PostgreSQL and the extracted
-  DLLs all load; no CodeIntegrity block events (IDs 3076/3077) in the event
-  log. This scenario cannot show that signing works: unsigned binaries also
-  passed it (Key Discoveries; T2 `224-research-14`, `-15`, `-16`). It shows only
-  that an install is not blocked. No known-blocked binary was found to use as a
-  canary, so signing's effect under Smart App Control is unverified (Critical
-  Assumptions).
+  `nx init --service`. **Verify** (since nexus-f9bgu.57): `nx init` refuses
+  with the install guide's message before it downloads the PostgreSQL bundle,
+  and `nx doctor`'s Smart App Control row fails in local mode. Status: not
+  reached. The detection is on develop and ships in the next client release
+  after 7.80.0, not in 7.80.0. On 2026-10-15, with a candidate wheel on the Home
+  guest's Smart App Control checkpoint, Windows blocked `nx.exe` at install, so
+  neither the refusal nor the row could report there (T2
+  `224-sac-detection-guest-runs-2026-10-15`); on 2026-10-14 `nx.exe` still ran
+  and the block came inside `nx init`, and why the two runs differ is not known.
+  With Smart App Control in evaluation the candidate passed the gate 5 of 5, so
+  the guard does not refuse there. In a second pair of runs the same day, the reader, run through the tool environment's Python, returned `on` on the Smart App Control checkpoint and `evaluation` on the other. On the Smart App Control checkpoint `nx.exe` ran that time, and `nx init` refused with the new message within a second, with no download and no `WinError 4551`. So the refusal and the reader work on real Windows, and whether Windows blocks `nx.exe` itself varied between two runs on the same checkpoint. The scenario first verified that the engine,
+  PostgreSQL and the extracted DLLs all load with no CodeIntegrity block events.
+  That FAILED on 2026-10-14 on the Home guest: `nx init --service` failed with
+  `WinError 4551`, and CodeIntegrity blocked the unsigned PostgreSQL bundle, uv's
+  unsigned CPython `.pyd` files and PortableGit DLLs (T2 `224-research-35`). A
+  machine with Smart App Control on is an unsupported configuration. The blocked
+  `.pyd` files (and on 2026-10-15 the blocked `nx.exe` launcher) show that
+  signing nexus's binaries would not have made those runs pass, so it is not a
+  test for signing (Critical Assumptions; Phase 0 Step 0.2
+  amendment).
 - **Scenario**: when signing is adopted (deferred, Phase 0 Step 0.2), a release
   leg with one shipped DLL left unsigned — **Verify**: the signature check fails
   the leg.
@@ -1684,14 +1923,18 @@ and the Phase 5 gate are the recurring proofs.
 ### Performance Expectations
 
 Measured on qwentescence. The 09-29 spike: native build about 80 s, exe 143 MB,
-health in about 3 s after start. The later builds at `-Ob` (the release leg builds
-at `-O2`, the pom default, which is unmeasured, as are its build time, its peak
-memory against the 12.5 GB cited here and its size): build 1 min 24 s, exe 127 MB
-(127,148,032 bytes), engine archive 33,687,976 bytes (32.1 MiB), PG bundle archive
-7,407,044 bytes. Boot to ready 0.96 to 1.06 s warm and 3.1 s on the first start
-after a fresh model path with a migration; 508 changesets in about 1.5 s; a
-serving stop in 0.07 to 0.08 s. The 55 MiB ceiling `check_engine_cut_riders.py`
-holds the Windows archive to is an estimate. No further targets.
+health in about 3 s after start. The later builds at `-Ob`: build 1 min 24 s, exe
+127 MB (127,148,032 bytes), engine archive 33,687,976 bytes (32.1 MiB), PG bundle
+archive 7,407,044 bytes. Boot to ready 0.96 to 1.06 s warm and 3.1 s on the first
+start after a fresh model path with a migration; 508 changesets in about 1.5 s; a
+serving stop in 0.07 to 0.08 s. The release leg builds at `-O2`, the pom default.
+A hand `-O2` build with the workflow's command, timed on 2026-10-05 (T2
+`224-windows-o2-build-timing`): 1 min 37 s to 1 min 45 s wall (native-image 1 min
+11 s to 1 min 17 s), peak RSS 9.44 to 10.14 GB, and 1 min 54 s with peak RSS
+7.73 GB under `--parallelism=8`; exe 151,449,600 bytes. The published `-O2`
+engine archive of `engine-service-v0.1.149` is 39.6 MiB, under the 55 MiB
+ceiling `check_engine_cut_riders.py` holds it to (T2 `224-engine-cut-v0.1.149`).
+No further targets.
 
 ## Finalization Gate
 
@@ -1712,11 +1955,13 @@ DLLs, not two, and the PG bundle needs them as well; 5 verified for
 SmartScreen). The `CTRL_BREAK` stop on the engine is verified, and on the
 supervisor path with stand-ins only. The stop during ONNX Runtime
 initialisation and the hooks assumptions are unverified and are Prerequisites.
-The signed-binaries assumption cannot be verified as written, because unsigned
-binaries were not blocked in our tests. (Amendment, 2026-10-05: the stop on the
-real supervisor and engine and the stop during ONNX Runtime initialisation are
-now verified; the hooks, the clean-machine run and the release-workflow run
-remain open. The gate text above records what the gate saw.)
+(Amendment, 2026-10-05: the stop on the real supervisor and engine and the stop
+during ONNX Runtime initialisation are now verified. Amendment, 2026-10-07: the
+hooks, the clean-machine run and the release-workflow run are verified by the
+7.72.1 gate and the `engine-service-v0.1.149` cut. Amendment, 2026-10-15: the
+signed-binaries assumption is falsified for Smart App Control, because Smart App
+Control blocked uv's unsigned CPython as well as nexus's files, T2
+`224-research-35`. The gate text above records what the gate saw.)
 
 #### API Verification
 
@@ -1724,8 +1969,8 @@ remain open. The gate text above records what the gate saw.)
 | --- | --- | --- |
 | native-image build on Windows | GraalVM 25.0.3 | Spike |
 | `CREATE EXTENSION vector` on the Windows bundle | pgvector 0.8.2 | Spike |
-| `OpenProcess` / exit-code liveness | Win32 API | Docs Only (Phase 3 verifies) |
-| Task Scheduler per-user logon task | Windows | Verified by hand at implementation (`schtasks`, a non-administrator token; a logon trigger that fires was not run) |
+| `OpenProcess` / `WaitForSingleObject` liveness | Win32 API | Verified on the real kernel: `tests.daemon.test_pid_alive_windows.TestRealWindowsKernel` (own pid alive, an exited child dead, a real handle as the non-vacuity check) is required by name in the Windows rehearsal job's junit floor (nexus-f9bgu.25) |
+| Task Scheduler per-user logon task | Windows | Verified by hand at implementation (`schtasks`, a non-administrator token); the logon trigger firing was measured after sign-out and restart on the clean guest (nexus-f9bgu.46) |
 
 ### Scope Verification
 
@@ -1746,8 +1991,11 @@ The Minimum Viable Validation is in scope and is Phase 5's first run.
 - **Deployment model**: `nx init --service` and
   `nx daemon service install-binary`, as on macOS and Linux.
 - **IDE compatibility**: N/A.
-- **Incremental adoption**: Windows stays unsupported until Phase 5's gate
-  passes; phases land on develop without declaring support.
+- **Incremental adoption**: phases landed on develop without declaring support
+  until Phase 5's gate passed. Sam declared Windows 11 x64 supported at close on
+  2026-10-15, in the same conversation as the close decisions (T2
+  `224-close-decisions-2026-10-15`); the residuals in § Delivered versus the
+  Problem Statement are its known limits.
 - **Secret/credential lifecycle**: signing is deferred (Phase 0 Step 0.2); when
   it is adopted, an Authenticode signing identity is required. Its key lives in a hardware or
   cloud HSM (Artifact Signing, or an OV certificate's cloud HSM, or SignPath's),
@@ -1771,6 +2019,33 @@ Right-sized for an Architecture record that replaces an accepted direction.
 - Source: `service/pom.xml` (`native-libs-windows`), `src/nexus/db/pg_bundle.py`,
   `src/nexus/daemon/`, `src/nexus/commands/daemon.py`, `mcpb/manifest.json`,
   `mcpb/src/bootstrap.py`, `.github/workflows/engine-service-release.yml`.
+
+## Delivered versus the Problem Statement
+
+Added 2026-10-15 at close. The residuals named here are accepted as known limits
+of the first Windows release, by Sam's decision at close on 2026-10-15 (T2
+`nexus_rdr/224-close-decisions-2026-10-15`; the 2026-10-15 comment on
+nexus-f9bgu.53). "Accepted, no bead" means no open bead carries the item.
+
+Closing this RDR as Implemented declares Windows 11 x64 supported: Sam decided
+this at close on 2026-10-15, in the same conversation as the close decisions
+(T2 `224-close-decisions-2026-10-15`). The residuals in the table below are the
+known limits of that support. Windows 10 is not measured and not supported:
+every measured guest is Windows 11 x64 (builds 26100 to 26300).
+
+The Problem Statement was accepted at commit `4de7d020c`. Its gap texts were
+edited in place since then with measured results; read that commit for the gaps
+as accepted.
+
+| Gap | Outcome | Residuals | Evidence |
+| --- | --- | --- | --- |
+| 1: No Windows engine binary | Met, with a named residual | The engine is not Authenticode-signed (Gap 6). | `engine-service-v0.1.149` published `nexus-service-windows-x64.txz` (T2 `224-engine-cut-v0.1.149`); every gate run installs it |
+| 2: No Windows PostgreSQL bundle | Met, with a named residual | The bundle is not Authenticode-signed (Gap 6). | `nexus-pg-windows-x64.txz` in the same release; gate precondition P0 and assertion 1 on a guest with no VC++ runtime |
+| 3: Supervisor POSIX-only | Met, with named residuals | Host sleep unmeasured (no sleep state in a Hyper-V guest); accepted, no bead. `schtasks` output on a Windows whose language is not English unmeasured; accepted, no bead. The aspect-worker daemon is outside the gate (observed, not asserted); accepted, no bead. A PostgreSQL bundle swap to a different `postgres.exe` is unmeasured (the measured swap went between two tags that carry the same binary); accepted, no bead. | Conformance on real Windows (T2 `224-f9bgu19-conformance`); sign-out and restart (nexus-f9bgu.46, .51); `install-binary` over a running stack after the nexus-f9bgu.56 fix (T2 `224-dll-rules-and-install-binary-proof-2026-10-14`); gate assertions 1 and 4 |
+| 4: No graceful engine stop | Met, with named residuals | The initialisation-phase stop of the `-O2` release exe is unmeasured (the `-Ob` probes cover it); accepted, no bead. A real initialisation longer than the 3 s `OrtInitGate` bound, and the supervisor's 5 s grace against that bound, are unmeasured; accepted, no bead. The Windows changeset-stop probe was not re-run against the nexus-8sph2 fix (the fix is pinned by `SchemaMigratorStaleChangelogLockIntegrationTest`); accepted, no bead. Open shapes of the same-session stop (Critical Assumptions): a real engine that ignores the break (stand-in only), a stop aimed at another user's service, and a launcher layer other than the venv trampoline (the gate's stop, assertion 4, passed with the generation launcher, nexus-f9bgu.47); accepted, no bead. | T2 `224-p1.1-stop-probe`, `224-p1.1-ort-init-timeout-probe`, `224-f9bgu17round2`, `224-review-p3-fixes-a`; the release-leg smoke; gate assertion 4 |
+| 5: Plugin and desktop surface | Met for Claude Code, with named residuals | The Desktop `.mcpb` bundle cannot be installed on the Claude Desktop build measured on 2026-10-11 (chat and Cowork get conexus from the account marketplace); accepted, no bead. A Windows Terminal window with several tabs, classic conhost, and sign-out with a session open are unmeasured; accepted, no bead. The time of a first hook run on a box with no Python, against the 5 s hook timeout, is unmeasured (no guest could show it); accepted, no bead. When uv finds no interpreter it exits 2 and five hook entries are blocked; kept as a loud block by Sam's decision on nexus-f9bgu.36, remedy `uv python install 3.12` in `conexus/README.md`; accepted, no bead. The first session after the install can lose its SessionStart hooks to their 5 s and 10 s time limits while `uv` prepares the hook environment: three gate runs in a row on the Home guest failed assertion 3 this way on 2026-10-15, the published 7.80.0 included, after two passes the same day; cause not known; Sam accepted it as a known limit at close; nexus-3ya9d. | Gap 5 amendment and "How Phase 4 ended"; gate assertion 3; T2 `224-wdac-and-window-close-2026-10-15`, `224-guest-batch-2026-10-12` (M4) |
+| 6: Unsigned binaries | Not met (deferred by decision); with Smart App Control on, the outcome varied between runs | Binaries unsigned (nexus-dj01b, deferred; Sam, 2026-10-05 and 2026-10-14). A machine with Smart App Control on is unsupported; its blocking behaviour varied between runs (September no block, 2026-10-14 a block inside `nx init`, 2026-10-15 `nx.exe` blocked at install), cause not known, and in the runs that blocked, signing nexus's binaries alone would not have helped. Detection (nexus-f9bgu.57): `nx init` refuses before the bundle download and `nx doctor` reports the state, with no row where the registry value is absent (Windows 10, older Windows 11). It is on develop and ships in the next client release after 7.80.0, not in 7.80.0. On the 2026-10-15 Smart App Control checkpoint Windows blocked `nx.exe` at install, so the detection could not report there; in evaluation the candidate passed the gate 5 of 5 (T2 `224-sac-detection-guest-runs-2026-10-15`). In a second pair of runs the same day, the reader, run through the tool environment's Python, returned `on` on the Smart App Control checkpoint and `evaluation` on the other. On the Smart App Control checkpoint `nx.exe` ran that time, and `nx init` refused with the new message within a second, with no download and no `WinError 4551`. So the refusal and the reader work on real Windows, and whether Windows blocks `nx.exe` itself varied between two runs on the same checkpoint. Windows switching Smart App Control from evaluation to on after install is expected, not observed; `nx doctor` warns in evaluation, which can only speak before the switch; bead nexus-f9bgu.58 measures it. AppLocker and WDAC need an administrator's path rules. A gate run with script enforcement on is unmeasured under both (under AppLocker, enforced script rules are known to stop the uv installer script), and install, upgrade and removal under WDAC are unmeasured; accepted, no bead. | Phase 0 Step 0.2 and its amendment; T2 `224-research-34`, `224-research-35`; nexus-f9bgu.57 |
+| 7: No gate on real Windows | Met by Sam's decision (Hyper-V guest, Step 0.5), 2026-10-15 | Every run was on Hyper-V guests on one host. Physical hardware and host sleep are accepted residuals by the same decision. Microsoft and domain accounts are unmeasured (all runs used local accounts); accepted, no bead. Every guest was Windows 11 x64 (builds 26100 to 26300); Windows 10 is unmeasured and not supported; accepted, no bead. | `tests/e2e/windows-phase5-gate.ps1` passed 5 of 5 on published 7.72.1, 7.78.0, 7.79.0 and 7.80.0 (Phase 5); T2 `nexus_rdr/224-close-decisions-2026-10-15`, item 3 |
 
 ## Revision History
 
@@ -1797,7 +2072,9 @@ Right-sized for an Architecture record that replaces an accepted direction.
   "blocks unsigned code" to what is measured versus documented; signing
   changed from a proven precondition to a Phase 0 decision. T2
   `224-research-15`. A follow-up browser download (Edge, real Mark of the Web)
-  of a new unsigned program also ran: T2 `224-research-16`.
+  of a new unsigned program also ran: T2 `224-research-16`. Superseded on
+  2026-10-14, when Smart App Control on blocked the install (T2
+  `224-research-35`; the 2026-10-15 closure text pass).
 - 2026-10-05: Gate round 1 — BLOCKED (3 Critical, 10 Significant, 2 ship-blocker(s)); commit `c080de3d6`; critique `nexus_rdr/224-gate-critique-2026-10-05-r1`.
 - 2026-10-05: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `107e0f958`; critique `nexus_rdr/224-gate-critique-2026-10-05-r2`.
 - 2026-10-05: Amendment pass after Phase 0 and Phases 1 to 3 landed (source: the
@@ -1856,9 +2133,12 @@ Right-sized for an Architecture record that replaces an accepted direction.
   loaded-library names are tied to the jar listing and it skips reparse points,
   the shipped VC++ DLLs are checked for a valid Microsoft signature, and the
   pre-cut guards exist (engine-release skill step 3f,
-  `check_engine_release_floor.py --require-windows`). Still open: S3 (clean-guest
-  candidate run, bead nexus-f9bgu.45) and S6 (the release workflow's Windows jobs
-  have not run on `win-release`).
+  `check_engine_release_floor.py --require-windows`). Still open then: S3
+  (clean-guest candidate run, bead nexus-f9bgu.45) and S6 (the release workflow's
+  Windows jobs on `win-release`). Both closed by 2026-10-07: S6 by the
+  `engine-service-v0.1.149` cut and S3 by the candidate run and the 7.72.1 gate
+  (T2 `224-engine-cut-v0.1.149`, `224-f9bgu45-clean-guest-candidate-run`,
+  `224-gate-run-7.72.1-2026-10-07`).
 - 2026-10-05: Phase 3 review fix round B (nexus-f9bgu.33, .34). The same-session
   stop assumption is now marked partially verified, with its five uncovered shapes
   listed; fix round A then measured (a), (d) and (e) with a stand-in supervisor
@@ -1970,8 +2250,9 @@ Right-sized for an Architecture record that replaces an accepted direction.
   the account installed uv and conexus; once enforcement began, `nx.exe`,
   `uv.exe` and the tool environment's `python.exe` were refused by path. The
   driver now waits for a start in the account's profile to be recorded as
-  blocked before the account does anything. Not measured: which allow rules make
-  the install and the gate pass, WDAC, and Smart App Control. The install guide
+  blocked before the account does anything. Not measured that evening, and
+  measured since: the allow rules (the next entry), Smart App Control (2026-10-14,
+  T2 `224-research-35`) and WDAC (2026-10-15, T2 `224-research-34`). The install guide
   now states the standard-account passes and the AppLocker result.
 - 2026-10-13, night: the allow rules an AppLocker machine needs, text and
   evidence only. An audit-only run (`--applocker-audit`) passed the gate 5 of 5
@@ -1985,8 +2266,10 @@ Right-sized for an Architecture record that replaces an accepted direction.
   audit only in that run: enforced, they put PowerShell in ConstrainedLanguage,
   where the uv installer script fails and no path rule helps. Publisher rules
   cannot replace the path rules while the engine and the PostgreSQL bundle are
-  unsigned (P0.2). Not measured: DLL rules, WDAC, Smart App Control, update and
-  removal under the policy. `docs/windows-install.md` lists the rules.
+  unsigned (P0.2). Not measured that night: DLL rules, WDAC, Smart App Control,
+  update and removal under the policy. All four were measured on 2026-10-14 and
+  2026-10-15 (nexus-f9bgu.53 item 9; T2 `224-research-34`, `224-research-35`).
+  `docs/windows-install.md` lists the rules.
 - 2026-10-13, late: the hook helper and the Desktop bundle launcher no longer
   return a `.cmd` or `.bat` hit from their `PATH` lookups (Sam's decision, the
   question the Phase 4 test review left open). A batch file runs through
@@ -2056,3 +2339,75 @@ Right-sized for an Architecture record that replaces an accepted direction.
   signature or an allowlist is now Verified for the allowlist (path rules
   suffice, nothing signed; T2 `224-research-34`), and only the Defender
   machine-learning question stays Assumed (T2 `224-research-12`).
+- 2026-10-15: closure text pass. (a) The Smart App Control result replaces the
+  "not reproduced" premise in Gap 6, Key Discoveries, the signing Critical
+  Assumption (now falsified for Smart App Control), the signing design, Risks,
+  Phase 0 Step 0.2 and the Test Plan: with it on, `nx init --service` fails
+  because the PostgreSQL bundle, uv's CPython and PortableGit DLLs are blocked,
+  so such a machine is unsupported and signing nexus's binaries alone would not
+  fix it (T2 `224-research-35`, `224-smart-app-control-on-2026-10-14`). The
+  September runs that saw no block are kept beside it with their differences;
+  the cause of the difference is not known. Step 0.2 gains Sam's 2026-10-14
+  amendment (nexus-dj01b comment). (b) Stale sentences replaced: the gate on the
+  shipped hook form, the Windows release workflow and published assets
+  (`engine-service-v0.1.149`), the packaged archives on a clean machine, the gate
+  script and what assertion 3 matches, nexus-8sph2 (closed, live since
+  `engine-service-v0.1.156`), the `-O2` build (T2 `224-windows-o2-build-timing`)
+  and archive size, sign-out, restart and the logon trigger (nexus-f9bgu.46,
+  .51), and `OpenProcess` liveness on the real kernel (nexus-f9bgu.25). (c) Gap 7
+  and Phase 5 state that every gate run was on Hyper-V guests on one host and
+  what that leaves unmeasured. (d) Added "Delivered versus the Problem
+  Statement". Sources: T2 `224-gate-run-7.72.1-2026-10-07`,
+  `224-gate-run-7.78.0-2026-10-12`, `224-published-7.79.0-gate-2026-10-14`,
+  `224-published-7.80.0-gate-2026-10-15`, `224-pro-guest-gate-2026-10-13`,
+  `224-home-guest-2026-10-14`, `224-engine-cut-v0.1.149`, `224-research-34`;
+  nexus-f9bgu.53. Text and evidence only; no status change.
+- 2026-10-15: closure text pass, round 2, from the second closure critique.
+  (a) Gap 7, Phase 5 and the Delivered row record Sam's close decision that a
+  clean Hyper-V guest satisfies the clean-machine gate (Step 0.5), with physical
+  hardware and sleep as accepted residuals (T2
+  `nexus_rdr/224-close-decisions-2026-10-15`, item 3). (b) Smart App Control is
+  now detected: Gap 6, Risks, the Test Plan row and Delivered row 6 state the
+  refusal before the bundle download and the `nx doctor` row (nexus-f9bgu.57;
+  the guest results are in the round 3 entry below). (c) The evaluation-mode basis now says what was
+  measured: the Home guest's normal checkpoint (state 2) passed the gate and
+  logged no blocks (T2 `224-home-guest-2026-10-14`,
+  `224-published-7.79.0-gate-2026-10-14`, `224-published-7.80.0-gate-2026-10-15`);
+  the September runs being in evaluation mode is inferred. Key Discoveries and
+  the Step 0.2 amendment changed; a Failure Modes entry covers Windows switching
+  evaluation to on after install. (d) The Delivered table gains the residuals
+  the body records (same-session stop shapes, the ORT bound and grace, the
+  changeset-stop re-run, a first hook run with no Python, uv exit 2, a bundle
+  swap to a different binary), and its intro cites the close decisions and the
+  accepted Problem Statement (`4de7d020c`). The three open Critical Assumption
+  boxes are marked deferred (signing, nexus-dj01b) or waived at close. (e) Gap
+  3 and Phase 3 now record the measured PostgreSQL bundle swap over a running
+  stack and the nexus-f9bgu.56 extraction bug and fix (T2
+  `224-dll-rules-and-install-binary-proof-2026-10-14`, `224-guest-batch-2026-10-12`).
+  (f) The Phase 4 amendment adds that the Desktop run was in cloud mode and that
+  `plugin:sn:serena` failed to connect (T2
+  `nexus/desktop-install-friction-qwent-2026-10-11`). Text and evidence only; no
+  status change.
+- 2026-10-15: closure text pass, round 3, and the support declaration. (a) The
+  guest results for the Smart App Control detection (T2
+  `224-sac-detection-guest-runs-2026-10-15`): on the Home guest's Smart App
+  Control checkpoint Windows blocked `nx.exe` at install, while uv, its Python
+  3.12.15, Claude Code and Git ran, so the refusal and the row could not
+  report; on the evaluation checkpoint the candidate passed the gate 5 of 5. Key
+  Discoveries adds this third run; three runs with Smart App Control on had
+  three different outcomes, cause not known, and Gap 6, the signing Critical
+  Assumption, the signing design, Risks, the Step 0.2 amendment, the Test Plan
+  and Delivered row 6 now say the blocking behaviour varied between runs. (b)
+  The absent state: where the registry value does not exist (Windows 10, older
+  Windows 11), `nx doctor` shows no Smart App Control row. (c) The detection's
+  release status: on develop, shipping in the next client release after 7.80.0,
+  not in 7.80.0. (d) The reader probe and the refusal on real Windows: In a second run that day `nx.exe` ran, the reader (through the tool environment's Python) returned `on`, and `nx init` refused with the new message within a second, with no download; on the evaluation checkpoint the reader returned `evaluation`. (e) Windows switching Smart App Control from evaluation to on after
+  install is expected, not observed, and the doctor warning can only speak
+  before the switch; bead nexus-f9bgu.58 measures it and replaces "accepted, no
+  bead" for that item. (f) Windows 10: every measured guest is Windows 11 x64
+  (builds 26100 to 26300); Windows 10 is unmeasured and not supported
+  (Technical Environment, Delivered row 7). (g) The declaration: Sam declared
+  Windows 11 x64 supported at close on 2026-10-15, in the same conversation as
+  the close decisions (T2 `224-close-decisions-2026-10-15`); Incremental
+  adoption and the Delivered intro record it, with the Delivered residuals as
+  its known limits. Text and evidence only; no status change.

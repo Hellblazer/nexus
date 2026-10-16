@@ -10,7 +10,7 @@
 # outcome exits non-zero.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--cache on|off] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -65,6 +65,18 @@
 # (enforced, PowerShell runs in ConstrainedLanguage, as with AppLocker's script
 # rules). The stduser step stops the run unless an unsigned control program
 # started as the account is recorded (3077 blocked, 3076 in audit).
+# --cache on (the default; nexus-bpzt7) saves what every restored guest would
+# download again: the restore step turns Windows Update off in the guest for that
+# boot, step 01c copies the host's C:\build\guest\cache (a uv cache archive, a
+# Claude Code binary, and nx init's two ONNX models when they were cached for
+# this version) into the installing account, and step 07 refills that cache
+# after the run. uv still resolves against PyPI and the Claude Code binary is
+# used only when its sha256 is the latest release's, so the install runs the
+# published path; the nexus engine and PostgreSQL bundle are downloaded and
+# checked by nx init as usual. Measured on Home: 2.46 GB per cycle before the
+# cache (2026-10-15), 1.30 GB with it before the models were cached (2026-10-16,
+# at the host's Default Switch). --cache off downloads everything
+# and leaves Windows Update alone, for a run whose subject is the download path.
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -80,11 +92,14 @@
 #                collects from it and powers it off at the end) only when that
 #                line is in the step's output.
 #   1s stduser   (--standard-user only) driver/stduser.ps1
+#   1c seed      (--cache on) driver/cache.ps1 -Mode seed
 #   2 install    uv, conexus, Claude Code, Git, the plugin
 #   3 setup      the gate's setup phase, a one-shot Interactive scheduled task
 #   4 gaterun    write GATERUN.txt
 #   5 launch     launch.sh: a signed-in Claude Code session that follows it
 #   6 verdict    bounded wait for verdict.txt, read-only collection of the run
+#   7 harvest    (--cache on) driver/cache.ps1 -Mode harvest; not part of the
+#                verdict, a failure is only reported
 #   end          shut the guest down, remove the staged host files
 #
 # Credentials: the guest password comes from the macOS keychain and travels ONLY
@@ -139,7 +154,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--cache on|off] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]" >&2
 }
 die() {
     local code="$1"; shift
@@ -156,6 +171,7 @@ standard_user=0
 admin_git=yes
 applocker=no
 wdac=no
+cache=on
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) [[ $# -ge 2 ]] || { usage; exit 2; }; version="$2"; shift 2 ;;
@@ -163,6 +179,7 @@ while [[ $# -gt 0 ]]; do
         --wheel) [[ $# -ge 2 ]] || { usage; exit 2; }; wheel="$2"; shift 2 ;;
         --out) [[ $# -ge 2 ]] || { usage; exit 2; }; out="$2"; shift 2 ;;
         --keep-guest) keep_guest=1; shift ;;
+        --cache) [[ $# -ge 2 ]] || { usage; exit 2; }; cache="$2"; shift 2 ;;
         --standard-user) standard_user=1; shift ;;
         --no-admin-git) admin_git=no; shift ;;
         --applocker) applocker=yes; shift ;;
@@ -178,6 +195,7 @@ done
 [[ -n "$version" && -n "$engine" ]] || { usage; die 2 "--version and --engine are required"; }
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 2 "--version must be X.Y.Z"
 [[ "$engine" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 2 "--engine must be X.Y.Z"
+[[ "$cache" == on || "$cache" == off ]] || { usage; die 2 "--cache must be on or off"; }
 # These values reach a remote command line; keep them to plain tokens.
 for pair in "NX_GUEST_HOST:$HOST" "NX_GUEST_VM:$VM" "NX_GUEST_USER:$GUSER" "NX_GUEST_KEYCHAIN_SERVICE:$KEYCHAIN_SERVICE" "NX_GUEST_CHECKPOINT:$CHECKPOINT" "NX_GUEST_STD_USER:$STD_USER"; do
     [[ "${pair#*:}" =~ ^[A-Za-z0-9._-]+$ ]] || die 2 "${pair%%:*} must be plain letters, digits, dot, dash or underscore"
@@ -214,6 +232,12 @@ if [[ -n "$wheel" ]]; then
 fi
 gate_sha=''
 sha256_of "$gate" gate_sha
+restore_cache=yes
+[[ "$cache" == on ]] || restore_cache=no
+cache_key="$version"
+cache_note="--cache off: everything downloaded fresh"
+[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, uv's files and Claude Code from the host cache when it held them (01c-seed.txt), the nx init models from the host cache when it held them for this version, nexus engine and bundle downloaded"
+[[ -z "$wheel_sha" ]] || cache_key="w-${wheel_sha:0:16}"
 
 RUN="nxg-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 HOST_WIN_DIR="C:\\build\\guest\\$RUN"
@@ -251,6 +275,7 @@ bound NX_GUEST_TIMEOUT_HOSTCHECK 300 T_HOSTCHECK
 bound NX_GUEST_TIMEOUT_RESTORE 900 T_RESTORE
 bound NX_GUEST_TIMEOUT_STDUSER 1200 T_STDUSER
 bound NX_GUEST_TIMEOUT_INSTALL 1800 T_INSTALL
+bound NX_GUEST_TIMEOUT_CACHE 900 T_CACHE
 bound NX_GUEST_TIMEOUT_SETUP 1800 T_SETUP
 bound NX_GUEST_TIMEOUT_GATERUN 300 T_GATERUN
 bound NX_GUEST_TIMEOUT_LAUNCH 600 T_LAUNCH
@@ -450,10 +475,10 @@ fi
 run_step 00 hostcheck "$T_HOSTCHECK" 1 host_ps hostcheck.ps1 -VMName "$VM" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
 
 if [[ -n "$wheel_name" ]]; then
-    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Wheel "$wheel_name"
+    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Wheel "$wheel_name" -Cache "$restore_cache"
     grep -qF "wheel sha256=$wheel_sha" "$out/01-restore.txt" || die 1 "the wheel in the guest does not have sha256 $wheel_sha"
 else
-    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
+    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Cache "$restore_cache"
 fi
 grep -qF "gate sha256=$gate_sha" "$out/01-restore.txt" || die 1 "the gate script in the guest does not have sha256 $gate_sha"
 
@@ -471,6 +496,12 @@ if [[ $standard_user -eq 1 ]]; then
     run_as="-RunAs $STD_USER"
 fi
 as_user="${run_as:+-AsUser yes}"
+
+# --cache on (nexus-bpzt7): the installing account's uv cache and a Claude Code binary come from the host's
+# C:\build\guest\cache (cache.ps1 seed), and step 07 refills it after the run.
+if [[ "$cache" == on ]]; then
+    run_step 01c seed "$T_CACHE" 1 host_ps_pw cache.ps1 -VMName "$VM" -GuestUser "$GUSER" -Mode seed -Account "$home_user" -Key "$cache_key"
+fi
 
 # shellcheck disable=SC2086
 if [[ -n "$wheel_name" ]]; then
@@ -493,6 +524,13 @@ run_step 06 verdict "$T_VERDICT" 0 host_ps_pw guest-run.ps1 -VMName "$VM" -Guest
 fetch_collected
 [[ $collected -eq 1 ]] || die 1 "the guest's run directory was not collected"
 
+# Refill the host cache from this guest. Not part of the verdict: a failure here is reported and the run goes on.
+if [[ "$cache" == on ]]; then
+    say "step 07 harvest"
+    run_bounded "$T_CACHE" host_ps_pw cache.ps1 -VMName "$VM" -GuestUser "$GUSER" -Mode harvest -Account "$home_user" -Key "$cache_key" 2>&1 | quiet | tee "$out/07-harvest.txt"
+    grep -q '^NXG-RESULT: ok' "$out/07-harvest.txt" || say "the cache harvest did not finish (not part of the verdict); log: $out/07-harvest.txt"
+fi
+
 # --- verdict ----------------------------------------------------------------
 verdict_file="$out/run/verdict.txt"
 [[ -f "$verdict_file" ]] || die 1 "no verdict.txt was collected: the run has no verdict, which is a FAILED run"
@@ -513,9 +551,9 @@ if [[ $provenance_ok -eq 0 ]]; then
     echo "run-gate.sh: the verdict is PASSED but verdict.txt does not carry the gate script line for this run's gate script (gate script sha256 $gate_sha (...; the setup phase ran the same file)); not accepted" >&2
 fi
 if [[ -n "$wheel_name" ]]; then
-    echo "run-gate.sh: candidate wheel $wheel_name (sha256 $wheel_sha), not a published build; gate script sha256 $gate_sha; logs in $out"
+    echo "run-gate.sh: candidate wheel $wheel_name (sha256 $wheel_sha), not a published build; $cache_note; gate script sha256 $gate_sha; logs in $out"
 else
-    echo "run-gate.sh: conexus==$version from PyPI; gate script sha256 $gate_sha; logs in $out"
+    echo "run-gate.sh: conexus==$version from PyPI; $cache_note; gate script sha256 $gate_sha; logs in $out"
 fi
 if [[ $standard_user -eq 1 ]]; then echo "run-gate.sh: run as standard user $STD_USER (not an administrator); $git_note"; fi
 exit "$rc"

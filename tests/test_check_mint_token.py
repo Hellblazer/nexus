@@ -109,10 +109,11 @@ def test_configured_and_mint_succeeds_reports_neutrally(monkeypatch, tmp_path):
     result = _label(_check_mint_token())
     assert result.ok is True
     assert "127.0.0.1:9999" in result.detail
-    # Neutral wording: success through the edge does not (yet) prove THIS
-    # credential's own authority pre-cutover (RDR-005 2a staged cutover).
-    assert "does not" in result.detail.lower() or "does NOT" in result.detail
-    assert "authority" in result.detail.lower()
+    # The edge forwards Authorization unvalidated on /v1 (conexus-qomd), so a
+    # mint is the engine checking this credential and its tenant; the row
+    # no longer hedges it as reachability only.
+    assert "checked this credential and its tenant" in result.detail
+    assert "does not" not in result.detail.lower()
 
 
 def test_success_line_reports_minted_when_no_live_token_cached(monkeypatch, tmp_path):

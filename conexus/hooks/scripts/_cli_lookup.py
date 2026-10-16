@@ -116,12 +116,204 @@ def resolve(name: str) -> str | None:
     return _exec_path.which_off_cwd(name, path=os.pathsep.join(entries))
 
 
+#: The most of a program that is read to find its shebang line. A line that does not
+#: end inside it is not a shebang anyone can resolve (the kernel's own limit is a few
+#: hundred bytes), so it is not judged.
+_SHEBANG_BYTES = 8192
+
+
+def _dangling_interpreter(root: str) -> str | None:
+    """A ``python*`` link in ``<root>/bin`` that points nowhere, or ``None``.
+
+    That is what ``uv`` leaves in a venv when it prunes the managed CPython the venv
+    was built on: ``bin/python`` and ``bin/python3`` stay, linking into a directory
+    that is gone. A venv whose links resolve is not judged by this.
+    """
+    found: list[str] = []
+    try:
+        with os.scandir(os.path.join(root, "bin")) as entries:
+            for entry in entries:
+                if entry.name.startswith("python") and entry.is_symlink() and not os.path.exists(entry.path):
+                    found.append(entry.path)
+    except OSError:
+        return None
+    return min(found) if found else None
+
+
+def _venv_problem(exe: str, windows: bool) -> str | None:
+    """Why the venv *exe* sits in cannot run, from its ``pyvenv.cfg``, or ``None``.
+
+    ``<venv>/bin/<name>`` (POSIX) and ``<venv>\\bin\\<name>.exe`` or
+    ``<venv>\\Scripts\\<name>.exe`` (Windows) all have the venv two levels up.
+    ``pyvenv.cfg`` names the directory of the interpreter the venv was built from
+    (``home``), and ``uv`` removes that directory when it prunes the Python.
+
+    Windows: a gone ``home`` is the whole of the evidence, because a generation's
+    launchers are copies with no shebang and there are no links. POSIX (Sam,
+    2026-10-14; the review of 4cffeb898 measured the false positive): a venv whose
+    ``home`` is gone can still start, because its ``bin/python`` is a link and the
+    interpreter finds its way back through the link's real path, so ``home`` alone
+    says nothing. It counts only beside a ``python*`` link in the venv that points
+    nowhere, which is the other thing a prune leaves. The program's own shebang is
+    judged separately (:func:`_shebang_problem`). A missing or unreadable
+    ``pyvenv.cfg``, or one with no ``home`` line, is no evidence.
+    """
+    root = os.path.dirname(os.path.dirname(exe))
+    try:
+        with open(os.path.join(root, "pyvenv.cfg"), encoding="utf-8", errors="replace") as cfg:
+            text = cfg.read(8192)
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "home":
+            home = value.strip()
+            if not home or os.path.isdir(home):
+                return None
+            if windows:
+                return f"the Python it was built with ({home}) is gone"
+            dangling = _dangling_interpreter(root)
+            if dangling is None:
+                return None
+            return f"the Python it was built with ({home}) is gone and {dangling} points nowhere"
+    return None
+
+
+def _polyglot_interpreter(second: bytes) -> str | None:
+    """The interpreter named by line 2 of an ``sh`` polyglot launcher, or ``None``.
+
+    ``uv`` writes a console script's first line as ``#!/bin/sh`` instead of naming the
+    interpreter when the interpreter's path will not fit a shebang (longer than 127
+    characters, or holding a space; nexus-sv2wx.20, measured with uv 0.8.0)::
+
+        #!/bin/sh
+        '''exec' '/path/to/venv/bin/python' "$0" "$@"
+        ' '''
+
+    ``pip`` (distlib) writes the same shape with the path in double quotes. The shell
+    runs line 2 as ``exec <python> "$0" "$@"``, and Python reads the same line as an
+    empty string, a name and a string, so the file is both. The path is one shell word
+    in either quoting, which ``shlex`` reads back (``uv`` writes an embedded quote as
+    ``'"'"'``). A line that does not have that shape is not judged.
+    """
+    if not second.startswith(b"'''exec' ") or not second.endswith(b"\n"):
+        return None
+    import shlex  # noqa: PLC0415 -- lazy: only an sh polyglot needs it, and the session-start hook has 100 ms
+
+    try:
+        words = shlex.split(second.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    return words[1] if len(words) >= 2 and words[0] == "exec" else None
+
+
+def _interpreter_problem(interpreter: str) -> str | None:
+    """Why the interpreter path *interpreter* cannot be started, or ``None``.
+
+    It must exist and be executable; a dangling symlink, which is how ``uv`` leaves a
+    pruned interpreter, does not exist. A relative path is not judged.
+    """
+    if not os.path.isabs(interpreter):
+        return None
+    if not os.path.exists(interpreter):
+        return f"its interpreter ({interpreter}) is missing"
+    if not os.access(interpreter, os.X_OK):
+        return f"its interpreter ({interpreter}) is not executable"
+    return None
+
+
+def _shebang_problem(exe: str) -> str | None:
+    """Why the script *exe* cannot be started, from its ``#!`` line, or ``None``.
+
+    Only a shebang whose meaning is certain counts: an absolute interpreter path
+    (it must exist and be executable; a dangling symlink, which is how ``uv``
+    leaves a pruned interpreter, does not exist) or ``/usr/bin/env <name>`` (the
+    name must be on ``PATH``). A relative interpreter, ``env`` with options or an
+    assignment, and any file that does not start with ``#!`` are not judged. The
+    whole line is read, up to :data:`_SHEBANG_BYTES`.
+
+    ``#!/bin/sh`` followed by the ``'''exec'`` line is ``uv``'s launcher for an
+    interpreter path a shebang cannot hold (:func:`_polyglot_interpreter`). The kernel
+    starts the shell, which succeeds; the shell then fails at its own ``exec`` with 126
+    or 127, after the caller has already started a process and cannot tell the failure
+    from the program's own. The interpreter on line 2 is judged by the same rule as a
+    shebang's, so a pruned one reads as "cannot start" behind either launcher.
+    """
+    try:
+        with open(exe, "rb") as handle:
+            head = handle.readline(_SHEBANG_BYTES)
+            second = handle.readline(_SHEBANG_BYTES) if head.startswith(b"#!") else b""
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    if len(head) >= _SHEBANG_BYTES and not head.endswith(b"\n"):
+        return None
+    fields = head[2:].decode("utf-8", "replace").split()
+    if not fields:
+        return None
+    interpreter = fields[0]
+    if os.path.basename(interpreter) == "env":
+        name = fields[1] if len(fields) > 1 else ""
+        if not name or name.startswith("-") or "=" in name or os.path.dirname(name):
+            return None
+        return None if _exec_path.which_off_cwd(name) else f"it needs `{name}`, which is not on PATH"
+    if os.path.basename(interpreter) == "sh" and len(fields) == 1 and os.path.isabs(interpreter):
+        named = _polyglot_interpreter(second)
+        if named is not None:
+            return _interpreter_problem(named)
+    return _interpreter_problem(interpreter)
+
+
+def cannot_start(exe: str, *, windows: bool | None = None) -> str | None:
+    """Why the program at *exe* cannot start, or ``None`` when nothing says so.
+
+    RDR-228 Phase 2 Step 4 (nexus-sv2wx.17; Sam, 2026-10-14). The lookup finds a
+    program by its file, and an install whose interpreter ``uv`` pruned still has
+    the file. Started, it fails. The answer is from files alone, a few stats and
+    two small reads, because the launcher and the session-start hook decide with
+    it in milliseconds: no process is started to ask. It claims "cannot start" only
+    on positive evidence, so a program in a directory with no ``pyvenv.cfg``
+    (the suite's fakes, a binary) is runnable here.
+
+    The rule, which ``nexus.commands.self_cmd._generation_interpreter_gone`` states
+    again for the CLI (``tests/hooks/test_cli_cannot_start.py`` runs the two over one
+    matrix, so they cannot disagree). Windows: ``pyvenv.cfg``'s ``home`` is not a
+    directory. POSIX: ``home`` is not a directory AND a ``python*`` link in the venv
+    dangles (:func:`_venv_problem`), or the program's own shebang names an
+    interpreter that is missing (:func:`_shebang_problem`; for ``uv``'s ``sh``
+    polyglot, the interpreter on its second line, nexus-sv2wx.20). The path is
+    checked as given and, when it is a link, as it resolves. *windows* selects the
+    Windows branch (no shebang, no links) for a test.
+    """
+    windows = (os.name == "nt") if windows is None else windows
+    try:
+        candidates = [exe]
+        real = os.path.realpath(exe)
+        if real != exe:
+            candidates.append(real)
+        for candidate in candidates:
+            problem = _venv_problem(candidate, windows)
+            if problem is not None:
+                return problem
+        return None if windows else _shebang_problem(exe)
+    except (OSError, ValueError):
+        return None
+
+
 def missing_note(program: str, what: str) -> str:
     """The one line written when *program* is not found and *what* is skipped."""
     return (
         f"conexus: `{program}` is not installed (not in the Nexus install "
         f"directory, not on PATH), so {what} is skipped.\n"
     )
+
+
+def cannot_start_note(exe: str, reason: str) -> str:
+    """The one line written when the program at *exe* is found and cannot start for
+    *reason*, and what it would have done is skipped. The launcher and the hook shim
+    say it the same way."""
+    return f"conexus: could not start {exe}: {reason}\n"
 
 
 def project_dir(payload: bytes) -> str | None:

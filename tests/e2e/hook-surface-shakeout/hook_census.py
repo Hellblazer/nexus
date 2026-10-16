@@ -43,9 +43,12 @@ import sys
 #: Declared silent on a healthy virgin box. Absence from the TRANSCRIPT is
 #: expected for these and means nothing; absence from the SHIM roster is a
 #: real finding, because the shim runs before the handler can decline to speak.
-#: ``nx_setup_notice.py`` prints nothing when the CLI is present (RDR-228: it
-#: speaks only when ``nx-mcp`` does not resolve), and this harness's box always
-#: has the CLI, so it is silent here by design, like ``preflight``.
+#: ``nx_setup_notice.py`` prints nothing when the CLI resolves, can start and a
+#: service is usable (RDR-228 Phase 2: with a CLI and no usable service it says
+#: "no service is set up" or "the service is not running"). This harness's box
+#: has the CLI, so it is expected silent here like ``preflight`` ONLY if a
+#: service is usable there; nexus-sv2wx.17 did not run this harness, so that is
+#: unverified. A box with no service would see the hook speak.
 SILENT_BY_DESIGN = {"nx-hook preflight", "nx_setup_notice.py"}
 
 #: Removed from the staged manifest by run.sh because they would mutate the

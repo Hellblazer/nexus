@@ -15,6 +15,7 @@ from nexus.config import (
     get_credential,
     load_config,
     set_credential,
+    unset_credential,
 )
 
 
@@ -159,6 +160,31 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
         click.echo(SERVICE_RESTART_HINT)
 
 
+@config_group.command("unset")
+@click.argument("key")
+def config_unset(key: str) -> None:
+    """Remove a saved credential from the config file.
+
+    Only the file is changed: an environment variable of the same name still
+    applies. Removing a key that is not saved is not an error.
+
+    \b
+      nx config unset service_token
+    """
+    key = key.strip().lower().replace("-", "_")
+    try:
+        removed = unset_credential(key)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    path = _global_config_path()
+    click.echo(f"Removed {key}  →  {path}" if removed else f"{key} was not saved in {path}; nothing to remove.")
+    env_var = CREDENTIALS[key]
+    if os.environ.get(env_var, ""):
+        click.echo(f"Note: {env_var} is set in the environment and still applies.", err=True)
+    if removed and key in RESTART_HINT_KEYS:
+        click.echo(SERVICE_RESTART_HINT)
+
+
 # ── get ───────────────────────────────────────────────────────────────────────
 
 @config_group.command("get")
@@ -262,11 +288,28 @@ def config_list(keys_only: bool) -> None:
 _SEP = "─" * 60
 
 
+def _tenant_name(value: str) -> str:
+    """A tenant as typed: no whitespace, no leading dash (it is saved with ``nx config set``)."""
+    text = value.strip()
+    if not text or text.startswith("-") or any(c.isspace() for c in text):
+        raise click.BadParameter("A tenant name has no spaces and does not start with a dash.")
+    return text
+
+
+#: The credential keys of each kind; the wizard saves one kind and removes the other's.
+_MINT_KEYS: tuple[str, ...] = ("mint_token", "mint_tenant")
+_STATIC_KEYS: tuple[str, ...] = ("service_token",)
+
+
 @config_group.command("init")
 def config_init() -> None:
     """Interactive wizard to configure managed-service (cloud) credentials.
 
-    Collects the managed nexus service endpoint + bearer token (RDR-166).
+    Asks the managed nexus service address (RDR-166), then the token (hidden as
+    you type it), then which kind it is: a mint credential, which is bound to
+    one tenant and so also asks for the tenant (saved as ``mint_token`` and
+    ``mint_tenant``), or a static service token (saved as ``service_token``).
+    Only the keys of the kind you pick are kept; the other kind's are removed.
     Skips any credential already present in the environment. Saves to
     ~/.config/nexus/config.yml.
 
@@ -276,46 +319,72 @@ def config_init() -> None:
     config_path = _global_config_path()
     click.echo("Nexus managed-service setup wizard\n")
     click.echo(f"Credentials are stored in {config_path}")
-    click.echo("Environment variables (NX_SERVICE_URL, NX_SERVICE_TOKEN) always take precedence.\n")
+    click.echo(
+        "Environment variables (NX_SERVICE_URL, NX_SERVICE_TOKEN, NX_MINT_TOKEN, NX_MINT_TENANT) "
+        "always take precedence.\n"
+    )
 
-    _required = [
-        ("service_url",   "Managed service URL"),
-        ("service_token", "Managed service token"),
-    ]
-
-    for key, label in _required:
-        env_var = CREDENTIALS[key]
-        existing_env = os.environ.get(env_var, "")
-        existing_file = get_credential(key)
-
-        click.echo(_SEP)
-        if existing_env:
-            click.echo(f"{label}")
-            # Named, not masked: the wizard's screen is shared and pasted, and
-            # a partial mask is how 8 characters leaked once (nexus-6fvwo).
-            click.echo(f"  Already set via environment: {env_var}")
-            click.echo("  (skipping — unset the environment variable to override here)")
-            continue
-
-        hint = _SIGNUP.get(key, "")
-        if hint:
-            click.echo(f"{label}")
-            click.echo(f"  {hint}")
-
-        current = _mask(existing_file) if existing_file else None
+    # -- the service address
+    click.echo(_SEP)
+    click.echo("Managed service URL")
+    if os.environ.get(CREDENTIALS["service_url"], ""):
+        # Named, not masked: the wizard's screen is shared and pasted, and
+        # a partial mask is how 8 characters leaked once (nexus-6fvwo).
+        click.echo(f"  Already set via environment: {CREDENTIALS['service_url']}")
+        click.echo("  (skipping \u2014 unset the environment variable to override here)")
+    else:
+        click.echo(f"  {_SIGNUP['service_url']}")
+        existing = get_credential("service_url")
+        current = _mask(existing) if existing else None
         val = click.prompt(
-            f"\n  Enter value",
-            default=current or "",
-            show_default=bool(current),
-            prompt_suffix=" > ",
+            "\n  Enter value", default=current or "", show_default=bool(current), prompt_suffix=" > ",
         )
-
         if val and val != current:
-            set_credential(key, val)
+            set_credential("service_url", val)
+
+    # -- the token, hidden, then its kind
+    click.echo(_SEP)
+    click.echo("Managed service token")
+    env_token = [name for name in ("service_token", "mint_token") if os.environ.get(CREDENTIALS[name], "")]
+    if env_token:
+        for key in env_token:
+            click.echo(f"  Already set via environment: {CREDENTIALS[key]}")
+        click.echo("  (skipping \u2014 unset the environment variable to override here)")
+        if "mint_token" in env_token and not (os.environ.get(CREDENTIALS["mint_tenant"], "") or get_credential("mint_tenant")):
+            # A mint credential needs its tenant even when the token itself comes from the environment.
+            tenant = click.prompt("\n  Tenant this mint credential is bound to", value_proc=_tenant_name, prompt_suffix=" > ")
+            set_credential("mint_tenant", tenant)
+    else:
+        click.echo(f"  {_SIGNUP['service_token']}")
+        saved = [k for k in ("mint_token", "service_token") if get_credential(k)]
+        if saved:
+            click.echo(f"  A token is already saved ({saved[0]}). Press Enter to keep it.")
+        token = click.prompt(
+            "\n  Enter token (hidden)", default="", show_default=False, hide_input=True, prompt_suffix=" > ",
+        )
+        if token:
+            kind = click.prompt(
+                "\n  Which kind of token is this? mint = a mint credential bound to one tenant, static = a static service token",
+                type=click.Choice(["mint", "static"], case_sensitive=False), default="mint", prompt_suffix=" > ",
+            ).lower()
+            if kind == "mint":
+                if os.environ.get(CREDENTIALS["mint_tenant"], ""):
+                    click.echo(f"  Tenant: already set via environment: {CREDENTIALS['mint_tenant']}")
+                else:
+                    tenant = click.prompt("\n  Tenant this credential is bound to", value_proc=_tenant_name, prompt_suffix=" > ")
+                    set_credential("mint_tenant", tenant)
+                set_credential("mint_token", token)
+                drop = _STATIC_KEYS
+            else:
+                set_credential("service_token", token)
+                drop = _MINT_KEYS
+            for key in drop:
+                if unset_credential(key):
+                    click.echo(f"  Removed the saved {key}: a {kind} credential replaces the other kind.")
 
     click.echo(_SEP)
     click.echo(f"\nCredentials saved to {config_path}")
 
     click.echo("\nNext steps:")
-    click.echo("  nx doctor          — probe the managed service (reachability + version)")
-    click.echo("  nx index repo .    — index your current repository")
+    click.echo("  nx doctor          \u2014 probe the managed service (reachability + version)")
+    click.echo("  nx index repo .    \u2014 index your current repository")

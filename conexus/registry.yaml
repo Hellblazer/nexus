@@ -668,6 +668,11 @@ utility_commands:
     description: "Verify conexus plugin dependencies: nx CLI, nx doctor, bd (beads)"
     disable_model_invocation: false
 
+  setup:
+    slash_command: /setup
+    description: "Set up Nexus on this machine through the nexus server's setup and setup_status tools: show what is missing, ask, then install the CLI and a service in the background (RDR-228)"
+    disable_model_invocation: false
+
   pdf-process:
     slash_command: /pdf-process
     description: "Index PDF files into the T3 knowledge store via nx index pdf"

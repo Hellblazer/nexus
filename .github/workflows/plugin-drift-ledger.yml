@@ -44,6 +44,7 @@ on:
       - 'sn/.mcp.json'
       - 'conexus/.mcp.json'
       - '.claude-plugin/marketplace.json'
+      - 'scripts/cut_plugin_release.py'
       - 'tests/test_plugin_release_drift_ledger.py'
       - '.github/workflows/plugin-drift-ledger.yml'
   pull_request:

@@ -7,7 +7,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-**Install:** follow the [install guide at hellblazer.github.io/nexus](https://hellblazer.github.io/nexus/). It has a version for Claude Code, for the `nx` CLI alone, and for Claude Desktop, on macOS, Linux and Windows.
+**Install:** follow the [install guide at hellblazer.github.io/nexus](https://hellblazer.github.io/nexus/). It has a version for Claude Code, for the `nx` CLI alone, and for Claude Desktop, on macOS, Linux and Windows. Windows 11 x64 is supported, with the limits listed in the [Windows install guide](https://github.com/Hellblazer/nexus/blob/develop/docs/windows-install.md#what-is-not-supported-or-not-measured).
 
 The package on PyPI is `conexus`. The command it installs is `nx`.
 

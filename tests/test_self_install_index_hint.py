@@ -12,6 +12,7 @@ running generation was untouched, and the message said neither.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -34,6 +35,25 @@ _RESOLVER_FAILURE = (
     "  x No solution found when resolving dependencies:\n"
     "  Because conexus==99 was not found in the package registry\n"
 )
+
+
+def _usable_bash() -> str:
+    """The ``bash`` these tests hand a fake build script to.
+
+    POSIX: ``bash`` on the PATH. Windows: the first ``bash`` on the PATH is
+    usually ``System32\\bash.exe``, the WSL launcher, which runs the script in a
+    Linux distribution (or fails when none is installed), so it is not used.
+    Git for Windows' own bash, next to ``git.exe``, is; with neither the tests
+    skip. Test-only: the Windows install path never runs bash."""
+    if os.name != "nt":
+        return "bash"
+    git = shutil.which("git")
+    if git:
+        root = Path(git).resolve().parent.parent
+        for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    pytest.skip("no Git for Windows bash next to git.exe (the bash on PATH may be the WSL launcher)")
 
 
 class TestTheHint:
@@ -208,7 +228,7 @@ class TestTheBuildFailureMessage:
         script = tmp_path / "fake_install_generation.sh"
         script.write_text(f"#!/usr/bin/env bash\ncat >&2 <<'EOF'\n{stderr}EOF\nexit 1\n")
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
-        return ["bash", str(script)]
+        return [_usable_bash(), str(script)]
 
     def _fail(self, tmp_path: Path, stderr: str, monkeypatch) -> str:
         for name in ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX", "HTTPS_PROXY", "https_proxy",
@@ -244,3 +264,89 @@ class TestTheBuildFailureMessage:
         assert not (tools / "current").exists()
         assert not any(p.name.startswith("gen-") for p in tools.iterdir())
         assert os.path.isdir(tools)
+
+
+# The plain command's text for two failure shapes, as printed before the
+# bootstrap path (nexus-sv2wx.14) added a variant. Pinned whole so that a
+# change to the shared function cannot move the plain path by a word.
+_PLAIN_DNS_HINT = (
+    "uv could not reach the package index at https://artifactory.infra.us-east-1.conductor.sh"
+    "/artifactory/api/pypi/pypi-local/simple/conexus/\n"
+    f"No setting naming {_HOST} was found (checked the UV_INDEX_URL, UV_DEFAULT_INDEX and "
+    "UV_INDEX variables, uv.toml and pip.conf).\n"
+    "The install you have was not changed.\n"
+    "Reach that index (connect to the VPN it needs, or check your network).\n"
+    "Or build this once from PyPI:\n"
+    "    UV_INDEX_URL=https://pypi.org/simple nx self install\n"
+    "A local-mode upgrade also downloads the pinned engine from GitHub releases, "
+    "which a corporate network may block too."
+)
+_TLS_FAILURE = (
+    "  Failed to fetch https://example.org/simple/conexus/\n"
+    "  invalid peer certificate: UnknownIssuer\n"
+)
+_PLAIN_TLS_HINT = (
+    "uv could not reach the package index at https://example.org/simple/conexus/\n"
+    "No setting naming example.org was found (checked the UV_INDEX_URL, UV_DEFAULT_INDEX and "
+    "UV_INDEX variables, uv.toml and pip.conf).\n"
+    "The install you have was not changed.\n"
+    "This looks like a certificate or TLS error, not an unreachable host. Check that the proxy "
+    "(HTTPS_PROXY / ALL_PROXY) is reachable and correct. If the proxy or index uses a private "
+    "certificate authority, point SSL_CERT_FILE at its CA bundle, or set UV_NATIVE_TLS=1 to use "
+    "the system certificate store.\n"
+    "A local-mode upgrade also downloads the pinned engine from GitHub releases, "
+    "which a corporate network may block too."
+)
+_BOOTSTRAP_RERUN = (
+    "Or re-run the same bootstrap command with UV_INDEX_URL=https://pypi.org/simple set."
+)
+
+
+class TestTheBootstrapVariant:
+    """On the bootstrap path there is no install to have been left unchanged and
+    no `nx` to run: the hint names the same bootstrap command instead."""
+
+    def test_the_plain_text_is_unchanged_word_for_word(self, tmp_path: Path):
+        assert self_cmd.index_failure_hint(_UV_DNS_FAILURE, env={}, home=tmp_path) == _PLAIN_DNS_HINT
+        assert self_cmd.index_failure_hint(_TLS_FAILURE, env={}, home=tmp_path) == _PLAIN_TLS_HINT
+
+    def test_the_dns_hint_names_the_bootstrap_rerun_and_nothing_about_an_install(self, tmp_path: Path):
+        hint = self_cmd.index_failure_hint(_UV_DNS_FAILURE, env={}, home=tmp_path, bootstrap=True)
+        assert hint is not None
+        assert _BOOTSTRAP_RERUN in hint
+        assert "Reach that index" in hint
+        for stale in ("not changed", "nx self install", "install you have", "upgrade"):
+            assert stale not in hint, stale
+
+    def test_the_tls_hint_says_nothing_about_an_install_either(self, tmp_path: Path):
+        hint = self_cmd.index_failure_hint(_TLS_FAILURE, env={}, home=tmp_path, bootstrap=True)
+        assert hint is not None
+        assert "SSL_CERT_FILE" in hint
+        for stale in ("not changed", "nx self install", "install you have", "upgrade"):
+            assert stale not in hint, stale
+
+    def test_a_pypi_failure_is_not_told_to_override_to_pypi(self, tmp_path: Path):
+        stderr = (
+            "  Failed to fetch: `https://pypi.org/simple/conexus/`\n"
+            "  dns error: failed to lookup address\n"
+        )
+        hint = self_cmd.index_failure_hint(stderr, env={}, home=tmp_path, bootstrap=True)
+        assert hint is not None
+        assert "UV_INDEX_URL=https://pypi.org/simple" not in hint
+
+    def test_the_build_failure_message_on_the_bootstrap_path_uses_the_variant(self, tmp_path, monkeypatch):
+        for name in ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX", "HTTPS_PROXY", "https_proxy",
+                     "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        script = tmp_path / "fake_install_generation.sh"
+        script.write_text(f"#!/usr/bin/env bash\ncat >&2 <<'EOF'\n{_UV_DNS_FAILURE}EOF\nexit 1\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._build_flip_shims(
+                [_usable_bash(), str(script)], install_dir=tmp_path, tools=tmp_path / "tools",
+                bin_dir=tmp_path / "bin", bootstrap=True,
+            )
+        message = exc.value.message
+        assert _BOOTSTRAP_RERUN in message
+        assert "not changed" not in message and "nx self install" not in message
+        assert message.index(_BOOTSTRAP_RERUN) < message.index("uv output:")

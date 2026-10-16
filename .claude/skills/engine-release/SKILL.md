@@ -1,6 +1,6 @@
 ---
 name: engine-release
-description: Use when cutting or deploying the Java engine-service binary (engine-service-vX.Y.Z), refreshing the cloud engine, or validating develop's engine tip in the cloud. This is the SECOND release lifecycle — separate from, and not gated by, the conexus PyPI release (use the `release` skill for that). Authority: docs/agents/engine-service-release.md (AGENTS.md § Engine-service release keeps the short rules and links it).
+description: Use when cutting or deploying the Java engine-service binary (engine-service-vX.Y.Z), refreshing the cloud engine, or validating develop's engine tip in the cloud. This is the SECOND release lifecycle — separate from, and not gated by, the conexus PyPI release (use the `release` skill for that). Authority: docs/agents/engine-service-release.md (.claude/rules/releases-and-engine.md § Engine-service release keeps the short rules and links it).
 ---
 
 # Engine-service Release Checklist

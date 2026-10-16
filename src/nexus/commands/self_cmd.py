@@ -59,12 +59,17 @@ import subprocess
 import sys
 import urllib.parse
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import argv_off_cwd
+
+if TYPE_CHECKING:
+    from importlib.metadata import EntryPoints
 
 __all__ = ["self_group", "perform_self_install", "packaged_install_dir", "index_failure_hint"]
 
@@ -157,7 +162,7 @@ class _WindowsBuild:
 
 def perform_self_install(
     *, keep: int = 3, version: str | None = None, dry_run: bool = False,
-    add_extras: tuple[str, ...] = (),
+    add_extras: tuple[str, ...] = (), bootstrap: bool = False,
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
 
@@ -169,6 +174,11 @@ def perform_self_install(
     set travels through ``install_generation.sh --extras`` and is rendered
     by ``install_layout.build_spec``, so spec and extras cannot disagree.
 
+    *bootstrap* (RDR-228, nexus-sv2wx.14) is the explicit first-install path:
+    see :func:`_bootstrap_install`. It is the only way into that path; nothing
+    is inferred from where this process runs, and without it every refusal
+    below is unchanged.
+
     Returns the new generation, or ``None`` on a dry run.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
@@ -178,6 +188,10 @@ def perform_self_install(
     install_dir = packaged_install_dir()
     tools = install_layout.tools_dir()
     bin_dir = install_layout.bin_dir()
+    if bootstrap:
+        return _bootstrap_install(
+            install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
+        )
     host = running_generation()
 
     # THREE SITES, NOT TWO (nexus-gu9zo). The original guard asked one
@@ -277,6 +291,388 @@ def perform_self_install(
     # test for this ordering reaped a free tree exactly that way.
     _register_legacy_tree_if_present(install_dir, tools)
     return generation
+
+
+@dataclass(frozen=True)
+class _RegistryReceipt:
+    """What a bootstrap build asks for, in the shape :func:`_build_request`
+    reads from a receipt: the distribution name from the package index, and no
+    extras (the documented first install records none; local mode's embedding
+    model belongs to the service, which ``nx init`` provisions)."""
+
+    source: str = "conexus"
+    extras: tuple[str, ...] = ()
+
+
+def _running_version() -> str:
+    """The version of the conexus this process is running."""
+    from importlib.metadata import PackageNotFoundError, version as dist_version  # noqa: PLC0415 — stdlib, deferred
+
+    try:
+        return dist_version("conexus")
+    except PackageNotFoundError as exc:
+        raise click.ClickException(
+            "--bootstrap installs the version of the conexus that is running this "
+            "command, and this process has no conexus distribution metadata. "
+            "Nothing was changed."
+        ) from exc
+
+
+def _current_generation_dir(tools: Path) -> Path | None:
+    """The directory ``<tools>/current`` names, when it resolves to one that
+    exists; ``None`` for an absent, dangling or unreadable pointer."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    try:
+        target = install_layout.current_generation(tools=tools, platform=_plat())
+    except Exception:  # noqa: BLE001 — no pointer, unreadable root: no current generation
+        return None
+    return target if target.is_dir() else None
+
+
+def _read_receipt_or_none(generation: Path):
+    """*generation*'s receipt, or ``None`` when it has none or cannot be read."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    try:
+        return install_layout.read_receipt(generation)
+    except Exception:  # noqa: BLE001 — missing, corrupt or unknown-schema: not receipted
+        return None
+
+
+def _shims_are_in_place(tools: Path, bin_dir: Path) -> bool:
+    """Whether the shim step's output is there: the part of an install that comes
+    AFTER the flip and is what puts ``nx`` on the PATH.
+
+    POSIX: ``<bin>/nx`` exists and is a shim this install wrote
+    (``shims_core._is_ours``) or a symlink into the ``uv tool`` conexus tree.
+    Windows: ``<tools>\\current\\bin\\nx.exe`` exists and that directory is on the
+    user PATH store (``inspect_user_path`` also reports a directory ahead of it
+    that provides ``nx.exe``; the shim step repairs that too, so it is unfinished)."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if _is_windows():
+        core = _generation()
+        return not core.inspect_user_path(core.current_launcher_dir(tools))
+    from nexus._install import shims_core  # noqa: PLC0415 — deferred import
+
+    nx = bin_dir / "nx"
+    if shims_core._is_ours(nx, tools / install_layout.CURRENT_LINK_NAME):
+        return True
+    return nx.is_symlink() and nx.exists() and install_layout.is_under_uv_tool_install(nx)
+
+
+#: The most of a program read to find its shebang line (``_cli_lookup._SHEBANG_BYTES``).
+_SHEBANG_BYTES = 8192
+
+
+def _python_link_dangles(venv: Path) -> bool:
+    """Whether a ``python*`` link in ``<venv>/bin`` points nowhere: what ``uv`` leaves
+    when it prunes the managed CPython the venv was built on."""
+    try:
+        with os.scandir(venv / "bin") as entries:
+            return any(
+                e.name.startswith("python") and e.is_symlink() and not os.path.exists(e.path) for e in entries
+            )
+    except OSError:
+        return False
+
+
+def _shebang_interpreter_missing(program: Path) -> bool:
+    """Whether *program*'s ``#!`` line names an interpreter that cannot be started: an
+    absolute path that is missing or not executable, or ``/usr/bin/env <name>`` with
+    no such ``<name>`` on the absolute ``PATH`` entries. Relative interpreters, ``env``
+    with options or an assignment, and any file with no ``#!`` line are not judged.
+    ``uv``'s launcher for an interpreter path a shebang cannot hold (over 127
+    characters, or a space) is ``#!/bin/sh`` then ``'''exec' '<python>' "$0" "$@"``; the
+    interpreter named on that second line is the one judged (nexus-sv2wx.20).
+    The plugin's ``_cli_lookup._shebang_problem`` states the same rule."""
+    try:
+        with open(program, "rb") as handle:
+            head = handle.readline(_SHEBANG_BYTES)
+            second = handle.readline(_SHEBANG_BYTES) if head.startswith(b"#!") else b""
+    except OSError:
+        return False
+    if not head.startswith(b"#!") or (len(head) >= _SHEBANG_BYTES and not head.endswith(b"\n")):
+        return False
+    fields = head[2:].decode("utf-8", "replace").split()
+    if not fields:
+        return False
+    interpreter = fields[0]
+    if os.path.basename(interpreter) == "sh" and len(fields) == 1 and os.path.isabs(interpreter):
+        if second.startswith(b"'''exec' ") and second.endswith(b"\n"):
+            import shlex  # noqa: PLC0415 — stdlib, deferred
+
+            try:
+                words = shlex.split(second.decode("utf-8", "replace"))
+            except ValueError:
+                words = []
+            if len(words) >= 2 and words[0] == "exec":
+                interpreter = words[1]
+    if os.path.basename(interpreter) == "env":
+        name = fields[1] if len(fields) > 1 else ""
+        if not name or name.startswith("-") or "=" in name or os.path.dirname(name):
+            return False
+        import shutil  # noqa: PLC0415 — stdlib, deferred
+
+        entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(e)]
+        return shutil.which(name, path=os.pathsep.join(entries)) is None
+    if not os.path.isabs(interpreter):
+        return False
+    return not os.path.exists(interpreter) or not os.access(interpreter, os.X_OK)
+
+
+def _generation_interpreter_gone(generation: Path, *, windows: bool | None = None) -> bool:
+    """Whether a venv (a generation, or the legacy ``uv tool`` tree) cannot start
+    because the Python it was built on is gone. The plugin's
+    ``_cli_lookup.cannot_start`` states the same rule for a program, and
+    ``tests/hooks/test_cli_cannot_start.py`` runs the two over one matrix.
+
+    Windows: ``pyvenv.cfg`` names a ``home`` that is not a directory, which is what
+    ``uv`` leaves when it prunes a managed CPython (the pipx#146 / uv#8028 class;
+    ``Receipt.base_interpreter`` records the same fact for ``nx doctor``). POSIX (Sam,
+    2026-10-14): a gone ``home`` alone says nothing, because the venv's ``bin/python``
+    is a link and the interpreter can find its way back through it; it counts beside
+    a ``python*`` link that dangles, and a console script whose own shebang names a
+    missing interpreter counts alone. A venv with no ``pyvenv.cfg``, or one with no
+    ``home`` line, gives no evidence from the cfg."""
+    windows = _is_windows() if windows is None else windows
+    try:
+        text = (generation / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    home = _generation()._pyvenv_value(text, "home").strip() if text else ""
+    if home and not Path(home).is_dir() and (windows or _python_link_dangles(generation)):
+        return True
+    if windows:
+        return False
+    # The two console scripts a generation always has (order is the plugin's; not an argv).
+    return any(_shebang_interpreter_missing(generation / "bin" / name) for name in ("nx-mcp", "nx"))
+
+
+def _existing_install(tools: Path, bin_dir: Path) -> str | None:
+    """Words naming a COMPLETE install on this box, or ``None``.
+
+    Complete means ``current`` resolves to a receipted generation that can run
+    (its Python is not gone, :func:`_generation_interpreter_gone`) AND the shim
+    step's output is in place (:func:`_shims_are_in_place`), or a
+    ``uv tool install conexus`` tree exists that can run. A tree or generation whose
+    interpreter was pruned is not complete: the plugin's launcher serves the stand-in
+    for it and its ``setup`` runs ``--bootstrap`` to repair it (RDR-228 Phase 2 Step 4,
+    nexus-sv2wx.17; Sam, 2026-10-14), and a refusal here would leave the repair with
+    nothing to run. That holds for the legacy tree (the README's own install path) as
+    much as for a generation, and a broken ``current`` generation is repaired even
+    when a working legacy tree sits beside it: the plugin's lookup is layout-first, so
+    the broken generation is the one it runs and the one to replace.
+    Neither half alone will do: the
+    receipt is written when the build ends, before ``current``, and ``current``
+    is flipped before the shims, so a run that died at either point leaves state
+    that nothing runs and that the plain command cannot be run from; see
+    :func:`_unfinished_generation`. A uv tree is complete by uv's own standard
+    and carries its own ``nx``."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    current = _current_generation_dir(tools)
+    if current is not None and _read_receipt_or_none(current) is not None:
+        if _generation_interpreter_gone(current):
+            return None
+        if _shims_are_in_place(tools, bin_dir):
+            return f"generation {current.name} under {tools}"
+    legacy = install_layout.uv_conexus_venv(platform=_plat())
+    if install_layout.venv_bin(legacy, platform=_plat()).is_dir() and not _generation_interpreter_gone(legacy):
+        return f"a `uv tool` install at {legacy}"
+    return None
+
+
+def _generation_answers_for_its_shims(generation: Path) -> bool:
+    """Whether *generation*'s own interpreter answers the console-script lookup
+    the shim step makes, and the answer includes ``nx``. A generation that does
+    not (its interpreter is gone, its distribution declares nothing) would
+    flip and then shim nothing."""
+    try:
+        return "nx" in _shim_names_of(generation)
+    except Exception:  # noqa: BLE001 — LayoutError, OSError: the generation cannot say
+        return False
+
+
+def _shim_names_of(generation: Path) -> list[str]:
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    return sorted(install_layout.owned_shim_names(generation, platform=_plat()))
+
+
+def _unfinished_generation(tools: Path, running: str) -> Path | None:
+    """The generation a bootstrap that died after its build can finish, or ``None``.
+
+    Reached only when no complete install exists. The candidates are the
+    generation ``current`` names (a run that died after the flip) or, when it
+    names none, every receipted generation, newest first. A candidate is
+    finished only when it is what a fresh build would produce: its receipt says
+    *running* and its interpreter answers the shim step's lookup. Otherwise the
+    caller builds afresh, which is safe because nothing complete is replaced."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    current = _current_generation_dir(tools)
+    candidates = [current] if current is not None else list(reversed(install_layout.list_generations(tools=tools)))
+    for generation in candidates:
+        receipt = _read_receipt_or_none(generation)
+        if receipt is not None and receipt.version == running and _generation_answers_for_its_shims(generation):
+            return generation
+    return None
+
+
+def _conexus_entry_points() -> EntryPoints:
+    """The running program's conexus entry points; raises
+    ``importlib.metadata.PackageNotFoundError`` when it has no metadata. A seam,
+    so a test fakes this module's answer without patching the stdlib."""
+    from importlib.metadata import distribution  # noqa: PLC0415 — stdlib, deferred
+
+    return distribution("conexus").entry_points
+
+
+def _shim_names_to_write(generation: Path | None = None) -> list[str]:
+    """The command names the shim step would write. For a generation that
+    already exists, that generation's own answer. Otherwise asked of the running
+    program, because the generation that will carry them does not exist yet: this
+    distribution's console scripts plus the dependency scripts it also shims,
+    minus the names nexus never shims."""
+    if generation is not None:
+        return _shim_names_of(generation)
+    from importlib.metadata import PackageNotFoundError  # noqa: PLC0415 — stdlib, deferred
+
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    try:
+        entry_points = _conexus_entry_points()
+    except PackageNotFoundError as exc:
+        raise click.ClickException(
+            "--bootstrap cannot tell which command names it would write, because this "
+            "process has no conexus distribution metadata. Nothing was changed."
+        ) from exc
+    declared = {entry.name for entry in entry_points if entry.group == "console_scripts"}
+    return sorted((declared | install_layout.DEPENDENCY_SCRIPTS) - install_layout.NEVER_SHIM)
+
+
+def _refuse_a_foreign_program_in_the_bin_directory(
+    tools: Path, bin_dir: Path, generation: Path | None = None,
+) -> None:
+    """Refuse, in one line, when a file the shim step would replace is not ours.
+
+    The shim step ``os.replace``s whatever is at ``<bin>/nx`` and the other shim
+    names. A plain ``nx self install`` runs where nexus already owns them; the
+    bootstrap runs where nothing of nexus's exists, which is where a pipx or
+    npm ``nx`` is most likely to be. A file is ours to replace when it is a
+    shim this install wrote (``shims_core._is_ours``) or a symlink into the
+    ``uv tool`` conexus tree (what ``uv tool install conexus`` leaves, and what
+    the migration replaces by design). Windows writes no file into the bin
+    directory, so there is nothing to protect there."""
+    if _is_windows():
+        return
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+    from nexus._install import shims_core  # noqa: PLC0415 — deferred import
+
+    pointer = tools / install_layout.CURRENT_LINK_NAME
+    for name in _shim_names_to_write(generation):
+        path = bin_dir / name
+        if not (path.exists() or path.is_symlink()):
+            continue
+        if shims_core._is_ours(path, pointer):
+            continue
+        if path.is_symlink() and install_layout.is_under_uv_tool_install(path):
+            continue
+        raise click.ClickException(
+            f"--bootstrap would replace {path}, which is not a nexus shim. Move it "
+            "aside or remove it, then run the same command again. Nothing was changed."
+        )
+
+
+def _bootstrap_install(
+    install_dir: Path, tools: Path, bin_dir: Path, *, version: str | None,
+    extras: list[str], dry_run: bool,
+) -> Path | None:
+    """The first install of the CLI, in one command and one generation (RDR-228
+    Phase 2 Step 1, nexus-sv2wx.14).
+
+    Reached ONLY through ``--bootstrap``. Installs the released package, at the
+    running program's own version and with no extras, from the package index
+    into a new ``gen-<stamp>``, points ``current`` at it and writes the command
+    shims. It is what ``uv tool run --python 3.12 --from conexus==<v> nx self
+    install --bootstrap`` runs, from a throwaway ``uv`` environment that
+    ``perform_self_install`` otherwise refuses (CA-3).
+
+    NOT DONE HERE, on purpose:
+
+    * No cache prune. The plain command prunes ``uv``'s shared cache at its end
+      (23.4 GiB from a developer's cache in the CA-3 test); this path never
+      calls :func:`prune_uv_cache`.
+    * No reap and no legacy-tree registration: with an existing install it
+      refuses, so there is nothing older to reap.
+    * No fallback to ``uv tool install`` then ``nx self install``: that runs the
+      prune and leaves two copies on disk.
+
+    With a complete install present it refuses, in one line naming the plain
+    command. Complete means ``current`` resolving to a receipted generation AND
+    the shim step's output in place, or a ``uv tool`` install. The record states
+    the flag for a first install and nothing else: refusing is the reading that
+    cannot overwrite a generation (checked by P2.R2, nexus-sv2wx.22). It also
+    refuses, before building, when ``current`` names an existing directory whose
+    receipt is missing or unreadable, and when a shim name in the bin directory
+    holds a program that is not nexus's. Anything short of complete is finished
+    rather than refused, because there is no ``nx`` on that machine to run the
+    plain command: a receipted generation with no ``current`` (a run that died
+    after its build) or with ``current`` and no shims (a run that died after the
+    flip) is finished without rebuilding, but only when its receipt names the
+    running version and its interpreter answers the shim step's lookup; any
+    other leftover falls through to a fresh build.
+    Two bootstraps at once are P2.2's lock, not this command's.
+    """
+    if version or extras:
+        raise click.ClickException(
+            "--bootstrap installs the version of the running nx with no extras, so it "
+            "takes neither --version nor --extras. Nothing was changed."
+        )
+    existing = _existing_install(tools, bin_dir)
+    if existing is not None:
+        raise click.ClickException(
+            f"--bootstrap is for a first install and {existing} is already installed. "
+            "Run `nx self install` to update it. Nothing was changed."
+        )
+    current = _current_generation_dir(tools)
+    if current is not None and _read_receipt_or_none(current) is None:
+        # `current` names a directory that exists and whose receipt is missing or
+        # unreadable. Whatever runs from it is not ours to move.
+        from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+        nx = install_layout.venv_script(current, "nx", platform=_plat())
+        raise click.ClickException(
+            f"--bootstrap will not move `current`: it names {current}, whose receipt is missing "
+            f"or unreadable. Repair it with `{nx} self install`. Nothing was changed."
+        )
+    running = _running_version()
+    unfinished = _unfinished_generation(tools, running)
+    _refuse_a_foreign_program_in_the_bin_directory(tools, bin_dir, unfinished)
+    if unfinished is not None:
+        # An earlier bootstrap built this generation and died before `current`
+        # and the shims, or after `current` and before the shims. There is no
+        # `nx` here to run, so the same command finishes the job, with no
+        # rebuild. Only a generation at the running version that answers the
+        # shim lookup is finished; any other leftover falls through to a build.
+        what = f"{unfinished.name} (conexus {running}) is already built"
+        if dry_run:
+            click.echo(f"would finish the interrupted install: {what} (no rebuild); "
+                       "would set `current` and write the command shims")
+            return None
+        click.echo(f"finishing the interrupted install: {what} (no rebuild); "
+                   "setting `current` and the command shims")
+        _flip_and_shim(unfinished, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True)
+        return unfinished
+    build = _build_request(install_dir, _RegistryReceipt(), version=running)
+    if dry_run:
+        click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
+        return None
+    return _build_flip_shims(
+        build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True,
+    )
 
 
 _EXTRA_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
@@ -465,6 +861,7 @@ def _file_names_host(path: Path, host: str) -> bool:
 
 def index_failure_hint(
     stderr: str, *, env: Mapping[str, str] | None = None, home: Path | None = None,
+    bootstrap: bool = False,
 ) -> str | None:
     """Explain a network-shaped generation-build failure, or ``None``.
 
@@ -476,6 +873,10 @@ def index_failure_hint(
     rather than reachability, so those get the proxy and certificate variables
     instead of the VPN and PyPI advice. *env* and *home* are injectable for
     tests; they default to the process's.
+
+    *bootstrap* is the ``nx self install --bootstrap`` variant: there is no
+    install to have been left unchanged and no ``nx`` to run, so the text says
+    nothing of either and names re-running the same bootstrap command.
     """
     tls = _TLS_FAILURE_RE.search(stderr) is not None
     if not tls and not _NETWORK_FAILURE_RE.search(stderr):
@@ -500,7 +901,8 @@ def index_failure_hint(
                 f"No setting naming {host} was found (checked the UV_INDEX_URL, "
                 "UV_DEFAULT_INDEX and UV_INDEX variables, uv.toml and pip.conf)."
             )
-    lines.append("The install you have was not changed.")
+    if not bootstrap:
+        lines.append("The install you have was not changed.")
     if tls or proxies:
         cause = "a certificate or TLS error" if tls else "a configured proxy"
         set_now = f" ({', '.join(proxies)} is set)" if proxies else ""
@@ -513,18 +915,27 @@ def index_failure_hint(
     else:
         lines.append("Reach that index (connect to the VPN it needs, or check your network).")
         if host.lower() != "pypi.org":
-            lines += [
-                "Or build this once from PyPI:",
-                "    UV_INDEX_URL=https://pypi.org/simple nx self install",
-            ]
-    lines.append(
-        "A local-mode upgrade also downloads the pinned engine from GitHub releases, "
-        "which a corporate network may block too."
-    )
+            if bootstrap:
+                lines.append(
+                    "Or re-run the same bootstrap command with "
+                    "UV_INDEX_URL=https://pypi.org/simple set."
+                )
+            else:
+                lines += [
+                    "Or build this once from PyPI:",
+                    "    UV_INDEX_URL=https://pypi.org/simple nx self install",
+                ]
+    if not bootstrap:
+        lines.append(
+            "A local-mode upgrade also downloads the pinned engine from GitHub releases, "
+            "which a corporate network may block too."
+        )
     return "\n".join(lines)
 
 
-def _build_flip_shims(build, *, install_dir: Path, tools: Path, bin_dir: Path) -> Path:
+def _build_flip_shims(
+    build, *, install_dir: Path, tools: Path, bin_dir: Path, bootstrap: bool = False,
+) -> Path:
     """Run one generation build, flip ``current`` to it, write the shims.
 
     No reap here: callers that reap do it afterwards and pass rule (d)
@@ -532,25 +943,42 @@ def _build_flip_shims(build, *, install_dir: Path, tools: Path, bin_dir: Path) -
     ships mode 755 today, but a mode bit lost in some install path would fail
     at exec with a permissions error rather than anything self-explanatory,
     and nothing about this command needs the bit.
+
+    *bootstrap* only changes the words a failure uses (see
+    :func:`index_failure_hint`).
     """
     tools.mkdir(parents=True, exist_ok=True)
     if isinstance(build, _WindowsBuild):
-        return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir)
+        return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
     built = subprocess.run(  # noqa: S603 — fixed argv, no shell
         argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
     )
     if built.returncode != 0:
         detail = built.stderr.strip()
-        hint = index_failure_hint(detail)
+        hint = index_failure_hint(detail, bootstrap=bootstrap)
         if hint is None:
             raise click.ClickException(f"generation build failed:\n{detail}")
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         )
     generation = Path(built.stdout.strip().splitlines()[-1])
+    _flip_and_shim(generation, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
+    return generation
+
+
+def _flip_and_shim(
+    generation: Path, *, install_dir: Path, tools: Path, bin_dir: Path, bootstrap: bool = False,
+) -> None:
+    """Point ``current`` at an already-built *generation* and write the shims
+    (on Windows: ``current`` and the user PATH entry). The two steps after a
+    build, on their own, so a bootstrap that died between the build and them can
+    finish without building again."""
+    tools.mkdir(parents=True, exist_ok=True)
+    if _is_windows():
+        _windows_flip_and_path(generation, tools=tools, bootstrap=bootstrap)
+        return
     _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
     _sh(install_dir, f'nx_write_shims "{generation}" "{bin_dir}"')
-    return generation
 
 
 def _echo_path_result(result) -> None:
@@ -560,7 +988,9 @@ def _echo_path_result(result) -> None:
         click.echo(_generation().restart_notice(result.entry))
 
 
-def _windows_build_flip_shims(build: _WindowsBuild, *, tools: Path, bin_dir: Path) -> Path:
+def _windows_build_flip_shims(
+    build: _WindowsBuild, *, tools: Path, bin_dir: Path, bootstrap: bool = False,
+) -> Path:
     """The Windows twin of the build, flip and shim steps, through
     ``generation_core``: the shim step is the user PATH entry. A build failure
     keeps the POSIX path's wording and its package-index diagnosis; nothing is
@@ -573,22 +1003,32 @@ def _windows_build_flip_shims(build: _WindowsBuild, *, tools: Path, bin_dir: Pat
         )
     except core.GenerationError as exc:
         detail = str(exc)
-        hint = index_failure_hint(detail)
+        hint = index_failure_hint(detail, bootstrap=bootstrap)
         if hint is None:
             raise click.ClickException(f"generation build failed:\n{detail}") from exc
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         ) from exc
+    _windows_flip_and_path(generation, tools=tools, bootstrap=bootstrap)
+    return generation
+
+
+def _windows_flip_and_path(generation: Path, *, tools: Path, bootstrap: bool = False) -> None:
+    """Flip ``current`` to *generation*, put its launcher directory on the user
+    PATH, and repoint the logon task. On the bootstrap path the failure names
+    the same ``--bootstrap`` command, because the plain one has no ``nx`` to
+    run there."""
+    core = _generation()
     try:
         core.flip_current(generation, tools, platform=_plat())
         _echo_path_result(core.ensure_user_path(core.current_launcher_dir(tools)))
     except core.GenerationError as exc:
-        raise click.ClickException(
-            f"flip or user PATH update failed (`nx self install` re-runs the missing "
-            f"steps):\n{exc}"
-        ) from exc
+        rerun = (
+            "re-run the same `--bootstrap` command to finish the install"
+            if bootstrap else "`nx self install` re-runs the missing steps"
+        )
+        raise click.ClickException(f"flip or user PATH update failed ({rerun}):\n{exc}") from exc
     _retarget_autostart_task(generation)
-    return generation
 
 
 def _retarget_autostart_task(generation: Path) -> None:
@@ -1076,9 +1516,16 @@ def self_group() -> None:
               help="Extra(s) to ADD, e.g. --extras local (repeatable, or "
                    "comma-separated). MERGED with the extras this install "
                    "already has — never replaces them (nexus-pffc4).")
+@click.option("--bootstrap", is_flag=True,
+              help="First install from nothing: build the released package, at the version "
+                   "of the nx running this command and with no extras, into a new "
+                   "generation. Takes neither --version nor --extras, does not prune "
+                   "uv's package cache, and refuses when an install already exists.")
 @click.option("--dry-run", is_flag=True,
               help="Print the build command and stop.")
-def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run: bool) -> None:
+def install_cmd(
+    keep: int, version: str | None, extras: tuple[str, ...], bootstrap: bool, dry_run: bool,
+) -> None:
     """Install a new generation from the one this process is running from.
 
     Safe under live sessions: nothing is swapped underneath a running process.
@@ -1089,11 +1536,15 @@ def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run
     fresh install needs no `nx upgrade`: `nx init` converges the ladder.
     """
     generation = perform_self_install(
-        keep=keep, version=version, dry_run=dry_run, add_extras=extras,
+        keep=keep, version=version, dry_run=dry_run, add_extras=extras, bootstrap=bootstrap,
     )
     if generation is None:
         return
     click.echo(f"installed {generation.name}")
+    if bootstrap:
+        # A first install: no cache prune (RDR-228), and nothing to migrate.
+        click.echo("a fresh install is set up by `nx init`")
+        return
     click.echo(prune_uv_cache())
     click.echo(
         "if this upgraded an existing install, run `nx upgrade` for migrations "

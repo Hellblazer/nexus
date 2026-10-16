@@ -295,6 +295,27 @@ class TestFlipAndRollback:
         self._flip(b, tools)
         assert os.readlink(tools / "previous") == str(a)
 
+    def test_flipping_over_a_dangling_current_succeeds_and_records_no_previous(self, tools: Path) -> None:
+        """``current`` can name a generation that is gone (reaped, or a build that
+        was removed). A Windows junction cannot be made to a missing directory, so
+        recording that outgoing target as ``previous`` failed the whole flip
+        before ``current`` moved. A missing outgoing target is not recorded."""
+        a, b = _gen(tools, "gen-A"), _gen(tools, "gen-B")
+        self._flip(a, tools)
+        shutil.rmtree(a)
+        self._flip(b, tools)
+        assert os.readlink(tools / "current") == str(b)
+        assert not os.path.lexists(tools / "previous")
+
+    def test_flipping_over_a_dangling_current_leaves_an_existing_previous_alone(self, tools: Path) -> None:
+        a, b, c = _gen(tools, "gen-A"), _gen(tools, "gen-B"), _gen(tools, "gen-C")
+        self._flip(a, tools)
+        self._flip(b, tools)
+        shutil.rmtree(b)
+        self._flip(c, tools)
+        assert os.readlink(tools / "current") == str(c)
+        assert os.readlink(tools / "previous") == str(a)
+
     def test_rollback_is_itself_reversible(self, tools: Path) -> None:
         a, b = _gen(tools, "gen-A"), _gen(tools, "gen-B")
         self._flip(a, tools)

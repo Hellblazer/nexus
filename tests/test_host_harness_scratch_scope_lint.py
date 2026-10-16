@@ -203,6 +203,14 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "both read-only listings, no write path at all; the third match is "
            "the \"nx collection list\" step label.",
     ),
+    "tests/e2e/lib/setup_journey.py": (
+        1, "NX_LOCAL+SANDBOX: tests/e2e/setup-journey.sh starts the driver "
+           "under `env -i`, and sandbox_env gives every child a scratch HOME (so its "
+           "config dir) built from an allowlist with no "
+           "service credentials; `setup` with mode local provisions that "
+           "HOME's own bundled engine, and the one `memory_put` round trip "
+           "lands there. The match is the REAL_TOOL_NAMES constant.",
+    ),
     "tests/e2e/scenarios/03_skills.sh": (
         1, "NX_LOCAL+SANDBOX: LOCAL mode + isolated $TEST_HOME "
            "(tests/e2e/run.sh forces `export NX_LOCAL=1` and swaps $HOME before "

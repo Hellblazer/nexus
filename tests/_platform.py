@@ -45,6 +45,72 @@ def install_windows_exe_fake(bindir: Path, name: str, script: str) -> Path:
     return exe
 
 
+def prune_python(venv: Path, gone: Path) -> Path:
+    """Leave *venv* as ``uv`` leaves a venv whose managed CPython it pruned (the
+    pipx#146 / uv#8028 class); returns *gone*, the directory that no longer exists.
+
+    ``pyvenv.cfg`` names *gone* as ``home`` (every platform). On POSIX the venv's
+    ``bin/python`` and ``bin/python3`` are also links into the pruned directory, so
+    they dangle. Both facts are what a real prune produces, and the second is what
+    the plugin and the CLI require beside the first: Python starts from a venv whose
+    ``home`` is gone as long as the link still resolves (measured on macOS and
+    Linux), so ``home`` alone is no evidence on POSIX. Windows has no links, and
+    ``home`` is the whole of it.
+    """
+    cfg = venv / "pyvenv.cfg"
+    kept = [
+        line for line in (cfg.read_text(encoding="utf-8").splitlines() if cfg.exists() else [])
+        if line.partition("=")[0].strip() != "home"
+    ]
+    cfg.write_text("\n".join([f"home = {gone}", *kept]) + "\n", encoding="utf-8")
+    if not IS_WINDOWS:
+        bindir = venv / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        for name in ("python", "python3"):
+            link = bindir / name
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(gone / "bin" / name)
+    return gone
+
+
+#: The most a shebang can hold on Linux (``BINPRM_BUF_SIZE``); ``uv`` writes an ``sh``
+#: polyglot instead of a shebang for an interpreter path longer than this.
+SHEBANG_LIMIT: int = 127
+
+
+def long_dir(root: Path) -> Path:
+    """A directory under *root*, created, deep enough that ``<it>/bin/python`` is longer
+    than :data:`SHEBANG_LIMIT` characters."""
+    deep = root
+    while len(str(deep / "bin" / "python")) <= SHEBANG_LIMIT:
+        deep = deep / ("d" + "x" * 40)
+    deep.mkdir(parents=True, exist_ok=True)
+    return deep
+
+
+def uv_polyglot_script(interpreter: str | Path, body: str = "import sys\nsys.exit(0)\n") -> str:
+    """The text of a console script as ``uv`` writes it when the interpreter's path
+    will not fit a shebang (nexus-sv2wx.20; ``tests/hooks/test_cli_cannot_start.py``
+    pins this text against a script ``uv`` itself wrote).
+
+    The first line is ``#!/bin/sh``; the second is read by the shell as
+    ``exec <python> "$0" "$@"`` and by Python as an empty string, a name and a
+    string. The path is one single-quoted shell word, an embedded quote written
+    ``'"'"'``. *body* stands for the entry-point import and call that follows.
+    """
+    word = "'" + str(interpreter).replace("'", "'\"'\"'") + "'"
+    return f"#!/bin/sh\n'''exec' {word} \"$0\" \"$@\"\n' '''\n# -*- coding: utf-8 -*-\n{body}"
+
+
+def write_uv_polyglot(path: Path, interpreter: str | Path, body: str = "import sys\nsys.exit(0)\n") -> Path:
+    """Write the :func:`uv_polyglot_script` for *interpreter* at *path*, executable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(uv_polyglot_script(interpreter, body), encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def posix_only(reason: str) -> pytest.MarkDecorator:
     """Skip on native Windows; *reason* names the POSIX-only mechanism pinned."""
     return pytest.mark.skipif(IS_WINDOWS, reason=f"POSIX-only: {reason}")

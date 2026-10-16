@@ -54,7 +54,7 @@ story.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
+- **Two bundled MCP servers** — `nexus` (46 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -315,7 +315,7 @@ names each handler by its program and verb.
 
 | Event | Handler | Purpose |
 |-------|--------|---------|
-| `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Prints nothing when the Nexus CLI is found, and nothing in a cloud session (`CLAUDE_CODE_REMOTE`), where the servers are not. When the CLI is not found, tells the model Nexus is not installed and gives the commands that install it (RDR-228) |
+| `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Reports the first of eight states (RDR-228): a setup run is live; the CLI is found and cannot start; the CLI resolves and a service is usable (nothing); a run was interrupted; the last run failed; no CLI (puts the one question with its table of choices: Local, Cloud, CLI only, Not now); a provisioned local service is down; no service is set up. The user's choice is honoured: after "not now" the no-CLI, down, no-service and stale failed or interrupted states are one quiet line naming `/conexus:setup` that asks nothing, and a recorded CLI-only choice makes the last two the same line. Says nothing in a cloud session (`CLAUDE_CODE_REMOTE`), where the servers are not. Starts no process, opens no socket, writes nothing |
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
 | `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
@@ -381,6 +381,7 @@ the invocation reads the same and the surface is marked per line below:
 **Utility commands** (no agent dispatch, no MCP call — direct local action):
 - `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
 - `/conexus:nx-preflight` — verify conexus plugin dependencies (CLI, doctor, beads).
+- `/conexus:setup` — set up Nexus through the nexus server's `setup` and `setup_status` tools: show what is missing, ask, then install the CLI and a service in the background. It has no `nx` shell line, because it must work where `nx` does not exist.
 
 **RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`, `/conexus:rdr-fix`. Four of these
 (`rdr-gate`, `rdr-accept`, `rdr-audit`, `rdr-fix`) pair a `commands/*.md` file with a distinctly-named
@@ -397,11 +398,11 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | Retrieval + storage (core) | 44 tools — see below |
+| `nexus` | Retrieval + storage (core) | 46 tools — see below |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### `nexus` MCP tool catalog (44 tools)
+### `nexus` MCP tool catalog (46 tools)
 
 | Category | Tools |
 |----------|-------|
@@ -415,6 +416,7 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Operators (RDR-079/088/093) | none on the MCP surface (nexus-ivi4s): `summarize`, `extract`, `rank`, `compare`, `generate`, `filter`, `groupby`, `aggregate`, `check`, `verify` run as plan steps inside `nx_answer` |
 | Orchestration (RDR-080) | `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
 | Admin | `daemon_uninstall` |
+| Setup (RDR-228) | `setup`, `setup_status` |
 
 **`nx_answer`** is the retrieval entry point for multi-step questions.
 It runs `plan_match` against the library, executes the best-matching plan

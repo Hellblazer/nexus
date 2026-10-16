@@ -602,6 +602,252 @@ def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them(
     phase2_deferral_check(REPO_ROOT, ref, "HEAD", _ledger_text())
 
 
+def _covers(entries: object, path: str) -> bool:
+    """*path* is an entry, or under an entry that ends in ``/``."""
+    return any(
+        path == entry or (entry.endswith("/") and path.startswith(entry))
+        for entry in entries  # type: ignore[attr-defined]
+    )
+
+
+def _uncovered(changed: list[str], guarded: list[str], safe: object) -> list[str]:
+    """Changed paths the Phase 2 guard neither holds nor lists as safe alone."""
+    return [p for p in changed if not _covers(guarded, p) and not _covers(safe, p)]
+
+
+#: The prefixes of PHASE2_SAFE_ALONE that are text the model reads, and what the
+#: scan under them looks for (case-insensitive, any file, changed or not).
+_TEXT_PREFIXES = ("conexus/skills/", "conexus/agents/", "conexus/resources/")
+_PHASE2_NAMES = (
+    r"nx_setup|nx_launch|nx_standin|_cli_lookup|_exec_path|nx_hook_shim|version_lockstep_hook|setup_status"
+    r"|/conexus:setup|__setup\b"
+)
+
+
+def _text_prefix_hits(tree: str, repo: pathlib.Path = REPO_ROOT) -> list[str]:
+    """``path:line`` of every line under the safe-alone text prefixes in *tree* that names a Phase 2 name.
+
+    ``git grep`` over the tree, so it reads what the checkout holds (CI's is a depth-1 one) and not the
+    working copy. Exit 1 is no match; anything else above 1 is an error, not a clean scan.
+    """
+    proc = subprocess.run(
+        ["git", "grep", "-n", "-I", "-i", "-E", _PHASE2_NAMES, tree, "--", *_TEXT_PREFIXES],
+        cwd=repo, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode in (0, 1), f"git grep failed:\n{proc.stderr}"
+    return [line.removeprefix(f"{tree}:") for line in proc.stdout.splitlines()]
+
+
+def _defined_names(source: str) -> set[str]:
+    """Top-level names a Python module defines, by line shape (no import)."""
+    return {
+        a or b
+        for a, b in re.findall(r"^(?:def|class)\s+(\w+)|^(\w+)\s*[:=]", source, re.M)
+    }
+
+
+def _phase2_modules(guarded: object, launch_paths: list[str]) -> dict[str, str]:
+    """Module name -> path of every Python module a safe-alone file must not call ahead of the pin: the ``.py``
+    entries of the guard and every module under ``conexus/launch/`` (the guard names that directory by prefix,
+    so a list built from its ``.py`` entries alone would miss ``nx_setup``, ``nx_launch`` and ``nx_standin``)."""
+    return {
+        pathlib.PurePosixPath(p).stem: p
+        for p in [*guarded, *launch_paths]  # type: ignore[misc]
+        if p.endswith(".py")
+    }
+
+
+def _unsafe_imports(
+    path: str, source: str, modules: dict[str, str], pin_source: object, ref: str,
+) -> list[str]:
+    """Why *path*, a file listed as safe alone, would break if shipped without the guarded modules: it imports
+    one the pin lacks, or calls a name in one that the pin's copy does not define. *pin_source* maps a module
+    path to its text at the pin, or None when the pin lacks it."""
+    problems: list[str] = []
+    for stem, module_path in modules.items():
+        from_names = {
+            n.strip()
+            for group in re.findall(rf"^\s*from\s+{re.escape(stem)}\s+import\s+([\w, ]+)", source, re.M)
+            for n in group.split(",") if n.strip()
+        }
+        if not from_names and not re.search(rf"^\s*import\s+{re.escape(stem)}\b", source, re.M):
+            continue  # a file name in a docstring is not a use
+        used = from_names | set(re.findall(rf"\b{re.escape(stem)}\.(\w+)", source))
+        if not used:
+            problems.append(f"{path} imports {stem} and uses nothing in it")
+            continue
+        at_pin = pin_source(module_path)  # type: ignore[operator]
+        if at_pin is None:
+            problems.append(
+                f"{path} is listed as safe alone but imports {stem}, and "
+                f"{module_path} is absent at {ref}: shipped alone it raises ImportError"
+            )
+            continue
+        missing = used - _defined_names(at_pin)
+        if missing:
+            problems.append(
+                f"{path} is listed as safe alone but calls {stem}.{sorted(missing)}, "
+                f"which {ref} lacks: shipped alone it raises AttributeError"
+            )
+    return problems
+
+
+def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() -> None:
+    """The Phase 2 guard names every shared file Phase 2 changes (nexus-sv2wx.22).
+
+    The guard holds a path back only if it is on the list, and the deferral
+    entry in the ledger is the only other thing between a plugin-only cut and
+    a Phase 2 file shipping alone: move a bullet to "Awaiting" and the cut
+    ships ``nx_hook_shim.py`` without the ``_cli_lookup.cannot_start`` it
+    calls. So while Phase 2 is in the tree and the pinned tag lacks it,
+    every ``conexus/`` path that differs from the pin is computed from git
+    here and must be guarded (``PHASE2_GUARDED``, plus the launcher's callers
+    while the pin lacks the launcher) or named in ``PHASE2_SAFE_ALONE`` with
+    a reason. A new plugin file on develop in that window fails until someone
+    decides which; that is the rule, not a defect.
+
+    The pin is the reference, as in the test above, and a missing pin fails
+    (or skips on a genuinely tagless checkout, under the file's one
+    taglessness rule, `_require_or_skip`).
+    """
+    _require_or_skip()
+    from cut_plugin_release import (
+        PHASE2_GUARDED,
+        PHASE2_SAFE_ALONE,
+        phase2_guarded_paths,
+        phase2_in_play,
+    )
+
+    ref = _pinned_refs()["conexus"]
+    if plugin_in_release_window("conexus", ref):
+        return  # the pin IS this branch's content; nothing differs from it
+    assert _git("rev-parse", "--verify", "-q", ref).returncode == 0, (
+        f"the pinned ref {ref!r} does not resolve, so which conexus/ paths "
+        "changed is UNKNOWN, not none"
+    )
+    if not phase2_in_play(REPO_ROOT, ref, "HEAD"):
+        return  # Phase 2 is not in the tree, or the pin already carries it
+    proc = _git("diff", "--name-only", "--no-renames", ref, "HEAD", "--", "conexus/")
+    assert proc.returncode == 0, f"git diff against {ref} failed:\n{proc.stderr}"
+    changed = sorted(p for p in proc.stdout.splitlines() if p.strip())
+    assert "conexus/launch/nx_setup.py" in changed, (
+        "Phase 2 is in play (the marker is in HEAD, absent from the pin) yet "
+        "the diff does not list it: the diff is not measuring what the guard does"
+    )
+
+    guarded = phase2_guarded_paths(REPO_ROOT, ref)
+    uncovered = _uncovered(changed, guarded, PHASE2_SAFE_ALONE)
+    assert not uncovered, (
+        "these conexus/ paths differ from the pin and are neither on "
+        "PHASE2_GUARDED nor in PHASE2_SAFE_ALONE (scripts/cut_plugin_release.py), "
+        "so a plugin-only cut could ship them without the Phase 2 files they "
+        "need. Guard each, or list it with the reason it stands alone:\n  "
+        + "\n  ".join(uncovered)
+    )
+
+    # A safe-alone entry is a decision with a stated reason, never a path the
+    # guard also holds (the list would then mean nothing).
+    for path, reason in PHASE2_SAFE_ALONE.items():
+        assert reason.strip() and len(reason.split()) >= 5, f"{path}: no real reason"
+        assert not _covers(PHASE2_GUARDED, path), (
+            f"{path} is on PHASE2_GUARDED and in PHASE2_SAFE_ALONE"
+        )
+
+    # The one claim a reason makes that git can check: a Python file listed as
+    # safe alone calls no name of a guarded module that the pin lacks. That is
+    # the failure the guard exists for (a caller shipped without its callee).
+    launch = _git("ls-tree", "-r", "--name-only", "HEAD", "--", "conexus/launch/")
+    assert launch.returncode == 0, f"git ls-tree failed:\n{launch.stderr}"
+    modules = _phase2_modules(PHASE2_GUARDED, launch.stdout.splitlines())
+    for path in (p for p in changed if _covers(PHASE2_SAFE_ALONE, p) and p.endswith(".py")):
+        problems = _unsafe_imports(
+            path,
+            _git("show", f"HEAD:{path}").stdout,
+            modules,
+            lambda module_path: (r.stdout if (r := _git("show", f"{ref}:{module_path}")).returncode == 0 else None),
+            ref,
+        )
+        assert not problems, "\n".join(problems)
+
+    # The prefixes safe alone because they are text the model reads: no file
+    # under them names a Phase 2 file or the setup command. A hit means the
+    # text calls something a plugin-only cut may not ship; guard it instead.
+    prefixes = [p for p in PHASE2_SAFE_ALONE if p.startswith(_TEXT_PREFIXES)]
+    assert sorted(prefixes) == sorted(_TEXT_PREFIXES), "the text prefixes left PHASE2_SAFE_ALONE"
+    hits = _text_prefix_hits("HEAD")
+    assert not hits, (
+        "files under the safe-alone text prefixes name a Phase 2 file or the "
+        "setup command, so they are not safe alone (guard the path in "
+        "PHASE2_GUARDED in scripts/cut_plugin_release.py, or take the name "
+        "out of the text):\n  " + "\n  ".join(hits)
+    )
+
+
+def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
+    """The rule above is not vacuous: removing one guarded path reports it."""
+    from cut_plugin_release import PHASE2_GUARDED, PHASE2_SAFE_ALONE
+
+    changed = [
+        "conexus/hooks/scripts/_cli_lookup.py",
+        "conexus/hooks/scripts/nx_hook_shim.py",
+        "conexus/launch/nx_setup.py",
+        "conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
+    ]
+    assert _uncovered(changed, list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == []
+    without = [p for p in PHASE2_GUARDED if not p.endswith("/_cli_lookup.py")]
+    assert _uncovered(changed, without, PHASE2_SAFE_ALONE) == [
+        "conexus/hooks/scripts/_cli_lookup.py"
+    ]
+    assert _uncovered(changed + ["conexus/hooks/scripts/new_one.py"],
+                      list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == [
+        "conexus/hooks/scripts/new_one.py"
+    ]
+
+
+def test_the_import_check_covers_the_launch_modules_the_guard_names_by_prefix() -> None:
+    """The gap: the module list came from the ``.py`` entries of PHASE2_GUARDED, which names ``conexus/launch/``
+    only as a prefix, so a safe-alone file importing ``nx_setup`` was not checked at all."""
+    from cut_plugin_release import PHASE2_GUARDED
+
+    launch = ["conexus/launch/nx_launch.py", "conexus/launch/nx_setup.py", "conexus/launch/nx_standin.py"]
+    assert "nx_setup" not in _phase2_modules(PHASE2_GUARDED, [])  # the old list
+    modules = _phase2_modules(PHASE2_GUARDED, launch)
+    assert {"nx_setup", "nx_launch", "nx_standin", "_cli_lookup"} <= set(modules)
+    source = "from nx_setup import setup_dir\nx = 1\n"
+    pin = {"conexus/launch/nx_launch.py": "def main(): pass\n"}  # a pin without nx_setup.py
+    problems = _unsafe_imports("conexus/hooks/scripts/new.py", source, modules, pin.get, "v7.79.0")
+    assert len(problems) == 1 and "nx_setup.py is absent at v7.79.0" in problems[0]
+    pin["conexus/launch/nx_setup.py"] = "def other(): pass\n"  # present, without the name used
+    assert "setup_dir" in _unsafe_imports("x.py", source, modules, pin.get, "v7.79.0")[0]
+    pin["conexus/launch/nx_setup.py"] = "def setup_dir(): pass\n"
+    assert _unsafe_imports("x.py", source, modules, pin.get, "v7.79.0") == []
+
+
+def test_the_text_prefix_scan_catches_a_name_in_a_skill_and_misses_a_clean_one(tmp_path: pathlib.Path) -> None:
+    """The scan is not vacuous: in a throwaway repo a skill, an agent and a resource that name a Phase 2 name
+    are reported, a clean skill is not, and a name outside the three prefixes is not looked at."""
+    def run(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    run("init", "-q")
+    run("config", "user.email", "t@example.invalid")
+    run("config", "user.name", "t")
+    run("config", "commit.gpgsign", "false")
+    for rel, text in {
+        "conexus/skills/a/SKILL.md": "Call setup_status first.\n",
+        "conexus/skills/b/SKILL.md": "Nothing about the launcher here.\n",
+        "conexus/agents/c.md": "See /conexus:setup.\n",
+        "conexus/resources/d.md": "run nx_launch\n",
+        "conexus/commands/e.md": "setup_status is allowed here\n",
+    }.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    run("add", ".")
+    run("commit", "-q", "-m", "x")
+    hits = sorted(line.split(":")[0] for line in _text_prefix_hits("HEAD", tmp_path))
+    assert hits == ["conexus/agents/c.md", "conexus/resources/d.md", "conexus/skills/a/SKILL.md"]
+
+
 # --- the skip/require mechanism is itself tested ----------------------------
 
 

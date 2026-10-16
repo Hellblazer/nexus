@@ -13,7 +13,6 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 HARNESS=$(dirname "$HERE")
 WT=$(cd "$HARNESS/../../.." && pwd)
 IMAGE=${IMAGE:-nexus-ab-seeded:2.1.300}
-: "${CLAUDE_CODE_OAUTH_TOKEN:?token not in env}"
 mkdir -p "$HERE/out"
 for rep in $(seq 1 "$REPS"); do
   for task in "$@"; do

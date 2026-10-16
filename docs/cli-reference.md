@@ -3050,10 +3050,11 @@ nx config init
 
 | Subcommand | Description |
 |------------|-------------|
-| `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
+| `init` | Interactive managed-service (cloud) credential wizard. Asks the service address, then the token (hidden as you type it), then which kind it is: a mint credential bound to one tenant (also asks the tenant; saves `mint_token` + `mint_tenant`) or a static service token (saves `service_token`). Only the chosen kind's keys are kept, and the other kind's are removed. A blank token keeps what is saved. Local mode uses `nx init` instead. |
 | `list` | Show all config values (secrets masked to their first and last four characters) |
 | `get KEY` | Get single value (masked by default) |
 | `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form, or `KEY --stdin` / `KEY --from-file PATH`. |
+| `unset KEY` | Remove a saved credential from the config file. Removing a key that is not saved is not an error; an environment variable of the same name still applies, and `unset` says so. |
 
 **`get` flags:**
 
@@ -3277,6 +3278,18 @@ grants only Administrators and SYSTEM) or cannot be read, so a normal session
 cannot write it. The fix it prints is an `icacls` grant to the current
 user, run from an elevated Command Prompt. The row is absent on POSIX.
 
+**Smart App Control row (Windows only, nexus-f9bgu.57).** "Smart App Control"
+reads `VerifiedAndReputablePolicyState` under
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`. On is a failure in local mode,
+because Windows then blocks the unsigned PostgreSQL bundle and the Python uv
+installs, and a warning in cloud mode, where its effect is not measured.
+Evaluation is a warning, because Windows can switch it on later. A state that
+cannot be read is a warning; off passes. `nx init` refuses local provisioning
+while the state is on. See
+[Smart App Control](windows-install.md#smart-app-control). The row is absent on
+POSIX, and also on a Windows that has no Smart App Control (the registry value
+does not exist, as on Windows 10 and older Windows 11).
+
 **Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
 authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
 password) and fails while any active line still says `trust`, which let any
@@ -3330,7 +3343,7 @@ only; `--json` output shape is unchanged.
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
-Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. IMPORTANT caveat baked into the success line's wording: pre-cutover on the managed cloud path the edge still strips client `Authorization` and injects its own credential (RDR-005 2a staged cutover), so a successful round trip through the edge does not yet prove this credential's own authority — treat it as reachability, not proof, until the cutover.
+Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. The managed edge forwards the client's `Authorization` on `/v1` unvalidated (conexus-qomd), so a successful mint means the engine checked this credential and its tenant.
 
 **Cross-process data-token lease cache (nexus-9c7t9).** Every successful mint also (best-effort) persists the short-TTL data token — never the mint credential itself — to `~/.config/nexus/data_token_lease.<key>` (mode `0600`, atomic write; `<key>` is a filesystem-safe digest of the endpoint host:port and tenant, never a raw URL). The NEXT `nx` invocation for the same `(endpoint, tenant)` borrows this lease instead of minting, as long as it is still within the same 20%-of-TTL freshness window the in-process cache uses; a stale, corrupt, or foreign lease is silently ignored and the manager mints as before, so a lease-write failure never breaks a mint. This is what makes back-to-back scripted `nx` loops safe: before this cache, every invocation minted its own token and 5+ back-to-back invocations in one minute exhausted the engine's `MintRateLimiter` default burst (5 per credential+tenant per minute) and failed loud; now the engine sees roughly one mint per `(endpoint, tenant)` per TTL window rather than per invocation, and the rate-limiter ceiling only binds a genuine cold-start storm (many `nx` processes launched concurrently before any lease exists), not ordinary sequential CLI usage. `nx uninstall` removes every `data_token_lease.*` file unconditionally, alongside the managed credentials.
 
@@ -3809,6 +3822,23 @@ warns from since-boot totals and cannot clear after the cause is
 fixed until the engine restarts. The order of operations for the cloud engine is
 [`docs/operations/ownerless-write-cutover.md`](operations/ownerless-write-cutover.md).
 
+**Plugin setup (nexus-sv2wx.19, RDR-228).** `nx doctor`'s "Plugin setup" row reads what the conexus plugin's
+`setup` tool leaves in `setup/` under the Nexus config directory: `status.json`, the lock's heartbeat and
+`status.error` (a run that could not write its own status). It names `setup/setup.log`. Outcomes: no setup has
+run (no status file and no live lock) is green and says "not applicable", which is what a new box reads; a run in
+progress (a fresh heartbeat) is green and names its mode and stage, because the setup process runs `nx doctor` as
+its own verify step while it holds the lock; a last run that failed (`failed`, or `doctor-failed` with the failing
+rows it recorded) warns with the failure line and the log path; a run whose status says `running` but whose
+heartbeat is older than 60 seconds, or whose lock is gone, warns that it was interrupted and that calling `setup`
+again with the same mode resumes it; a finished run, and a host where setup was `unsupported`, are green. A
+`status.json` that cannot be read warns, unless a run is live. A setup directory with a stale lock or a log with
+text in it and no `status.json` also warns (a run started and recorded nothing); a fresh lock reads as a run in
+progress. The three warnings about the last run (failed, verify failed, interrupted) are reported as information when no other row in the same `nx doctor` run is a
+failure or a warning, because nothing but another `setup` call clears them. The row reads the directory the setup
+script writes: `NEXUS_CONFIG_DIR`, then `NX_CONFIG_DIR`, then `~/.config/nexus`. The row never fails the run (a warning at most).
+The plugin script and the CLI ship separately, so `tests/fixtures/setup_status_format.json` pins the format and
+both `tests/hooks/test_nx_setup.py` and `tests/test_doctor_setup_row.py` read it.
+
 **Engine reaper (nexus-wbfpw.56).** `nx doctor`'s "Engine reaper" row reads the `reaper`
 object of `GET /v1/status`: `last_completed_pass_at`, the time the engine's chunk reaper
 last finished a pass, and `interval_seconds`. It warns when the last pass is older than three
@@ -4167,7 +4197,7 @@ plugins, so drift is caught without anyone remembering `--check`.
 ## nx self install
 
 ```
-nx self install [--keep N] [--version X.Y.Z] [--extras NAME] [--dry-run]
+nx self install [--keep N] [--version X.Y.Z] [--extras NAME] [--bootstrap] [--dry-run]
 ```
 
 Upgrade this install of `nx`. Installs are **side-by-side generations**: the
@@ -4187,6 +4217,67 @@ launcher exe cannot be replaced on Windows, so nothing is written into
 keep the old `nx` until restarted. A legacy `uv tool install` tree is migrated
 on the first run and its old launchers are removed by `nx self gc` once
 nothing runs them. The installer runs in Python there, never through `bash`.
+
+**First install from nothing: `--bootstrap` (RDR-228, nexus-sv2wx.14).** The
+plain command refuses a program that is not a generation or a packaged
+install, which includes the throwaway `uv` environment that
+`uv tool run --from conexus==X nx ...` runs from. `--bootstrap` is the one way
+into a first install from there, and nothing is inferred from where the
+process runs. The command the plugin runs is:
+
+```
+uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap
+```
+
+With the flag the command installs the released package from the package
+index, at the version of the `nx` that is running it, into a new
+`gen-<stamp>`, points `current` at it and writes the command shims (on Windows,
+the launchers and the user PATH entry described above). The receipt lists no
+extras, as the documented first install records none; `nx init` provisions the
+service. Unlike the plain command it does **not** run `uv cache prune` at the
+end, because that prune removes unreferenced packages from `uv`'s cache, which
+is shared with every other tool on the account. It takes neither `--version`
+nor `--extras` (both are refused: the version is the running program's, and a
+first install has no extras), and `--keep` has no effect because nothing is
+reaped. With a complete install already present it refuses in one line that
+names the plain `nx self install` and changes nothing. Complete means `current`
+pointing at a generation with a receipt **and** the shim step's output in place
+(POSIX: `<bin>/nx` is a nexus shim or a symlink into the `uv tool` tree;
+Windows: `current\bin\nx.exe` exists and that directory is on the user PATH), or
+a `uv tool install conexus` tree. `--dry-run`
+prints the build and stops (and refuses the same way when an install exists).
+There is no fallback to `uv tool install` followed by `nx self install`:
+that route runs the prune and leaves two copies on disk.
+
+Two states the flag handles itself, because on that machine there is no `nx` to
+run the plain command:
+
+- **A run that died after its build or after the flip.** The receipt is written
+  when the build ends, before `current`, and `current` is flipped before the
+  shims, so a run that dies, fails or is killed between those steps leaves a
+  receipted generation that nothing runs from: `current` absent or pointing at
+  nothing, or `current` set with no shims (on Windows, no PATH entry).
+  Running the same `--bootstrap` command again finishes the install with no
+  rebuild and names the generation and its version. It does so only for a
+  generation whose receipt names the running version and whose own interpreter
+  answers the console-script lookup the shim step makes; an older-version or
+  broken leftover is not finished, and the command builds afresh. If the build
+  itself failed there is no generation, and the command builds from the start.
+  A failed build names re-running the same bootstrap command (with
+  `UV_INDEX_URL=https://pypi.org/simple` when the index was a private one that
+  could not be reached), not `nx self install`. When `current` names an existing
+  directory whose receipt is missing or unreadable, the command refuses in one
+  line, naming it and the `bin/nx` inside it that can repair it with
+  `self install`, and moves nothing.
+- **A program in the bin directory that is not nexus's.** Before building, the
+  command refuses in one line, naming the file, when `nx`, `nx-mcp` or another
+  name it would write already exists there and is neither a shim this install
+  wrote nor a symlink into the `uv tool` conexus tree (a pipx or npm `nx`, for
+  example). Move or remove it and run the command again. On Windows nothing is
+  written into the bin directory, so this check does not apply.
+
+Two bootstraps running at once are not guarded here; the setup process's lock
+(RDR-228 P2.2) covers that.
 
 **Adding an extra (nexus-pffc4):** `nx self install --extras local` builds the
 new generation with that extra ADDED — the flag MERGES with the extras the

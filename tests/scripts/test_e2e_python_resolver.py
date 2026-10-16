@@ -94,6 +94,7 @@ _WHOLE_FILE = {
     "prefix-capture/capture_in_container.sh": "runs inside the prefix-capture image (Dockerfile apt python3)",
     "prefix-capture/ab/ab_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
     "prefix-capture/ab/tuplespace/ts_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
+    "prefix-capture/ab/seqthink/sq_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
     "lib/python_test.sh": "the resolver's own test: python3 is a stub's name there",
     "lib/python.sh": "the resolver: it names python3 as a candidate",
 }

@@ -24,7 +24,7 @@ $v = Get-VM -Name $vm
 # Exact names only: the run's own scripts, its staged files, the files collected
 # from the guest (named as collected, one by one), and the two files launch.sh
 # staged under nxgate\stage. launch.sh's helper scripts in nxgate stay.
-$mine = @('hostcheck.ps1', 'restore.ps1', 'guest-run.ps1', 'inst.ps1', 'setup-run.ps1', 'gaterun.ps1', 'waitv.ps1', 'stduser.ps1', 'as-user.ps1', 'end.ps1') | ForEach-Object { Join-Path $RunDir $_ }
+$mine = @('hostcheck.ps1', 'restore.ps1', 'guest-run.ps1', 'inst.ps1', 'setup-run.ps1', 'gaterun.ps1', 'waitv.ps1', 'stduser.ps1', 'as-user.ps1', 'cache.ps1', 'end.ps1') | ForEach-Object { Join-Path $RunDir $_ }
 $mine += Join-Path $RunDir 'portable-git.ps1'
 $mine += Join-Path $RunDir 'stage\windows-phase5-gate.ps1'
 if ($Wheel) { $mine += Join-Path $RunDir "stage\$Wheel" }

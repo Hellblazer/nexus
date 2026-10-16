@@ -14,13 +14,22 @@ import ast
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
 from pathlib import Path
 
 import pytest
-from tests._platform import IS_WINDOWS, install_windows_exe_fake, posix_only, scrubbed_env
+from tests._platform import (
+    IS_WINDOWS,
+    install_windows_exe_fake,
+    long_dir,
+    posix_only,
+    prune_python,
+    scrubbed_env,
+    write_uv_polyglot,
+)
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +52,7 @@ sys.stdout.write(json.dumps({{
     "args": sys.argv[1:],
     "cwd": os.path.realpath(os.getcwd()),
     "stdin": data.decode("latin-1"),
+    "setup_script": os.environ.get("NX_SETUP_SCRIPT"),
 }}))
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
@@ -387,20 +397,170 @@ def test_no_argument_is_a_usage_line_and_exit_1(tmp_path: Path) -> None:
 
 
 @posix_only("a file with the exec bit and no program in it; Windows decides by extension")
-@pytest.mark.parametrize(("name", "expected"), [("nx-hook", 0), ("nx-mcp", 1)])
-def test_a_program_that_is_found_and_cannot_start_skips_a_hook_and_fails_a_server(
-    tmp_path: Path, name: str, expected: int,
-) -> None:
+def test_a_program_the_system_will_not_execute_skips_a_hook(tmp_path: Path) -> None:
     tools, gen = _layout(tmp_path)
-    broken = gen / "bin" / name
-    broken.parent.mkdir()
+    broken = gen / "bin" / "nx-hook"
+    broken.parent.mkdir(exist_ok=True)
     broken.write_bytes(b"")
     broken.chmod(0o755)
-    r = _run([name, "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
-    assert r.returncode == expected
+    r = _run(["nx-hook", "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert r.returncode == 0
     assert r.stdout == b""
     lines = r.stderr.decode().splitlines()
     assert len(lines) == 1 and "could not start" in lines[0], lines
+
+
+@posix_only("a file with the exec bit and no program in it; Windows decides by extension")
+def test_a_server_the_system_will_not_execute_is_served_the_installed_but_cannot_start_stand_in(
+    tmp_path: Path,
+) -> None:
+    """Sam, 2026-10-14: before, exit 1 and no stand-in, so the application showed
+    a failed server and said nothing. Now the stand-in tells the model and the user."""
+    tools, gen = _layout(tmp_path)
+    broken = gen / "bin" / "nx-mcp"
+    broken.parent.mkdir(exist_ok=True)
+    broken.write_bytes(b"")
+    broken.chmod(0o755)
+    r = _run(["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0
+    assert r.stderr == b""
+    assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
+
+
+# -- the CLI is found and cannot start (Sam, 2026-10-14) -------------------------------------
+
+_BROKEN_PHRASE = "Nexus is installed but cannot start; setup repairs it"
+_INITIALIZE = (
+    json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+    }).encode() + b"\n"
+    + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).encode() + b"\n"
+)
+
+
+def _broken_layout(tmp_path: Path, *names: str) -> tuple[Path, Path]:
+    """A generation holding fakes for *names*, whose ``pyvenv.cfg`` names a Python
+    that is gone: what ``uv`` leaves when it prunes the interpreter. The same on
+    POSIX and Windows, where the fake is a launcher ``.exe`` with no shebang."""
+    tools, gen = _layout(tmp_path, *names)
+    prune_python(gen, tmp_path / "uv" / "cpython-3.12-pruned")
+    return tools, gen
+
+
+@pytest.mark.parametrize("invocation", _hook_invocations(), ids=" ".join)
+def test_a_hook_whose_cli_cannot_start_is_exit_0_with_one_line(tmp_path: Path, invocation: tuple[str, ...]) -> None:
+    tools, _gen = _broken_layout(tmp_path, *_HOOK_PROGRAMS)
+    r = _run(list(invocation), tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert r.returncode == 0
+    assert r.stdout == b"", "the broken program must not have run"
+    lines = r.stderr.decode().splitlines()
+    assert len(lines) == 1, lines
+    assert "could not start" in lines[0] and "cpython-3.12-pruned" in lines[0], lines
+    assert "is not installed" not in lines[0], "it is installed"
+
+
+def test_nx_mcp_whose_cli_cannot_start_is_served_the_stand_in_that_says_so(tmp_path: Path) -> None:
+    tools, _gen = _broken_layout(tmp_path, *_SERVER_PROGRAMS)
+    call = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "setup_status", "arguments": {}}})
+    r = _run(
+        ["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE + call.encode() + b"\n",
+        NEXUS_CONFIG_DIR=str(_empty(tmp_path, "config")), HOME=str(_empty(tmp_path, "home")),
+        USERPROFILE=str(tmp_path / "home"),
+    )
+    assert r.returncode == 0
+    assert r.stderr == b"", "a stdio server's standard error is recorded as an error by the application"
+    init, listed, status = (json.loads(line) for line in r.stdout.splitlines())
+    assert _BROKEN_PHRASE in init["result"]["instructions"]
+    assert "cpython-3.12-pruned" in init["result"]["instructions"]
+    assert "Nexus is not installed" not in init["result"]["instructions"]
+    tools_listed = {t["name"]: t for t in listed["result"]["tools"]}
+    assert sorted(tools_listed) == ["setup", "setup_status"]
+    for tool in tools_listed.values():
+        assert tool["description"].startswith(_BROKEN_PHRASE), "Desktop shows the model the descriptions only"
+    text = status["result"]["content"][0]["text"]
+    assert text.startswith(_BROKEN_PHRASE) and "Nexus is not installed" not in text
+    assert "ask the user first" in text.lower()
+
+
+def test_nx_mcp_catalog_whose_cli_cannot_start_is_the_stand_in_with_no_tools(tmp_path: Path) -> None:
+    tools, _gen = _broken_layout(tmp_path, *_SERVER_PROGRAMS)
+    r = _run(["nx-mcp-catalog"], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0 and r.stderr == b""
+    init, listed = (json.loads(line) for line in r.stdout.splitlines())
+    assert "instructions" not in init["result"] and listed["result"]["tools"] == []
+
+
+def test_any_other_program_whose_cli_cannot_start_fails_with_one_line(tmp_path: Path) -> None:
+    tools, _gen = _broken_layout(tmp_path, "nx")
+    r = _run(["nx", "doctor"], tools=tools, path=_empty(tmp_path, "bin"))
+    assert r.returncode == 1 and r.stdout == b""
+    assert len(r.stderr.decode().splitlines()) == 1, r.stderr
+
+
+def test_a_working_cli_beside_a_broken_one_on_path_is_not_chosen(tmp_path: Path) -> None:
+    """The layout is searched first, and a layout hit that cannot start is the
+    answer: serving the stand-in and not a `PATH` program is the same fact the
+    setup hook states, and `setup` repairs the layout."""
+    tools, _gen = _broken_layout(tmp_path, "nx-hook")
+    _install_fake(tmp_path / "bin", "nx-hook", "path")
+    r = _run(["nx-hook", "preflight"], tools=tools, path=tmp_path / "bin", payload=b"{}")
+    assert r.stdout == b"" and b"could not start" in r.stderr
+
+
+@posix_only("a shebang names the interpreter the kernel starts")
+@pytest.mark.parametrize("name", ["nx-hook", "nx-mcp"])
+def test_a_script_whose_shebang_interpreter_is_gone_cannot_start(tmp_path: Path, name: str) -> None:
+    """The POSIX shape of the pruned interpreter: a console script whose shebang
+    names the generation's python, a link `uv` left dangling."""
+    tools, gen = _layout(tmp_path)
+    gone = tmp_path / "uv" / "cpython-3.12-pruned" / "bin" / "python3.12"
+    link = gen / "bin" / "python"
+    link.parent.mkdir(exist_ok=True)
+    os.symlink(gone, link)
+    script = gen / "bin" / name
+    script.write_text(f"#!{link}\nprint('never run')\n", encoding="utf-8")
+    script.chmod(0o755)
+    r = _run([name], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0
+    assert b"never run" not in r.stdout
+    if name == "nx-hook":
+        assert r.stdout == b"" and b"could not start" in r.stderr and str(link).encode() in r.stderr
+    else:
+        assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+@pytest.mark.parametrize("name", ["nx-hook", "nx-mcp"])
+def test_a_polyglot_whose_interpreter_is_gone_cannot_start(tmp_path: Path, name: str) -> None:
+    """uv writes a console script as ``#!/bin/sh`` plus an ``exec`` line when the install
+    path is over 127 characters (nexus-sv2wx.20). The kernel starts the shell, which then
+    exits 126 or 127 at its own exec, so the launcher saw a program that started and
+    failed. The generation holds no ``pyvenv.cfg``: the script's second line is the only
+    evidence, and it must read as the shebang case does."""
+    tools, gen = _layout(long_dir(tmp_path))
+    assert len(str(gen / "bin" / "python")) > 127
+    link = gen / "bin" / "python"
+    link.parent.mkdir(exist_ok=True)
+    os.symlink(tmp_path / "uv" / "cpython-3.12-pruned" / "bin" / "python3.12", link)
+    write_uv_polyglot(gen / "bin" / name, link, "print('never run')\n")
+    r = _run([name], tools=tools, path=_empty(tmp_path, "bin"), payload=_INITIALIZE)
+    assert r.returncode == 0, r.stderr
+    assert b"never run" not in r.stdout
+    if name == "nx-hook":
+        assert r.stdout == b"" and b"could not start" in r.stderr and str(link).encode() in r.stderr
+        assert len(r.stderr.decode().splitlines()) == 1, r.stderr
+    else:
+        assert _BROKEN_PHRASE in json.loads(r.stdout.splitlines()[0])["result"]["instructions"]
+
+
+@posix_only("a polyglot is a POSIX script the shell runs")
+def test_a_polyglot_whose_interpreter_is_there_is_started(tmp_path: Path) -> None:
+    tools, gen = _layout(long_dir(tmp_path))
+    body = _FAKE.format(python="", marker="polyglot").split("\n", 1)[1]
+    write_uv_polyglot(gen / "bin" / "nx-hook", sys.executable, body)
+    r = _run(["nx-hook", "preflight"], tools=tools, path=_empty(tmp_path, "bin"), payload=b"{}")
+    assert _report(r)["marker"] == "polyglot"
 
 
 def test_a_dangling_current_falls_through_to_path(tmp_path: Path) -> None:
@@ -523,3 +683,107 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     assert len(spoke) == 1 and spoke[0].endswith("nx_setup_notice.py"), spoke
     written = sorted(str(p.relative_to(tmp_path)) for base in (config, tools) for p in base.rglob("*"))
     assert written == [], written
+
+
+# -- NX_SETUP_SCRIPT: the real nx-mcp reaches the setup process through the launcher ----------
+#
+# RDR-228 Phase 2 Step 3 (nexus-sv2wx.16). The real server's ``setup`` tool starts the
+# file this variable names, so the setup process has one copy, in the plugin. The
+# launcher sets it when it hands off to ``nx-mcp`` and reads none of the setup directory.
+
+_NX_SETUP = _ROOT / "conexus" / "launch" / "nx_setup.py"
+
+
+def _setup_dir_states(tmp_path: Path) -> dict[str, Path]:
+    """One config directory per state the setup directory can be in. Returns
+    ``{state: config dir}``."""
+    states: dict[str, Path] = {}
+    states["no directory"] = _empty(tmp_path, "cfg-none")
+    marker = _empty(tmp_path, "cfg-marker")
+    (marker / "setup").mkdir()
+    (marker / "setup" / "not-now").write_text("2026-01-01T00:00:00Z", encoding="utf-8")
+    states["a not-now marker"] = marker
+    failed = _empty(tmp_path, "cfg-failed")
+    (failed / "setup").mkdir()
+    (failed / "setup" / "status.json").write_text(json.dumps({"state": "failed", "stage": "build"}), encoding="utf-8")
+    states["a failed status"] = failed
+    stale = _empty(tmp_path, "cfg-stale")
+    (stale / "setup" / "lock").mkdir(parents=True)
+    (stale / "setup" / "lock" / "owner").write_text("a-dead-token", encoding="utf-8")
+    heartbeat = stale / "setup" / "lock" / "heartbeat"
+    heartbeat.write_text("x", encoding="utf-8")
+    os.utime(heartbeat, (1_000_000_000, 1_000_000_000))
+    (stale / "setup" / "status.json").write_text(json.dumps({"state": "running", "stage": "init"}), encoding="utf-8")
+    states["a stale lock"] = stale
+    return states
+
+
+def _tree(root: Path) -> dict[str, tuple[int, bytes | None]]:
+    out: dict[str, tuple[int, bytes | None]] = {}
+    for p in sorted(root.rglob("*")):
+        out[str(p.relative_to(root))] = (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+    return out
+
+
+@pytest.mark.parametrize("state", ["no directory", "a not-now marker", "a failed status", "a stale lock"])
+def test_the_real_nx_mcp_is_handed_the_setup_script_in_every_state_of_the_setup_directory(
+    tmp_path: Path, state: str,
+) -> None:
+    config = _setup_dir_states(tmp_path)[state]
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    before = _tree(config)
+    r = _run(["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), NEXUS_CONFIG_DIR=str(config))
+    report = _report(r)
+    assert report["marker"] == "layout", "the real program must run, not the stand-in"
+    assert report["setup_script"] is not None
+    assert os.path.samefile(report["setup_script"], _NX_SETUP)
+    assert os.path.isabs(report["setup_script"])
+    assert _tree(config) == before, "the launcher read or wrote the setup directory"
+
+
+def test_a_value_inherited_from_the_environment_is_replaced(tmp_path: Path) -> None:
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    r = _run(
+        ["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), NEXUS_CONFIG_DIR=str(_empty(tmp_path, "cfg")),
+        NX_SETUP_SCRIPT=str(tmp_path / "elsewhere.py"),
+    )
+    assert os.path.samefile(_report(r)["setup_script"], _NX_SETUP)
+
+
+def test_the_script_is_found_from_a_relative_launch_and_a_project_directory(tmp_path: Path) -> None:
+    """The launcher moves to the project before it starts the program; the path it
+    hands on is absolute and does not depend on that move."""
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    project = _empty(tmp_path, "project")
+    r = _run(
+        ["nx-mcp"], tools=tools, path=_empty(tmp_path, "bin"), cwd=_LAUNCH.parent,
+        NEXUS_CONFIG_DIR=str(_empty(tmp_path, "cfg")), CLAUDE_PROJECT_DIR=str(project),
+    )
+    report = _report(r)
+    assert os.path.isabs(report["setup_script"]) and os.path.samefile(report["setup_script"], _NX_SETUP)
+    assert os.path.samefile(report["cwd"], project)
+
+
+@pytest.mark.parametrize("program", ["nx-mcp-catalog", "nx-hook", "nx-session-end-launcher"])
+def test_no_other_program_is_handed_the_setup_script(tmp_path: Path, program: str) -> None:
+    tools, _gen = _layout(tmp_path, program)
+    r = _run([program], tools=tools, path=_empty(tmp_path, "bin"), NEXUS_CONFIG_DIR=str(_empty(tmp_path, "cfg")))
+    assert _report(r)["setup_script"] is None
+
+
+def test_a_plugin_copy_without_the_script_hands_on_no_path(tmp_path: Path) -> None:
+    """The variable names a file this plugin ships. If the file is not there the
+    real server must find the variable unset, and answer with the terminal commands."""
+    plugin = tmp_path / "plugin"
+    for sub in ("hooks/scripts", "launch"):
+        shutil.copytree(_ROOT / "conexus" / sub, plugin / sub, ignore=shutil.ignore_patterns("__pycache__"))
+    (plugin / "launch" / "nx_setup.py").unlink()
+    tools, _gen = _layout(tmp_path, "nx-mcp")
+    env = scrubbed_env(
+        PATH=str(_empty(tmp_path, "bin")), NX_TOOLS_DIR=str(tools), NX_SETUP_SCRIPT=str(tmp_path / "elsewhere.py"),
+    )
+    r = subprocess.run(
+        [sys.executable, str(plugin / "launch" / "nx_launch.py"), "nx-mcp"],
+        input=b"", capture_output=True, env=env, timeout=30, check=False,
+    )
+    assert _report(r)["setup_script"] is None

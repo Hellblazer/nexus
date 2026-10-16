@@ -60,6 +60,10 @@ from nexus._hook_runtime._io import HookResult, permission_decision, permission_
 #: an agent satisfies with one more tool call, not a human-in-the-loop
 #: check (nexus-cnzei.5, preserved from the bash script's own header
 #: comment). Do not add it here without a fresh review of that reasoning.
+#: ``mcp__plugin_conexus_nexus__setup`` and ``..._setup_status`` (RDR-228 Phase 2)
+#: are ABSENT on purpose too: ``setup`` installs software, and the application's
+#: prompt before it runs is the second check on consent after the model has asked
+#: the user (CA-8). The record holds ``setup_status`` to the same prompt.
 _ALLOWED_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__plugin_conexus_nexus__search",

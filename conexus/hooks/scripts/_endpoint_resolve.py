@@ -40,14 +40,12 @@ policy without re-deriving the lease/config reads.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import stat
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
 
@@ -83,7 +81,10 @@ class EndpointUnresolvable(Exception):
 
 
 def default_config_dir() -> Path:
-    """Stdlib-only mirror of ``nexus.config.nexus_config_dir``."""
+    """Stdlib-only counterpart of ``nexus.config.nexus_config_dir``, not a mirror: this also honours
+    ``NX_CONFIG_DIR`` (after ``NEXUS_CONFIG_DIR``), which the CLI's function does not. Whether the CLI should
+    is an open decision (nexus-sv2wx.22); ``nx doctor``'s "Plugin setup" row resolves its directory this
+    way, and ``tests/test_doctor_setup_row.py`` compares it with ``nx_setup.setup_dir()``."""
     config_dir = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
     if config_dir:
         return Path(config_dir)
@@ -360,6 +361,15 @@ _WINDOWS_SHARING_RETRY_FIRST_S = 0.002
 _WINDOWS_SHARING_RETRY_MAX_S = 0.01
 
 
+#: The longest the SESSION-START HOOK lets a lease read retry a Windows sharing
+#: violation (RDR-228 Phase 2 Step 4, nexus-sv2wx.17; residual nexus-9i4d4 item 9).
+#: The registry's own budget is two seconds, which suits a client that can wait; the
+#: hook has 100 ms in all, so it retries for at most this long and then reads the
+#: lease as absent. A miss then reports "no service" for that one session start,
+#: which is the safe side of the same question the hook asks again next time.
+HOOK_LEASE_RETRY_BUDGET_S = 0.03
+
+
 def read_lease_text(
     path: Path,
     *,
@@ -367,6 +377,7 @@ def read_lease_text(
     read: Callable[[Path], str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    budget_s: float | None = None,
 ) -> str:
     """Read the supervisor lease file, retrying a Windows sharing violation.
 
@@ -382,7 +393,7 @@ def read_lease_text(
     do_read = read if read is not None else (lambda p: p.read_text(encoding="utf-8"))
     if not _is_windows(platform):
         return do_read(path)
-    deadline = monotonic() + _WINDOWS_SHARING_RETRY_BUDGET_S
+    deadline = monotonic() + (_WINDOWS_SHARING_RETRY_BUDGET_S if budget_s is None else budget_s)
     pause = _WINDOWS_SHARING_RETRY_FIRST_S
     while True:
         try:
@@ -395,17 +406,128 @@ def read_lease_text(
             pause = min(pause * 2, _WINDOWS_SHARING_RETRY_MAX_S)
 
 
-def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
+#: Mirror of ``service_registry.STALE_LEASE_GRACE_MAX_TTL_MULTIPLE`` and
+#: ``_GRACE_PROBE_LOOPBACK_HOSTS`` (a parity test compares them).
+STALE_LEASE_GRACE_MAX_TTL_MULTIPLE = 10.0
+_GRACE_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+#: Mirror of ``service_registry``'s Windows process-liveness constants.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_ERROR_INVALID_PARAMETER = 87
+_WAIT_OBJECT_0 = 0x0
+_MAX_WINDOWS_PID = 0xFFFFFFFF
+
+
+class _KernelProcessApi:
+    """The three kernel32 calls the Windows liveness probe makes
+    (``service_registry._CtypesWinProcessApi``, restated: this file cannot import it)."""
+
+    def __init__(self) -> None:
+        import ctypes  # noqa: PLC0415 -- Windows-only, built on first use
+        from ctypes import wintypes  # noqa: PLC0415
+
+        self._ctypes = ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        k32.CloseHandle.restype = wintypes.BOOL
+        self._k32 = k32
+
+    def open_process(self, pid: int) -> tuple[int | None, int]:
+        handle = self._k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid)
+        if not handle:
+            return None, self._ctypes.get_last_error()  # type: ignore[attr-defined]
+        return handle, 0
+
+    def wait_zero(self, handle: int) -> int:
+        return self._k32.WaitForSingleObject(handle, 0)
+
+    def close(self, handle: int) -> None:
+        self._k32.CloseHandle(handle)
+
+
+def pid_alive(pid: int, *, platform: str | None = None, win_api: Any = None) -> bool:
+    """True when *pid* names a process that has not exited: stdlib mirror of
+    ``nexus.daemon.service_registry.pid_alive`` (a parity test runs the two over the same
+    cases, the Windows arm through the same fake API). Ambiguity reads as alive, as there.
+
+    POSIX signals 0. Windows must not (CPython sends ``CTRL_C_EVENT`` there): it opens the
+    process and asks whether it has exited. No process is started and nothing is written.
+    """
+    if pid <= 0:
+        return False
+    if _is_windows(platform):
+        if pid > _MAX_WINDOWS_PID:
+            return False
+        api = win_api if win_api is not None else _KernelProcessApi()
+        handle, last_error = api.open_process(pid)
+        if handle is None:
+            return last_error != _ERROR_INVALID_PARAMETER
+        try:
+            return api.wait_zero(handle) != _WAIT_OBJECT_0
+        finally:
+            api.close(handle)
+    import errno  # noqa: PLC0415 -- lazy: only a stale lease reaches this
+
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError):  # no such process; or a number no pid can be (a corrupt lease)
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+    return True
+
+
+def _stale_owner_alive(data: dict[str, Any], age: float, ttl: float) -> bool:
+    """Whether a lease past its TTL should still be read as live, as far as a reader that
+    makes no network request can tell: ``ServiceRegistry._stale_lease_still_live`` minus its
+    ``/health`` probe. The guards, each sufficient to deny: not more than ten TTLs stale; a
+    recorded ``payload.supervisor_pid`` that names a live process; a loopback host and a
+    positive port. (The caller has already required status ``live``.)"""
+    if age > ttl * STALE_LEASE_GRACE_MAX_TTL_MULTIPLE:
+        return False
+    payload = data.get("payload")
+    pid = payload.get("supervisor_pid") if isinstance(payload, dict) else None
+    if not (isinstance(pid, int) and pid > 0):
+        return False
+    if not pid_alive(pid):
+        return False
+    endpoint = data["endpoint"]
+    if str(endpoint.get("host", "")) not in _GRACE_LOOPBACK_HOSTS:
+        return False
+    try:
+        return int(endpoint.get("port", 0)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def read_storage_service_lease(
+    config_dir: Path, *, retry_budget_s: float | None = None, grace: bool = False,
+) -> dict[str, Any] | None:
     """Best-effort read of the local supervisor's ``ServiceRegistry``
     lease: ``{"host", "port", "token"}``, or ``None``. Any failure --
     missing file, unreadable, malformed JSON, non-``live`` status, or a
     heartbeat older than its TTL -- resolves to ``None``. Never raises.
+
+    *retry_budget_s* bounds the Windows sharing-violation retry (default: the
+    registry's two seconds); the session-start hook passes what is left of
+    :data:`HOOK_READ_BUDGET_S`.
+
+    *grace* (only :func:`endpoint_usable` passes it) keeps a lease past its TTL when its
+    recorded owner process is alive, as the CLI does (:func:`_stale_owner_alive`). The
+    other callers read a stale lease as absent, because they present its token.
     """
     path = _lease_path_or_none(config_dir)
     if path is None:
         return None
     try:
-        data = json.loads(read_lease_text(path))
+        data = json.loads(read_lease_text(path, budget_s=retry_budget_s))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     try:
@@ -421,7 +543,8 @@ def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
         return None
     if port <= 0:
         return None
-    if (time.time() - heartbeat_epoch) >= ttl:
+    age = time.time() - heartbeat_epoch
+    if age >= ttl and not (grace and _stale_owner_alive(data, age, ttl)):
         return None
     return {"host": host, "port": port, "token": token}
 
@@ -503,9 +626,97 @@ def _strip_inline_comment(value: str) -> str:
     return value.rstrip()
 
 
-def read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
+def _unquote(value: str) -> str:
+    """*value* without one pair of matching single or double quotes around it."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def _flow_body(text: str) -> str | None:
+    """What lies between the ``{`` that *text* starts with and its matching ``}``,
+    skipping quotes and nested brackets; ``None`` when the mapping does not close."""
+    quote: str | None = None
+    depth = 0
+    for i, ch in enumerate(text):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                return text[1:i] if ch == "}" else None
+    return None
+
+
+def _flow_items(body: str) -> list[str]:
+    """The comma-separated items of a flow mapping's inside, split outside quotes and
+    outside nested brackets."""
+    items: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    depth = 0
+    for ch in body:
+        if quote is not None:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            current.append(ch)
+        elif ch in "{[":
+            depth += 1
+            current.append(ch)
+        elif ch in "}]":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    items.append("".join(current))
+    return items
+
+
+def _flow_credentials(text: str, keys: tuple[str, ...]) -> dict[str, str]:
+    """*keys* from a flow mapping's inside, ``service_url: https://x, service_token: t``.
+
+    A flat mapping of scalars only, which is all ``credentials`` holds. Plain and
+    single- or double-quoted values (a quoted value may hold a comma); a key is a plain
+    or quoted word followed by ``:`` and a space, as YAML requires in a flow mapping.
+    Anything else in an item (a nested mapping or list, an anchor, an alias, a tag, a
+    block scalar) is skipped, so a value this scan does not understand reads as absent
+    and never as a guess.
+    """
+    result: dict[str, str] = {}
+    for item in _flow_items(text):
+        name, sep, value = item.strip().partition(":")
+        if not sep or not (value[:1].isspace() or not value):
+            continue
+        name = _unquote(name.strip())
+        value = value.strip()
+        if value[:1] in ("{", "[", "&", "*", "!", "|", ">"):
+            continue
+        value = _unquote(value)
+        if name in keys and value:
+            result[name] = value
+    return result
+
+
+#: The most lines a flow-style ``credentials`` mapping is followed over.
+_FLOW_LINES_MAX = 40
+
+
+def read_config_yml_credentials(
+    config_dir: Path, keys: tuple[str, ...] = ("service_url", "service_token"),
+) -> dict[str, str]:
     """Bounded, stdlib-only extraction of ``service_url``/``service_token``
-    from the persisted ``config.yml``.
+    (or the other *keys* asked for) from the persisted ``config.yml``.
 
     NOT a general YAML parser -- this module cannot import ``nexus`` or a
     third-party YAML library (nexus-vg6d4). It is a line-oriented scan
@@ -521,12 +732,20 @@ def read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
     on a credential line fed the comment text into the resolved value).
     Last-key-wins for a duplicate key (mirrors ``yaml.safe_load``).
 
-    Anything this narrow scanner does not recognize -- a hand-edited
-    flow-style file, an escaped quote, a value spanning multiple lines --
-    is silently skipped (that key absent from the result), never guessed:
-    a caller's normal env/lease fallback takes over exactly as if the
-    credential were absent, never mis-resolving a base URL from a
-    misparse.
+    A hand-edited flow-style mapping, ``credentials: {service_url: https://x,
+    service_token: t}`` on one line or over several (up to ``_FLOW_LINES_MAX``), is
+    read too, because the CLI reads it (PyYAML) and a plugin that did not would say "no
+    service" on a machine where every tool works (RDR-228 Phase 2 Step 4,
+    nexus-sv2wx.17; ``tests/hooks/test_usable_service_agreement.py`` holds the two
+    together). THE LIMITS, stated: a flow mapping of plain or quoted scalars, with no
+    comment inside it; ``credentials`` as a key of a document-wide flow mapping
+    (``{credentials: {...}}``), anchors and aliases, and block scalars are not read.
+
+    Anything this narrow scanner does not recognize -- an escaped quote, a
+    value spanning multiple lines in block style, the shapes above -- is silently
+    skipped (that key absent from the result), never guessed: a caller's normal
+    env/lease fallback takes over exactly as if the credential were absent, never
+    mis-resolving a base URL from a misparse.
 
     Returns ``{}`` when the file is absent, unreadable, or has no
     ``credentials:`` block.
@@ -540,7 +759,8 @@ def read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     in_credentials = False
     cred_indent = 0
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for number, line in enumerate(lines):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         indent = len(line) - len(line.lstrip(" "))
@@ -549,11 +769,20 @@ def read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
             if stripped == "credentials:":
                 in_credentials = True
                 cred_indent = indent
+            elif indent == 0 and stripped.startswith("credentials:") and stripped[len("credentials:"):].strip().startswith("{"):
+                flow = stripped[len("credentials:"):].strip()
+                inside = _flow_body(flow)
+                for more in lines[number + 1: number + _FLOW_LINES_MAX]:
+                    if inside is not None:
+                        break
+                    flow += " " + more.strip()
+                    inside = _flow_body(flow)
+                return _flow_credentials(inside, keys) if inside is not None else {}
             continue
         if indent <= cred_indent:
             # Dedented back out of the credentials block -- done scanning.
             break
-        for key in ("service_url", "service_token"):
+        for key in keys:
             prefix = f"{key}:"
             if not stripped.startswith(prefix):
                 continue
@@ -590,6 +819,9 @@ def read_data_token_lease(
     host still reproduces a matching digest and would otherwise be
     indistinguishable from a same-tenant lease by that check alone.
     """
+    import hashlib  # noqa: PLC0415 -- lazy: the session-start hook's 100 ms; only this reader needs them
+    import urllib.parse  # noqa: PLC0415
+
     host = urllib.parse.urlsplit(base_url).netloc or base_url
     now = time.time()
     best_token: str | None = None
@@ -708,3 +940,71 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
         f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
         f"supervisor lease at {_shown(lease_path)}"
     )
+
+
+def _credential(name: str, env_var: str, saved: dict[str, str]) -> str:
+    """``nexus.config.get_credential(name).strip()``: the environment variable
+    when it is set to anything (a blank value does NOT fall back to the file),
+    else the saved ``config.yml`` value."""
+    value = os.environ.get(env_var, "")
+    if not value:
+        value = saved.get(name, "")
+    return value.strip()
+
+
+def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None, grace: bool = True) -> bool:
+    """Whether the CLI would resolve a service endpoint: the plugin's restatement
+    of ``nexus.db.service_endpoint.resolve_service_endpoint()`` returning and not
+    raising (RDR-228 Phase 2 Step 4, nexus-sv2wx.17; residual nexus-9i4d4 item 9).
+
+    :func:`resolve_base_url` answers a different question, the base URL the other
+    hooks use with a credential policy of their own, and it returns a saved address
+    with no token and a lease with no token, where the CLI raises. The CLI is the
+    program that connects, so its answer is the one that counts. The four legs, in
+    the CLI's order:
+
+    1. ``NX_SERVICE_URL``, else a saved ``service_url``. Usable with a token
+       (``NX_SERVICE_TOKEN`` else a saved ``service_token``), else with the token of
+       a live local lease, else with a mint credential (``NX_MINT_TOKEN`` else a
+       saved ``mint_token``). A URL that is only slashes is no URL.
+    2. Otherwise ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` / ``NX_SERVICE_TOKEN``
+       from the environment alone (the saved token is not read on this leg), with a
+       live lease filling whichever of the three is missing. Usable with a port and
+       a token. A port that is not an integer is not usable.
+    3. Otherwise the live lease alone, which supplies all three.
+
+    No network request, no wait, nothing written. *retry_budget_s* bounds the
+    Windows sharing-violation retry of the lease read (the hook passes what is left of
+    its read budget). With *grace* (the default, the hook's), a lease past its TTL is kept
+    when its recorded owner process is alive (:func:`_stale_owner_alive`), so a laptop
+    that slept is not told "service down". One difference from the CLI, which can probe a
+    socket and this cannot: the CLI also requires the port to answer ``/health``, so an
+    owner that is alive and wedged reads as usable here and not there
+    (``tests/hooks/test_usable_service_agreement.py`` names it). The setup process passes
+    ``grace=False``: it decides whether to START a service, it has the time the hook has not,
+    and skipping the start on a wedged supervisor would end in a failed ``nx doctor``; a
+    lease past its TTL is then not a service. Any error is "not usable".
+    """
+    try:
+        saved = read_config_yml_credentials(config_dir, ("service_url", "service_token", "mint_token"))
+        url = _credential("service_url", "NX_SERVICE_URL", saved).rstrip("/")
+        if url:
+            if _credential("service_token", "NX_SERVICE_TOKEN", saved):
+                return True
+            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
+            if lease is not None and lease["token"]:
+                return True
+            return bool(_credential("mint_token", "NX_MINT_TOKEN", saved))
+        # The host never decides the answer (it defaults to 127.0.0.1), so a lease is
+        # read only when the port or the token is missing.
+        port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+        port = int(port_str) if port_str else None
+        token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+        if port is None or token is None:
+            lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
+            if lease is not None:
+                port = port if port is not None else lease["port"]
+                token = token or lease["token"] or None
+        return port is not None and bool(token)
+    except Exception:  # noqa: BLE001 -- any failure to resolve is "not usable", as the CLI's raise is
+        return False

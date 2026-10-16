@@ -1,0 +1,218 @@
+{
+  "comment": "The format of the setup directory, pinned from both sides. conexus/launch/nx_setup.py (a plugin script) writes it; the nx doctor row 'Plugin setup' (src/nexus/health.py) reads it; the two ship as separate release artifacts. tests/hooks/test_nx_setup.py (the writer) and tests/test_doctor_setup_row.py (the reader) both read THIS file, so neither side can change the format alone. Each case is a setup directory: status is the body of status.json (null: no file), error is the body of status.error, heartbeat_age_seconds is the age of lock/heartbeat (null: no lock), not_now makes the marker, log_text (optional; absent means no log file) is the text of setup.log. The text {LOG} in a value stands for the path of setup.log in the directory under test. view is what nx_setup.status_view reports; row is what the doctor row reports: outcome is one of not-applicable, ok, warn, and every string in contains must appear in its detail (and in its fix suggestions when named there).",
+  "stale_after_seconds": 60,
+  "files": {
+    "status": "status.json",
+    "error": "status.error",
+    "log": "setup.log",
+    "lock": "lock",
+    "heartbeat": "lock/heartbeat",
+    "marker": "not-now"
+  },
+  "states": ["running", "done", "doctor-failed", "failed", "unsupported"],
+  "terminal_states": ["done", "doctor-failed", "failed", "unsupported"],
+  "writer_keys": {
+    "running": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"],
+    "failed": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next", "failed_step"],
+    "doctor-failed": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next", "doctor", "doctor_failing"],
+    "done": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"],
+    "unsupported": ["state", "stage", "mode", "log", "started_at", "updated_at", "message", "next"]
+  },
+  "writer_error_keys": ["state", "stage", "failed_step", "mode", "log", "updated_at", "message", "next"],
+  "cases": {
+    "virgin": {
+      "setup_dir": false,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "not-applicable", "contains": ["not applicable"]}
+    },
+    "declined": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": true,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "not-applicable", "contains": ["not applicable"]}
+    },
+    "live": {
+      "setup_dir": true,
+      "status": {
+        "state": "running", "stage": "init", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:01:30Z",
+        "message": "running: init", "steps_done": ["build"], "next": "Call setup_status to follow it."
+      },
+      "error": null,
+      "heartbeat_age_seconds": 5,
+      "not_now": false,
+      "view": {"state": "running", "live": true},
+      "row": {"outcome": "ok", "contains": ["in progress", "mode local", "stage init", "{LOG}"]}
+    },
+    "live-unreadable-status": {
+      "setup_dir": true,
+      "status": "{not json",
+      "error": null,
+      "heartbeat_age_seconds": 3,
+      "not_now": false,
+      "view": {"state": "none", "live": true},
+      "row": {"outcome": "ok", "contains": ["in progress"]}
+    },
+    "interrupted": {
+      "setup_dir": true,
+      "status": {
+        "state": "running", "stage": "init", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:01:30Z",
+        "message": "running: init", "steps_done": ["build"], "next": "Call setup_status to follow it."
+      },
+      "error": null,
+      "heartbeat_age_seconds": 120,
+      "not_now": false,
+      "view": {"state": "interrupted", "live": false},
+      "row": {"outcome": "warn", "contains": ["interrupted", "stage init", "setup", "resumes", "{LOG}"]}
+    },
+    "interrupted-no-lock": {
+      "setup_dir": true,
+      "status": {
+        "state": "running", "stage": "build", "mode": "cli-only", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:00:10Z",
+        "message": "running: build", "steps_done": [], "next": "Call setup_status to follow it."
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "interrupted", "live": false},
+      "row": {"outcome": "warn", "contains": ["interrupted", "stage build", "resumes"]}
+    },
+    "failed": {
+      "setup_dir": true,
+      "status": {
+        "state": "failed", "stage": "init", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:05:00Z",
+        "message": "nx init exited 1.", "failed_step": "init", "steps_done": ["build"],
+        "next": "If the user agrees, call setup again: it resumes at the init step. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["nx init exited 1.", "init step", "{LOG}", "resumes"]}
+    },
+    "failed-with-leftover-lock": {
+      "setup_dir": true,
+      "status": {
+        "state": "failed", "stage": "build", "mode": "cli-only", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:00:20Z",
+        "message": "the build exited 2.", "failed_step": "build", "steps_done": [],
+        "next": "If the user agrees, call setup again: it resumes at the build step. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": 2,
+      "not_now": false,
+      "view": {"state": "failed", "live": true},
+      "row": {"outcome": "warn", "contains": ["the build exited 2.", "build step", "{LOG}"]}
+    },
+    "unwritable-status": {
+      "setup_dir": true,
+      "status": {
+        "state": "running", "stage": "init", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:01:30Z",
+        "message": "running: init", "steps_done": ["build"], "next": "Call setup_status to follow it."
+      },
+      "error": {
+        "state": "failed", "stage": "init", "failed_step": "init", "mode": "local", "log": "{LOG}",
+        "updated_at": "2026-10-14T10:05:00Z",
+        "message": "setup could not record its own progress (OSError: [Errno 28] No space left on device)",
+        "next": "Free disk space or fix the permissions on the setup directory, then, if the user agrees, call setup again. Log: {LOG}"
+      },
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["could not record its own progress", "No space left on device", "{LOG}"]}
+    },
+    "doctor-failed": {
+      "setup_dir": true,
+      "status": {
+        "state": "doctor-failed", "stage": "verify", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "nx doctor reported problems.", "doctor": "fail",
+        "doctor_failing": ["[✗] T3: vector store unreachable", "[✗] Service: not running"],
+        "steps_done": ["build", "init"],
+        "next": "Show the user the failing rows and run nx doctor in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "doctor-failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["nx doctor reported problems.", "T3: vector store unreachable", "{LOG}"]}
+    },
+    "done": {
+      "setup_dir": true,
+      "status": {
+        "state": "done", "stage": "verify", "mode": "local", "autostart": true, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "setup finished.", "doctor": "pass", "doctor_failing": [],
+        "steps_done": ["build", "init", "verify"],
+        "next": "Reconnect the nexus server or start a new session."
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "done", "live": false},
+      "row": {"outcome": "ok", "contains": ["finished", "mode local", "2026-10-14T10:09:00Z"]}
+    },
+    "unsupported": {
+      "setup_dir": true,
+      "status": {
+        "state": "unsupported", "stage": "starting", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:00:00Z",
+        "message": "this host stops a process the plugin starts when the session ends.",
+        "next": "Install Nexus in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "unsupported", "live": false},
+      "row": {"outcome": "ok", "contains": ["could not run here", "Install Nexus in a terminal"]}
+    },
+    "fresh-lock-no-status": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": 5,
+      "not_now": false,
+      "view": {"state": "none", "live": true},
+      "row": {"outcome": "ok", "contains": ["in progress", "{LOG}"]}
+    },
+    "stale-lock-no-status": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": 120,
+      "not_now": false,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "warn", "contains": ["started here and recorded no status", "{LOG}", "call the `setup` tool again"]}
+    },
+    "log-only": {
+      "setup_dir": true,
+      "status": null,
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "log_text": "--- uv tool run\n",
+      "not_now": false,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "warn", "contains": ["started here and recorded no status", "{LOG}", "call the `setup` tool again"]}
+    },
+    "unreadable-status-no-run": {
+      "setup_dir": true,
+      "status": "{not json",
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "none", "live": false},
+      "row": {"outcome": "warn", "contains": ["status.json", "{LOG}"]}
+    }
+  }
+}

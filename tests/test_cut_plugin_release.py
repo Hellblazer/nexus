@@ -1322,6 +1322,29 @@ class TestPhase2DeferralGuard:
         )
         assert f"{len(_P2_FILES)} guarded path(s)" in _check(repo, ledger)
 
+    @pytest.mark.parametrize("path", [
+        "conexus/hooks/scripts/_cli_lookup.py",
+        "conexus/hooks/scripts/_exec_path.py",
+        "conexus/hooks/scripts/nx_hook_shim.py",
+        LOCKSTEP_HOOK,
+        "conexus/registry.yaml",
+        "conexus/README.md",
+    ])
+    def test_a_shared_phase2_file_under_awaiting_refuses_even_with_the_launcher(
+        self, tmp_path: pathlib.Path, path: str
+    ) -> None:
+        """The hook shim calls the lookup's new function, the lockstep hook
+        leaves a CLI that cannot start to setup, and the registry and README
+        name /conexus:setup: none of them ships ahead of the files they need
+        (nexus-sv2wx.22)."""
+        repo, ledger = _phase_repo(
+            tmp_path, base=_PHASE1_SHIPPED, develop={**_P2_FILES, path: "phase 2\n"},
+            awaiting=[path], deferred=sorted(_P2_FILES),
+        )
+        with pytest.raises(CutRefused) as exc:
+            _check(repo, ledger)
+        assert path in str(exc.value)
+
     def test_perform_cut_refuses_before_any_mutation(
         self, tmp_path: pathlib.Path
     ) -> None:

@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 44 | Storage tiers, retrieval, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 46 | Storage tiers, retrieval, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`catalog_search`, `catalog_link`, etc.) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (44 tools)
+## `nexus` — retrieval + storage (46 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -127,9 +127,37 @@ One further tool rounds out the server (RDR-126): `daemon_uninstall`
 `com.nexus.t2` unit left behind by a pre-retirement install — and stop the
 engine-service + Postgres stack; destructive, `confirm=true` gated).
 
+### Setup (RDR-228)
+
+Two tools, registered in every session whether or not anything is missing. The
+plugin's stand-in server (`conexus/launch/nx_standin.py`), which the launcher
+serves when the machine has the plugin and no CLI, offers the same two tools
+with the same names, arguments and descriptions; a test pins the two copies equal.
+
+| Tool | Purpose |
+|---|---|
+| `setup` | Install the Nexus CLI and, for `mode` `local`, a service for it (`autostart` true also starts the service at login; false is the default). `mode` is `local`, `cloud`, `cli-only` or `not-now`; `cloud` connects a managed service and opens a page in the user's browser for the service address, token and tenant (the token never passes through the conversation). Returns at once with the current stage; the work continues in a background process. When nothing is missing it starts nothing. The tool description tells the model to ask the user first and act only on the answer |
+| `setup_status` | Report the stage, the log path and the next step of the last or current run, how long the stage usually takes and the earliest time to ask again, or that nothing is missing |
+
+Both start `conexus/launch/nx_setup.py`, the file the launcher names in the
+`NX_SETUP_SCRIPT` environment variable, with the server's own Python, and read
+its one JSON answer; the server never reads the setup directory. A server that
+was not started by the launcher has no such variable, starts nothing, and
+answers with the terminal commands (`nx init`). The launcher's value is used
+only if it is an absolute path to a file named `nx_setup.py`. A service is usable
+when the storage clients' own endpoint resolution succeeds (`resolve_service_endpoint`),
+so a saved `service_url` with no resolvable token is not usable. A last run that
+failed, was interrupted, ended with `nx doctor` problems or could not detach is
+reported even when a service answers. When no usable service is found the server's
+`instructions` say what is missing and that the tools fix it, and leave the decision
+to the user; `not-now` does not silence that note on this server, and a finished
+`cli-only` run does. A provisioned local service that is not running is said as
+that, and `setup` with mode `local` starts it without a download. Neither tool is
+auto-approved (see Permission auto-approval below).
+
 ### Hook-tier tools (internal plumbing, RDR-215)
 
-The remaining 2 of the 44 registered tools are `hook_*` entries
+The remaining 2 of the 46 registered tools are `hook_*` entries
 (`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
 conexus plugin `hooks.json` entry to a `hook_*` MCP tool.
 `hook_subagent_start` is what `hooks.json` WIRES for `SubagentStart` (an
@@ -145,8 +173,8 @@ and divergence-language hook tools (`hook_pre_close_verification`,
 `hook_divergence_language_guard`) at cleanup steps A2 and A3; the wire
 snapshot moved with them. There is no reason to call either remaining tool by
 hand, and their own tool descriptions say so ("not meant to be invoked
-directly"). Listed here only so the 44-tool count reconciles with the tables
-above, which cover the 42 tools an agent calls directly:
+directly"). Listed here only so the 46-tool count reconciles with the tables
+above, which cover the 44 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|
@@ -260,7 +288,7 @@ Pass `offset=N` back to the same tool to fetch the next page. Default page size:
 
 ## Permission auto-approval
 
-The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
+The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory; `mcp__plugin_conexus_nexus__setup` and `mcp__plugin_conexus_nexus__setup_status` are excluded too, because `setup` installs software and the application's own prompt before it runs is a second check on the user's consent. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
 
 The separate `sn` plugin auto-approves Serena's read and navigation tools and both Context7 tools. Serena's file and memory writers, `jet_brains_debug` (arbitrary Groovy/Java in the IDE's JVM), `query_project`, `onboarding` and `restart_language_server` get no decision and reach Claude Code's own prompt or auto-mode classifier, as Edit and Write do (nexus-2lf1v; before that every Serena tool was auto-approved). To stop being asked for the writers you use, add them by name to `permissions.allow`.
 

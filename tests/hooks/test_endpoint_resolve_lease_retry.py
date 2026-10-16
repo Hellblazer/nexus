@@ -214,3 +214,96 @@ def test_off_windows_the_endpoint_read_still_fails_open_at_once(
     flaky = _FlakyRead(Path.read_text, lease, fail=1).install(monkeypatch)
     assert mirror.read_storage_service_lease(tmp_path) is None
     assert flaky.calls == 1
+
+
+# -- the owner-liveness probe the usable-service check uses for a lease past its TTL ------------------
+#
+# ``_endpoint_resolve.pid_alive`` restates ``service_registry.pid_alive`` (this file cannot import it),
+# and the two are held together the way the retry above is: same constants, and the same answers over
+# the same inputs, the Windows arm through one fake kernel32.
+
+
+def test_the_grace_constants_are_the_registrys() -> None:
+    mod = _load()
+    assert mod.STALE_LEASE_GRACE_MAX_TTL_MULTIPLE == sr.STALE_LEASE_GRACE_MAX_TTL_MULTIPLE
+    assert mod._GRACE_LOOPBACK_HOSTS == sr._GRACE_PROBE_LOOPBACK_HOSTS
+    assert mod._PROCESS_QUERY_LIMITED_INFORMATION == sr.PROCESS_QUERY_LIMITED_INFORMATION
+    assert mod._SYNCHRONIZE == sr.SYNCHRONIZE
+    assert mod._ERROR_INVALID_PARAMETER == sr.ERROR_INVALID_PARAMETER
+    assert mod._WAIT_OBJECT_0 == sr.WAIT_OBJECT_0
+    assert mod._MAX_WINDOWS_PID == sr._MAX_WINDOWS_PID
+
+
+def test_pid_alive_answers_as_the_registry_does_on_this_host() -> None:
+    import subprocess
+
+    mod = _load()
+    child = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 -- our own interpreter
+    child.wait()
+    import os
+
+    for pid in (os.getpid(), child.pid, 0, -5):
+        assert mod.pid_alive(pid) == sr.pid_alive(pid), pid
+    assert mod.pid_alive(os.getpid()) is True and mod.pid_alive(child.pid) is False
+    # The one difference: a number no pid can be (a corrupt lease) is not alive here, where the registry's os.kill raises.
+    assert mod.pid_alive(2**40) is False
+
+
+class _FakeKernel:
+    def __init__(self, handle: int | None, error: int, wait: int) -> None:
+        self.handle, self.error, self.wait = handle, error, wait
+        self.closed: list[int] = []
+
+    def open_process(self, pid: int) -> tuple[int | None, int]:
+        return (self.handle, self.error)
+
+    def wait_zero(self, handle: int) -> int:
+        return self.wait
+
+    def close(self, handle: int) -> None:
+        self.closed.append(handle)
+
+
+@pytest.mark.parametrize(
+    ("handle", "error", "wait"),
+    [
+        (None, 5, 0), (None, 87, 0), (None, 6, 0), (None, 0, 0),
+        (7, 0, 0x0), (7, 0, 0x102), (7, 0, 0xFFFFFFFF),
+    ],
+    ids=["denied", "invalid-parameter", "other-error", "no-error", "exited", "running", "wait-failed"],
+)
+@pytest.mark.parametrize("pid", [1234, 0xFFFFFFFF, 0x100000000], ids=["pid", "max", "over-max"])
+def test_the_windows_arm_answers_as_the_registry_does(handle: int | None, error: int, wait: int, pid: int) -> None:
+    mod = _load()
+    ours, theirs = _FakeKernel(handle, error, wait), _FakeKernel(handle, error, wait)
+    assert mod.pid_alive(pid, platform="win32", win_api=ours) == sr.pid_alive(pid, platform="win32", win_api=theirs)
+    assert ours.closed == theirs.closed, "a handle that was opened is closed, and only that"
+
+
+@pytest.mark.parametrize(
+    ("raised", "alive"),
+    [
+        (ProcessLookupError(3, "no such process"), False),
+        (PermissionError(1, "not permitted"), True),
+        (OSError(3, "ESRCH as a bare OSError"), False),
+        (OSError(22, "an errno that proves nothing"), True),
+        (None, True),
+    ],
+    ids=["gone", "other-user", "esrch", "ambiguous", "signalled"],
+)
+def test_the_posix_arm_reads_ambiguity_as_alive_as_the_registry_does(
+    monkeypatch: pytest.MonkeyPatch, raised: BaseException | None, alive: bool,
+) -> None:
+    """The branches a real pid cannot reach without another user's process."""
+    from tests._module_seam import setattr_in
+
+    def kill(pid: int, sig: int) -> None:
+        assert sig == 0, "a probe, never a signal"
+        if raised is not None:
+            raise raised
+
+    mod = _load()
+    setattr_in(monkeypatch, mod, "os.kill", kill)
+    setattr_in(monkeypatch, sr, "os.kill", kill)
+    assert mod.pid_alive(4242, platform="linux") is alive
+    assert sr.pid_alive(4242, platform="linux") is alive

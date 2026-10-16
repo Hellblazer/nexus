@@ -402,6 +402,55 @@ def _win() -> str | None:
     return "win32" if os.name == "nt" else None
 
 
+_SAC_GUIDE = (
+    "https://github.com/Hellblazer/nexus/blob/main/docs/windows-install.md#smart-app-control"
+)
+
+
+def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[HealthResult]:
+    """The Windows Smart App Control row (nexus-f9bgu.57). No row off Windows,
+    and none on a Windows that has no Smart App Control (no policy value).
+
+    On blocks the unsigned PostgreSQL bundle and the unsigned Python that uv
+    installs, so a local install cannot work: a failure in local mode. In cloud
+    mode its effect on the client is not measured: a warning. Evaluation is a
+    warning because Windows can switch it on later; what that does to an
+    installed nexus is not measured. *state* is the test seam.
+    """
+    from nexus import _smart_app_control as sac  # noqa: PLC0415 — Windows row only
+
+    current = state if state is not None else sac.state()
+    label = "Smart App Control"
+    if current in (sac.NOT_WINDOWS, sac.ABSENT):
+        return []
+    if current == sac.OFF:
+        return [HealthResult(label=label, ok=True, detail="off")]
+    if current == sac.ON:
+        detail = (
+            "on: Windows blocks the unsigned PostgreSQL bundle and the unsigned "
+            "Python uv installs, so the local stack cannot run"
+            if local else
+            "on: blocks unsigned programs; its effect on a cloud-mode client is not measured"
+        )
+        return [HealthResult(
+            label=label, ok=False, warn=not local, fatal=local, detail=detail,
+            fix_suggestions=[f"Smart App Control on is not supported for a local install: {_SAC_GUIDE}"],
+        )]
+    if current == sac.EVALUATION:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                "evaluation: nothing is blocked now, but Windows can switch it on, "
+                "and then the unsigned PostgreSQL bundle and Python are blocked"
+            ),
+            fix_suggestions=[f"see {_SAC_GUIDE}"],
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail="could not read the state (CI\\Policy VerifiedAndReputablePolicyState)",
+    )]
+
+
 def _check_windows_user_path(tools, *, store=None, environ=None) -> list[HealthResult]:
     """The Windows shim row: the user PATH must carry ``<tools>\\current\\bin``
     ahead of every other directory that provides ``nx.exe``, and that directory
@@ -3401,13 +3450,13 @@ def _check_mint_token() -> list[HealthResult]:
         (``DataTokenMintError``): soft warning naming the failure.
       - configured and reachable: reports whether the round trip MINTED a
         fresh token or REUSED the manager's cached live one, plus the
-        granted TTL (critic S1/S3, nexus-ssqk9). IMPORTANT: on the managed
-        CLOUD path, pre-cutover, the edge strips client ``Authorization``
-        and injects its own credential (RDR-005 2a staged cutover -- T2
-        ``conexus/conexus-06`` answer, 2026-08-15). A mint succeeding
-        THROUGH the edge does not yet prove THIS credential's own
-        authority, so the success line is worded neutrally rather than
-        claiming credential-specific proof.
+        granted TTL (critic S1/S3, nexus-ssqk9). IMPORTANT: the managed
+        edge forwards the client's ``Authorization`` on ``/v1`` unvalidated
+        (conexus ``conexus-qomd``, edge sha 72d2238, 2026-10-15), so the
+        engine validates this credential itself. An earlier answer
+        (``conexus/conexus-06``, 2026-08-15) had the edge strip the header and
+        inject its own credential; the success line is still worded neutrally
+        rather than claiming credential-specific proof.
     """
     from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -3473,11 +3522,8 @@ def _check_mint_token() -> list[HealthResult]:
         label=label,
         ok=True,
         detail=(
-            f"{verb} data token via {host} ({ttl_detail}). Pre-cutover on "
-            "the managed cloud path this does NOT yet prove this "
-            "credential's own authority (the edge still strips/injects "
-            "Authorization until the RDR-005 2a cutover) — treat as "
-            "reachability, not proof."
+            f"{verb} data token via {host} ({ttl_detail}); the engine "
+            "checked this credential and its tenant to mint it."
         ),
     )]
 
@@ -4699,6 +4745,259 @@ def _check_config_dir_user_access(
             f'from an elevated Command Prompt: icacls "{config_dir}" /grant "%USERDOMAIN%\\%USERNAME%:(OI)(CI)F" /T',
         ],
     )]
+
+
+_SETUP_LABEL = "Plugin setup"
+#: A setup lock whose heartbeat is older than this is dead. The plugin script
+#: (``conexus/launch/nx_setup.py``, ``STALE_SECONDS``) owns the number and ships as
+#: a separate artifact; ``tests/fixtures/setup_status_format.json`` pins the two together.
+_SETUP_STALE_SECONDS = 60.0
+#: What ``status.json`` may hold in ``state`` (the script's ``STATES``; same fixture).
+_SETUP_STATES = ("running", "done", "doctor-failed", "failed", "unsupported")
+_SETUP_TEXT_CHARS = 300
+_SETUP_DOCTOR_ROWS = 3
+_SETUP_UNREADABLE = object()
+
+
+def _setup_text(value: object, limit: int = _SETUP_TEXT_CHARS) -> str:
+    """One bounded printable line from a field of a file another program wrote."""
+    text = "".join(ch for ch in " ".join(str(value).split()) if ch.isprintable())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _read_setup_json(path: Path) -> object:
+    """The JSON object in *path*; ``None`` when there is no such file; ``_SETUP_UNREADABLE``
+    for a file that cannot be read or is not a JSON object. A Windows sharing violation
+    (the run replacing ``status.json`` as this reads it) is retried briefly."""
+    for attempt in range(5):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if sys.platform == "win32" and attempt < 4:
+                time.sleep(0.1)
+                continue
+            return _SETUP_UNREADABLE
+        except (OSError, ValueError):
+            return _SETUP_UNREADABLE
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return _SETUP_UNREADABLE
+        return data if isinstance(data, dict) else _SETUP_UNREADABLE
+    return _SETUP_UNREADABLE
+
+
+def _setup_run_is_live(setup: Path) -> bool:
+    """A lock whose heartbeat is fresh (or, before the first beat, whose directory is young)."""
+    lock = setup / "lock"
+    for probe in (lock / "heartbeat", lock):
+        try:
+            age = time.time() - probe.stat().st_mtime
+        except OSError:
+            continue
+        return age <= _SETUP_STALE_SECONDS
+    return False
+
+
+@dataclass
+class _SetupLastRun(HealthResult):
+    """A warning that is a verdict about the LAST setup run (it failed, its verify step failed, or it was
+    interrupted), which nothing but another ``setup`` call clears. ``ended`` is the state it ended in and
+    ``log`` the setup log's path: :func:`_settle_setup_row` needs both to report it as information instead
+    when nothing else in the same sweep is wrong."""
+
+    ended: str = ""
+    log: str = ""
+
+
+def _setup_last_run_warning(ended: str, log: Path, detail: str, fix_suggestions: list[str]) -> HealthResult:
+    return _SetupLastRun(
+        label=_SETUP_LABEL, ok=False, warn=True, detail=detail, fix_suggestions=fix_suggestions,
+        ended=ended, log=str(log),
+    )
+
+
+def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
+    """The "Plugin setup" warning about the last run, reported as information when nothing else in this
+    sweep is a failure or a warning (nexus-sv2wx.19 fix round, 2026-10-15).
+
+    A failed, doctor-failed or interrupted run is a verdict about that run, not about the box: a user who
+    fixed the cause by hand (``nx config init``, ``nx daemon service start``) would otherwise read the same
+    warning on every ``nx doctor`` until a model-driven ``setup`` call cleared it. While anything else is
+    wrong the warning stays, because the setup run may be why. Rows are replaced, never mutated.
+    """
+    for index, row in enumerate(results):
+        if not isinstance(row, _SetupLastRun):
+            continue
+        if all(other.ok or _benign_warning(other) for other in results if other is not row):
+            results[index] = HealthResult(
+                label=_SETUP_LABEL, ok=True,
+                detail=f"the last setup run ended {row.ended}, and every other row of this sweep is fine. Log: {row.log}",
+            )
+    return results
+
+
+def _benign_warning(row: HealthResult) -> bool:
+    """A soft warning that says nothing is wrong: the managed deployment's storage row, which cannot be probed
+    from a client by design (nexus-y3wuu) and so warns on every cloud box. Without this a cloud box never
+    reaches the "every other row is fine" that lets the setup row stand down."""
+    return row.warn and not row.ok and row.detail == _MANAGED_DEPLOYMENT_SKIP_DETAIL
+
+
+def _setup_failed_row(status: dict, log: Path) -> HealthResult:
+    mode = _setup_text(status.get("mode", "unknown"), 40)
+    step = _setup_text(status.get("failed_step") or status.get("stage") or "unknown", 40)
+    return _setup_last_run_warning(
+        "failed", log,
+        f"the last setup run failed at the {step} step: {_setup_text(status.get('message', ''))} Log: {log}",
+        [f"If the user agrees, call the `setup` tool again with mode {mode}: it resumes at the {step} step"],
+    )
+
+
+def _setup_started_and_recorded_nothing(setup: Path, log: Path) -> bool:
+    """A lock left behind (a fresh one is a live run, handled before this) or a log with text in it, and no
+    status file: a run started and the file that says how it went never appeared."""
+    if _exists_or_unreadable(setup / "lock"):
+        return True
+    try:
+        return log.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _exists_or_unreadable(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return True
+
+
+def _setup_row(setup: Path) -> HealthResult:
+    log = setup / "setup.log"
+    live = _setup_run_is_live(setup)
+    status = _read_setup_json(setup / "status.json")
+    recorded = _read_setup_json(setup / "status.error")
+    in_progress = HealthResult(
+        label=_SETUP_LABEL, ok=True,
+        detail=f"a setup run is in progress; its status is not readable just now. Log: {log}",
+    )
+    # A run that could not write its own status says why in status.error; that overrides the status.
+    if isinstance(recorded, dict) and recorded.get("state") == "failed":
+        return _setup_failed_row({**(status if isinstance(status, dict) else {}), **recorded}, log)
+    if status is _SETUP_UNREADABLE or (isinstance(status, dict) and status.get("state") not in _SETUP_STATES):
+        if live:
+            return in_progress
+        return HealthResult(
+            label=_SETUP_LABEL, ok=False, warn=True,
+            detail=f"{setup / 'status.json'} could not be read or holds a state this version does not know. Log: {log}",
+            fix_suggestions=["If the user agrees, call the `setup` tool again: it starts a new run and rewrites the status"],
+        )
+    if not isinstance(status, dict):  # no status file
+        if live:
+            return in_progress
+        if _setup_started_and_recorded_nothing(setup, log):
+            return _setup_last_run_warning(
+                "interrupted", log,
+                f"a setup run started here and recorded no status (a stale lock or a log is all it left). Log: {log}",
+                ["If the user agrees, call the `setup` tool again: it starts a new run and writes the status"],
+            )
+        return HealthResult(label=_SETUP_LABEL, ok=True, detail="not applicable: no plugin setup has run on this machine")
+    state = status["state"]
+    mode = _setup_text(status.get("mode", "unknown"), 40)
+    stage = _setup_text(status.get("stage", "unknown"), 40)
+    again = f"call the `setup` tool again with mode {mode}"
+    if state == "running":
+        if live:
+            return HealthResult(
+                label=_SETUP_LABEL, ok=True,
+                detail=f"setup is in progress (mode {mode}, stage {stage}): {_setup_text(status.get('message', ''))}. Log: {log}",
+            )
+        return _setup_last_run_warning(
+            "interrupted", log,
+            f"setup was interrupted at stage {stage} (mode {mode}): its process is gone and it wrote no final status. Log: {log}",
+            [f"If the user agrees, {again}: it resumes at the step that was running"],
+        )
+    if state == "failed":
+        return _setup_failed_row(status, log)
+    if state == "doctor-failed":
+        rows = status.get("doctor_failing")
+        listed = rows if isinstance(rows, list) else []
+        shown = [_setup_text(r, 120) for r in listed[:_SETUP_DOCTOR_ROWS]]
+        more = f"; and {len(listed) - len(shown)} more" if len(listed) > len(shown) else ""
+        named = f" Failing: {'; '.join(shown)}{more}." if shown else ""
+        return _setup_last_run_warning(
+            "doctor-failed", log,
+            f"the last setup run finished, but its verify step failed: {_setup_text(status.get('message', ''))}{named} Log: {log}",
+            ["Run `nx doctor` in a terminal for the failing rows", f"After fixing them, {again}: it verifies again"],
+        )
+    if state == "unsupported":
+        # The script's next step already ends in the log path; one written by anything else may not.
+        next_step = _setup_text(status.get("next", ""))
+        named_log = "" if str(log) in next_step else f" Log: {log}"
+        return HealthResult(
+            label=_SETUP_LABEL, ok=True,
+            detail=f"the last setup could not run here ({_setup_text(status.get('message', ''))}). {next_step}{named_log}",
+        )
+    return HealthResult(
+        label=_SETUP_LABEL, ok=True,
+        detail=f"the last setup run finished (mode {mode}, {_setup_text(status.get('updated_at', 'time unknown'), 40)}). Log: {log}",
+    )
+
+
+def _setup_directory() -> Path:
+    """``setup/`` under the config directory, resolved the way the setup script resolves it
+    (``conexus/launch/nx_setup.py`` ``config_dir``): ``NEXUS_CONFIG_DIR``, then ``NX_CONFIG_DIR``,
+    then ``~/.config/nexus``, made absolute. ``nexus.config.nexus_config_dir`` reads only the first and
+    stays as it is for the rest of the CLI (whether it should honour ``NX_CONFIG_DIR`` is an open
+    decision, nexus-sv2wx.22); this row must look where the script wrote, or a box set up under
+    ``NX_CONFIG_DIR`` reads "not applicable". ``tests/test_doctor_setup_row.py`` compares the two."""
+    override = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
+    if override:
+        return Path(os.path.abspath(override)) / "setup"
+    import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+    return Path(os.path.abspath(_config.nexus_config_dir())) / "setup"
+
+
+def setup_recorded_cli_only(setup_dir: Path | None = None) -> bool:
+    """Whether the last setup run finished in mode ``cli-only``: the user chose no service.
+    The setup hook's rule for its quiet line (``nx_setup_notice.py``); the real server's
+    instructions say nothing then (Sam, 2026-10-15). Any unreadable status counts as no."""
+    status = _read_setup_json((setup_dir or _setup_directory()) / "status.json")
+    return isinstance(status, dict) and status.get("state") == "done" and status.get("mode") == "cli-only"
+
+
+def _check_setup_status(setup_dir: Path | None = None) -> list[HealthResult]:
+    """RDR-228 Day 2 (nexus-sv2wx.19): what the plugin's setup process left in ``setup/``
+    under the Nexus config directory (``status.json``, the lock's heartbeat, ``setup.log``).
+
+    * no setup has run (no status, no lock, no log text): not applicable, a pass. That is decided
+      last, after every file has been read, so a directory with something to judge is never
+      waved through; the fresh-install check allows no warning on a new box.
+    * a run is live: a pass naming its mode and stage. The setup process runs ``nx doctor``
+      as its verify step while it holds the lock, so this row must never be what fails it.
+    * the last run failed (including a status the run could not write): a warning with the
+      failure line and the log path.
+    * a run was interrupted (status ``running``, heartbeat stale or no lock): a warning that
+      says ``setup`` called again resumes. So is a stale lock, or a log with text in it, and no
+      status file at all: a run started and recorded nothing.
+    * the three warnings above are verdicts about the last run. :func:`run_health_checks` reports
+      them as information (:func:`_settle_setup_row`) when no other row is a failure or a warning.
+    * finished, or unsupported on this host: a pass saying so.
+
+    The row is never a hard failure. The plugin script ships separately from this CLI and
+    cannot be imported; ``tests/fixtures/setup_status_format.json`` is the format both sides
+    are tested against.
+    """
+    try:
+        if setup_dir is None:
+            setup_dir = _setup_directory()
+        return [_setup_row(setup_dir)]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_setup_status_check_failed", error=str(exc))
+        return [HealthResult(label=_SETUP_LABEL, ok=True, detail=f"could not be checked ({type(exc).__name__})")]
 
 
 def _check_local_pg_auth(config_dir: Path | None = None) -> list[HealthResult]:
@@ -10406,6 +10705,7 @@ def run_health_checks(
         results.extend(_check_service_crossencoder_model())
     else:
         results.extend(_check_t3_cloud())
+    results.extend(_check_smart_app_control(local=_local))  # nexus-f9bgu.57
 
     # nexus-9tsdf (GH #1113 AC2): name dimension-orphaned collections and
     # point at `nx collection prune`. Applies in both modes; degrades
@@ -10516,6 +10816,7 @@ def run_health_checks(
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
+    results.extend(_check_setup_status())  # nexus-sv2wx.19; not applicable where no setup has run
     results.extend(_check_local_pg_auth())  # nexus-ja4pq
     results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
     results.extend(_check_migration_state())
@@ -10592,4 +10893,4 @@ def run_health_checks(
             detail=f"check failed ({exc}) — could not read the plugin registry",
         ))
 
-    return results, _local
+    return _settle_setup_row(results), _local

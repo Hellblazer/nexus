@@ -61,7 +61,7 @@ The plugin does not install the Nexus CLI, and the plugin's servers and most of 
 
 - **The CLI is installed and `nx init` has run.** The two Nexus servers start and connect, and the session-start hooks run. This is the working state.
 - **The CLI is installed and `nx init` has not run.** The servers start, and every tool that needs the service reports that it cannot reach it. Run `nx init`.
-- **The CLI is not installed.** Nothing is installed for you. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`; `setup` answers with the commands below and installs nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
+- **The CLI is not installed.** Nothing is installed for you. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`. `setup` installs only after the model has asked you and acted on your answer (`local`, `cloud`, `cli-only` or `not-now`; `cloud` opens a page in your browser where you type the managed service's address, token and tenant yourself); it starts a background process, downloads up to about 1.3 GB, and `setup_status` follows it. Without the plugin's setup process, or on a host that cannot run it, the tools answer with the commands below and install nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
 
 The install is three terminal commands, then a reconnect of the `nexus` server (`/mcp`, the server, Reconnect) or a new session:
 
@@ -305,8 +305,11 @@ today's unspecified behaviour would recreate exactly the rot deleted here.
   - **Managed/cloud service intended** (this footgun): persist the cloud config via `nx config set service_url <url>` / `nx config set service_token <token>` (or the interactive wizard, `nx config init`; there is no `nx init --cloud` flag), then fully **quit and relaunch Claude Desktop** so the extension re-spawns and re-reads `config.yml` — a terminal `nx config set` alone does nothing for an already-running `.mcpb` process.
   - **Local install with Voyage embeddings intended**: the already-running service has not picked up `NX_VOYAGE_API_KEY` (it is read only at process spawn); set it in the SERVICE's own environment and restart the service: `nx daemon service stop && nx daemon service start`.
 
-  **6.0 cloud creds** are the managed nexus-service endpoint + bearer token
-  (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`); embedding runs server-side, so you do
+  **6.0 cloud creds** are the managed nexus-service endpoint plus either a
+  mint credential and its tenant (`NX_SERVICE_URL` + `NX_MINT_TOKEN` +
+  `NX_MINT_TENANT`, saved as `service_url`, `mint_token` and `mint_tenant`) or a
+  static service token (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`); the setup
+  page and `nx config init` ask for the kind you hold. Embedding runs server-side, so you do
   **not** supply a Voyage key. The legacy `chroma_api_key` / `chroma_tenant` /
   `chroma_database` keys are the retired pre-6.0 ChromaDB-Cloud surface.
 

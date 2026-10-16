@@ -676,9 +676,14 @@ def dispatch_ref_drift_action() -> None:
 
 
 def cli_present() -> bool:
-    """True when ``nx`` resolves by the launcher's lookup: the generation
-    layout, then ``PATH`` (``_cli_lookup.resolve``)."""
-    return _cli_lookup.resolve("nx") is not None
+    """True when ``nx`` resolves by the launcher's lookup (the generation
+    layout, then ``PATH``; ``_cli_lookup.resolve``) and can start. A CLI that
+    cannot start (a pruned interpreter, RDR-228 Phase 2 Step 4) is setup's to
+    repair, and the upgrade this hook would dispatch would race that repair
+    (found by the setup journey, 2026-10-15); ``nx_setup_notice.py`` gives the
+    session's one message about it."""
+    exe = _cli_lookup.resolve("nx")
+    return exe is not None and _cli_lookup.cannot_start(exe) is None
 
 
 def main() -> None:
@@ -691,10 +696,17 @@ def main() -> None:
     neither a generation nor a ``uv tool`` install and returned. The check comes
     before BOTH paths, the version mismatch and the ref drift. The session's
     one message about a missing CLI is ``nx_setup_notice.py``'s.
+
+    A CLI that is found and cannot start is treated as absent, so the same
+    skip also covers what the hook did for it before: the version nudge and
+    its upgrade dispatch, the ref-drift check (nexus-konsk) and its
+    dispatch, and the old repair of a pruned legacy ``uv tool`` tree through
+    ``uv tool upgrade``. ``setup`` repairs that CLI (the user is asked first);
+    a plugin-only cut waits for the repaired CLI's next session.
     """
     try:
         if not cli_present():
-            debug("no Nexus CLI resolves; nothing to keep in lockstep")
+            debug("no Nexus CLI resolves, or it cannot start; nothing to keep in lockstep")
             return
         plugin_version = read_plugin_version()
         version_mismatch = bool(plugin_version) and read_marker() != plugin_version

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +20,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     for key in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "MXBAI_API_KEY",
                 "CHROMA_TENANT", "CHROMA_DATABASE",
-                "NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+                "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN", "NX_MINT_TENANT"):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
 
@@ -258,11 +259,12 @@ def test_config_list_shows_mint_tenant_unmasked(runner, fake_home) -> None:
 def test_config_init_writes_service_credentials(runner, fake_home) -> None:
     # 6.0 managed onboarding: the wizard collects the service endpoint + token
     # (RDR-166), not Chroma credentials.
-    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\nstatic\n")
     assert result.exit_code == 0, result.output
     creds = _read_config(fake_home).get("credentials", {})
     assert creds.get("service_url") == "https://svc.example.com"
     assert creds.get("service_token") == "bearer-tok"
+    assert "mint_token" not in creds and "mint_tenant" not in creds
 
 
 def test_config_init_does_not_provision_chroma(runner, fake_home) -> None:
@@ -271,7 +273,7 @@ def test_config_init_does_not_provision_chroma(runner, fake_home) -> None:
     # Assert on output rather than a mock: config_init no longer imports the
     # provisioning helpers, so a patch on them would pass vacuously. The output
     # guards are real tripwires — they fail if provisioning is reintroduced.
-    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\n")
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nbearer-tok\nstatic\n")
     assert result.exit_code == 0, result.output
     assert "chromadb" not in result.output.lower()
     assert "provision" not in result.output.lower()
@@ -284,6 +286,96 @@ def test_config_init_shows_service_endpoint_hint(runner, fake_home) -> None:
     assert "service" in output
     # No stale Chroma/Voyage signup pointers in the managed wizard.
     assert "trychroma.com" not in output
+
+
+def test_config_init_saves_a_mint_credential_with_its_tenant_and_no_service_token(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nmint-tok\nmint\nacme\n")
+    assert result.exit_code == 0, result.output
+    creds = _read_config(fake_home).get("credentials", {})
+    assert creds == {"service_url": "https://svc.example.com", "mint_token": "mint-tok", "mint_tenant": "acme"}
+
+
+def test_config_init_hides_the_token_as_it_is_typed(runner, fake_home) -> None:
+    """The record's secret-lifecycle line says the terminal prompt has echo off; a visible prompt would echo it here."""
+    for kind, extra in (("static", ""), ("mint", "acme\n")):
+        result = runner.invoke(main, ["config", "init"], input=f"https://svc.example.com\ntyped-secret-{kind}\n{kind}\n{extra}")
+        assert result.exit_code == 0, result.output
+        assert f"typed-secret-{kind}" not in result.output
+        # ...and the visible answers do echo, so the check above is not blind.
+        assert "https://svc.example.com" in result.output
+
+
+def test_config_init_replaces_the_other_kind_so_the_config_never_holds_both(runner, fake_home) -> None:
+    _write_config(fake_home, {"credentials": {"service_url": "https://svc.example.com", "service_token": "old-static"}})
+    result = runner.invoke(main, ["config", "init"], input="\nmint-tok\nmint\nacme\n")
+    assert result.exit_code == 0, result.output
+    creds = _read_config(fake_home)["credentials"]
+    assert creds == {"service_url": "https://svc.example.com", "mint_token": "mint-tok", "mint_tenant": "acme"}
+    assert "service_token" in result.output, "the wizard says it removed the other kind"
+    assert "old-static" not in result.output
+    result = runner.invoke(main, ["config", "init"], input="\nnew-static\nstatic\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com", "service_token": "new-static"}
+
+
+def test_config_init_keeps_what_is_saved_when_the_token_is_left_blank_and_asks_no_kind(runner, fake_home) -> None:
+    _write_config(fake_home, {"credentials": {"service_url": "https://svc.example.com", "mint_token": "keep-me", "mint_tenant": "acme"}})
+    result = runner.invoke(main, ["config", "init"], input="\n\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com", "mint_token": "keep-me", "mint_tenant": "acme"}
+    assert "keep-me" not in result.output and "mint or static" not in result.output.lower()
+
+
+def test_config_init_refuses_a_tenant_with_whitespace_or_a_leading_dash_and_asks_again(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nmint-tok\nmint\n-x\na b\nacme\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"]["mint_tenant"] == "acme"
+
+
+def test_config_init_skips_a_token_the_environment_already_holds(runner, fake_home, monkeypatch) -> None:
+    monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
+    monkeypatch.delenv("NX_MINT_TENANT", raising=False)
+    monkeypatch.setenv("NX_SERVICE_TOKEN", _SECRET)
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\n")
+    assert result.exit_code == 0, result.output
+    assert "NX_SERVICE_TOKEN" in result.output and _SECRET not in result.output
+    creds = _read_config(fake_home)["credentials"]
+    assert creds == {"service_url": "https://svc.example.com"}, "the environment wins; nothing about the token is saved"
+
+
+def test_config_init_asks_the_tenant_of_a_mint_token_the_environment_holds(runner, fake_home, monkeypatch) -> None:
+    """A mint credential needs its tenant even when the token comes from NX_MINT_TOKEN."""
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("NX_MINT_TENANT", raising=False)
+    monkeypatch.setenv("NX_MINT_TOKEN", _SECRET)
+    result = runner.invoke(main, ["config", "init"], input="https://svc.example.com\nacme\n")
+    assert result.exit_code == 0, result.output
+    assert "NX_MINT_TOKEN" in result.output and _SECRET not in result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com", "mint_tenant": "acme"}
+    monkeypatch.setenv("NX_MINT_TENANT", "from-env")
+    result = runner.invoke(main, ["config", "init"], input="\n")
+    assert result.exit_code == 0, result.output
+    assert "tenant this mint credential" not in result.output.lower(), "a tenant in the environment is not asked"
+
+
+def test_config_unset_removes_a_saved_credential_and_is_quiet_when_absent(runner, fake_home, monkeypatch) -> None:
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    _write_config(fake_home, {"credentials": {"service_url": "https://svc.example.com", "service_token": "old-static"}})
+    result = runner.invoke(main, ["config", "unset", "service_token"])
+    assert result.exit_code == 0, result.output
+    assert "Removed service_token" in result.output and "old-static" not in result.output
+    assert _read_config(fake_home)["credentials"] == {"service_url": "https://svc.example.com"}
+    result = runner.invoke(main, ["config", "unset", "service-token"])
+    assert result.exit_code == 0 and "nothing to remove" in result.output
+
+
+def test_config_unset_refuses_an_unknown_key_and_names_an_environment_override(runner, fake_home, monkeypatch) -> None:
+    result = runner.invoke(main, ["config", "unset", "no_such_key"])
+    assert result.exit_code == 2 and "Unknown credential" in result.output
+    monkeypatch.setenv("NX_MINT_TOKEN", _SECRET)
+    _write_config(fake_home, {"credentials": {"mint_token": "saved"}})
+    result = runner.invoke(main, ["config", "unset", "mint_token"])
+    assert result.exit_code == 0 and "NX_MINT_TOKEN" in result.output and _SECRET not in result.output
 
 
 def test_config_init_skips_keys_already_in_env(runner, fake_home, monkeypatch) -> None:
@@ -463,6 +555,12 @@ def test_config_set_from_file_reads_a_private_file(runner, fake_home, tmp_path) 
     assert _read_config(fake_home)["credentials"]["voyage_api_key"] == _SECRET
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="the mode-bit refusal is POSIX only: Windows has no group/other mode bits (os.chmod sets only the "
+    "read-only flag) and --from-file does not inspect ACLs; the Windows path, which reads and says it did not "
+    "check, is test_config_set_from_file_off_posix_reads_and_says_it_did_not_check",
+)
 def test_config_set_from_file_refuses_a_group_or_world_readable_file(runner, fake_home, tmp_path) -> None:
     secret_file = tmp_path / "voyage.key"
     secret_file.write_text(_SECRET)
@@ -478,11 +576,16 @@ def test_config_set_from_file_refuses_a_group_or_world_readable_file(runner, fak
     [
         ["voyage_api_key", "inline", "--stdin"],
         ["voyage_api_key=inline", "--stdin"],
-        ["voyage_api_key", "--stdin", "--from-file", "/dev/null"],
+        ["voyage_api_key", "--stdin", "--from-file", "{FILE}"],
     ],
     ids=["value-and-stdin", "key-equals-and-stdin", "stdin-and-file"],
 )
-def test_config_set_refuses_two_value_sources(runner, fake_home, args) -> None:
+def test_config_set_refuses_two_value_sources(runner, fake_home, tmp_path, args) -> None:
+    # A real file, not /dev/null: click's exists/dir_okay check runs before the refusal,
+    # and Windows has no /dev/null.
+    value_file = tmp_path / "value.txt"
+    value_file.write_text("x\n")
+    args = [str(value_file) if a == "{FILE}" else a for a in args]
     result = runner.invoke(main, ["config", "set", *args], input="x\n")
     assert result.exit_code != 0
     assert "Give the value one way" in result.output  # our refusal, not an unknown option

@@ -1,0 +1,1 @@
+Should T1 session scratch (src/nexus/db/t1.py) regain an in-process fallback for when the nexus service is unreachable, or keep failing loud as it does now? Recommend one and justify it from the code. Do not edit any files. Keep the answer under 250 words.

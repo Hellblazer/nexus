@@ -13,20 +13,32 @@ program it wants::
     uv tool run --directory ${CLAUDE_PLUGIN_ROOT} ... python launch/nx_launch.py nx-mcp
     uv tool run --directory ${CLAUDE_PLUGIN_ROOT} ... python launch/nx_launch.py nx-hook preflight
 
-What happens is decided from one fact, whether the program resolves
-(``_cli_lookup.resolve``: the generation layout, then ``PATH``, never the
-current directory). No file the plugin writes takes part, so an install done by
-hand at any time is used at the next launch.
+What happens is decided from two facts about the program, both read from files
+and neither from anything the plugin writes: whether it resolves
+(``_cli_lookup.resolve``: the generation layout, then ``PATH``, never the current
+directory) and, when it does, whether it can start (``_cli_lookup.cannot_start``:
+a stat and one small read, no process; Sam, 2026-10-14). An install done by hand
+at any time is used at the next launch.
 
-* It resolves: run it. On POSIX the launcher replaces itself with the program
-  (``os.execv``), so the launcher is not left between a running server and
-  the application. ``uv`` is: it stays alive as the parent of what it runs, on
-  every platform. On Windows the launcher starts the program with its own
+* It resolves and can start: run it. On POSIX the launcher replaces itself with
+  the program (``os.execv``), so the launcher is not left between a running server
+  and the application. ``uv`` is: it stays alive as the parent of what it runs,
+  on every platform. On Windows the launcher starts the program with its own
   standard input and output and exits with the program's exit code.
+* The real ``nx-mcp`` is handed ``NX_SETUP_SCRIPT``, the path of ``nx_setup.py``
+  beside this file (RDR-228 Phase 2 Step 3). Its ``setup`` and ``setup_status``
+  tools start that file, so the setup process has one copy, in the plugin. It is
+  set in every state of the setup directory and the launcher reads none of it. A
+  value inherited from the environment is replaced: the variable names the file
+  this plugin ships. No other program gets it.
 * It does not resolve and a hook program was asked for: exit 0 with one line on
   standard error. A missing CLI never blocks a prompt or a tool call.
 * It does not resolve and a server was asked for: :func:`serve_stand_in`, a
   server that says Nexus is not installed (``nx_standin.py``).
+* It resolves and cannot start (an interpreter ``uv`` pruned), or starting it
+  fails: a hook program gets one line on standard error saying so and exit 0, and
+  a server gets the same stand-in, which says "Nexus is installed but cannot
+  start; setup repairs it" with the reason. The ``setup`` tool rebuilds the CLI.
 
 The entries start this script with ``--directory ${CLAUDE_PLUGIN_ROOT}``, so its
 working directory is the plugin root, and the programs read the project from
@@ -67,19 +79,35 @@ HOOK_PROGRAMS = frozenset({"nx-hook", "nx-session-end-launcher"})
 #: Programs a server entry runs. Absent, the stand-in is served.
 SERVER_PROGRAMS = frozenset({"nx-mcp", "nx-mcp-catalog"})
 
+#: The environment variable that carries the setup process's path to the real
+#: ``nx-mcp``, which starts it from its ``setup`` tool.
+SETUP_SCRIPT_ENV = "NX_SETUP_SCRIPT"
 
-def serve_stand_in(name: str) -> int:
-    """Serve in place of the server *name* when there is no CLI.
+
+def serve_stand_in(name: str, broken: str | None = None) -> int:
+    """Serve in place of the server *name* when there is no CLI, or when there is
+    one and it cannot start (*broken* is the reason).
 
     The stand-in (``nx_standin.py``, beside this file) answers the handshake and
-    says Nexus is not installed. Nothing is written to standard error: for a
-    stdio server Claude Code records each such line as an error. The import is
-    here, not at module scope, so a hook launch does not pay for it.
+    says Nexus is not installed, or installed but cannot start. Nothing is written
+    to standard error: for a stdio server Claude Code records each such line as
+    an error. The import is here, not at module scope, so a hook launch does not
+    pay for it.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import nx_standin  # noqa: PLC0415 -- see the docstring
 
-    return nx_standin.main(name)
+    return nx_standin.main(name, broken)
+
+
+def _cannot_start(name: str, exe: str, reason: str) -> int:
+    """The program *name*, found at *exe*, cannot start for *reason*. A server is
+    served by the stand-in that says so; a hook is skipped with one line; any other
+    program fails with one line."""
+    if name in SERVER_PROGRAMS:
+        return serve_stand_in(name, reason)
+    sys.stderr.write(_cli_lookup.cannot_start_note(exe, reason))
+    return 0 if name in HOOK_PROGRAMS else 1
 
 
 def _skipped(name: str, args: list[str]) -> str:
@@ -114,6 +142,12 @@ def _hook_stdin() -> tuple[BinaryIO | None, str | None]:
 def _hand_off(name: str, exe: str, args: list[str]) -> int:
     """Run *exe* in the project directory and return its exit code (POSIX: never
     returns on success)."""
+    if name == "nx-mcp":  # before the move to the project: __file__ may be relative to this directory
+        setup_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nx_setup.py")
+        if os.path.isfile(setup_script):
+            os.environ[SETUP_SCRIPT_ENV] = setup_script
+        else:
+            os.environ.pop(SETUP_SCRIPT_ENV, None)  # never hand on a path this plugin did not ship
     stdin: BinaryIO | None = None
     if name in HOOK_PROGRAMS:
         stdin, project = _hook_stdin()
@@ -144,15 +178,18 @@ def main(argv: list[str]) -> int:
     name, args = argv[0], argv[1:]
     exe = _cli_lookup.resolve(name)
     if exe is not None:
+        # Found, and the files say it cannot start: no process is started to find out.
+        reason = _cli_lookup.cannot_start(exe)
+        if reason is not None:
+            return _cannot_start(name, exe, reason)
         try:
             return _hand_off(name, exe, args)
         except OSError as exc:
-            # Found and not startable (a generation reaped between the lookup and
-            # the start, a script whose interpreter is gone). A hook is skipped, as
-            # when absent. A server fails with exit 1 and NO stand-in: the install
-            # is there and broken, and "not installed" would be untrue.
-            sys.stderr.write(f"conexus: could not start {exe}: {exc}\n")
-            return 0 if name in HOOK_PROGRAMS else 1
+            # Found and not startable after all (a generation reaped between the
+            # lookup and the start, a file the system will not execute). Treated as
+            # the case above: a hook is skipped and a server is served the stand-in
+            # that says "installed but cannot start", never "not installed".
+            return _cannot_start(name, exe, str(exc))
     if name in HOOK_PROGRAMS:
         sys.stderr.write(_cli_lookup.missing_note(name, _skipped(name, args)))
         return 0

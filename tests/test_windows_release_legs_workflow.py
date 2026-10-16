@@ -794,8 +794,9 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
     # a floor that can be passed by a mostly-skipped or much smaller run is no floor
     passed = int(re.search(r"--min-passed (\d+)", floor["run"]).group(1))
     skipped = int(re.search(r"--max-skipped (\d+)", floor["run"]).group(1))
-    assert passed >= 1000, passed
-    assert skipped <= passed // 20, f"{skipped} skips against a {passed} pass floor is a mostly-skipped run"
+    assert passed >= 2750, passed
+    # 6%, not 5%: RDR-228 Phase 2's POSIX-only hook cases skip on Windows (Sam, 2026-10-16).
+    assert skipped <= passed * 6 // 100, f"{skipped} skips against a {passed} pass floor is a mostly-skipped run"
 
 
 #: The tests only a real Windows run exercises. Each is a ``--require-passed`` pattern in the floor

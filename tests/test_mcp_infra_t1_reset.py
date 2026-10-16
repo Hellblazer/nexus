@@ -8,7 +8,18 @@ narrower contract: only ``_t1_instance``/``_t1_isolated`` are touched.
 """
 from __future__ import annotations
 
+import pytest
+
 import nexus.mcp_infra as mcp_infra
+
+
+@pytest.fixture(autouse=True)
+def _no_t1_left_behind():
+    """Each test here injects or builds a sentinel T1. Left cached, a later test on the
+    same worker gets a bare ``object()`` from ``get_t1()`` (the z0o2p ``store_put``
+    stamp test failed on chas when this file ran before it on one xdist worker)."""
+    yield
+    mcp_infra.reset_t1_for_release()
 
 
 def test_reset_clears_injected_t1_singleton():

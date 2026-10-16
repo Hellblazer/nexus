@@ -286,7 +286,15 @@ def flip_current(
     _sweep_swap_litter(previous, ops)
     if ops.is_link(current):
         outgoing = ops.read(current)
-        if outgoing and _key(outgoing, platform) != _key(str(gen), platform):
+        # A missing outgoing target is not recorded: a junction cannot point at
+        # a directory that is gone, so recording it failed the whole flip before
+        # `current` moved, and a ``previous`` naming nothing is no rollback
+        # target anyway. An existing ``previous`` is left as it is.
+        if (
+            outgoing
+            and Path(outgoing).is_dir()
+            and _key(outgoing, platform) != _key(str(gen), platform)
+        ):
             swap_link(outgoing, previous, ops)
     swap_link(str(gen), current, ops)
 
