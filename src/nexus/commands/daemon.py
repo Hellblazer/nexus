@@ -944,6 +944,12 @@ def service_start_cmd(
     config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
 
     if foreground:
+        # nexus-sv2wx.24: the autostart unit runs this with --config-dir and no
+        # NEXUS_CONFIG_DIR, under the account's real home. Export the flag so every
+        # config read below (local.embed_model, the Voyage key handed to the engine)
+        # and the engine itself use this dir, not ~/.config/nexus.
+        if config_dir_str:
+            os.environ["NEXUS_CONFIG_DIR"] = str(config_dir.resolve())
         try:
             code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:
