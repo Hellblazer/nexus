@@ -386,6 +386,9 @@ channel it already uses for another notice (`apply_stranded_notice`,
 So "CLI only" is an ordinary state: the real server runs, and after a
 finished CLI-only run its instructions say nothing about a service, because
 none is what the user chose (Sam, 2026-10-15; the hook says one quiet line).
+Nor do they carry the embedder notice that says to run `nx init`, which
+offers the provisioning the user declined; `nx doctor` still reports it
+(Sam, 2026-10-16).
 A reboot that leaves a provisioned local service down is said as that: the
 service is installed and not running, and `setup` with mode `local` starts it
 and downloads nothing (Minimum Viable Validation row 2, 2026-10-15).
@@ -1132,7 +1135,8 @@ None. The launcher, the hook and the stand-in server are standard library.
   lock and no directory at all, and sets `NX_SETUP_SCRIPT`.
 - The real `nx-mcp` registers `setup` and `setup_status` always. With no
   usable service its instructions text says so, except after a finished
-  CLI-only run; with one it does not. With
+  CLI-only run; with one it does not. After a finished CLI-only run the
+  embedder notice is left out too. With
   `NX_SETUP_SCRIPT` unset the tools start no process.
 - `mcp__plugin_conexus_nexus__setup` and `mcp__plugin_conexus_nexus__setup_status`
   are in `_MANUAL_APPROVAL_REQUIRED`, each with its "requires manual
@@ -1526,3 +1530,8 @@ is flagged for trimming before then.
   server's instructions and `setup_status`, and `/conexus:setup` offers to
   start it (row 2 found both saying nothing was set up). After a finished
   CLI-only run the server's instructions say nothing (Sam, 2026-10-15).
+- 2026-10-16: From the Minimum Viable Validation on macOS (nexus-sv2wx.24).
+  After a finished CLI-only run the server's instructions also leave out the
+  embedder notice that says to run `nx init` (Sam, 2026-10-16). The
+  start-at-login supervisor reads every setting from the config directory it
+  was installed for.
