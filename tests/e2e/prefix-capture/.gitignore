@@ -6,3 +6,5 @@ __pycache__/
 ab/seqthink/out/
 ab/seqthink/project.tar.gz
 ab/seqthink/user_claude.md
+ab/skillroute/out/
+ab/skillroute/plugins/

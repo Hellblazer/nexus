@@ -80,3 +80,24 @@ and `analyse_sq.py ab/seqthink/out` reports main-session and subagent
 sequential-thinking calls, the first turn that made one, ToolSearch and Agent
 counts, and cost per cell. Results of the 2026-10-15 run: T2
 `nexus/seqthink-uncued-real-guidance-2026-10-15`.
+
+## ab/skillroute/: skill routing under distractor plugins (nexus-dg7i6.1)
+
+Do conexus skills still load when other plugins' skills crowd the listing?
+`claude plugin eval` cannot answer this (its sandbox loads only the plugin
+under test), so this runs the `conexus/evals` case prompts as plain
+`claude -p` sessions on the seeded image, graded with the cases' own
+`tool_used` graders. Arms: `S0` is the image's conexus + sn with nexus tools as
+shipped (8 eager); `S1` adds the beads plugin; `S2` adds every other plugin
+enabled on the laptop except the LSP plugins. Extra plugins load with
+`--plugin-dir` from `ab/skillroute/plugins/`, which is not committed: build it
+on the laptop with `snapshot_plugins.sh` (copies from the installed plugin
+cache) and copy it to the chas worktree.
+
+`sr_batch.sh <REPS> <ARM>... [-- <case>...]` is the loop on chas (cases default
+to every `conexus/evals` case), `sr_detach.sh` starts it detached through the
+credentials helper, and `score_sr.py ab/skillroute/out <conexus/evals>`
+reports positive-grader pass rate, zero-load rate on positive cases,
+negative-grader pass rate, and the skill-listing size of each arm's first
+request (an arm whose listing did not grow over S0 is flagged vacuous). The
+2026-10-16 smoke run listed 76, 104 and 135 entries for S0, S1 and S2.
