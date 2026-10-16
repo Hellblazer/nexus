@@ -67,13 +67,15 @@
 # started as the account is recorded (3077 blocked, 3076 in audit).
 # --cache on (the default; nexus-bpzt7) saves what every restored guest would
 # download again: the restore step turns Windows Update off in the guest for that
-# boot, step 01c copies the host's C:\build\guest\cache (a uv cache archive and
-# a Claude Code binary) into the installing account, and step 07 refills that
-# cache after the run. uv still resolves against PyPI and the Claude Code binary
-# is used only when its sha256 is the latest release's, so the install runs the
-# published path; the nexus engine, PostgreSQL bundle and models are downloaded
-# by nx init as usual. Measured 2026-10-15 on Home: a cycle received 2.46 GB,
-# about 1.1 GB of it during the conexus install. --cache off downloads everything
+# boot, step 01c copies the host's C:\build\guest\cache (a uv cache archive, a
+# Claude Code binary, and nx init's two ONNX models when they were cached for
+# this version) into the installing account, and step 07 refills that cache
+# after the run. uv still resolves against PyPI and the Claude Code binary is
+# used only when its sha256 is the latest release's, so the install runs the
+# published path; the nexus engine and PostgreSQL bundle are downloaded and
+# checked by nx init as usual. Measured on Home: 2.46 GB per cycle before the
+# cache (2026-10-15), 1.30 GB with it before the models were cached (2026-10-16,
+# at the host's Default Switch). --cache off downloads everything
 # and leaves Windows Update alone, for a run whose subject is the download path.
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
@@ -234,7 +236,7 @@ restore_cache=yes
 [[ "$cache" == on ]] || restore_cache=no
 cache_key="$version"
 cache_note="--cache off: everything downloaded fresh"
-[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, uv's files and Claude Code from the host cache when it held them (01c-seed.txt), nexus engine, bundle and models downloaded"
+[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, uv's files and Claude Code from the host cache when it held them (01c-seed.txt), the nx init models from the host cache when it held them for this version, nexus engine and bundle downloaded"
 [[ -z "$wheel_sha" ]] || cache_key="w-${wheel_sha:0:16}"
 
 RUN="nxg-$(date -u +%Y%m%dT%H%M%SZ)-$$"

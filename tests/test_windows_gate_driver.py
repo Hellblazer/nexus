@@ -1266,6 +1266,21 @@ def test_the_cache_script_writes_only_under_its_folder_and_removes_by_exact_name
     assert "Checkpoint-VM" not in code and "Restore-VM" not in code
 
 
+def test_the_model_cache_is_seeded_only_for_the_conexus_version_that_filled_it() -> None:
+    # nx init reuses a model file found in place by its size alone, so a model archive left over from an
+    # older release could stand in for a changed pinned model. The archive carries the key of the install
+    # that downloaded and sha256-checked it, and is seeded only for that key (nexus-bpzt7).
+    code = "\n".join(_code_lines(_read("cache.ps1")))
+    seed = code[code.index("if ($Mode -eq 'seed')"):code.index("} else {\n        $claudeVer")]
+    assert "$have -contains \"models=$Key\"" in seed and "Test-Path $modelsTar" in seed
+    assert ".cache\\nexus" in seed
+    harvest = code[code.index("$claudeVer = Invoke-Command"):]
+    assert "$have -notcontains \"models=$Key\"" in harvest
+    assert "onnx_models" in harvest and "\"models=$Key\"" in harvest
+    # only the models: the engine binary and the PostgreSQL bundle stay on the gated download path
+    assert "nexus-service" not in code and "nexus-pg" not in code and "NEXUS_SERVICE_BIN" not in code
+
+
 def test_the_cached_claude_binary_is_used_only_when_it_is_the_latest_releases_by_sha256() -> None:
     inst = _read("inst.ps1")
     fn = inst[inst.index("function CachedClaude"):inst.index("Step 'claude code'")]
