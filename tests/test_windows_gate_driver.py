@@ -133,6 +133,35 @@ def test_the_guest_is_reached_only_by_the_two_password_scripts() -> None:
         assert reaches == (name in PW_SCRIPTS), name
 
 
+# ---- guest sign-in: one retry block (nexus-bpzt7) ---------------------------
+
+
+def _guest_session_block(name: str) -> str:
+    text = _read(name)
+    start = text.index("# guest-session:")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+def test_every_guest_session_opens_through_one_identical_retry_block() -> None:
+    blocks = {name: _guest_session_block(name) for name in PW_SCRIPTS}
+    assert len(set(blocks.values())) == 1, "the guest-session block differs between scripts"
+    for name in PW_SCRIPTS:
+        code = "\n".join(_code_lines(_read(name)))
+        assert code.count("New-PSSession") == 1, f"{name} opens a session outside Open-GuestSession"
+        assert re.search(r"^\$s = Open-GuestSession \$(VMName|vm)$", code, re.M), name
+
+
+def test_the_retry_takes_only_the_credential_error_and_is_bounded() -> None:
+    block = _guest_session_block("cache.ps1")
+    # cycles 1 and B of 2026-10-16 were refused this way seconds after the console sign-in
+    assert "-notmatch 'credential is invalid' -or $i -gt 12) { throw }" in block
+    assert "Start-Sleep 10" in block
+    assert "Id = 4625, 4776" in block, "a refusal must print the guest's failed sign-in events"
+    # the function's pipeline output is its return value: everything it prints goes through Write-Host
+    assert not re.search(r"^\s*[\"']", block, re.M) and "Write-Output" not in block
+    assert block.strip().splitlines()[-2].strip() == "$sess", "the function returns the session last"
+
+
 # ---- restore: the named checkpoint only --------------------------------------
 
 
@@ -969,7 +998,10 @@ def test_the_account_step_and_the_run_as_wrapper_keep_their_guarantees() -> None
     # its secret is random, set without a command line, and removed from Winlogon once the account is signed in
     assert "RNGCryptoServiceProvider" in std and "net user" not in std and "net.exe" not in std
     assert std.index("-Name DefaultPassword -Value $tp; $tp = $null") < std.index("Remove-ItemProperty -Path $wl -Name DefaultPassword")
-    assert not re.search(r'"[^"\n]*\$tp\b[^"\n]*"|Write-|Out-File[^\n]*\$tp|Set-Content[^\n]*\$tp', std)
+    # the shared guest-session block prints with Write-Host and never sees $tp; it is pinned identical above
+    session = _guest_session_block("stduser.ps1")
+    assert "$tp" not in session
+    assert not re.search(r'"[^"\n]*\$tp\b[^"\n]*"|Write-|Out-File[^\n]*\$tp|Set-Content[^\n]*\$tp', std.replace(session, ""))
     asu = _read("as-user.ps1")
     assert "-UserId $u -LogonType Interactive -RunLevel Limited" in asu
     assert "administrators-member=False$" in asu

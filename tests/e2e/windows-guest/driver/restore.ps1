@@ -26,6 +26,37 @@ if (-not $pw) { throw 'nothing on stdin' }
 # plain text in a cmdlet parameter binding, which PowerShell module logging records when it is on.
 $sec = New-Object System.Security.SecureString; foreach ($c in $pw.ToCharArray()) { $sec.AppendChar($c) }; $sec.MakeReadOnly(); $pw = $null; $c = $null
 $cred = New-Object PSCredential($GuestUser, $sec)
+# guest-session: the same block in every script that opens a session (tests/test_windows_gate_driver.py).
+# PowerShell Direct has refused the right password with "The credential is invalid" seconds after the guest
+# restarted and an account signed in at the console (nexus-bpzt7, cycles 1 and B of 2026-10-16; not a lockout,
+# cause unknown). That one error is retried every 10 s for 2 minutes; any other error stops the script. After a
+# refusal, the guest's failed sign-ins (events 4625 and 4776) from a minute before the first one are printed.
+# Everything it prints goes through Write-Host: its pipeline output is its return value, the session.
+function Open-GuestSession($Name) {
+    $since = $null
+    for ($i = 1; ; $i++) {
+        try { $sess = New-PSSession -VMName $Name -Credential $cred -ErrorAction Stop; break }
+        catch {
+            if ($_.Exception.Message -notmatch 'credential is invalid' -or $i -gt 12) { throw }
+            if (-not $since) { $since = (Get-Date).AddMinutes(-1) }
+            Write-Host "guest sign-in refused (credential is invalid) at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss')); retry $i of 12 in 10 s"
+            Start-Sleep 10
+        }
+    }
+    if ($since) {
+        $ev = @(Invoke-Command -Session $sess -ArgumentList $since {
+            param($t)
+            $fields = '^\s*(Account Name|Account For Which Logon Failed|Logon Account|Failure Reason|Status|Sub Status|Error Code|Logon Type|Caller Process Name|Source Workstation):'
+            Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625, 4776; StartTime = $t } -ErrorAction SilentlyContinue | ForEach-Object {
+                $keep = @($_.Message -split "`r?`n" | Where-Object { $_ -match $fields } | ForEach-Object { $_.Trim() -replace '\s+', ' ' })
+                $_.TimeCreated.ToUniversalTime().ToString('HH:mm:ss') + " event $($_.Id): " + ($keep -join '; ')
+            }
+        })
+        Write-Host "guest failed sign-ins since $($since.ToUniversalTime().ToString('HH:mm:ss')): $($ev.Count)"
+        foreach ($e in $ev) { Write-Host "  $e" }
+    }
+    $sess
+}
 $vm = $VMName; $cp = $Checkpoint; $t0 = Get-Date
 function Nics { @(Get-VMNetworkAdapter -VMName $vm).Count }
 function EnsureNic($when) {
@@ -91,7 +122,7 @@ $v = Get-VM -Name $vm
 "after: state=$($v.State) parent=$($v.ParentCheckpointName) nics=$(Nics)"
 if (-not $ok) { 'NXG-RESULT: FAIL the guest has no network'; exit 4 }
 $rc = 0
-$s = New-PSSession -VMName $vm -Credential $cred -ErrorAction Stop
+$s = Open-GuestSession $vm
 try {
     $b = Invoke-Command -Session $s { New-Item -ItemType Directory -Force "$env:USERPROFILE\nx-gate" | Out-Null; "$env:USERPROFILE\nx-gate" }
     Copy-Item -ToSession $s -Path (Join-Path $RunDir 'stage\windows-phase5-gate.ps1') -Destination "$b\windows-phase5-gate.ps1" -Force
