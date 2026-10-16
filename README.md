@@ -51,7 +51,7 @@ In Claude Desktop, install `uv`, open Customize → Plugins, add the marketplace
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. On an Apple Silicon Mac it took about 2.4 GB (Local). `uv` also keeps a download cache, about 2.4 GB on Linux, 2.5 GB on Windows and 3.6 GB on macOS after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
+Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. On an Apple Silicon Mac it took about 2.4 GB (Local). `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
 
 ## Install by hand
 

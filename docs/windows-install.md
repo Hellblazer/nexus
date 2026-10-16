@@ -72,7 +72,7 @@ When the install finishes, run `/reload-plugins` or start a new session. In that
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. On an Apple Silicon Mac it took about 2.4 GB (Local). `uv` also keeps a download cache, about 2.4 GB on Linux, 2.5 GB on Windows and 3.6 GB on macOS after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The Windows cache figure was measured on 2026-10-14 with conexus 7.78.0.
+Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. On an Apple Silicon Mac it took about 2.4 GB (Local). `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The macOS and Windows cache figures were measured on 2026-10-16 with conexus 7.81.0.
 
 ## Install by hand
 
@@ -204,7 +204,7 @@ The install by the one-command route measured about 2.3 GB of disk (conexus
 7.78.0, CLI only), and about 3.1 GB with Local, which adds the service's
 configuration and models. A folder-size tool reports more, because it counts
 some files twice: uv installs packages as hardlinks to the copies in its cache
-(`%LOCALAPPDATA%\uv\cache`, about 2.5 GB after a first install), so the
+(`%LOCALAPPDATA%\uv\cache`, about 4.8 GB after a first install), so the
 environment is mostly the same data under a second name. That sharing was not
 measured with a hardlink-aware tool on Windows. The same kind of install on
 Linux (CLI only, conexus 7.81.0) shows the effect: 2.4 GB in uv's cache and
@@ -389,7 +389,7 @@ on a uv-only install, `nx uninstall --yes --remove-data` took 6 s and the same
 lines left nothing once the models and `%LOCALAPPDATA%\nexus` were removed as
 above.
 What stays belongs to uv and to you: uv, the Python 3.12 it downloaded, its
-cache (about 2.5 GB after this install; `uv cache clean` empties it) and
+cache (about 4.8 GB after this install; `uv cache clean` empties it) and
 PortableGit.
 
 ## Signing and SmartScreen
