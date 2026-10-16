@@ -54,7 +54,7 @@ ANTHROPIC_BASE_URL="http://127.0.0.1:${PORT}" ENABLE_TOOL_SEARCH=true \
     --debug --debug-file "$OUT/debug.S.log" \
   > "$OUT/result.S.json" 2> "$OUT/claude.S.stderr"
 echo "S exit=$? wall=$(( $(date +%s) - t0 ))" >> "$OUT/exit.txt"
-git -C "$REPO" status --short | head -20 > "$OUT/repo_dirty.txt"
+git -C "$REPO" status --short > "$OUT/repo_dirty.txt"
 sleep 2
 kill "$PROXY_PID" 2>/dev/null
 gzip -f "$OUT"/debug.*.log 2>/dev/null
