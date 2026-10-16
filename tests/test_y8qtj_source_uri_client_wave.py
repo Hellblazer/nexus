@@ -153,13 +153,17 @@ class TestSourceUriConvergence:
         path = tmp_path / "mismatch.pdf"
         path.write_bytes(b"%PDF-1.4 stub")
 
-        with pytest.raises(SourceUriCollectionMismatchError):
+        with pytest.raises(SourceUriCollectionMismatchError) as exc:
             _register_or_lookup_doc_id(
                 path, "dt-papers-mismatch",
                 content_type="paper",
                 physical_collection="docs__default__bge-base-en-v15-768__v1",
                 source_uri=dt_uri,
             )
+        # The remedy named must be one that works: 'nx catalog update' has
+        # no collection option, so it cannot move a document.
+        assert "nx catalog delete" in str(exc.value)
+        assert "nx catalog update" not in str(exc.value)
 
 
 # ── nexus-y8qtj reproduced INSIDE its own fix ────────────────────────────────
