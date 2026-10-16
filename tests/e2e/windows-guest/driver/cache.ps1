@@ -11,10 +11,18 @@
 #                  manifest of the version Anthropic's download service names
 #                  as latest. uv still resolves against PyPI; only the files
 #                  come from the cache, so the install runs the published path.
-#   -Mode harvest  after a successful install: copy that account's uv cache and
-#                  installed claude.exe back to the host when the cache does not
-#                  yet hold this install (keys.txt: conexus=<-Key>, and
-#                  claude=<version>).
+#                  When the cache holds models for this -Key, unpack them into
+#                  the account's .cache\nexus\onnx_models, where nx init reuses
+#                  a model file it finds in place. The engine binary and the
+#                  PostgreSQL bundle are never cached: their sha256 and
+#                  signature checks stay on the gated download path.
+#   -Mode harvest  after a successful install: copy that account's uv cache,
+#                  installed claude.exe and onnx_models back to the host when the
+#                  cache does not yet hold this install (keys.txt: conexus=<-Key>,
+#                  claude=<version>, models=<-Key>). nx init checked the models'
+#                  sha256 when it downloaded them. They are keyed by -Key because
+#                  nx init reuses a model by size alone, so an archive from an
+#                  older release must not stand in for a changed pinned model.
 # Host writes stay under C:\build\guest\cache; files there are replaced or
 # removed by exact name only. In the guest: the account's uv cache folder,
 # nx-gate\claude-cache, and one archive file in nx-gate, removed after use.
@@ -30,6 +38,7 @@ if ($Key -notmatch '^[A-Za-z0-9._+-]+$') { throw 'Key has a character outside A-
 $root = 'C:\build\guest\cache'
 $uvTar = Join-Path $root 'uv-cache.tar'
 $keys = Join-Path $root 'keys.txt'
+$modelsTar = Join-Path $root 'models.tar'
 $pw = [Console]::In.ReadLine()
 if (-not $pw) { throw 'nothing on stdin' }
 # The characters go into the SecureString one by one: ConvertTo-SecureString -AsPlainText would put the
@@ -37,7 +46,7 @@ if (-not $pw) { throw 'nothing on stdin' }
 $sec = New-Object System.Security.SecureString; foreach ($c in $pw.ToCharArray()) { $sec.AppendChar($c) }; $sec.MakeReadOnly(); $pw = $null; $c = $null
 $cred = New-Object PSCredential($GuestUser, $sec)
 New-Item -ItemType Directory -Force $root | Out-Null
-$have = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match '^(conexus|claude)=[A-Za-z0-9._+-]+$' })
+$have = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match '^(conexus|claude|models)=[A-Za-z0-9._+-]+$' })
 function ClaudeBin($v) { Join-Path $root "claude-$v-win32-x64.exe" }
 # Host to guest over PowerShell Direct (Sam, 2026-10-15: no host-side VM settings, so no Copy-VMFile).
 function ToGuest($src, $dst) { Copy-Item -ToSession $s -Path $src -Destination $dst -Force; "copied $(Split-Path $src -Leaf)" }
@@ -66,10 +75,22 @@ try {
             ToGuest (ClaudeBin $cv[0]) "$guestCc\claude-$($cv[0])-win32-x64.exe"
             "seeded claude-cache: $($cv[0])"
         } else { 'seeded claude-cache: none' }
+        if ($have -contains "models=$Key" -and (Test-Path $modelsTar)) {
+            $guestMt = "$prof\nx-gate\models.tar"
+            ToGuest $modelsTar $guestMt
+            Invoke-Command -Session $s -ArgumentList $prof, $guestMt {
+                param($p, $t)
+                $d = "$p\.cache\nexus"
+                New-Item -ItemType Directory -Force $d | Out-Null
+                tar.exe -xf $t -C $d; "unpack exit=$LASTEXITCODE"
+                Remove-Item -LiteralPath $t -Force
+                Get-ChildItem "$d\onnx_models" -Recurse -File | ForEach-Object { 'seeded model file {0} {1:N0} MB' -f $_.FullName.Substring($d.Length + 1), ($_.Length / 1MB) }
+            }
+        } else { "seeded models: none for $Key" }
         # The installing account writes its own uv cache (locks, new entries): make it the owner of what was copied in.
-        Invoke-Command -Session $s -ArgumentList $Account, "$prof\AppData\Local\uv", $guestCc {
-            param($a, $u, $c)
-            foreach ($d in @($u, $c)) { if (Test-Path $d) { icacls $d /setowner $a /T /C /Q | Out-Null; icacls $d /grant "${a}:(OI)(CI)F" /T /C /Q | Out-Null } }
+        Invoke-Command -Session $s -ArgumentList $Account, "$prof\AppData\Local\uv", $guestCc, "$prof\.cache" {
+            param($a, $u, $c, $m)
+            foreach ($d in @($u, $c, $m)) { if (Test-Path $d) { icacls $d /setowner $a /T /C /Q | Out-Null; icacls $d /grant "${a}:(OI)(CI)F" /T /C /Q | Out-Null } }
         }
     } else {
         $claudeVer = Invoke-Command -Session $s -ArgumentList $prof {
@@ -99,6 +120,23 @@ try {
             $keep = @($keep | Where-Object { $_ -notlike 'claude=*' }) + "claude=$claudeVer"
             "harvested claude.exe $claudeVer"
         } else { "harvest: claude $claudeVer already cached or not found" }
+        if ($have -notcontains "models=$Key") {
+            $guestMt = "$prof\nx-gate\models.tar"
+            $found = Invoke-Command -Session $s -ArgumentList $prof, $guestMt {
+                param($p, $t)
+                if (-not (Test-Path "$p\.cache\nexus\onnx_models")) { return 'no onnx_models' }
+                tar.exe -cf $t -C "$p\.cache\nexus" onnx_models; "pack exit=$LASTEXITCODE"
+            }
+            $found
+            if ($found -like 'pack exit=0') {
+                $tmp = Join-Path $root 'models.tar.new'
+                Copy-Item -FromSession $s -Path $guestMt -Destination $tmp -Force
+                Invoke-Command -Session $s -ArgumentList $guestMt { param($t) Remove-Item -LiteralPath $t -Force }
+                Move-Item -LiteralPath $tmp -Destination $modelsTar -Force
+                $keep = @($keep | Where-Object { $_ -notlike 'models=*' }) + "models=$Key"
+                'harvested models: {0:N0} MB' -f ((Get-Item $modelsTar).Length / 1MB)
+            }
+        } else { "harvest: the models archive already holds models=$Key" }
         $keep | Sort-Object -Unique | Set-Content -Encoding UTF8 $keys
     }
 } finally { Remove-PSSession $s }
