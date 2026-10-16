@@ -72,7 +72,7 @@ When the install finishes, run `/reload-plugins` or start a new session. In that
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. macOS was not measured. `uv` also keeps a download cache, about 2.4 GB on Linux and 2.5 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The Windows cache figure was measured on 2026-10-14 with conexus 7.78.0.
+Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. On an Apple Silicon Mac it took about 2.4 GB (Local). `uv` also keeps a download cache, about 2.4 GB on Linux, 2.5 GB on Windows and 3.6 GB on macOS after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The Windows cache figure was measured on 2026-10-14 with conexus 7.78.0.
 
 ## Install by hand
 
