@@ -18,6 +18,7 @@ never lets ``nx init --yes`` register the login unit by default.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -30,6 +31,7 @@ import pytest
 from tests._installer_standins import (
     AUTOSTART_QUESTION,
     BOOTSTRAP,
+    check_the_record_quiets_the_hook,
     CLAUDE_STANDIN as _CLAUDE_STANDIN,
     FOREIGN_NX as _FOREIGN_NX,
     NX_STANDIN as _NX_STANDIN,
@@ -438,6 +440,108 @@ def test_cli_only_runs_neither(box: Box) -> None:
     assert result.returncode == 0, result.stderr
     assert BOOTSTRAP in box.calls()
     assert _nx_calls(box) == []
+
+
+# ---- the CLI-only record (nexus-sv2wx.31) ----------------------------------------------------
+# Whoever ends CLI only leaves the plugin's setup record, so Claude Code's session-start hook does
+# not ask about a service at every session. The record is the file the plugin's own setup writes
+# for its cli-only mode: setup/status.json under the config directory.
+
+
+def _config(machine: Box) -> Path:
+    return machine.home / ".config" / "nexus"
+
+
+def test_cli_only_records_the_choice_the_way_the_plugin_does(box: Box) -> None:
+    box.with_uv()
+    result = box.run("--cli-only")
+    assert result.returncode == 0, result.stderr
+    setup = _config(box) / "setup"
+    assert sorted(p.name for p in setup.iterdir()) == ["status.json"], "no temporary file is left"
+    assert stat.S_IMODE(os.stat(setup / "status.json").st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(setup).st_mode) == 0o700
+    record = json.loads((setup / "status.json").read_text(encoding="utf-8"))
+    assert record["message"] == "The Nexus CLI is installed. No service is set up."
+    assert record["autostart"] is False
+
+
+def test_the_record_keeps_the_session_start_hook_quiet(box: Box, tmp_path: Path) -> None:
+    """The point of the record: read the way the plugin reads it, and run the real hook."""
+    box.with_uv()
+    assert box.run("--cli-only").returncode == 0
+    check_the_record_quiets_the_hook(_config(box), tmp_path / "hook")
+
+
+def test_no_terminal_and_no_flag_records_it_too(box: Box) -> None:
+    box.with_uv()
+    assert box.run().returncode == 0
+    assert (_config(box) / "setup" / "status.json").is_file()
+
+
+def test_pressing_enter_at_the_question_records_it(box: Box) -> None:
+    box.with_uv()
+    code, _ = box.run_on_a_terminal(answers=[(SERVICE_QUESTION, "")])
+    assert code == 0
+    record = json.loads((_config(box) / "setup" / "status.json").read_text(encoding="utf-8"))
+    assert record["mode"] == "cli-only"
+
+
+def test_local_and_cloud_record_nothing(box: Box) -> None:
+    """A service run leaves the record to the plugin's setup or to nothing at all: it is not
+    the CLI-only choice."""
+    box.with_uv()
+    box.extra_env.update({"NX_SERVICE_URL": "https://managed.example.test", "NX_SERVICE_TOKEN": "t"})
+    assert box.run("--local", "--no-autostart").returncode == 0
+    assert box.run("--cloud").returncode == 0
+    assert not (_config(box) / "setup").exists()
+
+
+def test_the_record_removes_the_not_now_marker_as_the_plugin_does(box: Box) -> None:
+    box.with_uv()
+    setup = _config(box) / "setup"
+    setup.mkdir(parents=True)
+    (setup / "not-now").write_text("2026-01-01T00:00:00Z", encoding="utf-8")
+    assert box.run("--cli-only").returncode == 0
+    assert not (setup / "not-now").exists()
+    assert (setup / "status.json").is_file()
+
+
+def test_the_record_goes_where_the_plugin_reads_it(box: Box) -> None:
+    """NEXUS_CONFIG_DIR first, then NX_CONFIG_DIR, as the plugin's config_dir does; a relative
+    value is read against the current directory."""
+    box.with_uv()
+    box.extra_env.update({"NEXUS_CONFIG_DIR": str(box.root / "first"), "NX_CONFIG_DIR": str(box.root / "second")})
+    assert box.run("--cli-only").returncode == 0
+    assert (box.root / "first" / "setup" / "status.json").is_file()
+    assert not (box.root / "second").exists() and not _config(box).exists()
+    box.extra_env.pop("NEXUS_CONFIG_DIR")
+    assert box.run("--cli-only").returncode == 0
+    assert (box.root / "second" / "setup" / "status.json").is_file()
+    box.extra_env.update({"NX_CONFIG_DIR": "relative-config"})
+    assert box.run("--cli-only").returncode == 0
+    assert (box.root / "relative-config" / "setup" / "status.json").is_file()  # cwd is the sandbox root
+
+
+def test_a_live_setup_run_keeps_its_record(box: Box) -> None:
+    box.with_uv()
+    setup = _config(box) / "setup"
+    (setup / "lock").mkdir(parents=True)
+    (setup / "status.json").write_text('{"state": "running", "mode": "local"}', encoding="utf-8")
+    result = box.run("--cli-only")
+    assert result.returncode == 0, result.stderr
+    assert (setup / "status.json").read_text(encoding="utf-8") == '{"state": "running", "mode": "local"}'
+
+
+def test_a_record_that_cannot_be_written_is_a_note_not_a_failure(box: Box) -> None:
+    """The config directory is a file: nothing can be made under it. The install is done."""
+    box.with_uv()
+    blocker = box.root / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    box.extra_env["NEXUS_CONFIG_DIR"] = str(blocker)
+    result = box.run("--cli-only")
+    assert result.returncode == 0, result.stderr
+    assert "could not record that no service is set up" in result.stderr
+    assert "Done." in result.stdout
 
 
 def test_autostart_flags_are_ignored_with_a_note_outside_local(box: Box) -> None:

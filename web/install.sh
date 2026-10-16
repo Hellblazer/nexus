@@ -267,6 +267,33 @@ main() {
         find_cli || die "the build finished but nx was not found in $TOOLS_DIR/current/bin. Open a new terminal and run this again."
     fi
 
+    # ---- the CLI-only record ----------------------------------------------------------
+    # Claude Code's session-start hook asks about a missing service at every session unless
+    # the plugin's setup record says CLI only was chosen. The plugin's setup tool writes that
+    # record when it is asked for CLI only; this writes the same file, the same shape, so a
+    # CLI-only install by script and by plugin look alike to the hook and to `nx doctor`.
+    # The directory is the one the plugin reads: NEXUS_CONFIG_DIR, else NX_CONFIG_DIR, else
+    # ~/.config/nexus (a relative value is read against the current directory). The record
+    # holds no secret. A run of the plugin's setup that is live keeps its record, and a failed
+    # write is a note, not a failure: the install is done either way.
+    record_cli_only() {
+        cfg=${NEXUS_CONFIG_DIR:-${NX_CONFIG_DIR:-$HOME/.config/nexus}}
+        case $cfg in /*) ;; *) cfg=$PWD/$cfg ;; esac
+        sdir=$cfg/setup
+        if [ -d "$sdir/lock" ]; then return 0; fi
+        now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        if ( umask 077 \
+            && mkdir -p "$sdir" \
+            && printf '{"state": "done", "stage": "build", "mode": "cli-only", "autostart": false, "started_at": "%s", "updated_at": "%s", "message": "The Nexus CLI is installed. No service is set up.", "steps_done": ["build"], "next": "Reconnect the nexus server or start a new session. To set up a service, ask the user first; if they agree, call setup with mode local."}\n' "$now" "$now" > "$sdir/status.json.$$.tmp" \
+            && mv -f "$sdir/status.json.$$.tmp" "$sdir/status.json" \
+            && rm -f "$sdir/not-now" ) 2>/dev/null; then
+            :
+        else
+            rm -f "$sdir/status.json.$$.tmp" 2>/dev/null || true
+            warn "Note: could not record that no service is set up, so Claude Code may ask about one."
+        fi
+    }
+
     # ---- the plugin -------------------------------------------------------------------
     if command -v claude >/dev/null 2>&1; then
         say "Adding the conexus plugin to Claude Code."
@@ -303,7 +330,9 @@ main() {
                     || die "nx config init did not finish. The CLI is installed; run \`nx config init\` in a terminal."
             fi
             ;;
-        *) ;;
+        *)
+            record_cli_only
+            ;;
     esac
 
     # ---- done -------------------------------------------------------------------------

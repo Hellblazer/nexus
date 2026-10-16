@@ -305,6 +305,45 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             }
         }
 
+        # ---- the CLI-only record ------------------------------------------------------
+        # Claude Code's session-start hook asks about a missing service at every session
+        # unless the plugin's setup record says CLI only was chosen. The plugin's setup tool
+        # writes that record when it is asked for CLI only; this writes the same file, the
+        # same shape. The directory is the one the plugin reads: NEXUS_CONFIG_DIR, else
+        # NX_CONFIG_DIR, else ~/.config/nexus. The record holds no secret and sits under the
+        # user's profile. A live run of the plugin's setup keeps its record, and a failed
+        # write is a note, not a failure. The text is written as UTF-8 with no byte order
+        # mark, because the reader is Python's json module.
+        function Write-CliOnlyRecord {
+            $cfg = $env:NEXUS_CONFIG_DIR
+            if (-not $cfg) { $cfg = $env:NX_CONFIG_DIR }
+            if (-not $cfg) { $cfg = Join-Path (Join-Path $homeDir '.config') 'nexus' }
+            try {
+                $sdir = Join-Path ([System.IO.Path]::GetFullPath($cfg)) 'setup'
+                if (Test-Path -LiteralPath (Join-Path $sdir 'lock') -PathType Container) { return }
+                [void](New-Item -ItemType Directory -Force -Path $sdir)
+                $now = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                $record = [ordered]@{
+                    state = 'done'; stage = 'build'; mode = 'cli-only'; autostart = $false
+                    started_at = $now; updated_at = $now
+                    message = 'The Nexus CLI is installed. No service is set up.'
+                    steps_done = @('build')
+                    next = 'Reconnect the nexus server or start a new session. To set up a service, ask the user first; if they agree, call setup with mode local.'
+                }
+                $json = ConvertTo-Json -InputObject $record -Compress
+                $tmp = Join-Path $sdir ('status.json.' + [guid]::NewGuid().ToString('N') + '.tmp')
+                try {
+                    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+                    Move-Item -LiteralPath $tmp -Destination (Join-Path $sdir 'status.json') -Force
+                } finally {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Item -LiteralPath (Join-Path $sdir 'not-now') -Force -ErrorAction SilentlyContinue
+            } catch {
+                Warn 'Note: could not record that no service is set up, so Claude Code may ask about one.'
+            }
+        }
+
         # ---- the plugin ---------------------------------------------------------------
         if (Get-Command claude -ErrorAction SilentlyContinue) {
             Say 'Adding the conexus plugin to Claude Code.'
@@ -348,6 +387,8 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             if ($LASTEXITCODE -ne 0) {
                 Stop-Install 1 'install.ps1: nx config init did not finish. The CLI is installed; run `nx config init` in a terminal.'
             }
+        } else {
+            Write-CliOnlyRecord
         }
 
         # ---- done ---------------------------------------------------------------------
