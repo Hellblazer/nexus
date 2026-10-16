@@ -307,14 +307,23 @@ jobs:
           # to fix. The `*/*` arm below fires for ANY remaining path with a
           # directory component (once the two legitimately-nested arms,
           # `docs/*`, `web/*` (the GitHub Pages site, nexus-ynejb: static
-          # HTML no test imports, deployed by pages.yml on its own trigger)
+          # HTML no test imports, deployed by pages.yml on its own trigger;
+          # except web/install.*, see below)
           # and the exact `conexus/CHANGELOG.md`, have already had
           # first crack) and marks it code -- so `CHANGELOG*`/`LICENSE*`
           # below it only ever see slash-free, true root-level filenames.
+          #
+          # web/install.sh and web/install.ps1 are the exception to the
+          # `web/*` arm (nexus-sv2wx.28). They are the programs `curl | sh`
+          # and `irm | iex` run, pages.yml publishes them on any push, and
+          # tests/test_install_sh.py and tests/test_install_ps1.py read them,
+          # so "no test imports" is false for them. The first matching arm
+          # wins, so their arm sits above `web/*`.
           docs_only=true
           while IFS= read -r f; do
             case "$f" in
               docs/*) ;;
+              web/install.*) docs_only=false ;;
               web/*) ;;
               conexus/CHANGELOG.md) ;;
               */*) docs_only=false ;;

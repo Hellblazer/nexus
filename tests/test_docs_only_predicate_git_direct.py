@@ -524,3 +524,42 @@ def test_nested_web_lookalike_is_code(tmp_path: Path) -> None:
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert outputs.get("code") == "true"
+
+
+@pytest.mark.parametrize("script_name", ["install.sh", "install.ps1"])
+def test_the_published_installer_scripts_are_code_not_site_pages(
+    tmp_path: Path, script_name: str,
+) -> None:
+    """nexus-sv2wx.28: web/install.sh and web/install.ps1 are what `curl | sh`
+    and `irm | iex` run, and tests/test_install_sh.py and tests/test_install_ps1.py
+    read them. A push that touches only one of them must run the pytest matrix,
+    not take the `web/*` docs-only arm. Falsified by deleting the `web/install.*`
+    arm (or moving it below `web/*`) in ci.yml."""
+    repo = _init_repo(tmp_path)
+    before = _commit(repo, {"seed.txt": "x"}, "seed")
+    _commit(repo, {f"web/{script_name}": "echo changed"}, "installer edit")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "true"
+
+
+def test_a_site_page_beside_the_installers_stays_docs_only(tmp_path: Path) -> None:
+    """The installer arm is narrow: the neighbouring pages keep the docs-only lane."""
+    repo = _init_repo(tmp_path)
+    before = _commit(repo, {"seed.txt": "x"}, "seed")
+    _commit(repo, {"web/getting-started.html": "<h1>hi</h1>"}, "page edit")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "false"
+
+
+def test_a_mixed_push_of_a_page_and_an_installer_is_code(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    before = _commit(repo, {"seed.txt": "x"}, "seed")
+    _commit(repo, {"web/index.html": "<h1>hi</h1>", "web/install.sh": "echo changed"}, "both")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "true"
