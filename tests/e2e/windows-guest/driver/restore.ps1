@@ -15,7 +15,8 @@ param(
     [Parameter(Mandatory = $true)][string]$GuestUser,
     [Parameter(Mandatory = $true)][string]$Checkpoint,
     [Parameter(Mandatory = $true)][string]$RunDir,
-    [string]$Wheel = ''
+    [string]$Wheel = '',
+    [ValidateSet('yes', 'no')][string]$Cache = 'yes'
 )
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
 if ($Wheel -and $Wheel -notmatch '^[A-Za-z0-9._+-]+\.whl$') { throw 'Wheel is not a wheel file name' }
@@ -45,11 +46,42 @@ Start-VM -Name $vm -ErrorAction Stop
 "started at $((Get-Date).ToUniversalTime().ToString('o'))"
 Start-Sleep 5
 EnsureNic 'after Start-VM'
+# nexus-bpzt7 (Sam, 2026-10-15): every restore is a fresh Windows that starts its own update downloads, on a
+# host shared with other work. Unless -Cache no, the first time the guest answers over PowerShell Direct:
+# stop and disable Windows Update, its orchestrator and Delivery Optimization, set the policies that keep
+# them from coming back, and stop Defender's signature updates (the gate does not depend on them). Inside
+# the guest only: no host setting changes, no checkpoint is taken, and the next restore discards all of it.
+# Disabled services stay disabled through the stduser step's restart. Delivery Optimization off can break
+# winget, which only the administrator-Git runs use.
+$quietBlock = {
+    $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows'
+    New-Item -Force "$pol\WindowsUpdate\AU" | Out-Null
+    Set-ItemProperty "$pol\WindowsUpdate\AU" NoAutoUpdate 1 -Type DWord
+    New-Item -Force "$pol\DeliveryOptimization" | Out-Null
+    Set-ItemProperty "$pol\DeliveryOptimization" DODownloadMode 99 -Type DWord
+    New-Item -Force 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' | Out-Null
+    Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' AutoDownload 2 -Type DWord
+    foreach ($n in 'wuauserv', 'UsoSvc', 'DoSvc') {
+        try { Set-Service -Name $n -StartupType Disabled -ErrorAction Stop }
+        catch { Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$n" Start 4 -Type DWord -ErrorAction SilentlyContinue }
+        try { Stop-Service -Name $n -Force -ErrorAction Stop } catch { "quiet-updates: $n not stopped: $($_.Exception.Message)" }
+        $start = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$n" -ErrorAction SilentlyContinue).Start
+        "quiet-updates: $n " + (Get-Service -Name $n).Status + " start=$start"
+    }
+    try { Set-MpPreference -SignatureScheduleDay 8 -SignatureUpdateInterval 0 -SignatureDisableUpdateOnStartupWithoutEngine $true -ErrorAction Stop; 'quiet-updates: Defender signature updates off' }
+    catch { "quiet-updates: Defender signature updates not changed: $($_.Exception.Message)" }
+    'quiet-updates: applied at ' + (Get-Date).ToUniversalTime().ToString('o')
+}
+$quieted = $Cache -ne 'yes'
+if ($quieted) { "quiet-updates: not with -Cache $Cache" }
 $ok = $false
 for ($i = 0; $i -lt 60; $i++) {
     if ($i -gt 0 -and ($i % 6) -eq 0 -and (Nics) -eq 0) { EnsureNic "in the network wait, iteration $i" }
     try {
-        $r = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { try { (Invoke-WebRequest https://pypi.org/simple/ -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 } }
+        if (-not $quieted) { Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $quietBlock; $quieted = $true }
+        # HEAD only: https://pypi.org/simple/ is the whole package index (47 MB on 2026-10-15), and a GET that
+        # timed out was fetched again every 5 s; one slow boot spent about 0.9 GB here (nexus-bpzt7).
+        $r = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { try { (Invoke-WebRequest https://pypi.org/simple/ -Method Head -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 } }
         if ($r -eq 200) { $ok = $true; break }
     } catch {}
     Start-Sleep 5
