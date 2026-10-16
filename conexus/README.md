@@ -291,7 +291,13 @@ scripts' own guards enforce, so uv never runs them under an older interpreter it
 first; `--no-config` keeps a `uv.toml` from choosing the interpreter. `--directory` makes a
 script's process cwd the plugin root; it takes the project from the payload's `cwd`, else
 `CLAUDE_PROJECT_DIR`, and the shim and the launcher start their program in that directory. The first hook run on a machine with no Python 3.12 or newer
-makes uv fetch one, which can outlast a hook's timeout once; later runs find it.
+makes uv fetch one (uv keeps it outside `UV_CACHE_DIR`, so a seeded cache does not hold it), and every
+hook started with it waits on the same uv locks. Measured on macOS, seven hooks started together on
+empty directories: 0.1 to 0.2 s with a Python already there, 2.3 s each when uv fetches one, 0.1 s warm;
+the Windows gate hosts were slower (nexus-3ya9d). Each `SessionStart` entry's timeout is therefore its own
+work budget plus a 30 s cold-start allowance, so Claude Code does not cancel the first session's hooks while
+uv starts; a warm hook returns when it is done and pays nothing for the larger limit.
+`tests/test_session_start_cold_start_allowance.py` pins the rule.
 
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
@@ -323,7 +329,7 @@ names each handler by its program and verb.
 | `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
-| `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
+| `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s, inside a 50 s timeout that also covers uv's cold start) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4); a single ssh command to the chas test host is exempt, since its git runs there (nexus-yc7fs) |

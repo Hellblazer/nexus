@@ -53,6 +53,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - Agent bodies carry skill procedure (nexus-dg7i6.3): `conexus/agents/strategic-planner.md` gives the continuation-state `memory_put` example `ttl=14`, as the strategic-planning skill did, so resume snapshots expire.
 
+- `conexus/hooks/hooks.json` (nexus-3ya9d): every SessionStart entry's timeout is its own work budget plus a 30 s cold-start allowance for `uv tool run` (a Python fetch on the first session, the one-time tool environment, nine processes waiting on the same uv locks): 5 to 35 s for the setup notice and the lockstep hook, 10 to 40 s for preflight, session-start, session-context and rdr, 30 to 60 s for upgrade-auto and self-gc, 20 to 50 s for mcp-connect-wait. Warm hooks return when done and pay nothing.
+
 
 
 ## Deferred to the next client release

@@ -90,7 +90,9 @@ class TestSC8HooksJson:
         cli_hooks = [h for h in startup_hooks if runs_cli_program(h)]
         assert cli_hooks, "no SessionStart hook runs a CLI program: the order below would be vacuous"
         assert command_verb(cli_hooks[0]) == "upgrade-auto"
-        assert cli_hooks[0]["timeout"] == 30
+        # 30 s for its own work; the cold-start allowance on top is pinned in
+        # test_session_start_cold_start_allowance.py (nexus-3ya9d).
+        assert cli_hooks[0]["timeout"] >= 30
         # Nothing but the notice may stand ahead of it.
         assert startup_hooks.index(cli_hooks[0]) == 1
 

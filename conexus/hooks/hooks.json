@@ -19,7 +19,7 @@
               "python",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py"
             ],
-            "timeout": 5
+            "timeout": 35
           },
           {
             "type": "command",
@@ -38,7 +38,7 @@
               "nx-hook",
               "upgrade-auto"
             ],
-            "timeout": 30
+            "timeout": 60
           },
           {
             "type": "command",
@@ -57,7 +57,7 @@
               "nx-hook",
               "preflight"
             ],
-            "timeout": 10
+            "timeout": 40
           },
           {
             "type": "command",
@@ -76,7 +76,7 @@
               "nx-hook",
               "self-gc"
             ],
-            "timeout": 30
+            "timeout": 60
           },
           {
             "type": "command",
@@ -95,7 +95,7 @@
               "nx-hook",
               "session-start"
             ],
-            "timeout": 10
+            "timeout": 40
           },
           {
             "type": "command",
@@ -114,7 +114,7 @@
               "nx-hook",
               "session-context"
             ],
-            "timeout": 10
+            "timeout": 40
           },
           {
             "type": "command",
@@ -133,7 +133,7 @@
               "nx-hook",
               "rdr"
             ],
-            "timeout": 10
+            "timeout": 40
           }
         ]
       },
@@ -155,7 +155,7 @@
               "python",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"
             ],
-            "timeout": 5
+            "timeout": 35
           },
           {
             "type": "command",
@@ -173,7 +173,7 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "mcp-connect-wait"
             ],
-            "timeout": 20
+            "timeout": 50
           }
         ]
       }
