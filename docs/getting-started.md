@@ -72,12 +72,26 @@ There are two routes, and both end in the same install. The [install guide on th
 **Route one: run one command in a terminal.** It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your PATH, and asks the question below once, before it downloads anything.
 
 ```bash
-curl -fsSL https://hellblazer.github.io/nexus/install.sh | sh        # macOS and Linux
+curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh        # macOS and Linux
 ```
 
 ```powershell
 irm https://hellblazer.github.io/nexus/install.ps1 | iex             # Windows, normal PowerShell window
 ```
+
+To skip the question, add a flag: `--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`. On macOS and Linux put the flags after `sh -s --`:
+
+```bash
+curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart
+```
+
+The `iex` form cannot take flags, so on Windows run the script as a script block:
+
+```powershell
+& ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart
+```
+
+When the script asks whether the service should start at login, the answer is No unless you type `y`. The script itself does not need Git, but Claude Code fetches the plugin with Git, so on Windows install Git first if you want the script to add the plugin.
 
 **Route two: install `uv`, add the plugin, answer one question.** Install `uv`, then add the plugin in Claude Code:
 
@@ -90,7 +104,7 @@ In your first session Claude tells you that Nexus is not installed and asks the 
 
 In Claude Desktop, add the plugin in Customize → Plugins, then say "Set up Nexus" in a conversation. Desktop does not offer plugin commands, so there is no `/conexus:setup` there. To update the plugin in Desktop, remove the `Hellblazer/nexus` marketplace and add it again.
 
-**The question.** These are the four choices:
+**The question.** Route two asks it with these four choices. The script asks the same question without Not now, because typing the command is your permission to install:
 
 | Choice | What happens | Download |
 |---|---|---|
@@ -99,7 +113,7 @@ In Claude Desktop, add the plugin in Customize → Plugins, then say "Set up Nex
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. On Linux the cache held about 0.55 GB after a first install and the build peaked near 2.6 GB with the cache included. On Windows the cache held about 2.5 GB. The service is the **nexus-service**: the native Postgres + pgvector + bge-768 backend that serves every persistent tier. Check the result with `nx doctor`. The commands the routes run for you are under [Install by hand](#install-by-hand) in Troubleshooting. The [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) cover the work you do next, and updating is covered at the end of this page.
+The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. After a first install the cache held about 2.4 GB on Linux and about 2.5 GB on Windows. The service is the **nexus-service**: the native Postgres + pgvector + bge-768 backend that serves every persistent tier. Check the result with `nx doctor`. The commands the routes run for you are under [Install by hand](#install-by-hand) in Troubleshooting. The [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) cover the work you do next, and updating is covered at the end of this page.
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document — pre-PG installs need a **two-hop** upgrade via `conexus==6.18.1` (the last migration-capable release); a direct jump to current migrates nothing.
 

@@ -188,10 +188,14 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <p data-for="code">The command installs uv if you do not have it, installs the <code>nx</code> command, and adds the plugin to Claude Code. It asks you the question below once, before it downloads anything.</p>
 <p class="hidden" data-for="cli">The command installs uv if you do not have it and installs the <code>nx</code> command. It adds the Claude Code plugin when <code>claude</code> is on your PATH. It asks you the question below once, before it downloads anything.</p>
 <p class="hidden" data-for="desktop">The command installs uv if you do not have it, installs the <code>nx</code> command, and asks you the question below once, before it downloads anything. It cannot reach the plugin store of your Claude account. Add the plugin in Claude Desktop, as step 2 of route two shows.</p>
-<div class="cmd" data-os-block="mac linux"><pre>curl -fsSL https://hellblazer.github.io/nexus/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
 <div class="cmd hidden" data-os-block="windows"><pre>irm https://hellblazer.github.io/nexus/install.ps1 | iex</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Typing the command is your permission to install the <code>nx</code> command, so the script does not ask about that. With no terminal attached and no flag, it installs the <code>nx</code> command only and says so.</p>
-<p class="note" data-os-block="mac linux">To skip the question, add a flag: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example, <code>... | sh -s -- --local --no-autostart</code>. With <code>--local</code> and neither autostart flag, the script asks whether the service should start when you log in.</p>
+<p class="note">Typing the command is your permission to install the <code>nx</code> command, so the script does not ask about that. Its question has no Not now choice. With no terminal attached and no flag, it installs the <code>nx</code> command only and says so. If you chose Local, it also asks whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
+<p class="note" data-os-block="mac linux">To skip the question, add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example, this installs the service and does not start it at login:</p>
+<div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
+<p class="note hidden" data-os-block="windows">Run it in a normal PowerShell window, not an elevated one. The script itself does not need Git. Claude Code fetches the plugin with Git, so install Git first (see Tools to have) if you want the script to add the plugin.</p>
+<p class="note hidden" data-os-block="windows">The <code>iex</code> form cannot take flags. To skip the question, run the script as a script block and add the flags after it. The flags are the same: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example:</p>
+<div class="cmd hidden" data-os-block="windows"><pre>&amp; ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
 
 <h3 id="route-two">Route two: install uv, add the plugin, answer one question</h3>
 <p data-for="cli">This route needs Claude Code or Claude Desktop. If you use only the <code>nx</code> command, run route one, or follow the steps under <a href="#by-hand">Install by hand</a>.</p>
@@ -230,7 +234,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 </ol>
 
 <h3 id="question">The question</h3>
-<p>Both routes ask the same question. These are the four choices:</p>
+<p>The route-one script asks this question without Not now, because typing the command is your permission to install. Route two asks it with all four choices:</p>
 <div class="tbl"><table>
 <tr><th>Choice</th><th>What happens</th><th>Download</th></tr>
 <tr><td>Local</td><td>Install the CLI and run a Nexus service on this machine</td><td>about 1.3 GB down, 2.4 GB on disk</td></tr>
@@ -238,7 +242,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <tr><td>CLI only</td><td>Install the CLI and decide about a service later</td><td>about 0.7 GB down, 1.6 GB on disk</td></tr>
 <tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
 </table></div>
-<p class="note">With Cloud, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. The sizes do not count the download cache that uv keeps until you run <code>uv cache clean</code>. On Linux the cache held about 0.55 GB after a first install, and the build peaked near 2.6 GB with the cache included. On Windows the cache held about 2.5 GB.</p>
+<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one the script runs <code>nx config init</code> and you type them in the terminal. The sizes do not count the download cache that uv keeps until you run <code>uv cache clean</code>. After a first install the cache held about 2.4 GB on Linux and about 2.5 GB on Windows.</p>
 
 <h3 id="after">After the install</h3>
 <ol class="steps">

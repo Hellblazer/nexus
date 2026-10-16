@@ -48,7 +48,7 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 
 There are two routes, and both end in the same install:
 
-1. **Route one, one command in a terminal.** `curl -fsSL https://hellblazer.github.io/nexus/install.sh | sh` on macOS and Linux, or `irm https://hellblazer.github.io/nexus/install.ps1 | iex` in a normal PowerShell window on Windows. It installs `uv` if you do not have it, installs the CLI, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the one question below once, before it downloads anything.
+1. **Route one, one command in a terminal.** `curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh` on macOS and Linux, or `irm https://hellblazer.github.io/nexus/install.ps1 | iex` in a normal PowerShell window on Windows. It installs `uv` if you do not have it, installs the CLI, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the one question below once, before it downloads anything. The script's question has no Not now choice, because typing the command is your permission to install. To skip the question, add a flag (`--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`): after `sh -s --` on macOS and Linux, and on Windows as `& ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart`, because the `iex` form cannot take flags. The start-at-login question defaults to No.
 2. **Route two, from inside Claude.** Install `uv`, add the plugin, and answer one question:
 
 ```bash
@@ -65,7 +65,7 @@ The question has four choices:
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes do not count the download cache that `uv` keeps until you run `uv cache clean` (about 0.55 GB on Linux and about 2.5 GB on Windows after a first install). `uv` is the one prerequisite of route two. Route two is described under "First run" below, and the commands that both routes run for you are under "Install by hand" at the end of that section.
+The sizes do not count the download cache that `uv` keeps until you run `uv cache clean` (about 2.4 GB on Linux and about 2.5 GB on Windows after a first install). `uv` is the one prerequisite of route two. Route two is described under "First run" below, and the commands that both routes run for you are under "Install by hand" at the end of that section.
 
 On first session start with the CLI installed, the plugin's SessionStart hook runs `nx upgrade --auto` (converging any pending migration) plus a preflight check. **It installs no daemon** — the T2 daemon it used to auto-install is retired (`nexus-i711w`). The storage service is provisioned by `nx init` and managed with `nx daemon service start|status|stop`.
 

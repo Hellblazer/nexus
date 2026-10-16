@@ -38,7 +38,7 @@ was not measured, it says so.
 
 ## Two routes
 
-There are two routes, and both end in the same install. Install Git first (step 2 below), because both routes fetch the plugin with it and `nx doctor` checks for it.
+There are two routes, and both end in the same install. Install Git first (step 2 below): the plugin marketplace is fetched with it, Claude Code on Windows needs it, and `nx doctor` checks for it. The route-one script itself does not need Git, but adding the plugin to Claude Code needs it. When Claude Code does not take the plugin, the script prints the two `/plugin` lines for you to type later.
 
 **Route one: run one command.** In a normal (not elevated) PowerShell window:
 
@@ -46,7 +46,13 @@ There are two routes, and both end in the same install. Install Git first (step 
 irm https://hellblazer.github.io/nexus/install.ps1 | iex
 ```
 
-It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the question below once, before it downloads anything. Typing the command is your permission to install the `nx` command, so it does not ask about that.
+It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the question below once, before it downloads anything. Typing the command is your permission to install the `nx` command, so it does not ask about that, and its question has no Not now choice. If you choose Local, it also asks whether the service should start when you log in, and the answer is No unless you type `y`.
+
+The `iex` form cannot take flags. To skip the question, run the script as a script block and add a flag: `--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`:
+
+```powershell
+& ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart
+```
 
 **Route two: install `uv`, add the plugin, answer one question.** Install `uv` (step 1 below), then add the plugin in Claude Code:
 
@@ -57,7 +63,7 @@ It installs `uv` if you do not have it, installs the `nx` command, adds the plug
 
 In your first session Claude tells you that Nexus is not installed and asks the question. If you want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. In Claude Desktop, add the plugin in Customize → Plugins and say "Set up Nexus" in a conversation (step 5 below).
 
-**The question.** Both routes ask it. These are the four choices:
+**The question.** Route two asks it with these four choices. The script asks the same question without Not now:
 
 | Choice | What happens | Download |
 |---|---|---|

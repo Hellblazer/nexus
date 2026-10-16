@@ -20,7 +20,7 @@ There are two routes, and both end in the same install.
 On macOS and Linux:
 
 ```bash
-curl -fsSL https://hellblazer.github.io/nexus/install.sh | sh
+curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh
 ```
 
 On Windows, in a normal PowerShell window:
@@ -28,6 +28,8 @@ On Windows, in a normal PowerShell window:
 ```powershell
 irm https://hellblazer.github.io/nexus/install.ps1 | iex
 ```
+
+To skip the question, add a flag: `--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`. On macOS and Linux put them after `sh -s --`, for example `curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart`. The `iex` form cannot take flags, so on Windows run the script as a script block: `& ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart`. When the script asks whether the service should start at login, the answer is No unless you type `y`. The script itself does not need Git, but Claude Code fetches the plugin with Git, so on Windows install Git first if you want the script to add the plugin.
 
 **Route two: install uv, add the plugin, answer one question.** Install `uv` (the one tool this route needs from you), then start `claude` and type these two lines inside Claude Code, not in the terminal:
 
@@ -40,7 +42,7 @@ In your first session Claude tells you that Nexus is not installed and asks the 
 
 In Claude Desktop, install `uv`, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, install `conexus`, and say "Set up Nexus" in a conversation. Desktop does not offer plugin commands, so there is no `/conexus:setup` there. To update the plugin in Desktop, remove the marketplace and add it again.
 
-**The question.** Both routes ask it. These are the four choices:
+**The question.** Route two asks it with these four choices. The script asks the same question without Not now, because typing the command is your permission to install:
 
 | Choice | What happens | Download |
 |---|---|---|
