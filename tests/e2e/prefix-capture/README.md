@@ -105,10 +105,11 @@ and S2.
 
 Arms `D` and `N` swap the conexus tree instead of adding plugins: the
 installed conexus is switched off in the container's settings and a tree is
-loaded with `--plugin-dir`, so the listing holds exactly one conexus. `D` loads
-the worktree's own `conexus/`; `N` loads `plugins/N/conexus`, which
-`export_conexus.sh <commit>` extracts from a commit fetched on chas (the
-narrowed conexus of nexus-dg7i6.2). The MCP servers of either tree hand off to
+loaded with `--plugin-dir`, so the listing holds exactly one conexus. Each arm
+loads `plugins/<arm>/conexus`, which `export_conexus.sh <arm> <commit>`
+extracts from a commit fetched on chas: `N` the narrowed conexus of
+nexus-dg7i6.2, `D` that commit's parent, so the two differ by exactly the
+narrowing diff. The MCP servers of either tree hand off to
 the image's installed `nx`, so the nexus tools match S0. `score_sr.py` counts
 each arm's conexus entries, flags a listing name that appears twice, and takes
 markers `ARM:+name` / `ARM:-name` that must hold in every run of that arm, for
