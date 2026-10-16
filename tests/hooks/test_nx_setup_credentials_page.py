@@ -1922,14 +1922,19 @@ def test_no_text_promises_a_second_credentials_page_after_a_finished_run_or_a_fa
         "opens the credentials page again", "replaces a saved credential", "reopens the page", "opens it again",
         "call setup with mode cloud again once this run ends", "opens again",
     )
-    pending = (_ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
-    pending_line = next(ln for ln in pending.splitlines() if "credentials page for mode cloud (nexus-sv2wx.18)" in ln)
     changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     changelog_line = next(ln for ln in changelog.splitlines() if ln.startswith("- **Mode `cloud` of `setup` opens a local credentials page"))
-    for name, text in (("nx_setup.py", _SETUP.read_text(encoding="utf-8")), ("PENDING_RELEASE.md", pending_line), ("CHANGELOG.md", changelog_line)):
+    texts = [("nx_setup.py", _SETUP.read_text(encoding="utf-8")), ("CHANGELOG.md", changelog_line)]
+    # The release that carries the entry empties PENDING_RELEASE.md, so its line is checked only while it is pending.
+    pending = (_ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+    pending_line = next((ln for ln in pending.splitlines() if "credentials page for mode cloud (nexus-sv2wx.18)" in ln), None)
+    if pending_line is not None:
+        texts.append(("PENDING_RELEASE.md", pending_line))
+        assert "nx config init" in pending_line
+    for name, text in texts:
         for phrase in stale:
             assert phrase not in text.lower(), f"{name} still says {phrase!r}"
-    assert "nx config init" in pending_line and "nx config init" in changelog_line
+    assert "nx config init" in changelog_line
 
 
 @pytest.mark.parametrize(
