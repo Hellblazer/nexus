@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.81.0] - 2026-10-16
+
+Plugin version aligned with conexus 7.81.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied), all from RDR-228 Phase 2 unless named:
+
+- **Setup process** (nexus-sv2wx.15, nexus-sv2wx.17, nexus-sv2wx.18, nexus-sv2wx.20). `launch/nx_setup.py` is new: one detached process that builds the CLI (`uv tool run ... nx self install --bootstrap`, CPU torch on Linux), then for mode `local` runs `nx init`, for mode `cloud` serves a one-time loopback page where the user types the service address, token and tenant, and records its stage in `setup/status.json`. It repairs a CLI that is found and cannot start.
+- **`setup` and `setup_status` in the stand-in** (nexus-sv2wx.16, nexus-sv2wx.17, nexus-sv2wx.18). `launch/nx_standin.py` gives the two tools their work and puts the one question (local, cloud, CLI only, not now) in its instructions; the launcher hands the setup script to the real server and serves the stand-in for a CLI that cannot start.
+- **Session-start hook, eight states** (nexus-sv2wx.17, nexus-sv2wx.18). `hooks/scripts/nx_setup_notice.py` reports the first state that matches, from a live setup run to no service set up, and names the managed service.
+- **Found-and-cannot-start** (nexus-sv2wx.17, nexus-sv2wx.20). `hooks/scripts/_cli_lookup.py` gains `cannot_start`, a files-only check that also reads `uv`'s sh polyglot scripts; the hook shim, the launcher and the lockstep hook use it. `hooks/scripts/_endpoint_resolve.py` gains `endpoint_usable`.
+- **`/conexus:setup`** (nexus-sv2wx.17, nexus-sv2wx.18, nexus-sv2wx.24). `commands/setup.md` is new: it shows the choices still open, asks first, offers Cloud without ever asking for the token, and starts a stopped local service. `registry.yaml` lists it; `README.md` describes the command and the two tools.
+- **Lazy imports for the session-start hook** (nexus-sv2wx.17). `hooks/scripts/_exec_path.py` imports `shutil` only on POSIX.
+- **Orchestration skill cites the moved engine rules** (nexus-2ziaz). `skills/orchestration/SKILL.md` names `.claude/rules/releases-and-engine.md`.
+
+Claude Desktop picks these up only after the marketplace is removed and added again (RDR-228 Discovery 6). Desktop offers plugin skills and not plugin commands (T2 `nexus_rdr/228-research-38`), so a Desktop user asks "set up Nexus" instead of typing `/conexus:setup`.
+
 ## [7.80.0] - 2026-10-15
 
 Plugin version aligned with conexus 7.80.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied):
