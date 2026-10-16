@@ -1134,6 +1134,10 @@ def index_cmd(
     # nexus-gjxkb: records failed by an exception that is not a NexusError (a defect); the run
     # finishes the batch and then exits non-zero.
     unexpected_failed = 0
+    # nexus-gjxkb: records failed by RuntimeError/ImportError (the extraction and corrupt-install
+    # cases the per-record catch below has always survived). The batch continues, but a run with
+    # failed records no longer exits 0 over them, the same rule as unexpected_failed.
+    errored_failed = 0
 
     # RDR-139 Layer D / nexus-fdk1x: probe DT reachability ONCE for
     # link-semantic/writeback/highlights (which now try HTTP then fall
@@ -1380,6 +1384,7 @@ def index_cmd(
                 error_type=type(exc).__name__,
             )
             failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+            errored_failed += 1
             continue
         except NexusError:
             raise  # run-level by the rlkgu classification: stops the run, as before
@@ -1572,11 +1577,20 @@ def index_cmd(
         # bead — only a POSITIVE engine verdict or a write/identity
         # failure fails the run.
         raise_identity_drop_exception(subject="record")
-    if unexpected_failed:
+    if unexpected_failed or errored_failed:
+        parts = []
+        if unexpected_failed:
+            parts.append(
+                f"{unexpected_failed} record(s) failed with an unexpected error (see Failures above; "
+                "the 'dt_index_unexpected_error' log event carries the traceback)."
+            )
+        if errored_failed:
+            parts.append(
+                f"{errored_failed} record(s) failed with RuntimeError or ImportError (see Failures "
+                "above; the 'dt_index_failed' log event names each)."
+            )
         raise click.ClickException(
-            f"{unexpected_failed} record(s) failed with an unexpected error (see Failures above; "
-            "the 'dt_index_unexpected_error' log event carries the traceback). The other records "
-            "were indexed; the failed ones are retried by the next run."
+            " ".join(parts) + " The other records were indexed; the failed ones are retried by the next run."
         )
     if coverage_failed:
         raise click.ClickException(

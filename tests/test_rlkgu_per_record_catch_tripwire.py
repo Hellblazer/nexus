@@ -36,6 +36,11 @@ Two independent, complementary gates:
    correct behavior -- there is no batch to protect, so no allowlist
    entry is needed or wanted for them.
 
+   Note (nexus-gjxkb): the two ``dt.py`` sites re-raise ``NexusError``
+   ahead of their broad ``except Exception``, so for a NexusError there
+   gate 2's classification (per-record in the tuple, else run-level)
+   governs, not the broad handler's "safe by construction" coverage.
+
 2. **Classification completeness** (``test_every_nexuserror_subclass_is_
    classified``): AST-derives every class defined in ``errors.py`` that
    is ``NexusError`` or a (transitive) subclass of it, and requires each
@@ -340,6 +345,10 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # document inside the per-record loops (nx dt index, index_markdown/index_pdf), so one
     # document's failed write must fail that record only.
     "BatchWriteFailedError",
+    # nexus-gjxkb: pipeline_stages.uploader_loop raises it when the next chunk never becomes
+    # readable after the chunker finished (index_pdf -> pipeline_index_pdf); one such document
+    # must fail that record only, not hold the run open.
+    "UploadStalledError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,

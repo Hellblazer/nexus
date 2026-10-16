@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 import structlog
 
 from nexus.embed_window import window_for_collection
+from nexus.errors import UploadStalledError
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
@@ -54,6 +55,16 @@ _EMBED_BATCH_SIZE = 32  # Smaller than batch path (128) — favours heartbeat fr
 # pipeline_index_pdf path). Latency cost is bounded by a few poll cycles
 # per ingest; extraction dominates wall-clock.
 _POLL_INTERVAL = 2.0
+
+#: How many polls the uploader waits, with the chunker finished and no chunk taken, before it warns
+#: and before it fails the record (nexus-gjxkb). Counted in polls, not wall-clock, so a test counts
+#: calls; 30 and 150 polls are 60 s and 300 s at the 2 s interval. The only legitimate cause of the
+#: wait is another thread's chunk flush still in flight (``HttpPipelineDB`` documents it): one HTTP
+#: POST, seconds at most. A minute is far past that, so the warning means something is wrong; five
+#: minutes leaves room for a slow engine under load before the record is failed instead of the run
+#: held open for good.
+_STALL_WARN_POLLS = 30
+_STALL_FAIL_POLLS = 150
 
 EmbedFn = Callable[[list[str], str], tuple[list[list[float]], str]]
 
@@ -571,6 +582,14 @@ class UploadRun:
             close()
 
 
+class UploaderInvariantError(RuntimeError):
+    """The uploader was about to hand rows to a writer that had already finished (nexus-gjxkb).
+
+    An internal invariant: the uploader finishes its writer only when every chunk is in it, so rows
+    arriving after that are a defect, not a state a run reaches. Raised in place of the writer's
+    generic ``ValueError`` so the message names the document and the positions."""
+
+
 #: One batch handed to the writer and not yet flagged uploaded: (rows, ids, documents,
 #: embeddings, metadatas).
 _Held = tuple[list[dict], list[str], list[str], list[list[float]], list[dict]]
@@ -657,6 +676,8 @@ def uploader_loop(
         run = UploadRun()
     held: _Held | None = None
     last_added = -1
+    stalled_polls = 0       # polls since the last batch, with the chunker finished
+    stall_warned = False
 
     def _flag(batch: _Held) -> None:
         """The batch's request was sent: post-store hooks (RDR-095), then flag it uploaded."""
@@ -706,6 +727,30 @@ def uploader_loop(
         created = state["chunks_created"] if state else None
         return created is not None and db.count_embedded_chunks(content_hash) >= created
 
+    def _wait_for_the_next_chunk() -> None:
+        """One poll of waiting on a chunk the chunker has finished making and the buffer does not
+        show. Past ``_STALL_WARN_POLLS`` without progress, say so once; past ``_STALL_FAIL_POLLS``,
+        fail the record, since nothing here makes the chunk appear (nexus-gjxkb)."""
+        nonlocal stalled_polls, stall_warned
+        stalled_polls += 1
+        if stalled_polls >= _STALL_WARN_POLLS:
+            state = db.get_pipeline_state(content_hash)
+            created = state["chunks_created"] if state else None
+            embedded = db.count_embedded_chunks(content_hash)
+            if stalled_polls >= _STALL_FAIL_POLLS:
+                raise UploadStalledError(
+                    content_hash=content_hash, next_index=last_added + 1, polls=stalled_polls,
+                    chunks_created=created, embedded=embedded,
+                    seconds=stalled_polls * _POLL_INTERVAL)
+            if not stall_warned:
+                stall_warned = True
+                _log.warning(
+                    "uploader_waiting_for_a_chunk",
+                    content_hash=content_hash, next_index=last_added + 1, polls=stalled_polls,
+                    chunks_created=created, embedded=embedded, uploaded=total_uploaded,
+                    fails_after_polls=_STALL_FAIL_POLLS)
+        time.sleep(_POLL_INTERVAL)
+
     try:
         while not cancel.is_set():
             # nexus-gjxkb: look at the chunker BEFORE reading. It writes its last chunks and then
@@ -725,6 +770,8 @@ def uploader_loop(
                 if row["chunk_index"] != last_added + 1 + len(batch_rows) or len(batch_rows) >= _UPLOAD_BATCH_SIZE:
                     break
                 batch_rows.append(row)
+            if batch_rows:
+                stalled_polls, stall_warned = 0, False
 
             if not dry_run and run.writer is None and pending and pending[0]["chunk_index"] > 0:
                 # Read from the rows and the flags, not the progress counter: the counter is
@@ -765,6 +812,13 @@ def uploader_loop(
                     if not catalog_doc_id:
                         from nexus.doc_indexer import _raise_identity_missing  # noqa: PLC0415 - deferred to avoid circular import at module load
                         _raise_identity_missing(f"PDF {content_hash[:12]}", collection, None)
+                    if run.writer is not None and run.finished:
+                        raise UploaderInvariantError(
+                            f"the uploader of document {catalog_doc_id!r} ({collection}) has "
+                            f"{len(batch_rows)} chunk(s) to add at positions "
+                            f"{[row['chunk_index'] for row in batch_rows]} but its writer is already "
+                            "finished: a writer is finished only once every chunk is in it, so this "
+                            "is a defect in the uploader, not a state the run can reach.")
                     if run.writer is None:
                         run.open_writer(
                             doc_id=catalog_doc_id, collection=collection, content_hash=content_hash,
@@ -790,9 +844,12 @@ def uploader_loop(
                     held = batch
                 last_added = batch_rows[-1]["chunk_index"]
 
-            if not chunker_finished or (pending and not batch_rows):
-                # The chunker can still add chunks, or the next position is not visible yet.
+            if not chunker_finished:
                 time.sleep(_POLL_INTERVAL)
+                continue
+            if pending and not batch_rows:
+                # The next position is not visible yet.
+                _wait_for_the_next_chunk()
                 continue
 
             if cancel.is_set():
@@ -801,7 +858,7 @@ def uploader_loop(
                 continue
 
             if held is not None and not run.finished and not _every_chunk_is_in_the_buffer():
-                time.sleep(_POLL_INTERVAL)
+                _wait_for_the_next_chunk()
                 continue
 
             # The chunker is done and nothing new is readable: the writer's last request, the
@@ -812,7 +869,7 @@ def uploader_loop(
                 db.mark_completed(content_hash)
                 return
 
-            time.sleep(_POLL_INTERVAL)
+            _wait_for_the_next_chunk()
     finally:
         if own_run:
             run.close()

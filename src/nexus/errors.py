@@ -717,6 +717,35 @@ class BatchWriteFailedError(NexusError):
         super().__init__(f"multi-batch write of {doc_id!r} failed at batch {batch}: {reason}")
 
 
+class UploadStalledError(NexusError):
+    """The streaming PDF uploader waited past its bound for a chunk the chunker had already
+    reported done and the buffer never showed (nexus-gjxkb, ``nexus.pipeline_stages.uploader_loop``).
+
+    Defined here so it can join :data:`PER_RECORD_SURVIVABLE_EXCEPTIONS`: one document whose chunk
+    never becomes readable must fail THAT record (``nx dt index``), not hold the run open or abort
+    the batch. Nothing was finished or swept: the document's previous version is untouched.
+
+    Attributes: ``content_hash``, ``next_index`` (the first position not visible), ``polls`` (polls
+    without progress), ``chunks_created`` (what the chunker made), ``embedded`` (rows in the buffer).
+    """
+
+    def __init__(
+        self, *, content_hash: str, next_index: int, polls: int, chunks_created: int | None,
+        embedded: int, seconds: float,
+    ) -> None:
+        self.content_hash = content_hash
+        self.next_index = next_index
+        self.polls = polls
+        self.chunks_created = chunks_created
+        self.embedded = embedded
+        super().__init__(
+            f"the chunk uploader for {content_hash!r} waited about {seconds:.0f}s ({polls} polls) for "
+            f"chunk #{next_index}, which never became readable: the chunker made {chunks_created} "
+            f"chunks and the buffer holds {embedded} embedded rows. The writer was not finished, so "
+            "the document's previous version is untouched; re-run the index to retry."
+        )
+
+
 # SystemicExtractionFailureError DELETED (nexus-deyd5 round 3, coordinator
 # directive, 2026-08-21). Round 2 added this type for run_file_loop to
 # raise on a systemic-skip breach; a code-review HIGH finding traced that
@@ -818,4 +847,7 @@ PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     # RDR-223 (nexus-z0o2p.10): one document's multi-batch write failing (a request that did
     # not land, or an engine answer the writer cannot trust) fails that record only.
     BatchWriteFailedError,
+    # nexus-gjxkb: the streaming uploader gave up waiting for a chunk that never became readable;
+    # that one document fails, the batch goes on.
+    UploadStalledError,
 )

@@ -949,9 +949,15 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
     SourceUriNotFoundError,
     UnchunkableContentError,
     UnextractableContentError,
+    UploadStalledError,
 )
 
 _MEMBER_KWARGS: dict[type, dict] = {
+    # nexus-gjxkb: the streaming uploader gave up on a chunk that never became readable.
+    UploadStalledError: {
+        "content_hash": "h1", "next_index": 2, "polls": 150, "chunks_created": 5, "embedded": 4,
+        "seconds": 300.0,
+    },
     # nexus-z0o2p.10: the RDR-223 writer's per-document failure fails that
     # record, never the rest of an nx dt index batch.
     BatchWriteFailedError: {"doc_id": "1.99.1", "batch": 1, "reason": "write_many named the document in failed_doc_ids"},
@@ -2934,6 +2940,24 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert result.exit_code == 1, result.output
         assert isinstance(result.exception, SystemExit), repr(result.exception)
         assert "1 record(s) failed with an unexpected error" in result.output, result.output
+
+    @pytest.mark.parametrize("exc", [RuntimeError("extraction blew up"), ImportError("mineru is corrupt")],
+                             ids=["RuntimeError", "ImportError"])
+    def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(
+        self, runner, monkeypatch, exc,
+    ) -> None:
+        """The (RuntimeError, ImportError) catch still fails only that record and the batch
+        continues, but the run no longer exits 0 over a failed record: the same rule as the
+        unexpected-exception path above, which would otherwise be the only way to a non-zero
+        exit from a defect."""
+        result, seq = self._file_backed(runner, monkeypatch, exc)
+
+        assert not seq, "U2 was never dispatched: the batch aborted after U1's exception"
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert f"{type(exc).__name__}: {exc}" in result.output
+        assert result.exit_code == 1, result.output
+        assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
 
     def test_a_run_level_nexus_error_still_stops_the_run(self, runner, monkeypatch) -> None:
         from nexus.errors import CredentialsMissingError
