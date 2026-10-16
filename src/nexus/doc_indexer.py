@@ -1034,10 +1034,11 @@ def _register_or_lookup_doc_id(
                     f"{existing_by_uri.physical_collection!r}, but this "
                     f"index run targets {physical_collection!r}. Refusing "
                     f"to name both — re-indexing into a different "
-                    f"collection is a move, not a re-index. Use "
-                    f"'nx catalog update' to move the document "
-                    f"deliberately, or drop --collection to target its "
-                    f"current home."
+                    f"collection is a move, not a re-index. To move "
+                    f"it, soft-delete the old entry with 'nx catalog "
+                    f"delete {existing_by_uri.tumbler}' (restorable) and "
+                    f"re-run this index; or drop --collection to target "
+                    f"its current home."
                 )
             return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 

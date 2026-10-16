@@ -56,7 +56,35 @@ Step "conexus $source" {
         } else { "informational: no installed pg_provision.py at $pp (nothing to probe)" }
     } catch { "informational: the pg_provision.py probe was skipped: $($_.Exception.Message)" }
 }
-Step 'claude code' { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://claude.ai/install.ps1 | iex'; & "$env:USERPROFILE\.local\bin\claude.exe" --version }
+# run-gate.sh --cache on (nexus-bpzt7): when cache.ps1 left a binary in claude-cache, do what
+# https://claude.ai/install.ps1 does (latest version, its manifest's sha256, then `claude.exe install`) with that
+# file in place of the download, and only if its sha256 is the manifest's for the latest version. Anything else
+# (no cached file, an older version, a different hash, a lookup that fails) runs the official installer as before.
+function CachedClaude {
+    $base = 'https://downloads.claude.ai/claude-code-releases'
+    try {
+        $ver = "$(Invoke-RestMethod -Uri "$base/latest" -ErrorAction Stop)".Trim()
+        if ($ver -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { return "claude-cache: latest version not usable ($ver)" }
+        $want = (Invoke-RestMethod -Uri "$base/$ver/manifest.json" -ErrorAction Stop).platforms.'win32-x64'.checksum
+        $f = "$b\claude-cache\claude-$ver-win32-x64.exe"
+        if (-not (Test-Path $f)) { return "claude-cache: no cached $ver" }
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLowerInvariant()
+        if ($got -ne "$want".ToLowerInvariant()) { return "claude-cache: cached $ver sha256 $got is not the manifest's $want" }
+        $dl = "$env:USERPROFILE\.claude\downloads"
+        New-Item -ItemType Directory -Force $dl | Out-Null
+        Copy-Item -LiteralPath $f -Destination "$dl\claude-$ver-win32-x64.exe" -Force
+        & "$dl\claude-$ver-win32-x64.exe" install; $rc = $LASTEXITCODE
+        Remove-Item -LiteralPath "$dl\claude-$ver-win32-x64.exe" -Force -ErrorAction SilentlyContinue
+        if ($rc -ne 0) { return "claude-cache: claude install exited $rc" }
+        return "claude-cache: used $ver (sha256 matches the manifest)"
+    } catch { return "claude-cache: $($_.Exception.Message)" }
+}
+Step 'claude code' {
+    $used = $false
+    if (Test-Path "$b\claude-cache") { $m = CachedClaude; $m; $used = $m -like 'claude-cache: used *' }
+    if (-not $used) { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://claude.ai/install.ps1 | iex' }
+    & "$env:USERPROFILE\.local\bin\claude.exe" --version
+}
 $gitDirs = @('C:\Program Files\Git\cmd', "$env:LOCALAPPDATA\Programs\Git\cmd")
 function GitDir { $gitDirs | Where-Object { Test-Path "$_\git.exe" } | Select-Object -First 1 }
 Step 'git (winget)' { if (GitDir) { 'Git is already installed; not installing it' } elseif (Test-Path "$b\portable-git.ps1") { 'PortableGit, from the block in docs/windows-install.md, as this account'; powershell -NoProfile -ExecutionPolicy Bypass -File "$b\portable-git.ps1"; "portable-git exit=$LASTEXITCODE"; "user PATH names it=" + ([Environment]::GetEnvironmentVariable('Path', 'User') -like '*\Programs\Git\cmd*') } else { winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity; "winget exit=$LASTEXITCODE" }; "gitdir=" + (GitDir) }
@@ -66,6 +94,9 @@ Step 'versions' {
         "uv: " + (uv --version)
         "nx: " + (nx --version)
         "python (tool venv): " + (& "$env:APPDATA\uv\tools\conexus\Scripts\python.exe" --version)
+        # Informational (nexus-f9bgu.57): the Smart App Control state as nx reads it, through the tool
+        # Python, which still runs where Smart App Control blocks nx.exe. Older wheels lack the module.
+        "smart app control (nx reader): " + ((& "$env:APPDATA\uv\tools\conexus\Scripts\python.exe" -c "from nexus._smart_app_control import state; print(state())" 2>&1) -join ' ')
         "claude: " + (& "$env:USERPROFILE\.local\bin\claude.exe" --version)
         "gitver: " + (& "$(GitDir)\git.exe" --version) + " at " + (GitDir)
         "ps: " + $PSVersionTable.PSVersion.ToString()

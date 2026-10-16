@@ -63,23 +63,6 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 - **Structured logging only.** `structlog.get_logger(__name__)`. Never `print()` in library code; CLI commands use `click.echo()`.
 - **`uv` as package manager.** `pyproject.toml` for deps. Don't bump `llama-index-core` or `tree-sitter-language-pack` without exercising the chunking pipeline — they have known breaking incompatibilities.
 
-## External service limits — check before every call
-
-The single source of truth is `src/nexus/db/limits.py` (`QUOTAS: ServiceLimits`). Only `SAFE_CHUNK_BYTES` and `MAX_QUERY_RESULTS` have module-level aliases; the rest are `QUOTAS.<FIELD>`.
-
-| Operation | Limit | Constant |
-|---|---|---|
-| paging (`limit=N`) | N ≤ 300 | `MAX_QUERY_RESULTS` |
-| query (`n_results=N`) | N ≤ 300 | `MAX_QUERY_RESULTS` |
-| batch write (`ids=[...]`) | ≤ 300 records | `QUOTAS.MAX_RECORDS_PER_WRITE` |
-| Concurrent reads / writes per collection | ≤ 10 each | `QUOTAS.MAX_CONCURRENT_READS/WRITES` |
-| Document size | ≤ 16384 bytes | `QUOTAS.MAX_DOCUMENT_BYTES` (use `SAFE_CHUNK_BYTES = 12288`) |
-| Query string | ≤ 256 chars | `QUOTAS.MAX_QUERY_STRING_CHARS` |
-| `where` predicates | ≤ 8 top-level | `QUOTAS.MAX_WHERE_PREDICATES` |
-| Embedding dims | ≤ 4096 | `QUOTAS.MAX_EMBEDDING_DIMENSIONS` |
-
-Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 1,000 inputs per request (`VoyageEmbedder.MAX_BATCH_TEXTS`). Use `nexus.retry._voyage_with_retry` for transient failures. Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in a loop. Provenance and the retired-client notes: [external-service-limits](docs/agents/external-service-limits.md).
-
 ## Hot rules (don'ts paired with dos)
 
 Full text with history: [hot-rules](docs/agents/hot-rules.md).
@@ -96,76 +79,19 @@ Full text with history: [hot-rules](docs/agents/hot-rules.md).
 - **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line** (nexus-5kwkf: the harness cuts worktrees from the default branch's tip, so one can be stale by construction).
 - **Daemon-lifecycle fixes land in the shared primitive (`src/nexus/daemon/service_registry.py`), never one tier's copy.** See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
-## CI Cost Discipline
+## Situational rules (`.claude/rules/`)
 
-Project policy, cited by name from the workflows. Full text and origin: [ci-cost-discipline](docs/agents/ci-cost-discipline.md).
+These load only when you read a file their `paths:` matches; each is a verbatim move from this file (nexus-2ziaz follow-up):
 
-- **Never test the same tree twice.** A tree that passed a PR's required checks does not re-run on the merge-push or at tag time; tag/release workflows publish, they do not re-test.
-- **Expensive jobs run only when their inputs changed** (per-job path filters). Required checks stay satisfied via job-level skip or always-run-report-skip WITH a non-vacuity assert.
-- **Never rebuild deterministic artifacts.** Version-pinned compiles are cached or prebuilt, keyed on exact inputs.
-- **BILLED macOS/premium runners only where the artifact requires the platform** (release/tag builds), never in routine push/PR CI. Self-hosted runners on owned hardware are the exception.
-- **Every workflow has a concurrency group; superseded runs cancel.**
-- **Full matrix breadth only at merge boundaries.** PRs run the full matrix; interior pushes run the minimal representative.
-- **Tag cadence is a cost decision.** Batch related work into one cut.
+- [`releases-and-engine.md`](.claude/rules/releases-and-engine.md): release cadence, plugin channel, engine-service release, cutting a release and its blocking Step 0. The `release` and `engine-release` skills stay the authority.
+- [`ci-and-runners.md`](.claude/rules/ci-and-runners.md): CI Cost Discipline, self-hosted runners and fork PRs.
+- [`external-service-limits.md`](.claude/rules/external-service-limits.md): `QUOTAS` limits and Voyage limits.
+- [`adding-a-cli-command.md`](.claude/rules/adding-a-cli-command.md).
 
-## Self-hosted runners and fork PRs
+Two of them hold always-on rules, repeated here because no file read triggers them:
 
-Full text (runner inventory, lab pool, hellmini, win-release): [self-hosted-runners](docs/agents/self-hosted-runners.md).
-
-- CI runs on GitHub-hosted runners except two lab-pool jobs (Service CI Java on `lab-16c16g`, pytest shards on `lab-6c18g`) and the release legs on `hellmini` / `win-release`. **A pull request from a fork never runs on those:** a new pool job must carry the same `runs-on` expression that sends fork PRs to `ubuntu-latest`. Repo variable `NX_CI_POOL=off` sends every run back to `ubuntu-latest`.
-- Pool runners share a persistent `$HOME`: a step that writes a fixed path under it must be safe against a sibling job. No sudo; hard memory cap (exit 137 = over it).
-- **Before approving a fork-PR run, read its diff for:** anything under `.github/`; any `runs-on` naming a self-hosted label (`self-hosted`, `hellmini`, `win-release`, a `lab-*` label, `hellmini-ci`, `qwen-linux`, `gtr-windows`); any change to the `runs-on` expression that routes forks to `ubuntu-latest`.
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
-- **Read a contributor change as release-runner code, not only a fork-PR run:** merged code on `win-release` runs without a further click. Read in full what it executes if it touches `windows-pg-bundle-rehearsal.yml`'s `paths:` filter (including `service/pom.xml`), `scripts/*windows*`, `scripts/windows_*.py`, `.github/actions/windows-*`, `.github/actions/resolve-windows-python/**`, or the Windows jobs of `engine-service-release.yml` and `pg-bundle-cache-seed.yml`.
-- Registering `win-release` or flipping `NX_WINDOWS_RELEASE_LEGS` needs Sam's explicit go.
 - On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI.
-
-## Workflows
-
-### Adding a CLI command
-
-1. Create `src/nexus/commands/your_cmd.py` with a Click group/command.
-2. Register it in `src/nexus/cli.py` via `cli.add_command()`.
-3. Add tests in `tests/test_your_cmd.py`.
-4. Document the new flags/subcommands in `docs/cli-reference.md`.
-
-### Release cadence policy (nexus-mkj6u)
-
-Full text: [release-cadence](docs/agents/release-cadence.md).
-
-1. **Releases are hand-cut.** CI does not publish on merge; a tag push publishes.
-2. **`source.ref` only ever points at immutable release tags.** Never a branch, never main HEAD.
-3. **One channel until proven otherwise.** No `-dev` / `-rc` / `-canary` variants.
-4. **Bump cadence matches user-visible impact, not commit volume.**
-5. **Releaser is human. AI prepares; human cuts** (merge, tag, push tag).
-6. **Parity tests stay strict.** `pyproject.toml` version must match `mcpb/pyproject.toml`, `mcpb/manifest.json`, marketplace.json `plugins[].version` and `source.ref`, every plugin's `plugin.json`, and `uv.lock`. No `# noqa` escape hatches.
-
-### Independent plugin release channel (RDR-197)
-
-Full text: [plugin-release-channel](docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `.claude-plugin/marketplace.json`) ships without a client release via an anchored tag `plugin-v{X.Y.Z}-{n}`. The cut is `scripts/cut_plugin_release.py`; the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`, never a bare merge. Never cut while a release PR is open; batch related plugin work. **Rehearse before every real cut:** `tests/e2e/plugin-cut-rehearsal/run.sh` must end `PLUGIN-CUT REHEARSAL PASSED`.
-
-### Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
-
-**Authority and the full incident archive: [engine-service-release](docs/agents/engine-service-release.md)** (moved verbatim; it is not a summary). Invoke the `engine-release` skill as the executable checklist.
-
-- The Java engine-service binary is cut by an `engine-service-vX.Y.Z` tag, separate from the PyPI release and not gated by it. **Prep is AI, the tag push is human (Sam).** Version is tag-stamped; there is no manifest to bump.
-- Build or test the engine only through `scripts/mvnw-leased.sh`, never a bare `./mvnw`/`mvn` (one builder at a time).
-- **ONE engine identity per release:** bump `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py` unconditionally to the engine the release was built and gated with. It also derives `PINNED_SERVICE_TAG`. Local-mode installs get only what that constant names.
-- **Paired release:** cut the engine tag FIRST (a tag cut is never blocked); the client release bumps the pin in the same release; the deploy fires before or at client-tag push, never "eventually". `scripts/check_engine_release_floor.py --client-precondition engine-service-vX.Y.Z` gates the DEPLOY, never the tag cut.
-- Deploy and cloud-gate are conexus-side: surface "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Sam, never as autonomous.
-- After every cloud deploy run `tests/e2e/cloud-client-path-gate.sh` from a cloud-mode box with `NX_EXPECTED_OWNERLESS_WRITE_MODE=log-only` (or `=enforce` after the flip); plain, it FAILS leg B3.
-
-### Cutting a release (version bump + tag-push to PyPI)
-
-**The `release` skill is the authority and the executable checklist.** Invoke it (`/conexus:release`, or `Skill` on `release`); this section is a pointer. `docs/contributing.md#release-process` is the long form for rollback and one-time setup. Full text: [cutting-a-release](docs/agents/cutting-a-release.md).
-
-**Step 0 stays here because other sections cite it.** The engine-freshness gate is BLOCKING and is a command, not a prose eyeball-check (nexus-i5c2u):
-
-```bash
-uv run python scripts/check_engine_release_floor.py
-```
-
-Non-zero means STOP. It fails in both directions — a cloud behind the pinned identity, and a gated engine tag that was never pinned — and the remedy differs per direction. The skill's Step 0 carries both, the `--paired-deploy` form for a paired release (nexus-k1c08), and the post-tag verify obligation.
 
 ## Worktrees: one session, one worktree (2026-09-19)
 

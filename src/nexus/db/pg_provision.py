@@ -112,6 +112,8 @@ from typing import Callable, NamedTuple
 
 import structlog
 
+from nexus._smart_app_control import ON as _SAC_ON
+from nexus._smart_app_control import state as smart_app_control_state
 from nexus._winsec import grant_user_tree_access, restrict_to_owner
 from nexus.bounded_subprocess import run_bounded
 from nexus.db.pg_auth import (
@@ -225,6 +227,47 @@ def root_user_remedy() -> str:
         "distro default with a [user] default=nexus stanza in /etc/wsl.conf "
         "followed by `wsl --terminate <distro>`."
     )
+
+
+class PgSmartAppControlError(RuntimeError):
+    """Raised when local provisioning is attempted with Windows Smart App
+    Control on (nexus-f9bgu.57).
+
+    Smart App Control blocks the unsigned PostgreSQL bundle and the unsigned
+    Python that uv installs, so the cluster cannot be created or started. Raised
+    BEFORE the bundle fetch, so the user gets the reason instead of a download
+    followed by ``[WinError 4551]``.
+    """
+
+
+def smart_app_control_remedy() -> str:
+    """The message :class:`PgSmartAppControlError` carries."""
+    return (
+        "Local PostgreSQL cannot be set up while Windows Smart App Control is on.\n"
+        "\n"
+        "Smart App Control blocks programs and libraries that carry no trusted "
+        "signature. The PostgreSQL bundle nexus uses and the Python that uv "
+        "installs are unsigned, so Windows refuses them ('An Application Control "
+        "policy has blocked this file').\n"
+        "\n"
+        "Smart App Control on is not a supported configuration for a local "
+        "nexus install. See "
+        "https://github.com/Hellblazer/nexus/blob/main/docs/windows-install.md#smart-app-control"
+    )
+
+
+def refuse_smart_app_control(read_state: Callable[[], str] | None = None) -> None:
+    """Refuse local provisioning when Smart App Control is on (nexus-f9bgu.57).
+
+    Only the ``on`` state refuses. Evaluation mode is not refused, though
+    Windows can switch it on later, and an unreadable state is not grounds to
+    refuse; ``nx doctor`` warns about both. *read_state* is the test seam.
+    """
+    current = (read_state or smart_app_control_state)()
+    if current != _SAC_ON:
+        return
+    _log.error("pg_provision_refused_smart_app_control")
+    raise PgSmartAppControlError(smart_app_control_remedy())
 
 
 def refuse_root() -> None:
@@ -3040,6 +3083,7 @@ def _provision_impl(
         When any provisioning subprocess exits non-zero.
     """
     refuse_root()
+    refuse_smart_app_control()
 
     if config_dir is None:
         from nexus.config import nexus_config_dir  # local import to avoid circular  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs

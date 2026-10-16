@@ -86,7 +86,7 @@ def test_the_pre_push_mode_assertion_is_named_as_conexus_owned_in_every_place_th
 def test_standing_instructions_that_run_the_cloud_gate_name_the_mode_variable() -> None:
     """Critique round 3 L1: run plain, the gate FAILS leg B3 on any engine that reports a mode, so
     every instruction that tells an operator to run it must say what to set."""
-    for rel in ("AGENTS.md", "docs/agents/engine-service-release.md", "docs/contributing.md", "docs/runbooks/rdr-191-phase5-cloud-fk.md"):
+    for rel in (".claude/rules/releases-and-engine.md", "docs/agents/engine-service-release.md", "docs/contributing.md", "docs/runbooks/rdr-191-phase5-cloud-fk.md"):
         text = (REPO_ROOT / rel).read_text()
         assert "cloud-client-path-gate.sh" in text, rel
         for m in re.finditer(r"cloud-client-path-gate\.sh", text):

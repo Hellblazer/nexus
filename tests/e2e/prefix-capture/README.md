@@ -58,3 +58,25 @@ sequential thinking in the first main and subagent `tools`, tool calls and
 ToolSearch counts, engine census and the drain probe. Channel push delivery is
 not covered: `claude -p` runs without channels. Results of the 2026-10-15 run:
 T2 `nexus/arm-c-tuplespace-seqthink-validation-2026-10-15`.
+
+## ab/seqthink/: uncued sequential thinking on the real repo
+
+Measures how often the main session calls sequential thinking on its own when
+the prompt is a design decision that never names the tool. Each run is one
+`claude -p` session in a snapshot of this repo, crossed over arm A or C and
+two guidance levels: `G1` has no user CLAUDE.md, `G2` installs the user's
+global CLAUDE.md. The `prompts/` are three decision questions about real code
+(T1 fallback, the paged-limit fix, the retry-loop test seam).
+
+Two inputs are not committed and are rebuilt by hand before a batch:
+`project.tar.gz`, from `git archive --format=tar.gz -o
+ab/seqthink/project.tar.gz <sha>` (the 2026-10-15 runs used 005fd83ac), and
+`user_claude.md`, a copy of the user's `~/.claude/CLAUDE.md`, which is
+personal and stays out of the repo.
+
+`sq_batch.sh <REPS> <ARM>:<GUIDE>:<prompt>...` is the loop on chas,
+`sq_detach.sh` starts it detached through the credentials helper as for `ab/`,
+and `analyse_sq.py ab/seqthink/out` reports main-session and subagent
+sequential-thinking calls, the first turn that made one, ToolSearch and Agent
+counts, and cost per cell. Results of the 2026-10-15 run: T2
+`nexus/seqthink-uncued-real-guidance-2026-10-15`.

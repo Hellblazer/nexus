@@ -19,13 +19,17 @@
   `uv tool install conexus` and `nx init --service`, using the published
   windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
   clean Windows 11 x64 machine (conexus 7.72.1: `nx init --service`, a live
-  Claude Code session with MCP store and search, hooks, stop and restart), but
-  Windows is **not yet declared supported**. The step-by-step path, with what
-  was and was not measured, is [Installing nexus on Windows](windows-install.md).
-  Known gaps: the Claude Desktop install dialog has not been walked (the
-  extension itself was run headless, nexus-ijue9.21); the Windows binaries are
-  not code-signed (nexus-dj01b), and a machine with Smart App Control enforcing
-  was not tested; Windows on ARM is out of scope.
+  Claude Code session with MCP store and search, hooks, stop and restart).
+  Windows 11 x64 is supported, with the limits listed in
+  [What is not supported or not measured](windows-install.md#what-is-not-supported-or-not-measured).
+  The step-by-step path, with what was and was not measured, is
+  [Installing nexus on Windows](windows-install.md). Known limits: the
+  `conexus.mcpb` Desktop Extension is not a working route on Windows (chat and
+  Cowork get conexus from the plugin marketplace); the Windows binaries are not
+  code-signed (nexus-dj01b); Smart App Control on is not supported (in both
+  measured installs with it on, Windows blocked files the setup needs);
+  AppLocker and WDAC need an administrator's path rules; Windows 10 and Windows
+  on ARM are not supported.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
   the tree). On Linux, torch is pinned to its CPU build at both install steps:

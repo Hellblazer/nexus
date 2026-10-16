@@ -232,7 +232,9 @@ def test_the_release_gates_are_prescribed_as_commands(flag: str) -> None:
 ENGINE_RELEASE_AUTHORITY = REPO_ROOT / "docs" / "agents" / "engine-service-release.md"
 
 GOVERNANCE_DOCS = (
-    "AGENTS.md",
+    # The engine section moved verbatim from AGENTS.md to a path-scoped rule
+    # (loads when service/** or engine_version.py is read), 2026-10-15.
+    ".claude/rules/releases-and-engine.md",
     ENGINE_RELEASE_AUTHORITY.relative_to(REPO_ROOT).as_posix(),
     ".claude/skills/release/SKILL.md",
     ".claude/skills/engine-release/SKILL.md",

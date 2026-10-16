@@ -402,6 +402,55 @@ def _win() -> str | None:
     return "win32" if os.name == "nt" else None
 
 
+_SAC_GUIDE = (
+    "https://github.com/Hellblazer/nexus/blob/main/docs/windows-install.md#smart-app-control"
+)
+
+
+def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[HealthResult]:
+    """The Windows Smart App Control row (nexus-f9bgu.57). No row off Windows,
+    and none on a Windows that has no Smart App Control (no policy value).
+
+    On blocks the unsigned PostgreSQL bundle and the unsigned Python that uv
+    installs, so a local install cannot work: a failure in local mode. In cloud
+    mode its effect on the client is not measured: a warning. Evaluation is a
+    warning because Windows can switch it on later; what that does to an
+    installed nexus is not measured. *state* is the test seam.
+    """
+    from nexus import _smart_app_control as sac  # noqa: PLC0415 — Windows row only
+
+    current = state if state is not None else sac.state()
+    label = "Smart App Control"
+    if current in (sac.NOT_WINDOWS, sac.ABSENT):
+        return []
+    if current == sac.OFF:
+        return [HealthResult(label=label, ok=True, detail="off")]
+    if current == sac.ON:
+        detail = (
+            "on: Windows blocks the unsigned PostgreSQL bundle and the unsigned "
+            "Python uv installs, so the local stack cannot run"
+            if local else
+            "on: blocks unsigned programs; its effect on a cloud-mode client is not measured"
+        )
+        return [HealthResult(
+            label=label, ok=False, warn=not local, fatal=local, detail=detail,
+            fix_suggestions=[f"Smart App Control on is not supported for a local install: {_SAC_GUIDE}"],
+        )]
+    if current == sac.EVALUATION:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                "evaluation: nothing is blocked now, but Windows can switch it on, "
+                "and then the unsigned PostgreSQL bundle and Python are blocked"
+            ),
+            fix_suggestions=[f"see {_SAC_GUIDE}"],
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail="could not read the state (CI\\Policy VerifiedAndReputablePolicyState)",
+    )]
+
+
 def _check_windows_user_path(tools, *, store=None, environ=None) -> list[HealthResult]:
     """The Windows shim row: the user PATH must carry ``<tools>\\current\\bin``
     ahead of every other directory that provides ``nx.exe``, and that directory
@@ -10656,6 +10705,7 @@ def run_health_checks(
         results.extend(_check_service_crossencoder_model())
     else:
         results.extend(_check_t3_cloud())
+    results.extend(_check_smart_app_control(local=_local))  # nexus-f9bgu.57
 
     # nexus-9tsdf (GH #1113 AC2): name dimension-orphaned collections and
     # point at `nx collection prune`. Applies in both modes; degrades

@@ -66,7 +66,7 @@
 # files, via a throwaway git index) plus the stamped release_version; a hit
 # copies the cached jar into service/target and prints the build_ref that
 # jar carries, a miss builds and stores. "Never rebuild deterministic
-# artifacts" (AGENTS.md § CI Cost Discipline), applied to the dev box. A hit
+# artifacts" (.claude/rules/ci-and-runners.md § CI Cost Discipline), applied to the dev box. A hit
 # therefore REUSES a build_ref: the per-run-unique guarantee below holds per
 # distinct service/ content, not per invocation — a caller that captured the
 # printed value still matches the jar it is given. NX_GATE_JAR_CACHE=off

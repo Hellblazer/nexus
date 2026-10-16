@@ -35,7 +35,7 @@ DRIVER: Path = GUEST_DIR / "driver"
 RUN_GATE: Path = GUEST_DIR / "run-gate.sh"
 GATE: Path = REPO / "tests" / "e2e" / "windows-phase5-gate.ps1"
 
-PW_SCRIPTS = ("restore.ps1", "guest-run.ps1", "stduser.ps1")
+PW_SCRIPTS = ("restore.ps1", "guest-run.ps1", "stduser.ps1", "cache.ps1")
 NO_PW_SCRIPTS = ("hostcheck.ps1", "end.ps1")
 INNER_SCRIPTS = ("inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1", "as-user.ps1")
 ALL_PS = PW_SCRIPTS + NO_PW_SCRIPTS + INNER_SCRIPTS
@@ -459,6 +459,11 @@ case "$cmd" in
           if [[ -n "${FAKE_VERDICT_FILE:-}" ]]; then cp "$FAKE_VERDICT_FILE" "$rundir/out/verdict.txt"; fi
           echo "collected verdict.txt"
         fi ;;
+      cache.ps1)
+        m="${cmd#* -Mode }"; m="${m%% *}"
+        echo "$m :: $cmd" >> "$FAKE_ROOT/cache.log"
+        if [[ "${FAKE_FAIL_STEP:-}" == "$m" ]]; then echo "NXG-RESULT: FAIL cache $m broke"; exit 1; fi
+        echo "NXG-RESULT: ok" ;;
       end.ps1)
         echo "$cmd" >> "$FAKE_ROOT/end.log"
         rm -rf "$rundir"
@@ -616,7 +621,7 @@ def test_a_passed_verdict_exits_zero_and_everything_staged_is_removed(harness: H
     # and the caller's stdin (the canary) read by none of the others
     assert (harness.root / "inner.log").read_text().split() == ["inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1"]
     for line in ssh_log:
-        reads_pw = "restore.ps1" in line or "guest-run.ps1" in line
+        reads_pw = "restore.ps1" in line or "guest-run.ps1" in line or "cache.ps1" in line
         assert line.startswith("bytes_on_stdin=0 ::") != reads_pw, line
         assert "placeholder-not-a-secret" not in line
     assert "-Checkpoint clean-baseline-2026-10-06" in "\n".join(ssh_log) and "-Arg1 9.8.7" in "\n".join(ssh_log)
@@ -1179,3 +1184,117 @@ def test_applocker_dll_modes_add_the_dll_collection(harness: Harness, flag: str,
     assert '<RuleCollection Type="Dll" EnforcementMode="' in block
     assert "if ($appLocker -eq 'allow-dll') { 'Enabled' } else { 'AuditOnly' }" in block
     assert "foreach ($p in @($folders) + $(if ($appLocker -eq 'allow-dll') { $dllExtra } else { @() }))" in block
+
+
+# ---- --cache (nexus-bpzt7) ----------------------------------------------------
+
+
+def _scripts_in_order(h: Harness) -> list[str]:
+    """The host script each ssh call ran, in order (guest-run.ps1 shown with its inner script)."""
+    names = []
+    for line in h.ssh_lines():
+        m = re.search(r"-File \S*\\([a-z-]+\.ps1)", line)
+        if not m:
+            continue
+        name = m.group(1)
+        inner = re.search(r" -Inner ([a-z-]+\.ps1)", line)
+        mode = re.search(r" -Mode ([a-z]+)", line)
+        names.append(f"{name}:{inner.group(1)}" if inner else f"{name}:{mode.group(1)}" if mode else name)
+    return names
+
+
+def test_cache_on_is_the_default_seeds_before_the_install_and_harvests_after_the_verdict(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    order = _scripts_in_order(harness)
+    assert order.index("stduser.ps1") < order.index("cache.ps1:seed") < order.index("guest-run.ps1:inst.ps1")
+    assert order.index("guest-run.ps1:waitv.ps1") < order.index("cache.ps1:harvest") < order.index("end.ps1")
+    ssh = "\n".join(harness.ssh_lines())
+    assert "restore.ps1" in ssh and "-Cache yes" in ssh
+    # the cache is filled for the account that installs, keyed on the published version
+    cache_log = (harness.root / "cache.log").read_text()
+    assert "-Account nxstd -Key 9.8.7" in cache_log
+    assert "--cache on" in res.stdout and (harness.out / "07-harvest.txt").exists()
+
+
+def test_cache_off_touches_no_cache_and_leaves_windows_update_alone(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--cache", "off", "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert not (harness.root / "cache.log").exists()
+    assert "-Cache no" in "\n".join(harness.ssh_lines())
+    assert "--cache off: everything downloaded fresh" in res.stdout
+
+
+def test_a_candidate_wheel_keys_the_cache_on_its_sha256(harness: Harness, tmp_path: Path) -> None:
+    wheel = tmp_path / "conexus-9.8.7-py3-none-any.whl"
+    wheel.write_bytes(b"not really a wheel")
+    sha = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    res = harness.run(*_BASE, "--wheel", str(wheel), "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert f"-Key w-{sha[:16]}" in (harness.root / "cache.log").read_text()
+
+
+def test_a_bad_cache_value_exits_2_before_any_remote_call(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--cache", "maybe")
+    assert res.returncode == 2
+    assert not (harness.root / "ssh.log").exists()
+
+
+def test_a_failed_seed_stops_before_the_install(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED), fail_step="seed")
+    assert res.returncode != 0
+    assert not (harness.root / "inner.log").exists() or "inst.ps1" not in (harness.root / "inner.log").read_text()
+    _assert_cleaned_up_once(harness)
+
+
+def test_a_failed_harvest_is_reported_and_does_not_change_a_passed_verdict(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--out", str(harness.out), verdict=_verdict(PASSED), fail_step="harvest")
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "the cache harvest did not finish (not part of the verdict)" in res.stdout
+    _assert_cleaned_up_once(harness)
+
+
+def test_the_cache_script_writes_only_under_its_folder_and_removes_by_exact_name() -> None:
+    text = _read("cache.ps1")
+    code = "\n".join(_code_lines(text))
+    assert "$root = 'C:\\build\\guest\\cache'" in code
+    for ln in (ln.strip() for ln in _code_lines(text) if "Remove-Item" in ln):
+        assert "-LiteralPath" in ln and "-Recurse" not in ln and not re.search(r"Remove-Item[^\n]*[*?]", ln), ln
+    # host-side writes name a path built from $root (or the guest session, -ToSession/-FromSession)
+    for ln in (ln.strip() for ln in _code_lines(text) if re.search(r"Set-Content|Move-Item|New-Item -ItemType Directory -Force \$root", ln)):
+        assert "$root" in ln or "$keys" in ln or "$uvTar" in ln or "$tmp" in ln, ln
+    assert "Checkpoint-VM" not in code and "Restore-VM" not in code
+
+
+def test_the_cached_claude_binary_is_used_only_when_it_is_the_latest_releases_by_sha256() -> None:
+    inst = _read("inst.ps1")
+    fn = inst[inst.index("function CachedClaude"):inst.index("Step 'claude code'")]
+    assert "claude-code-releases" in fn and "/latest" in fn and "manifest.json" in fn
+    assert fn.index("Get-FileHash") < fn.index("install")
+    assert "if ($got -ne" in fn
+    step = inst[inst.index("Step 'claude code'"):]
+    step = step[:step.index("\n}\n")]
+    # anything but a used cached binary runs the official installer
+    assert "if (-not $used) { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://claude.ai/install.ps1 | iex' }" in step
+
+
+def test_updates_go_off_inside_the_guest_at_first_contact_and_nothing_changes_on_the_host() -> None:
+    restore = _read("restore.ps1")
+    block = restore[restore.index("$quietBlock = {"):restore.index("$quieted = $Cache -ne 'yes'")]
+    for name in ("'wuauserv', 'UsoSvc', 'DoSvc'", "NoAutoUpdate", "SignatureScheduleDay 8", "SignatureUpdateInterval 0"):
+        assert name in block, name
+    # applied inside the network wait, before the first reachability probe, and only with -Cache yes
+    loop = restore[restore.index("for ($i = 0; $i -lt 60; $i++)"):]
+    assert loop.index("$quietBlock") < loop.index("Invoke-WebRequest https://pypi.org/simple/")
+    # Sam, 2026-10-15: no host-side VM settings from the driver
+    for name in ALL_PS:
+        code = "\n".join(_code_lines(_read(name)))
+        assert not re.search(r"Enable-VMIntegrationService|Disable-VMIntegrationService|Copy-VMFile|Set-VMNetworkAdapter|Set-VMProcessor|Set-VMMemory", code), name
+
+
+def test_the_network_probe_asks_for_headers_only() -> None:
+    # https://pypi.org/simple/ is the whole package index (47 MB on 2026-10-15). A GET that timed out was
+    # fetched again every 5 s, and one slow boot spent about 0.9 GB on it (nexus-bpzt7).
+    restore = _read("restore.ps1")
+    probes = [ln for ln in _code_lines(restore) if "Invoke-WebRequest" in ln]
+    assert probes and all("-Method Head" in ln for ln in probes), probes

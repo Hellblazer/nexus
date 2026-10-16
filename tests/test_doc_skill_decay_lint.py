@@ -204,6 +204,8 @@ def _target_files() -> list[Path]:
     # docs/agents/; the text moved out of the scan's reach, so the directory is
     # scanned too rather than letting that content rot unchecked.
     files.extend(sorted((REPO_ROOT / "docs" / "agents").glob("*.md")))
+    # 2026-10-15: situational sections moved on to path-scoped rules.
+    files.extend(sorted((REPO_ROOT / ".claude" / "rules").glob("*.md")))
 
     seen: set[Path] = set()
     deduped: list[Path] = []
@@ -557,12 +559,12 @@ def scan_referenced_paths(extra_files: Sequence[Path] = ()) -> PathScanResult:
 #: not a real, checkable path rather than a genuine rot site. Shrink-only:
 #: see ``_PATH_ALLOWLIST_CEILING`` and ``test_path_allowlist_is_shrink_only``.
 PATH_EXISTS_ALLOWLIST: dict[tuple[str, str], str] = {
-    ("AGENTS.md", "src/nexus/commands/your_cmd.py"): (
+    (".claude/rules/adding-a-cli-command.md", "src/nexus/commands/your_cmd.py"): (
         "2026-09-19: 'Adding a CLI command' workflow example -- a "
         "placeholder filename for a command that does not exist yet, not "
         "a real path that decayed."
     ),
-    ("AGENTS.md", "tests/test_your_cmd.py"): (
+    (".claude/rules/adding-a-cli-command.md", "tests/test_your_cmd.py"): (
         "2026-09-19: same workflow example, the paired test-file placeholder."
     ),
     # REMOVED 2026-09-20. The entry was a retrospective pointer to
