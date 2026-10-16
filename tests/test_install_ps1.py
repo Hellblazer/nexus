@@ -139,7 +139,7 @@ class Box:
         installer = _UV_INSTALLER.format(
             rec=self.rec, home=self.home, root=root, sep=os.sep, ext=EXT,
         )
-        (root / "uv-installer.ps1").write_text(installer)
+        (root / "uv-installer.ps1").write_text(installer, encoding="utf-8")
 
     # ---- machine state ---------------------------------------------------------------
     def _install(self, standin: str, into: Path, name: str) -> "Box":
@@ -168,12 +168,12 @@ class Box:
         return self._install("nx-standin", layout, "nx")
 
     def failing(self, what: str) -> "Box":
-        (self.root / f"fail-{what}").write_text("")
+        (self.root / f"fail-{what}").write_text("", encoding="utf-8")
         return self
 
     def env_log(self, name: str) -> list[str]:
         path = self.root / name
-        return [line.strip() for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
 
     # ---- running ---------------------------------------------------------------------
     def env(self, *, assume_terminal: bool = False) -> dict[str, str]:
@@ -210,7 +210,7 @@ class Box:
         return subprocess.run(
             [PWSH, "-NoProfile", *POLICY, "-File", str(script), *args],
             input=stdin if stdin is not None else "",
-            capture_output=True, text=True, env=self.env(assume_terminal=stdin is not None),
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=self.env(assume_terminal=stdin is not None),
             cwd=self.root, timeout=180,
         )
 
@@ -275,7 +275,7 @@ class Box:
     def calls(self) -> list[str]:
         if not self.rec.exists():
             return []
-        return [line.strip() for line in self.rec.read_text().splitlines() if line.strip()]
+        return [line.strip() for line in self.rec.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 @pytest.fixture
@@ -310,7 +310,7 @@ def test_the_script_exists() -> None:
 def test_everything_is_inside_one_function_called_on_the_last_line() -> None:
     """A download cut short must run nothing: no command sits outside ``Install-Nexus`` and
     the call is the last thing in the file."""
-    lines = SCRIPT.read_text().splitlines()
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
     code = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
     assert code[-1] == "Install-Nexus -ArgumentList $args"
     # Lines at column 0, leaving out the here-string of the help text.
@@ -331,13 +331,13 @@ def test_everything_is_inside_one_function_called_on_the_last_line() -> None:
 
 def test_it_never_exits_unless_it_was_run_as_a_file() -> None:
     """``exit`` in text that ``iex`` runs closes the user's window."""
-    exits = [n for n, line in enumerate(SCRIPT.read_text().splitlines(), 1) if line.strip().startswith("if ($PSCommandPath) { exit")]
+    exits = [n for n, line in enumerate(SCRIPT.read_text(encoding="utf-8").splitlines(), 1) if line.strip().startswith("if ($PSCommandPath) { exit")]
     assert len(exits) == 1
-    assert [line for line in SCRIPT.read_text().splitlines() if line.lstrip().startswith("exit ")] == []
+    assert [line for line in SCRIPT.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("exit ")] == []
 
 
 def test_it_does_not_use_the_plugins_setup_process() -> None:
-    text = SCRIPT.read_text()
+    text = SCRIPT.read_text(encoding="utf-8")
     assert "nx_setup" not in text
     assert "NX_SETUP_SCRIPT" not in text
 
@@ -345,7 +345,7 @@ def test_it_does_not_use_the_plugins_setup_process() -> None:
 def test_it_never_edits_the_user_path_itself() -> None:
     """The uv installer and the bootstrap do that. A second edit here would be an unreviewed
     write to the registry."""
-    text = SCRIPT.read_text()
+    text = SCRIPT.read_text(encoding="utf-8")
     for forbidden in ("SetEnvironmentVariable", "HKCU", "Set-ItemProperty", "[Environment]::SetEnvironment"):
         assert forbidden not in text, forbidden
 
@@ -694,10 +694,10 @@ def test_a_download_cut_short_runs_nothing(box: Box, tmp_path: Path) -> None:
     """Cut the script at a line boundary part of the way through, and again just before the
     call: PowerShell reports a parse error, and no stand-in is started."""
     box.with_uv().with_claude()
-    lines = SCRIPT.read_text().splitlines(keepends=True)
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines(keepends=True)
     for number, cut in enumerate(sorted({len(lines) // 4, len(lines) // 2, 3 * len(lines) // 4, len(lines) - 1})):
         partial = tmp_path / f"cut-{number}.ps1"
-        partial.write_text("".join(lines[:cut]))
+        partial.write_text("".join(lines[:cut]), encoding="utf-8")
         box.run("--local", "--no-autostart", script=partial)
         assert box.calls() == [], f"cut at line {cut} ran {box.calls()}"
         assert not (box.home / ".local" / "bin").exists()
@@ -715,7 +715,7 @@ def test_run_as_iex_text_it_reports_through_lastexitcode_and_does_not_exit(box: 
         "Write-Host \"SURVIVED code=$LASTEXITCODE\""
     )
     result = subprocess.run(
-        [PWSH, "-NoProfile", "-Command", command], input="", capture_output=True, text=True,
+        [PWSH, "-NoProfile", "-Command", command], input="", capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=box.env(), cwd=box.root, timeout=180,
     )
     assert "SURVIVED code=1" in result.stdout, (result.stdout, result.stderr)
@@ -942,7 +942,7 @@ def test_the_uv_url_override_is_not_mentioned_when_uv_is_already_there(box: Box)
 @needs_pwsh
 def test_a_build_that_leaves_no_nx_names_the_generation_layout(box: Box) -> None:
     box.with_uv()
-    (box.root / "skip-nx").write_text("")
+    (box.root / "skip-nx").write_text("", encoding="utf-8")
     result = box.run("--cli-only")
     assert result.returncode != 0
     layout = box.home / ".local" / "share" / "nexus" / "tools" / "current" / "bin"
