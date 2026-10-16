@@ -46,7 +46,7 @@ There are two routes, and both end in the same install. Install Git first (step 
 irm https://hellblazer.github.io/nexus/install.ps1 | iex
 ```
 
-It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the question below once, before it downloads anything. Typing the command is your permission to install the `nx` command, so it does not ask about that, and its question has no Not now choice. If you choose Local, it also asks whether the service should start when you log in, and the answer is No unless you type `y`.
+It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks you one question before it downloads anything. With Local it asks a second, whether to start at login. Typing the command is your permission to install the `nx` command, so it does not ask about that, and its question has no Not now choice. If you choose Local, it also asks whether the service should start when you log in, and the answer is No unless you type `y`. If you press Enter at the question, or the script has no terminal, it installs the `nx` command only. `/conexus:setup` in Claude Code, or `nx init` (Local) or `nx config init` (Cloud) in a terminal, sets up a service later.
 
 The `iex` form cannot take flags. To skip the question, run the script as a script block and add a flag: `--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`:
 
@@ -61,7 +61,7 @@ The `iex` form cannot take flags. To skip the question, run the script as a scri
 /plugin install conexus@nexus-plugins
 ```
 
-In your first session Claude tells you that Nexus is not installed and asks the question. If you want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. In Claude Desktop, add the plugin in Customize → Plugins and say "Set up Nexus" in a conversation (step 5 below).
+When the install finishes, run `/reload-plugins` or start a new session. In that session Claude tells you that Nexus is not installed and asks the question. If you want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. In Claude Desktop, add the plugin in Customize → Plugins and say "Set up Nexus" in a conversation (step 5 below). If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool.
 
 **The question.** Route two asks it with these four choices. The script asks the same question without Not now:
 
@@ -72,7 +72,7 @@ In your first session Claude tells you that Nexus is not installed and asks the 
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. On Windows it held about 2.5 GB after a first install by hand (measured 2026-10-14, conexus 7.78.0).
+Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. macOS was not measured. `uv` also keeps a download cache, about 2.4 GB on Linux and 2.5 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The Windows cache figure was measured on 2026-10-14 with conexus 7.78.0.
 
 ## Install by hand
 
@@ -200,16 +200,15 @@ PostgreSQL 7 MB, embedding model 436 MB, reranker 91 MB), so about 1.25 GB in
 all. These are the published file sizes of what each step fetches. On disk,
 `nx init` unpacks to about 0.75 GB.
 
-The whole install takes about 2.5 GB of disk. A folder-size tool reports about
-4 GB, because it counts some files twice: on Windows uv installs packages as
-hardlinks to the copies in its cache (`%LOCALAPPDATA%\uv\cache`, about 1.7 GB),
-so the tool environment under `%APPDATA%\uv` (about 1.6 GB) is mostly the same
-data under a second name. The 2.5 GB is the cache, plus the Python uv
-downloaded, plus the 0.75 GB from `nx init`. It was computed from the walk's
-folder sizes and uv's documented Windows link mode, not measured with a
-hardlink-aware tool on Windows. The same install on Linux, measured
-hardlink-aware, shows the effect: 2.2 GB in uv's cache and 2.1 GB in the tool
-environment occupy 2.25 GB together.
+The install by the one-command route measured about 2.3 GB of disk (conexus
+7.78.0, CLI only), and about 3.1 GB with Local, which adds the service's
+configuration and models. A folder-size tool reports more, because it counts
+some files twice: uv installs packages as hardlinks to the copies in its cache
+(`%LOCALAPPDATA%\uv\cache`, about 2.5 GB after a first install), so the
+environment is mostly the same data under a second name. That sharing was not
+measured with a hardlink-aware tool on Windows. The same kind of install on
+Linux (CLI only, conexus 7.81.0) shows the effect: 2.4 GB in uv's cache and
+2.0 GB in the install occupy 2.4 GB together.
 
 ## 4. Claude Code and the plugin
 
@@ -241,20 +240,19 @@ You can add the plugin from inside a session instead, then restart Claude Code:
 
 In Claude Desktop, open Customize → Plugins, add the marketplace
 `Hellblazer/nexus`, and install `conexus`
-([Desktop deployment](desktop-deployment.md)). Chat and Cowork read the plugins
+([Desktop deployment](desktop-deployment.md)). If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Chat and Cowork read the plugins
 on your claude.ai account, not the ones step 4 installed, so step 4 does not
 cover them. The plugin launches `nx-mcp` from the CLI install and talks to the
 stack step 3 started.
 
 With no CLI on the machine, open a conversation and say "Set up Nexus". Claude
 shows the four choices from [Two routes](#two-routes) and asks which you want.
-Desktop does not tell you when Nexus is missing, so you have to ask. It offers
-the plugin's skills in its `/` menu and not its commands, so there is no
-`/conexus:setup` there. To see progress, ask "Is Nexus set up yet?". When Claude
+Desktop does not tell you when Nexus is missing, so you have to ask. Do not type
+`/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen
+on Claude Desktop 2.42304.0 on macOS). To see progress, ask "Is Nexus set up yet?". When Claude
 says setup is done, start a new conversation. Or do steps 1 to 3 first, by hand.
 
-If the marketplace is already on your account from an earlier release, remove it
-and add it again; an existing one stayed at the release it was added at.
+An existing marketplace entry stayed at the release it was added at, which is why an older copy has no setup tool.
 
 What was measured (2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0, a
 clean Windows 11 machine): with only step 4 done, the Code tab found the plugin

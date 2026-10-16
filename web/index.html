@@ -185,12 +185,14 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <p>There are two routes, and both end in the same install.</p>
 
 <h3 id="route-one">Route one: run one command</h3>
-<p data-for="code">The command installs uv if you do not have it, installs the <code>nx</code> command, and adds the plugin to Claude Code when <code>claude</code> is on your PATH. It asks the question below before it downloads anything.</p>
-<p class="hidden" data-for="cli">The command installs uv if you do not have it and installs the <code>nx</code> command. It adds the Claude Code plugin when <code>claude</code> is on your PATH. It asks the question below before it downloads anything.</p>
-<p class="hidden" data-for="desktop">The command installs uv if you do not have it, installs the <code>nx</code> command, and asks the question below before it downloads anything. It cannot reach the plugin store of your Claude account. Add the plugin in Claude Desktop, as step 2 of route two shows.</p>
+<p data-for="code">The command installs uv if you do not have it, installs the <code>nx</code> command, and adds the plugin to Claude Code when <code>claude</code> is on your PATH. It asks you one question before it downloads anything.</p>
+<p class="hidden" data-for="cli">The command installs uv if you do not have it and installs the <code>nx</code> command. It adds the Claude Code plugin when <code>claude</code> is on your PATH. It asks you one question before it downloads anything.</p>
+<p class="hidden" data-for="desktop">The command installs uv if you do not have it, installs the <code>nx</code> command, and asks you one question before it downloads anything. It cannot reach the plugin store of your Claude account. Add the plugin in Claude Desktop, as step 2 of route two shows.</p>
 <div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
 <div class="cmd hidden" data-os-block="windows"><pre>irm https://hellblazer.github.io/nexus/install.ps1 | iex</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">If you choose Local, the script also asks whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
+<p class="note">With Local, the script asks a second question before it downloads anything: whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
+<p class="note">If you press Enter at the question, or the script has no terminal, it installs the <code>nx</code> command only. <code>/conexus:setup</code> in Claude Code, or <code>nx init</code> (Local) or <code>nx config init</code> (Cloud) in a terminal, sets up a service later.</p>
+<p class="note hidden" data-os-block="linux">The script asks uv for the CPU build of torch. If your uv is older than 0.9.19, run <code>uv self update</code> first, or the build downloads about 4.5 GB of GPU libraries that Nexus does not use.</p>
 <p class="note" data-os-block="mac linux">To skip the question, add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example, this installs the service and does not start it at login:</p>
 <div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
 <p class="note hidden" data-os-block="windows">Run it in a normal PowerShell window, not an elevated one. The script itself does not need Git. Claude Code fetches the plugin with Git, so install Git first (see Tools to have) if you want the script to add the plugin.</p>
@@ -202,7 +204,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <ol class="steps">
 <li><div class="step">
   <h3>Install uv</h3>
-  <p>Install uv and git, as shown under <a href="#before">Before you start</a>. uv is the one tool this route needs from you.</p>
+  <p>Install uv and git, as shown under <a href="#before">Before you start</a>. Besides Claude itself and git, uv is the one tool this route needs.</p>
   <div class="hidden" data-for="desktop"><p class="note" data-os-block="mac linux">When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</p></div>
 </div></li>
 <li data-for="code cli"><div class="step">
@@ -213,11 +215,11 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 </div></li>
 <li class="hidden" data-for="desktop"><div class="step">
   <h3>Add the plugin</h3>
-  <p>In Claude Desktop, open Customize → Plugins, add the marketplace <code>Hellblazer/nexus</code>, and install <code>conexus</code>. Chat and Cowork read the plugins on your Claude account, not the ones that Claude Code installed, so do this even if you added the plugin in Claude Code.</p>
+  <p>In Claude Desktop, open Customize → Plugins, add the marketplace <code>Hellblazer/nexus</code>, and install <code>conexus</code>. Chat and Cowork read the plugins on your Claude account, not the ones that Claude Code installed, so do this even if you added the plugin in Claude Code. If you added <code>Hellblazer/nexus</code> before, remove it and add it again first. An older copy has no setup tool.</p>
 </div></li>
 <li data-for="code cli"><div class="step">
   <h3>Answer the question</h3>
-  <p>In your first session, Claude tells you that Nexus is not installed and asks the question below. Answer it. If you choose Local, Claude also asks whether the service should start when you log in.</p>
+  <p>When the install finishes, run <code>/reload-plugins</code> or start a new session. In that session Claude tells you that Nexus is not installed and asks the question below. Answer it. If you choose Local, Claude also asks whether the service should start when you log in.</p>
   <p>Setup then runs in the background. For Local it takes from under two minutes on a fast connection to about seven on a slow one (an estimate), and you can ask Claude for progress. When Claude says setup is done, reconnect the Nexus server: type <code>/mcp</code>, choose <code>nexus</code>, and choose Reconnect. A new session works too.</p>
   <p class="note">If you choose Not now, each session shows one line that names <code>/conexus:setup</code>, so you can answer later.</p>
 </div></li>
@@ -238,7 +240,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.7 GB down, 1.6 GB on disk</td></tr>
 <tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
 </table></div>
-<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one you type them in the terminal. The sizes do not count the download cache that uv keeps until you run <code>uv cache clean</code>. After a first install the cache used about 2.4 GB on Linux and about 2.5 GB on Windows.</p>
+<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one you type them in the terminal. Measured on the one-command path, the install itself took about 2.1 GB (Cloud, CLI only) or 2.7 GB (Local) on Linux. On Windows it took about 2.3 GB or 3.1 GB. macOS was not measured. uv also keeps a download cache, about 2.4 GB on Linux and 2.5 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. <code>uv cache clean</code> empties it but frees only the files the install does not share.</p>
 
 <h3 id="after">After the install</h3>
 <ol class="steps">
@@ -343,7 +345,7 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
 </div></li>
 <li><div class="step">
   <h3>Set up the storage service</h3>
-  <p>This command first asks whether the service should start at login. Answer yes. It then downloads the service program, the database, and the search model, and starts the service.</p>
+  <p>This command first asks whether the service should start at login. Answer yes to start it at each login. The one-command route defaults to no. It then downloads the service program, the database, and the search model, and starts the service.</p>
   <div class="cmd"><pre>nx init</pre><button class="copy" type="button">Copy</button></div>
   <div class="expect">
     <div><b data-os-block="mac linux">~700 MB</b><b class="hidden" data-os-block="windows">~580 MB</b><span>downloaded, first run only</span></div>
