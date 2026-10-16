@@ -11,9 +11,49 @@
 
 The package on PyPI is `conexus`. The command it installs is `nx`.
 
-## Quick start
+## Install
 
-The common case: Claude Code on macOS or Linux, with [uv](https://docs.astral.sh/uv/) and git already installed.
+There are two routes, and both end in the same install.
+
+**Route one: run one command in a terminal.** It installs [uv](https://docs.astral.sh/uv/) if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your PATH, and asks the question below once, before it downloads anything.
+
+On macOS and Linux:
+
+```bash
+curl -fsSL https://hellblazer.github.io/nexus/install.sh | sh
+```
+
+On Windows, in a normal PowerShell window:
+
+```powershell
+irm https://hellblazer.github.io/nexus/install.ps1 | iex
+```
+
+**Route two: install uv, add the plugin, answer one question.** Install `uv` (the one tool this route needs from you), then start `claude` and type these two lines inside Claude Code, not in the terminal:
+
+```
+/plugin marketplace add Hellblazer/nexus
+/plugin install conexus@nexus-plugins
+```
+
+In your first session Claude tells you that Nexus is not installed and asks the question. If you answered Not now or want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session.
+
+In Claude Desktop, install `uv`, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, install `conexus`, and say "Set up Nexus" in a conversation. Desktop does not offer plugin commands, so there is no `/conexus:setup` there. To update the plugin in Desktop, remove the marketplace and add it again.
+
+**The question.** Both routes ask it. These are the four choices:
+
+| Choice | What happens | Download |
+|---|---|---|
+| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 1.6 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
+| Not now | Nothing is installed | none |
+
+The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
+
+## Install by hand
+
+Use these commands when a route above fails, or when you want each step yourself. The common case is Claude Code on macOS or Linux, with `uv` and git already installed.
 
 On macOS:
 
@@ -33,14 +73,7 @@ nx init
 nx doctor
 ```
 
-Then start `claude` and type these two lines inside Claude Code, not in the terminal:
-
-```
-/plugin marketplace add Hellblazer/nexus
-/plugin install conexus@nexus-plugins
-```
-
-The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
+Then add the plugin with the two lines from route two.
 
 ## Update, remove, problems
 

@@ -165,7 +165,7 @@ ul.plain li{margin:3px 0}
 <h1>Nexus Getting Started</h1>
 <p class="lede">Everything on this page happens inside Claude Code. You describe what you want, and Claude chooses the Nexus tools and skills for you. Each lesson gives an instruction to type, says what Claude does with it, and says what you will see. There are twelve lessons, and they take about ninety minutes together.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
-<p class="note">Before you start, install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in one of your projects and run <code>claude</code>. Every lesson happens in that session.</p>
+<p class="note">Before you start, install Nexus and the plugin with the <a href="./">install guide</a>. It has two routes: one command, or uv plus the plugin and one question. Then open a terminal in one of your projects and run <code>claude</code>. Every lesson happens in that session.</p>
 
 <div class="gloss-wrap">
 <p class="note" style="margin-bottom:6px">The lessons use a few words with one fixed meaning each. Open a group to read them.</p>
@@ -210,7 +210,7 @@ ul.plain li{margin:3px 0}
 <tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
 </table></div>
 <p class="note">Not every project has every block. A project without the <code>bd</code> task tracker has no Ready Beads block, a project without RDRs has no RDR block, and a new install has an empty T2 Memory block and a short Knowledge Map. All of that is normal.</p>
-<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", part of the install is missing. Type <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/nx-preflight.md"><code>/conexus:nx-preflight</code></a> and it tells you which part.</p>
+<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", part of the install is missing. Type <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/nx-preflight.md"><code>/conexus:nx-preflight</code></a> and it tells you which part. If the <code>nx</code> command itself is missing, type <code>/conexus:setup</code> and answer its question.</p>
 
 <h3>Why Claude receives this context</h3>
 <p>Claude does not follow a fixed script. It reads the situation and chooses what to do, and the blocks above are what it chooses from.</p>

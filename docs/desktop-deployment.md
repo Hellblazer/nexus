@@ -46,10 +46,26 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 
 **Audience**: developers who already use Claude Code from the command line.
 
+There are two routes, and both end in the same install:
+
+1. **Route one, one command in a terminal.** `curl -fsSL https://hellblazer.github.io/nexus/install.sh | sh` on macOS and Linux, or `irm https://hellblazer.github.io/nexus/install.ps1 | iex` in a normal PowerShell window on Windows. It installs `uv` if you do not have it, installs the CLI, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the one question below once, before it downloads anything.
+2. **Route two, from inside Claude.** Install `uv`, add the plugin, and answer one question:
+
 ```bash
 /plugin marketplace add Hellblazer/nexus
 /plugin install conexus@nexus-plugins
 ```
+
+The question has four choices:
+
+| Choice | What happens | Download |
+|---|---|---|
+| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 1.6 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
+| Not now | Nothing is installed | none |
+
+The sizes do not count the download cache that `uv` keeps until you run `uv cache clean` (about 0.55 GB on Linux and about 2.5 GB on Windows after a first install). `uv` is the one prerequisite of route two. Route two is described under "First run" below, and the commands that both routes run for you are under "Install by hand" at the end of that section.
 
 On first session start with the CLI installed, the plugin's SessionStart hook runs `nx upgrade --auto` (converging any pending migration) plus a preflight check. **It installs no daemon** — the T2 daemon it used to auto-install is retired (`nexus-i711w`). The storage service is provisioned by `nx init` and managed with `nx daemon service start|status|stop`.
 
@@ -63,7 +79,13 @@ The plugin does not install the Nexus CLI, and the plugin's servers and most of 
 - **The CLI is installed and `nx init` has not run.** The servers start, and every tool that needs the service reports that it cannot reach it. Run `nx init`.
 - **The CLI is not installed.** Nothing is installed for you. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`. `setup` installs only after the model has asked you and acted on your answer (`local`, `cloud`, `cli-only` or `not-now`; `cloud` opens a page in your browser where you type the managed service's address, token and tenant yourself); it starts a background process, downloads up to about 1.3 GB, and `setup_status` follows it. Without the plugin's setup process, or on a host that cannot run it, the tools answer with the commands below and install nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
 
-The install is three terminal commands, then a reconnect of the `nexus` server (`/mcp`, the server, Reconnect) or a new session:
+When setup is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. `/conexus:setup` runs the same question again for a user who answered Not now.
+
+The plugin's three local servers and all of its command hooks start through `uv`, so `uv` must be on the `PATH` the application starts with. Without `uv` none of them runs and the application shows the servers as failed. Skills, commands and the `sn` plugin's hosted server do not need it.
+
+### Install by hand
+
+When a route fails, or when you want each step yourself, the install is three terminal commands, then a reconnect of the `nexus` server or a new session:
 
 ```bash
 uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
@@ -73,18 +95,18 @@ nx init
 
 The commands are the same on Windows; [Installing nexus on Windows](windows-install.md) has that platform's prerequisites.
 
-The plugin's three local servers and all of its command hooks start through `uv`, so `uv` must be on the `PATH` the application starts with. Without `uv` none of them runs and the application shows the servers as failed. Skills, commands and the `sn` plugin's hosted server do not need it.
-
 ## Surface 2: Claude Desktop chat and Cowork (account plugin)
 
 **Audience**: Claude Desktop users who open chat or Cowork sessions.
 
 Claude Desktop keeps two plugin stores. Claude Code and the Desktop Code tab read `~/.claude`, which is where `claude plugin install` writes. Chat and Cowork read the plugins enabled on your claude.ai account, which Desktop downloads itself. A plugin installed only from the command line is not visible to chat or Cowork: on a clean Windows 11 machine with only the CLI plugin installed, the Code tab found the plugin and chat and Cowork found none (measured 2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0).
 
-Install:
+Install, with the same two routes as Surface 1:
 
-1. Install the `nx` CLI and provision the service first (`nx init`). The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has no Nexus tools (see "First run" under Surface 1).
-2. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it).
+1. **Route one.** Run the one command from Surface 1 in a terminal. It installs `uv`, the CLI and the service you choose. It cannot reach the plugin store of your claude.ai account, so you still do step 2 of route two in the application.
+2. **Route two.** Install `uv`. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it). Then open a conversation and say "Set up Nexus". Claude calls the plugin's `setup` tool, shows the four choices from Surface 1, and asks which you want. Desktop shows no message when Nexus is missing, because the session-start hook runs in a cloud workspace and not on your machine (measured 2026-10-16: a Desktop conversation starts no local Claude Code session), so you have to ask. Desktop offers the plugin's skills in its `/` menu and not its commands, so there is no `/conexus:setup` here. Desktop has no progress display: ask "Is Nexus set up yet?" and Claude reads the status with `setup_status`. When it says setup is done, start a new conversation.
+
+The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has only the two setup tools (see "First run" under Surface 1). To install the CLI by hand instead, see "Install by hand" under Surface 1.
 
 To upgrade after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 while 7.77.1 was current), and conexus could not be enabled from it until the marketplace was removed and added again. Why it does not follow new release tags is not yet understood.
 
@@ -97,6 +119,8 @@ State is shared with the host CLI Claude and any other session running against t
 ## Surface 3: Claude Desktop chat (Desktop Extension)
 
 **Audience**: Claude Desktop users who do NOT have Claude Code installed.
+
+The plugin route in Surface 2 is the one that installs the CLI for you. The extension is an alternative, and it needs the CLI and the service installed by hand first ("Install by hand" under Surface 1).
 
 Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 

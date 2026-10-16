@@ -36,6 +36,42 @@ was not measured, it says so.
 - **The binaries are unsigned** (signing is deferred, nexus-dj01b). See
   [Signing and SmartScreen](#signing-and-smartscreen).
 
+## Two routes
+
+There are two routes, and both end in the same install. Install Git first (step 2 below), because both routes fetch the plugin with it and `nx doctor` checks for it.
+
+**Route one: run one command.** In a normal (not elevated) PowerShell window:
+
+```powershell
+irm https://hellblazer.github.io/nexus/install.ps1 | iex
+```
+
+It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks the question below once, before it downloads anything. Typing the command is your permission to install the `nx` command, so it does not ask about that.
+
+**Route two: install `uv`, add the plugin, answer one question.** Install `uv` (step 1 below), then add the plugin in Claude Code:
+
+```
+/plugin marketplace add Hellblazer/nexus
+/plugin install conexus@nexus-plugins
+```
+
+In your first session Claude tells you that Nexus is not installed and asks the question. If you want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. In Claude Desktop, add the plugin in Customize → Plugins and say "Set up Nexus" in a conversation (step 5 below).
+
+**The question.** Both routes ask it. These are the four choices:
+
+| Choice | What happens | Download |
+|---|---|---|
+| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 1.6 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
+| Not now | Nothing is installed | none |
+
+The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. On Windows it held about 2.5 GB after a first install (measured 2026-10-13, conexus 7.78.0). The disk paragraph in step 3 explains why a folder-size tool reports more than the sum.
+
+## Install by hand
+
+The numbered steps below are the install by hand. Use them when a route above fails, or when you want each step yourself. They are the steps the Phase 5 gate ran.
+
 ## 1. Install uv
 
 In a normal (not elevated) PowerShell window:
@@ -202,7 +238,15 @@ In Claude Desktop, open Customize → Plugins, add the marketplace
 ([Desktop deployment](desktop-deployment.md)). Chat and Cowork read the plugins
 on your claude.ai account, not the ones step 4 installed, so step 4 does not
 cover them. The plugin launches `nx-mcp` from the CLI install and talks to the
-stack step 3 started, so do steps 1 to 3 first.
+stack step 3 started.
+
+With no CLI on the machine, open a conversation and say "Set up Nexus". Claude
+calls the plugin's `setup` tool, shows the four choices from [Two routes](#two-routes),
+and asks which you want. Desktop shows no message when Nexus is missing, so you
+have to ask, and it offers the plugin's skills in its `/` menu and not its
+commands, so there is no `/conexus:setup` there. Desktop has no progress
+display: ask "Is Nexus set up yet?" and Claude reads the status. When it says
+setup is done, start a new conversation. Or do steps 1 to 3 first, by hand.
 
 If the marketplace is already on your account from an earlier release, remove it
 and add it again; an existing one stayed at the release it was added at.
