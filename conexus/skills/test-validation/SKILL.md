@@ -77,7 +77,7 @@ suite, never about the individual test that was supposed to catch this bug.
 ## Bead Integration
 
 After validation:
-- **Tests pass + coverage adequate**: `/beads:close <id>` with success note
+- **Tests pass + coverage adequate**: `bd close <id>` with success note
 - **Tests fail**: Keep in_progress, may trigger debugging
 - **Coverage gaps**: Create new bead for missing tests
 

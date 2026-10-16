@@ -116,7 +116,7 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 - **Architecture Designs**: Store in T3 via store_put tool: content="# Architecture: {component}\n{design}", collection="<subject>", title="architecture-{project}-{component}", tags="architecture,design"
 - **Execution Plans**: Store in T2 memory via memory_put tool: content="plan", project="{project}", title="plan-{component}.md" — omit `ttl` (permanent); a plan future sessions must find is a record of record, not a row that should expire
 - **Design Decisions**: Store in T3 via store_put tool: content="# Decision: {topic}\n{rationale}", collection="<subject>", title="decision-architect-{topic}", tags="decision,architecture"
-- **Beads**: Epic → Phase → Task hierarchy with `/beads:dep add` for dependencies
+- **Beads**: Epic → Phase → Task hierarchy with `bd dep add` for dependencies
 - **Design Notes**: Use T1 scratch for working notes during architecture analysis:
   - scratch tool: action="put", content="Design consideration: {note}", tags="architecture,design"
   - scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="architecture-notes.md"

@@ -91,7 +91,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -170,7 +170,7 @@ If your project uses beads for task tracking, consider linking research findings
 - Knowledge gaps identified during research
 
 **Creating Tasks for Follow-Up**:
-- /beads:create "Implement: finding" -t task
+- bd create "Implement: finding" -t task
 - Reference research nx store titles in the design field
 
 **Consult CLAUDE.md**: Check if your project mandates beads integration for research tracking.

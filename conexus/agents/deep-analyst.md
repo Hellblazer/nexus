@@ -90,7 +90,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -184,7 +184,7 @@ Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty t
 ## Beads Integration
 
 - Check if analysis is associated with an existing bead
-- Create bead for significant analysis work: /beads:create "Analysis: topic" -t task
+- Create bead for significant analysis work: bd create "Analysis: topic" -t task
 - Update bead with key findings and conclusions
 - Close bead with analysis summary when complete
 

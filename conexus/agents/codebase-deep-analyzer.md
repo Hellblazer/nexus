@@ -90,13 +90,13 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Check `/beads:ready` for unblocked tasks.
+T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
 
 ### Link Context (before starting work)
 
@@ -199,8 +199,8 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
 ## Beads Integration
 
-- Check if analysis is part of a larger initiative: /beads:ready
-- Create bead for significant analysis work: /beads:create "Codebase analysis: scope" -t task
+- Check if analysis is part of a larger initiative: bd ready
+- Create bead for significant analysis work: bd create "Codebase analysis: scope" -t task
 - Update bead with progress during multi-session analysis
 - Close bead with summary of findings and deliverables
 

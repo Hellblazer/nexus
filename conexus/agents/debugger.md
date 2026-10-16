@@ -90,7 +90,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -198,11 +198,11 @@ Pattern: Form hypothesis -> Use search tool to gather evidence -> Validate with 
 
 ## Beads Integration
 
-- Check if a bead exists for the issue: /beads:show <id> or search with /beads:list
-- Create a bead if investigating a new bug: /beads:create "Bug: description" -t bug -p 1
-- Update bead status when starting: /beads:update <id> --status=in_progress
+- Check if a bead exists for the issue: bd show <id> or search with bd list
+- Create a bead if investigating a new bug: bd create "Bug: description" -t bug -p 1
+- Update bead status when starting: bd update <id> --status=in_progress
 - Add notes to bead with findings: update the design/notes field
-- Close bead with resolution: /beads:close <id> --reason "Root cause: X, fix: Y"
+- Close bead with resolution: bd close <id> --reason "Root cause: X, fix: Y"
 
 
 

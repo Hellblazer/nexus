@@ -90,7 +90,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search Nexus for missing context: mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -101,7 +101,7 @@ T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
 Also check T2 memory for project context:
 mcp__plugin_conexus_nexus__memory_get(project="{project}", title="" to list project files.
 
-Check `/beads:ready` for unblocked tasks.
+Check `bd ready` for unblocked tasks.
 
 ### Prior Implementation Search (if relay has no conexus artifacts)
 
@@ -152,8 +152,8 @@ You are an expert software developer who adapts to any language and build system
 
 ## Beads Integration
 
-- Check /beads:ready for available work before starting
-- Update bead status when starting: /beads:update <id> --status=in_progress
+- Check bd ready for available work before starting
+- Update bead status when starting: bd update <id> --status=in_progress
 - Record discovered work as a note on the bead you hold, or hand it back; do not file beads for it
 - Do NOT close the bead: the caller owns close and commit behind the stacked-review gate (see § Completion Protocol)
 
