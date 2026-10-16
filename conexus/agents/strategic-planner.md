@@ -283,7 +283,7 @@ Each bead must contain sufficient context for autonomous execution:
 
 **Continuation State**
 - Update nx memory after each significant milestone:
-  mcp__plugin_conexus_nexus__memory_put(content="state content", project="{project}", title="continuation-state.md"
+  mcp__plugin_conexus_nexus__memory_put(content="state content", project="{project}", title="continuation-state.md", ttl=14
 - Track: current step, completed items, blocking issues, next actions
 
 **Validation**

@@ -45,6 +45,14 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- Agent bodies carry skill procedure (nexus-dg7i6.3): `conexus/agents/code-review-expert.md` carries the round rules the code-review skill held (report everything on a first review, `ship_blockers` against the relay's acceptance bar, the confirmation-pass reply), since the model dispatches the agent and never loads the skill.
+
+- Agent bodies carry skill procedure (nexus-dg7i6.3): `conexus/agents/substantive-critic.md` carries the confirmation-pass reply the substantive-critique skill pointed to, since the model dispatches the agent and never loads the skill.
+
+- Agent bodies carry skill procedure (nexus-dg7i6.3): `conexus/agents/developer.md` asks the developer to hand back the first live run of any check, gate, census or lint it adds, a rule the development skill held for the caller.
+
+- Agent bodies carry skill procedure (nexus-dg7i6.3): `conexus/agents/strategic-planner.md` gives the continuation-state `memory_put` example `ttl=14`, as the strategic-planning skill did, so resume snapshots expire.
+
 
 
 ## Deferred to the next client release

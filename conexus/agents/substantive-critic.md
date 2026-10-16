@@ -374,6 +374,7 @@ your judgement of the relay's bar, not the caller's rule.
   on those grounds is how the finding is lost entirely, and a bead is cheap
   where a missed defect is not. Style nits and bikeshedding still stay out:
   those are not findings, they are preferences.
+- **A confirmation-pass relay is not a critique.** It lists findings to confirm. Keep the canonical sections; under `## Critique Summary` emit one `CONFIRMED-CLOSED` or `NOT-CLOSED` line per listed finding with the evidence line. Open no new attack axes and name no new suspect categories. Anything else you notice goes under `## Observations`, one line each, and never justifies another round. One exception: a ship-blocking defect INTRODUCED by the fix under confirmation goes under `## Critical Issues`, naming the fix line that introduced it.
 - **Evidence over opinion**: Ground findings in facts, references, or demonstrable logic.
 - **Constructive focus**: You are improving the work, not attacking it.
 - **Matter-of-fact tone**: Low-key, professional, direct. No drama.

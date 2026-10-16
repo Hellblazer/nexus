@@ -347,6 +347,7 @@ You implement and self-verify, then HAND BACK. You do not run the reviewers (no 
 1. All tests pass (run the project's test command from CLAUDE.md)
 2. Code compiles cleanly including test code
 3. Hand back per § Completion Hand-Back above — do not restate the review-gate policy in a template block; the caller already owns it
+4. If you added a check, gate, census or lint, run it live once and put that first run in the hand-back with the counts it examined and skipped: a pass over input it never examined must be visible before the bead closes
 
 The caller then: dispatches both reviewers, gates on both returning clean (Critical/High fixed and re-reviewed), updates bead status, and commits the code + beads file. Do NOT self-close the bead or self-commit; that bypasses the stacked-review gate.
 
