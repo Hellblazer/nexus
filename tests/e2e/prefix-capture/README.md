@@ -99,5 +99,18 @@ to every `conexus/evals` case), `sr_detach.sh` starts it detached through the
 credentials helper, and `score_sr.py ab/skillroute/out <conexus/evals>`
 reports positive-grader pass rate, zero-load rate on positive cases,
 negative-grader pass rate, and the skill-listing size of each arm's first
-request (an arm whose listing did not grow over S0 is flagged vacuous). The
-2026-10-16 smoke run listed 76, 104 and 135 entries for S0, S1 and S2.
+request (an arm S1 or S2 whose listing did not grow over S0 is flagged
+vacuous). The 2026-10-16 smoke run listed 76, 104 and 135 entries for S0, S1
+and S2.
+
+Arms `D` and `N` swap the conexus tree instead of adding plugins: the
+installed conexus is switched off in the container's settings and a tree is
+loaded with `--plugin-dir`, so the listing holds exactly one conexus. `D` loads
+the worktree's own `conexus/`; `N` loads `plugins/N/conexus`, which
+`export_conexus.sh <commit>` extracts from a commit fetched on chas (the
+narrowed conexus of nexus-dg7i6.2). The MCP servers of either tree hand off to
+the image's installed `nx`, so the nexus tools match S0. `score_sr.py` counts
+each arm's conexus entries, flags a listing name that appears twice, and takes
+markers `ARM:+name` / `ARM:-name` that must hold in every run of that arm, for
+example `D:+conexus:setup S0:-conexus:setup` (`setup` is a command develop has
+and the image's 7.79.0 does not).

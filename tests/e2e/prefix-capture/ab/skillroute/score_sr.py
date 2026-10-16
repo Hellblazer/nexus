@@ -1,6 +1,6 @@
 """Score skill-routing runs (nexus-dg7i6.1) with the conexus/evals graders.
 
-  python3 score_sr.py <out-dir> <conexus/evals dir>
+  python3 score_sr.py <out-dir> <conexus/evals dir> [ARM:+name | ARM:-name ...]
 
 For every run under <out-dir>/<ARM>/<case>/r<n>/ the main-session transcript's
 Skill calls are graded with that case's tool_used graders (input_match regex
@@ -9,7 +9,11 @@ same rule claude plugin eval applies. Per arm it reports positive-grader pass
 rate (loaded-skill recall on the cases that expect a skill), the zero-load
 rate on positive cases, negative-grader pass rate (absorption guards), and the
 number of entries in the first request's skill listing: an arm whose listing
-did not grow over S0 is vacuous, and the report says so.
+did not grow over S0 is vacuous, and the report says so. Arms D and N swap the
+conexus tree instead of adding plugins, so for every arm the report also counts
+the conexus entries and flags a duplicated listing name (two conexus copies
+loaded). A marker ARM:+name says that listing name must appear in every run of
+ARM, ARM:-name that it must not; it shows which conexus tree was loaded.
 """
 
 from __future__ import annotations
@@ -60,7 +64,7 @@ def tool_calls(run: Path) -> list[tuple[str, dict]]:
     return calls
 
 
-def listing_entries(run: Path) -> int | None:
+def listing_names(run: Path) -> list[str] | None:
     req = run / "requests.jsonl"
     if not req.exists():
         return None
@@ -75,7 +79,7 @@ def listing_entries(run: Path) -> int | None:
             continue
         section = blob[i:].split("\\n\\n", 2)
         lines = (section[1] if len(section) > 1 else section[0]).split("\\n")
-        return sum(1 for ln in lines if ln.startswith("- "))
+        return [ln[2:].split(": ", 1)[0] for ln in lines if ln.startswith("- ")]
     return None
 
 
@@ -88,12 +92,18 @@ def grade(calls: list[tuple[str, dict]], g: dict) -> tuple[bool, int]:
 
 def main() -> int:
     out_dir, evals = Path(sys.argv[1]), Path(sys.argv[2])
+    markers = []
+    for m in sys.argv[3:]:
+        arm_name, _, rest = m.partition(":")
+        markers.append((arm_name, rest[0] == "+", rest[1:]))
+    problems = []
     arms = sorted(p for p in out_dir.iterdir() if p.is_dir())
     summary = {}
     for arm in arms:
         pos = neg = pos_ok = neg_ok = 0
         pos_runs = zero = 0
         listings = []
+        conexus = []
         rows = []
         for case in sorted(p for p in arm.iterdir() if p.is_dir()):
             gs = graders(evals / case.name)
@@ -102,8 +112,15 @@ def main() -> int:
                     continue
                 calls = tool_calls(run)
                 skills = [i.get("skill", "?") for n, i in calls if n == "Skill"]
-                if (n := listing_entries(run)) is not None:
-                    listings.append(n)
+                if (names := listing_names(run)) is not None:
+                    listings.append(len(names))
+                    conexus.append(sum(1 for x in names if x.startswith("conexus:")))
+                    if dups := sorted({x for x in names if names.count(x) > 1}):
+                        problems.append(f"DUPLICATE LISTING NAMES {arm.name}/{case.name}/{run.name}: {dups}")
+                    for m_arm, want, name in markers:
+                        if m_arm == arm.name and (name in names) != want:
+                            problems.append(f"MARKER FAIL {arm.name}/{case.name}/{run.name}: "
+                                            f"{name} {'missing' if want else 'present'}")
                 verdicts = []
                 for g in gs:
                     ok, n_match = grade(calls, g)
@@ -120,19 +137,22 @@ def main() -> int:
         summary[arm.name] = {
             "positive_pass": f"{pos_ok}/{pos}", "negative_pass": f"{neg_ok}/{neg}",
             "zero_load_on_positive": f"{zero}/{pos_runs}",
-            "listing_entries_median": statistics.median(listings) if listings else None}
+            "listing_entries_median": statistics.median(listings) if listings else None,
+            "conexus_entries_median": statistics.median(conexus) if conexus else None}
         print(f"== {arm.name}: positive {pos_ok}/{pos}  negative {neg_ok}/{neg}  "
               f"zero-load(positive cases) {zero}/{pos_runs}  "
-              f"listing entries median {summary[arm.name]['listing_entries_median']}")
+              f"listing entries median {summary[arm.name]['listing_entries_median']}  "
+              f"conexus entries median {summary[arm.name]['conexus_entries_median']}")
         print("\n".join(rows))
     for name, s in summary.items():
         if s["listing_entries_median"] is None:
             print(f"NO LISTING FOUND for arm {name}: the listing check did not run")
     base = summary.get("S0", {}).get("listing_entries_median")
     for name, s in summary.items():
-        if name != "S0" and base is not None and s["listing_entries_median"] is not None \
+        if name in ("S1", "S2") and base is not None and s["listing_entries_median"] is not None \
                 and s["listing_entries_median"] <= base:
             print(f"VACUOUS ARM {name}: listing {s['listing_entries_median']} <= S0 {base}")
+    print("\n".join(problems))
     print(json.dumps(summary, indent=2))
     return 0
 

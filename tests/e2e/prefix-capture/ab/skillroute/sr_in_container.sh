@@ -1,10 +1,16 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Skill routing under distractor plugins (nexus-dg7i6.1). One container run.
-# Env: ARM (S0|S1|S2), CASE (a conexus/evals case directory name), ANTHROPIC_MODEL.
+# Env: ARM (S0|S1|S2|D|N), CASE (a conexus/evals case directory name), ANTHROPIC_MODEL.
 #   S0  the image's installed conexus + sn, nexus tools as shipped (8 eager)
 #   S1  S0 + every plugin under /plugins/S1 (the beads plugin)
 #   S2  S0 + every plugin under /plugins/S2 (the rest of the laptop's enabled set)
+#   D   S0 with the installed conexus disabled and the worktree's own conexus
+#       tree (/src/conexus) loaded with --plugin-dir instead
+#   N   the same with /plugins/N/conexus, a narrowed conexus (nexus-dg7i6.2)
+#       extracted from a commit by export_conexus.sh
+# D and N change only the plugin tree: its MCP servers hand off to the image's
+# installed nx, so the nexus tools are the ones S0 has.
 # /plugins is ab/skillroute/plugins (not committed; built by snapshot_plugins.sh).
 set -uo pipefail
 OUT=/out
@@ -32,6 +38,18 @@ PLUGIN_ARGS=()
 case "$ARM" in
   S0) : ;;
   S1|S2) for d in /plugins/"$ARM"/*/; do PLUGIN_ARGS+=(--plugin-dir "${d%/}"); done ;;
+  D|N)
+    TREE=/src/conexus; [ "$ARM" = N ] && TREE=/plugins/N/conexus
+    [ -f "$TREE/.claude-plugin/plugin.json" ] || { echo "no conexus tree at $TREE" >&2; exit 2; }
+    # Exactly one conexus in the listing: the installed one is switched off.
+    python3 - /home/nexus/.claude/settings.json <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d.setdefault("enabledPlugins", {})["conexus@nexus-plugins"] = False
+json.dump(d, open(p, "w"), indent=2)
+PY
+    PLUGIN_ARGS+=(--plugin-dir "$TREE") ;;
   *) echo "bad ARM $ARM" >&2; exit 2 ;;
 esac
 printf '%s\n' "arm=$ARM case=$CASE" "${PLUGIN_ARGS[@]}" > "$OUT/setup.txt"
