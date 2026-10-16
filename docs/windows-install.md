@@ -38,7 +38,7 @@ was not measured, it says so.
 
 ## Two routes
 
-There are two routes, and both end in the same install. Install Git first (step 2 below): the plugin marketplace is fetched with it, Claude Code on Windows needs it, and `nx doctor` checks for it. The route-one script itself does not need Git, but adding the plugin to Claude Code needs it. When Claude Code does not take the plugin, the script prints the two `/plugin` lines for you to type later.
+There are two routes, and both end in the same install. Install Git first (step 2 below), because Claude Code needs it to fetch the plugin and `nx doctor` checks for it. The route-one script does not need Git itself. If Claude Code does not take the plugin, the script prints the two `/plugin` lines for you to type later.
 
 **Route one: run one command.** In a normal (not elevated) PowerShell window:
 
@@ -72,11 +72,11 @@ In your first session Claude tells you that Nexus is not installed and asks the 
 | CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. On Windows it held about 2.5 GB after a first install (measured 2026-10-13, conexus 7.78.0). The disk paragraph in step 3 explains why a folder-size tool reports more than the sum.
+The sizes do not count the download cache that `uv` keeps until you run `uv cache clean`. On Windows it held about 2.5 GB after a first install by hand (measured 2026-10-14, conexus 7.78.0).
 
 ## Install by hand
 
-The numbered steps below are the install by hand. Use them when a route above fails, or when you want each step yourself. They are the steps the Phase 5 gate ran.
+The numbered steps below are the install by hand. Use them when a route above fails, or when you want each step yourself.
 
 ## 1. Install uv
 
@@ -247,12 +247,11 @@ cover them. The plugin launches `nx-mcp` from the CLI install and talks to the
 stack step 3 started.
 
 With no CLI on the machine, open a conversation and say "Set up Nexus". Claude
-calls the plugin's `setup` tool, shows the four choices from [Two routes](#two-routes),
-and asks which you want. Desktop shows no message when Nexus is missing, so you
-have to ask, and it offers the plugin's skills in its `/` menu and not its
-commands, so there is no `/conexus:setup` there. Desktop has no progress
-display: ask "Is Nexus set up yet?" and Claude reads the status. When it says
-setup is done, start a new conversation. Or do steps 1 to 3 first, by hand.
+shows the four choices from [Two routes](#two-routes) and asks which you want.
+Desktop does not tell you when Nexus is missing, so you have to ask. It offers
+the plugin's skills in its `/` menu and not its commands, so there is no
+`/conexus:setup` there. To see progress, ask "Is Nexus set up yet?". When Claude
+says setup is done, start a new conversation. Or do steps 1 to 3 first, by hand.
 
 If the marketplace is already on your account from an earlier release, remove it
 and add it again; an existing one stayed at the release it was added at.

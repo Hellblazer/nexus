@@ -145,7 +145,7 @@ td:first-child{font-weight:500;white-space:nowrap}
   <div><b>Mac, Linux, Windows</b><span>Apple Silicon Mac, Linux on x86-64 or arm64, Windows 11 on x64</span></div>
   <div><b>1.2 GB</b><span>memory when idle, about 4.5 GB while indexing</span></div>
   <div><b>No GPU</b><span>search runs on the CPU</span></div>
-  <div><b>~1.3 GB</b><span>download for the Local choice, with the service (all four choices are under The question)</span></div>
+  <div><b>~1.3 GB</b><span>download for the Local choice (all four choices are under The question)</span></div>
 </div>
 <p class="note">Nexus ships its own PostgreSQL, built for these platforms only, so an Intel Mac or Windows on ARM cannot run a local install and setup stops with an error. The memory figures come from an Apple Silicon Mac that indexed a medium-sized code repository. The first PDF you index downloads about 2.3 GB more, for the PDF models.</p>
 
@@ -182,32 +182,28 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 </ul>
 
 <h2 id="install">Install</h2>
-<p>There are two routes. Route one is one command that you run in a terminal. Route two starts inside Claude: you install uv, add the plugin, and answer one question. Both end in the same install.</p>
+<p>There are two routes, and both end in the same install.</p>
 
 <h3 id="route-one">Route one: run one command</h3>
-<p data-for="code">The command installs uv if you do not have it, installs the <code>nx</code> command, and adds the plugin to Claude Code. It asks you the question below once, before it downloads anything.</p>
-<p class="hidden" data-for="cli">The command installs uv if you do not have it and installs the <code>nx</code> command. It adds the Claude Code plugin when <code>claude</code> is on your PATH. It asks you the question below once, before it downloads anything.</p>
-<p class="hidden" data-for="desktop">The command installs uv if you do not have it, installs the <code>nx</code> command, and asks you the question below once, before it downloads anything. It cannot reach the plugin store of your Claude account. Add the plugin in Claude Desktop, as step 2 of route two shows.</p>
+<p data-for="code">The command installs uv if you do not have it, installs the <code>nx</code> command, and adds the plugin to Claude Code when <code>claude</code> is on your PATH. It asks the question below before it downloads anything.</p>
+<p class="hidden" data-for="cli">The command installs uv if you do not have it and installs the <code>nx</code> command. It adds the Claude Code plugin when <code>claude</code> is on your PATH. It asks the question below before it downloads anything.</p>
+<p class="hidden" data-for="desktop">The command installs uv if you do not have it, installs the <code>nx</code> command, and asks the question below before it downloads anything. It cannot reach the plugin store of your Claude account. Add the plugin in Claude Desktop, as step 2 of route two shows.</p>
 <div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
 <div class="cmd hidden" data-os-block="windows"><pre>irm https://hellblazer.github.io/nexus/install.ps1 | iex</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Typing the command is your permission to install the <code>nx</code> command, so the script does not ask about that. Its question has no Not now choice. With no terminal attached and no flag, it installs the <code>nx</code> command only and says so. If you chose Local, it also asks whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
+<p class="note">If you choose Local, the script also asks whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
 <p class="note" data-os-block="mac linux">To skip the question, add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example, this installs the service and does not start it at login:</p>
 <div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
 <p class="note hidden" data-os-block="windows">Run it in a normal PowerShell window, not an elevated one. The script itself does not need Git. Claude Code fetches the plugin with Git, so install Git first (see Tools to have) if you want the script to add the plugin.</p>
-<p class="note hidden" data-os-block="windows">The <code>iex</code> form cannot take flags. To skip the question, run the script as a script block and add the flags after it. The flags are the same: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example:</p>
+<p class="note hidden" data-os-block="windows">The <code>iex</code> form cannot take flags. To skip the question, run the script as a script block and add the flags after it. The flags are <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example:</p>
 <div class="cmd hidden" data-os-block="windows"><pre>&amp; ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
 
 <h3 id="route-two">Route two: install uv, add the plugin, answer one question</h3>
-<p data-for="cli">This route needs Claude Code or Claude Desktop. If you use only the <code>nx</code> command, run route one, or follow the steps under <a href="#by-hand">Install by hand</a>.</p>
+<p class="hidden" data-for="cli">This route needs Claude Code or Claude Desktop. If you use only the <code>nx</code> command, run route one, or follow the steps under <a href="#by-hand">Install by hand</a>.</p>
 <ol class="steps">
 <li><div class="step">
   <h3>Install uv</h3>
-  <p>uv is the one tool this route needs from you. Nexus also reads git information when it indexes a repository, so install git as shown under <a href="#before">Before you start</a> if you do not have it.</p>
-  <div class="cmd" data-os-block="mac"><pre>brew install uv</pre><button class="copy" type="button">Copy</button></div>
-  <div class="cmd hidden" data-os-block="linux"><pre>curl -LsSf https://astral.sh/uv/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
-  <div class="cmd hidden" data-os-block="windows"><pre>powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</pre><button class="copy" type="button">Copy</button></div>
-  <p class="note hidden" data-os-block="windows">Run it in a normal PowerShell window, not an elevated one. Then open a new PowerShell window so <code>uv</code> is on your PATH.</p>
-  <p class="note hidden" data-for="desktop"><span data-os-block="mac linux">When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</span></p>
+  <p>Install uv and git, as shown under <a href="#before">Before you start</a>. uv is the one tool this route needs from you.</p>
+  <div class="hidden" data-for="desktop"><p class="note" data-os-block="mac linux">When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</p></div>
 </div></li>
 <li data-for="code cli"><div class="step">
   <h3>Add the plugin</h3>
@@ -222,14 +218,14 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <li data-for="code cli"><div class="step">
   <h3>Answer the question</h3>
   <p>In your first session, Claude tells you that Nexus is not installed and asks the question below. Answer it. If you choose Local, Claude also asks whether the service should start when you log in.</p>
-  <p>Setup then runs in the background. For Local it takes from under two minutes on a fast connection to about seven on a slow one, and Claude can tell you how far it has got. When Claude says setup is done, reconnect the Nexus server: type <code>/mcp</code>, choose <code>nexus</code>, and choose Reconnect. A new session works too. The Nexus tools appear after that.</p>
-  <p class="note">If you choose Not now, nothing is installed. Each session then shows one line that names <code>/conexus:setup</code>, so you can answer later.</p>
+  <p>Setup then runs in the background. For Local it takes from under two minutes on a fast connection to about seven on a slow one (an estimate), and you can ask Claude for progress. When Claude says setup is done, reconnect the Nexus server: type <code>/mcp</code>, choose <code>nexus</code>, and choose Reconnect. A new session works too.</p>
+  <p class="note">If you choose Not now, each session shows one line that names <code>/conexus:setup</code>, so you can answer later.</p>
 </div></li>
 <li class="hidden" data-for="desktop"><div class="step">
   <h3>Ask Claude to set up Nexus</h3>
-  <p>Open a conversation and say this. Claude calls the Nexus setup tool, shows you the choices below, and asks which you want. Claude Desktop shows no message when Nexus is missing, so you have to ask. Desktop may ask you to allow the tool first.</p>
+  <p>Open a conversation and say this. Claude shows you the choices below and asks which you want. Claude Desktop does not tell you when Nexus is missing, so you have to ask. Desktop may ask you to allow the tool first.</p>
   <div class="cmd"><pre>Set up Nexus.</pre><button class="copy" type="button">Copy</button></div>
-  <p>Setup runs in the background, and Desktop has no progress display. Ask <em>"Is Nexus set up yet?"</em> and Claude reads the status. When it says setup is done, start a new conversation. The Nexus tools appear there.</p>
+  <p>Setup runs in the background. To see progress, ask <em>"Is Nexus set up yet?"</em>. When Claude says setup is done, start a new conversation.</p>
 </div></li>
 </ol>
 
@@ -237,12 +233,12 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <p>The route-one script asks this question without Not now, because typing the command is your permission to install. Route two asks it with all four choices:</p>
 <div class="tbl"><table>
 <tr><th>Choice</th><th>What happens</th><th>Download</th></tr>
-<tr><td>Local</td><td>Install the CLI and run a Nexus service on this machine</td><td>about 1.3 GB down, 2.4 GB on disk</td></tr>
-<tr><td>Cloud</td><td>Install the CLI and connect it to a managed service you have an address, token and tenant for</td><td>about 0.7 GB down, 1.6 GB on disk</td></tr>
-<tr><td>CLI only</td><td>Install the CLI and decide about a service later</td><td>about 0.7 GB down, 1.6 GB on disk</td></tr>
+<tr><td>Local</td><td>Install the <code>nx</code> command and run a Nexus service on this machine</td><td>about 1.3 GB down, 2.4 GB on disk</td></tr>
+<tr><td>Cloud</td><td>Install the <code>nx</code> command and connect it to a managed service you have an address, token and tenant for</td><td>about 0.7 GB down, 1.6 GB on disk</td></tr>
+<tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.7 GB down, 1.6 GB on disk</td></tr>
 <tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
 </table></div>
-<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one the script runs <code>nx config init</code> and you type them in the terminal. The sizes do not count the download cache that uv keeps until you run <code>uv cache clean</code>. After a first install the cache held about 2.4 GB on Linux and about 2.5 GB on Windows.</p>
+<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one you type them in the terminal. The sizes do not count the download cache that uv keeps until you run <code>uv cache clean</code>. After a first install the cache used about 2.4 GB on Linux and about 2.5 GB on Windows.</p>
 
 <h3 id="after">After the install</h3>
 <ol class="steps">
@@ -284,7 +280,7 @@ nx upgrade        <span class="c"># update the service, the data, and the plugin
   <h3>Remove the Claude integration</h3>
   <p data-for="code cli">In Claude Code:</p>
   <div class="cmd" data-for="code cli"><pre>/plugin uninstall conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
-  <p data-for="desktop">In Claude Desktop: Settings → Connectors → Desktop → Conexus → Uninstall. This removes the extension only, and steps 3 and 4 remove the service and the data.</p>
+  <p class="hidden" data-for="desktop">In Claude Desktop: Settings → Connectors → Desktop → Conexus → Uninstall. This removes the extension only, and steps 3 and 4 remove the service and the data.</p>
   <p class="note">If you use both Claude Code and Claude Desktop, do both.</p>
 </div></li>
 <li><div class="step">
@@ -367,14 +363,8 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
 /plugin install conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
   <p class="note">Then run <code>/conexus:nx-preflight</code>, which checks that everything the plugin needs is present.</p>
 </div></li>
-<li><div class="step">
-  <h3>Index a repository and search it</h3>
-  <div class="cmd"><pre>cd your-project
-nx index repo .
-nx search "how does retry work"</pre><button class="copy" type="button">Copy</button></div>
-  <p class="note">If you index the same repository again, Nexus skips files that did not change. For a large repository, add <code>--monitor</code> to see the progress for each file.</p>
-</div></li>
 </ol>
+<p>Then follow <a href="#after">After the install</a>.</p>
 
 </section>
 
@@ -424,9 +414,8 @@ nx doctor</pre><button class="copy" type="button">Copy</button></div>
 <details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Your install runs on Python 3.14, which does not work yet. Run these two commands in order: <code>uv tool install conexus --force --python 3.12</code> (on Linux, add <code>--torch-backend cpu</code>), then <code>nx self install</code>.<span class="hidden" data-os-block="windows"> On Windows, run <code>nx daemon service stop</code> first, because the install replaces files that the running service uses.</span></p></details>
 <details class="hidden" data-os-block="linux"><summary>Linux: uv says "unexpected argument '--torch-backend'"</summary><p>Your uv is older than 0.9.19. Run <code>uv self update</code>, or update uv with the package manager that installed it. Then run the install command again. Do not leave the option off: uv then installs the 4.3 GB GPU build of torch.</p></details>
 <details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If the index was interrupted, run <code>nx index repo .</code> again and it continues where it stopped. If you updated with <code>uv tool install</code>, see "Update Nexus" above.</p></details>
-<details data-for="code cli"><summary>Plugin installed but its tools never appear</summary><p>The usual cause is that the <code>nx</code> command is not installed, or that setup has not finished. Type <code>/conexus:setup</code>. It shows what is missing and asks you before it installs anything. After setup is done, reconnect the <code>nexus</code> server with <code>/mcp</code>. <code>/conexus:nx-preflight</code> also lists what is missing.</p></details>
+<details data-for="code cli"><summary>Plugin installed but its tools never appear</summary><p>The usual cause is that the <code>nx</code> command is not installed, that setup has not finished, or that you chose Not now. Type <code>/conexus:setup</code>. It shows what is missing and asks you before it installs anything. After setup is done, reconnect the <code>nexus</code> server with <code>/mcp</code>. <code>/conexus:nx-preflight</code> also lists what is missing.</p></details>
 <details class="hidden" data-for="desktop"><summary>Plugin added but Claude shows no Nexus tools</summary><p>The usual cause is that the <code>nx</code> command is not installed, or that setup has not finished. Say <em>Set up Nexus</em> in a conversation. Claude shows what is missing and asks you before it installs anything. After setup is done, start a new conversation.</p></details>
-<details data-for="code cli"><summary>Claude never asked the question</summary><p>The question is asked in a session that starts with the plugin added and no <code>nx</code> command found. If you chose Not now earlier, or the session started before you added the plugin, type <code>/conexus:setup</code>.</p></details>
 <details><summary>Nothing above helps</summary><p>Paste the <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a> as the first message of a Claude Code session, and Claude checks the install step by step and asks you before it changes any data.</p></details>
 
 <h2 id="what">What you installed</h2>
@@ -467,6 +456,8 @@ nx doctor</pre><button class="copy" type="button">Copy</button></div>
       if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,fail);}else{fail();}
     });
   });
+  function openHash(){var e=location.hash&&document.getElementById(location.hash.slice(1));if(e&&e.tagName==="DETAILS")e.open=true;}
+  openHash();addEventListener("hashchange",openHash);
   apply();
 })();
 </script>
