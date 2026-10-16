@@ -27,6 +27,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -68,8 +69,11 @@ if "%1"=="tool" if "%2"=="run" (
         echo stand-in uv: the build failed 1>&2
         exit /b 1
     )
-    if not exist "%USERPROFILE%\\.local\\bin" mkdir "%USERPROFILE%\\.local\\bin"
-    copy /y "{root}\\nx-standin.cmd" "%USERPROFILE%\\.local\\bin\\nx.cmd" >nul
+    if defined UV_TORCH_BACKEND (>> "{root}\\uv-env.log" echo UV_TORCH_BACKEND=%UV_TORCH_BACKEND%) else (>> "{root}\\uv-env.log" echo UV_TORCH_BACKEND=^<unset^>)
+    if not exist "{root}\\skip-nx" (
+        if not exist "%USERPROFILE%\\.local\\bin" mkdir "%USERPROFILE%\\.local\\bin"
+        copy /y "{root}\\nx-standin.cmd" "%USERPROFILE%\\.local\\bin\\nx.cmd" >nul
+    )
 )
 exit /b 0
 """
@@ -79,6 +83,7 @@ if "%1"=="--version" (
     exit /b 0
 )
 >> "{rec}" echo nx %*
+if defined NX_LOCAL (>> "{root}\\nx-env.log" echo %1 NX_LOCAL=%NX_LOCAL%) else (>> "{root}\\nx-env.log" echo %1 NX_LOCAL=^<unset^>)
 if exist "{root}\\fail-nx" exit /b 1
 exit /b 0
 """
@@ -93,8 +98,10 @@ exit /b 0
 # the uv stand-in where the real one puts uv.
 _UV_INSTALLER = """\
 Add-Content -LiteralPath '{rec}' -Value 'uv-installer'
+if (Test-Path -LiteralPath '{root}{sep}fail-uv-installer') {{ exit 3 }}
 $dir = Join-Path '{home}' '.local'
 $dir = Join-Path $dir 'bin'
+if ($env:UV_INSTALL_DIR) {{ $dir = $env:UV_INSTALL_DIR }}
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item -LiteralPath '{root}{sep}uv-standin{ext}' -Destination (Join-Path $dir 'uv{ext}')
 if ($IsLinux -or $IsMacOS) {{ & chmod +x (Join-Path $dir 'uv') }}
@@ -116,6 +123,7 @@ class Box:
         self.home = root / "home"
         self.bin = root / "bin"
         self.rec = root / "rec.log"
+        self.extra_env: dict[str, str] = {}
         self.home.mkdir()
         self.bin.mkdir()
         (root / "tmp").mkdir()
@@ -163,6 +171,10 @@ class Box:
         (self.root / f"fail-{what}").write_text("")
         return self
 
+    def env_log(self, name: str) -> list[str]:
+        path = self.root / name
+        return [line.strip() for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+
     # ---- running ---------------------------------------------------------------------
     def env(self, *, assume_terminal: bool = False) -> dict[str, str]:
         if WINDOWS:
@@ -186,6 +198,7 @@ class Box:
         })
         if assume_terminal:
             env["NX_INSTALL_ASSUME_TERMINAL"] = "1"
+        env.update(self.extra_env)
         return env
 
     def run(
@@ -371,7 +384,7 @@ def test_single_dash_flags_are_accepted_too(box: Box) -> None:
     """PowerShell users type ``-Local``; the same flags work in either spelling."""
     box.with_uv()
     assert box.run("-Local", "-NoAutostart").returncode == 0
-    assert _nx_calls(box) == ["nx init --no-autostart"]
+    assert _nx_calls(box) == ["nx init --no-autostart --no-beads-prime"]
 
 
 # ---- the terminal, through the seam (every platform) ------------------------------------------
@@ -389,7 +402,7 @@ def test_answering_3_builds_the_cli_and_starts_no_service(box: Box) -> None:
 
 @needs_pwsh
 @pytest.mark.parametrize(
-    ("answer", "expected"), [("y", "nx init --yes"), ("n", "nx init --no-autostart"), ("", "nx init --no-autostart")],
+    ("answer", "expected"), [("y", "nx init --yes --no-beads-prime"), ("n", "nx init --no-autostart --no-beads-prime"), ("", "nx init --no-autostart --no-beads-prime")],
     ids=["yes", "no", "empty-is-no"],
 )
 def test_local_answer_then_the_autostart_question(box: Box, answer: str, expected: str) -> None:
@@ -408,7 +421,7 @@ def test_local_alone_with_a_terminal_asks_the_autostart_question_only(box: Box) 
     result = box.run("--local", stdin="y\n")
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert SERVICE_QUESTION not in result.stdout
-    assert _nx_calls(box) == ["nx init --yes"]
+    assert _nx_calls(box) == ["nx init --yes --no-beads-prime"]
 
 
 @needs_pwsh
@@ -417,7 +430,7 @@ def test_an_autostart_flag_with_a_terminal_asks_nothing_about_it(box: Box) -> No
     result = box.run("--local", "--autostart", stdin="")
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "Start the service at login?" not in result.stdout
-    assert _nx_calls(box) == ["nx init --yes"]
+    assert _nx_calls(box) == ["nx init --yes --no-beads-prime"]
 
 
 @needs_pwsh
@@ -475,7 +488,7 @@ def test_with_a_real_terminal_local_asks_the_autostart_question(box: Box) -> Non
         answers=[("Choose 1, 2 or 3 [3]:", "1"), ("[y/N]:", "y")],
     )
     assert status == 0, output
-    assert _nx_calls(box) == ["nx init --yes"], box.calls()
+    assert _nx_calls(box) == ["nx init --yes --no-beads-prime"], box.calls()
 
 
 @needs_pwsh
@@ -510,12 +523,12 @@ def test_local_with_no_terminal_and_no_autostart_flag_passes_no_autostart(box: B
     box.with_uv()
     result = box.run("--local")
     assert result.returncode == 0, (result.stdout, result.stderr)
-    assert _nx_calls(box) == ["nx init --no-autostart"], box.calls()
+    assert _nx_calls(box) == ["nx init --no-autostart --no-beads-prime"], box.calls()
 
 
 @needs_pwsh
 @pytest.mark.parametrize(
-    ("flag", "expected"), [("--no-autostart", "nx init --no-autostart"), ("--autostart", "nx init --yes")],
+    ("flag", "expected"), [("--no-autostart", "nx init --no-autostart --no-beads-prime"), ("--autostart", "nx init --yes --no-beads-prime")],
 )
 def test_local_with_an_autostart_flag_passes_the_matching_flag(box: Box, flag: str, expected: str) -> None:
     box.with_uv()
@@ -525,7 +538,10 @@ def test_local_with_an_autostart_flag_passes_the_matching_flag(box: Box, flag: s
 
 @needs_pwsh
 def test_cloud_runs_the_config_wizard(box: Box) -> None:
+    """With no terminal the wizard can only skip its prompts, which it does for what the
+    environment already holds."""
     box.with_uv()
+    box.extra_env.update({"NX_SERVICE_URL": "https://managed.example.test", "NX_SERVICE_TOKEN": "t"})
     assert box.run("--cloud").returncode == 0
     assert _nx_calls(box) == ["nx config init"]
 
@@ -591,7 +607,7 @@ def test_the_second_run_with_local_still_runs_init(box: Box) -> None:
     assert box.run("--local", "--no-autostart").returncode == 0
     assert box.run("--local", "--no-autostart").returncode == 0
     assert box.calls().count(BOOTSTRAP) == 1
-    assert _nx_calls(box) == ["nx init --no-autostart"] * 2
+    assert _nx_calls(box) == ["nx init --no-autostart --no-beads-prime"] * 2
 
 
 @needs_pwsh
@@ -607,7 +623,7 @@ def test_a_cli_that_already_resolves_skips_the_build(box: Box, where: str) -> No
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert BOOTSTRAP not in box.calls()
     assert "already installed" in result.stdout
-    assert _nx_calls(box) == ["nx init --no-autostart"]
+    assert _nx_calls(box) == ["nx init --no-autostart --no-beads-prime"]
 
 
 @needs_pwsh
@@ -664,7 +680,7 @@ def test_a_failing_claude_is_a_warning_not_a_failure(box: Box) -> None:
     result = box.run("--local", "--no-autostart")
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "/plugin install conexus@nexus-plugins" in result.stdout + result.stderr
-    assert _nx_calls(box) == ["nx init --no-autostart"], "the service step still ran"
+    assert _nx_calls(box) == ["nx init --no-autostart --no-beads-prime"], "the service step still ran"
 
 
 # ---- conduct ---------------------------------------------------------------------------------
@@ -714,8 +730,236 @@ def test_a_directory_missing_from_the_users_path_is_pointed_out(box: Box) -> Non
 
 @needs_pwsh
 def test_the_script_never_writes_outside_the_home_it_was_given(box: Box) -> None:
+    """Walks the whole sandbox, not only its top level."""
     box.with_uv().with_claude()
     assert box.run("--local", "--no-autostart").returncode == 0
     written = {p.name for p in box.root.iterdir()}
-    allowed_prefixes = ("home", "bin", "tmp", "rec.log", "uv-standin", "nx-standin", "claude-standin", "uv-installer")
+    allowed_prefixes = (
+        "home", "bin", "tmp", "rec.log", "uv-standin", "nx-standin", "claude-standin", "uv-installer",
+        "uv-env.log", "nx-env.log",
+    )
     assert all(name.startswith(allowed_prefixes) for name in written), written
+    assert list((box.root / "tmp").iterdir()) == [], "the script left a temporary file"
+    in_home = {p.relative_to(box.home).parts[0] for p in box.home.rglob("*")}
+    # PowerShell keeps its own data under ~/.cache (Linux) and AppData (Windows); the script
+    # writes only .local.
+    assert in_home <= {".local", ".cache", "AppData"}, in_home
+
+
+# ---- the CPU build of torch on Linux (nexus-sv2wx.28) --------------------------------------------
+# The script reads the platform from PowerShell ($IsLinux), which no stand-in can change, so the
+# Linux case runs on a Linux machine (CI runs this file on one) and the others assert nothing is set.
+
+LINUX = sys.platform.startswith("linux")
+
+
+@needs_pwsh
+@pytest.mark.skipif(not LINUX, reason="the Linux branch runs where PowerShell says it is Linux")
+def test_on_linux_the_build_asks_for_the_cpu_build_of_torch(box: Box) -> None:
+    box.with_uv()
+    assert box.run("--cli-only").returncode == 0
+    assert box.env_log("uv-env.log") == ["UV_TORCH_BACKEND=cpu"]
+
+
+@needs_pwsh
+@pytest.mark.skipif(not LINUX, reason="the Linux branch runs where PowerShell says it is Linux")
+def test_nx_torch_backend_wins_over_cpu_on_linux(box: Box) -> None:
+    box.with_uv()
+    box.extra_env["NX_TORCH_BACKEND"] = "cu121"
+    assert box.run("--cli-only").returncode == 0
+    assert box.env_log("uv-env.log") == ["UV_TORCH_BACKEND=cu121"]
+
+
+@needs_pwsh
+@pytest.mark.skipif(not LINUX, reason="the Linux branch runs where PowerShell says it is Linux")
+def test_an_ambient_uv_torch_backend_is_replaced_on_linux(box: Box) -> None:
+    box.with_uv()
+    box.extra_env["UV_TORCH_BACKEND"] = "cu121"
+    assert box.run("--cli-only").returncode == 0
+    assert box.env_log("uv-env.log") == ["UV_TORCH_BACKEND=cpu"]
+
+
+@needs_pwsh
+@pytest.mark.skipif(LINUX, reason="off Linux the script sets no torch backend")
+def test_off_linux_the_script_sets_no_torch_backend(box: Box) -> None:
+    """The plugin's setup sets nothing on Windows or macOS either."""
+    box.with_uv()
+    assert box.run("--cli-only").returncode == 0
+    assert box.env_log("uv-env.log") == ["UV_TORCH_BACKEND=<unset>"]
+
+
+# ---- the build asks for the newest conexus ----------------------------------------------------
+
+
+@needs_pwsh
+def test_the_build_requirement_is_conexus_at_latest(box: Box) -> None:
+    box.with_uv()
+    assert box.run("--cli-only").returncode == 0
+    (build,) = [c for c in box.calls() if c.startswith("uv tool run")]
+    assert "--from conexus@latest" in build
+    assert build == BOOTSTRAP
+
+
+# ---- --local means local ----------------------------------------------------------------------
+
+
+@needs_pwsh
+def test_local_forces_local_mode_on_the_one_nx_init_call(box: Box) -> None:
+    box.with_uv()
+    assert box.run("--local", "--no-autostart").returncode == 0
+    assert box.env_log("nx-env.log") == ["init NX_LOCAL=1"]
+
+
+@needs_pwsh
+def test_an_ambient_nx_local_of_zero_does_not_defeat_local(box: Box) -> None:
+    box.with_uv()
+    box.extra_env["NX_LOCAL"] = "0"
+    assert box.run("--local", "--no-autostart").returncode == 0
+    assert box.env_log("nx-env.log") == ["init NX_LOCAL=1"]
+
+
+@needs_pwsh
+def test_cloud_does_not_set_nx_local(box: Box) -> None:
+    box.with_uv()
+    box.extra_env.update({"NX_SERVICE_URL": "https://managed.example.test", "NX_SERVICE_TOKEN": "t"})
+    assert box.run("--cloud").returncode == 0
+    assert box.env_log("nx-env.log") == ["config NX_LOCAL=<unset>"]
+
+
+# ---- --cloud with no terminal ----------------------------------------------------------------
+
+
+@needs_pwsh
+def test_cloud_with_no_terminal_and_no_credentials_stops_before_anything_is_downloaded(box: Box) -> None:
+    result = box.run("--cloud")
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "NX_SERVICE_URL" in result.stderr and "NX_SERVICE_TOKEN" in result.stderr
+    assert box.calls() == [], "something ran before the refusal"
+
+
+@needs_pwsh
+def test_cloud_with_an_address_but_no_token_is_refused_too(box: Box) -> None:
+    box.extra_env["NX_SERVICE_URL"] = "https://managed.example.test"
+    result = box.run("--cloud")
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert box.calls() == []
+
+
+@needs_pwsh
+def test_cloud_with_a_mint_credential_in_the_environment_goes_ahead(box: Box) -> None:
+    box.with_uv()
+    box.extra_env.update({"NX_SERVICE_URL": "https://managed.example.test", "NX_MINT_TOKEN": "t"})
+    assert box.run("--cloud").returncode == 0
+    assert _nx_calls(box) == ["nx config init"]
+
+
+# ---- nx init runs the way setup runs it --------------------------------------------------------
+
+
+@needs_pwsh
+def test_nx_init_is_told_not_to_install_a_beads_file(box: Box) -> None:
+    box.with_uv()
+    assert box.run("--local", "--autostart").returncode == 0
+    assert box.run("--local", "--no-autostart").returncode == 0
+    assert len(_nx_calls(box)) == 2
+    assert all(c.endswith("--no-beads-prime") for c in _nx_calls(box)), _nx_calls(box)
+
+
+# ---- uv's installer: its directory, its exit status, its temporary file ------------------------
+
+
+@needs_pwsh
+def test_uv_installed_into_uv_install_dir_is_found(box: Box) -> None:
+    custom = box.root / "uvdir"
+    box.extra_env["UV_INSTALL_DIR"] = str(custom)
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert (custom / f"uv{EXT}").exists()
+    assert BOOTSTRAP in box.calls()
+
+
+@needs_pwsh
+def test_a_failing_uv_installer_stops_the_script_and_leaves_no_file(box: Box) -> None:
+    box.failing("uv-installer")
+    result = box.run("--cli-only")
+    assert result.returncode != 0
+    assert "uv installer failed" in result.stderr
+    assert BOOTSTRAP not in box.calls()
+    assert list((box.root / "tmp").iterdir()) == []
+
+
+@needs_pwsh
+def test_the_uv_installer_temporary_file_is_removed(box: Box) -> None:
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert list((box.root / "tmp").iterdir()) == []
+
+
+@needs_pwsh
+def test_a_download_that_fails_leaves_no_file(box: Box) -> None:
+    box.extra_env["NX_INSTALL_UV_URL"] = (box.root / "no-such-installer.ps1").as_uri()
+    result = box.run("--cli-only")
+    assert result.returncode != 0
+    assert "could not download the uv installer" in result.stderr
+    assert list((box.root / "tmp").iterdir()) == []
+
+
+# ---- NX_INSTALL_UV_URL ------------------------------------------------------------------------
+
+
+@needs_pwsh
+def test_the_uv_url_override_is_named_never_printed(box: Box) -> None:
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "NX_INSTALL_UV_URL" in result.stdout
+    assert "uv-installer.ps1" not in result.stdout + result.stderr
+
+
+@needs_pwsh
+def test_a_plain_http_uv_url_is_refused_and_not_printed(box: Box) -> None:
+    box.extra_env["NX_INSTALL_UV_URL"] = "http://internal.example.test/secret-path/uv.ps1"
+    result = box.run("--cli-only")
+    assert result.returncode != 0
+    assert "NX_INSTALL_UV_URL" in result.stderr
+    assert "secret-path" not in result.stdout + result.stderr
+    assert box.calls() == []
+
+
+@needs_pwsh
+def test_the_uv_url_override_is_not_mentioned_when_uv_is_already_there(box: Box) -> None:
+    box.with_uv()
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "NX_INSTALL_UV_URL" not in result.stdout + result.stderr
+
+
+# ---- where the CLI is, and what the script says about it --------------------------------------
+
+
+@needs_pwsh
+def test_a_build_that_leaves_no_nx_names_the_generation_layout(box: Box) -> None:
+    box.with_uv()
+    (box.root / "skip-nx").write_text("")
+    result = box.run("--cli-only")
+    assert result.returncode != 0
+    layout = box.home / ".local" / "share" / "nexus" / "tools" / "current" / "bin"
+    assert str(layout) in result.stderr
+
+
+@needs_pwsh
+def test_a_tilde_tools_directory_is_expanded(box: Box) -> None:
+    box.with_uv()
+    box._install("nx-standin", box.home / "custom" / "tools" / "current" / "bin", "nx")
+    box.extra_env["NX_TOOLS_DIR"] = "~/custom/tools"
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert BOOTSTRAP not in box.calls()
+
+
+@needs_pwsh
+def test_a_relative_tools_directory_is_refused(box: Box) -> None:
+    box.with_uv()
+    box._install("nx-standin", box.root / "rel" / "tools" / "current" / "bin", "nx")
+    box.extra_env["NX_TOOLS_DIR"] = "rel/tools"
+    assert box.run("--cli-only").returncode == 0
+    assert BOOTSTRAP in box.calls()

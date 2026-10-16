@@ -22,9 +22,12 @@ main() {
     NX_INSTALL_NAME="install.sh"
     NX_MARKETPLACE="Hellblazer/nexus"
     NX_PLUGIN="conexus@nexus-plugins"
-    # The uv project's own installer. The variable is a test seam (file:// works)
-    # and is never printed.
+    # The uv project's own installer. NX_INSTALL_UV_URL replaces it (a test seam;
+    # file: works). The script says the override is in use, by name, and never prints
+    # the value; only https: and file: are accepted.
     UV_INSTALLER_URL="${NX_INSTALL_UV_URL:-https://astral.sh/uv/install.sh}"
+    UV_URL_OVERRIDDEN=no
+    if [ -n "${NX_INSTALL_UV_URL:-}" ]; then UV_URL_OVERRIDDEN=yes; fi
 
     say() { printf '%s\n' "$*"; }
     warn() { printf '%s\n' "$*" >&2; }
@@ -39,9 +42,13 @@ main() {
 	Usage: install.sh [--local | --cloud | --cli-only] [--autostart | --no-autostart]
 
 	  --local          Run the storage service on this machine. Downloads up to about
-	                   1.3 GB. Runs `nx init`.
+	                   1.3 GB. Runs `nx init`, in local mode even when a service
+	                   address is already configured.
 	  --cloud          Use a managed service. Runs `nx config init`, which asks for the
-	                   service address and your token.
+	                   service address and your token. With no terminal attached it
+	                   needs NX_SERVICE_URL and NX_SERVICE_TOKEN (or NX_MINT_TOKEN) in
+	                   the environment, and stops before downloading anything without
+	                   them.
 	  --cli-only       Install the command-line tool and nothing else.
 	  --autostart      With --local: start the service at login. Passed to `nx init`
 	                   as --yes.
@@ -52,7 +59,10 @@ main() {
 	Typing this command is your consent to install the command-line tool, so the
 	script does not ask about that. It installs uv first when uv is missing, using
 	the uv project's own installer. When nx is already installed it skips the build
-	and says so.
+	and says so. The build downloads about 700 MB (the conexus package and its
+	dependencies; measured on Linux x86-64 with 7.81.0). On Linux it asks for the CPU
+	build of torch, so it does not download the CUDA libraries, about 4.5 GB more (set
+	NX_TORCH_BACKEND to choose another build).
 
 	With no service flag, the script asks one question on the terminal, before it
 	downloads anything. With no terminal attached and no flag, it installs the
@@ -155,6 +165,15 @@ main() {
         fi
     fi
 
+    # --cloud with no terminal: the wizard can only skip its prompts for what the
+    # environment already holds. Stop now, not after the build. Presence only; the
+    # values are never read or printed.
+    if [ "$MODE" = cloud ] && [ "$TTY" = no ]; then
+        if [ -z "${NX_SERVICE_URL:-}" ] || { [ -z "${NX_SERVICE_TOKEN:-}" ] && [ -z "${NX_MINT_TOKEN:-}" ]; }; then
+            bad_usage "--cloud needs a terminal to ask for the service address and token. Run it in a terminal, or set NX_SERVICE_URL and NX_SERVICE_TOKEN (or NX_MINT_TOKEN) first. Nothing was changed."
+        fi
+    fi
+
     # ---- where things are -------------------------------------------------------------
     expand() { # a directory setting: ~ and ~/ expanded, a relative path refused
         case $1 in
@@ -170,7 +189,7 @@ main() {
 
     # ---- uv ---------------------------------------------------------------------------
     uv_dir_on_path() { # put the first directory that holds uv on the PATH
-        for d in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+        for d in "${XDG_BIN_HOME:-$HOME/.local/bin}" "${UV_INSTALL_DIR:-$HOME/.local/bin}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
             if [ -x "$d/uv" ]; then PATH="$d:$PATH"; export PATH; return 0; fi
         done
         return 1
@@ -179,19 +198,29 @@ main() {
         if command -v uv >/dev/null 2>&1; then return 0; fi
         if uv_dir_on_path; then return 0; fi
         say "uv is not installed; installing it with the uv project's own installer."
+        if [ "$UV_URL_OVERRIDDEN" = yes ]; then
+            say "Using the uv installer named by NX_INSTALL_UV_URL."
+            case $UV_INSTALLER_URL in
+                https:*|file:*) ;;
+                *) die "NX_INSTALL_UV_URL must be an https: or file: URL. Nothing was changed." ;;
+            esac
+        fi
         # Fetch to a file, then run it: in a pipe, a failed download would be hidden
-        # by the shell that runs the empty result.
+        # by the shell that runs the empty result. The file goes when the script ends,
+        # however it ends.
+        fetched=""
+        trap 'rm -f "$fetched"' EXIT
+        trap 'exit 1' INT TERM
         fetched=$(mktemp "${TMPDIR:-/tmp}/nx-install-uv.XXXXXX") || die "could not create a temporary file."
         fetch_failed="could not download the uv installer. Install uv (https://docs.astral.sh/uv/), then run this again."
         if command -v curl >/dev/null 2>&1; then
-            curl -LsSf "$UV_INSTALLER_URL" -o "$fetched" || { rm -f "$fetched"; die "$fetch_failed"; }
+            curl -LsSf "$UV_INSTALLER_URL" -o "$fetched" || die "$fetch_failed"
         elif command -v wget >/dev/null 2>&1; then
-            wget -q -O "$fetched" "$UV_INSTALLER_URL" || { rm -f "$fetched"; die "$fetch_failed"; }
+            wget -q -O "$fetched" "$UV_INSTALLER_URL" || die "$fetch_failed"
         else
-            rm -f "$fetched"
             die "curl or wget is needed to install uv. Install one of them, or install uv yourself (https://docs.astral.sh/uv/), then run this again."
         fi
-        sh "$fetched" || { rm -f "$fetched"; die "the uv installer failed. Install uv (https://docs.astral.sh/uv/), then run this again."; }
+        sh "$fetched" || die "the uv installer failed. Install uv (https://docs.astral.sh/uv/), then run this again."
         rm -f "$fetched"
         uv_dir_on_path || true
         command -v uv >/dev/null 2>&1 || die "uv was installed but is not on the PATH. Open a new terminal and run this again."
@@ -220,9 +249,22 @@ main() {
         say "The Nexus CLI is already installed ($NX); skipping the build."
     else
         say "Building the Nexus CLI (this downloads the conexus package)."
-        uv tool run --python 3.12 --from conexus nx self install --bootstrap \
-            || die "the build failed (see the lines above). Nothing else was done."
-        find_cli || die "the build finished but nx was not found in $BIN_DIR. Open a new terminal and run this again."
+        # conexus@latest, not bare conexus: uv reuses the environment it cached for a bare
+        # requirement, which can be a conexus from before --bootstrap existed.
+        # On Linux the build gets the CPU build of torch, as the plugin's setup tool gives
+        # it to the same build (its build_env function): without it uv installs the CUDA torch
+        # and its libraries, about 4.5 GB. NX_TORCH_BACKEND alone overrides, and an
+        # ambient UV_TORCH_BACKEND is replaced, so the throwaway environment and the
+        # generation get the same torch. A uv too old to know the variable ignores it.
+        if [ "$(uname -s 2>/dev/null || true)" = Linux ]; then
+            UV_TORCH_BACKEND="${NX_TORCH_BACKEND:-cpu}" \
+                uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap \
+                || die "the build failed (see the lines above). Nothing else was done."
+        else
+            uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap \
+                || die "the build failed (see the lines above). Nothing else was done."
+        fi
+        find_cli || die "the build finished but nx was not found in $TOOLS_DIR/current/bin. Open a new terminal and run this again."
     fi
 
     # ---- the plugin -------------------------------------------------------------------
@@ -245,8 +287,10 @@ main() {
     case $MODE in
         local)
             if [ "$AUTOSTART" = yes ]; then flag=--yes; else flag=--no-autostart; fi
-            say "Setting up the local service: nx init $flag"
-            "$NX" init "$flag" </dev/null \
+            say "Setting up the local service: nx init $flag --no-beads-prime"
+            # NX_LOCAL=1 on this one call: nx init picks the managed arm when a service
+            # address is configured, and --local asked for the local service.
+            NX_LOCAL=1 "$NX" init "$flag" --no-beads-prime </dev/null \
                 || die "nx init did not finish. The CLI is installed; fix the cause above and run \`nx init\` again."
             ;;
         cloud)

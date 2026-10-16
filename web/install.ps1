@@ -25,10 +25,12 @@ function Install-Nexus {
     $state = @{ Mode = ''; Autostart = ''; AutostartArg = ''; Terminal = $false; Nx = '' }
     $marketplace = 'Hellblazer/nexus'
     $plugin = 'conexus@nexus-plugins'
-    # The uv project's own installer. NX_INSTALL_UV_URL is a test seam (a file: URL
-    # works) and is never printed.
+    # The uv project's own installer. NX_INSTALL_UV_URL replaces it (a test seam; a file:
+    # URL works). The script says the override is in use, by name, and never prints the
+    # value; only https: and file: are accepted.
     $uvInstallerUrl = 'https://astral.sh/uv/install.ps1'
-    if ($env:NX_INSTALL_UV_URL) { $uvInstallerUrl = $env:NX_INSTALL_UV_URL }
+    $uvUrlOverridden = $false
+    if ($env:NX_INSTALL_UV_URL) { $uvInstallerUrl = $env:NX_INSTALL_UV_URL; $uvUrlOverridden = $true }
 
     function Say([string]$Text) { Write-Host $Text }
     function Warn([string]$Text) { [Console]::Error.WriteLine($Text) }
@@ -48,9 +50,13 @@ when claude is on the PATH, and sets up the storage service if you ask for it.
 Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostart]
 
   --local          Run the storage service on this machine. Downloads up to about
-                   1.3 GB. Runs `nx init`.
+                   1.3 GB. Runs `nx init`, in local mode even when a service
+                   address is already configured.
   --cloud          Use a managed service. Runs `nx config init`, which asks for the
-                   service address and your token.
+                   service address and your token. With no terminal attached it
+                   needs NX_SERVICE_URL and NX_SERVICE_TOKEN (or NX_MINT_TOKEN) in
+                   the environment, and stops before downloading anything without
+                   them.
   --cli-only       Install the command-line tool and nothing else.
   --autostart      With --local: start the service at login. Passed to `nx init`
                    as --yes.
@@ -61,7 +67,8 @@ Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostar
 Typing this command is your consent to install the command-line tool, so the
 script does not ask about that. It installs uv first when uv is missing, using
 the uv project's own installer. When nx is already installed it skips the build
-and says so.
+and says so. The build downloads about 700 MB (the conexus package and its
+dependencies; measured on Linux x86-64 with 7.81.0).
 
 With no service flag, the script asks one question on the terminal, before it
 downloads anything. With no terminal attached and no flag, it installs the
@@ -168,6 +175,15 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             }
         }
 
+        # --cloud with no terminal: the wizard can only skip its prompts for what the
+        # environment already holds. Stop now, not after the build. Presence only; the
+        # values are never read or printed.
+        if ($state.Mode -eq 'cloud' -and -not $state.Terminal) {
+            if (-not $env:NX_SERVICE_URL -or (-not $env:NX_SERVICE_TOKEN -and -not $env:NX_MINT_TOKEN)) {
+                Bad-Usage '--cloud needs a terminal to ask for the service address and token. Run it in a terminal, or set NX_SERVICE_URL and NX_SERVICE_TOKEN (or NX_MINT_TOKEN) first. Nothing was changed.'
+            }
+        }
+
         # ---- where things are ---------------------------------------------------------
         $homeDir = $env:USERPROFILE
         if (-not $homeDir) { $homeDir = $env:HOME }
@@ -217,6 +233,12 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             if (Get-Command uv -ErrorAction SilentlyContinue) { return }
             if (Add-UvDirToPath) { return }
             Say "uv is not installed; installing it with the uv project's own installer."
+            if ($uvUrlOverridden) {
+                Say 'Using the uv installer named by NX_INSTALL_UV_URL.'
+                if ($uvInstallerUrl -notmatch '^(https|file):') {
+                    Stop-Install 1 'install.ps1: NX_INSTALL_UV_URL must be an https: or file: URL. Nothing was changed.'
+                }
+            }
             # Fetch to a file, then run it in a child PowerShell with the execution policy
             # set for that one process, as the uv documentation does.
             $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('nx-install-uv-' + [guid]::NewGuid().ToString('N') + '.ps1')
@@ -263,8 +285,21 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             Say ('The Nexus CLI is already installed (' + $state.Nx + '); skipping the build.')
         } else {
             Say 'Building the Nexus CLI (this downloads the conexus package).'
-            & uv tool run --python 3.12 --from conexus nx self install --bootstrap
-            if ($LASTEXITCODE -ne 0) { Stop-Install 1 'install.ps1: the build failed (see the lines above). Nothing else was done.' }
+            # conexus@latest, not bare conexus: uv reuses the environment it cached for a bare
+            # requirement, which can be a conexus from before --bootstrap existed.
+            # On Linux (PowerShell 7 there, which is how this script is tested) the build gets
+            # the CPU build of torch, as install.sh gives it; Windows and macOS get nothing.
+            $torchBefore = $env:UV_TORCH_BACKEND
+            if ($IsLinux) {
+                $env:UV_TORCH_BACKEND = $(if ($env:NX_TORCH_BACKEND) { $env:NX_TORCH_BACKEND } else { 'cpu' })
+            }
+            try {
+                & uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap
+                $buildCode = $LASTEXITCODE
+            } finally {
+                if ($IsLinux) { $env:UV_TORCH_BACKEND = $torchBefore }
+            }
+            if ($buildCode -ne 0) { Stop-Install 1 'install.ps1: the build failed (see the lines above). Nothing else was done.' }
             if (-not (Find-Cli)) {
                 Stop-Install 1 ('install.ps1: the build finished but nx was not found in ' + $layoutBin + '. Open a new terminal and run this again.')
             }
@@ -293,9 +328,18 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
         # ---- the service --------------------------------------------------------------
         if ($state.Mode -eq 'local') {
             $flag = if ($state.Autostart -eq 'yes') { '--yes' } else { '--no-autostart' }
-            Say ('Setting up the local service: nx init ' + $flag)
-            & $state.Nx init $flag
-            if ($LASTEXITCODE -ne 0) {
+            Say ('Setting up the local service: nx init ' + $flag + ' --no-beads-prime')
+            # NX_LOCAL=1 on this one call: nx init picks the managed arm when a service
+            # address is configured, and --local asked for the local service.
+            $localBefore = $env:NX_LOCAL
+            $env:NX_LOCAL = '1'
+            try {
+                & $state.Nx init $flag --no-beads-prime
+                $initCode = $LASTEXITCODE
+            } finally {
+                $env:NX_LOCAL = $localBefore
+            }
+            if ($initCode -ne 0) {
                 Stop-Install 1 'install.ps1: nx init did not finish. The CLI is installed; fix the cause above and run `nx init` again.'
             }
         } elseif ($state.Mode -eq 'cloud') {

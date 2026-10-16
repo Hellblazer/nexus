@@ -8,8 +8,10 @@ file, which is how the installer tests see what the script ran. ``{rec}`` is tha
 standard library, so it loads on Windows too.
 """
 
-# What the script runs for the CLI build, word for word (the bead's Build item 3).
-BOOTSTRAP = "uv tool run --python 3.12 --from conexus nx self install --bootstrap"
+# What the script runs for the CLI build, word for word (the bead's Build item 3). The
+# requirement is ``conexus@latest``: a bare ``conexus`` reuses the environment ``uv`` cached on an
+# earlier run, which may predate ``--bootstrap`` (nexus-sv2wx.28).
+BOOTSTRAP = "uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap"
 
 # Strings the script prints that the tests look for.
 SERVICE_QUESTION = "How should Nexus run its storage service?"
@@ -22,9 +24,12 @@ if [ "$1" = tool ] && [ "$2" = run ]; then
         echo "stand-in uv: the build failed" >&2
         exit 1
     fi
-    mkdir -p "$HOME/.local/bin"
-    cp "{root}/nx-standin" "$HOME/.local/bin/nx"
-    chmod +x "$HOME/.local/bin/nx"
+    printf 'UV_TORCH_BACKEND=%s\\n' "${{UV_TORCH_BACKEND-<unset>}}" >> "{root}/uv-env.log"
+    if [ ! -e "{root}/skip-nx" ]; then
+        mkdir -p "$HOME/.local/bin"
+        cp "{root}/nx-standin" "$HOME/.local/bin/nx"
+        chmod +x "$HOME/.local/bin/nx"
+    fi
 fi
 exit 0
 """
@@ -35,6 +40,7 @@ if [ "$1" = "--version" ]; then
     exit 0
 fi
 printf 'nx %s\\n' "$*" >> "{rec}"
+printf '%s NX_LOCAL=%s\\n' "$1" "${{NX_LOCAL-<unset>}}" >> "{root}/nx-env.log"
 if [ -e "{root}/fail-nx" ]; then
     exit 1
 fi
