@@ -745,6 +745,8 @@ WINDOWS_TEST_SET = (
     # plugin structure checks and the hooks' Knowledge Map readers; 21 of these failed on
     # native Windows while only five hook files ran here.
     "tests/hooks/",
+    # RDR-228 Phase 3: the PowerShell installer's tests; the self-hosted lab pool has no pwsh.
+    "tests/test_install_ps1.py",
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
@@ -794,8 +796,9 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
     # a floor that can be passed by a mostly-skipped or much smaller run is no floor
     passed = int(re.search(r"--min-passed (\d+)", floor["run"]).group(1))
     skipped = int(re.search(r"--max-skipped (\d+)", floor["run"]).group(1))
-    assert passed >= 1000, passed
-    assert skipped <= passed // 20, f"{skipped} skips against a {passed} pass floor is a mostly-skipped run"
+    assert passed >= 2750, passed
+    # 6%, not 5%: RDR-228 Phase 2's POSIX-only hook cases skip on Windows (Sam, 2026-10-16).
+    assert skipped <= passed * 6 // 100, f"{skipped} skips against a {passed} pass floor is a mostly-skipped run"
 
 
 #: The tests only a real Windows run exercises. Each is a ``--require-passed`` pattern in the floor
@@ -818,6 +821,8 @@ REAL_KERNEL_PATTERNS = (
     "tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows",
     # nexus-3fme8: the hooks' Knowledge Map read under a locale that is not UTF-8.
     "test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale",
+    # RDR-228 Phase 3: the PowerShell installer, whose cases skip where there is no pwsh.
+    "test_help_states_the_autostart_default_and_installs_nothing",
 )
 
 

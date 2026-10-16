@@ -84,20 +84,9 @@ def _default_lockstep_marker() -> str | None:
     (``<nexus_config_dir()>/cli_lockstep_marker``; ``NX_LOCKSTEP_MARKER``
     overrides for tests, mirroring the hook). ``None`` = never confirmed or
     unreadable — a comparison INPUT, never an authority."""
-    import os  # noqa: PLC0415 — stdlib, deferred with the module's on-disk-read convention
+    from nexus.lockstep_marker import read_marker  # noqa: PLC0415 — deferred to avoid import cycle
 
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle
-
-    override = os.environ.get("NX_LOCKSTEP_MARKER")
-    marker = (
-        Path(override) if override
-        else nexus_config_dir() / "cli_lockstep_marker"
-    )
-    try:
-        text = marker.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
+    return read_marker()
 
 
 def _lockstep_report(

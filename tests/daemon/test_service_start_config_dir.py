@@ -32,6 +32,7 @@ def test_foreground_start_reads_the_flagged_config_dir_not_the_home_one(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     # Recorded so the teardown removes whatever the command exports.
     monkeypatch.setenv("NEXUS_CONFIG_DIR", "")
     monkeypatch.delenv("NEXUS_CONFIG_DIR")
@@ -62,6 +63,7 @@ def test_foreground_start_without_the_flag_leaves_the_environment_alone(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     monkeypatch.setenv("NEXUS_CONFIG_DIR", "")
     monkeypatch.delenv("NEXUS_CONFIG_DIR")
     seen: dict[str, object] = {}

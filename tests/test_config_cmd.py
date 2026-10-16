@@ -302,7 +302,8 @@ def test_config_init_hides_the_token_as_it_is_typed(runner, fake_home) -> None:
         assert result.exit_code == 0, result.output
         assert f"typed-secret-{kind}" not in result.output
         # ...and the visible answers do echo, so the check above is not blind.
-        assert "https://svc.example.com" in result.output
+        # (a token match, not a substring test, which CodeQL reads as URL sanitizing)
+        assert result.output.split().count("https://svc.example.com") >= 1, result.output
 
 
 def test_config_init_replaces_the_other_kind_so_the_config_never_holds_both(runner, fake_home) -> None:

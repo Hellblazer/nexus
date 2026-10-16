@@ -109,6 +109,10 @@ on:
       - tests/test_mcp_win_stdin.py
       - src/nexus/mcp/_win_stdin.py
       - tests/hooks/test_endpoint_resolve_lease_retry.py
+      # RDR-228 Phase 3: the PowerShell installer runs its tests here, where PowerShell is real.
+      - web/install.ps1
+      - tests/test_install_ps1.py
+      - tests/_installer_standins.py
       # nexus-3fme8: the job runs all of tests/hooks/ and the two Knowledge Map hook classes of
       # tests/test_context.py, but only source paths trigger the workflow: this workflow has no
       # per-job filter, so a test-only edit here would rebuild the PG bundle and the engine on the
@@ -377,7 +381,7 @@ jobs:
       # that quietly stopped running.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -411,7 +415,15 @@ jobs:
       # 0 failed. The floor is 2150 (about 90%) and the ceiling the 5% cap against it
       # (2150 // 20 = 107), a margin of 13. The non-UTF-8 locale pin is named because a skip of it
       # would hide the encoding fix.
+      # RDR-228 Phase 2 (nexus-sv2wx.24, Sam 2026-10-16) added POSIX-only cases to tests/hooks/
+      # (shebangs, dangling links and uv's sh polyglot in test_cli_cannot_start.py, plus the
+      # launcher, shim and setup files), in files whose Windows cases run here. Develop at
+      # 1e46c2d47 skipped 222 (0 failed); 671d0d31a stopped generating 72 POSIX matrix cells on
+      # Windows, leaving 150. The ceiling is 163, the same margin of 13 over that count. The same
+      # run passed 3062, so the floor rises to 2750 (about 90%), and the cap the workflow test
+      # holds is 6% of the floor (2750 * 6 // 100 = 165): 5% of any floor this run can meet is
+      # under 150.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 2150 --max-skipped 107 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 2750 --max-skipped 163 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing

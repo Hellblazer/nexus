@@ -4276,6 +4276,17 @@ run the plain command:
   example). Move or remove it and run the command again. On Windows nothing is
   written into the bin directory, so this check does not apply.
 
+- **The version-lockstep marker.** A bootstrap that installs a generation (a
+  fresh build or a finished leftover) writes the running version to
+  `cli_lockstep_marker` in the config directory (`NX_LOCKSTEP_MARKER` replaces the
+  path), the file the plugin's SessionStart hook compares with the plugin's
+  version. The installer scripts (`web/install.sh`, `web/install.ps1`) build the
+  CLI with this command and without the plugin's setup, which writes the same
+  marker after its own checked build; without it the first Claude session would
+  announce an upgrade and dispatch one (nexus-sv2wx.28). A dry run, a refusal and
+  a failed build write nothing, and a marker that cannot be written is a warning,
+  not a failure.
+
 Two bootstraps running at once are not guarded here; the setup process's lock
 (RDR-228 P2.2) covers that.
 
