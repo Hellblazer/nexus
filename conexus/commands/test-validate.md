@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Validate tests using test-validator agent
+disable-model-invocation: true
 ---
 
 # Test Validation Request

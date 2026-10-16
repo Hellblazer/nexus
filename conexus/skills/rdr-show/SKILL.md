@@ -59,7 +59,7 @@ effort: low
 (not closed yet)
 ```
 
-7. If the RDR ID is not found, list available RDRs (delegate to `/conexus:rdr-list` behavior).
+7. If the RDR ID is not found, list available RDRs (run `nx rdr preamble rdr-list` through Bash, the table the user's `/rdr-list` shows).
 
 ## Success Criteria
 
@@ -68,7 +68,7 @@ effort: low
 - [ ] Linked beads shown with status (if `epic_bead` is set in T2)
 - [ ] Supersedes/Superseded-by relationships displayed
 - [ ] Catalog links displayed (if catalog initialized and RDR indexed)
-- [ ] Fallback to `/conexus:rdr-list` behavior if RDR ID not found
+- [ ] Fallback to `nx rdr preamble rdr-list` if RDR ID not found
 
 ## Agent-Specific PRODUCE
 

@@ -18,7 +18,7 @@ line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 ## Action
 
-Follow the `rdr-audit` skill body.
+Follow the `rdr-audit-checklist` skill body.
 
 The preamble above has already derived the target project and pre-scoped the evidence layer, AND (RDR-201 P1.8, nexus-j9z30.8) run a closed-vocabulary scan of the target's `docs/rdr/*.md` frontmatter against the packaged `rdr-lifecycle` table: any on-disk `status:` value outside the table's domain is printed as a `FINDING:` line naming the file and the value; a file carrying `kind: companion` is skipped and counted separately (companions carry no lifecycle status at all). A separate `T2 <repo>_rdr status census:` line reports the same repo's T2-side status counts — this is informational only, never merged into the file findings. Directly under it, one `DRIFT:` line per RDR whose file frontmatter status and T2 status disagree, plus a count: nothing reconciles the two surfaces automatically (the SessionStart reconcile that claimed to had never run and was deleted, nexus-e19sa; `set-status` writes the file, the lifecycle skills write T2), so a disagreement is a finding for a human to settle by hand (bead nexus-nxn5g carries the known nine). If those `FINDING:` lines are non-empty, surface them to the user alongside the skill body's own drift-audit summary below; they are a distinct, mechanically-checked signal from the LLM-judged silent-scope-reduction audit the rest of this command runs.
 

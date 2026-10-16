@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Implement feature using developer agent
+disable-model-invocation: true
 ---
 
 # Implementation Request

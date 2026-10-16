@@ -1,6 +1,6 @@
 ---
 name: why-was-this-written
-description: Use when the design intent behind a failing code path must be reduced from several RDRs/notes before trusting a fix — not for dispatching a debugger, that's /conexus:debug.
+description: Use when the design intent behind a failing code path must be reduced from several RDRs/notes before trusting a fix — not for dispatching a debugger, that's /conexus:debugging.
 effort: medium
 ---
 
@@ -13,7 +13,7 @@ reduced from several RDRs/notes** — the debug plan surfaces that
 decision history. A single-corpus RDR lookup is a `search` call — see
 "When direct `search` is fine" below. This skill is retrieval only — it
 does not dispatch a debugger. For hypothesis-driven fault isolation, use
-`/conexus:debug`.
+`/conexus:debugging`.
 
 **Note — the debug scenario is intentionally flat** (no `traverse`
 step). Dev work starts from a concrete failing path; the primary
@@ -50,7 +50,7 @@ falls through to an inline `claude -p` planner.
   `jet_brains_find_referencing_symbols`, etc.). The debug plan
   surfaces design context; Serena surfaces code structure. Use them
   together.
-- **`/conexus:debug`** — once the design context is known, the
+- **`/conexus:debugging`** — once the design context is known, the
   hypothesis-driven debugging skill guides the iterative fix loop.
 
 ## When direct `search` is fine

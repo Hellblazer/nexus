@@ -1,7 +1,7 @@
 ---
 allowed-tools: Bash
 description: Check that all conexus plugin dependencies are correctly installed and configured
-disable-model-invocation: false
+disable-model-invocation: true
 ---
 
 !`nx command-context nx-preflight`

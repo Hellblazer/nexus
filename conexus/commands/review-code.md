@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Review code changes using code-review-expert agent
+disable-model-invocation: true
 ---
 
 # Code Review Request

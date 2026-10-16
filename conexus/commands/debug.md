@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Debug test failures using debugger agent
+disable-model-invocation: true
 ---
 
 # Debug Request

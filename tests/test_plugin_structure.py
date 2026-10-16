@@ -397,6 +397,16 @@ class TestSkillDescriptionCSO:
         assert not offenders, "\n".join(offenders)
 
 
+def _hides_from_model(path: Path) -> bool:
+    """True when the file's frontmatter carries `disable-model-invocation: true`.
+
+    A regex on the frontmatter block, not yaml.safe_load, for the same reason
+    as ``_description_bytes``: some command frontmatter is not strict YAML.
+    """
+    fm = re.match(r"^---\n(.*?)\n---", path.read_text(encoding="utf-8"), re.DOTALL)
+    return bool(fm and re.search(r"(?m)^disable-model-invocation:\s*true\s*$", fm.group(1)))
+
+
 class TestSkillListingByteBudget:
     """nexus-cnzei.6 (injection audit S3): Claude Code drops descriptions
     from the Skill-tool listing once the listing exceeds a fraction of the
@@ -428,7 +438,13 @@ class TestSkillListingByteBudget:
         return len(m.group(1).strip().encode("utf-8")) if m else 0
 
     def test_total_description_bytes_under_budget(self) -> None:
-        paths = list(skill_skill_mds()) + command_files() + agent_files()
+        # nexus-dg7i6.2: an entry with `disable-model-invocation: true` is not in
+        # the model's listing at all, so its description is not counted here.
+        paths = [
+            p
+            for p in list(skill_skill_mds()) + command_files() + agent_files()
+            if not _hides_from_model(p)
+        ]
         assert paths, "no skill/command/agent files found — path resolution broke"
         total = sum(self._description_bytes(p) for p in paths)
         assert total < self._TOTAL_DESCRIPTION_BUDGET_BYTES, (
@@ -438,6 +454,116 @@ class TestSkillListingByteBudget:
             f"listing is at real risk of Claude Code dropping the least-"
             f"invoked skills' descriptions (injection audit S3)"
         )
+
+class TestModelHiddenCommands:
+    """nexus-dg7i6.2: ten commands are user-only, so the model's listing does
+    not carry them.
+
+    Agents load relevant skills less as the listing grows, and the description
+    of an entry that does not apply suppresses loading (T3 notes 1.11.758 and
+    1.11.759). Eight of these commands wrap a same-topic skill and had no
+    model-initiated invocation in 30 days; ``rdr-list`` and ``nx-preflight``
+    are user-only. ``disable-model-invocation: true`` removes the entry from
+    the model's context and keeps the ``/slash`` form for the user.
+
+    The cost of hiding a command is every place that told the model to run it:
+    the model cannot run it any more, so model-facing routing must name the
+    skill (or the CLI line) instead. User-facing documents (README, the
+    registry's ``slash_command`` fields) keep naming the commands.
+    """
+
+    #: command stem -> the skill the model is routed to instead (None: no
+    #: wrapped skill; the model-facing alternative is a CLI line, pinned below).
+    HIDDEN: dict[str, str | None] = {
+        "debug": "debugging",
+        "review-code": "code-review",
+        "test-validate": "test-validation",
+        "create-plan": "strategic-planning",
+        "implement": "development",
+        "research": "research-synthesis",
+        "analyze-code": "codebase-analysis",
+        "plan-audit": "plan-validation",
+        "rdr-list": None,
+        "nx-preflight": None,
+    }
+
+    _TEXT_SUFFIXES = {".md", ".py", ".sh", ".json", ".yaml", ".yml", ".txt"}
+
+    def _model_facing_files(self) -> list[Path]:
+        """Everything the model reads as instruction: agents, skills, shared
+        resources, hook scripts, the commands that stay model-invocable, and the
+        wheel's own hook texts. README, CHANGELOG and registry.yaml are user-facing
+        documents and stay out."""
+        files: list[Path] = []
+        for sub in ("agents", "skills", "resources", "hooks"):
+            files += [
+                p for p in (PLUGIN_DIR / sub).rglob("*")
+                if p.is_file() and p.suffix in self._TEXT_SUFFIXES
+            ]
+        files += [p for p in command_files() if not _hides_from_model(p)]
+        src = REPO_ROOT / "src" / "nexus"
+        files += sorted((src / "hooks").glob("*.py")) + [src / "session_start_guidance.py"]
+        return files
+
+    def test_every_hidden_command_carries_the_flag(self) -> None:
+        missing = [
+            name for name in self.HIDDEN
+            if not _hides_from_model(COMMANDS_DIR / f"{name}.md")
+        ]
+        assert not missing, f"commands without `disable-model-invocation: true`: {missing}"
+
+    def test_no_other_command_is_hidden(self) -> None:
+        """The set is closed: the model does invoke continuation, setup,
+        pdf-process, devonthink-index and the rdr-* lifecycle commands."""
+        hidden = {p.stem for p in command_files() if _hides_from_model(p)}
+        assert hidden == set(self.HIDDEN), (
+            f"hidden commands differ from the audited set: extra={sorted(hidden - set(self.HIDDEN))} "
+            f"missing={sorted(set(self.HIDDEN) - hidden)}"
+        )
+
+    def test_the_skill_each_hidden_command_wraps_exists(self) -> None:
+        for name, skill in self.HIDDEN.items():
+            if skill is not None:
+                assert (SKILLS_DIR / skill / "SKILL.md").is_file(), f"/{name} -> skill {skill!r} is gone"
+
+    def test_no_model_facing_text_names_a_hidden_command(self) -> None:
+        names = "|".join(re.escape(n) for n in self.HIDDEN)
+        # `(?![\w-])` keeps `/conexus:debugging` and `/conexus:rdr-list-foo` from matching `debug`.
+        ref = re.compile(rf"(?<![\w-])/(?:conexus|nx):({names})(?![\w-])")
+        offenders: list[str] = []
+        for path in self._model_facing_files():
+            for m in ref.finditer(path.read_text(encoding="utf-8")):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {m.group(0)}")
+        assert not offenders, (
+            "model-facing text routes the model to a command it can no longer run; "
+            "name the skill (see TestModelHiddenCommands.HIDDEN) or the CLI line instead:\n"
+            + "\n".join(sorted(offenders))
+        )
+
+    def test_the_routing_skill_names_the_skill_in_place_of_each_command(self) -> None:
+        text = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text(encoding="utf-8")
+        for name, skill in self.HIDDEN.items():
+            if skill is not None:
+                assert f"/conexus:{skill}" in text, (
+                    f"using-nx-skills/SKILL.md no longer routes to {skill!r} (was /conexus:{name})"
+                )
+        assert "nx rdr preamble rdr-list" in text, "the RDR list route lost its CLI line"
+
+    def test_the_registry_flag_matches_the_frontmatter(self) -> None:
+        entries = {**REGISTRY.get("utility_commands", {}), **REGISTRY.get("rdr_skills", {})}
+        checked = 0
+        for name, meta in entries.items():
+            path = COMMANDS_DIR / f"{name}.md"
+            if path.is_file() and "disable_model_invocation" in meta:
+                checked += 1
+                assert meta["disable_model_invocation"] == _hides_from_model(path), (
+                    f"registry.yaml {name}.disable_model_invocation "
+                    f"disagrees with {path.name}'s frontmatter"
+                )
+        for name in ("nx-preflight", "plan-audit", "rdr-list"):
+            assert entries[name].get("disable_model_invocation") is True, f"registry.yaml {name} lost its flag"
+        assert checked >= 5, f"only {checked} registry entries were compared; the walk found nothing to check"
+
 
 def _command_bash_block(text: str) -> str | None:
     """Return the body of the documented ```! fenced bash block, or None.

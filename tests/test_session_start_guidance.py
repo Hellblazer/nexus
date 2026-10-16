@@ -61,22 +61,30 @@ _IMPERATIVE_BUDGET_BYTES = 1500
 #: baseline: every one of these must still be reachable from SKILL.md
 #: after the inversion, even though none of them survive in the short
 #: SessionStart form any more.
+#:
+#: nexus-dg7i6.2: nine of the command destinations became user-only
+#: (``disable-model-invocation: true``), so SKILL.md now routes the model to the
+#: skill each one wraps. The destination moved, not dropped; each row below
+#: carries its replacement. ``/conexus:rdr-list`` became the CLI line
+#: ``nx rdr preamble rdr-list``, which ``_DESTINATION_RE`` does not match, so it
+#: is pinned by ``tests/test_plugin_structure.py::TestModelHiddenCommands``
+#: instead, so this set holds 38 rows.
 _PRE_INVERSION_DESTINATIONS = frozenset(
     {
         "/conexus:analyze",
-        "/conexus:analyze-code",
+        "/conexus:codebase-analysis",  # was /conexus:analyze-code (nexus-dg7i6.2)
         "/conexus:architecture",
         "/conexus:brainstorming-gate",
         "/conexus:catalog",
         "/conexus:cli-controller",
-        "/conexus:create-plan",
-        "/conexus:debug",
+        "/conexus:strategic-planning",  # was /conexus:create-plan (nexus-dg7i6.2)
+        "/conexus:debugging",  # was /conexus:debug (nexus-dg7i6.2)
         "/conexus:deep-analysis",
         "/conexus:document",
         "/conexus:enrich-plan",
         "/conexus:finishing-branch",
         "/conexus:git-worktrees",
-        "/conexus:implement",
+        "/conexus:development",  # was /conexus:implement (nexus-dg7i6.2)
         # nexus-cnzei.4: /conexus:knowledge-tidy (command) was deleted and
         # merged into the /conexus:knowledge-tidying skill, which is now the
         # sole entry point — the destination moved, not dropped.
@@ -84,27 +92,26 @@ _PRE_INVERSION_DESTINATIONS = frozenset(
         "/conexus:nexus",
         "/conexus:pdf-process",
         "/conexus:phase-review-gate",
-        "/conexus:plan-audit",
+        "/conexus:plan-validation",  # was /conexus:plan-audit (nexus-dg7i6.2)
         "/conexus:query",
         "/conexus:rdr-accept",
         "/conexus:rdr-audit",
         "/conexus:rdr-close",
         "/conexus:rdr-create",
         "/conexus:rdr-gate",
-        "/conexus:rdr-list",
         "/conexus:rdr-research",
         "/conexus:rdr-show",
         "/conexus:receiving-review",
-        "/conexus:research",
+        "/conexus:research-synthesis",  # was /conexus:research (nexus-dg7i6.2)
         # nexus-cnzei.4: the bare-verb "review" skill (nx_answer verb=review,
         # decision-history retrieval) was renamed to decision-drift-review —
         # "review" invited confusion with code review. Destination moved,
         # not dropped.
         "/conexus:decision-drift-review",
-        "/conexus:review-code",
+        "/conexus:code-review",  # was /conexus:review-code (nexus-dg7i6.2)
         "/conexus:serena-code-nav",
         "/conexus:substantive-critique",
-        "/conexus:test-validate",
+        "/conexus:test-validation",  # was /conexus:test-validate (nexus-dg7i6.2)
         "/conexus:writing-nx-skills",
         "mcp__plugin_conexus_nexus__plan_save",
         "mcp__plugin_conexus_nexus__plan_search",
@@ -226,8 +233,8 @@ def test_guidance_imperative_is_nonempty():
 #: red run here by deleting a row -- fix the drift the row is reporting.
 _TRIGGER_ANCHOR_PAIRS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("no design of record", ("brainstorming-gate",)),
-    ("failed fix attempt", ("/conexus:debug",)),
-    ("cross-module design", ("/conexus:architecture", "/conexus:create-plan")),
+    ("failed fix attempt", ("/conexus:debugging",)),
+    ("cross-module design", ("/conexus:architecture", "/conexus:strategic-planning")),
     ("quality gate", ("Quality gates",)),
     ("reduced from many documents", ("REDUCED FROM MANY DOCUMENTS",)),
     ("t1/t2/t3", ("Conexus Storage Tiers",)),

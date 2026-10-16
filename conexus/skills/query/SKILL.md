@@ -98,9 +98,8 @@ The five verb skills (`/conexus:design-to-code-trace` [verb: research],
 `dimensions={"verb": …}` filter so the plan matcher narrows to the right
 template family — the skill's own name no longer matches its verb string for
 three of the five (nexus-cnzei.4: renamed off the bare verb name to stop
-colliding with, respectively, the `/conexus:research` and `/conexus:debug`
-agent-dispatch commands, and to stop inviting confusion with
-`/conexus:review-code`). Pick the verb that matches the question shape; fall
+colliding with, respectively, the `research` and `debug` agent-dispatch
+commands, and to stop inviting confusion with the `review-code` command). Pick the verb that matches the question shape; fall
 back to this plain `/conexus:query` skill when no verb cleanly fits.
 
 ## Anti-patterns

@@ -65,7 +65,7 @@ before synthesis.
 - **Using `analyze` when `research` would suffice.** `research` is
   single-concept; `analyze` implies cross-corpus / cross-approach
   synthesis. If the caller only wants to understand one thing, use
-  `/conexus:research`.
+  `/conexus:research-synthesis`.
 - **Using bare `criterion`.** "important" is not a criterion; pick
   an axis the ranker can actually sort by.
 

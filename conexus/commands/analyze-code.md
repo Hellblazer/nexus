@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Analyze codebase using codebase-deep-analyzer agent
+disable-model-invocation: true
 ---
 
 # Codebase Analysis Request

@@ -1,6 +1,6 @@
 ---
 name: decision-drift-review
-description: Use when critiquing a change set against decision history to check it hasn't drifted from what an RDR decided — not for routine code review, that's /conexus:review-code.
+description: Use when critiquing a change set against decision history to check it hasn't drifted from what an RDR decided — not for routine code review, that's /conexus:code-review.
 effort: medium
 ---
 
@@ -71,7 +71,7 @@ RDRs against a change set and extract drift claims.
   has no sensible default — missing `changed_paths` raises
   `PlanRunBindingError(missing=["changed_paths"])`. Surface the
   error to the user rather than passing empty list.
-- **Using `review` for bug triage.** That's `/conexus:debug`; the two
+- **Using `review` for bug triage.** That's `/conexus:debugging`; the two
   verbs differ on what drives the walk (`review` starts from a
   diff, `debug` starts from a failing path).
 

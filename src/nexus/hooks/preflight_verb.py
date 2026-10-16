@@ -229,7 +229,7 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never
         "``mcp__plugin_conexus_nexus__*`` will fail. Fall back to "
         "direct ``Read`` / ``Grep`` / ``Glob`` for code "
         "exploration; do NOT attempt to invoke conexus skills "
-        "(``/conexus:query``, ``/conexus:debug``, ``/conexus:create-plan``, "
+        "(``/conexus:query``, ``/conexus:debugging``, ``/conexus:strategic-planning``, "
         "etc.); they will produce confusing partial errors."
     )
     out.append("")

@@ -44,7 +44,7 @@ question. Plans requiring one are not offered unless it is supplied.
 
 ## When to pin dimensions
 
-- **From a verb skill** (e.g. `/conexus:research`): pass
+- **From a verb skill** (e.g. `/conexus:design-to-code-trace`): pass
   `dimensions={"verb": "research"}` — narrows the match pool to that verb's
   plans.
 - **From the top-level agent**: omit `dimensions` and let the semantic match

@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Create implementation plan using strategic-planner agent
+disable-model-invocation: true
 ---
 
 # Planning Request

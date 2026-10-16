@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: List all RDRs with status, type, and priority
+disable-model-invocation: true
 ---
 
 # RDR List

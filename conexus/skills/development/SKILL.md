@@ -164,7 +164,7 @@ criticals."
 
 Run BOTH reviewers, they catch different, non-overlapping classes of issue:
 
-1. **code-review-expert** (`/conexus:review-code`): line-level bugs, security,
+1. **code-review-expert** (`/conexus:code-review`): line-level bugs, security,
    missing edge cases, convention violations.
 2. **substantive-critic** (`/conexus:substantive-critique`): unvalidated
    assumptions, silent scope reduction, vacuous test assertions, spec-vs-
@@ -202,7 +202,7 @@ The developer agent follows test-driven development:
 5. Ensure all existing tests still pass
 
 **REQUIRED:** Run verification (tests pass, no regressions) before claiming any task is done.
-**REQUIRED SUB-SKILLS (both, in this order):** `/conexus:review-code` (code-review-expert) THEN `/conexus:substantive-critique` (substantive-critic) after implementation. Commit only after both return clean. See "Post-Implementation Review + Commit" above.
+**REQUIRED SUB-SKILLS (both, in this order):** `/conexus:code-review` (code-review-expert) THEN `/conexus:substantive-critique` (substantive-critic) after implementation. Commit only after both return clean. See "Post-Implementation Review + Commit" above.
 
 ## Success Criteria
 

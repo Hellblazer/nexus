@@ -24,26 +24,26 @@ After a successful pipeline:
 
 Before code:
 - About to implement with no design of record → `/conexus:brainstorming-gate` (mandatory; a locked T2 memo, accepted RDR, or reviewed bead is the approved design, so implement it without re-gating)
-- Multi-step → `/conexus:create-plan`
-- Needs design across modules → `/conexus:create-plan` then `/conexus:architecture` (architecture/SKILL.md's own Pipeline Position: strategic-planner -> nx_plan_audit -> architect-planner)
+- Multi-step → `/conexus:strategic-planning`
+- Needs design across modules → `/conexus:strategic-planning` then `/conexus:architecture` (architecture/SKILL.md's own Pipeline Position: strategic-planner -> nx_plan_audit -> architect-planner)
 
 Something broken:
-- Failure, exception, or unexpected behaviour → `/conexus:debug` immediately
-- 2 failed fix attempts without `/conexus:debug` → invoke now
+- Failure, exception, or unexpected behaviour → `/conexus:debugging` immediately
+- 2 failed fix attempts without `/conexus:debugging` → invoke now
 
 Analyzing code:
-- Structure or dependencies → `/conexus:analyze-code`
+- Structure or dependencies → `/conexus:codebase-analysis`
 - Why something behaves a certain way → `/conexus:deep-analysis`
 
 Executing:
-- Plan approved → `/conexus:implement`
+- Plan approved → `/conexus:development`
 - Beads need enrichment → `/conexus:enrich-plan`
 
 Quality gates:
-- Code ready → `/conexus:review-code`
-- Plan ready → `/conexus:plan-audit` (validates against the codebase)
+- Code ready → `/conexus:code-review`
+- Plan ready → `/conexus:plan-validation` (validates against the codebase)
 - Critique reasoning soundness → `/conexus:substantive-critique`
-- Tests written → `/conexus:test-validate`
+- Tests written → `/conexus:test-validation`
 
 `nx_answer` is for questions whose answer must be REDUCED FROM MANY DOCUMENTS. It composes search and query plus `claude -p` operators under a plan-match gate. Use it for:
 - cross-corpus synthesis over `knowledge__` / `docs__` / `rdr__` ("what approaches to X appear across this corpus")
@@ -58,7 +58,7 @@ Two return shapes (RDR-200, landing with the Phase 1 go-live; headless is the on
 
 - Reduce-from-many-documents questions ("what approaches to X appear in…", "tradeoffs across…", "compare… across the corpus") → `/conexus:query`
 - Design walks from concept to code (retrieval, not a synthesizer dispatch) → `/conexus:design-to-code-trace`
-- Broad topic research across nx store, web, and codebase (dispatches deep-research-synthesizer) → `/conexus:research`
+- Broad topic research across nx store, web, and codebase (dispatches deep-research-synthesizer) → `/conexus:research-synthesis`
 - Critique a change set against decision history → `/conexus:decision-drift-review`
 - Cross-corpus synthesis or ranking → `/conexus:analyze`
 - Why was this written this way (design-intent retrieval, not a debugger dispatch) → `/conexus:why-was-this-written`
@@ -66,7 +66,7 @@ Two return shapes (RDR-200, landing with the Phase 1 go-live; headless is the on
 - 3+ validated findings to keep → `/conexus:knowledge-tidying`
 - PDF to index → `/conexus:pdf-process`
 
-RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`. Every name above still resolves the same way after the nexus-cnzei.4/.6 collision fix rounds — `rdr-gate`/`rdr-fix`/`rdr-accept`/`rdr-audit` kept both a command and a skill (deliberately, both files real; the skill side is renamed to `rdr-gate-checklist`/`rdr-fix-checklist`/`rdr-accept-checklist`/`rdr-audit-checklist` so it no longer shares the command's exact name), `rdr-list` kept only its command, and `rdr-create`/`rdr-research`/`rdr-close`/`rdr-show` kept only their skill.
+RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List: `nx rdr preamble rdr-list` through Bash (the `/rdr-list` command is the user's form). Show: `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`. Every name above still resolves the same way after the nexus-cnzei.4/.6 collision fix rounds — `rdr-gate`/`rdr-fix`/`rdr-accept`/`rdr-audit` kept both a command and a skill (deliberately, both files real; the skill side is renamed to `rdr-gate-checklist`/`rdr-fix-checklist`/`rdr-accept-checklist`/`rdr-audit-checklist` so it no longer shares the command's exact name), `rdr-list` kept only its command (user-only, so the model runs its `nx rdr preamble rdr-list` line instead), and `rdr-create`/`rdr-research`/`rdr-close`/`rdr-show` kept only their skill.
 
 Phase boundary inside an implementation arc: every phase-review bead, before close, runs the `/conexus:phase-review-gate` checklist: every numbered phase item in the RDR has a closing-bead pointer or an explicit `none` deferral. Nothing enforces it, so do it by hand. It prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: the T3 daemon was silently dropped from a 6-bead close, found three phases later, at a cost of 2 to 3 days of replanning).
 
@@ -106,9 +106,9 @@ Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (sur
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
 | `memory_put` with a `ttl` for a decision, handoff or directive | omit `ttl` (or pass `ttl=None`); omitting it now means permanent (reversed 2026-09-12, nexus-473mx) |
 | `store_put(collection="knowledge")` or any placeholder (`default`, `test`, a session, a source app) | `collection="<subject>"`: a durable subject area a reader would browse (`distributed-systems`); reuse an existing one (`nx collection list`) before minting; rules in docs/collections.md |
-| Test fails → try a different fix | `/conexus:debug` |
+| Test fails → try a different fix | `/conexus:debugging` |
 | Implement undesigned work without brainstorming-gate | `brainstorming-gate` first (unless a design of record exists) |
-| Plan exists, start implementing | `/conexus:plan-audit` first |
+| Plan exists, start implementing | `/conexus:plan-validation` first |
 | Symbol callers via grep | `/conexus:serena-code-nav` |
 | Implement review feedback blindly | `/conexus:receiving-review` first |
 | Manual worktree setup | `isolation: "worktree"` on the Agent tool, or `/conexus:git-worktrees` |

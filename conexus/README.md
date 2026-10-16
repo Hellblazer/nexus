@@ -71,6 +71,8 @@ New to Nexus? Follow [Getting started](https://hellblazer.github.io/nexus/gettin
 | Index PDFs into semantic search | `/conexus:pdf-process` |
 | Not sure which agent to use | Check the skill directory in `using-nx-skills` |
 
+The slash commands in this table are for you to type. They are hidden from the model's skill listing (`disable-model-invocation: true`), so the model reaches the same work through the skill each one wraps (`debugging`, `code-review`, `strategic-planning`, `codebase-analysis`, `research-synthesis`, and so on); the `/conexus:rdr-list` table is `nx rdr preamble rdr-list` to the model.
+
 ## Directory Structure
 
 ```

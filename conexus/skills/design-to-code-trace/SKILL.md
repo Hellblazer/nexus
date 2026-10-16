@@ -1,6 +1,6 @@
 ---
 name: design-to-code-trace
-description: Use when doing design / architecture / planning work that walks from prose (RDRs, docs, knowledge) into the modules implementing a concept — not for open-ended topic research, that's /conexus:research
+description: Use when doing design / architecture / planning work that walks from prose (RDRs, docs, knowledge) into the modules implementing a concept — not for open-ended topic research, that's /conexus:research-synthesis
 effort: medium
 ---
 
