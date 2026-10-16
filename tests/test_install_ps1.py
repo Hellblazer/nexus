@@ -291,11 +291,11 @@ def _nx_calls(machine: Box) -> list[str]:
 
 
 def test_a_powershell_is_present_where_it_must_be() -> None:
-    """The cases below skip when there is no PowerShell. On Windows, on a GitHub-hosted runner
-    (which ships pwsh) or where NX_REQUIRE_PWSH is set, a skip would turn this whole file into a
-    pass that checked nothing. The self-hosted lab pool has no pwsh; there the file runs in the
-    Windows test set (windows-pg-bundle-rehearsal.yml), which requires one of its cases passed."""
-    required = WINDOWS or os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" or os.environ.get("NX_REQUIRE_PWSH")
+    """The cases below skip when there is no PowerShell. On CI (GitHub-hosted runners ship pwsh, and
+    the lab pool has PowerShell 7.6.7 since 2026-10-16), on Windows or where NX_REQUIRE_PWSH is set,
+    a skip would turn this whole file into a pass that checked nothing. The Windows test set also
+    runs the file and requires one of its cases passed."""
+    required = WINDOWS or os.environ.get("CI") or os.environ.get("NX_REQUIRE_PWSH")
     if PWSH is None and required:
         pytest.fail("no PowerShell was found; set NX_TEST_PWSH or install pwsh")
 
