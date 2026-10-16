@@ -482,7 +482,7 @@ class TestS1TruncationMetadata:
         # schema-conformant payload directly.
         captured_args: list[dict] = []
 
-        async def fake_dispatch(prompt, schema, timeout=300.0):
+        async def fake_dispatch(prompt, schema, timeout=300.0, **_kw):  # model=, operator= since 3abbca601
             return {
                 "groups": [
                     {
