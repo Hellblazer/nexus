@@ -22,7 +22,6 @@ from click.testing import CliRunner
 
 import nexus.commands.upgrade as upgrade_mod
 from nexus.cli import main
-from nexus.upgrade_ladder.census_progress import CensusProgress
 from nexus.upgrade_ladder.completion import CompletionRecord
 import nexus.db as nexus_db
 from nexus.upgrade_ladder.deadline import (
@@ -448,7 +447,6 @@ def _real_rung(monkeypatch: pytest.MonkeyPatch, engine: SlowEngine, backfill_fn=
     rung.record_fn = lambda: None
     rung.installed_version_fn = lambda: "9.9.9"
     rung.memo = MemoryNote()
-    rung.progress = CensusProgress(None)  # resume is covered by test_census_progress.py; here every session starts at zero
     rung.lock_factory = _always_locked
     if backfill_fn is not None:
         rung.backfill_fn = backfill_fn

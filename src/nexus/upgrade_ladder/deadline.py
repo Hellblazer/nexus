@@ -22,8 +22,8 @@ run re-detects and resumes. Backfill progress persists in the database, so a
 resumed run's census skips what is already done, and census progress persists
 too (nexus-y67n5, :mod:`nexus.upgrade_ladder.census_progress`): each
 collection's reading is kept, age bounded, so a slow engine's sessions together
-finish the census instead of each starting it again. Consecutive cuts are
-counted and ``nx doctor`` shows them.
+finish the census instead of each starting it again. Consecutive cuts that
+made no progress are counted and ``nx doctor`` shows them.
 
 What the ceiling does NOT bound: (a) a census call already in flight, up to
 its own HTTP timeout, and (b) one collection's entire backfill once it has

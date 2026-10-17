@@ -21,10 +21,12 @@ import java.util.function.Predicate;
  * <p>Completion is recorded by the client's upgrade-ladder rung
  * {@value #RUNG_NAME} (Python {@code
  * nexus.upgrade_ladder.rungs.rdr192_manifest_backfill}) in {@code
- * nexus.ladder_completions}, and ONLY after a fresh census over the tenant
- * reads zero legacy-unmanifested and zero unclassified chunks (RDR-142
- * verify-before-record). This class reads that one fact. It does not run the
- * census itself and never writes.
+ * nexus.ladder_completions}, and ONLY after a census over the tenant reads
+ * zero legacy-unmanifested and zero unclassified chunks (RDR-142
+ * verify-before-record). That census may be assembled across sessions from
+ * per-collection readings kept at most 24 hours (nexus-y67n5); the record's
+ * detail says how many and how old. This class reads that one fact. It does
+ * not run the census itself and never writes.
  *
  * <p><b>Fails closed.</b> No record, a different rung's record, another
  * tenant's record, and a ledger that cannot be read all refuse. A tenant no
