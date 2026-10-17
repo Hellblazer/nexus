@@ -1144,16 +1144,14 @@ def read_source(
     ``file``, ``chroma``, ``nx-scratch``, ``https``, ``x-devonthink-item``,
     ``obsidian``.
 
-    **RDR-169 G3 reachability split:** the Java service also has handlers for
-    ``chroma://`` and ``https://`` in its ``UriSchemeResolverRegistry``
-    (``dev.nexus.service.resolver``).  The SPLIT means: at /v1 serving time a
-    server-reachable scheme (``chroma``, ``https``) MAY be resolved inline by
-    the Java handler; a local scheme (``file``, ``obsidian``,
-    ``x-devonthink-item``, ``nx-scratch``) is resolved client-side by calling
-    this function.  The Python-side ``chroma`` and ``https`` readers exist for
-    the Python bridge's own aspect-enrichment path (``commands/enrich.py``),
-    which runs in the MCP process on the tenant's local machine where both local
-    and network sources are reachable.
+    **Where the readers run:** every scheme is read client-side, in this
+    process.  The engine had a ``POST /v1/vectors/resolve`` route and a Java
+    resolver registry for ``chroma://`` and ``https://``; both were removed
+    (nexus-3t0jv), so there is no server-side read of any scheme.  The
+    ``chroma`` and ``https`` readers serve the Python bridge's own
+    aspect-enrichment path (``commands/enrich.py``), which runs in the MCP
+    process on the tenant's local machine where both local and network sources
+    are reachable.
 
     **Security contract for ``obsidian://`` (and any future local-scheme that
     uses ``tenant``):** ``tenant["vault_root"]`` MUST be server-provisioned
@@ -1256,10 +1254,9 @@ def read_source(
 #                          stat_source/staleness_signal over them
 #                          (``nexus.doctor_references``).  See
 #                          _stat_https_uri.
-#   Java-side: still DEFERRED, owned by nexus-oqenh (leg 2).  The
-#     UriSchemeHandler interface has a comment-only seam; no stat/head
-#     capability is implemented yet, so POST /v1/vectors/resolve cannot
-#     surface a staleness field to callers.
+#   Java-side: gone.  The engine's URI resolver (``POST /v1/vectors/resolve``)
+#     was removed (nexus-3t0jv), so there is no server-side stat seam to
+#     build; leg 2 (nexus-oqenh) has nothing left to attach to.
 
 
 @dataclass(frozen=True)

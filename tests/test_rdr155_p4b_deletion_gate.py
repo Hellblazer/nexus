@@ -22,8 +22,9 @@ Assertion strategy (19svb 2026-07-23 correction):
     census assert-EMPTY) is P3's extension of this suite, not P2's.
 
 Exemption classes (persisted-data / heritage, locked in [21094]/[21096]):
-chroma:// URI literals (aspect_readers.py, ChromaSchemeHandler.java —
-persisted catalog data, forever), stranded_install.py filename strings,
+chroma:// URI literals (aspect_readers.py — persisted catalog data,
+forever; ChromaSchemeHandler.java was removed with the resolve route,
+nexus-3t0jv), stranded_install.py filename strings,
 Liquibase changelog comments (checksum-locked), OnnxEmbedder's
 ~/.cache/chroma artifact path, db/t3.py + chroma_quotas.py (die at P3
 with the chromadb dependency, not at P2).
@@ -211,6 +212,17 @@ DELETED_JAVA_MAIN = [
     "vectors/ChromaQuotaValidator.java",
     "http/MigrationHandler.java",
     "db/MigrationJobRepository.java",
+    # nexus-3t0jv: POST /v1/vectors/resolve and the whole URI-scheme resolver
+    # behind it are removed in every mode (it fetched any caller-supplied
+    # https URL with redirects and no destination filter).
+    "http/ResolveHandler.java",
+    "resolver/ChromaSchemeHandler.java",
+    "resolver/ChunkTextFetcher.java",
+    "resolver/HttpsSchemeHandler.java",
+    "resolver/ResolveResult.java",
+    "resolver/UnknownSchemeException.java",
+    "resolver/UriSchemeHandler.java",
+    "resolver/UriSchemeResolverRegistry.java",
 ]
 
 DELETED_JAVA_TEST = [
@@ -218,6 +230,12 @@ DELETED_JAVA_TEST = [
     "vectors/DualRunHarnessIntegrationTest.java",
     "vectors/HybridParityIntegrationTest.java",
     "http/MigrationHandlerIngestCloudTest.java",
+    "http/ResolveHandlerHttpsFetchFailureTest.java",
+    "http/ResolveHandlerReasonMappingTest.java",
+    "http/ResolveHandlerTest.java",
+    "resolver/ChromaSchemeHandlerTest.java",
+    "resolver/HttpsSchemeHandlerTest.java",
+    "resolver/UriSchemeResolverRegistryTest.java",
 ]
 
 # Tokens that must not appear in service main source post-deletion.
@@ -485,11 +503,11 @@ def test_java_main_has_no_chroma_client_tokens() -> None:
 
 
 def test_java_survivors_present() -> None:
-    # Persisted-data exemption class: the chroma:// URI resolver survives
-    # forever (the scheme literal is persisted catalog data), as does the
-    # MiniLM embedder the default test suite depends on.
+    # The MiniLM embedder the default test suite depends on survives. (The
+    # chroma:// URI resolver no longer does: it went with POST
+    # /v1/vectors/resolve, nexus-3t0jv; the chroma:// literal itself stays as
+    # persisted catalog data in aspect_readers.py.)
     for rel in (
-        "resolver/ChromaSchemeHandler.java",
         "vectors/OnnxEmbedder.java",
         "vectors/PgVectorRepository.java",
     ):

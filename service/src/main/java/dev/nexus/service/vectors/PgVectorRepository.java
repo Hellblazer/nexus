@@ -6764,46 +6764,6 @@ FROM scope s
         });
     }
 
-    /**
-     * Fetch the {@code chunk_text} for a single {@code (tenant, collection, chash)}
-     * triple — targeted single-row lookup for the RDR-169 G3 URI-resolver path.
-     *
-     * <p>Returns {@code null} when:
-     * <ul>
-     *   <li>the row does not exist (missing chunk), or</li>
-     *   <li>{@code chunk_text} is {@code NULL} (reference-only retention, RDR-169 G1).</li>
-     * </ul>
-     *
-     * <p>Callers must distinguish "missing row" from "reference-only" at the
-     * resolver level if needed; this method treats both as "no stored text."
-     * RLS is enforced via {@link dev.nexus.service.db.TenantScope#withTenant} —
-     * cross-tenant rows are invisible.
-     *
-     * <p><b>Physical read, deliberately not live(c)</b> (RDR-192 Phase 2 gate M7,
-     * nexus-wbfpw.35). Its one caller is the {@code chroma://<collection>/<chash>} URI
-     * resolver ({@link dev.nexus.service.resolver.ChromaSchemeHandler}), and a URI
-     * that names a chash is a content-addressed permalink: it resolves whatever is
-     * stored at that (collection, chash), including a chunk live(c) hides (no owner,
-     * or owners all tombstoned). Everything that serves a chunk by search, get or list
-     * goes through {@code liveChunksCondition} or a live(c) function instead.
-     * {@code Rdr192EngineLivenessMatrixIntegrationTest#fetchChunkText_readsPhysically_regardlessOfLiveness}
-     * pins this.
-     *
-     * @param tenant     the requesting tenant principal
-     * @param collection four-segment conformant collection name (drives dim dispatch)
-     * @param chash      the chunk's natural ID (the full sha256 hexdigest, RDR-180)
-     * @return the stored {@code chunk_text}, or {@code null} if none
-     */
-    public String fetchChunkText(String tenant, String collection, String chash) {
-        int dim = dimForCollection(tenant, collection);
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chunkText()).from(ch.table())
-               .where(scope.and(ch.chash().eq(chash)))
-               .fetchOne(ch.chunkText()));
-    }
-
     // -- Internal helpers -------------------------------------------------------
 
     /**

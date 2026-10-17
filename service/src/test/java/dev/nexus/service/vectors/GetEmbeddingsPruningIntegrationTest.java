@@ -273,7 +273,6 @@ class GetEmbeddingsPruningIntegrationTest {
             .hasSize(ROWS);
         assertThat((List<?>) repo.getAllMetadata(tenant, coll, Map.of()).get("ids")).hasSize(ROWS);
         assertThat(repo.selectExistingChashes(tenant, coll, ids)).containsExactlyInAnyOrderElementsOf(ids);
-        assertThat(repo.fetchChunkText(tenant, coll, ids.get(0))).isEqualTo("gep fixture row 0");
     }
 
     /**

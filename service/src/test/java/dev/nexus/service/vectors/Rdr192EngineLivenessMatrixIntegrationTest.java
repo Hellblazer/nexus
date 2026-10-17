@@ -518,30 +518,6 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertThat((List<?>) vecRepo.presentRows(tenant, COLLECTION_A, List.of()).get("ids")).isEmpty();
     }
 
-    // ── fetchChunkText: the chroma:// permalink is a physical read ───────────
-
-    /**
-     * RDR-192 Phase 2 gate M7 (nexus-wbfpw.35): {@link PgVectorRepository#fetchChunkText}
-     * backs the {@code chroma://<collection>/<chash>} resolver and reads by (collection, chash)
-     * with no liveness filter, while search, get and list are live(c). That is the contract for
-     * a content-addressed permalink, so it is pinned rather than left implicit: the two rows live(c)
-     * hides in this collection (R1 unowned, R3 tombstoned-owner only) still resolve, and so does a live
-     * one.
-     */
-    @Test
-    void fetchChunkText_readsPhysically_regardlessOfLiveness() throws Exception {
-        String tenant = "wbfpw1-ro";
-        Fixture fx = seedLivenessFixture(tenant);
-
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r2())).as("R2, live").isEqualTo("r2 text");
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r1())).as("R1, unowned, hidden by live(c)")
-            .isEqualTo("r1 text");
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r3()))
-            .as("R3, owner tombstoned, hidden by live(c)").isEqualTo("r3 text");
-        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_B, fx.r1()))
-            .as("a chash stored only in A does not resolve in B").isNull();
-    }
-
     // ── P1h: hybridSearch() visibility (text_gated_search_*_<dim>) ───────────
 
     @Test
