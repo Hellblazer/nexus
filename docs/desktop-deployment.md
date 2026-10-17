@@ -175,7 +175,7 @@ After upgrading conexus or after the plugin rename (`nx` → `conexus` at v5.0.0
 
 Both warnings include the resolution commands; `nx doctor` is the single explicit-invocation surface that consolidates them.
 
-For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it writes a warning to stderr that says the extension does not update itself and names the recommended route, the conexus plugin (Surface 2), with the switch steps and the release URL as the manual fallback:
+For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it writes a warning to stderr, which Claude Desktop puts only in the extension's log (`~/Library/Logs/Claude/mcp-server-Conexus.log` on macOS); a user who never opens that log does not see it, so this page and the install page are the main way `.mcpb` users learn of the plugin route. The warning says the extension does not update itself and names the recommended route, the conexus plugin (Surface 2), with the switch steps and the release URL as the manual fallback:
 
 ```
 [conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. This .mcpb

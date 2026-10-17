@@ -250,7 +250,7 @@ shows the four choices from [Two routes](#two-routes) and asks which you want.
 Desktop does not tell you when Nexus is missing, so you have to ask. Do not type
 `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen
 on Claude Desktop 2.42304.0 on macOS). To see progress, ask "Is Nexus set up yet?". When Claude
-says setup is done, start a new conversation. Or do steps 1 to 3 first, by hand.
+says setup is done, quit Claude Desktop fully and open it again; a new conversation keeps the old server. Or do steps 1 to 3 first, by hand.
 
 An existing marketplace entry stayed at the release it was added at, which is why an older copy has no setup tool.
 
