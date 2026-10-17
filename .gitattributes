@@ -6,3 +6,5 @@
 # Windows ships core.autocrlf=true, which turned the appliance endpoint fixture's
 # trailing \n into \r\n on the win-release runner (nexus-f9bgu.14).
 tests/fixtures/** -text
+# The rdr161 Sigstore bundles are genuine release artifacts, byte-exact too.
+tests/daemon/fixtures/rdr161/** -text

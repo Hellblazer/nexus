@@ -29,15 +29,18 @@ matrix, T2 nexus_rdr/161-research):
   style). This lets the fail-closed/pass wiring be covered WITHOUT sigstore
   installed and WITHOUT a real release artifact.
 * an end-to-end real verify against a genuine published ``.sigstore.json`` is
-  deferred to an integration test (skip-with-reason) because no real
-  ``engine-service-v*`` release artifact exists yet (RDR-155 P4b freeze
-  window). The gap is declared out loud rather than papered over with a mock
-  pretending to be a real verify.
+  an integration test over the bundles committed in
+  ``tests/daemon/fixtures/rdr161/`` (nexus-3lnxr): real sigstore, real
+  Fulcio/Rekor material, the pinned issuer and identity, no mock, plus two
+  one-byte-change negatives.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -331,26 +334,88 @@ def test_cli_install_binary_fails_closed_exit_2(tmp_path, monkeypatch):
     assert "sha256 mismatch" in result.output
 
 
-# ── end-to-end real verify (deferred, declared out loud) ────────────────────
+# ── end-to-end real verify against a genuine published bundle ───────────────
+#
+# nexus-3lnxr. ``tests/daemon/fixtures/rdr161/`` holds the Sigstore bundles
+# published beside a real ``engine-service-v*`` release (see provenance.json
+# there for the tag and the pinned sha256 of each asset). The asset itself is
+# not committed: the test downloads it once into the test-substrate cache,
+# checks the pinned sha256, and runs the production ``verify_signature`` with
+# the real sigstore checker, no seam. The 5 MB ``nexus-pg-<platform>.txz`` stands in
+# for the 160 MB ``nexus-service`` binary; the same workflow signs both under
+# the same identity. The release tag is pinned here and does NOT track
+# ``REQUIRED_ENGINE_VERSION``, so an engine bump never invalidates the fixture.
 
-_REAL_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "rdr161" / "nexus-service-linux-amd64.sigstore.json"
-)
+_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "rdr161"
+_PROVENANCE = json.loads((_FIXTURE_DIR / "provenance.json").read_text(encoding="utf-8"))
+
+
+def _real_asset_and_bundle() -> tuple[Path, Path]:
+    """The host's genuine release asset (downloaded, sha256-pinned) and its
+    committed bundle. Fails, never skips, when the fixture cannot be armed:
+    a skip here is the silent disarm this test exists to prevent."""
+    from nexus.db.pg_bundle import current_platform_tag
+    from tests.db._service_fixture import substrate_cache_root
+
+    plat = current_platform_tag()
+    entry = _PROVENANCE["assets"].get(plat)
+    if entry is None:
+        pytest.skip(
+            f"no rdr161 fixture for platform {plat!r} (release {_PROVENANCE['release_tag']} "
+            f"publishes {sorted(_PROVENANCE['assets'])}); mac-x64 has no engine artifact"
+        )
+    name = entry["asset"]
+    bundle = _FIXTURE_DIR / f"{name}.sigstore.json"
+    assert bundle.is_file(), f"committed fixture missing: {bundle}"
+
+    cache = substrate_cache_root() / "rdr161-fixture" / _PROVENANCE["release_tag"]
+    asset = cache / name
+    if not (asset.is_file() and asset.stat().st_size == entry["size"]):
+        cache.mkdir(parents=True, exist_ok=True)
+        # Per-process temp name + atomic replace: xdist workers and parallel
+        # jobs sharing one cache never see a half-written asset.
+        part = cache / f"{name}.{os.getpid()}.part"
+        try:
+            binstall._download(binstall.release_asset_url(_PROVENANCE["release_tag"], name), part)
+            os.replace(part, asset)
+        except binstall.BinaryVerificationError as exc:
+            pytest.fail(f"cannot arm the rdr161 fixture: {exc}")
+        finally:
+            part.unlink(missing_ok=True)
+    assert binstall.compute_sha256(asset) == entry["sha256"], (
+        f"{asset} does not match the sha256 pinned in provenance.json"
+    )
+    return asset, bundle
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    not (_SIGSTORE_INSTALLED and _REAL_FIXTURE.is_file()),
-    reason=(
-        "no genuine engine-service-v* .sigstore.json fixture exists yet "
-        "(produced by the publisher nexus-ltjws at a real release; blocked by "
-        "the RDR-155 P4b freeze window). Capture one from the first signed "
-        "release and drop it at tests/daemon/fixtures/rdr161/ to arm this."
-    ),
-)
 def test_verify_signature_real_bundle_end_to_end():
-    asset = _REAL_FIXTURE.with_suffix("")  # the binary sits beside the bundle
-    binstall.verify_signature(asset, _REAL_FIXTURE)  # real sigstore verify, no mock
+    asset, bundle = _real_asset_and_bundle()
+    binstall.verify_signature(asset, bundle)  # real sigstore verify, no mock
+
+
+@pytest.mark.integration
+def test_verify_signature_real_bundle_rejects_one_changed_asset_byte(tmp_path):
+    asset, bundle = _real_asset_and_bundle()
+    data = bytearray(asset.read_bytes())
+    data[len(data) // 2] ^= 0x01
+    tampered = tmp_path / asset.name
+    tampered.write_bytes(bytes(data))
+    with pytest.raises(binstall.BinaryVerificationError):
+        binstall.verify_signature(tampered, bundle)
+
+
+@pytest.mark.integration
+def test_verify_signature_real_bundle_rejects_one_changed_signature_byte(tmp_path):
+    asset, bundle = _real_asset_and_bundle()
+    doc = json.loads(bundle.read_text(encoding="utf-8"))
+    sig = bytearray(base64.b64decode(doc["messageSignature"]["signature"]))
+    sig[0] ^= 0x01
+    doc["messageSignature"]["signature"] = base64.b64encode(bytes(sig)).decode("ascii")
+    bad_bundle = tmp_path / bundle.name
+    bad_bundle.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(binstall.BinaryVerificationError):
+        binstall.verify_signature(asset, bad_bundle)
 
 
 # ── nexus-pnwu0 / GH #1390: chash-poison upgrade gate ───────────────────────
