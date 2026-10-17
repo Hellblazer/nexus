@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The detached `nx upgrade --auto` child has an overall ceiling, 15 minutes by default** (nexus-dcbof). Since nexus-wozn6 the SessionStart hook starts the child and does not wait, so nothing bounded it. The ladder runner now checks the clock before it starts each rung; once `NX_UPGRADE_AUTO_DEADLINE_SECONDS` (default `900`) has passed it starts no more, logs `upgrade_auto_deadline_reached` (elapsed, deadline, the rungs skipped) to `<config>/logs/upgrade-auto-child.log`, reports the next rung deferred and exits 0. A running rung is never interrupted, and the next session's run resumes from the skipped rung. An interactive `nx upgrade` has no ceiling. A value that is not a positive finite number falls back to the default with `upgrade_auto_deadline_env_invalid`.
+
 ### Changed
 
 - **Every push to develop gets a CI run that finishes** (Sam, 2026-10-17). With several sessions pushing, the next push cancelled the last one's run in `ci.yml`, the Windows rehearsal and the plugin drift ledger, so many develop commits never got a finished run. Those three workflows now take one concurrency group per commit on develop and one per ref elsewhere, so a PR push still cancels the run it supersedes. Sessions batch their commits and push less often. Test: `tests/test_ci_develop_runs_finish.py`.

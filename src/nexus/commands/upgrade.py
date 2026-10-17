@@ -53,6 +53,12 @@ def upgrade(
     # daemon is retired (nexus-i711w Stage 2 sub-stage B), so there are no
     # serving connections to free; the migration flock that serialized the
     # MIGRATOR processes is untouched and still does its half.
+    #
+    # nexus-dcbof: the detached SessionStart child gets an overall ceiling,
+    # checked between ladder rungs only (never mid-rung). The clock starts
+    # here so the precondition stage counts against it. An interactive
+    # `nx upgrade` has none.
+    deadline = _auto_deadline() if auto_mode else None
     try:
         _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3)
         # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
@@ -88,7 +94,7 @@ def upgrade(
         # walk cannot derive (source-gone, billed re-embed) surface from
         # INSIDE the rung; pending state is reported by `nx doctor`.
         with _standing_consent(assume_yes):
-            _run_ladder(dry_run=dry_run, auto_mode=auto_mode)
+            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
 
         # nexus-g7ijj: an install that converged purely via `nx upgrade`
         # (never re-running `nx init`) never got install.mode stamped —
@@ -166,6 +172,14 @@ def upgrade(
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+
+
+def _auto_deadline() -> "Deadline":  # noqa: F821 — lazy import (module keeps cold-start cheap)
+    """The ``--auto`` ceiling, its clock started now (nexus-dcbof). A seam:
+    tests monkeypatch it to hand the command a fixed-clock deadline."""
+    from nexus.upgrade_ladder.deadline import Deadline, auto_deadline_seconds  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+    return Deadline(auto_deadline_seconds())
 
 
 @contextlib.contextmanager
@@ -265,8 +279,8 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
     ``msvcp140.dll`` and ``msvcp140_1.dll`` where the client's extension modules
     find them. This is the automatic leg for installs that predate ``nx init``'s
     step (a cloud-mode box has no engine or PG bundle carrying them): it rides the
-    SessionStart ``nx upgrade --auto``, which runs detached with no time ceiling,
-    so the download is safe there. A cheap three-directory stat on every run once
+    SessionStart ``nx upgrade --auto``, which runs detached with a ceiling checked only
+    between ladder rungs (nexus-dcbof), so the download is never interrupted. A cheap three-directory stat on every run once
     the DLLs are in place, a no-op off Windows. Runs after the engine axis so a
     local-mode install gets the DLLs from its engine first. Never raises."""
     try:
@@ -299,6 +313,7 @@ def _run_ladder(
     dry_run: bool,
     auto_mode: bool,
     _ledger_fn: "Callable[[], object] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    deadline: "Deadline | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
 ) -> None:
     """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
 
@@ -310,6 +325,10 @@ def _run_ladder(
     completion is on file. A failed rung raises ``ClickException`` — no silent fallbacks
     for correctness problems; ``--auto`` invocations are swallowed by
     ``upgrade()``'s existing auto-mode handler, not here.
+
+    ``deadline`` (``--auto`` only, nexus-dcbof) stops the walk before the next
+    rung once passed; the skipped rung reports DEFERRED, so it is non-fatal
+    and the next run resumes from it.
 
     Keyword-only ``_ledger_fn`` is an injectable seam for unit tests: it
     returns the durable :class:`CompletionLedger` backend the holder
@@ -360,7 +379,7 @@ def _run_ladder(
     ledger = _ledger_fn() if _ledger_fn is not None else DeferredLadderLedger()
     try:
         holder = InProcessCompletionHolder(ledger)
-        report = LadderRunner(registry, holder).run()
+        report = LadderRunner(registry, holder, deadline=deadline).run()
         holder.flush()
     finally:
         close = getattr(ledger, "close", None)

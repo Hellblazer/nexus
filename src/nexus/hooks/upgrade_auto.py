@@ -63,11 +63,16 @@ observed to completion. The acceptance is the outcome: after the next version
 change, the upgrade ledger advances to the installed version with no manual
 run. If it does not, the premise above is wrong.
 
-**No ceiling on the child.** A timeout that killed it would put a kill partway
-through a ladder rung, which is worse than letting it finish, and a ceiling
-cannot be added from here without a supervising process around ``nx``. A
-wedged child is bounded only by the HTTP timeouts inside ``nx upgrade``;
-the spawn event and the stderr log are how one is found.
+**The child has a ceiling, checked between rungs (nexus-dcbof).** A timeout
+that killed it would put a kill partway through a ladder rung, which is worse
+than letting it finish, and a ceiling cannot be added from here without a
+supervising process around ``nx``. So the ceiling lives inside ``nx upgrade
+--auto``: the ladder runner stops starting new rungs once
+``NX_UPGRADE_AUTO_DEADLINE_SECONDS`` (default 900) has passed, logs
+``upgrade_auto_deadline_reached`` to the child log and exits 0, and the next
+session's run resumes from the rung it skipped. A rung that is running is
+never interrupted, so a wedged rung is still bounded only by the HTTP timeouts
+inside ``nx upgrade``; the spawn event and the stderr log are how one is found.
 """
 from __future__ import annotations
 
@@ -201,7 +206,8 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
     forwarding an empty stream to the decision channel.
 
     No timeout kills the child, deliberately: a kill partway through a ladder
-    rung is worse than letting it finish unattended, and the rung's own
+    rung is worse than letting it finish unattended (the child bounds itself
+    between rungs instead, see the module docstring), and the rung's own
     cross-process lock turns concurrent session starts into quick deferrals.
     The spawn is logged once, as ``upgrade_auto_child_spawned`` in
     ``hook.log`` with the pid, argv and (if it exited inside the wait) its
