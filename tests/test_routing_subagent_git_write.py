@@ -701,6 +701,45 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "for k in a b; do git config --get " + D + "k; done",
         "git status; git " + D + "(echo config) user.name x",
         "git config --get a; git " + BT + "echo config" + BT + " b c",
+        # An unquoted-looking `config` rebuilt from a path: a final component a
+        # substitution closes is how the shell builds the word, trailing slash too.
+        "git " + D + "(basename /x/config/) user.name x",
+        "git " + D + "(basename /x/config) user.name x",
+    ],
+    # nexus-dsr6a review B1/B2: the read test counts words, and the shell decides
+    # what the words are. Quote stripping erased or moved the argument that made
+    # a write (a quoted metacharacter value moved text out of its segment or was
+    # stripped as a redirect) and brace expansion or a glob made one word several,
+    # so each of these read as a bare-key read and wrote (verified on real git).
+    # Outside get/list mode a quote, a backslash or `{ } * ? [` denies.
+    "config_arity_unprovable": [
+        "git config core.hooksPath ';x'",
+        "git config user.name ' '",
+        "git config user.name '&'",
+        "git config user.name '('",
+        "git config user.name ')'",
+        "git config user.name $'" + BS + "n'",
+        "git config user.name '<x'",
+        "git config user.name '>/dev/null'",
+        "git config user.name '2>&1'",
+        "git config user.name '|x'",
+        "git config --global user.name ';x'",
+        "git config --local core.hooksPath ';x'",
+        "git config user.name " + BS + ";x",
+        "git config user.name x" + BS + " y",
+        "git config 'user.name' 'x'",
+        "git config \"user.name\"",
+        "git config {user.name,x}",
+        "git config user.{name,email}",
+        "git config user.name{,x}",
+        "git config {--unset,user.name}",
+        "git config --global {user.name,x}",
+        "git config user.*",
+        "git config user.nam?",
+        "git config [uv]*",
+        "git config core.hooks*",
+        "git config user.name x{,y}",
+        "git config --worktree user.name ';x'",
     ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
@@ -715,17 +754,14 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "make i${n}t",
         "ls ~/git/ && echo add",
         "cd ~/git && echo add",
-        # nexus-dsr6a: `config` is read as a verb wherever the text can rebuild
-        # a word, and as a subcommand-with-arguments otherwise, so a bare
-        # `config` word that is only an argument of another git command still
-        # denies once a flag, a second path or a pipe follows it.
-        "git grep config src tests",
-        "git log -S config --oneline",
-        "git log --grep=config --oneline",
+        # nexus-dsr6a: `config` after git reads as the verb when it is the
+        # subcommand slot's word, wherever the command sits, and a read that
+        # pipes into a non-filter is unprovable.
         "echo git config user.name x",
         "git config --get user.name | sort",
-        "git diff -- src/config.py | sort",
-        "git log -- conexus/config/ | awk 1",
+        # nexus-dsr6a: a standalone `config` word reads as the verb in text that
+        # can rebuild a word, whatever it follows.
+        "git show HEAD:config | sort",
         # nexus-0l6zh: the same no-position-analysis price for gh and hub.
         "echo 'gh pr checkout' > notes.txt",
         "gh pr view 5 && echo pr checkout",
@@ -862,6 +898,41 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "git status; grep config a b",
         "ls .config/git/config",
         "cat ~/.gitconfig",
+        # Another git subcommand whose ARGUMENT is the word config is not the
+        # config verb (the relaxed rule reads the subcommand slot).
+        "git grep config src tests",
+        "git grep -n config -- conexus/",
+        "git log --grep config --since=1.day",
+        "git log --grep=config --oneline",
+        "git log -S config --oneline",
+        "git log -G config --stat",
+        "git -C {repo} log -S config --oneline",
+        "git -c a.b=c grep config",
+        "git -C config status",
+        "git status config",
+        # Text that can rebuild a word (a pipe into a non-filter, a redirect to
+        # a file, a `$`) is held to the strict rule, which counts only a
+        # STANDALONE `config` word: a path, file stem or identifier containing
+        # it does not count.
+        "git diff -- src/config.py | sort",
+        "git log -- conexus/config/ | awk 1",
+        "git show HEAD:src/nexus/config.py > /tmp/c.py",
+        "git show HEAD:src/nexus/config.py | sed -n 1,10p",
+        "git log -1; ls ~/.config/nexus | sort",
+        "git diff main -- conexus/config/ | wc -l",
+        "git diff -- db-config.sh config_cmd.py | sort",
+        "git diff -- .git/config | sort",
+        "git log -1 && cat ~/.ssh/config | sort",
+        "git log -1 && python3 -c 'import config_loader' | sort",
+        # Quotes and braces make a WRITE unprovable; a get/list read does not
+        # care how many words it has.
+        "git config --get user.name ';x'",
+        "git config --get-all 'remote.origin.fetch'",
+        "git config --get-regexp 'user.*'",
+        "git config --list ' '",
+        "git config get 'user.name'",
+        "git config list '{a,b}'",
+        "git config --get user.{name,email}",
     ],
     "not_git": [
         "ls -la && echo commit",
@@ -1126,19 +1197,120 @@ def test_documented_residual_config_named_by_a_variable_assigned_earlier(shared_
     assert not _denied(cmd, shared_repo), cmd
 
 
-def test_a_config_write_in_a_linked_worktree_and_by_the_main_conversation_passes(
+def _config_read(repo: pathlib.Path, *args: str) -> str:
+    """What the config of *repo* says, read by a plain subprocess (not through
+    the hook, which only gates a subagent's Bash tool)."""
+    out = subprocess.run(
+        ["git", "config", *args], cwd=repo, capture_output=True, text=True, check=False,
+    )
+    return out.stdout.strip()
+
+
+#: Config writes that reach state shared with the primary checkout.
+_SHARED_CONFIG_WRITES = [
+    "git config user.name x",
+    "git config core.hooksPath /tmp/x",
+    "git config --local core.hooksPath /tmp/x",
+    "git config --global user.name x",
+    "git config --system core.hooksPath /tmp/x",
+    "git config --unset core.hooksPath",
+    "git config --file /tmp/x/cfg user.name x",
+    "git config set user.name x",
+    "git config --worktree user.name --global",
+    "git config --worktree --global user.name x",
+    "git config --worktree --glo user.name x",
+    "git config --worktree --local user.name x",
+    "git config --worktree -f /tmp/x/cfg user.name x",
+    "git config user.name x --worktree",
+    "git -C {primary} config --worktree core.hooksPath /tmp/x",
+    "git --git-dir={primary}/.git config --worktree core.hooksPath /tmp/x",
+    "git config {--worktree,--global} user.name x",
+    "git status; git config user.name x",
+    "git commit -m x; git config --global user.name x",
+]
+
+
+def test_a_config_write_by_the_main_conversation_passes(shared_repo):
+    for cmd in ("git config user.name x", "git config --global user.name x"):
+        assert "permissionDecision" not in _verdict(cmd, shared_repo, agent=False), cmd
+    assert _denied("git config user.name x", shared_repo)
+
+
+def test_a_config_write_that_reaches_shared_state_is_denied_in_a_linked_worktree(
     shared_repo, linked_worktree,
 ):
-    """The exemptions are the guard's, not config's own: the orchestrator and a
-    proven linked worktree may write config, as they may commit. Known gap,
-    pinned so closing it is a deliberate change: a plain `git config` in a
-    linked worktree writes the COMMON config file, which the primary reads too,
-    exactly as `git branch -D` and `git push` from a worktree already reach it
-    (nexus-dsr6a left the uniform worktree exemption alone)."""
-    cmd = "git config user.name x"
-    assert "permissionDecision" not in _verdict(cmd, shared_repo, agent=False)
-    assert "permissionDecision" not in _verdict(cmd, linked_worktree)
-    assert _denied(cmd, shared_repo)
+    """A linked worktree is exempt from the verb scan, not from a config write
+    that reaches state the primary reads: a plain `git config` writes the common
+    `.git/config` (verified), `--global`/`--system` the whole box, `--local` the
+    common file, and `--file` stays denied everywhere. The deny names config
+    only, never the exempt verb that shares the line."""
+    cmds = [
+        c.replace("{primary}", str(shared_repo)) for c in _SHARED_CONFIG_WRITES
+    ]
+    leaked = _not_denied(cmds, linked_worktree)
+    assert not leaked, f"worktree subagent config write(s) NOT denied: {leaked!r}"
+    out = _verdict("git commit -m x; git config --global user.name x", linked_worktree)
+    reason = out["permissionDecisionReason"]
+    assert "(config)" in reason and "(commit" not in reason, reason
+    assert "--worktree" in reason, reason
+    # nothing was written to the shared config by the probes above (the hook
+    # only decides; this pins that the fixture is what the test says it is)
+    assert _config_read(shared_repo, "--local", "--get", "user.name") == ""
+
+
+def test_a_worktree_write_and_every_config_read_pass_in_a_linked_worktree(
+    shared_repo, linked_worktree,
+):
+    """The wanted behaviour is not lost: reads, and `--worktree` writes once
+    `extensions.worktreeConfig` is on, pass from a linked worktree, as does
+    everything else a worktree owns."""
+    allowed = [
+        "git config --worktree user.name x",
+        "git config --worktree core.hooksPath /tmp/x",
+        "git config --worktree --unset user.name",
+        "git config --worktree --add a.b c",
+        "git config --worktree user.name ';x'",
+        "git config --worktree user.name 'a b'",
+        "git status; git config --worktree user.name x",
+        "git config --get user.name",
+        "git config user.name",
+        "git config --global --get user.name",
+        "git config --list",
+        "git config --local --get remote.origin.url",
+        "git config get 'user.name'",
+        "git commit -m x",
+        "git checkout -- f.txt",
+        "git diff -- src/config.py | sort",
+    ]
+    leaked = _denied_among(allowed, linked_worktree)
+    assert not leaked, f"worktree command(s) wrongly denied: {leaked!r}"
+
+
+def test_git_refuses_a_worktree_write_without_the_extension_so_it_cannot_reach_the_primary(
+    shared_repo, linked_worktree,
+):
+    """Why `--worktree` is the one write a linked worktree may make: with
+    `extensions.worktreeConfig` unset git refuses it in a repo that has linked
+    worktrees (measured on git 2.53), and with it set the write lands in the
+    per-worktree file. Either way the common config the primary reads is
+    untouched. Run for real (plain subprocesses, not the hook) so the guard's
+    premise is measured, not assumed; the plain write is the control."""
+    refused = subprocess.run(
+        ["git", "config", "--worktree", "zz.probe", "1"], cwd=linked_worktree,
+        capture_output=True, text=True,
+    )
+    assert refused.returncode != 0 and "worktreeConfig" in refused.stderr, refused.stderr
+    assert _config_read(shared_repo, "--local", "--get", "zz.probe") == ""
+    subprocess.run(
+        ["git", "config", "extensions.worktreeConfig", "true"], cwd=shared_repo, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "--worktree", "zz.probe", "1"], cwd=linked_worktree, check=True,
+    )
+    assert _config_read(shared_repo, "--local", "--get", "zz.probe") == ""
+    assert _config_read(linked_worktree, "--worktree", "--get", "zz.probe") == "1"
+    subprocess.run(["git", "config", "zz.plain", "1"], cwd=linked_worktree, check=True)
+    assert _config_read(shared_repo, "--local", "--get", "zz.plain") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -1242,6 +1414,23 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     ("git status; " * 3_000 + "git config user.name x", True),
     ("git log " + "x/config " * 5_000, False),
     ("git config user.name " + "x " * 12_000, True),
+    # nexus-dsr6a review: a long run of digits was quadratic in the redirect
+    # regexes (`\d*<` here, `\d*>` in the pre-existing `_SAFE_REDIRECT_RE`): 40k
+    # digits cost 5.5 s each, past the 5 s hook timeout, which fails open, so
+    # the pad hid the write after it. `(?<!\d)` makes the start of a run the
+    # only start.
+    ("git config user.name x ; echo " + "1" * 40_000, True),
+    ("git status ; echo " + "1" * 40_000, False),
+    ("git config --get a ; echo " + "9" * 40_000 + " ; git config user.name x", True),
+    ("git log " + "1" * 40_000 + "x", False),
+    ("git log " + "12 " * 14_000 + "7" * 30_000 + "<", False),
+    # The subcommand cursor moves forward only: many global options before the
+    # verb are one pass, and many `config` arguments after another subcommand
+    # are each O(1).
+    ("git " + "-C x " * 6_000 + "config user.name y", True),
+    ("git " + "-c a=b " * 5_000 + "config --get user.name", False),
+    ("git log " + "config " * 8_000, False),
+    ("git grep " + "config " * 4_000 + "; git status; " * 2_000, False),
 ]
 
 
