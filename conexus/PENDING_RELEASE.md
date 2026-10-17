@@ -59,5 +59,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - Description without angle brackets (nexus-0nskc): `conexus/commands/continuation.md` writes the path placeholder as PATH in its description, since Claude Desktop's plugin sync rejects angle brackets there.
 
 
+- sequential-thinking survives hostile stdio (nexus-rwv5i): `conexus/mcp/sequential_thinking.py` answers input that is not UTF-8, nested past the recursion limit, an integer too long to parse, or a lone surrogate or NaN in an id with a JSON-RPC error and goes on, leaves quietly when the client stops reading (at the write and again at interpreter exit) or when stdin or stdout is closed at start, and writes nothing to stderr in any of them. Replies are ASCII-escaped JSON. Carries over the fixes the RDR-228 stand-in review made (nexus-sv2wx.6).
+
 
 ## Deferred to the next client release

@@ -22,13 +22,16 @@ conexus already requires uv and Python 3.12+, so the server runs on those.
 Transport: MCP stdio, newline-delimited JSON-RPC 2.0 on stdin/stdout. It writes
 nothing to stderr: Claude Code records every stderr line of a stdio server as an
 ``error`` entry in its MCP log, so the upstream startup banner and per-thought
-echo would read as faults there. Like the upstream server, it keeps the thought
-history in process memory for the session's life.
+echo would read as faults there, and so would a traceback: input that is not
+UTF-8, too deeply nested, or too long to parse gets a JSON-RPC error, and a
+client that stops reading ends the server quietly. Like the upstream server, it
+keeps the thought history in process memory for the session's life.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -280,32 +283,73 @@ def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
             return _error(request_id, -32601, f"Method not found: {method}")
 
 
+def _answer(state: SequentialThinking, line: str) -> dict[str, Any] | None:
+    """The reply to one input line. Never raises: an uncaught error would be a
+    traceback on standard error and the end of the server."""
+    try:
+        message = json.loads(line)
+    except (ValueError, RecursionError):  # bad JSON, a 5000-digit integer, deep nesting
+        return _error(None, -32700, "Parse error")
+    try:
+        return handle(state, message)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        request_id = message.get("id") if isinstance(message, dict) else None
+        return _error(request_id, -32603, "Internal error")
+
+
+def _send(stdout: Any, reply: dict[str, Any]) -> None:
+    # ASCII output: a lone surrogate echoed in an id cannot be encoded, and
+    # U+2028 inside a string must not read as a line end.
+    try:
+        line = json.dumps(reply, allow_nan=False)
+    except ValueError:  # an id of NaN or Infinity is not JSON
+        line = json.dumps(_error(None, -32600, "Invalid Request"))
+    stdout.write(line + "\n")
+    stdout.flush()
+
+
 def serve(stdin: Any = None, stdout: Any = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin until EOF."""
+    """Read newline-delimited JSON-RPC from stdin until EOF, or until the client
+    stops reading."""
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
     state = SequentialThinking()
     for line in stdin:
         if not line.strip():
             continue
+        reply = _answer(state, line)
+        if reply is None:
+            continue
         try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            reply: dict[str, Any] | None = _error(None, -32700, "Parse error")
-        else:
-            reply = handle(state, message)
-        if reply is not None:
-            stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
-            stdout.flush()
+            _send(stdout, reply)
+        except OSError:  # the client went away
+            return _client_gone()
+    return 0
+
+
+def _client_gone() -> int:
+    """Leave quietly after a failed write: point fd 1 at the null device so the
+    interpreter's own flush at exit does not report the dead pipe."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
+    except OSError:
+        pass
     return 0
 
 
 def main() -> int:
+    if sys.stdin is None or sys.stdout is None:  # started with a stream closed
+        return 0
     # Text-mode stdio on Windows would translate "\n" to "\r\n" and decode with
-    # the ANSI code page; MCP stdio is UTF-8 with bare newlines.
-    sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Bytes that are
+    # not UTF-8 become a replacement character in their line, not the end of the
+    # server.
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
-    return serve()
+    try:
+        return serve()
+    except KeyboardInterrupt:
+        return 0
 
 
 if __name__ == "__main__":
