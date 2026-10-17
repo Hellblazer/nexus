@@ -1801,6 +1801,7 @@ class TestGracefulStopChannel:
         try:
             result = sweep_matching_processes(
                 lambda cmd: cmd == command, exclude_pid=os.getpid(), grace_s=0.3,
+                member_check=None,
             )
             assert result.pids == (proc.pid,)
             assert result.stubborn == (proc.pid,)

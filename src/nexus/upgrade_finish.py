@@ -1445,7 +1445,7 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     return [
         (pid, command)
         for pid, _age, command in all_process_rows()
-        if pid != me and pid not in ancestors and matcher(command) and member(pid, command)
+        if pid != me and pid not in ancestors and matcher(command) and member(pid, command) == "member"
     ]
 
 

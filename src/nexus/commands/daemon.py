@@ -1333,6 +1333,14 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         # Printed below, with the refusal; "stopped" or "already stopped"
         # would both be false here.
         pass
+    elif outcome.source == "none" and outcome.unreadable:
+        # nexus-oacd3: a flagless start whose directory could not be read is
+        # left alone, so "already stopped" would be a claim the sweep never
+        # earned. The unreadable-pid warning below names it.
+        click.echo(
+            "No process was identified as this config directory's service, "
+            "but the stop could not be verified."
+        )
     elif outcome.source == "none":
         if outcome.lease_seen:
             click.echo(
@@ -1376,8 +1384,19 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
+    if outcome.unreadable:
+        click.echo(
+            f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
+            "run 'nx daemon service start' without --config-dir and their "
+            "environment could not be read, so it is unknown whether they "
+            "serve this config directory. They were NOT signalled and may "
+            "still be running; stop them by hand if they are this "
+            "directory's service.",
+            err=True,
+        )
     if (
         not outcome.sweep_verified
+        and not outcome.unreadable
         and outcome.source != "process_table_unavailable"
         and not outcome.refused
     ):

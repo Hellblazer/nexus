@@ -51,13 +51,14 @@ import json
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Protocol, TypeVar
 
 import structlog
 
@@ -2178,15 +2179,19 @@ def storage_service_stack_matcher(
     flagless command, or a live default-dir ``stop`` would sweep an
     unrelated isolated stack and vice versa.
 
-    RESOLVED for the sweeps (nexus-oacd3): the limitation below is closed by
-    :func:`storage_service_member_check`, the second stage every sweep applies
-    to a flagless candidate. It reads the process's own ``NEXUS_CONFIG_DIR``
-    / ``HOME`` and accepts the process only when they resolve to *config_dir*;
-    an unreadable environment fails closed. This function itself still matches
-    on text alone, so a caller that signals what it returns must apply the
-    check too.
+    PARTLY RESOLVED for the sweeps (nexus-oacd3): the false-positive half of
+    the limitation below is closed by :func:`storage_service_member_check`,
+    the second stage every sweep applies to a flagless candidate. It reads the
+    process's own ``NEXUS_CONFIG_DIR`` / ``HOME`` and accepts the process only
+    when they resolve to *config_dir*; an unreadable environment fails closed
+    and is reported (``ProcessSweepResult.unreadable``). The FALSE-NEGATIVE
+    half remains: this function still accepts a flagless command only for the
+    default directory, so a flagless start with ``NEXUS_CONFIG_DIR=D`` for a
+    non-default ``D`` is never offered to the second stage, and ``stop(D)``
+    does not match it. This function matches on text alone, so a caller that
+    signals what it returns must apply the check too.
 
-    Known, DOCUMENTED limitation (historical, see above), ASYMMETRIC (not merely "unresolvable" —
+    Known, DOCUMENTED limitation (the false-positive half is closed above), ASYMMETRIC (not merely "unresolvable" —
     nexus-cd1k0 review round 2, finding stated precisely rather than
     understated): this matcher sees only argv (the process table's
     ``command`` string), never a process's environment. A process that
@@ -2347,8 +2352,10 @@ def _is_bare_supervisor_head(command: str) -> bool:
     forbids for a config_dir. Here it fails closed: a legacy flagless unit
     whose nx path contains a space is no longer matched from the process
     table and is stopped through its lease alone. Every unit and spawn
-    nexus writes today passes ``--config-dir`` and never reaches this
-    function.
+    nexus writes today passes ``--config-dir``; what reaches this function
+    is a legacy unit installed before that fix and a bare ``nx daemon
+    service start`` a user types (the release battery's local-service gate
+    was one, nexus-oacd3).
     """
     head, verb, _tail = command.partition("daemon service start")
     if not verb or (head and not head[-1].isspace()):
@@ -2385,18 +2392,28 @@ def process_environment_values(
     signal. Windows has no equivalent here, and a vanished or foreign
     process is unreadable: ``None``, never a guess. A name that is absent
     from a readable environment is simply missing from the returned dict.
+
+    Fails closed on every shape that is not a clean read: a zero-byte
+    ``environ`` (a kernel thread, a zombie, a process whose pages are not
+    ours to read) is ``None``, not an empty environment, and so is a
+    ``KERN_PROCARGS2`` block that does not parse (see
+    :func:`parse_procargs2_environment`) or a libc without ``sysctl``.
     """
     if _is_windows(platform):
         return None
     try:
         if _procfs_available():
             blob = (PROCFS_ROOT / str(pid) / "environ").read_bytes()
+            if not blob:
+                return None
             entries: list[bytes] | None = blob.split(b"\x00")
         elif (platform if platform is not None else sys.platform) == "darwin":
             entries = _darwin_procargs_environment(pid)
         else:
             return None
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError, struct.error):
+        # AttributeError: a libc without ``sysctl`` (ctypes resolves the
+        # symbol lazily); struct.error: a block that is not a block.
         return None
     if entries is None:
         return None
@@ -2409,32 +2426,79 @@ def process_environment_values(
     return out
 
 
+def parse_procargs2_environment(data: bytes) -> list[bytes] | None:
+    """The environment entries of a macOS ``KERN_PROCARGS2`` block, or
+    ``None`` when the block is not internally consistent (nexus-oacd3).
+
+    Layout: ``int32 argc`` (host order), the exec path and its NUL, NUL
+    padding, ``argc`` NUL-terminated argv strings, then the environment
+    strings, each NUL-terminated. A pure function over bytes so every
+    platform's tests exercise it.
+
+    Every length is checked before it is used. ``None`` (never ``[]`` and
+    never a slice of the wrong region) for: fewer than 4 bytes, a negative
+    ``argc``, an exec path with no terminator, fewer than ``argc`` argv
+    strings in the block (``argc`` too big, or a block truncated inside
+    argv), and an environment region whose last entry is unterminated (a
+    truncated read). A block with an empty environment is a clean ``[]``.
+    """
+    if len(data) < 4:
+        return None
+    try:
+        (argc,) = struct.unpack_from("i", data, 0)
+    except struct.error:
+        return None
+    if argc < 0:
+        return None
+    pos = data.find(b"\x00", 4)
+    if pos < 0:
+        return None  # no exec-path terminator
+    while pos < len(data) and data[pos] == 0:
+        pos += 1  # the NUL padding after the exec path
+    for _ in range(argc):
+        end = data.find(b"\x00", pos)
+        if end < 0:
+            return None  # fewer argv strings than argc claims
+        pos = end + 1
+    rest = data[pos:]
+    if rest and not rest.endswith(b"\x00"):
+        return None  # last environment entry cut off
+    return [part for part in rest.split(b"\x00") if part]
+
+
+def _load_libc() -> Any:
+    """The process's libc through ctypes; a seam so a test can stand in a libc
+    that lacks ``sysctl`` without patching ``ctypes`` process-wide."""
+    import ctypes  # noqa: PLC0415 — deferred: only the macOS branch needs it
+
+    return ctypes.CDLL(None, use_errno=True)
+
+
 def _darwin_procargs_environment(pid: int) -> list[bytes] | None:
     """The environment entries from macOS ``KERN_PROCARGS2`` for *pid*.
 
-    Layout: ``int32 argc``, the exec path, NUL padding, ``argc`` argv
-    strings, then the environment strings, each NUL-terminated. ``None``
-    when the sysctl refuses (a process of another user, or gone).
+    ``None`` when the sysctl refuses (a process of another user, or gone),
+    reports an implausible size, or returns a block
+    :func:`parse_procargs2_environment` rejects.
     """
     import ctypes  # noqa: PLC0415 — deferred: only the macOS branch needs it
-    import struct  # noqa: PLC0415 — deferred: only the macOS branch needs it
 
-    libc = ctypes.CDLL(None, use_errno=True)
+    libc = _load_libc()
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
     size = ctypes.c_size_t(0)
-    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 4:
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return None
+    if size.value < 4 or size.value > _MAX_PROCARGS2_BYTES:
         return None
     buf = ctypes.create_string_buffer(size.value)
     if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
         return None
-    data = buf.raw[: size.value]
-    (argc,) = struct.unpack_from("i", data, 0)
-    parts = data[4:].split(b"\x00")
-    index = 1  # parts[0] is the exec path
-    while index < len(parts) and parts[index] == b"":
-        index += 1  # padding between the exec path and argv[0]
-    index += argc
-    return [part for part in parts[index:] if part]
+    return parse_procargs2_environment(buf.raw[: min(size.value, len(buf))])
+
+
+#: Upper bound on a KERN_PROCARGS2 block we will allocate for (macOS ARG_MAX is
+#: 1 MiB; anything far past that is not a real exec block).
+_MAX_PROCARGS2_BYTES: int = 8 * 1024 * 1024
 
 
 def process_config_dir(
@@ -2443,14 +2507,20 @@ def process_config_dir(
     platform: str | None = None,
     environment_of: Callable[[int, tuple[str, ...]], dict[str, str] | None] | None = None,
 ) -> Path | None:
-    """The config directory *pid* itself resolves to, or ``None`` when its
-    environment cannot be read (nexus-oacd3).
+    """The config directory *pid* itself resolves to, or ``None`` when that
+    cannot be established from its own environment (nexus-oacd3).
 
     The same rule ``nexus.config.nexus_config_dir`` applies inside the
     process: its ``NEXUS_CONFIG_DIR`` when set and non-empty, else
     ``$HOME/.config/nexus`` under its own ``HOME``. A flagless command line
     carries no directory, so this is the only honest way to say which
     directory such a process belongs to.
+
+    ``None`` (fail closed) when the environment is unreadable, when it names
+    neither ``NEXUS_CONFIG_DIR`` nor ``HOME`` (falling back to the STOPPER's
+    home would answer for the wrong user), and when ``NEXUS_CONFIG_DIR`` or
+    ``HOME`` is relative (it would resolve against the stopper's cwd, not the
+    process's).
     """
     read = environment_of if environment_of is not None else (
         lambda target, names: process_environment_values(target, names, platform=platform)
@@ -2460,9 +2530,13 @@ def process_config_dir(
         return None
     override = env.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
+        if not Path(override).is_absolute():
+            return None
         return Path(override).resolve(strict=False)
     home = env.get("HOME", "").strip()
-    return (Path(home) if home else Path.home()).joinpath(".config", "nexus").resolve(strict=False)
+    if not home or not Path(home).is_absolute():
+        return None
+    return Path(home).joinpath(".config", "nexus").resolve(strict=False)
 
 
 def _is_flagless_start_command(command: str) -> bool:
@@ -2471,38 +2545,46 @@ def _is_flagless_start_command(command: str) -> bool:
     return "daemon service start" in command and "--config-dir" not in command
 
 
+#: What :func:`storage_service_member_check` says about one candidate.
+#: ``member``: signal it. ``other``: it serves another directory, leave it.
+#: ``unreadable``: its directory could not be established, leave it AND say so.
+MemberVerdict = Literal["member", "other", "unreadable"]
+
+
 def storage_service_member_check(
     config_dir: Path,
     *,
     platform: str | None = None,
     environment_of: Callable[[int, tuple[str, ...]], dict[str, str] | None] | None = None,
-) -> Callable[[int, str], bool]:
-    """``(pid, command) -> bool`` second stage for
+) -> Callable[[int, str], MemberVerdict]:
+    """``(pid, command) -> MemberVerdict`` second stage for
     :func:`storage_service_stack_matcher` (nexus-oacd3).
 
     The matcher decides from command-line text, and a flagless ``nx daemon
     service start`` has no directory in its text: it matched ANY default-dir
     stop, so a stop for one directory signalled a start that belongs to
     another (the release battery's local-service gate, exit 143). For that
-    shape this asks the process which directory it resolves to and accepts
-    it only when that equals *config_dir*. An environment that cannot be
-    read fails closed: the process is left alone and a real supervisor is
-    still stopped through its lease. Every other command (an explicit
-    ``--config-dir`` supervisor, the engine) is accepted unchanged.
+    shape this asks the process which directory it resolves to and answers
+    ``member`` only when that equals *config_dir*. An environment that cannot
+    be read fails closed as ``unreadable``: the process is left alone, a real
+    supervisor is still stopped through its lease, and the sweep reports the
+    pid (``ProcessSweepResult.unreadable``) so the caller can say the stop was
+    not verified. Every other command (an explicit ``--config-dir``
+    supervisor, the engine) is ``member`` unchanged.
     """
     target = Path(config_dir).resolve(strict=False)
 
-    def _check(pid: int, command: str) -> bool:
+    def _check(pid: int, command: str) -> MemberVerdict:
         if not _is_flagless_start_command(command):
-            return True
+            return "member"
         owner = process_config_dir(pid, platform=platform, environment_of=environment_of)
         if owner is None:
-            _log.info("stack_member_flagless_owner_unreadable", pid=pid, command=command[:120])
-            return False
+            _log.warning("stack_member_flagless_owner_unreadable", pid=pid, command=command[:120])
+            return "unreadable"
         if owner != target:
             _log.info("stack_member_flagless_other_dir", pid=pid, command=command[:120])
-            return False
-        return True
+            return "other"
+        return "member"
 
     return _check
 
@@ -2551,6 +2633,11 @@ class ProcessSweepResult:
     #: (another session; nexus-f9bgu.17). They were not signalled and not
     #: killed, and they are also among ``stubborn`` while still running.
     refused: tuple[GracefulStopSend, ...] = ()
+    #: Flagless candidates the ``member_check`` could not place in any
+    #: directory (an unreadable or malformed environment, nexus-oacd3). They
+    #: were NOT signalled and may still be running, so a caller must not
+    #: report the sweep as verified while this is non-empty.
+    unreadable: tuple[int, ...] = ()
 
     @property
     def pids(self) -> tuple[int, ...]:
@@ -2562,7 +2649,7 @@ def sweep_matching_processes(
     *,
     exclude_pid: int | None = None,
     grace_s: float = 10.0,
-    member_check: Callable[[int, str], bool] | None = None,
+    member_check: Callable[[int, str], MemberVerdict] | None,
 ) -> ProcessSweepResult:
     """Find OS processes whose command line satisfies *matcher*, terminate
     them (SIGTERM -> SIGKILL via :func:`terminate_pids`), and report what
@@ -2591,6 +2678,14 @@ def sweep_matching_processes(
     engine child, a mechanism RDR-175 retired (the supervisor's in-process
     respawn-on-child-death is gone, so there is no cascade left to
     sequence around) — simultaneous SIGTERM is not a regression here.
+
+    *member_check* is a required keyword (nexus-oacd3): the matcher sees
+    command-line text only, and a flagless ``daemon service start`` names no
+    directory, so every caller must decide whether to ask the process
+    (:func:`storage_service_member_check`) or to pass ``None`` and take the
+    matcher's text-only answer. A candidate the check calls ``unreadable`` is
+    not signalled and is listed in ``ProcessSweepResult.unreadable`` while it
+    is still running.
     """
     me = exclude_pid if exclude_pid is not None else os.getpid()
     try:
@@ -2604,6 +2699,7 @@ def sweep_matching_processes(
     # kills the stop itself and whatever was to run after it.
     ancestors = ancestor_pids(me)
     found: list[tuple[int, str]] = []
+    unreadable: list[int] = []
     for pid, _age, command in rows:
         if pid == me or not matcher(command):
             continue
@@ -2613,7 +2709,11 @@ def sweep_matching_processes(
         # nexus-oacd3: a flagless command line names no directory, so a
         # caller-supplied check (storage_service_member_check) asks the
         # process which directory it serves before it is signalled.
-        if member_check is not None and not member_check(pid, command):
+        verdict = member_check(pid, command) if member_check is not None else "member"
+        if verdict != "member":
+            # An unreadable candidate that has since exited is not a survivor.
+            if verdict == "unreadable" and process_command(pid):
+                unreadable.append(pid)
             continue
         current = process_command(pid)
         # An unreadable argv (permissions, zombie mid-reap) is not evidence
@@ -2627,7 +2727,9 @@ def sweep_matching_processes(
         found.append((pid, command))
 
     if not found:
-        return ProcessSweepResult(available=True, error=None, found=(), stubborn=())
+        return ProcessSweepResult(
+            available=True, error=None, found=(), stubborn=(), unreadable=tuple(unreadable),
+        )
 
     refused: list[GracefulStopSend] = []
     stubborn = tuple(
@@ -2637,5 +2739,5 @@ def sweep_matching_processes(
     )
     return ProcessSweepResult(
         available=True, error=None, found=tuple(found), stubborn=stubborn,
-        refused=tuple(refused),
+        refused=tuple(refused), unreadable=tuple(unreadable),
     )

@@ -806,7 +806,7 @@ class TestSweepMatchingProcesses:
             side_effect=lambda pids, **_: terminated.append(sorted(pids)) or [],
         ):
             result = sweep_matching_processes(
-                storage_service_stack_matcher(cfg), exclude_pid=99999,
+                storage_service_stack_matcher(cfg), exclude_pid=99999, member_check=None,
             )
         assert isinstance(result, ProcessSweepResult)
         assert result.available
@@ -841,7 +841,7 @@ class TestSweepMatchingProcesses:
             side_effect=lambda pids, **_: terminated.append(sorted(pids)) or [],
         ):
             result = sweep_matching_processes(
-                storage_service_stack_matcher(cfg), exclude_pid=400,
+                storage_service_stack_matcher(cfg), exclude_pid=400, member_check=None,
             )
         assert sorted(result.pids) == [196]
         assert terminated == [[196]]
@@ -879,7 +879,7 @@ class TestSweepMatchingProcesses:
         ), patch(
             "nexus.daemon.service_registry.terminate_pids",
         ) as term:
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
         assert result.available
         assert result.found == ()
         assert result.pids == ()
@@ -905,7 +905,7 @@ class TestSweepMatchingProcesses:
             "nexus.daemon.service_registry.terminate_pids",
             side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
         ):
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
         assert result.pids == (214,), (
             f"the recycled pid 196 must never be signalled: {result}"
         )
@@ -919,7 +919,7 @@ class TestSweepMatchingProcesses:
             "nexus.daemon.service_registry.all_process_rows",
             side_effect=RuntimeError("no ps, no /proc"),
         ):
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
         assert not result.available
         assert result.error and "no ps" in result.error
         assert result.found == ()
@@ -939,7 +939,7 @@ class TestSweepMatchingProcesses:
         ), patch(
             "nexus.daemon.service_registry.terminate_pids", return_value=[196],
         ):
-            result = sweep_matching_processes(storage_service_stack_matcher(cfg))
+            result = sweep_matching_processes(storage_service_stack_matcher(cfg), member_check=None)
         assert result.pids == (196,)
         assert result.stubborn == (196,)
 

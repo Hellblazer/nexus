@@ -3575,10 +3575,15 @@ class StopOutcome:
     #: hard-kills). ``source`` is ``"refused"`` when nothing else was signalled.
     #: A refused pid is still running, so it is also in ``stubborn``.
     refused: tuple[GracefulStopSend, ...] = ()
+    #: Flagless ``daemon service start`` processes the stop could not place in
+    #: any directory (unreadable or malformed environment, nexus-oacd3). They
+    #: were NOT signalled and may still be running, so ``sweep_verified`` is
+    #: False and the outcome is not "already stopped".
+    unreadable: tuple[int, ...] = ()
 
     @property
     def already_stopped(self) -> bool:
-        return not self.pids and not self.refused
+        return not self.pids and not self.refused and not self.unreadable
 
 
 def stop_storage_service(
@@ -3879,6 +3884,16 @@ def _stop_marked_service(
             sweep_verified=False,
         )
 
+    if sweep.unreadable:
+        # nexus-oacd3: left alone because its directory could not be
+        # established; the stop must not read as "already stopped, verified".
+        _log.warning(
+            "storage_service_stop_flagless_unreadable",
+            pids=list(sweep.unreadable),
+            config_dir=str(config_dir),
+        )
+    sweep_verified = not sweep.unreadable
+
     # Captured BEFORE the sweep extends `signalled`, so the log reason below
     # can distinguish "the lease produced nothing to signal, the sweep is
     # doing all the work" from "the lease already signalled something and
@@ -3925,8 +3940,9 @@ def _stop_marked_service(
             stubborn=sweep.stubborn,
             source="refused",
             lease_seen=lease_seen,
-            sweep_verified=True,
+            sweep_verified=sweep_verified,
             refused=sweep.refused,
+            unreadable=sweep.unreadable,
         )
 
     if not signalled:
@@ -3942,7 +3958,8 @@ def _stop_marked_service(
             stubborn=(),
             source="none",
             lease_seen=lease_seen,
-            sweep_verified=True,
+            sweep_verified=sweep_verified,
+            unreadable=sweep.unreadable,
         )
 
     return StopOutcome(
@@ -3950,6 +3967,7 @@ def _stop_marked_service(
         stubborn=tuple(dict.fromkeys([*lease_stubborn, *sweep.stubborn])),
         source=source,
         lease_seen=lease_seen,
-        sweep_verified=True,
+        sweep_verified=sweep_verified,
         refused=sweep.refused,
+        unreadable=sweep.unreadable,
     )
