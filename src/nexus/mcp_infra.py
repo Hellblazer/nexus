@@ -1029,6 +1029,82 @@ def _counts_are_fresh(max_age: float) -> bool:
         return _collections_counts_loaded and _now() - _collections_counts_ts <= max_age
 
 
+class ServiceNotReadyError(RuntimeError):
+    """The configured nexus service is not answering yet (nexus-5rs3i): connection refused, or a
+    502/503/504 from an engine that is up but not serving. The message is written for the person
+    or agent reading a tool result, so it says the service is starting and to retry.
+
+    It is raised, never returned as ``[]``: an empty collection list is an answer ("this store
+    holds nothing"), and a service that has not come up yet has given none. A plugin server that
+    starts at login, beside the start-at-login service, hits this window routinely.
+    """
+
+    MESSAGE = (
+        "The nexus service is not answering yet; it is probably still starting (this happens "
+        "right after login or a restart). This is not an empty store: nothing was searched. "
+        "Retry in a few seconds."
+    )
+
+    def __init__(self, detail: str = "") -> None:
+        super().__init__(f"{self.MESSAGE} ({detail})" if detail else self.MESSAGE)
+
+
+#: The statuses an engine that is up but not serving answers with (the vector routes answer 503
+#: until their backend is wired; a gateway in front answers 502/504). The vector client has
+#: already retried them on its gateway schedule by the time one reaches here.
+_NOT_READY_HTTP_CODES = frozenset({502, 503, 504})
+
+
+def list_collections_or_not_ready(t3: Any, *, routing: bool) -> list[dict]:
+    """``t3.list_collections()`` for the collections cache, with a not-ready service raised.
+
+    ``HttpVectorClient.list_collections`` degrades a non-404 failure to ``[]`` (its documented
+    default, which the CLI listings rely on). The cache would then hold that ``[]`` as the
+    store's real contents for :data:`_COLLECTIONS_CACHE_TTL`, and every tool that resolves a
+    corpus reported "No collections match" (nexus-5rs3i). This asks for the strict form and turns
+    the not-ready shapes into :class:`ServiceNotReadyError`; any other failure propagates as it
+    always did for a refused connection, and a hard engine error (500) keeps its own text.
+
+    A handle that is not the real client (a test double) has no strict form and is called as before.
+    """
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, matches this module's lazy-import convention
+
+    from nexus.db.http_vector_client import (  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+        HttpVectorClient,
+        VectorServiceError,
+        _is_retryable_endpoint_error,
+    )
+
+    if not isinstance(t3, HttpVectorClient):
+        return t3.list_collections()
+
+    def refused_or_reset(exc: BaseException | None) -> bool:
+        # A refused or reset connection (URLError wraps the socket error): the service is not
+        # listening yet. The vector client already re-resolved the endpoint and retried once on
+        # these (nexus-pebfx.1). Any other transport failure (a bad host, a timeout from a slow
+        # service) is not "starting".
+        return (
+            exc is not None
+            and not isinstance(exc, urllib.error.HTTPError)
+            and _is_retryable_endpoint_error(exc)  # type: ignore[arg-type]
+        )
+
+    try:
+        return t3.list_collections(routing=routing, strict=True)
+    except VectorServiceError as exc:
+        if exc.code in _NOT_READY_HTTP_CODES:
+            raise ServiceNotReadyError(f"HTTP {exc.code}") from exc
+        # An explicit endpoint reframes a connection failure as a code-less VectorServiceError
+        # chained to the transport error (nexus-kf679).
+        if exc.code is None and refused_or_reset(exc.__cause__):
+            raise ServiceNotReadyError(type(exc.__cause__).__name__) from exc
+        raise
+    except (urllib.error.URLError, ConnectionError) as exc:
+        if not refused_or_reset(exc):
+            raise
+        raise ServiceNotReadyError(type(exc).__name__) from exc
+
+
 def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
     """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
 
@@ -1048,14 +1124,10 @@ def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
     if now - ts > _COLLECTIONS_CACHE_TTL:
         generation = _cache_generation()
         t3 = get_t3()
-        from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
         # nexus-mz9jv: names and registry rows are all most readers of this cache use, so the
         # real client is asked for the catalog-only listing; any other handle has no such
         # listing and gives the full one.
-        if isinstance(t3, HttpVectorClient) and not need_counts:
-            rows = t3.list_collections(routing=True)
-        else:
-            rows = t3.list_collections()
+        rows = list_collections_or_not_ready(t3, routing=not need_counts)
         # A routing row has no count; an engine that ignored the request answered with the
         # full rows, which do.
         _install_collections_cache(rows, generation=generation)
@@ -1157,7 +1229,9 @@ def get_collection_counts(max_age: float | None = None) -> dict[str, int]:
         # listing, which has no counts: the caller that wants sizes pays for the full listing,
         # which replaces the cache with a superset.
         generation = _cache_generation()
-        _install_collections_cache(get_t3().list_collections(), generation=generation)
+        _install_collections_cache(
+            list_collections_or_not_ready(get_t3(), routing=False), generation=generation,
+        )
     with _collections_cache_lock:
         return _collections_cache[1]
 

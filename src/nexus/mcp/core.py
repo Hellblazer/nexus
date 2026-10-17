@@ -69,8 +69,10 @@ from nexus.mcp_infra import (
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
     invalidate_collections_cache as _invalidate_collections_cache,
+    list_collections_or_not_ready,
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
+    ServiceNotReadyError as _ServiceNotReadyError,
     flush_search_telemetry_at_exit as _flush_search_telemetry_at_exit,
     search_taxonomy as _search_taxonomy,
     search_telemetry_sink as _search_telemetry_sink,
@@ -172,6 +174,12 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     """
     _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
     text = str(e)
+
+    # nexus-5rs3i: a service that has not come up yet is told as such (and as not being an empty
+    # store), not given the "may be unreachable, check the daemon" hint below, which sends the
+    # reader to debug a service that is only starting.
+    if isinstance(e, _ServiceNotReadyError):
+        return f"Error: {text}"
 
     from nexus.db.http_scratch_store import (  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
         HEAL_ADOPTED_SUFFIX,
@@ -7084,7 +7092,7 @@ def collection_list() -> str:
     collection, sorted by name.
     """
     try:
-        cols = _get_t3().list_collections()
+        cols = list_collections_or_not_ready(_get_t3(), routing=False)
         if not cols:
             return "No collections found."
         lines: list[str] = []
