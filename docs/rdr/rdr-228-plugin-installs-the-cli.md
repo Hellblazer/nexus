@@ -276,7 +276,10 @@ assumed (`-13`, replaced by the Windows run in `-14`).
   (`nexus_rdr/228-mvv-2026-10-16-macos`). Claude Desktop 2.42304.0 on macOS
   asked before each plugin tool in one live conversation; the tool asked for
   was `collection_list`, not `setup` (`nexus_rdr/228-mvv-2026-10-16-desktop`).
-  Desktop on Windows is not measured. A Claude Code user who has allowed all
+  On 2026-10-17 Sam's own Desktop on macOS asked before `setup` itself ran on
+  7.82.0, so no approval from the Phase 1 tool of the same name carried over
+  (`nexus_rdr/228-mvv-2026-10-17-remembered-approval`). Desktop on Windows is
+  not measured. A Claude Code user who has allowed all
   of the plugin's tools has turned the prompt off for themselves. What rests
   on it is stated once, in "Consent".
 - **CA-9 (Verified with conditions, 2026-10-14, native Windows, one host).** A
@@ -461,7 +464,7 @@ answer. That instruction is the control this design owns, and it is a
 request to a model, so it can fail. The application's own prompt before a
 plugin tool runs is a second check (CA-8). The Minimum Viable Validation found
 it on every cell it measured: Claude Code asked before `setup` on macOS and on
-Windows, and Desktop on macOS asked before each plugin tool. It found no
+Windows, and Desktop on macOS asked before each plugin tool, `setup` included. It found no
 surface that shows no prompt, so the branch where consent rests on the model
 alone did not arise there. Desktop on Windows is not measured, and a Claude
 Code user who allowed all of the plugin's tools has no prompt.
@@ -1358,7 +1361,7 @@ ask for something Nexus does. The install page carries the instruction.
 | CA-5 `uv` launch form on Windows | verified on native Windows; Desktop by log | spike, log |
 | CA-6 unattended `nx init` | verified | spike |
 | CA-7 Desktop shell is not on the machine | verified, one conversation | live conversation |
-| CA-8 applications ask before a plugin tool runs | verified: Claude Code on macOS and Windows (before `setup`), Desktop on macOS (before each plugin tool, one conversation); Desktop on Windows not measured | Minimum Viable Validation, `228-mvv-2026-10-15`, `228-mvv-2026-10-16-macos`, `228-mvv-2026-10-16-desktop` |
+| CA-8 applications ask before a plugin tool runs | verified: Claude Code on macOS and Windows (before `setup`), Desktop on macOS (before each plugin tool in one conversation, and before `setup` on Sam's Desktop on 7.82.0); Desktop on Windows not measured | Minimum Viable Validation, `228-mvv-2026-10-15`, `228-mvv-2026-10-16-macos`, `228-mvv-2026-10-16-desktop`, `228-mvv-2026-10-17-remembered-approval` |
 | CA-9 a detached setup process outlives its server on Windows | verified with conditions: only by a double launch, with `CREATE_BREAKAWAY_FROM_JOB` where the job asks for it; one host | spike, `228-research-32`, `-33`, `-35` |
 
 Not verified before implementation, each named in Phase 0's "still open"
