@@ -346,6 +346,26 @@ _DOCTOR_ROW_CHARS = 300
 #: before that change fails the row, and the plugin updates independently of the CLI it finds.
 _GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|$)")
 
+#: The exit code of ``nx doctor`` when a check marked fatal fails (``nexus.health.EXIT_FATAL``). The git row of a CLI
+#: from before nexus-36qyh is fatal, so it ends the sweep with this code and no other.
+_DOCTOR_EXIT_FATAL = 2
+
+#: The summary ``nx doctor`` prints after its main sweep when a fatal check failed: the first is the local-mode
+#: footer, the second the one a service-mode (cloud) sweep prints (``format_health_for_cli`` in ``nexus.health``;
+#: ``tests/hooks/test_nx_setup.py`` pins both to that function's real output). A CLI that fails the git row and then
+#: dies (a traceback, a crash, a cut-off pipe, an encoding error on the glyph on Windows) printed the row but not
+#: this, and exits with another code; such a run is a failure, not a missing git (nexus-0ky29).
+_DOCTOR_FATAL_FOOTERS = (
+    "Some checks failed.",
+    "Run 'nx config init' to configure managed-service credentials",
+)
+
+#: The row added to a record when ``nx doctor`` named only ``git`` but did not finish as a git-only sweep does, so
+#: that neither this script's view nor ``nx doctor``'s setup row (which read the rows alone) reads it as ``done``.
+_DOCTOR_UNFINISHED_ROW = (
+    "nx doctor did not finish a sweep that failed only on git (exit code {code}); its output may be cut short"
+)
+
 #: ``nx --version`` of the Nexus CLI (click's ``version_option(prog_name="nx")``).
 _VERSION_LINE = re.compile(r"nx, version [0-9][0-9A-Za-z.+!_-]*")
 
@@ -2010,6 +2030,17 @@ def only_git_failed(rows: object) -> bool:
     )
 
 
+def git_only_sweep(code: int | None, text: str, rows: object) -> bool:
+    """Whether ``nx doctor`` finished a sweep whose only failing row is ``git``: exit code 2 (fatal), the fatal
+    footer printed after the rows, and *rows* naming ``git`` alone. Rows without the exit code and the footer are an
+    old CLI that failed the row and then died (nexus-0ky29): a real failure."""
+    return (
+        code == _DOCTOR_EXIT_FATAL
+        and any(footer in text for footer in _DOCTOR_FATAL_FOOTERS)
+        and only_git_failed(rows)
+    )
+
+
 def _is_nexus_cli(run: _Run, hit: str) -> bool:
     """A ``PATH`` hit is the Nexus CLI only with ``nx-mcp`` beside it and a
     version line in the Nexus form. A hit without ``nx-mcp`` is never run."""
@@ -2181,12 +2212,14 @@ def _execute(run: _Run) -> int:
     except OSError as exc:
         return run.fail("verify", f"nx doctor could not start: {exc}")
     rows = _doctor_rows(text)
-    if code == 0 or (code is not None and only_git_failed(rows)):
+    if code == 0 or git_only_sweep(code, text, rows):
         run.step_done("verify")
         return run.end(
             DONE, "Nexus is installed and nx doctor passes.",
             RECONNECT_NEXT, doctor="pass", doctor_failing=[],
         )
+    if only_git_failed(rows):
+        rows = [*rows, _DOCTOR_UNFINISHED_ROW.format(code="none, it timed out" if code is None else code)]
     return run.end(
         DOCTOR_FAILED, "nx doctor reported problems." if code is not None else "nx doctor timed out.",
         f"Run `nx doctor` in a terminal to see the failing rows.{_CLOUD_DOCTOR_NOTE if run.mode == MODE_CLOUD else ''} "
