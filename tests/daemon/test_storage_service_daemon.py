@@ -2051,6 +2051,44 @@ class TestSpawnServiceOnnxModelRoot:
         home = Path(os.environ.get("HOME") or Path.home())
         assert env["DJL_CACHE_DIR"] == str(home / ".cache" / "nexus" / "djl")
 
+    def test_ort_native_root_is_passed_under_the_nexus_cache(
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-8ool4: the engine extracts ONNX Runtime's native libraries once into
+        HOME/.cache/nexus/ort_native; the supervisor passes that root explicitly,
+        as it does the model root and the DJL cache, so a HOME override cannot split them."""
+        monkeypatch.delenv("NX_ORT_NATIVE_DIR", raising=False)
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        home = Path(os.environ.get("HOME") or Path.home())
+        assert env["NX_ORT_NATIVE_DIR"] == str(home / ".cache" / "nexus" / "ort_native")
+
+    def test_an_explicit_ort_native_root_passes_through(
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_ORT_NATIVE_DIR", "/their/ort")
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert env["NX_ORT_NATIVE_DIR"] == str(Path("/their/ort"))
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_ort_native_root_is_unset_not_a_choice(
+        self,
+        blank: str,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_ORT_NATIVE_DIR", blank)
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        home = Path(os.environ.get("HOME") or Path.home())
+        assert env["NX_ORT_NATIVE_DIR"] == str(home / ".cache" / "nexus" / "ort_native")
+
     @pytest.mark.parametrize("name", ["DJL_CACHE_DIR", "ENGINE_CACHE_DIR"])
     def test_an_operators_own_djl_directory_is_left_alone(
         self,

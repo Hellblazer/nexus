@@ -102,6 +102,39 @@ def apply_djl_cache_env(env: dict[str, str]) -> None:
     env[ENV_DJL_CACHE_DIR] = str(djl_cache_root())
 
 
+# ── ONNX Runtime native-library cache (nexus-8ool4) ───────────────────────────
+#
+# onnxruntime-java unpacks ~16 MB of native libraries on every JVM start and
+# deletes them only on a clean exit. The engine (``OrtNativeDir.java``)
+# extracts them once into ``<root>/<version>-<os-arch>`` and points
+# ``onnxruntime.native.path`` there. Its root is ``NX_ORT_NATIVE_DIR``, else
+# ``HOME/.cache/nexus/ort_native``, else ``user.home`` plus the same suffix.
+# The supervisor passes the root explicitly so both sides agree by construction
+# when HOME is overridden, as it does for the model root and the DJL cache.
+
+#: Spawn-env override naming the extraction ROOT. Mirrors ``OrtNativeDir.ROOT_ENV``.
+ENV_ORT_NATIVE_DIR = "NX_ORT_NATIVE_DIR"
+
+
+def ort_native_root() -> Path:
+    """The engine's ORT native-library extraction root: env, else ``<nexus cache>/ort_native``."""
+    env = os.environ.get(ENV_ORT_NATIVE_DIR, "").strip()
+    if env:
+        return Path(env)
+    return nexus_cache_root() / "ort_native"
+
+
+def apply_ort_native_env(env: dict[str, str]) -> None:
+    """Pass the ORT native-library root to the engine in the spawn env *env*.
+
+    A blank ``NX_ORT_NATIVE_DIR`` counts as unset (the engine reads blank as
+    unset too); a non-blank one already in *env* is the operator's and wins.
+    """
+    if env.get(ENV_ORT_NATIVE_DIR, "").strip():
+        return
+    env[ENV_ORT_NATIVE_DIR] = str(ort_native_root())
+
+
 def legacy_djl_tokenizer_cache() -> Path:
     """``~/.djl.ai/tokenizers``, where engines before this change extracted.
 

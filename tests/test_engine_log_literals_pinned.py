@@ -26,6 +26,7 @@ MAIN = JAVA / "Main.java"
 NEXUS_SERVICE = JAVA / "NexusService.java"
 SCHEMA_MIGRATOR = JAVA / "db" / "SchemaMigrator.java"
 ORT_INIT_GATE = JAVA / "vectors" / "OrtInitGate.java"
+ORT_NATIVE_DIR = JAVA / "vectors" / "OrtNativeDir.java"
 
 
 def _code(path: Path) -> str:
@@ -89,6 +90,21 @@ def test_the_ort_init_wait_events_are_the_ones_the_probe_and_the_signal_tests_re
     # nexus-y6aj0: tests/test_main_sigterm_during_model_init.py and OrtShutdownSafetyTest read this one.
     assert any(lit.startswith("event=ort_init_shutdown_halt ") for lit in lits)
     assert any(lit.startswith("event=ort_init_signal_gate_unavailable") for lit in lits)
+
+
+def test_the_ort_native_dir_events_are_the_ones_the_smokes_read() -> None:
+    """nexus-8ool4: engine_windows_smoke.check_ort_native_log (the Windows leg) and service/native-smoke.sh
+    (the native binary) read event=ort_native_dir source=... dir="..." and the three fallback events."""
+    lits = _log_literals(ORT_NATIVE_DIR)
+    ok = [lit for lit in lits if lit.startswith("event=ort_native_dir source={} ")]
+    assert ok, f"OrtNativeDir no longer logs 'event=ort_native_dir source={{}} dir=': {lits}"
+    for lit in ok:
+        rendered = lit.replace("{}", "extracted", 1).replace("{}", "/x", 1).replace('\\"', '"')
+        es.check_ort_native_log(rendered)
+    for ev in es._ORT_NATIVE_FAILED:
+        assert any(lit.startswith(ev) for lit in lits), f"nothing logs {ev}"
+    smoke = (REPO / "service" / "native-smoke.sh").read_text(encoding="utf-8")
+    assert "event=ort_native_dir source=" in smoke, "native-smoke.sh no longer asserts the native binary's ORT directory"
 
 
 def test_the_literal_scan_is_not_satisfied_by_a_comment(tmp_path: Path) -> None:

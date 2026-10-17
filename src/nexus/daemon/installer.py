@@ -1539,6 +1539,23 @@ def _user_model_root_outside(cache: Path) -> Path | None:
     return None
 
 
+def _user_ort_native_root_outside(cache: Path) -> Path | None:
+    """The ``NX_ORT_NATIVE_DIR`` root when it lies outside ``cache``, else None (nexus-8ool4).
+
+    Like the model root, a directory the user chose; uninstall never removes it.
+    """
+    from nexus.db import onnx_model_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if not os.environ.get(onnx_model_root.ENV_ORT_NATIVE_DIR, "").strip():
+        return None
+    root = onnx_model_root.ort_native_root()
+    try:
+        root.resolve().relative_to(cache.resolve())
+    except ValueError:
+        return root
+    return None
+
+
 #: The extraction directory onnxruntime-java makes on every start. The engine's
 #: own boot sweep (``OrtTempSweep.java``, nexus-f9bgu.8/.11) removes the old
 #: ones, so the LAST run's directory is the one a Windows uninstall finds. The
@@ -1868,6 +1885,7 @@ def uninstall_daemon(
     marker = _first_run_marker_path()
     cache_dir = nexus_cache_root()
     user_model_root = _user_model_root_outside(cache_dir)
+    user_ort_native_root = _user_ort_native_root_outside(cache_dir)
     legacy_djl = legacy_djl_tokenizer_cache()
 
     on_windows = _is_windows()
@@ -1898,6 +1916,10 @@ def uninstall_daemon(
             if user_model_root is not None:
                 parts.append(
                     f"(the NX_ONNX_MODEL_DIR model root at {user_model_root} is kept)"
+                )
+            if user_ort_native_root is not None:
+                parts.append(
+                    f"(the NX_ORT_NATIVE_DIR native-library root at {user_ort_native_root} is kept)"
                 )
             if on_windows:
                 parts.append(
@@ -2034,6 +2056,11 @@ def uninstall_daemon(
         if user_model_root is not None:
             warnings.append(
                 f"kept the NX_ONNX_MODEL_DIR model root {user_model_root}: "
+                "it is a directory you chose; remove it yourself if you no longer need it"
+            )
+        if user_ort_native_root is not None:
+            warnings.append(
+                f"kept the NX_ORT_NATIVE_DIR native-library root {user_ort_native_root}: "
                 "it is a directory you chose; remove it yourself if you no longer need it"
             )
         if cache_dir.exists() or cache_dir.is_symlink():

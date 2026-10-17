@@ -95,9 +95,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# nexus-8ool4: the engine extracts ONNX Runtime's native libraries once into
+# NX_ORT_NATIVE_DIR and loads them from there; onnxruntime-java still makes an
+# (empty) onnxruntime-java<random> directory under java.io.tmpdir. Point both at
+# the per-run scratch dir so the checks below read what THIS native binary did,
+# not the machine's real cache or /tmp.
+export NX_ORT_NATIVE_DIR="$SMOKE_TMP/ort_native"
+mkdir -p "$SMOKE_TMP/jtmp"
+
 # nexus-9gaj7: -Duser.timezone=UTC defense-in-depth alongside Main.main's
 # in-process TimeZone.setDefault(UTC) pin (asserted at boot, fails loud).
-"$BIN" -Duser.timezone=UTC > "$SMOKE_TMP/svc.log" 2>&1 &
+"$BIN" -Duser.timezone=UTC -Djava.io.tmpdir="$SMOKE_TMP/jtmp" > "$SMOKE_TMP/svc.log" 2>&1 &
 SVCPID=$!
 U="http://localhost:${SVCPORT}"
 
@@ -640,6 +648,23 @@ fi
 
 if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log"; then
   echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log" | head; fail=1
+fi
+
+# nexus-8ool4: the native binary must load ONNX Runtime from the shared directory. The engine
+# logs where it extracted/reused; onnxruntime-java must have put NO library in the temp dir
+# (only an empty onnxruntime-java<random> directory). A native image that initialised
+# OnnxRuntime at build time would read the property too late and fail the second check.
+ORT_LINES=$(grep -E 'ort_native_dir' "$SMOKE_TMP/svc.log" || true)
+if [[ "$ORT_LINES" =~ event=ort_native_dir\ source=(extracted|reused)\ dir= ]]; then
+  echo "  ok   ORT native libraries from the shared directory (source=${BASH_REMATCH[1]})"
+else
+  echo "  FAIL no event=ort_native_dir source=extracted|reused in the service log; saw: ${ORT_LINES:-nothing}"; fail=1
+fi
+ORT_TMP_BIG=$(find "$SMOKE_TMP/jtmp" -type f -size +1000k 2>/dev/null || true)
+if [ -z "$ORT_TMP_BIG" ]; then
+  echo "  ok   no ORT library was unpacked into the temp directory"
+else
+  echo "  FAIL ONNX Runtime still unpacked large file(s) into the temp directory: $ORT_TMP_BIG"; fail=1
 fi
 
 # ── SIGTERM during in-flight local inference (nexus-o5xyx.3) ─────────────────

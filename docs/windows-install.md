@@ -369,6 +369,10 @@ Set-ItemProperty 'HKCU:\Environment' -Name Path -Value $path -Type $kind
 Those releases, and 7.74.0, also leave two folders the lines above do not name.
 `%TEMP%\onnxruntime-java<n>` (about 11 MB) holds the engine's last run's ONNX
 Runtime libraries; delete the folders with that name once the stack is stopped.
+Engines after the one carrying nexus-8ool4 extract those libraries once into
+`%USERPROFILE%\.cache\nexus\ort_native` instead (`nx uninstall --remove-data` removes
+that with the rest of `.cache\nexus`), and the `onnxruntime-java<n>` folder they still
+create holds no files.
 `%USERPROFILE%\.djl.ai\tokenizers` (about 13 MB) is the engine's tokenizer
 library; releases after 7.74.0 keep it under `.cache\nexus` instead, but do not touch
 a `.djl.ai` an earlier engine already made. `nx uninstall --remove-data` reports that folder
@@ -449,7 +453,10 @@ with no AppLocker block. Three limits:
   (ONNX Runtime, extracted to the temp folder at every engine start) and
   `%OSDRIVE%\ProgramData\Microsoft\Windows Defender\Platform\*` (Defender's
   own DLL, which it loads into every process). The first two are folders the
-  user can write to.
+  user can write to. These measurements are of engines before the one carrying
+  nexus-8ool4; a later engine loads ONNX Runtime from
+  `.cache\nexus\ort_native`, which the first rule already covers, so the temp
+  rule should no longer be needed for it. That has not been measured on Windows.
 
 #### WDAC (App Control for Business)
 
@@ -473,6 +480,10 @@ C:\Users\<account>\AppData\Local\Temp\PortableGit.exe
 C:\Users\<account>\.cache\nexus\*
 C:\Users\<account>\AppData\Local\Temp\onnxruntime-java*
 ```
+
+(The last line is for engines before the one carrying nexus-8ool4; a later
+engine loads ONNX Runtime from `.cache\nexus\ort_native`, covered by the line
+above it.)
 
 A run with the same policy in audit mode recorded files in these folders and
 nowhere else: uv, the `nx` programs, Claude Code and its installer, the Python

@@ -7,16 +7,30 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributes;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -28,8 +42,9 @@ import java.util.function.UnaryOperator;
  * <p><b>The leak.</b> {@code OnnxRuntime.init()} (onnxruntime-java 1.20.0) extracts
  * {@code libonnxruntime} and {@code libonnxruntime4j_jni} from the jar into a new temp directory on
  * every start, and its only cleanup is {@code File.deleteOnExit()}. A killed engine (a test that
- * SIGKILLs the service, a SIGKILLed daemon) never runs it. On chas, where {@code /tmp} is RAM, about
- * 6,000 such directories held 36 GB in four days.
+ * SIGKILLs the service, a SIGKILLed daemon) never runs it. labrun reported the leak from chas, where
+ * {@code /tmp} is RAM and the directories pile up until its reaper removes them; at about 16 MB a
+ * directory, thousands of them are tens of gigabytes.
  *
  * <p><b>The mechanism.</b> {@code OnnxRuntime.load} tries {@code onnxruntime.native.path} before it
  * tries the jar resources: when the property names a directory it {@code System.load}s
@@ -43,14 +58,31 @@ import java.util.function.UnaryOperator;
  *
  * <p><b>Where.</b> {@code NX_ORT_NATIVE_DIR} if set, else {@code $HOME/.cache/nexus/ort_native}, else
  * {@code user.home} plus the same suffix: the cache tree the engine's ONNX model root and the DJL
- * tokenizer cache already live in, never the temp directory. If that location cannot be created or
- * written, the property is left unset and ORT behaves exactly as before.
+ * tokenizer cache already live in. None of the defaults is the temp directory. If that location cannot
+ * be created or written, the property is left unset and ORT behaves exactly as before.
+ *
+ * <p><b>Trust (POSIX).</b> A shared native library is code the engine loads, so the root and the
+ * version directory must be owned by the current user and not writable by group or others; otherwise
+ * this warns and returns {@link Outcome#UNAVAILABLE} (ORT's old temp-directory path). The stage keeps
+ * the mode {@code createTempDirectory} gave it (0700), so a directory one user extracted is not
+ * reusable by another: a cache shared across users falls back per user. Windows skips the check.
+ *
+ * <p><b>Integrity.</b> Each library's size is recorded in {@value #SIZES_FILE} when it is extracted;
+ * a directory is complete only when every required library is present at its recorded size, so a
+ * truncated library counts as broken. Files and the stage directory are fsynced before the rename
+ * where the platform allows.
  *
  * <p><b>Safe under concurrent first starts.</b> Each starter extracts into its own private
  * {@code .stage-*} directory under the root and publishes it with one directory rename onto the
  * final name. The rename is atomic and fails if the target exists, so the final directory is either
- * absent or complete; the loser of a race deletes its stage and uses the winner's directory. A stage
- * left by a killed starter is removed by the next start once it is over {@link #STALE_STAGE_AGE} old.
+ * absent or complete; the loser of a race deletes its stage and uses the winner's directory. Every start, including one
+ * that reuses a complete directory, first removes {@code .stage-*} and {@code .broken-*} leftovers of
+ * killed starters once they are over {@link #STALE_STAGE_AGE} old.
+ *
+ * <p><b>A published directory is never destroyed in place.</b> A directory that fails the completeness
+ * check is renamed aside to {@code .broken-<random>} and deleted from there, under an in-JVM monitor
+ * and a file lock on {@code <root>/.lock}, with the check repeated inside the lock, so a sibling that
+ * has just published a whole directory is never moved out from under its loader.
  *
  * <p><b>Operator wins.</b> If {@code onnxruntime.native.path} is already set (a {@code -D} flag, a
  * native-image runtime option), nothing here runs and ORT loads from that directory as it always has.
@@ -79,6 +111,14 @@ public final class OrtNativeDir {
     public static final Duration STALE_STAGE_AGE = Duration.ofMinutes(10);
 
     private static final String STAGE_PREFIX = ".stage-";
+    private static final String BROKEN_PREFIX = ".broken-";
+
+    /** Records each extracted library's size, so a truncated file is told from a whole one. */
+    static final String SIZES_FILE = ".sizes";
+    private static final String LOCK_FILE = ".lock";
+
+    /** Serialises broken-directory recovery within this JVM (a {@link FileLock} is per-JVM). */
+    private static final Object RECOVERY = new Object();
 
     /** Libraries ORT cannot start without. */
     private static final List<String> REQUIRED = List.of("onnxruntime", "onnxruntime4j_jni");
@@ -176,41 +216,54 @@ public final class OrtNativeDir {
         return System.mapLibraryName(library).replace("jnilib", "dylib");
     }
 
+    /** {@link #ensure(Path, String, String, Resources, String)} for the current user. */
+    public static Result ensure(Path root, String osName, String osArchName, Resources resources) {
+        return ensure(root, osName, osArchName, resources, System.getProperty("user.name"));
+    }
+
     /**
      * Makes {@code <root>/<version>-<os-arch>} exist and hold the libraries, extracting at most once.
-     * Never throws; returns a null {@link Result#dir()} when nothing usable could be prepared.
+     * Never throws; returns a null {@link Result#dir()} when nothing usable could be prepared or the
+     * root or the version directory is not trusted (see the class comment). {@code user} is the name
+     * the root and version directory must be owned by (POSIX only; null skips the owner check).
      */
-    public static Result ensure(Path root, String osName, String osArchName, Resources resources) {
+    static Result ensure(Path root, String osName, String osArchName, Resources resources, String user) {
         String platform = osArch(osName, osArchName);
         if (platform == null) {
             return new Result(null, Outcome.UNAVAILABLE);
         }
         Path finalDir = root.resolve(ORT_VERSION + "-" + platform);
         try {
-            if (isComplete(finalDir)) {
-                return new Result(finalDir, Outcome.REUSED);
+            createRoot(root);
+            if (!trusted(root, user)) {
+                return new Result(null, Outcome.UNAVAILABLE);
             }
-            Files.createDirectories(root);
-            sweepStaleStages(root, Instant.now());
+            // Before the reuse return: a stage left by a killed starter is removed by ANY later start.
+            sweepStale(root, Instant.now());
+            if (Files.exists(finalDir)) {
+                if (!trusted(finalDir, user)) {
+                    return new Result(null, Outcome.UNAVAILABLE);
+                }
+                if (isComplete(finalDir)) {
+                    return new Result(finalDir, Outcome.REUSED);
+                }
+            }
             Path stage = Files.createTempDirectory(root, STAGE_PREFIX);
             try {
                 if (!extractInto(stage, platform, resources)) {
                     return new Result(null, Outcome.UNAVAILABLE);
                 }
-                if (publish(stage, finalDir)) {
+                fsyncDirectory(stage);
+                IOException failure = publish(stage, finalDir);
+                if (failure == null) {
+                    fsyncDirectory(root);
                     return new Result(finalDir, Outcome.EXTRACTED);
                 }
                 // Lost a race (or a broken directory sits there): use the winner's if it is whole.
                 if (isComplete(finalDir)) {
                     return new Result(finalDir, Outcome.REUSED);
                 }
-                deleteTree(finalDir);
-                if (publish(stage, finalDir)) {
-                    return new Result(finalDir, Outcome.EXTRACTED);
-                }
-                return isComplete(finalDir)
-                        ? new Result(finalDir, Outcome.REUSED)
-                        : new Result(null, Outcome.UNAVAILABLE);
+                return recover(root, stage, finalDir, user, failure);
             } finally {
                 deleteTree(stage);
             }
@@ -220,67 +273,230 @@ public final class OrtNativeDir {
         }
     }
 
+    /**
+     * {@code finalDir} exists and is not whole (or a publish failed for another reason): replace it
+     * without ever destroying a directory a sibling just published. Serialised by an in-JVM monitor and
+     * a file lock; the check is repeated inside the lock, and a broken directory is renamed aside, not
+     * deleted in place.
+     */
+    private static Result recover(Path root, Path stage, Path finalDir, String user, IOException lastFailure)
+            throws IOException {
+        synchronized (RECOVERY) {
+            try (FileChannel ch = FileChannel.open(root.resolve(LOCK_FILE),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                 FileLock ignored = lockOrNull(ch)) {
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    // Immediately before acting: a sibling may have published a whole directory.
+                    if (isComplete(finalDir)) {
+                        return new Result(finalDir, Outcome.REUSED);
+                    }
+                    if (Files.exists(finalDir, LinkOption.NOFOLLOW_LINKS)) {
+                        if (!trusted(finalDir, user)) {
+                            return new Result(null, Outcome.UNAVAILABLE);
+                        }
+                        Path aside = root.resolve(BROKEN_PREFIX + UUID.randomUUID().toString().substring(0, 8));
+                        try {
+                            Files.move(finalDir, aside, StandardCopyOption.ATOMIC_MOVE);
+                        } catch (IOException e) {
+                            lastFailure = e;
+                            continue;
+                        }
+                        deleteTree(aside);
+                    }
+                    IOException failure = publish(stage, finalDir);
+                    if (failure == null) {
+                        fsyncDirectory(root);
+                        return new Result(finalDir, Outcome.EXTRACTED);
+                    }
+                    lastFailure = failure;
+                }
+            }
+        }
+        if (isComplete(finalDir)) {
+            return new Result(finalDir, Outcome.REUSED);
+        }
+        log.warn("event=ort_native_dir_publish_failed target=\"{}\" error=\"{}\"", finalDir, lastFailure);
+        return new Result(null, Outcome.UNAVAILABLE);
+    }
+
+    /** A file lock for cross-process exclusion, or null when the filesystem will not give one. */
+    private static FileLock lockOrNull(FileChannel ch) {
+        try {
+            return ch.lock();
+        } catch (IOException | RuntimeException e) {
+            log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
+            return null;
+        }
+    }
+
+    /** Creates the root, mode 0755 at most (the umask can only narrow it) where the platform has modes. */
+    private static void createRoot(Path root) throws IOException {
+        if (Files.isDirectory(root)) {
+            return;
+        }
+        if (root.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+            Files.createDirectories(root, PosixFilePermissions.asFileAttribute(
+                    PosixFilePermissions.fromString("rwxr-xr-x")));
+        } else {
+            Files.createDirectories(root);
+        }
+    }
+
+    /**
+     * POSIX: {@code dir} must be owned by {@code user} and not writable by group or others, or a
+     * planted library could be loaded into the engine. Other platforms: true. A false return warns.
+     */
+    static boolean trusted(Path dir, String user) {
+        PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
+        if (view == null) {
+            return true;
+        }
+        try {
+            PosixFileAttributes a = view.readAttributes();
+            String owner = a.owner().getName();
+            Set<PosixFilePermission> perms = a.permissions();
+            boolean ownerOk = user == null || user.equals(owner);
+            boolean writable = perms.contains(PosixFilePermission.GROUP_WRITE)
+                    || perms.contains(PosixFilePermission.OTHERS_WRITE);
+            if (ownerOk && !writable) {
+                return true;
+            }
+            log.warn("event=ort_native_dir_untrusted dir=\"{}\" owner=\"{}\" expected_owner=\"{}\" mode={} "
+                            + "note=\"must be owned by the current user and not group- or world-writable; "
+                            + "onnxruntime-java will extract into the temp directory on this start\"",
+                    dir, owner, user, PosixFilePermissions.toString(perms));
+            return false;
+        } catch (IOException e) {
+            log.warn("event=ort_native_dir_untrusted dir=\"{}\" error=\"{}\"", dir, e.toString());
+            return false;
+        }
+    }
+
+    /**
+     * Whole means: every required library is a regular file whose size equals the size recorded
+     * when it was extracted (the jar resource's length), so a truncated library is broken.
+     */
     private static boolean isComplete(Path dir) {
         if (!Files.isDirectory(dir)) {
             return false;
         }
+        Map<String, Long> recorded = readSizes(dir.resolve(SIZES_FILE));
+        if (recorded == null) {
+            return false;
+        }
         for (String lib : REQUIRED) {
-            Path f = dir.resolve(mapLibraryName(lib));
-            try {
-                if (!Files.isRegularFile(f) || Files.size(f) == 0) {
-                    return false;
-                }
-            } catch (IOException e) {
+            if (!matches(dir, mapLibraryName(lib), recorded, true)) {
+                return false;
+            }
+        }
+        for (String lib : OPTIONAL) {
+            if (!matches(dir, mapLibraryName(lib), recorded, false)) {
                 return false;
             }
         }
         return true;
     }
 
+    private static boolean matches(Path dir, String file, Map<String, Long> recorded, boolean required) {
+        Long want = recorded.get(file);
+        if (want == null) {
+            return !required;
+        }
+        Path f = dir.resolve(file);
+        try {
+            return Files.isRegularFile(f) && want > 0 && Files.size(f) == want;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static Map<String, Long> readSizes(Path file) {
+        try {
+            Map<String, Long> m = new LinkedHashMap<>();
+            for (String line : Files.readAllLines(file)) {
+                int eq = line.lastIndexOf('=');
+                if (eq > 0) {
+                    m.put(line.substring(0, eq), Long.parseLong(line.substring(eq + 1).trim()));
+                }
+            }
+            return m;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
     /** Copies the libraries out of the jar into {@code stage}; false if a required one is absent. */
     private static boolean extractInto(Path stage, String platform, Resources resources) throws IOException {
+        Map<String, Long> sizes = new LinkedHashMap<>();
         for (String lib : REQUIRED) {
-            if (!copy(stage, platform, lib, resources)) {
+            if (!copy(stage, platform, lib, resources, sizes)) {
                 log.warn("event=ort_native_dir_resource_missing library=\"{}\" platform=\"{}\"", lib, platform);
                 return false;
             }
         }
         for (String lib : OPTIONAL) {
-            copy(stage, platform, lib, resources);
+            copy(stage, platform, lib, resources, sizes);
+        }
+        StringBuilder manifest = new StringBuilder();
+        sizes.forEach((name, size) -> manifest.append(name).append('=').append(size).append('\n'));
+        Path sizesFile = stage.resolve(SIZES_FILE);
+        try (FileChannel ch = FileChannel.open(sizesFile, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            ch.write(java.nio.ByteBuffer.wrap(manifest.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            ch.force(true);
         }
         return true;
     }
 
-    private static boolean copy(Path stage, String platform, String lib, Resources resources) throws IOException {
+    private static boolean copy(Path stage, String platform, String lib, Resources resources,
+                                Map<String, Long> sizes) throws IOException {
         String file = mapLibraryName(lib);
         try (InputStream in = resources.open("/ai/onnxruntime/native/" + platform + "/" + file)) {
             if (in == null) {
                 return false;
             }
-            Files.copy(in, stage.resolve(file), StandardCopyOption.REPLACE_EXISTING);
+            try (FileChannel ch = FileChannel.open(stage.resolve(file),
+                    StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                 OutputStream out = Channels.newOutputStream(ch)) {
+                long n = in.transferTo(out);
+                out.flush();
+                ch.force(true);
+                sizes.put(file, n);
+            }
             return true;
         }
     }
 
-    /** Renames {@code stage} onto {@code finalDir}; false when the target exists or the rename failed. */
-    private static boolean publish(Path stage, Path finalDir) {
+    /** Best-effort fsync of a directory's entries; platforms that cannot open a directory skip it. */
+    private static void fsyncDirectory(Path dir) {
+        try (FileChannel ch = FileChannel.open(dir, StandardOpenOption.READ)) {
+            ch.force(true);
+        } catch (IOException | RuntimeException e) {
+            log.debug("event=ort_native_dir_fsync_skipped dir=\"{}\" error=\"{}\"", dir, e.toString());
+        }
+    }
+
+    /** Renames {@code stage} onto {@code finalDir}; null on success, else why not. */
+    private static IOException publish(Path stage, Path finalDir) {
         try {
             Files.move(stage, finalDir, StandardCopyOption.ATOMIC_MOVE);
-            return true;
+            return null;
         } catch (AtomicMoveNotSupportedException e) {
             // Same-directory rename; not expected to be unsupported. Do not fall back to a copying move:
             // it would publish a half-copied directory.
             log.warn("event=ort_native_dir_rename_unsupported error=\"{}\"", e.toString());
-            return false;
+            return e;
         } catch (IOException e) {
             log.debug("event=ort_native_dir_publish_lost target=\"{}\" error=\"{}\"", finalDir, e.toString());
-            return false;
+            return e;
         }
     }
 
-    /** Removes {@code .stage-*} directories whose starter was killed. */
-    private static void sweepStaleStages(Path root, Instant now) {
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(root, STAGE_PREFIX + "*")) {
+    /** Removes {@code .stage-*} and {@code .broken-*} directories whose owner was killed. */
+    private static void sweepStale(Path root, Instant now) {
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(root, p -> {
+            String n = p.getFileName().toString();
+            return n.startsWith(STAGE_PREFIX) || n.startsWith(BROKEN_PREFIX);
+        })) {
             for (Path p : ds) {
                 try {
                     Instant m = Files.getLastModifiedTime(p).toInstant();
@@ -298,7 +514,7 @@ public final class OrtNativeDir {
 
     /** Best-effort recursive delete of a directory this class made; never follows a link. */
     private static void deleteTree(Path dir) {
-        if (!Files.exists(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
         try (var walk = Files.walk(dir)) {

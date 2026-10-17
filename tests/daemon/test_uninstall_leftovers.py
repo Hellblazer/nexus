@@ -332,6 +332,34 @@ class TestRemoveDataRemovesTheModelCache:
         assert str(mine) in preview.message and "kept" in preview.message, preview.message
         assert any(str(mine) in w for w in report.warnings), report.warnings
 
+    def test_a_user_chosen_ort_native_root_is_named_and_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-8ool4: like NX_ONNX_MODEL_DIR, an NX_ORT_NATIVE_DIR outside the nexus
+        cache is the user's: the preview and the report name it and it survives."""
+        cache = _cache_layout(monkeypatch, tmp_path, "linux")
+        mine = tmp_path / "my-ort"
+        (mine / "1.20.0-linux-x64").mkdir(parents=True)
+        monkeypatch.setenv(omr.ENV_ORT_NATIVE_DIR, str(mine))
+
+        preview = installer.uninstall_daemon(confirm=False, remove_data=True)
+        report = installer.uninstall_daemon(confirm=True, remove_data=True)
+
+        assert (mine / "1.20.0-linux-x64").is_dir(), "an NX_ORT_NATIVE_DIR root is the user's"
+        assert not cache.exists(), "the default nexus cache still goes"
+        assert str(mine) in preview.message and "NX_ORT_NATIVE_DIR" in preview.message, preview.message
+        assert any(str(mine) in w and "NX_ORT_NATIVE_DIR" in w for w in report.warnings), report.warnings
+
+    def test_an_ort_native_root_inside_the_cache_is_not_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _cache_layout(monkeypatch, tmp_path, "linux")
+        monkeypatch.setenv(omr.ENV_ORT_NATIVE_DIR, str(cache / "ort_native"))
+
+        preview = installer.uninstall_daemon(confirm=False, remove_data=True)
+
+        assert "NX_ORT_NATIVE_DIR" not in preview.message, preview.message
+
     def test_a_symlinked_cache_dir_loses_only_the_link(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

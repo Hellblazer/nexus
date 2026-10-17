@@ -74,11 +74,6 @@ public final class Main {
         // per start on Windows (its DLLs are locked at exit, so deleteOnExit loses). Remove
         // the dead ones from earlier runs; Windows only, best effort, never throws.
         OrtTempSweep.sweepAtBoot();
-        // nexus-8ool4: load ONNX Runtime's native libraries from one per-version directory
-        // extracted once under the engine's cache tree, instead of unpacking ~16 MB into a fresh
-        // /tmp/onnxruntime-java<random> on every start (a killed engine never deletes it). Sets
-        // onnxruntime.native.path unless the operator already did; best effort, never throws.
-        OrtNativeDir.applyAtBoot();
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
@@ -291,6 +286,12 @@ public final class Main {
             var onnxRoot = dev.nexus.service.vectors.OnnxModelPaths.resolved();
             log.info("event=onnx_model_root root={} source={}",
                     onnxRoot.root(), onnxRoot.source());
+            // nexus-8ool4: load ONNX Runtime's native libraries from one per-version directory
+            // extracted once under the engine's cache tree, instead of unpacking ~16 MB into a fresh
+            // /tmp/onnxruntime-java<random> on every start (a killed engine never deletes it). Local
+            // mode only: cloud/Voyage mode never touches ONNX Runtime. Sets onnxruntime.native.path
+            // unless the operator already did; best effort, never throws; must precede any ORT use.
+            OrtNativeDir.applyAtBoot();
             Bge768Embedder bge;
             try {
                 bge = new Bge768Embedder();

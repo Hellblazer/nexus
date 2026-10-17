@@ -163,7 +163,9 @@ try {
                 # the DLL runs of 2026-10-14 needed: the engine's tokenizer library, which it extracts under
                 # .cache\nexus\djl, ONNX Runtime, which it extracts to %TEMP%\onnxruntime-java<digits> at every start
                 # (blocked under the enforced rules; the audit run did not record it), and Defender's scanning DLL,
-                # which Defender loads into every process.
+                # which Defender loads into every process. An engine after the one carrying nexus-8ool4 loads ONNX
+                # Runtime from .cache\nexus\ort_native instead (covered by the first rule); keep the Temp rule for
+                # the earlier engines this driver still installs.
                 $dllExtra = @('.cache\nexus\*', 'AppData\Local\Temp\onnxruntime-java*')
                 $dll = '<RuleCollection Type="Dll" EnforcementMode="' + $(if ($appLocker -eq 'allow-dll') { 'Enabled' } else { 'AuditOnly' }) + '">' +
                     (& $path 'fe64f59f-6fca-45e5-a731-0f6715327c38' 'Program Files DLLs' $everyone '%PROGRAMFILES%\*') +

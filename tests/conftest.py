@@ -574,13 +574,14 @@ def pytest_sessionstart(session):
             CACHE_DIR_ENV, str(Path(_real_home) / ".cache" / "chroma" / "onnx_models"),
         )
         # nexus-8ool4: every engine JVM a test starts unpacks ONNX Runtime's ~16 MB native
-        # libraries into onnxruntime-java<random> under /tmp and a killed one never deletes
-        # it. The engine now extracts once into NX_ORT_NATIVE_DIR instead; under the fenced
-        # HOME above that default would be a fresh directory per suite, so pin it to the
-        # operator's real cache like the model cache. setdefault: an outer value wins.
-        os.environ.setdefault(
-            "NX_ORT_NATIVE_DIR", str(Path(_real_home) / ".cache" / "nexus" / "ort_native"),
-        )
+        # libraries into onnxruntime-java<random> under /tmp unless the engine has a native
+        # cache, and a killed one never deletes it. The engine extracts once into
+        # NX_ORT_NATIVE_DIR (default HOME/.cache/nexus/ort_native). The fence symlinks
+        # ~/.cache through today, so the default already lands in the real cache; the pin
+        # matters for a test that moves HOME and for the day the fence stops mirroring
+        # .cache (nexus-ld3aa). An empty value counts as unset; an explicit outer value wins.
+        if not os.environ.get("NX_ORT_NATIVE_DIR", "").strip():
+            os.environ["NX_ORT_NATIVE_DIR"] = str(Path(_real_home) / ".cache" / "nexus" / "ort_native")
 
     if _is_controller_or_serial:
         # Snapshotting here (before any worker is spawned -- xdist spawns

@@ -265,7 +265,7 @@ class FakeLauncher:
         proc.log = log
         self.procs.append(proc)
         new = self._first_boot_new if len(self.procs) == 1 else self._reboot_new
-        text = "event=service_ready\n"
+        text = 'event=ort_native_dir source=extracted dir="X"\nevent=service_ready\n'
         if new is not None:
             text = f"event=schema_migration_complete new_changesets={new} reexecuted_changesets=12\n" + text
         log.write_text(text)
@@ -533,13 +533,38 @@ def test_a_graceful_stop_reports_the_exit_code_and_off_windows_a_hard_stop_is_on
 # --------------------------------------------------------------------------- #
 
 
+def test_the_ort_native_log_check_accepts_the_real_event_and_refuses_a_fallback_or_silence() -> None:
+    """nexus-8ool4: the leg proves the engine loaded ONNX Runtime from the shared directory."""
+    es.check_ort_native_log('INFO event=ort_native_dir source=extracted dir="C:\\run\\ort_native\\1.20.0-win-x64"')
+    es.check_ort_native_log('event=ort_native_dir source=reused dir="/x"\n')
+    with pytest.raises(es.SmokeError, match="lacks event=ort_native_dir"):
+        es.check_ort_native_log("event=service_ready\n")
+    with pytest.raises(es.SmokeError, match="ort_native_dir_unavailable"):
+        es.check_ort_native_log('event=ort_native_dir_unavailable root="/x"\n')
+    with pytest.raises(es.SmokeError, match="ort_native_dir_untrusted"):
+        es.check_ort_native_log('event=ort_native_dir source=reused dir="/x"\nevent=ort_native_dir_untrusted dir="/y"')
+
+
+def test_a_run_whose_engine_never_logs_the_ort_native_event_fails(tmp_path: Path) -> None:
+    class Silent(FakeLauncher):
+        def start(self, argv, env, log):  # noqa: ANN001
+            proc = super().start(argv, env, log)
+            log.write_text(log.read_text().replace("event=ort_native_dir", "event=other"))
+            return proc
+
+    with pytest.raises(es.SmokeError, match="lacks event=ort_native_dir"):
+        _run(tmp_path, windows=True, launcher=Silent(), runner=_ListingRunner(Silent()))
+
+
 def test_engine_env_keeps_only_the_os_basics_and_the_nx_settings() -> None:
     env = es.engine_env(
         engine_dir=Path(r"C:\run\engine"), platform=sm.Platform(windows=True),
         base={"SystemRoot": r"C:\Windows", "TEMP": r"C:\t", "USERPROFILE": r"C:\u", "SECRET_TOKEN": "x",
               "GH_TOKEN": "y", "PATH": r"C:\Program Files\Python313", "JAVA_HOME": r"D:\jdk"},
         db_url="jdbc:postgresql://127.0.0.1:1/nexus", db_user="u", port=2, model_root=Path(r"C:\m"),
+        ort_native_root=Path(r"C:\ort"),
     )
+    assert env["NX_ORT_NATIVE_DIR"] == str(Path(r"C:\ort"))
     assert "SECRET_TOKEN" not in env and "GH_TOKEN" not in env and "JAVA_HOME" not in env
     assert "Python313" not in env["PATH"]
     assert env["TEMP"] == r"C:\t" and env["USERPROFILE"] == r"C:\u"
