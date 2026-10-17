@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`same-as` links join PDFs with the same file content, not PDFs indexed at the same commit** (nexus-utkop). The PDF dedup linker grouped pdf and paper entries by `head_hash`, which for a repo-indexed file is the git commit, so every PDF indexed at one commit was linked as a duplicate of the lowest tumbler: seven distinct PDFs in the nexus repo (different bytes, different chunk counts) carried six `same-as` links to `distributed-bloom-filter.pdf`. It now groups by the file-content hash the indexer stamps (`index_content_hash`, or `meta.content_hash` on rows that predate the fence) and skips entries with neither. The six existing false links are not removed by this change. Tests: `tests/test_link_generator.py::TestPdfCorpusLinks`, `tests/catalog/test_link_generator_service_mode.py::TestPdfCorpusLinksServiceMode`.
+
 ## [7.82.0] - 2026-10-17
 
 Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). RDR-228 follow-through: a one-command installer (`install.sh`, `install.ps1`), install pages around two routes, measured install sizes, and Desktop told to quit and reopen after setup. The conexus skill listing shrinks: ten commands hidden from the model, six wrapper skills retired into agents and rules, the review and planning procedure carried in the agents, and `bd prime` printed by the session-start hook when the beads plugin is off. Fixes: the streaming PDF index race, Windows first-session hook timeouts, and the MinerU semaphore leak.

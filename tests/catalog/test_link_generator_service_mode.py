@@ -496,14 +496,36 @@ class TestProseFilepathLinksServiceMode:
 
 
 class TestPdfCorpusLinksServiceMode:
+    def test_pdfs_sharing_a_commit_but_not_content_are_not_linked(self, reader, writer) -> None:
+        """nexus-utkop: head_hash is the git commit for a repo-indexed file,
+        so seven distinct PDFs indexed at one commit were joined as same-as."""
+        for t, h in (("1.1.1", "3e397d9c"), ("1.1.2", "4fe9dd09"), ("1.1.3", "a2723ab6")):
+            _State.add_document(
+                t, title=t, content_type="pdf", head_hash="aee32ea0commit",
+                index_content_hash=h, physical_collection="docs__1-1",
+            )
+        assert generate_pdf_corpus_links(reader, writer=writer) == 0
+        assert _State.links == []
+
+    def test_legacy_meta_content_hash_is_the_fallback_key(self, reader, writer) -> None:
+        _State.add_document(
+            "1.1.1", title="P1", content_type="paper", head_hash="c1",
+            metadata={"content_hash": "same-bytes"}, physical_collection="knowledge__a",
+        )
+        _State.add_document(
+            "1.1.2", title="P2", content_type="pdf", head_hash="c2",
+            index_content_hash="same-bytes", physical_collection="knowledge__b",
+        )
+        assert generate_pdf_corpus_links(reader, writer=writer) == 1
+
     def test_two_pdfs_with_same_hash_get_linked(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="Paper1", content_type="paper",
-            head_hash="abc123", physical_collection="knowledge__delos",
+            index_content_hash="abc123", physical_collection="knowledge__delos",
         )
         _State.add_document(
             "1.1.2", title="Paper2", content_type="paper",
-            head_hash="abc123", physical_collection="knowledge__art-papers",
+            index_content_hash="abc123", physical_collection="knowledge__art-papers",
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 1
@@ -517,7 +539,7 @@ class TestPdfCorpusLinksServiceMode:
     def test_no_link_when_hash_unique(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="Unique", content_type="paper",
-            head_hash="unique-hash", physical_collection="knowledge__delos",
+            index_content_hash="unique-hash", physical_collection="knowledge__delos",
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 0
@@ -525,11 +547,11 @@ class TestPdfCorpusLinksServiceMode:
     def test_idempotent(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__delos",
+            index_content_hash="h1", physical_collection="knowledge__delos",
         )
         _State.add_document(
             "1.1.2", title="P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__art-papers",
+            index_content_hash="h1", physical_collection="knowledge__art-papers",
         )
         first = generate_pdf_corpus_links(reader, writer=writer)
         second = generate_pdf_corpus_links(reader, writer=writer)
@@ -537,14 +559,14 @@ class TestPdfCorpusLinksServiceMode:
         assert second == 0
         assert len(_State.links) == 1
 
-    def test_pdfs_without_head_hash_skipped(self, reader, writer) -> None:
+    def test_pdfs_without_content_hash_skipped(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="NoHash1", content_type="paper",
-            head_hash="", physical_collection="knowledge__delos",
+            index_content_hash="", physical_collection="knowledge__delos",
         )
         _State.add_document(
             "1.1.2", title="NoHash2", content_type="paper",
-            head_hash="", physical_collection="knowledge__art-papers",
+            index_content_hash="", physical_collection="knowledge__art-papers",
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 0
@@ -651,18 +673,25 @@ def _old_generate_prose_filepath_links(cat, *, writer=None, new_tumblers=None):
     return count
 
 
+def _content_key(e) -> str:
+    return e.index_content_hash or (e.meta or {}).get("content_hash") or ""
+
+
 def _old_generate_pdf_corpus_links(cat, *, writer=None, new_tumblers=None):
-    """Reference copy of the PRE-T0.2 ``generate_pdf_corpus_links`` body."""
+    """Reference copy of the PRE-T0.2 ``generate_pdf_corpus_links`` body,
+    with the grouping key moved from head_hash to the content hash
+    (nexus-utkop) so the fetch-scope equivalence still compares like with
+    like."""
     if new_tumblers is not None and len(new_tumblers) == 0:
         return 0
     entries = cat.all_documents()
     pdf_entries = [
         e for e in entries
-        if e.content_type in ("pdf", "paper") and e.head_hash
+        if e.content_type in ("pdf", "paper") and _content_key(e)
     ]
     by_hash: dict[str, list] = {}
     for e in pdf_entries:
-        by_hash.setdefault(e.head_hash, []).append(e)
+        by_hash.setdefault(_content_key(e), []).append(e)
     new_set = {str(t) for t in new_tumblers} if new_tumblers is not None else None
     count = 0
     for group in by_hash.values():
@@ -739,11 +768,11 @@ class TestLinkGeneratorFetchScope:
     def test_pdf_linker_fetches_only_its_content_types(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__a",
+            index_content_hash="h1", physical_collection="knowledge__a",
         )
         _State.add_document(
             "1.1.2", title="P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__b",
+            index_content_hash="h1", physical_collection="knowledge__b",
         )
 
         generate_pdf_corpus_links(reader, writer=writer)
@@ -827,12 +856,12 @@ class TestLinkGeneratorFetchScopeEquivalence:
         assert new_snap == old_snap
 
     def test_pdf_linker_equivalent(self, reader, writer) -> None:
-        _State.add_document("1.1.1", title="P1", content_type="pdf", head_hash="h1", physical_collection="knowledge__a")
-        _State.add_document("1.1.2", title="P2", content_type="paper", head_hash="h1", physical_collection="knowledge__b")
-        _State.add_document("1.1.3", title="P3", content_type="paper", head_hash="h1", physical_collection="knowledge__c")
-        _State.add_document("1.1.4", title="Unique", content_type="pdf", head_hash="h2", physical_collection="knowledge__d")
-        # Noise: same head_hash, wrong content_type — must not join the group.
-        _State.add_document("2.2.1", title="noise", content_type="knowledge", head_hash="h1")
+        _State.add_document("1.1.1", title="P1", content_type="pdf", index_content_hash="h1", physical_collection="knowledge__a")
+        _State.add_document("1.1.2", title="P2", content_type="paper", index_content_hash="h1", physical_collection="knowledge__b")
+        _State.add_document("1.1.3", title="P3", content_type="paper", index_content_hash="h1", physical_collection="knowledge__c")
+        _State.add_document("1.1.4", title="Unique", content_type="pdf", index_content_hash="h2", physical_collection="knowledge__d")
+        # Noise: same content hash, wrong content_type — must not join the group.
+        _State.add_document("2.2.1", title="noise", content_type="knowledge", index_content_hash="h1")
 
         old_snap = self._run(_old_generate_pdf_corpus_links, reader, writer)
         new_snap = self._run(generate_pdf_corpus_links, reader, writer)
@@ -990,11 +1019,11 @@ class TestLinkGeneratorSeedSkip:
     def test_pdf_linker_still_fetches_and_links_when_pdf_seed_present(self, reader, writer) -> None:
         _State.add_document(
             "1.1.1", title="P1", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__a",
+            index_content_hash="h1", physical_collection="knowledge__a",
         )
         _State.add_document(
             "1.1.2", title="P2", content_type="paper",
-            head_hash="h1", physical_collection="knowledge__b",
+            index_content_hash="h1", physical_collection="knowledge__b",
         )
         member_t = Tumbler.parse("1.1.2")
 

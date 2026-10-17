@@ -814,17 +814,20 @@ def generate_pdf_corpus_links(
 ) -> int:
     """nexus-sob9: link PDFs that share a content_hash via ``same-as``.
 
-    Two PDFs in different physical_collections with the same
-    ``head_hash`` are the same source paper indexed twice (e.g. a
-    PDF imported into both ``knowledge__delos`` and
-    ``knowledge__art-grossberg-papers``). The catalog should
+    Two PDFs with the same file-content hash are the same source paper
+    indexed twice (e.g. a PDF imported into both ``knowledge__delos``
+    and ``knowledge__art-grossberg-papers``). The catalog should
     surface that fact so cross-corpus retrieval can collapse them
     to one logical document.
 
     Algorithm:
     1. Group catalog PDF entries (``content_type in {"pdf",
-       "paper"}``) by ``head_hash`` (the catalog's stored
-       file-content hash; populated at register time).
+       "paper"}``) by :func:`_pdf_content_hash`: the sha256 of the
+       file's bytes the indexer stamps as ``index_content_hash``, or
+       ``meta.content_hash`` on rows that predate the fence. Never
+       ``head_hash``: for a repo-indexed file that is the git commit,
+       shared by every file indexed at it (nexus-utkop joined seven
+       distinct PDFs that way).
     2. For each group with >= 2 entries, create ``same-as`` links
        from every member to the lexicographically-first member
        (the canonical anchor). Avoids O(N^2) pairwise links;
@@ -862,12 +865,12 @@ def generate_pdf_corpus_links(
         e
         for content_type in ("pdf", "paper")
         for e in _entries_of_type(cat, content_type)
-        if e.head_hash
+        if _pdf_content_hash(e)
     ]
 
     by_hash: dict[str, list[CatalogEntry]] = {}
     for e in pdf_entries:
-        by_hash.setdefault(e.head_hash, []).append(e)
+        by_hash.setdefault(_pdf_content_hash(e), []).append(e)
 
     new_set: set[str] | None
     if new_tumblers is not None:
@@ -898,10 +901,16 @@ def generate_pdf_corpus_links(
                     "pdf_same_as_link_created",
                     member=str(member.tumbler),
                     anchor=str(anchor.tumbler),
-                    head_hash=hash_value[:16],
+                    content_hash=hash_value[:16],
                 )
 
     return count
+
+
+def _pdf_content_hash(entry: CatalogEntry) -> str:
+    """The file-content key for same-as grouping: ``index_content_hash``,
+    else the pre-fence ``meta.content_hash``, else ``''`` (not groupable)."""
+    return entry.index_content_hash or (entry.meta or {}).get("content_hash") or ""
 
 
 
