@@ -153,16 +153,37 @@ public final class NightlyJob {
 JAVA
 git add -A
 git commit -qm "Nightly rollup job with a shared connection pool"
-python3 - <<'PY'
-p = "src/main/java/aurora/NightlyJob.java"
-s = open(p).read()
-s = s.replace("                Connection conn = pool.borrow();\n",
-              "                Connection conn = pool.borrow();\n"
-              "                if (conn == null) {\n"
-              "                    conn = pool.borrow();\n"
-              "                }\n")
-open(p, "w").write(s)
-PY
+cat > src/main/java/aurora/NightlyJob.java <<'JAVA'
+package aurora;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/** Rolls up the day's events, eight partitions at a time. */
+public final class NightlyJob {
+    public static void main(String[] args) throws InterruptedException {
+        ConnectionPool pool = new ConnectionPool(8);
+        ExecutorService workers = Executors.newFixedThreadPool(8);
+        for (int p = 0; p < 64; p++) {
+            final int partition = p;
+            workers.submit(() -> {
+                Connection conn = pool.borrow();
+                if (conn == null) {
+                    conn = pool.borrow();
+                }
+                try {
+                    conn.execute("INSERT INTO rollup SELECT * FROM events WHERE part = " + partition);
+                } finally {
+                    pool.giveBack(conn);
+                }
+            });
+        }
+        workers.shutdown();
+        workers.awaitTermination(1, TimeUnit.HOURS);
+    }
+}
+JAVA
 git commit -qam "Retry borrow once when the pool hands back null"
 sed -i.bak 's/new ConnectionPool(8)/new ConnectionPool(16)/' src/main/java/aurora/NightlyJob.java && rm -f src/main/java/aurora/NightlyJob.java.bak
 git commit -qam "Double the pool size"
