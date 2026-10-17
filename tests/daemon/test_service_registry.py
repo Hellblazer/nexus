@@ -963,8 +963,15 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
         import sys
         import time
 
+        from nexus.daemon.service_registry import process_command
         from nexus.upgrade_finish import service_stack_pids
 
+        # nexus-oacd3: a flagless command line names no directory, so the sweep
+        # reads the process's own environment; Windows has no reader for it
+        # (process_environment_values is None by design), the member check
+        # fails closed, and a flagless start there is found through its lease
+        # only. This test holds no lease, so on win32 it must NOT be listed.
+        on_windows = sys.platform == "win32"
         fake_home = Path("/home/fakehome-cd1k0")
         monkeypatch.setattr(Path, "home", lambda: fake_home)
         default_dir = fake_home / ".config" / "nexus"
@@ -1000,6 +1007,12 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
                 found_pids = [pid for pid, _cmd in service_stack_pids(default_dir)]
                 if proc.pid in found_pids:
                     break
+                # win32 never finds it, so end the poll once the process table
+                # has demonstrably reported the stand-in (the positive control
+                # for the absence asserted below), not at the deadline.
+                if on_windows and "daemon service start" in process_command(proc.pid):
+                    found_pids = [pid for pid, _cmd in service_stack_pids(default_dir)]
+                    break
                 time.sleep(0.1)
         finally:
             for child in (proc, bystander):
@@ -1007,10 +1020,16 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
                 with contextlib.suppress(Exception):
                     child.wait(timeout=5)
 
-        assert proc.pid in found_pids, (
-            "a unit-launched (flagless) supervisor process must be visible "
-            f"to service_stack_pids at the DEFAULT config dir; found={found_pids}"
-        )
+        if on_windows:
+            assert proc.pid not in found_pids, (
+                "win32 has no environment reader, so a flagless start fails closed "
+                f"and is found only through its lease, which this test holds none of; found={found_pids}"
+            )
+        else:
+            assert proc.pid in found_pids, (
+                "a unit-launched (flagless) supervisor process must be visible "
+                f"to service_stack_pids at the DEFAULT config dir; found={found_pids}"
+            )
         assert bystander.pid not in found_pids, (
             "a process that only carries the text 'daemon service start' in "
             f"its command line is not part of the stack; found={found_pids}"

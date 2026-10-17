@@ -2074,7 +2074,10 @@ class TestSpawnServiceOnnxModelRoot:
     ) -> None:
         monkeypatch.setenv("NX_ORT_NATIVE_DIR", "/their/ort")
         env = self._spawn_env(config_dir, clock, monkeypatch)
-        assert env["NX_ORT_NATIVE_DIR"] == str(Path("/their/ort"))
+        # Verbatim, not str(Path(...)): apply_ort_native_env returns early on a
+        # non-blank value, so the operator's spelling reaches the engine as
+        # written; str(Path("/their/ort")) is "\\their\\ort" on Windows.
+        assert env["NX_ORT_NATIVE_DIR"] == "/their/ort"
 
     @pytest.mark.parametrize("blank", ["", "   "])
     def test_a_blank_ort_native_root_is_unset_not_a_choice(
