@@ -4385,7 +4385,9 @@ def _pytest_root_is_live(root: Path) -> bool:
         return False
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, OverflowError):
+        # OverflowError: a garbage lock naming a pid too large for the
+        # syscall. Escaping here would empty the whole scan, not skip a root.
         return False
     return True
 
@@ -4399,10 +4401,17 @@ def stale_pytest_roots(basetemp: Path) -> list[Path]:
     several scoped runs at once is normal, and reaping a live
     sibling's root SIGTERMs that run's test daemons mid-test. The
     ``pytest-current`` symlink is skipped; it aliases a numbered root.
+
+    Under xdist a worker's basetemp is ``pytest-<n>/gw<k>``, one level below
+    its session root, so the root is taken from the parent there; without that
+    the scan found no ``pytest-of-`` parent and returned nothing on every
+    worker, and the drain never ran under ``-n``.
     """
     try:
-        parent = Path(basetemp).resolve().parent
         current = Path(basetemp).resolve()
+        parent = current.parent
+        if parent.name.startswith("pytest-") and not parent.name.startswith("pytest-of-"):
+            current, parent = parent, parent.parent
     except Exception:  # noqa: BLE001 -- probe
         return []
     if not parent.is_dir() or not parent.name.startswith("pytest-of-"):

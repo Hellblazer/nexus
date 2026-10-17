@@ -275,6 +275,33 @@ class TestStaleRootDiscovery:
         found = [p.name for p in stale_pytest_roots(root / "pytest-8")]
         assert found == ["pytest-6", "pytest-5"], found
 
+    def test_an_xdist_worker_basetemp_scans_its_session_roots_siblings(
+        self, tmp_path: Path,
+    ) -> None:
+        """Under ``-n`` a worker's basetemp is ``pytest-<n>/gw<k>``. The scan
+        must climb to the session root, exclude it, and see its siblings; it
+        used to return nothing on every worker."""
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        for name in ("pytest-3", "pytest-4"):
+            (root / name).mkdir()
+        (root / "pytest-4" / "gw0").mkdir()
+
+        found = [p.name for p in stale_pytest_roots(root / "pytest-4" / "gw0")]
+        assert found == ["pytest-3"], found
+
+    def test_a_garbage_lock_skips_one_root_not_the_whole_scan(self, tmp_path: Path) -> None:
+        """A lock naming a pid too large for kill() raises OverflowError, which
+        must read as "not live" for that root rather than empty the scan."""
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        for name in ("pytest-1", "pytest-2", "pytest-3"):
+            (root / name).mkdir()
+        (root / "pytest-2" / ".lock").write_text("99999999999999999999")
+
+        found = [p.name for p in stale_pytest_roots(root / "pytest-3")]
+        assert found == ["pytest-2", "pytest-1"], found
+
 
 class TestPathsWithSpaces:
     """`ps -eo command=` returns argv joined by spaces, UNQUOTED.
