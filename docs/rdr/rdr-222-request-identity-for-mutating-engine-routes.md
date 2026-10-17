@@ -674,9 +674,26 @@ fixed by catalog-043, nexus-brxnp).
 3. **nexus-ll31n (Phase 1)** stays open; nothing measured argues for or
    against it.
 
+## Decisions on the open questions (Sam, 2026-10-17)
+
+1. **Header: `Idempotency-Key`**, with the IETF draft's semantics: 409 while
+   a request with the key is in flight, 422 when the same key arrives with a
+   different body.
+2. **Retention: 7 days, full responses.** The ledger stores the original
+   response body, capped at 64 KB, so a replay returns what the first call
+   returned. A sweep's response is a small JSON object of counts.
+3. **A keyless sweep is never refused.** The key stays optional, so old
+   clients and hand calls keep working.
+4. **The managed service is one engine instance for now.** No
+   once-per-database guard is built for the retention arm or the capability
+   echo yet; revisit if the service runs more than one instance.
+
+Record: T2 `nexus/decision-rdr222-open-questions-2026-10-17`.
+
 ## Open Questions (for Sam)
 
-Questions 3, 4 and 6 are answered above. Still open: 1, 2, 5 and 7.
+All seven are answered: 3, 4 and 6 in the earlier decisions, and 1, 2, 5 and
+7 in the decisions of 2026-10-17 above. The list stays as asked.
 
 1. Header name: `Idempotency-Key` (IETF draft semantics) or a house
    `X-Nexus-Request-Id`.
@@ -698,6 +715,8 @@ Questions 3, 4 and 6 are answered above. Still open: 1, 2, 5 and 7.
    retention arm should run once per database, not once per instance.
 
 ## Revision History
+
+- 2026-10-17: Sam's answers to open questions 1, 2, 5 and 7 recorded (Idempotency-Key, 7 days with full responses up to 64 KB, keyless sweeps stay allowed, one managed instance).
 
 - 2026-10-02: `raced_embeds_total` now counts committed writes only, from both feeders (nexus-wbfpw.66, engine tag carrying it); text note under Phase 0.
 
