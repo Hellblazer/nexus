@@ -1,5 +1,5 @@
 # The review round contracts (nexus-dv7gw). One table for the three bounds
-# that used to be stated separately: code-review (conexus/skills/code-review),
+# that used to be stated separately: code-review (conexus/skills/orchestration, Review Gate),
 # plan-audit (nexus.plans.audit_rounds), rdr-gate (nexus.commands.rdr and
 # conexus/skills/rdr-gate). Each contract's constant derives from this
 # table through nexus.tables.review_rounds, and tests/test_plugin_structure.py

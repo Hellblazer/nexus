@@ -69,9 +69,9 @@ New to Nexus? Follow [Getting started](https://hellblazer.github.io/nexus/gettin
 | Research an unfamiliar topic | `/conexus:research` |
 | Document a technical decision | `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-accept` |
 | Index PDFs into semantic search | `/conexus:pdf-process` |
-| Not sure which agent to use | Check the skill directory in `using-nx-skills` |
+| Not sure which agent to use | Read the `orchestration` skill (routing tables, review gate, skill routing) |
 
-The slash commands in this table are for you to type. They are hidden from the model's skill listing (`disable-model-invocation: true`), so the model reaches the same work through the skill each one wraps (`debugging`, `code-review`, `strategic-planning`, `codebase-analysis`, `research-synthesis`, and so on); the `/conexus:rdr-list` table is `nx rdr preamble rdr-list` to the model.
+The slash commands in this table are for you to type. They are hidden from the model's skill listing (`disable-model-invocation: true`), so the model reaches the same work through the agent or skill each one wraps (the `debugger`, `code-review-expert`, `test-validator` and `developer` agents; the `strategic-planning`, `codebase-analysis` and `research-synthesis` skills); the `/conexus:rdr-list` table is `nx rdr preamble rdr-list` to the model.
 
 ## Directory Structure
 
@@ -115,7 +115,6 @@ conexus/
     ├── cli-controller/      # Standalone: tmux-based interactive CLI control
     ├── nexus/               # Standalone: CLI reference (all tiers)
     ├── serena-code-nav/     # Standalone: navigate code by symbol (definitions, callers, renames)
-    ├── using-nx-skills/     # Standalone: skill invocation discipline
     ├── writing-nx-skills/   # Standalone: plugin authorship guide
     ├── orchestration/       # Standalone: routing reference
     ├── mailbox/             # Standalone: RDR-205 mailbox/<address> tuple-space convention
@@ -149,11 +148,8 @@ conexus/
     ├── deep-analysis/       # → deep-analyst agent
     ├── substantive-critique/# → substantive-critic agent
     ├── architecture/        # → architect-planner agent
-    ├── debugging/           # → debugger agent
-    ├── development/         # → developer agent
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
-    ├── test-validation/     # → test-validator agent
     │
     │   # RDR workflow skills
     ├── rdr-create/          # RDR: create new RDR from template
@@ -166,7 +162,7 @@ conexus/
     └── rdr-audit-checklist/ # RDR: audit project RDR lifecycle
 ```
 
-## Standalone Skills (26)
+## Standalone Skills (24)
 
 Skills that dispatch a tool or agent directly — no relay to a full sub-agent.
 This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure skills.
@@ -180,13 +176,12 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | analyze | Cross-corpus analysis and synthesis |
 | why-was-this-written | Design intent behind a failing code path (renamed off bare `debug`, nexus-cnzei.4) |
 | document | Documentation authoring or coverage audit |
-| plan-first | Retrieval gate — try `plan_match` before falling through to `/conexus:query` |
+| plan-first | Retrieval gate — try `plan_match` before falling through to `nx_answer` |
 
 ### MCP-tool pointer skills (RDR-080)
 
 | Skill | Delegates to |
 |-------|--------------|
-| query | `mcp__plugin_conexus_nexus__nx_answer` — multi-step retrieval |
 | knowledge-tidying | `mcp__plugin_conexus_nexus__nx_tidy` — knowledge consolidation |
 | enrich-plan | `mcp__plugin_conexus_nexus__nx_enrich_beads` — bead context enrichment |
 | plan-validation | `mcp__plugin_conexus_nexus__nx_plan_audit` — plan audit |
@@ -204,12 +199,11 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | mailbox | RDR-205 mailbox/<address> tuple-space convention — send by tuple_out, drain by tuple_in before hand-back |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
 | peer-messaging | Messaging other sessions and dispatched agents: channel choice, acknowledgement, trust boundary, sharing one machine |
-| orchestration | Agent routing reference — routing tables, pipeline templates |
+| orchestration | Agent routing reference — routing tables, pipeline templates, the review gate, skill routing, working rules |
 | phase-review-gate | Phase-boundary checklist — cross-walk RDR §Approach against closing beads to catch silent scope reduction |
 | receiving-review | Technical evaluation of code review feedback |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies |
 | upgrade | Shows what `nx upgrade` would converge, then runs it |
-| using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring conexus plugin skills |
 
 ## Agents (13)
@@ -327,7 +321,7 @@ names each handler by its program and verb.
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
 | `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
-| `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
+| `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the routing guidance imperative (nexus-h33x8.4 — moved here from a pinned `cat` of a skill file so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
@@ -380,7 +374,7 @@ project-context calls cover the same ground.
 are commands (`conexus/commands/*.md`) and some are skills
 (`conexus/skills/*/SKILL.md`); Claude Code spells both `/conexus:<name>`, so
 the invocation reads the same and the surface is marked per line below:
-- `/conexus:query` (skill) → `nx_answer` (multi-step retrieval)
+- `nx_answer` (MCP tool, no skill or command since nexus-dg7i6.6) — multi-step retrieval
 - `/conexus:knowledge-tidying` (skill) → `nx_tidy` *(was → knowledge-tidier agent; command `/conexus:knowledge-tidy` merged into this skill at nexus-cnzei.4)*
 - `/conexus:plan-audit` (command) → `nx_plan_audit` *(was → plan-auditor agent)*
 - `/conexus:enrich-plan` (skill) → `nx_enrich_beads` *(was → plan-enricher agent)*

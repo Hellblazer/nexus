@@ -195,7 +195,7 @@ def _build_capabilities_block() -> list[str]:
         "noise filter (results carry `chunk_text_hash`)",
         "`query` MCP tool: document-level, catalog-aware (`author`, `content_type`, "
         "`subtree`, `follow_links`, `depth`), taxonomy-boosted",
-        "`/conexus:query` skill: multi-step retrieval/analysis",
+        "`nx_answer` MCP tool: reduce many documents (minutes); `search`/`query`: lookups (seconds)",
         "`plan_save`/`plan_search` MCP tools: T2, project-scoped plan library",
         "`scratch` MCP tool: session-scoped, shared across agents",
         "`search`/`links`/`link` MCP tools (nexus-catalog): metadata-first; "

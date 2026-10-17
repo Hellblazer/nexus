@@ -23,7 +23,6 @@ agents:
     model: sonnet
     version: "2.0"
     color: purple
-    skill: code-review
     slash_command: /review-code
     description: "Reviews code for quality, security, and best practices"
     triggers:
@@ -123,7 +122,6 @@ agents:
     model: opus
     version: "2.0"
     color: red
-    skill: debugging
     slash_command: /debug
     description: "Hypothesis-driven debugging for failures"
     triggers:
@@ -143,7 +141,6 @@ agents:
     model: sonnet
     version: "2.0"
     color: cyan
-    skill: development
     slash_command: /implement
     description: "TDD implementation with test-first methodology"
     triggers:
@@ -203,7 +200,6 @@ agents:
     model: sonnet
     version: "2.0"
     color: lime
-    skill: test-validation
     slash_command: /test-validate
     description: "Validates test coverage and quality after implementation"
     triggers:
@@ -351,13 +347,6 @@ standalone_skills:
   # like this one, plus release/ and engine-release/, live in .claude/skills/
   # and are not part of the plugin's registry.
 
-  query:
-    description: "Use when a question needs multi-step retrieval via mcp__plugin_conexus_nexus__nx_answer"
-    triggers:
-      - "analytical question over conexus knowledge"
-      - "plan-match-first retrieval"
-    tools: []
-
   enrich-plan:
     description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_enrich_beads directly, no agent spawn"
     triggers:
@@ -460,13 +449,6 @@ standalone_skills:
       - "adding functionality"
     tools: [Read, Glob, Grep, Bash]
 
-  using-nx-skills:
-    description: "Skill invocation discipline — check skills before every response"
-    triggers:
-      - "starting any conversation"
-      - "before any action"
-    tools: []
-
   writing-nx-skills:
     description: "Guide for authoring conexus plugin skills"
     triggers:
@@ -518,7 +500,7 @@ standalone_skills:
     dispatches_to: [general-purpose]
 
   plan-first:
-    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to /conexus:query otherwise"
+    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to nx_answer otherwise"
     triggers:
       - "before any retrieval task"
       - "before dispatching search/query"
@@ -571,14 +553,11 @@ standalone_skills:
 # Common agent sequences for different work types
 
 # nexus-cnzei.6: this `sequence:` list is the ONE canonical pipeline order —
-# orchestration/SKILL.md's Quick Routing table and development/SKILL.md's
-# Post-Implementation Review section both point here rather than restating
-# their own copy (the audit behind nexus-cnzei found the two disagreeing:
-# orchestration omitted substantive-critic from the implement-code row while
-# development/SKILL.md § Post-Implementation Review always required both
-# reviewers). code-review-expert and substantive-critic are BOTH mandatory,
-# non-interchangeable, every implementation — see development/SKILL.md for
-# why (they catch different, non-overlapping classes of issue).
+# orchestration/SKILL.md's Quick Routing table and its Review Gate section both
+# point here rather than restating their own copy. code-review-expert and
+# substantive-critic are BOTH mandatory, non-interchangeable, every
+# implementation — see orchestration/SKILL.md § Review Gate for why (they catch
+# different, non-overlapping classes of issue).
 pipelines:
   feature:
     description: "Full feature development from planning to validation"
@@ -630,11 +609,11 @@ naming_aliases:
   # nexus-dg7i6.2: every command below (and review-code) is user-only
   # (`disable-model-invocation: true`), so it is out of the model's skill listing;
   # the model is routed to the skill on the right.
-  /implement: development              # Action-oriented naming
-  /debug: debugging                    # Shorter, memorable
+  # nexus-dg7i6.6: /implement, /debug, /test-validate and /review-code no longer
+  # wrap a skill (the skills were retired); each dispatches its agent directly
+  # (developer, debugger, test-validator, code-review-expert).
   /create-plan: strategic-planning     # Avoids built-in /plan collision
   /research: research-synthesis        # Common usage
-  /test-validate: test-validation      # Verb form preference
   /plan-audit: plan-validation         # Action-oriented (RDR-080 pointer skill — nx_plan_audit MCP tool, no agent spawn)
   /analyze-code: codebase-analysis     # Different naming convention
 

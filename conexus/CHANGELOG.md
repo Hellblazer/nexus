@@ -1620,7 +1620,7 @@ root changelog for detail.
 
 ### Activated by this pin advance (from PENDING_RELEASE.md)
 - **SessionStart guidance moves off the plugin-release cadence**
-  (nexus-h33x8.4): the `cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md`
+  (nexus-h33x8.4): the `cat` of the `using-nx-skills` skill file (under the plugin root)
   entry in `hooks.json` is removed; the same guidance imperative is now
   emitted by `nx hook session-start` (the CLI wheel), so future edits to
   the guidance text ship on the PyPI/reinstall cadence instead of waiting

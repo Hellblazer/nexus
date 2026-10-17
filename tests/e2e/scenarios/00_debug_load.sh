@@ -220,7 +220,7 @@ for skill in \
     "brainstorming-gate" \
     "rdr-create" \
     "cli-controller" \
-    "using-nx-skills"; do
+    "orchestration"; do
     if [[ -f "$skills_dir/$skill/SKILL.md" ]]; then
         pass "skill packaged: $skill (conexus/skills/$skill/SKILL.md)"
     else

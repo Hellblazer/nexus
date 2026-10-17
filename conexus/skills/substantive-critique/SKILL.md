@@ -31,16 +31,16 @@ The substantive-critic agent defaults to **sonnet** (its frontmatter pins it; om
 | Focused or multi-file critique | sonnet (default) | Docs, plans, implementation vs spec |
 | Cycle-level or architectural | opus | Multi-RDR assessment, system-wide design review |
 
-Pass `model: "opus"` on the Agent tool call to escalate. Briefing rigour beats model choice — see `/conexus:code-review` § Prompt Rigour.
+Pass `model: "opus"` on the Agent tool call to escalate. Briefing rigour beats model choice — see the `orchestration` skill's Review Gate (first-pass reviewer brief).
 
 ## Rounds (bounded — same gate as code-review-expert)
 
-This skill shares ONE bounded review loop with `/conexus:code-review`: acceptance
+This skill shares ONE bounded review loop with `code-review-expert`: acceptance
 bar stated before dispatch, round 1 full critique (report everything — recall is
 the critic's job, triage is the orchestrator's), orchestrator triage (ship-blocker
 or bead, never both), at most one confirmation pass on a fixed ship-blocker, round
-3+ requires an explicit human ask. See [code-review/SKILL.md § Rounds](../code-review/SKILL.md)
-and § Confirmation Pass for the full flow and the confirmation-brief template — it
+3+ requires an explicit human ask. See [orchestration/SKILL.md § Review Gate](../orchestration/SKILL.md)
+for the full flow and the confirmation-brief template — it
 applies here verbatim, substituting substantive-critic for code-review-expert.
 
 ## Agent Invocation

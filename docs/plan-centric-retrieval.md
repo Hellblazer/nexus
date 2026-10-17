@@ -317,16 +317,14 @@ RDR-079 P5). Passing an explicit float overrides both the `plan_match`
 gate and the `_nx_answer_match_is_hit` check so a tighter precision
 floor is honoured consistently.
 
-### Via the query skill
+### Via the nx_answer tool
 
-`query` is a SKILL (`conexus/skills/query`), not a slash command: there is
-no `conexus/commands/query.md`. Claude Code surfaces a skill under the same
-`/conexus:query` spelling, so the invocation reads the same, but the surface
-it comes from is the skill directory and that is where its behaviour is
-defined. The skill is a thin pointer to `nx_answer`, for when an analytical
-question has to be reduced from many documents rather than looked up; its own
-description says when NOT to reach for it (a file:line, a single fact, or a
-question `search`/`query` already answer in seconds).
+There is no `query` skill or command: the `/conexus:query` skill was retired
+(the model called `nx_answer` directly and never loaded it). Call
+the `nx_answer` MCP tool when an analytical question has to be reduced from many
+documents rather than looked up; the routing rule (and when NOT to: a file:line,
+a single fact, or a question `search`/`query` already answer in seconds) is in
+the `orchestration` skill's reference, § nx_answer.
 
 ## Plan operators (what plan_run can call)
 

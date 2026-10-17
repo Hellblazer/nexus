@@ -7,13 +7,13 @@ Runs at SessionStart. Checks whether the tools the conexus skills route
 to are actually reachable. When everything works, emits NOTHING
 (silent on healthy hosts). When something is missing or broken,
 emits a "## nx Preflight: FAILED" marker that names the gap and
-tells the model the using-nx-skills routing is unsafe in this
+tells the model the conexus routing guidance is unsafe in this
 session.
 
 Why a marker rather than gating the SKILL itself: skills are
 loaded by Claude Code's plugin manager from the marketplace, not
 from the SessionStart hook output. We can't unload the
-``using-nx-skills`` routing once it's installed, but we can plant
+SessionStart routing guidance once it's installed, but we can plant
 a loud counter-signal in session context that the model will see
 before it tries to call the routing.
 
@@ -208,12 +208,12 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never
     ]
     # bd is optional; only nx-being-broken triggers the degraded
     # marker. A missing bd reduces task-tracking convenience but
-    # doesn't make the using-nx-skills routing unsafe.
+    # doesn't make the routing guidance unsafe.
     nx_ok = checks[0].available
     if nx_ok:
         # Healthy host: emit nothing. Existing SessionStart hooks
-        # downstream of this one (session_start_hook.py + the
-        # using-nx-skills cat) inject the normal routing guidance
+        # downstream of this one (session-context + the
+        # session-start guidance emitter) inject the normal routing guidance
         # and capability summary as before.
         return HookResult(stdout=None)
 
@@ -224,12 +224,12 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never
     out.append("")
     out.append(
         "The nx CLI is not reachable in this session. The "
-        "``using-nx-skills`` routing guidance below is INACTIVE: "
+        "conexus routing guidance below is INACTIVE: "
         "any tool path that starts with ``nx ...`` or "
         "``mcp__plugin_conexus_nexus__*`` will fail. Fall back to "
         "direct ``Read`` / ``Grep`` / ``Glob`` for code "
         "exploration; do NOT attempt to invoke conexus skills "
-        "(``/conexus:query``, ``/conexus:debugging``, ``/conexus:strategic-planning``, "
+        "(``/conexus:strategic-planning``, ``/conexus:brainstorming-gate``, "
         "etc.); they will produce confusing partial errors."
     )
     out.append("")

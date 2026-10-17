@@ -872,7 +872,7 @@ class TestGuidanceByteBudgetIntegration:
         # the output rather than sitting behind a preamble. Only the
         # sentence it pins changed.
         head = output.encode("utf-8")[:500].decode("utf-8", errors="ignore")
-        assert "Conexus skills carry this project's accumulated practice" in head
+        assert "Conexus skills and agents carry this project's accumulated practice" in head
 
     def test_session_start_output_with_stale_note_under_honest_budget(
         self, monkeypatch

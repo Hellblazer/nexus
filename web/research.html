@@ -207,7 +207,7 @@ figure.fig .you-edge{stroke:var(--brass)}
 <p>Claude extracts the text, cuts it into chunks, embeds them, registers the paper in the catalog, finds its DOI and authors, and links it to the similar documents already in the store. You see the catalog entry with its links. <a href="#l2">Lesson 2</a>.</p>
 <h3>Ask a question that needs several papers</h3>
 <div class="see">You might say</div>
-<div class="cmd"><pre>/conexus:query What do the <span class="ph">&lt;SUBJECT&gt;</span> papers say about <span class="ph">&lt;THE POINT&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>What do the <span class="ph">&lt;SUBJECT&gt;</span> papers say about <span class="ph">&lt;THE POINT&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What happens</div>
 <p>Claude runs a plan over the collection: search, read the passages, extract, and write one answer with a source for each claim. A saved plan is reused when one fits the question. <a href="#l5">Lesson 5</a>.</p>
 <h3>Check a proposal against your own code</h3>
@@ -340,7 +340,7 @@ Companion: arXiv:2608.16621 (maintenance study), Takahashi, Wild, Uraki.</pre></
 <div class="lhead"><span class="lnum">5</span><h2>Ask a question across papers</h2><span class="ltime">15 min</span></div>
 <p class="why">A question over several papers on one subject needs several searches, the passages from each result, an extraction, and a comparison. Claude runs that as a plan and returns one answer with a source for each claim, and a plan that worked is saved for the next question of the same shape.</p>
 <div class="see">You might say</div>
-<div class="cmd"><pre>/conexus:query What do the <span class="ph">&lt;SUBJECT&gt;</span> papers say about <span class="ph">&lt;THE POINT&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>What do the <span class="ph">&lt;SUBJECT&gt;</span> papers say about <span class="ph">&lt;THE POINT&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude calls <code>nx_answer</code> with the question and the collection. If a saved plan fits, it runs. If none fits, Claude writes a plan, runs it, and saves it. A comparison across one collection takes one to five minutes.</p>
 <details class="gloss out"><summary>What you see</summary><pre class="out">nx_answer  question: What do the semantic operator papers say about batching to reduce model calls?
@@ -510,7 +510,7 @@ WHAT A FAIR RERUN NEEDS. (1) Read the dates from frontmatter and fall back to gi
 <tr><td>Catalog tools</td><td><code>show</code>, <code>links</code>, <code>link</code>, and <code>traverse</code> on the nexus-catalog server. Titles work as addresses.</td></tr>
 <tr><td>Store tools</td><td><code>store_put</code> for a document, <code>memory_put</code> for a note by project and title, <code>plan_search</code> for the saved plans.</td></tr>
 <tr><td>Operators</td><td><code>extract</code>, <code>compare</code>, <code>check</code>, <code>verify</code>, and the rest: steps inside the plans <code>nx_answer</code> runs, not tools you call directly. Ask <code>nx_answer</code> to use them.</td></tr>
-<tr><td>Skills</td><td><code>/conexus:query</code> for a question across documents, <code>/conexus:research</code> for the research agent, <code>/conexus:substantive-critique</code> for the critic, <code>/conexus:knowledge-tidying</code> to consolidate what was stored.</td></tr>
+<tr><td>Skills</td><td>a plain-words question across documents (Claude calls <code>nx_answer</code>), <code>/conexus:research</code> for the research agent, <code>/conexus:substantive-critique</code> for the critic, <code>/conexus:knowledge-tidying</code> to consolidate what was stored.</td></tr>
 <tr><td><code>nx</code> commands</td><td><code>nx index pdf</code>, <code>nx dt capture</code>, <code>nx enrich</code>, <code>nx catalog show</code> and <code>links</code>, <code>nx doc cite</code>, <code>nx taxonomy</code>, <code>nx search --where</code>.</td></tr>
 </table></div>
 <div class="see">From the terminal</div>
