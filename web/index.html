@@ -372,7 +372,7 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
 
 <!-- ===== Desktop path ===== -->
 <section class="hidden" data-for="desktop">
-<p>Steps 1 and 2 install uv, the <code>nx</code> command and the service by hand. After them, add the plugin as route two shows. Step 3 is the extension, an alternative to the plugin for Desktop users who do not have Claude Code. Do not install both, because you get two copies of the tools with different names.</p>
+<p>Steps 1 and 2 install uv, the <code>nx</code> command and the service by hand. After them, add the plugin as route two shows. The plugin is the recommended route for Desktop. Step 3 is the extension, an alternative for Desktop users who do not have Claude Code; it does not update itself, so you must download a new file for each release. Do not install both, because you get two copies of the tools with different names.</p>
 <ol class="steps">
 <li><div class="step">
   <h3>Install uv</h3>
@@ -402,7 +402,7 @@ nx doctor</pre><button class="copy" type="button">Copy</button></div>
 </div></li>
 <li><div class="step">
   <h3>Add the extension</h3>
-  <p data-os-block="mac linux">Download <code>conexus.mcpb</code> from the <a href="https://github.com/Hellblazer/nexus/releases/latest">latest release</a> and double-click the file. Claude Desktop adds it under Settings → Connectors as "Conexus", and the first start takes about 20 seconds.</p>
+  <p data-os-block="mac linux">Download <code>conexus.mcpb</code> from the <a href="https://github.com/Hellblazer/nexus/releases/latest">latest release</a> and double-click the file. The extension does not update itself; the plugin is the recommended route. Claude Desktop adds it under Settings → Connectors as "Conexus", and the first start takes about 20 seconds.</p>
   <p class="hidden" data-os-block="windows">On Windows, add Nexus as a plugin, not as the <code>conexus.mcpb</code> file: double-clicking that file does nothing there. In Claude Desktop, open Customize → Plugins, add the marketplace <code>Hellblazer/nexus</code>, and install <code>conexus</code>.</p>
   <p class="note hidden" data-os-block="windows">If the marketplace is already on your account from an earlier release, remove it and add it again to get the current version.</p>
 </div></li>

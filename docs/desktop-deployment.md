@@ -99,6 +99,8 @@ The commands are the same on Windows; [Installing nexus on Windows](windows-inst
 
 **Audience**: Claude Desktop users who open chat or Cowork sessions.
 
+**This is the recommended Desktop route.** The `.mcpb` extension (Surface 3) does not update itself; the account plugin installs the CLI for you and is the route validated on macOS and Windows Desktop (RDR-228). If you run the `.mcpb`, switch to this surface.
+
 Claude Desktop keeps two plugin stores. Claude Code and the Desktop Code tab read `~/.claude`, which is where `claude plugin install` writes. Chat and Cowork read the plugins enabled on your claude.ai account, which Desktop downloads itself. A plugin installed only from the command line is not visible to chat or Cowork: on a clean Windows 11 machine with only the CLI plugin installed, the Code tab found the plugin and chat and Cowork found none (measured 2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0).
 
 Install, with the same two routes as Surface 1:
@@ -119,6 +121,8 @@ State is shared with the host CLI Claude and any other session running against t
 ## Surface 3: Claude Desktop chat (Desktop Extension)
 
 **Audience**: Claude Desktop users who do NOT have Claude Code installed.
+
+**Not the recommended route.** The extension does not update itself, so users sit on old versions; prefer the account plugin in Surface 2. The extension stays available.
 
 The plugin route in Surface 2 is the one that installs the CLI for you. The extension is an alternative, and it needs the CLI and the service installed by hand first ("Install by hand" under Surface 1).
 
@@ -171,20 +175,24 @@ After upgrading conexus or after the plugin rename (`nx` → `conexus` at v5.0.0
 
 Both warnings include the resolution commands; `nx doctor` is the single explicit-invocation surface that consolidates them.
 
-For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it emits a one-line warning to stderr naming the GitHub release URL to re-download:
+For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it writes a warning to stderr that says the extension does not update itself and names the recommended route, the conexus plugin (Surface 2), with the switch steps and the release URL as the manual fallback:
 
 ```
-[conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. Re-download
-the .mcpb from https://github.com/Hellblazer/nexus/releases/latest and
-re-install in Claude Desktop to upgrade. (Set NX_MCPB_SKIP_UPDATE_CHECK=1
-to silence.)
+[conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. This .mcpb
+extension does not update itself. The recommended Desktop route is the
+conexus plugin: in Claude Desktop open Customize -> Plugins, add the
+marketplace Hellblazer/nexus, install conexus, then say "Set up Nexus".
+Afterwards remove the Conexus extension (Settings -> Connectors) so two
+servers do not run. To stay on the .mcpb, re-download it from
+https://github.com/Hellblazer/nexus/releases/latest and re-install it.
+(Set NX_MCPB_SKIP_UPDATE_CHECK=1 to silence.)
 ```
 
 The check is non-fatal: a network failure, timeout, or unreachable PyPI never blocks startup. Set `NX_MCPB_SKIP_UPDATE_CHECK=1` in the environment to opt out entirely.
 
 ## Updating the Desktop Extension
 
-The `.mcpb` does **not** auto-update. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt.
+The `.mcpb` does **not** auto-update, and the account plugin (Surface 2) is the recommended Desktop route instead of keeping it current by hand. If you stay on the `.mcpb`, the steps below are the only update path. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt.
 
 So the update is a manual, idempotent re-install:
 
