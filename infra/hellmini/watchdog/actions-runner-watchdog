@@ -3,34 +3,71 @@
 # Runner.Listener is alive but stalled (nexus-ey1me). Run by the LaunchDaemon
 # local.actions-runner-watchdog every 60 s, as root.
 #
+# Precaution, not a known-hang fix. The 2026-09-29 episode that prompted it was
+# a routine post-job long-poll cancel followed by an idle long-poll, not a hang
+# (the listener cancels its own Busy long-poll at the end of every job, 20-40
+# times per busy log). What this catches is a listener process that is alive but
+# has stopped talking to the broker. Worst-case latency from the stall to the
+# restart is HARD_SILENT (3900 s of log silence) plus up to 60 s (one tick).
+#
 # Why not "Runner log silent for 5 min": an idle healthy listener logs at INFO
-# only on its OAuth token refresh, every ~50 min. So the rule is, with no
-# Runner.Worker running, listener up >= STARTUP_GRACE, cooldown elapsed:
-#   (A) the listener's own open Runner_*.log silent >= HARD_SILENT (65 min:
+# only on its OAuth token refresh, about every 50-51 min (max 3058 s over 23
+# logs). So the rule is, with no Runner.Worker running, listener up >=
+# STARTUP_GRACE, cooldown elapsed:
+#   (A) the listener's own open Runner_*.log silent >= HARD_SILENT (3900 s:
 #       one missed token refresh), or
 #   (B) no ESTABLISHED TCP :443 from the listener for >= NOSOCK continuous
 #       seconds AND its log silent >= SILENT (an idle listener holds its broker
-#       long-poll connection open; measured 60/60 samples).
+#       long-poll connection open; measured 60/60 samples). B is skipped on a
+#       tick where lsof fails or times out: "unknown" is not "no connection".
 # A running job logs "renew job" every 60 s, so it is never quiet; jobs are
-# excluded anyway.
+# excluded anyway. Worker and the listener log are re-checked immediately before
+# the kickstart, and the restart is abandoned if either changed.
 #
-# Flags: --dry-run (report, never restart), --verbose (print the evaluation).
-# Test seams (env): WD_SILENT_SECS WD_NOSOCK_SECS WD_HARD_SILENT_SECS
-#   WD_COOLDOWN_SECS WD_STARTUP_GRACE_SECS WD_SOCK_PORT WD_STATE_DIR
-# Disable: sudo launchctl bootout system/local.actions-runner-watchdog
+# State and log live in STATE_DIR, /var/db/actions-runner-watchdog: root:wheel
+# 700, created by install-watchdog.sh. They must NOT live on the runner volume:
+# its parent directory is owned by the CI user, who could rename and replace a
+# root-owned directory there, and this script runs as root. Because the
+# directory is root-only, no other user can plant a symlink in it, so writing
+# there never follows an attacker's link; the script still refuses a symlinked
+# or non-root-owned or group/other-writable STATE_DIR. Every value read from a
+# state file is validated as digits before any arithmetic and is never
+# evaluated; anything else is treated as absent and the file is removed. State
+# is written to a temp file in the same directory and renamed into place.
+#
+# Flags: --dry-run (report, never restart; it still writes state files and INFO
+#   lines to the log), --verbose (print the evaluation).
+# Test seams (env; the daemon sets none): WD_SILENT_SECS WD_NOSOCK_SECS
+#   WD_HARD_SILENT_SECS WD_COOLDOWN_SECS WD_STARTUP_GRACE_SECS WD_SOCK_PORT
+#   WD_STATE_DIR WD_RUNNER_DIR WD_TARGET WD_PATH (directories searched for
+#   pgrep ps lsof launchctl stat date perl) WD_LSOF_TIMEOUT
+#   WD_LAUNCHCTL_TIMEOUT. A command that takes longer than its timeout is
+#   killed (portable: perl alarm; macOS has no timeout(1)).
+# macOS only (BSD stat, ps and lsof output).
+# Disable: sudo launchctl bootout system/local.actions-runner-watchdog && sudo
+#   launchctl disable system/local.actions-runner-watchdog (bootout alone does
+#   not survive a reboot).
 set -u
-PATH=/usr/bin:/bin:/usr/sbin:/sbin
+PATH=${WD_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+umask 077
 
-RUNNER_DIR=/Volumes/Bulk/ghrunner/actions-runner
-TARGET=system/local.actions-runner
-STATE_DIR=${WD_STATE_DIR:-/Volumes/Bulk/ghrunner/actions-runner-watchdog}
+RUNNER_DIR=${WD_RUNNER_DIR:-/Volumes/Bulk/ghrunner/actions-runner}
+TARGET=${WD_TARGET:-system/local.actions-runner}
+STATE_DIR=${WD_STATE_DIR:-/var/db/actions-runner-watchdog}
 SILENT_SECS=${WD_SILENT_SECS:-300}
 NOSOCK_SECS=${WD_NOSOCK_SECS:-300}
 HARD_SILENT_SECS=${WD_HARD_SILENT_SECS:-3900}
 COOLDOWN_SECS=${WD_COOLDOWN_SECS:-900}
 STARTUP_GRACE_SECS=${WD_STARTUP_GRACE_SECS:-300}
 SOCK_PORT=${WD_SOCK_PORT:-443}
+LSOF_TIMEOUT=${WD_LSOF_TIMEOUT:-20}
+LAUNCHCTL_TIMEOUT=${WD_LAUNCHCTL_TIMEOUT:-30}
 LOG_MAX_BYTES=1048576
+
+# Numeric settings feed arithmetic: refuse anything that is not digits.
+for v in SILENT_SECS NOSOCK_SECS HARD_SILENT_SECS COOLDOWN_SECS STARTUP_GRACE_SECS SOCK_PORT LSOF_TIMEOUT LAUNCHCTL_TIMEOUT; do
+  case "${!v}" in ''|*[!0-9]*) echo "actions-runner-watchdog: $v is not a number" >&2; exit 2 ;; esac
+done
 
 DRY_RUN=0
 VERBOSE=0
@@ -46,7 +83,20 @@ done
 # nothing (never create directories under an unmounted volume path).
 [ -d "$RUNNER_DIR/bin" ] || exit 0
 
+if [ -L "$STATE_DIR" ]; then
+  echo "actions-runner-watchdog: $STATE_DIR is a symlink; refusing" >&2
+  exit 1
+fi
 mkdir -p "$STATE_DIR" || exit 1
+sd_uid="" sd_mode=""
+read -r sd_uid sd_mode <<EOF
+$(stat -f '%u %Lp' "$STATE_DIR")
+EOF
+case "$sd_uid$sd_mode" in ''|*[!0-9]*) echo "actions-runner-watchdog: cannot stat $STATE_DIR" >&2; exit 1 ;; esac
+if [ "$sd_uid" != "$(id -u)" ] || [ $(( 8#$sd_mode & 8#022 )) -ne 0 ]; then
+  echo "actions-runner-watchdog: $STATE_DIR must be owned by uid $(id -u) and not group/other-writable (is uid $sd_uid mode $sd_mode); refusing" >&2
+  exit 1
+fi
 LOG="$STATE_DIR/watchdog.log"
 NOSOCK_FILE="$STATE_DIR/nosock_since"
 LAST_FILE="$STATE_DIR/last_restart"
@@ -62,6 +112,50 @@ log() {
   say "$*"
 }
 
+# run_to SECS CMD ARGS...: run CMD, kill it after SECS. Exit 124 on timeout.
+# (alarm survives exec; SIGALRM's default action kills the command, which the
+# shell reports as 142.)
+run_to() {
+  local secs=$1 rc
+  shift
+  perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"
+  rc=$?
+  [ "$rc" -eq 142 ] && rc=124
+  return "$rc"
+}
+
+# read_num FILE: set NUM to the file's first line if it is 1-12 digits and not
+# in the future, else to "" and remove the file. The content is only ever
+# compared as a string and then used as a number: never evaluated.
+NUM=""
+read_num() {
+  local f=$1 v=""
+  NUM=""
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    IFS= read -r -n 32 v < "$f" 2>/dev/null || true
+  fi
+  case "$v" in
+    ''|*[!0-9]*) ;;
+    *) [ "${#v}" -le 12 ] && NUM=$((10#$v)) ;;
+  esac
+  if [ -z "$NUM" ] || [ "$NUM" -gt "$now" ]; then
+    NUM=""
+    rm -f "$f"
+    log "WARN ignored and removed invalid state file $(basename "$f")"
+  fi
+  return 0
+}
+
+# write_num FILE VALUE: temp file in the same root-only directory, then rename.
+write_num() {
+  local t
+  t=$(mktemp "$STATE_DIR/.tmp.XXXXXX") || return 1
+  if echo "$2" > "$t" && mv -f "$t" "$1"; then return 0; fi
+  rm -f "$t"
+  return 1
+}
+
 # etime ([[dd-]hh:]mm:ss) to seconds
 etime_secs() {
   local e=$1 d=0 h=0 m=0 s=0
@@ -73,14 +167,17 @@ EOF
   echo $(( 10#$d*86400 + 10#$h*3600 + 10#$m*60 + 10#$s ))
 }
 
-lpid=$(pgrep -f "^$RUNNER_DIR/bin/Runner.Listener run" | head -1)
+listener_pid() { pgrep -f "^$RUNNER_DIR/bin/Runner.Listener run" | head -1; }
+worker_running() { pgrep -f "^$RUNNER_DIR/bin/Runner.Worker" >/dev/null; }
+
+lpid=$(listener_pid)
 if [ -z "$lpid" ]; then
   rm -f "$NOSOCK_FILE"
   say "no Runner.Listener running (stopped or updating); nothing to do"
   exit 0
 fi
 
-if pgrep -f "^$RUNNER_DIR/bin/Runner.Worker" >/dev/null; then
+if worker_running; then
   rm -f "$NOSOCK_FILE"
   say "Runner.Worker running (job in progress); nothing to do"
   exit 0
@@ -88,39 +185,63 @@ fi
 
 uptime=$(etime_secs "$(ps -o etime= -p "$lpid" | tr -d ' ')")
 
-# The log the live listener holds open; a stray Runner_*.log (e.g. from
-# `Runner.Listener --version`) can be newer by name and mtime.
-rlog=$(lsof -nP -p "$lpid" -Fn 2>/dev/null | sed -n 's/^n\(.*\/_diag\/Runner_.*\.log\)$/\1/p' | head -1)
+# One lsof call gives both the log the live listener holds open (a stray
+# Runner_*.log, e.g. from `Runner.Listener --version`, can be newer by name and
+# mtime) and its TCP connections. A non-zero exit or a timeout means "unknown".
+lsof_ok=1
+lsof_out=$(run_to "$LSOF_TIMEOUT" lsof -nP -p "$lpid" -F ftnT 2>/dev/null)
+lrc=$?
+if [ "$lrc" -ne 0 ]; then
+  lsof_ok=0
+  log "ERROR lsof -p $lpid failed rc=$lrc (124 = timed out); connection check skipped this tick"
+fi
+rlog="" nsock=0
+if [ "$lsof_ok" = 1 ]; then
+  rlog=$(printf '%s\n' "$lsof_out" | sed -n 's/^n\(.*\/_diag\/Runner_.*\.log\)$/\1/p' | head -1)
+  nsock=$(printf '%s\n' "$lsof_out" | awk -v port="$SOCK_PORT" '
+    function flush() { if (st == "ESTABLISHED" && nm ~ ("->[^>]*:" port "$")) c++; st = ""; nm = "" }
+    /^f/ { flush(); next }
+    /^TST=/ { st = substr($0, 5); next }
+    /^n/ { nm = substr($0, 2); next }
+    END { flush(); print c + 0 }')
+fi
 if [ -z "$rlog" ]; then
+  # shellcheck disable=SC2012 # Runner_*.log names are plain; find has no -t
   rlog=$(ls -t "$RUNNER_DIR"/_diag/Runner_*.log 2>/dev/null | head -1)
 fi
 if [ -z "$rlog" ]; then
   say "no Runner_*.log found; nothing to do"
   exit 0
 fi
-age=$(( now - $(stat -f %m "$rlog") ))
+mtime=$(stat -f %m "$rlog" 2>/dev/null)
+case "$mtime" in ''|*[!0-9]*) say "cannot stat $rlog; nothing to do"; exit 0 ;; esac
+age=$(( now - mtime ))
+[ "$age" -lt 0 ] && age=0
 
-nsock=$(lsof -nP -a -p "$lpid" -iTCP -sTCP:ESTABLISHED 2>/dev/null | grep -c ":$SOCK_PORT ")
-if [ "$nsock" -gt 0 ]; then
-  if [ -f "$NOSOCK_FILE" ]; then
-    log "INFO listener pid=$lpid established :$SOCK_PORT connection is back after $(( now - $(cat "$NOSOCK_FILE") ))s"
-    rm -f "$NOSOCK_FILE"
+nosock_for=0
+if [ "$lsof_ok" = 1 ]; then
+  read_num "$NOSOCK_FILE"
+  ns=$NUM
+  if [ "$nsock" -gt 0 ]; then
+    if [ -n "$ns" ]; then
+      log "INFO listener pid=$lpid established :$SOCK_PORT connection is back after $(( now - ns ))s"
+      rm -f "$NOSOCK_FILE"
+    fi
+  else
+    if [ -z "$ns" ]; then
+      if write_num "$NOSOCK_FILE" "$now"; then ns=$now; else log "ERROR cannot write $NOSOCK_FILE"; fi
+      log "INFO listener pid=$lpid has no established :$SOCK_PORT connection (log silent ${age}s)"
+    fi
+    [ -n "$ns" ] && nosock_for=$(( now - ns ))
   fi
-  nosock_for=0
-else
-  if [ ! -f "$NOSOCK_FILE" ]; then
-    echo "$now" > "$NOSOCK_FILE"
-    log "INFO listener pid=$lpid has no established :$SOCK_PORT connection (log silent ${age}s)"
-  fi
-  nosock_for=$(( now - $(cat "$NOSOCK_FILE") ))
 fi
 
-say "listener pid=$lpid uptime=${uptime}s log=$(basename "$rlog") silent=${age}s sockets:$SOCK_PORT=$nsock nosock_for=${nosock_for}s thresholds: hard=${HARD_SILENT_SECS}s silent=${SILENT_SECS}s nosock=${NOSOCK_SECS}s grace=${STARTUP_GRACE_SECS}s cooldown=${COOLDOWN_SECS}s"
+say "listener pid=$lpid uptime=${uptime}s log=$(basename "$rlog") silent=${age}s sockets:$SOCK_PORT=$nsock lsof_ok=$lsof_ok nosock_for=${nosock_for}s thresholds: hard=${HARD_SILENT_SECS}s silent=${SILENT_SECS}s nosock=${NOSOCK_SECS}s grace=${STARTUP_GRACE_SECS}s cooldown=${COOLDOWN_SECS}s"
 
 reason=""
 if [ "$age" -ge "$HARD_SILENT_SECS" ]; then
   reason="listener log silent ${age}s >= ${HARD_SILENT_SECS}s (a live listener refreshes its token every ~50 min)"
-elif [ "$nosock_for" -ge "$NOSOCK_SECS" ] && [ "$age" -ge "$SILENT_SECS" ]; then
+elif [ "$lsof_ok" = 1 ] && [ "$nosock_for" -ge "$NOSOCK_SECS" ] && [ "$age" -ge "$SILENT_SECS" ]; then
   reason="no established :$SOCK_PORT connection for ${nosock_for}s and listener log silent ${age}s"
 fi
 
@@ -134,8 +255,9 @@ if [ "$uptime" -lt "$STARTUP_GRACE_SECS" ]; then
   exit 0
 fi
 
-if [ -f "$LAST_FILE" ]; then
-  since=$(( now - $(cat "$LAST_FILE") ))
+read_num "$LAST_FILE"
+if [ -n "$NUM" ]; then
+  since=$(( now - NUM ))
   if [ "$since" -lt "$COOLDOWN_SECS" ]; then
     say "would restart ($reason) but last restart was ${since}s ago < cooldown ${COOLDOWN_SECS}s"
     exit 0
@@ -147,12 +269,30 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
+# The checks above can be a few seconds old (lsof is bounded by its timeout).
+# A job that started, or a listener log that moved, since means abandon.
+if worker_running; then
+  log "ABORT restart pid=$lpid: a Runner.Worker appeared before the kickstart ($reason)"
+  exit 0
+fi
+if [ "$(listener_pid)" != "$lpid" ]; then
+  log "ABORT restart pid=$lpid: the listener pid changed before the kickstart"
+  exit 0
+fi
+mtime2=$(stat -f %m "$rlog" 2>/dev/null)
+if [ "$mtime2" != "$mtime" ]; then
+  log "ABORT restart pid=$lpid: $(basename "$rlog") changed before the kickstart"
+  exit 0
+fi
+
 log "RESTART pid=$lpid log=$(basename "$rlog") reason: $reason"
-if launchctl kickstart -k "$TARGET"; then
-  echo "$now" > "$LAST_FILE"
+run_to "$LAUNCHCTL_TIMEOUT" launchctl kickstart -k "$TARGET"
+krc=$?
+if [ "$krc" -eq 0 ]; then
+  write_num "$LAST_FILE" "$now" || log "ERROR cannot record $LAST_FILE; the cooldown will not hold"
   rm -f "$NOSOCK_FILE"
   log "RESTART kickstart -k $TARGET ok"
 else
-  log "ERROR kickstart -k $TARGET failed rc=$?"
+  log "ERROR kickstart -k $TARGET failed rc=$krc (124 = timed out)"
   exit 1
 fi

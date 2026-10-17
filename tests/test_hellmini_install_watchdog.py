@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 
 INFRA = Path(__file__).resolve().parent.parent / "infra" / "hellmini"
-INSTALL = INFRA / "install-watchdog.sh"
+# WD_TEST_INSTALL points the suite at a mutated copy (the copy needs a sibling watchdog/ directory).
+INSTALL = Path(os.environ.get("WD_TEST_INSTALL") or INFRA / "install-watchdog.sh")
 SRC_SCRIPT = INFRA / "watchdog" / "actions-runner-watchdog"
 SRC_PLIST = INFRA / "watchdog" / "local.actions-runner-watchdog.plist"
 
@@ -38,9 +39,13 @@ def host(tmp_path: Path) -> dict:
     runas.chmod(0o755)
     calls = tmp_path / "launchctl.calls"
     launchctl = tmp_path / "launchctl"
+    first = tmp_path / "bootstrap.seen"
     launchctl.write_text(
         f'#!/bin/sh\necho "$@" >> "{calls}"\n'
-        '[ "${FAKE_BOOTSTRAP_FAIL:-}" = 1 ] && [ "$1" = bootstrap ] && exit 5\nexit 0\n'
+        '[ "${FAKE_BOOTSTRAP_FAIL:-}" = 1 ] && [ "$1" = bootstrap ] && exit 5\n'
+        f'if [ "${{FAKE_BOOTSTRAP_FAIL_ONCE:-}}" = 1 ] && [ "$1" = bootstrap ] && [ ! -e "{first}" ]; then : > "{first}"; exit 5; fi\n'
+        '[ "${FAKE_NOT_LOADED:-}" = 1 ] && [ "$1" = print ] && exit 113\n'
+        '[ "${FAKE_ENABLE_FAIL:-}" = 1 ] && [ "$1" = enable ] && exit 1\nexit 0\n'
     )
     launchctl.chmod(0o755)
     owner = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
@@ -52,10 +57,12 @@ def host(tmp_path: Path) -> dict:
         "HELLMINI_WD_OWNER": f"{owner}:{group}",
         "HELLMINI_LAUNCHCTL": str(launchctl),
         "HELLMINI_RETRY_SLEEP": "0",
+        "HELLMINI_WD_HOSTMARK": str(tmp_path / "no-such-hellmini"),
     }
     return {
         "env": env,
         "script": root / "usr" / "local" / "libexec" / "actions-runner-watchdog",
+        "state": root / "var" / "db" / "actions-runner-watchdog",
         "plist": root / "Library" / "LaunchDaemons" / "local.actions-runner-watchdog.plist",
         "calls": calls,
         "root": root,
@@ -95,17 +102,20 @@ def test_install_when_absent_then_check_is_clean(host: dict) -> None:
     assert host["plist"].read_bytes() == SRC_PLIST.read_bytes()
     assert oct(host["script"].stat().st_mode & 0o777) == "0o755"
     assert oct(host["plist"].stat().st_mode & 0o777) == "0o644"
-    # HELLMINI_LAUNCHCTL is set, so the reload ran: bootout, then bootstrap.
+    # HELLMINI_LAUNCHCTL is set, so the reload ran: bootout, enable (the daemon
+    # may have been disabled), then bootstrap.
     assert _launchctl_calls(host) == [
         "bootout system/local.actions-runner-watchdog",
+        "enable system/local.actions-runner-watchdog",
         f"bootstrap system {host['plist']}",
     ]
+    assert oct(host["state"].stat().st_mode & 0o777) == "0o700"
     # Drift check on the result: exit 0, nothing written, no reload.
     host["calls"].unlink()
     again = _run(host)
     assert again.returncode == 0, again.stderr
-    assert again.stdout.count("unchanged:") == 2
-    assert _launchctl_calls(host) == []
+    assert again.stdout.count("unchanged:") == 3  # script, plist, state dir
+    assert _launchctl_calls(host) == ["print system/local.actions-runner-watchdog"]
 
 
 def test_launchctl_is_skipped_for_a_prefixed_tree_without_a_stand_in(host: dict) -> None:
@@ -151,7 +161,7 @@ def test_force_backs_up_overwrites_and_reloads(host: dict) -> None:
     assert len(backups) == 1 and backups[0].read_text() == "stale\n"
     assert host["plist"].read_bytes() == SRC_PLIST.read_bytes()
     assert not list(host["script"].parent.glob("*.bak-*")), "identical script is not backed up"
-    assert len(_launchctl_calls(host)) == 2
+    assert [c.split()[0] for c in _launchctl_calls(host)] == ["bootout", "enable", "bootstrap"]
 
 
 def test_script_only_change_does_not_reload(host: dict) -> None:
@@ -162,7 +172,8 @@ def test_script_only_change_does_not_reload(host: dict) -> None:
     r = _run(host, "--force")
     assert r.returncode == 0, r.stderr
     assert host["script"].read_bytes() == SRC_SCRIPT.read_bytes()
-    assert _launchctl_calls(host) == []
+    # The daemon is loaded (print succeeds), so no bootout/enable/bootstrap.
+    assert _launchctl_calls(host) == ["print system/local.actions-runner-watchdog"]
 
 
 def test_wrong_mode_on_identical_content_is_drift(host: dict) -> None:
@@ -191,3 +202,94 @@ def test_missing_launchdaemons_dir_is_a_usage_error(host: dict) -> None:
 
 def test_unknown_argument_is_a_usage_error(host: dict) -> None:
     assert _run(host, "--nope").returncode == 2
+
+
+def test_bootstrap_that_fails_once_is_retried(host: dict) -> None:
+    r = _run(host, env_extra={"FAKE_BOOTSTRAP_FAIL_ONCE": "1"})
+    assert r.returncode == 0, r.stderr
+    assert [c.split()[0] for c in _launchctl_calls(host)] == ["bootout", "enable", "bootstrap", "bootstrap"]
+    assert "loaded: system/local.actions-runner-watchdog" in r.stdout
+
+
+def test_enable_precedes_bootstrap_and_a_failed_enable_is_not_fatal(host: dict) -> None:
+    r = _run(host, env_extra={"FAKE_ENABLE_FAIL": "1"})
+    assert r.returncode == 0, r.stderr
+    verbs = [c.split()[0] for c in _launchctl_calls(host)]
+    assert verbs.index("enable") < verbs.index("bootstrap")
+    assert "launchctl enable" in r.stderr
+
+
+def test_force_backs_up_the_script_too(host: dict) -> None:
+    assert _run(host).returncode == 0
+    host["script"].write_text("#!/bin/bash\nexit 0\n")
+    r = _run(host, "--force")
+    assert r.returncode == 0, r.stderr
+    backups = list(host["script"].parent.glob("actions-runner-watchdog.bak-*"))
+    assert len(backups) == 1 and backups[0].read_text() == "#!/bin/bash\nexit 0\n"
+    assert host["script"].read_bytes() == SRC_SCRIPT.read_bytes()
+    assert not list(host["plist"].parent.glob("*.bak-*")), "identical plist is not backed up"
+
+
+def test_an_unchanged_plist_with_a_booted_out_daemon_is_loaded_on_force(host: dict) -> None:
+    """The redeploy case: files already match, the daemon was disabled and booted out."""
+    assert _run(host).returncode == 0
+    host["calls"].unlink()
+    # Without --force it only says so.
+    r = _run(host, env_extra={"FAKE_NOT_LOADED": "1"})
+    assert r.returncode == 0
+    assert "is not loaded" in r.stderr
+    assert [c.split()[0] for c in _launchctl_calls(host)] == ["print"]
+    host["calls"].unlink()
+    r = _run(host, "--force", env_extra={"FAKE_NOT_LOADED": "1"})
+    assert r.returncode == 0, r.stderr
+    assert [c.split()[0] for c in _launchctl_calls(host)] == ["print", "bootout", "enable", "bootstrap"]
+
+
+def test_state_dir_is_created_root_only_and_wrong_mode_is_drift(host: dict) -> None:
+    assert _run(host).returncode == 0
+    assert oct(host["state"].stat().st_mode & 0o777) == "0o700"
+    host["state"].chmod(0o755)
+    r = _run(host)
+    assert r.returncode == 1
+    assert "state dir: live is" in r.stdout
+    assert oct(host["state"].stat().st_mode & 0o777) == "0o755", "a refusal changes nothing"
+    r = _run(host, "--force")
+    assert r.returncode == 0, r.stderr
+    assert oct(host["state"].stat().st_mode & 0o777) == "0o700"
+
+
+def test_state_dir_that_is_a_symlink_is_refused(host: dict) -> None:
+    target = host["root"].parent / "elsewhere"
+    target.mkdir()
+    host["state"].parent.mkdir(parents=True)
+    host["state"].symlink_to(target)
+    r = _run(host, "--force")
+    assert r.returncode == 2
+    assert "not a plain directory" in r.stderr
+    assert not host["script"].exists()
+
+
+def test_state_dir_matches_the_script_default() -> None:
+    """The installer's directory and the script's default STATE_DIR are the same literal."""
+    assert 'STATE_DEST="$PREFIX/var/db/actions-runner-watchdog"' in INSTALL.read_text()
+    assert "STATE_DIR=${WD_STATE_DIR:-/var/db/actions-runner-watchdog}" in SRC_SCRIPT.read_text()
+    assert "/Volumes/Bulk/ghrunner/actions-runner-watchdog" not in SRC_SCRIPT.read_text()
+
+
+def test_refuses_off_hellmini_without_a_prefix(host: dict) -> None:
+    env = {k: v for k, v in host["env"].items() if k != "HELLMINI_WD_ROOT"}
+    host["env"] = env  # HELLMINI_WD_HOSTMARK names a directory that does not exist
+    r = _run(host)
+    assert r.returncode == 2
+    assert "not hellmini" in r.stderr
+    assert _launchctl_calls(host) == []
+    assert not list(host["root"].rglob("actions-runner-watchdog*"))
+
+
+def test_an_empty_prefix_is_refused_even_with_a_launchctl_stand_in(host: dict) -> None:
+    host["env"] = {**host["env"], "HELLMINI_WD_ROOT": ""}
+    r = _run(host)
+    assert r.returncode == 2
+    assert "set but empty" in r.stderr
+    assert _launchctl_calls(host) == []
+    assert not list(host["root"].rglob("actions-runner-watchdog*"))
