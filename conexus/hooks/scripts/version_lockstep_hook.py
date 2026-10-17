@@ -332,6 +332,11 @@ _CLI_VERSION_TIMEOUT_S = 3.0
 #: ``CREATE_NO_WINDOW`` (Windows): the child gets no console window.
 _CREATE_NO_WINDOW = 0x08000000
 
+
+def _is_windows() -> bool:
+    """The platform test, as a seam a test can patch without touching ``os``."""
+    return os.name == "nt"
+
 #: A COPY of ``version_lockstep_action._VERSION_RE`` (the two bare stdlib
 #: scripts cannot import each other); tests/hooks/test_version_lockstep_hook.py
 #: pins the copies together.
@@ -380,7 +385,7 @@ def read_cli_version() -> str | None:
             timeout=_CLI_VERSION_TIMEOUT_S,
             # A hook inherits Claude Code's stdin: never let the child read it.
             stdin=subprocess.DEVNULL,
-            creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=_CREATE_NO_WINDOW if _is_windows() else 0,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"`nx --version` failed: {exc}")

@@ -378,10 +378,10 @@ class TestReadCliVersion:
         mod.read_cli_version()
         assert seen["kw"]["stdin"] is subprocess.DEVNULL
 
-    @pytest.mark.parametrize("os_name, flags", [("nt", 0x08000000), ("posix", 0)])
-    def test_no_console_window_on_windows_only(self, mod, monkeypatch, os_name, flags) -> None:
+    @pytest.mark.parametrize("windows, flags", [(True, 0x08000000), (False, 0)])
+    def test_no_console_window_on_windows_only(self, mod, monkeypatch, windows, flags) -> None:
         seen = self._run_with(mod, monkeypatch, self._Done(0, "nx, version 9.9.9\n"))
-        monkeypatch.setattr(mod.os, "name", os_name)
+        monkeypatch.setattr(mod, "_is_windows", lambda: windows)
         mod.read_cli_version()
         assert seen["kw"]["creationflags"] == flags
 
