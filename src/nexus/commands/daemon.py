@@ -225,6 +225,10 @@ def _resolve_nx_bin() -> list[str]:
     if found:
         # Absolute, because the spawned daemon starts in "/" (stable_cwd): a
         # relative PATH entry would resolve against the wrong directory there.
+        # Only a relative result is touched; abspath on Windows would put a
+        # drive on a rooted path.
+        if os.path.isabs(found) or found.startswith(("/", "\\")):
+            return [found]
         try:
             return [os.path.abspath(found)]
         except OSError:
