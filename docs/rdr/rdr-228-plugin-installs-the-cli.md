@@ -49,8 +49,10 @@ This record meets the requirement for the CLI and keeps two prerequisites
 (disposition at close, 2026-10-17). A user with no terminal can get a working
 Nexus once `uv` and `git` are on the machine. `uv` stays a hard prerequisite
 by Sam's decision of 2026-10-13 ("Briefly Rejected", the plugin installs `uv`
-itself). `git` stays because Claude Code fetches the plugin from its
-marketplace with `git`. The install pages still use a terminal for `uv` and
+itself). `git` stays for Claude Code, which fetches the plugin from its marketplace
+with `git`. Desktop gets the plugin from the account, and a Desktop-only
+Windows box with no `git` reached a working service in the 2026-10-17 cells;
+only `nx doctor`'s Git row failed there (nexus-36qyh). The install pages still use a terminal for `uv` and
 `git` (close critique, T2 `nexus_rdr/228-close-critique-2026-10-17`); the
 one-command installer script installs `uv` for a user who starts in a
 terminal.
@@ -277,8 +279,9 @@ assumed (`-13`, replaced by the Windows run in `-14`).
   asked before each plugin tool in one live conversation; the tool asked for
   was `collection_list`, not `setup` (`nexus_rdr/228-mvv-2026-10-16-desktop`).
   On 2026-10-17 Sam's own Desktop on macOS asked before `setup` itself ran on
-  7.82.0, so no approval from the Phase 1 tool of the same name carried over
-  (`nexus_rdr/228-mvv-2026-10-17-remembered-approval`). Desktop on Windows is
+  7.82.0 (`nexus_rdr/228-mvv-2026-10-17-remembered-approval`). Whether an
+  earlier "Always allow" on the Phase 1 tool of the same name carries over was
+  not tested: it is not recorded that Sam chose it on 7.79.0. Desktop on Windows is
   not measured. A Claude Code user who has allowed all
   of the plugin's tools has turned the prompt off for themselves. What rests
   on it is stated once, in "Consent".

@@ -27,7 +27,12 @@ live Windows Desktop conversation (Desktop's prompt was measured on macOS, befor
 `setup` itself, and Claude Code asks on Windows). Desktop's local half on Windows
 was run in a clean guest on 7.82.0 (T2 `nexus_rdr/228-mvv-2026-10-17-windows-desktop`):
 rows 3, 4 and 6 pass, and rows 1 and 2 work but end in "doctor-failed" on a box
-with no Git (divergence 9). A first close attempt on 2026-10-17 claimed the gate
+with no Git (divergence 9). The Desktop cells on both systems, apart from Sam's
+one live conversation on macOS, drove the plugin's server through an MCP client
+that starts it as Desktop does, not through the Desktop application. The
+remembered-approval check found that Desktop asks before `setup` on 7.82.0;
+whether an earlier "Always allow" carries over was not tested, because it is not
+recorded that Sam chose it on 7.79.0. A first close attempt on 2026-10-17 claimed the gate
 complete before the Windows Desktop cells had run; the close critique caught it. The installer scripts were checked from nothing on Linux, macOS and
 Windows (T2 `nexus/rdr-228-p3-publish-check`,
 `nexus/rdr-228-p3-publish-check-macos-windows`). The record of every cell is on
@@ -115,10 +120,21 @@ Each divergence carries its status as of the close.
    works. Status: open, nexus-5rs3i.
    *Drift class: missing failure mode.*
 
+11. **After a hand install, the lockstep hook says the CLI may be out of
+   lockstep and starts an upgrade.** It compares a marker file that a hand
+   install does not write, not the CLI's version. This is Gap 2's failure mode
+   (telling the user the opposite of the truth) on the hand-install path, in
+   Claude Code; Desktop runs no hooks. Seen in MVV row 4 on 2026-10-15 and
+   2026-10-16 and passed as pre-existing. Status: open, nexus-ehg1y, fix in
+   progress in another session.
+   *Drift class: missing failure mode.*
+
 ## What stays open
 
 - **No-Git setup on Windows** (divergence 9, nexus-36qyh) and **the login-race
   search text** (divergence 10, nexus-5rs3i).
+- **The false lockstep nudge after a hand install** (divergence 11,
+  nexus-ehg1y).
 
 - **Desktop needs a restart after setup** (divergence 1). Removing it would
   need Desktop to act on a tool-list change, or to restart plugin servers per
@@ -130,7 +146,7 @@ Each divergence carries its status as of the close.
 
 **A host application's lifecycle is a measurement, not an assumption.** The
 record knew Desktop's plugin behaviour was unmeasured and still wrote the
-reconnect step from Claude Code's behaviour. Two of the eight divergences came
+reconnect step from Claude Code's behaviour. Two of the eleven divergences came
 from Desktop doing something different, and both were found only when a person
 held a real Desktop conversation, late in the release gate.
 
