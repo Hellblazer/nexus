@@ -261,9 +261,48 @@ def _write(path: str, content: str) -> str:
 
 
 def _edit(path: str, old: str, new: str) -> str:
+    # Key order as the live o01 run serialized it: replace_all first (nexus-pztjj).
     return _trace_line([{"type": "tool_use", "id": "toolu_e", "name": "Edit",
-                         "input": {"file_path": "/tmp/claude-eval-x/home/cwd/" + path,
+                         "input": {"replace_all": False, "file_path": "/tmp/claude-eval-x/home/cwd/" + path,
                                    "old_string": old, "new_string": new}}])
+
+
+def _multiedit(path: str, old: str, new: str) -> str:
+    return _trace_line([{"type": "tool_use", "id": "toolu_m", "name": "MultiEdit",
+                         "input": {"file_path": "/tmp/claude-eval-x/home/cwd/" + path,
+                                   "edits": [{"old_string": old, "new_string": new}]}}])
+
+
+def _content_first_write(path: str, content: str) -> str:
+    """A Write whose input serializes content before file_path; the anchor is key-order-agnostic."""
+    return _trace_line([{"type": "tool_use", "id": "toolu_w", "name": "Write",
+                         "input": {"content": content, "file_path": "/tmp/claude-eval-x/home/cwd/" + path}}])
+
+
+def _then_text(call: str, text: str) -> str:
+    """A tool call with a text block after it in the same message line."""
+    return _trace_line([json.loads(call)["message"]["content"][0], {"type": "text", "text": text}])
+
+
+def _with_usage(call: str) -> str:
+    """A tool call followed on the same line by the message's usage counts."""
+    d = json.loads(call)
+    d["message"]["usage"] = {"input_tokens": 3, "cache_read_input_tokens": 512}
+    return json.dumps(d, separators=(",", ":"))
+
+
+def _scaffold_embed() -> str:
+    """The whole src/embed.py the o01 scaffold writes, as an Edit's old_string would carry it."""
+    src = (EVALS / "o01-voyage-retry-wrapper" / "fixture.sh").read_text()
+    m = re.search(r"cat > src/embed\.py <<'PY'\n(.*?)\nPY\n", src, re.S)
+    assert m, "o01 fixture no longer writes src/embed.py through a PY heredoc"
+    return m.group(1)
+
+
+def _two_calls(first: str, second: str) -> str:
+    """One assistant message carrying two tool calls, as a model may batch them."""
+    a, b = (json.loads(x)["message"]["content"][0] for x in (first, second))
+    return _trace_line([a, b])
 
 
 def _text(text: str) -> str:
@@ -312,26 +351,49 @@ _REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
          "It is a race between the check and the read in borrow()."],
         ["Here is the stack trace of the NPE.", "Embrace a bigger pool size."],
     ),
-    # o01 grades trace lines (nexus-pztjj), so its controls are trace lines: a write to any file
-    # passes; the same code in prose, an Edit that adds none of it, or hook text quoting a tool
-    # call does not.
+    # o01 grades trace lines (nexus-pztjj), so its controls are trace lines: a write to any source
+    # file passes; the same code in prose, an Edit that adds none of it, a test file (every live run
+    # wrote tests/test_embed.py), a test write batched after a source edit, or hook text quoting a
+    # tool call does not.
     "o01-voyage-retry-wrapper/graders/bounded-attempts.md": (
         [_write("src/retry.py", "for attempt in range(5):\n    try:"),
          _write("src/embed.py", "MAX_RETRIES = 4\nretries = 0"),
          _edit("src/embed.py", _O01_EMBED_CALL, "for _ in range(3):\n" + _O01_EMBED_CALL),
-         _write("src/retry.py", "@retry(stop=stop_after_attempt(3))\ndef embed(texts):")],
+         _write("src/retry.py", "@retry(stop=stop_after_attempt(3))\ndef embed(texts):"),
+         _two_calls(_write("tests/test_embed.py", "def test_ok(): pass"),
+                    _edit("src/embed.py", _O01_EMBED_CALL, "for attempt in range(3):\n" + _O01_EMBED_CALL)),
+         _multiedit("src/embed.py", _O01_EMBED_CALL, "MAX_ATTEMPTS = 4\n" + _O01_EMBED_CALL),
+         _content_first_write("src/retry.py", "for attempt in range(5):")],
         [_write("src/retry.py", "while True:\n    try:\n        return post()"),
+         _edit("src/embed.py", _scaffold_embed(), _scaffold_embed() + "\n# TODO retry"),
+         _then_text(_write("src/util.py", "x = 1"), "retries = 3 on a 503"),
+         _write("src/util.py", "entries = []"),
+         _write("conftest.py", "retries = 3"),
+         _write("src/testing/fake.py", "retries = 3"),
          _text("I would wrap it: for attempt in range(5): try the request, then back off."),
          _edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
-         _hook('{"type":"tool_use","name":"Write","input":{"content":"retries = 3"}}')],
+         _hook('{"type":"tool_use","name":"Write","input":{"content":"retries = 3"}}'),
+         _write("tests/test_embed.py", "for attempt in range(3):\n    fake.fail(503)"),
+         _write("test_retry.py", "MAX_RETRIES = 3"),
+         _two_calls(_edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
+                    _write("tests/test_embed.py", "attempts = 3"))],
     ),
     "o01-voyage-retry-wrapper/graders/retries-on-http-errors.md": (
         [_write("src/retry.py", "except urllib.error.HTTPError as e:\n    if e.code in (429, 503):"),
          _edit("src/embed.py", _O01_EMBED_CALL, "if resp.status >= 500:\n    raise Transient()"),
-         _write("src/net/backoff.py", "TRANSIENT = {429, 500, 502, 503, 504}")],
+         _write("src/net/backoff.py", "TRANSIENT = {429, 500, 502, 503, 504}"),
+         _multiedit("src/embed.py", _O01_EMBED_CALL, "except urllib.error.HTTPError as e:")],
         [_text("Catch HTTPError and retry on a 503."),
+         _edit("src/embed.py", _scaffold_embed(), _scaffold_embed() + "\n# TODO retry"),
+         _then_text(_write("src/util.py", "x = 1"), "retry on a 503"),
+         _with_usage(_write("src/util.py", "x = 1")),
+         _write("conftest.py", "raise HTTPError(url, 503, 'busy', {}, None)"),
+         _write("src/tests.py", "fake.fail(503)"),
          _edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
-         _hook('{"type":"tool_use","name":"Edit","input":{"new_string":"except HTTPError:"}}')],
+         _hook('{"type":"tool_use","name":"Edit","input":{"new_string":"except HTTPError:"}}'),
+         _write("tests/test_embed.py", "raise HTTPError(url, 503, 'busy', {}, None)"),
+         _two_calls(_edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
+                    _write("tests/test_embed.py", "fake.fail(503)"))],
     ),
 }
 
