@@ -25,6 +25,11 @@ import runpy
 import subprocess
 import sys
 import time
+
+try:
+    import resource
+except ImportError:  # Windows has no getrusage
+    resource = None
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -913,9 +918,22 @@ def test_a_hostile_300kb_command_is_scanned_in_linear_time(shared_repo):
 
 
 def _timed_verdict(cmd: str, repo: pathlib.Path) -> tuple[dict, float]:
-    t0 = time.monotonic()
+    """The verdict and the CPU seconds the hook process tree spent on it.
+
+    CPU time, not wall time: on a box whose cores are oversubscribed (a full
+    suite inside a lab-run grant measured CPU pressure avg10 88%, 2026-10-17)
+    wall time measures the queue for a core, and the linear-time ceilings below
+    failed four times on a correct scanner. A quadratic scan still shows up,
+    because it burns CPU. Windows has no getrusage, so it keeps wall time.
+    """
+    if resource is None:  # Windows
+        t0 = time.monotonic()
+        out = _verdict(cmd, repo)
+        return out, time.monotonic() - t0
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
     out = _verdict(cmd, repo)
-    return out, time.monotonic() - t0
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return out, (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
 
 
 #: Hostile inputs that stress the gh walk, the command-position walk and the
