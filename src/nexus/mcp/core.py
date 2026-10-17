@@ -711,7 +711,9 @@ def _raise_t1_unavailable_this_process() -> None:
         "from its parent is unaffected too (checked before this hook "
         "would ever be consulted). Remedy: reconnect the conexus "
         "MCP/extension from a Claude Code session that stamps a "
-        "resolvable session id, or run `nx doctor --check-t1`."
+        "resolvable session id; on another MCP host (Cursor, Codex, "
+        "Gemini) set NX_SESSION_ID in the server's environment to name "
+        "the scratch scope; or run `nx doctor --check-t1`."
     )
 
 
@@ -13070,6 +13072,12 @@ def main():
     from nexus.mcp._win_stdin import isolate_stdin  # noqa: PLC0415 — entry-point only
 
     _stdin_isolation = isolate_stdin()
+
+    # nexus-xs7fp: this process is an MCP server, so the machine-wide
+    # current_session file is only its session when Claude Code started it.
+    from nexus.session import mark_mcp_server_process  # noqa: PLC0415 — entry-point only
+
+    mark_mcp_server_process()
 
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in

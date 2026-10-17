@@ -2303,6 +2303,19 @@ def _restore_cwd():
 
 
 @pytest.fixture(autouse=True)
+def _mcp_server_process_flag_does_not_leak(monkeypatch):
+    """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
+    ``session.mark_mcp_server_process()``, and a couple of tests run a
+    ``main()`` in-process. Left set, the flag would make every later test in
+    the worker lose the ``current_session`` fallback whenever the environment
+    carries no Claude Code marker (CI has none), and fail for a reason far from
+    its cause. monkeypatch restores the value after each test."""
+    import nexus.session as session
+
+    monkeypatch.setattr(session, "_mcp_server_process", False)
+
+
+@pytest.fixture(autouse=True)
 def _no_engine_restart_taxonomy_deferral(monkeypatch):
     """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
     /version reports ``process_uptime_seconds`` under a threshold. The

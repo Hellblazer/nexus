@@ -87,6 +87,37 @@ def read_claude_session_id() -> str | None:
         return None  # intentional: file not created yet, normal on first run
 
 
+#: Environment variables a process started by Claude Code carries, measured on
+#: live ``nx-mcp`` children of the Claude Code CLI (nexus-xs7fp): the CLI sets
+#: both on every subprocess it spawns, MCP servers included. A server started
+#: by another host (Cursor, Codex, Gemini, Claude Desktop chat) has neither.
+#: ``CLAUDE_CODE_SESSION_ID`` is not listed: it is tier 3 of the chain and
+#: answers before the flat file is asked.
+_CLAUDE_CODE_ENV_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+
+#: True in a process that is an MCP server (``nx-mcp`` / ``nx-mcp-catalog``),
+#: set once from the server's ``main()`` by :func:`mark_mcp_server_process`.
+#: A process-wide fact, like ``sys.argv``: nothing in an MCP call carries it.
+_mcp_server_process: bool = False
+
+
+def mark_mcp_server_process() -> None:
+    """Record that this process is an MCP server (nexus-xs7fp).
+
+    From here :func:`resolve_active_session_id` consults the machine-wide
+    ``current_session`` file only when Claude Code started the process
+    (:func:`started_by_claude_code`). Called from each server's ``main()``;
+    the CLI, the hooks and ``claude -p`` children never call it.
+    """
+    global _mcp_server_process
+    _mcp_server_process = True
+
+
+def started_by_claude_code() -> bool:
+    """True when the environment carries a Claude Code marker (non-blank)."""
+    return any(os.environ.get(name, "").strip() for name in _CLAUDE_CODE_ENV_MARKERS)
+
+
 def resolve_active_session_id(arg: str | None = None) -> str | None:
     """Single source of truth for the active Claude session_id.
 
@@ -116,7 +147,17 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
        overwrites this file unconditionally on its own SessionStart
        (``hooks.session_start()``). Now the last-resort fallback for
        genuinely no-harness contexts (e.g. a bare shell invocation with
-       neither env var set).
+       neither env var set). **Not consulted by an MCP server that Claude
+       Code did not start** (nexus-xs7fp): the file belongs to whichever
+       Claude session wrote it last, and a Cursor, Codex or Gemini host's
+       ``nx-mcp`` has no claim on that session's scratch, which may already
+       have ended. Such a server resolves nothing here, so its T1 scratch
+       is unavailable (the fail-loud branch of ``mcp.core._t1_lifespan``)
+       until the host names a session with ``NX_SESSION_ID``. "Started by
+       Claude Code" is the ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT``
+       environment (:func:`started_by_claude_code`); the gate applies only
+       to a process that called :func:`mark_mcp_server_process`, so a bare
+       ``nx`` in a terminal and the hooks keep the file.
     5. ``None``.
 
     Returns ``None`` when nothing in the chain resolves. Callers choose
@@ -153,6 +194,8 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     claude_code_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     if claude_code_env:
         return claude_code_env
+    if _mcp_server_process and not started_by_claude_code():
+        return None
     file_id = read_claude_session_id()
     if file_id:
         return file_id

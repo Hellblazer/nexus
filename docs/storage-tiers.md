@@ -101,6 +101,17 @@ through to the flat file; only a **bare** invocation (neither env var set)
 uses the flat-file fallback. Concurrent independent Claude Code windows
 stay isolated because each has its own session-id.
 
+An MCP server that Claude Code did not start (`nx-mcp` under Cursor, Codex
+CLI, Gemini CLI, or a Claude Desktop chat) never reads the flat file
+(nexus-xs7fp): the file names whichever Claude session wrote it last, which
+that host has no claim on and which may already have ended. "Started by
+Claude Code" means the process environment carries `CLAUDECODE` or
+`CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets on every subprocess,
+MCP servers included. Such a server has no session id, so its `scratch`
+tools report that T1 is unavailable for the process and every other tool is
+unaffected. Set `NX_SESSION_ID` in the server's environment to give it a
+scratch scope. A bare `nx` in a terminal and the hooks still use the file.
+
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
 lease discovery) retired with the chroma substrate. The in-process
 `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired

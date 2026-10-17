@@ -308,3 +308,134 @@ class TestRecordTierWriteRoutesThroughHelper:
         assert observed.get("session_id") == "unknown"
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-xs7fp: the flat-file tier belongs to Claude Code hosts, for an MCP server
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: What a process started by Claude Code carries (measured on live nx-mcp
+#: children of the CLI, nexus-xs7fp): every Claude Code subprocess has these.
+_CLAUDE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID")
+
+
+def _foreign_host_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The environment a Cursor / Codex / Gemini host gives nx-mcp: no
+    session id of any kind and no Claude Code marker, with a Claude
+    session's pointer file sitting in the machine-wide config dir."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    for name in _CLAUDE_MARKERS:
+        monkeypatch.delenv(name, raising=False)
+    _write_current_session(tmp_path, "last-claude-session")
+
+
+def _as_mcp_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nexus.session as session
+
+    monkeypatch.setattr(session, "_mcp_server_process", True)
+
+
+class TestFlatFileFallbackIsClaudeOnlyForTheMcpServer:
+    def test_a_non_claude_host_does_not_get_the_files_session(self, tmp_path, monkeypatch):
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+
+        assert resolve_active_session_id() is None
+
+    def test_a_claude_code_child_still_gets_the_files_session(self, tmp_path, monkeypatch):
+        """A Claude Code child with neither session env var (an older Claude
+        Code, or a launch path that drops it) still falls back to the file."""
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        assert resolve_active_session_id() == "last-claude-session"
+
+    def test_the_entrypoint_marker_alone_also_counts(self, tmp_path, monkeypatch):
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+
+        assert resolve_active_session_id() == "last-claude-session"
+
+    def test_a_blank_marker_is_not_a_marker(self, tmp_path, monkeypatch):
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("CLAUDECODE", "  ")
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "")
+
+        assert resolve_active_session_id() is None
+
+    def test_a_named_session_still_wins_on_a_non_claude_host(self, tmp_path, monkeypatch):
+        """The workaround the docs used to prescribe keeps working: tiers 1-3
+        are untouched, only tier 4 is gated."""
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.setenv("NX_SESSION_ID", "named-by-the-host")
+        assert resolve_active_session_id() == "named-by-the-host"
+
+        monkeypatch.delenv("NX_SESSION_ID")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "harness-id")
+        assert resolve_active_session_id() == "harness-id"
+
+    def test_a_bare_cli_with_no_marker_keeps_the_file(self, tmp_path, monkeypatch):
+        """Only the MCP server process is gated. `nx scratch` run from a plain
+        terminal beside a Claude session (and a hook, a doctor run) has no
+        marker and still resolves through the file, as documented."""
+        from nexus.session import resolve_active_session_id
+
+        _foreign_host_env(monkeypatch, tmp_path)
+
+        assert resolve_active_session_id() == "last-claude-session"
+
+    def test_the_t1_routing_of_a_non_claude_host_has_no_session_to_mint(self, tmp_path, monkeypatch):
+        """What the MCP lifespan consumes: no session id, so it takes the
+        existing fail-loud 'T1 unavailable this process' branch instead of
+        minting or borrowing the Claude session's scope."""
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
+
+        _foreign_host_env(monkeypatch, tmp_path)
+        _as_mcp_server(monkeypatch)
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+
+        assert decision.action == T1RoutingAction.MINT
+        assert decision.session_id is None
+
+    def test_marking_the_process_turns_the_gate_on(self, monkeypatch):
+        import nexus.session as session
+
+        monkeypatch.setattr(session, "_mcp_server_process", False)
+        session.mark_mcp_server_process()
+
+        assert session._mcp_server_process is True
+
+    @pytest.mark.parametrize("module_name", ["nexus.mcp.core", "nexus.mcp.catalog"])
+    def test_both_server_entry_points_mark_the_process(self, module_name):
+        """Source-level pin, as the spawn-tripwire test does: nothing but
+        ``main()`` runs only in a real server process, and a gate nobody
+        switches on protects nothing."""
+        import ast
+        import importlib
+        import inspect
+
+        main = importlib.import_module(module_name).main
+        tree = ast.parse(inspect.getsource(main).lstrip())
+        called = {
+            c.func.id for c in ast.walk(tree)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        }
+        assert "mark_mcp_server_process" in called, f"{module_name}.main() does not mark the process"
