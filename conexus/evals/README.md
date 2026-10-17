@@ -39,8 +39,18 @@ passed 3/3 and showed the answers, so no grader defect was found. One
 caveat on that run: inside docker, Claude Code's Bash sandbox could start
 bubblewrap but not apply its seccomp filter, so every shell command
 failed and the model worked by reading files. Read the run as a
-shell-less baseline; a run on a host with a working sandbox (or a
-container allowed to apply seccomp) is still owed.
+shell-less baseline. A second run on 2026-10-17 in a `--privileged`
+container scored 14/16 (0.953) and was shell-less too: its kept traces
+show every Bash call failing with `apply-seccomp: write
+/proc/self/setgroups (nested userns is capability-restricted; caller
+must provide CAP_SYS_ADMIN)`. Claude Code's seccomp step creates a user
+namespace inside bubblewrap's, and chas (Ubuntu 26.04) sets
+`kernel.apparmor_restrict_unprivileged_userns = 1`, which refuses the
+nested namespace to every process in the container, root included
+(probe: `bwrap --unshare-user ... bwrap --unshare-user ... /bin/true`
+fails, a single level succeeds). No container flag fixes that; a run
+with a shell needs that sysctl relaxed on the host, or a host whose
+sandbox is not bubblewrap (macOS).
 
 ## Layout
 
@@ -223,7 +233,10 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   needs `--security-opt seccomp=unconfined --security-opt
   apparmor=unconfined --security-opt systempaths=unconfined`:
   `tests/e2e/prefix-capture/ab/skillroute/pe_detach.sh` runs it that way
-  on chas.
+  on chas. Those flags let the sandbox start but not run commands on a
+  host that restricts unprivileged user namespaces (see the run notes
+  above); check a trace for `apply-seccomp` errors before reading a
+  score as a run with a shell.
 - **`--no-publish`** keeps the HTML report local; the default publishes
   it to claude.ai.
 - **Case filters match the `name:` field**, not the directory
