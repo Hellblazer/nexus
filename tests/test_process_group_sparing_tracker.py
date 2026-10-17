@@ -456,3 +456,13 @@ def test_a_kill_through_the_primitive_leaks_no_semaphore(door) -> None:
     names, leaked = _run_pool_and_kill(door, exists, unlink)
     assert len(names) >= 3
     assert leaked == [], f"{len(leaked)} of {len(names)} semaphores leaked past {door.__name__}"
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups")
+def test_the_primitive_refuses_to_signal_nx_s_own_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(pg.os, "killpg", lambda g, s: sent.append((g, s)))
+    own = os.getpgrp()
+    assert pg._signal_group(own, signal.SIGTERM) is False
+    assert pg._signal_group(own, signal.SIGKILL) is False
+    assert sent == [], "a signal reached nx's own process group"

@@ -30,8 +30,10 @@ _log = structlog.get_logger(__name__)
 #: A server counts as "every task fails" only with at least this many failed
 #: tasks in its retention window (``MINERU_API_TASK_RETENTION_SECONDS``, 300 s,
 #: so the counts are recent) AND a failure share of at least
-#: :data:`ALL_TASKS_FAILING_MIN_SHARE`. Three bad PDFs on a server with no
-#: completed task yet is not a server that cannot work; the bar is a pattern.
+#: :data:`ALL_TASKS_FAILING_MIN_SHARE`. Three failures with none completed
+#: does count: a server that has finished nothing after three tries is the
+#: broken-server pattern (every task failed in the deleted-cwd incident). The
+#: share keeps a working server with a few bad PDFs healthy.
 ALL_TASKS_FAILING_MIN_FAILED: int = 3
 ALL_TASKS_FAILING_MIN_SHARE: float = 0.9
 
@@ -397,7 +399,12 @@ def server_is_broken(url: str, error_text: str, info: dict[str, Any] | None) -> 
         owned.append(info["output_root"])
     python = info.get("python")
     if isinstance(python, str) and python:
-        owned.append(os.path.dirname(os.path.dirname(python)))
+        # Every traceback frame sits under the interpreter's prefix, so it
+        # counts only when the prefix is gone (a replaced venv); a live prefix
+        # in a request's traceback says nothing about the server.
+        prefix = os.path.dirname(os.path.dirname(python))
+        if not os.path.exists(prefix):
+            owned.append(prefix)
     # At least two components, to be distinctive: "/" or "/tmp" in an error names
     # nothing in particular (a server started by this code has "/" as its cwd).
     return any(p.count(os.sep) >= 2 and p in (error_text or "") for p in owned)

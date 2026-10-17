@@ -508,6 +508,27 @@ def test_server_is_broken_needs_the_registered_server_and_a_server_side_cause(
     assert server_is_broken(url, "No such file or directory: '/opt/tool/lib/x.py'", _REG) is True
 
 
+def test_a_live_interpreter_prefix_in_a_request_traceback_restarts_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # Every frame of a real 409 traceback sits under the server's venv, so a
+    # prefix that still exists says nothing about the server; a gone one does.
+    from nexus._mineru_health import server_is_broken
+
+    url = "http://127.0.0.1:8010/file_parse"
+    monkeypatch.setattr("nexus._mineru_health.process_cwd_state", lambda pid: "ok")
+    monkeypatch.setattr("nexus._mineru_health.process_cwd_path", lambda pid: "/")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    info = {**_REG, "python": str(venv / "bin" / "python")}
+    trace = f"File \"{venv}/lib/python3.12/site-packages/mineru/x.py\", line 9\nFileNotFoundError: in.pdf"
+    assert server_is_broken(url, trace, info) is False
+    import shutil
+
+    shutil.rmtree(venv)
+    assert server_is_broken(url, trace, info) is True
+
+
 def test_a_server_started_from_the_root_is_not_named_by_every_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Servers this code starts have ``/`` as their cwd; ``/`` is a substring of
     every path, so it must not count as 'a path the server owns'."""

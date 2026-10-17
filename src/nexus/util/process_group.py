@@ -352,6 +352,11 @@ def _signal_group(pgid: int, sig: int) -> bool:
     here."""
     if getattr(os, "killpg", None) is None:
         return False
+    if pgid == os.getpgrp():
+        # A caller handing in nx's own group is a caller bug; signalling it
+        # would take nx (or, sparing it, every sibling) down with the target.
+        _log.warning("process_group_refused_own_group", pgid=pgid, sig=sig)
+        return False
     if sig in _UNCATCHABLE_SIGNALS and not getattr(_in_sparing_kill, "active", False):
         return _kill_group_sparing_tracker(pgid, sig)
     return _plain_killpg(pgid, sig)

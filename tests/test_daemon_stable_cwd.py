@@ -501,3 +501,17 @@ def test_the_hook_verbs_session_end_grandchild_leaves_the_launch_directory(tmp_p
     report = json.loads(out.read_text())
     assert report["cwd"] == ROOT
     assert report["root"] in (str(launch.resolve()), str(launch))
+
+
+def test_the_supervisor_argv_is_absolute_when_path_holds_a_relative_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # The daemon starts in "/", so a relative nx from PATH would miss there.
+    from nexus.commands import daemon as daemon_cmd
+
+    monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+    monkeypatch.setattr(daemon_cmd.shutil, "which", lambda name: "rel/bin/nx")
+    monkeypatch.chdir(tmp_path)
+    argv = daemon_cmd._resolve_nx_bin()
+    assert len(argv) == 1 and Path(argv[0]).is_absolute()
+    assert Path(argv[0]).resolve() == (tmp_path / "rel" / "bin" / "nx").resolve()

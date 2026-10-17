@@ -383,8 +383,9 @@ def sweep_orphan_resource_trackers(
     accumulation produces ``Errno 28`` system-wide.
 
     This sweep runs from `nx doctor --check-resources`' remediation hint.
-    Sends SIGTERM (graceful), then SIGKILL after 3 s for any tracker
-    that did not exit. Returns the count signalled.
+    Sends SIGTERM (graceful) and waits; a tracker that does not exit is
+    reported, never SIGKILLed, because a killed tracker leaks the
+    semaphores it holds. Returns the count signalled.
 
     *command_substring* is a defence-in-depth filter the caller can
     narrow (e.g. tests pass a unique marker so the sweep cannot

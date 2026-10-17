@@ -223,7 +223,12 @@ def _resolve_nx_bin() -> list[str]:
         return nx_argv()
     found = shutil.which("nx")
     if found:
-        return [found]
+        # Absolute, because the spawned daemon starts in "/" (stable_cwd): a
+        # relative PATH entry would resolve against the wrong directory there.
+        try:
+            return [os.path.abspath(found)]
+        except OSError:
+            pass
     from nexus import install_layout  # noqa: PLC0415 — deferred import — only the off-PATH fallback needs it
 
     try:
