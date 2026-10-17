@@ -1,6 +1,6 @@
 ---
 name: tumbler-footnotes
-description: "Use when a markdown file cites the catalog as `[label](nx://catalog/<tumbler>)` links and needs those converted to footnotes that GitHub/GitLab/VS Code actually render, or checked/reversed — drives nx catalog footnotes."
+description: "Use when a markdown file cites the catalog as `[label](nx://catalog/TUMBLER)` links and needs those converted to footnotes that GitHub/GitLab/VS Code actually render, or checked/reversed — drives nx catalog footnotes."
 effort: low
 ---
 

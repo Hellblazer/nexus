@@ -407,6 +407,54 @@ def _hides_from_model(path: Path) -> bool:
     return bool(fm and re.search(r"(?m)^disable-model-invocation:\s*true\s*$", fm.group(1)))
 
 
+# Top-level plugin.json keys per the Claude Code manifest reference
+# (code.claude.com/docs/en/plugins/manifest-reference, "Fields").
+_PLUGIN_JSON_RECOGNISED_KEYS = frozenset({
+    "$schema", "name", "displayName", "version", "description", "author",
+    "homepage", "repository", "license", "keywords", "metadata", "icon",
+    "documentationUrl", "supportUrl", "privacyPolicyUrl", "termsOfServiceUrl",
+    "defaultEnabled", "dependencies", "settings", "userConfig", "types",
+    "channels", "skills", "commands", "agents", "hooks", "mcpServers",
+    "lspServers", "outputStyles", "workflows", "experimental",
+})
+
+
+def _frontmatter_description(path: Path) -> str | None:
+    """The `description:` value of a skill, agent or command file.
+
+    A regex over the frontmatter block, not yaml.safe_load, because some
+    command frontmatter is not strict YAML. Continuation lines (indented)
+    belong to the value.
+    """
+    fm = re.match(r"^---\n(.*?)\n---", path.read_text(encoding="utf-8"), re.DOTALL)
+    if not fm:
+        return None
+    m = re.search(r"(?m)^description:[ \t]*(.*(?:\n[ \t]+.*)*)", fm.group(1))
+    return m.group(1) if m else None
+
+
+class TestDescriptionsCarryNoAngleBrackets:
+    """nexus-0nskc: Claude Desktop's plugin sync rejects an XML-tag-like
+    description and claude.ai stores it with the angle brackets stripped, so
+    a placeholder like `mailbox/<address>` reached the model as
+    `mailbox/address`. Write the placeholder as ADDRESS or in braces.
+    """
+
+    def test_no_description_contains_angle_brackets(self) -> None:
+        files = list(skill_skill_mds()) + agent_files() + command_files()
+        offenders: list[str] = []
+        examined = 0
+        for path in files:
+            desc = _frontmatter_description(path)
+            if desc is None:
+                continue
+            examined += 1
+            if re.search(r"[<>]", desc):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {desc[:100]!r}")
+        assert examined >= 60, f"only {examined} descriptions examined; the walk found nothing to check"
+        assert not offenders, "\n".join(offenders)
+
+
 class TestSkillListingByteBudget:
     """nexus-cnzei.6 (injection audit S3): Claude Code drops descriptions
     from the Skill-tool listing once the listing exceeds a fraction of the
@@ -643,7 +691,7 @@ class TestRetiredWrapperSkillsLiveInTheOrchestrationSkill:
             text = (PLUGIN_DIR / "agents" / f"{agent}.md").read_text(encoding="utf-8")
             assert "NO ACCEPTANCE BAR" in text, agent
             front = text.split("---", 2)[1]
-            assert "Ship when <X>" in front, f"{agent} description does not ask for the bar"
+            assert "Ship when BAR" in front, f"{agent} description does not ask for the bar"
 
 
 def _command_bash_block(text: str) -> str | None:
@@ -860,16 +908,17 @@ class TestHooks:
             "check."
         )
 
-    def test_plugin_json_declares_python_engine(self) -> None:
-        """conexus/.claude-plugin/plugin.json must declare engines.python so the
-        Python ≥3.12 requirement is discoverable from the plugin manifest,
-        not just from the runtime guards in each hook script.
+    def test_plugin_json_has_only_recognised_keys(self) -> None:
+        """Claude Desktop's plugin sync warns on, and the store strips, any
+        plugin.json key outside the manifest reference (nexus-0nskc: 'bugs'
+        and 'engines' drew two of five warnings). The Python >=3.12
+        requirement lives in pyproject.toml's requires-python and in each
+        hook script's runtime guard, not in the manifest.
         """
         plugin_json = json.loads((PLUGIN_DIR / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-        engines = plugin_json.get("engines") or {}
-        py_req = engines.get("python", "")
-        assert py_req, "plugin.json missing 'engines.python' field"
-        assert "3.12" in py_req, f"engines.python should require >=3.12, got {py_req!r}"
+        unknown = sorted(set(plugin_json) - _PLUGIN_JSON_RECOGNISED_KEYS)
+        assert not unknown, f"plugin.json keys outside the manifest reference: {unknown}"
+        assert "name" in plugin_json and "version" in plugin_json, "non-vacuity: manifest lost name/version"
 
     def test_session_end_hook_registered(self) -> None:
         """Regression guard: SessionEnd must run a nexus cleanup entry point.

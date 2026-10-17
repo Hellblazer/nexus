@@ -7,9 +7,5 @@
     "url": "https://github.com/Hellblazer"
   },
   "repository": "https://github.com/Hellblazer/nexus",
-  "license": "AGPL-3.0-or-later",
-  "engines": {
-    "python": ">=3.12"
-  },
-  "bugs": "https://github.com/Hellblazer/nexus/issues"
+  "license": "AGPL-3.0-or-later"
 }

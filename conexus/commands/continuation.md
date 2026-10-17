@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash
-description: Write a handoff document under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Chat response is `cat <path>`; user copies it and pastes after /clear to bootstrap the next session.
+description: Write a handoff document under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Chat response is `cat PATH`; user copies it and pastes after /clear to bootstrap the next session.
 argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 ---
 

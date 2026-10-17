@@ -48,6 +48,16 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-ehg1y): with a missing or stale `cli_lockstep_marker` (a hand install never writes one; a pip or dev-tree install cannot have the action rewrite it) the lockstep hook runs `nx --version` (3 s bound) and treats a CLI not older than the plugin as in lockstep, by the action's own `satisfies` rule, so a matching CLI no longer gets a false nudge and an upgrade dispatch. A marker equal to the plugin's version still decides alone, with no subprocess.
 - `conexus/launch/nx_setup.py` (nexus-ehg1y): a docstring in `_record_lockstep` now names what the lockstep hook does when the marker is missing; no behaviour change.
 
+- Description without angle brackets (nexus-0nskc): `conexus/skills/mailbox/SKILL.md` writes the address placeholder as ADDRESS in its description, since Claude Desktop's plugin sync rejects angle brackets there.
+
+- Description without angle brackets (nexus-0nskc): `conexus/skills/tumbler-footnotes/SKILL.md` writes the tumbler placeholder as TUMBLER in its description, since Claude Desktop's plugin sync rejects angle brackets there.
+
+- Description without angle brackets (nexus-0nskc): `conexus/agents/code-review-expert.md` writes the acceptance-bar placeholder as BAR in its description ("Ship when BAR"), since Claude Desktop's plugin sync rejects angle brackets there.
+
+- Description without angle brackets (nexus-0nskc): `conexus/agents/substantive-critic.md` writes the acceptance-bar placeholder as BAR in its description ("Ship when BAR"), since Claude Desktop's plugin sync rejects angle brackets there.
+
+- Description without angle brackets (nexus-0nskc): `conexus/commands/continuation.md` writes the path placeholder as PATH in its description, since Claude Desktop's plugin sync rejects angle brackets there.
+
 
 
 ## Deferred to the next client release

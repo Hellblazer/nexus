@@ -1,7 +1,7 @@
 ---
 name: substantive-critic
 version: "2.0"
-description: Provides deep constructive critique of code, documentation, plans, and designs. Identifies structural flaws, logical inconsistencies, and unvalidated assumptions. Use when reviewing architectural decisions, validating implementations against specifications, or auditing plans before committing. Brief it with "Ship when <X>"; for code, dispatch code-review-expert alongside it.
+description: Provides deep constructive critique of code, documentation, plans, and designs. Identifies structural flaws, logical inconsistencies, and unvalidated assumptions. Use when reviewing architectural decisions, validating implementations against specifications, or auditing plans before committing. Brief it with "Ship when BAR"; for code, dispatch code-review-expert alongside it.
 model: sonnet
 color: teal
 effort: high

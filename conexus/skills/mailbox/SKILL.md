@@ -1,6 +1,6 @@
 ---
 name: mailbox
-description: Use when sending or draining a mailbox tuple-space message between agents or instances, or when authoring or reviewing code against the mailbox/<address> template
+description: Use when sending or draining a mailbox tuple-space message between agents or instances, or when authoring or reviewing code against the mailbox/ADDRESS template
 effort: low
 ---
 
