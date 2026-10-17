@@ -1003,6 +1003,7 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
         try:
             deadline = time.monotonic() + 5.0
             found_pids: list[int] = []
+            control_seen = False
             while time.monotonic() < deadline:
                 found_pids = [pid for pid, _cmd in service_stack_pids(default_dir)]
                 if proc.pid in found_pids:
@@ -1011,6 +1012,7 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
                 # has demonstrably reported the stand-in (the positive control
                 # for the absence asserted below), not at the deadline.
                 if on_windows and "daemon service start" in process_command(proc.pid):
+                    control_seen = True
                     found_pids = [pid for pid, _cmd in service_stack_pids(default_dir)]
                     break
                 time.sleep(0.1)
@@ -1021,6 +1023,9 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
                     child.wait(timeout=5)
 
         if on_windows:
+            # Without the control the absence below proves nothing: the stand-in
+            # may simply never have reached the process table.
+            assert control_seen, "the process table never showed the stand-in's command line"
             assert proc.pid not in found_pids, (
                 "win32 has no environment reader, so a flagless start fails closed "
                 f"and is found only through its lease, which this test holds none of; found={found_pids}"
