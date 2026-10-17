@@ -4470,10 +4470,12 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
-| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a call in flight, the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)) |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
+
+Environment: `NX_ASSUME_YES=1` is `--yes`. `NX_UPGRADE_AUTO_DEADLINE_SECONDS` (seconds, default `900`, minimum `60`; anything else falls back to `900` with a warning) is the `--auto` time limit above and is ignored by an interactive `nx upgrade`.
 
 **Restart after the ownerless-write release.** A local install enforces the ownerless-write
 refusal from the first boot of the upgraded engine, so after `nx upgrade` restart every

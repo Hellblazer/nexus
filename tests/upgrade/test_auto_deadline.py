@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-dcbof: the overall ceiling on the detached ``nx upgrade --auto`` child.
+"""nexus-dcbof: the time limit on the detached ``nx upgrade --auto`` child.
 
-The ceiling is checked BEFORE each rung starts, never mid-rung. Clocks are
-fixed (a value the rungs advance), so nothing here sleeps.
+The child stops STARTING work at safe points: before each rung that has work,
+and, inside the production RDR-192 rung, between census calls and between
+backfill collections. A call in flight is never interrupted. Clocks are fixed
+(a value the fakes advance), so nothing here sleeps.
+
+``TestRealRegistryShape`` is the test that matters most: production
+``default_registry()`` holds ONE rung, so a between-rungs check alone bounds
+nothing. It drives the real rung class and the real ``_default_census`` against
+a fake engine client whose calls advance the injected clock.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 
 import pytest
@@ -15,14 +23,22 @@ from click.testing import CliRunner
 import nexus.commands.upgrade as upgrade_mod
 from nexus.cli import main
 from nexus.upgrade_ladder.completion import CompletionRecord
+import nexus.db as nexus_db
 from nexus.upgrade_ladder.deadline import (
     AUTO_DEADLINE_ENV,
     DEFAULT_AUTO_DEADLINE_S,
+    MIN_AUTO_DEADLINE_S,
     Deadline,
+    active_deadline,
+    active_expired,
     auto_deadline_seconds,
+    bound,
 )
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, ConvergeResult, RungStatus
-from nexus.upgrade_ladder.registry import LadderRegistry
+from nexus.upgrade_ladder.registry import LadderRegistry, default_registry
+from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
+    Rdr192ManifestBackfillRung,
+)
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 
 
@@ -164,9 +180,11 @@ class TestEnvParsing:
 
     def test_override_is_read(self) -> None:
         assert auto_deadline_seconds({AUTO_DEADLINE_ENV: "120"}) == 120.0
-        assert auto_deadline_seconds({AUTO_DEADLINE_ENV: "0.5"}) == 0.5
+        assert auto_deadline_seconds({AUTO_DEADLINE_ENV: "60"}) == MIN_AUTO_DEADLINE_S == 60.0
 
-    @pytest.mark.parametrize("bad", ["abc", "0", "-5", "nan", "inf", "1e999"])
+    @pytest.mark.parametrize(
+        "bad", ["abc", "0", "-5", "nan", "inf", "1e999", "0.5", "1", "59.9"]
+    )
     def test_a_bad_value_falls_back_with_a_warning(self, bad: str) -> None:
         with structlog.testing.capture_logs() as logs:
             assert auto_deadline_seconds({AUTO_DEADLINE_ENV: bad}) == DEFAULT_AUTO_DEADLINE_S
@@ -179,8 +197,8 @@ class TestEnvParsing:
         assert logs == []
 
     def test_reads_the_process_environment_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(AUTO_DEADLINE_ENV, "42")
-        assert auto_deadline_seconds() == 42.0
+        monkeypatch.setenv(AUTO_DEADLINE_ENV, "90")
+        assert auto_deadline_seconds() == 90.0
 
 
 class TestCommandWiring:
@@ -216,6 +234,21 @@ class TestCommandWiring:
         assert seen == [None]
         assert called == [], "the interactive path must not even build a deadline"
 
+    def test_a_failure_building_the_deadline_still_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--auto`` promises exit 0 always, so the deadline is built inside
+        the command's try and a failure there is swallowed like any other."""
+
+        def boom() -> None:
+            raise RuntimeError("deadline construction failed")
+
+        monkeypatch.setattr(upgrade_mod, "_auto_deadline", boom)
+        seen = self._capture(monkeypatch)
+        result = CliRunner().invoke(main, ["upgrade", "--auto"])
+        assert result.exit_code == 0, result.output
+        assert seen == []
+
     def test_dry_run_has_no_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = self._capture(monkeypatch)
         result = CliRunner().invoke(main, ["upgrade", "--dry-run"])
@@ -246,3 +279,249 @@ class TestCommandWiring:
         assert result.exit_code == 0, result.output
         assert a.converge_calls == 1 and b.converge_calls == 0
         assert ledger.verified_rungs() == frozenset({"a"})
+
+
+class NoWorkRung:
+    """A rung with nothing to do: not applicable, or converged and recorded."""
+
+    def __init__(self, name: str, *, applicable: bool = True) -> None:
+        self.name = name
+        self.applicable = applicable
+        self.converge_calls = 0
+
+    def detect(self) -> RungStatus:
+        return RungStatus(applicable=self.applicable, converged=True)
+
+    def converge(self, report: object) -> ConvergeResult:  # pragma: no cover - must not run
+        self.converge_calls += 1
+        return ConvergeResult(ConvergeOutcome.COMPLETED)
+
+    def verify(self) -> bool:
+        return True
+
+
+class TestRungsWithNothingToDo:
+    def test_an_expired_deadline_does_not_defer_a_rung_that_needs_no_work(self) -> None:
+        clock = FakeClock()
+        deadline = Deadline(10.0, clock=clock)
+        clock.now = 11.0
+        recorded = NoWorkRung("recorded")
+        na = NoWorkRung("na", applicable=False)
+        work, later_noop = TimedRung("work", clock), NoWorkRung("later")
+        ledger = Ledger()
+        ledger.record_verified("recorded", package_version="9.9.9")
+        ledger.record_verified("later", package_version="9.9.9")
+        with structlog.testing.capture_logs() as logs:
+            report = _runner((recorded, na, work, later_noop), ledger, deadline).run()
+        assert _outcomes(report) == [
+            ("recorded", RungOutcome.ALREADY_RECORDED),
+            ("na", RungOutcome.SKIPPED_NOT_APPLICABLE),
+            ("work", RungOutcome.DEFERRED),
+            ("later", RungOutcome.NOT_ATTEMPTED),
+        ]
+        assert work.converge_calls == 0
+        (event,) = [e for e in logs if e["event"] == "upgrade_auto_deadline_reached"]
+        assert event["next_rung"] == "work"
+        assert event["skipped"] == ["work"], "a rung that needs no work is not 'skipped'"
+
+    def test_an_expired_deadline_with_only_finished_rungs_is_a_converged_walk(self) -> None:
+        clock = FakeClock()
+        deadline = Deadline(10.0, clock=clock)
+        clock.now = 11.0
+        ledger = Ledger()
+        ledger.record_verified("a", package_version="9.9.9")
+        report = _runner((NoWorkRung("a"), NoWorkRung("b", applicable=False)), ledger, deadline).run()
+        assert report.converged and not report.hard_failed
+
+
+class TestBoundDeadline:
+    def test_the_runner_binds_the_deadline_for_the_rung_and_unbinds_it(self) -> None:
+        clock = FakeClock()
+        seen: list[object] = []
+
+        class Probe(TimedRung):
+            def converge(self, report: object) -> ConvergeResult:
+                seen.append(active_deadline())
+                return super().converge(report)
+
+        deadline = Deadline(900.0, clock=clock)
+        _runner((Probe("p", clock),), Ledger(), deadline).run()
+        assert seen == [deadline]
+        assert active_deadline() is None and not active_expired()
+
+    def test_no_deadline_binds_nothing(self) -> None:
+        with bound(None):
+            assert active_deadline() is None and not active_expired()
+
+    def test_active_expired_follows_the_bound_clock(self) -> None:
+        clock = FakeClock()
+        with bound(Deadline(5.0, clock=clock)):
+            assert not active_expired()
+            clock.now = 5.0
+            assert active_expired()
+        assert not active_expired()
+
+
+# ── the production shape ─────────────────────────────────────────────────────
+
+_BUCKETS = ("legacy-unmanifested", "unclassified", "superseded", "dead-owner", "no-owner")
+
+
+class SlowEngine:
+    """A fake engine client. Every census call costs ``census_cost`` seconds on
+    the injected clock; ``legacy`` is the mutable DB state a backfill heals."""
+
+    def __init__(
+        self, clock: FakeClock, names: list[str], *, census_cost: float, legacy: dict[str, int] | None = None
+    ) -> None:
+        self.clock = clock
+        self.names = names
+        self.census_cost = census_cost
+        self.legacy = dict(legacy or {})
+        self.censused: list[str] = []
+
+    def list_collections(self, strict: bool = False) -> list[dict]:
+        return [{"name": n, "lifecycle_state": "live"} for n in self.names]
+
+    def manifest_less_census(self, collection: str, limit: int = 1, offset: int = 0) -> dict:
+        self.censused.append(collection)
+        self.clock.now += self.census_cost
+        totals = dict.fromkeys(_BUCKETS, 0)
+        totals["legacy-unmanifested"] = self.legacy.get(collection, 0)
+        return {"totals": totals, "scope_chunk_total": 10}
+
+
+class MemoryNote:
+    def __init__(self) -> None:
+        self.note: dict | None = None
+        self.saves = 0
+
+    def load(self):
+        return self.note
+
+    def save(self, note: dict) -> None:
+        self.saves += 1
+        self.note = dict(note)
+
+    def clear(self) -> None:
+        self.note = None
+
+
+@contextlib.contextmanager
+def _always_locked():
+    yield True
+
+
+def _real_rung(monkeypatch: pytest.MonkeyPatch, engine: SlowEngine, backfill_fn=None):
+    """The rung PRODUCTION builds (``default_registry()``), its real
+    ``_default_census``, with only the engine client, the completion record,
+    the memo, the lock and the backfill call replaced."""
+    monkeypatch.setattr(nexus_db, "make_t3", lambda **kw: engine)
+    registry = default_registry()
+    (rung,) = list(registry)
+    assert type(rung) is Rdr192ManifestBackfillRung, "production ladder is one RDR-192 rung"
+    rung.record_fn = lambda: None
+    rung.installed_version_fn = lambda: "9.9.9"
+    rung.memo = MemoryNote()
+    rung.lock_factory = _always_locked
+    if backfill_fn is not None:
+        rung.backfill_fn = backfill_fn
+    return registry, rung
+
+
+def _walk(registry, ledger, clock: FakeClock, seconds: float):
+    return LadderRunner(
+        registry, ledger, package_version_fn=lambda: "9.9.9",
+        deadline=Deadline(seconds, clock=clock),
+    ).run()
+
+
+class TestRealRegistryShape:
+    def test_slow_census_calls_stop_within_one_call_of_the_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = FakeClock()
+        names = [f"knowledge__c{i:02d}" for i in range(98)]
+        engine = SlowEngine(clock, names, census_cost=30.0)
+        backfilled: list[str] = []
+        registry, rung = _real_rung(monkeypatch, engine, lambda c: backfilled.append(c) or 0)
+        ledger = Ledger()
+
+        report = _walk(registry, ledger, clock, 900.0)
+
+        assert _outcomes(report) == [("rdr192-manifest-backfill", RungOutcome.DEFERRED)]
+        assert not report.hard_failed
+        # 98 calls at 30 s is 2940 s uninterrupted; the walk stopped at the
+        # first check at or past 900 s, so it made exactly 900 / 30 calls.
+        assert len(engine.censused) == 30
+        assert 900.0 <= clock.now <= 900.0 + 30.0
+        assert backfilled == [] and ledger.verified_rungs() == frozenset()
+        assert rung.memo.saves == 0, "a deadline stop remembers nothing"
+        assert "time limit" in report.runs[0].detail
+
+    def test_fast_calls_complete_and_record(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock = FakeClock()
+        engine = SlowEngine(clock, [f"knowledge__c{i:02d}" for i in range(98)], census_cost=0.0)
+        registry, _ = _real_rung(monkeypatch, engine)
+        ledger = Ledger()
+
+        report = _walk(registry, ledger, clock, 900.0)
+
+        assert _outcomes(report) == [("rdr192-manifest-backfill", RungOutcome.RECORDED)]
+        assert report.converged
+        assert len(engine.censused) == 98
+        assert ledger.verified_rungs() == frozenset({"rdr192-manifest-backfill"})
+
+    def test_backfill_stops_between_collections_and_the_next_session_resumes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = FakeClock()
+        engine = SlowEngine(
+            clock, ["knowledge__a", "knowledge__b", "knowledge__c"], census_cost=0.0,
+            legacy={"knowledge__a": 5, "knowledge__b": 5, "knowledge__c": 5},
+        )
+        backfilled: list[str] = []
+
+        def backfill(collection: str) -> int:
+            """Each collection costs 500 s and, once finished, is healed in the
+            'database' (the engine's state), which outlives the session."""
+            backfilled.append(collection)
+            clock.now += 500.0
+            healed, engine.legacy[collection] = engine.legacy[collection], 0
+            return healed
+
+        registry, rung = _real_rung(monkeypatch, engine, backfill)
+        ledger = Ledger()
+
+        first = _walk(registry, ledger, clock, 900.0)
+
+        assert _outcomes(first) == [("rdr192-manifest-backfill", RungOutcome.DEFERRED)]
+        assert backfilled == ["knowledge__a", "knowledge__b"], "c is not started once 1000 s > 900 s"
+        assert engine.legacy == {"knowledge__a": 0, "knowledge__b": 0, "knowledge__c": 5}
+        assert rung.memo.saves == 0 and ledger.verified_rungs() == frozenset()
+
+        # Next session: a fresh deadline, same database. The re-census sees only c.
+        second = _walk(registry, ledger, clock, 900.0)
+
+        assert _outcomes(second) == [("rdr192-manifest-backfill", RungOutcome.RECORDED)]
+        assert backfilled == ["knowledge__a", "knowledge__b", "knowledge__c"], "a and b are not redone"
+        assert engine.legacy == dict.fromkeys(engine.legacy, 0)
+
+    def test_the_rung_itself_defers_at_its_safe_points_under_a_bound_deadline(self) -> None:
+        """Called directly (no runner), with injected seams: an expired bound
+        deadline defers before the census and before any backfill."""
+        clock = FakeClock()
+        calls: list[str] = []
+        rung = Rdr192ManifestBackfillRung(
+            census_fn=lambda: calls.append("census"),  # type: ignore[arg-type,return-value]
+            backfill_fn=lambda c: calls.append(c) or 0,
+            record_fn=lambda: None,
+            installed_version_fn=lambda: "9.9.9",
+            memo=MemoryNote(),
+            lock_factory=_always_locked,
+        )
+        deadline = Deadline(5.0, clock=clock)
+        clock.now = 5.0
+        with bound(deadline):
+            result = rung.converge(object())  # type: ignore[arg-type]
+        assert result.deferred and calls == []

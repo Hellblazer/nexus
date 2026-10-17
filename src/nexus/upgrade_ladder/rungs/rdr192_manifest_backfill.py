@@ -110,6 +110,7 @@ from typing import Any, Protocol
 import structlog
 
 from nexus.upgrade_ladder.completion import CompletionRecord
+from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     CompletionLedger,
     ConvergeOutcome,
@@ -167,6 +168,14 @@ class CensusUnavailable(RuntimeError):
     """The census could not be taken: engine unreachable, older than the
     census route, or an answer that lacks the positive signal. Distinct from
     a census that ran and found something."""
+
+
+class CensusDeadlineReached(CensusUnavailable):
+    """The ``nx upgrade --auto`` ceiling passed between census calls
+    (nexus-dcbof). A census is a read, so stopping loses only the reading; the
+    rung defers and the next session's run takes it again. A subclass of
+    :class:`CensusUnavailable` so every caller that defers on an unavailable
+    census defers on this too."""
 
 
 class BackfillIncompleteError(RuntimeError):
@@ -409,6 +418,14 @@ def _default_census() -> CensusReading:
         if row.get("lifecycle_state") == "quarantine":
             quarantine_skipped += 1
             continue
+        # nexus-dcbof safe point: between census calls, never inside one. A
+        # census call can take up to its HTTP timeout, so this check is what
+        # keeps the census from outliving the `--auto` ceiling by a whole pass.
+        if active_expired():
+            raise CensusDeadlineReached(
+                f"the `nx upgrade --auto` time limit passed after {len(readings)} of "
+                f"{len(rows)} collection(s) were censused; the census runs again on the next `nx upgrade`"
+            )
         name = row["name"]
         try:
             page = reach(lambda n=name: client.manifest_less_census(n, limit=1, offset=0))
@@ -700,6 +717,8 @@ class Rdr192ManifestBackfillRung:
                 _log.warning("rdr192_backfill_residual_gated", detail=detail)
                 return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
 
+        if active_expired():
+            return self._deadline_deferral("before the census")
         reading = self.census_fn()
         if reading.clean:
             return self._completed(reading)
@@ -720,6 +739,13 @@ class Rdr192ManifestBackfillRung:
             if not targets:
                 break
             for target in targets:
+                # nexus-dcbof safe point: between collections. A collection's
+                # backfill is either finished or not started, and what it wrote
+                # is in the database, so the next run's census no longer lists it.
+                if active_expired():
+                    return self._deadline_deferral(
+                        f"in pass {pass_number} before backfilling {target.collection}"
+                    )
                 try:
                     outcome = self.backfill_fn(target.collection)
                 except Exception as exc:  # noqa: BLE001 — one collection's failure must not stop the rest; the next census names what remains
@@ -739,6 +765,8 @@ class Rdr192ManifestBackfillRung:
                     manifest_rows_written=outcome.chunks_written,
                     skipped=outcome.skipped,
                 )
+            if active_expired():
+                return self._deadline_deferral(f"after pass {pass_number}")
             after = self.census_fn()
             progressed = after.legacy_total < reading.legacy_total
             reading = after
@@ -776,6 +804,17 @@ class Rdr192ManifestBackfillRung:
             "detail": detail[:_DETAIL_MAX * 3],
         })
         _log.warning("rdr192_backfill_residual", detail=detail)
+        return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
+
+    def _deadline_deferral(self, where: str) -> ConvergeResult:
+        """The `nx upgrade --auto` ceiling passed at a safe point (nexus-dcbof).
+        Non-fatal and nothing is remembered: backfill progress is already in the
+        database, and the next session's census starts from it."""
+        detail = (
+            f"the `nx upgrade --auto` time limit passed {where}; "
+            "the next `nx upgrade` continues from what is already backfilled"
+        )
+        _log.warning("rdr192_backfill_deadline_reached", where=where)
         return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
 
     def _completed(self, reading: CensusReading) -> ConvergeResult:

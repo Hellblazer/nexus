@@ -54,12 +54,17 @@ def upgrade(
     # serving connections to free; the migration flock that serialized the
     # MIGRATOR processes is untouched and still does its half.
     #
-    # nexus-dcbof: the detached SessionStart child gets an overall ceiling,
-    # checked between ladder rungs only (never mid-rung). The clock starts
-    # here so the precondition stage counts against it. An interactive
-    # `nx upgrade` has none.
-    deadline = _auto_deadline() if auto_mode else None
+    #
+    # nexus-dcbof: the detached SessionStart child stops STARTING new work
+    # after a time limit (default 900 s), at safe points: between census
+    # calls, backfill collections and ladder rungs. The clock starts here, so
+    # the precondition stage counts against it. It does not bound the "finish"
+    # pass the root CLI group runs before this function, a call already in
+    # flight, or the service stop/start cycle in the `finally` below (about
+    # 60 s each). An interactive `nx upgrade` has no limit. Built inside the
+    # try: `--auto` promises exit 0, so even a failure here is swallowed.
     try:
+        deadline = _auto_deadline() if auto_mode else None
         _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3)
         # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
         # STATELESS preconditions before the ladder walks — re-derived from
@@ -279,8 +284,9 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
     ``msvcp140.dll`` and ``msvcp140_1.dll`` where the client's extension modules
     find them. This is the automatic leg for installs that predate ``nx init``'s
     step (a cloud-mode box has no engine or PG bundle carrying them): it rides the
-    SessionStart ``nx upgrade --auto``, which runs detached with a ceiling checked only
-    between ladder rungs (nexus-dcbof), so the download is never interrupted. A cheap three-directory stat on every run once
+    SessionStart ``nx upgrade --auto``, which runs detached with a limit on starting new
+    ladder work (nexus-dcbof; this step is not bounded by it), so the download is never
+    interrupted. A cheap three-directory stat on every run once
     the DLLs are in place, a no-op off Windows. Runs after the engine axis so a
     local-mode install gets the DLLs from its engine first. Never raises."""
     try:
@@ -326,9 +332,10 @@ def _run_ladder(
     for correctness problems; ``--auto`` invocations are swallowed by
     ``upgrade()``'s existing auto-mode handler, not here.
 
-    ``deadline`` (``--auto`` only, nexus-dcbof) stops the walk before the next
-    rung once passed; the skipped rung reports DEFERRED, so it is non-fatal
-    and the next run resumes from it.
+    ``deadline`` (``--auto`` only, nexus-dcbof) stops the walk from starting
+    new work at safe points (before a rung that has work to do, and inside the
+    rung between census calls and backfill collections) once passed; the
+    stopped rung reports DEFERRED, so it is non-fatal and the next run resumes.
 
     Keyword-only ``_ledger_fn`` is an injectable seam for unit tests: it
     returns the durable :class:`CompletionLedger` backend the holder
