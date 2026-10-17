@@ -12,6 +12,7 @@ Start on the site, then find your section below by what you're trying to do.
 
 - [Getting Started](getting-started.md) — Install, first index + search, the Claude Code plugin, troubleshooting
 - [Desktop Deployment](desktop-deployment.md) — All three Claude surfaces (chat, Cowork, Code) and the host daemon lifecycle
+- [MCP Hosts](mcp-hosts.md): run the stdio MCP server in Cursor, Codex CLI, Gemini CLI, VS Code Copilot or another host, and what stays Claude-only
 - [Managed Onboarding](managed-onboarding.md) — Use the hosted managed service instead of a local stack
 
 ## I want to...
@@ -52,7 +53,7 @@ Start on the site, then find your section below by what you're trying to do.
 - [Plan-Centric Retrieval](plan-centric-retrieval.md) — `nx_answer`, plan matching, scenario templates
 - [Plan Authoring Guide](plan-authoring-guide.md) — YAML schema for plan templates
 - [CLI Reference](cli-reference.md) — Every command, every flag
-- [MCP Servers](mcp-servers.md) — The two bundled MCP servers and their tools
+- [MCP Servers](mcp-servers.md) — The two bundled MCP servers and their tools; [MCP Hosts](mcp-hosts.md) for other hosts
 - [RDR: Research-Design-Review](rdr.md) — Lifecycle, workflow, Nexus integration, templates
 
 ## Researcher / historian
