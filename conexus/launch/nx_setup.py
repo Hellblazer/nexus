@@ -339,11 +339,12 @@ _CHILD = "child"  # in the lock directory: the pid of the child program the run 
 _DOCTOR_ROWS_MAX = 20
 _DOCTOR_ROW_CHARS = 300
 
-#: A failing row of ``nx doctor`` naming the ``git`` check: ``  ✗ git: ...`` (the main sweep) or ``[✗] git: ...``
-#: (the supplementary checks). Git is needed only to index repositories and by Claude Code's plugin marketplace,
+#: A failing row of ``nx doctor`` for the check labelled exactly ``git``: ``  ✗ git: ...`` (the main sweep) or
+#: ``[✗] git: ...`` (the supplementary checks). ``git hooks (stanza drift)`` and the like are other checks, real
+#: failures, and do not match. Git is needed only to index repositories and by Claude Code's plugin marketplace,
 #: so a Claude Desktop-only user has none, and ``nx doctor`` reports it as a warning (nexus-36qyh). A CLI from
 #: before that change fails the row, and the plugin updates independently of the CLI it finds.
-_GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|\s|$)")
+_GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|$)")
 
 #: ``nx --version`` of the Nexus CLI (click's ``version_option(prog_name="nx")``).
 _VERSION_LINE = re.compile(r"nx, version [0-9][0-9A-Za-z.+!_-]*")

@@ -64,4 +64,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-- A missing git no longer fails setup (nexus-36qyh): `conexus/launch/nx_setup.py` records the failing rows of the main sweep of `nx doctor` (it printed `  ✗ label` and the filter wanted `[✗]`), ends a run `done` when the only failing row is `git`, and reads a recorded `doctor-failed` over `git` alone as `done`, so it no longer outranks "the service is not running". Deferred because the same bead makes the `git` row of `nx doctor` a warning in `src/nexus/health.py`.
+- A missing git no longer fails setup (nexus-36qyh): `conexus/launch/nx_setup.py` records the failing rows of the main sweep of `nx doctor` (it printed `  ✗ label` and the filter wanted `[✗]`), ends a run `done` when the only failing row is the one labelled exactly `git` (the `git hooks (...)` rows stay failures), and reads a recorded `doctor-failed` over `git` alone as `done`, so it no longer outranks "the service is not running". Deferred because the same bead makes the `git` row of `nx doctor` a warning in `src/nexus/health.py`.

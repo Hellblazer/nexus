@@ -1185,3 +1185,66 @@ def test_a_log_with_no_error_stays_a_bare_not_reachable(monkeypatch, tmp_path) -
     )
 
     assert _check_vector_service().detail == "not reachable"
+
+
+def _unreachable_detail(monkeypatch, tmp_path) -> str:
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    return _check_vector_service().detail
+
+
+def test_an_old_error_followed_by_a_clean_stop_is_not_a_boot_failure(monkeypatch, tmp_path) -> None:
+    """The engine ran, logged a request ERROR, and stopped cleanly months later: the log's last output is
+    not an error, so the August ERROR is not why it is down (nexus-pbway critique)."""
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        "2026-08-01 02:10:03,114 ERROR [http-1] d.n.service.Api - event=request_failed error=\"boom\"\n"
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - shutdown complete\n",
+    )
+    assert _unreachable_detail(monkeypatch, tmp_path) == "not reachable"
+
+
+def test_a_plain_text_shutdown_tail_is_not_a_boot_failure(monkeypatch, tmp_path) -> None:
+    """A tail outside the logback format that is no fatal output ('Shutting down...') is not a reason, with
+    or without an older ERROR before it."""
+    for earlier in ("", "2026-08-01 02:10:03,114 ERROR [http-1] d.n.service.Api - event=request_failed\n"):
+        sub = tmp_path / ("with-error" if earlier else "bare")
+        sub.mkdir()
+        _write_engine_log(
+            sub, "storage_service_native",
+            earlier + "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - stopping\nShutting down...\n",
+        )
+        assert _unreachable_detail(monkeypatch, sub) == "not reachable", earlier
+
+
+def test_a_final_fatal_line_outside_the_logback_format_is_reported(monkeypatch, tmp_path) -> None:
+    """An engine that dies before logback is up prints a bare exception: that is the reason."""
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - starting\n"
+        "Exception in thread \"main\" java.lang.IllegalStateException: no pg\n\tat d.n.Main.main(Main.java:9)\n",
+    )
+    detail = _unreachable_detail(monkeypatch, tmp_path)
+    assert "not reachable" in detail and "IllegalStateException: no pg" in detail
+
+
+def test_the_newer_jar_log_does_not_hide_behind_a_stale_native_failure(monkeypatch, tmp_path) -> None:
+    """The reverse of the stale-native case: the jar log is the stale one, and the newer native log is clean."""
+    _write_engine_log(tmp_path, "storage_service_jar", _ENGINE_ERR + "\n", mtime=1_000_000)
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - shutdown complete\n", mtime=2_000_000,
+    )
+    assert _unreachable_detail(monkeypatch, tmp_path) == "not reachable"
+
+
+def test_the_newer_native_log_is_the_one_reported(monkeypatch, tmp_path) -> None:
+    _write_engine_log(
+        tmp_path, "storage_service_jar",
+        _ENGINE_ERR.replace("pg_session_env_invalid", "stale_jar_error") + "\n", mtime=1_000_000,
+    )
+    _write_engine_log(tmp_path, "storage_service_native", _ENGINE_ERR + "\n", mtime=2_000_000)
+    detail = _unreachable_detail(monkeypatch, tmp_path)
+    assert "pg_session_env_invalid" in detail and "stale_jar_error" not in detail

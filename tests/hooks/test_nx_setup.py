@@ -752,6 +752,20 @@ def test_a_missing_vcs_tool_with_another_failing_row_still_fails_the_verify_step
     assert done["doctor_failing"] == ["✗ git: not found on PATH", "✗ Service: not running"]
 
 
+def test_a_failing_git_hooks_row_still_fails_the_verify_step(box: Box) -> None:
+    """The row labelled ``git hooks (stanza drift)`` is a real failure of ``nx doctor``, not the missing tool."""
+    box.layout()
+    box.provision()
+    box.behave([{
+        "prog": "nx", "match": ["doctor"], "exit": 1,
+        "out": "  ✗ git hooks (stanza drift): /r/.git/hooks/post-commit\n",
+    }])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed"
+    assert done["doctor_failing"] == ["✗ git hooks (stanza drift): /r/.git/hooks/post-commit"]
+
+
 @pytest.mark.parametrize(
     ("rows", "expected"),
     [
@@ -760,9 +774,15 @@ def test_a_missing_vcs_tool_with_another_failing_row_still_fails_the_verify_step
         (["✗ git: not found on PATH", "[✗] git: x"], "done"),
         (["✗ git: not found on PATH", "✗ Service: not running"], "doctor-failed"),
         (["✗ gitea: unreachable"], "doctor-failed"),
+        (["✗ git hooks (stanza drift): x"], "doctor-failed"),
+        (["[✗] git hooks (malformed stanza): y"], "doctor-failed"),
+        (["✗ git hooks (stanza drift): x", "✗ git: not found on PATH"], "doctor-failed"),
         ([], "doctor-failed"),
     ],
-    ids=["only-the-tool", "bracketed", "twice", "plus-another", "a-different-prefix", "no-rows-recorded"],
+    ids=[
+        "only-the-tool", "bracketed", "twice", "plus-another", "a-different-prefix",
+        "git-hooks-drift", "git-hooks-malformed", "git-hooks-beside-the-tool", "no-rows-recorded",
+    ],
 )
 def test_a_recorded_doctor_failure_over_one_optional_tool_reads_done(
     box: Box, monkeypatch: pytest.MonkeyPatch, rows: list[str], expected: str

@@ -1030,6 +1030,38 @@ def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
     return reason
 
 
+#: A line outside the logback format that is the engine dying: a bare JVM exception (the engine
+#: failed before logback was up), a ``Caused by:`` root cause, or a JVM or native fatal banner.
+#: Plain progress text such as ``Shutting down...`` is not.
+_ENGINE_FATAL_LINE = re.compile(
+    r"^(Exception in thread |Caused by: |# A fatal error|Fatal error|FATAL\b|[\w.$]+(Error|Exception)\b)"
+)
+
+
+def engine_boot_failure_reason(log_path: Path, start_offset: int = 0) -> str | None:
+    """Why the engine is down, when its log says so as its FINAL output; else ``None``.
+
+    :func:`last_engine_error_line` answers "what is the last error in this log", which is
+    right for a caller that just watched the engine exit. A caller that finds the engine
+    down some time later (``nx doctor``) needs the other question: is the log's end an
+    exit reason, or an old ERROR followed by a clean stop? The trailing lines outside the
+    logback format (a stack trace, a bare JVM exception) belong to the logback line before
+    them. That line at ERROR makes the log end in an error, and the reason is the engine's
+    last error line. At INFO or WARN, or with no logback line at all, the reason is the
+    last fatal-looking line of the trailing block, if any (:data:`_ENGINE_FATAL_LINE`); a
+    block of plain text (``Shutting down...``) is no reason. Credentials are redacted.
+    """
+    lines = _log_lines_since(log_path, start_offset)
+    anchor: int | None = next(
+        (i for i in range(len(lines) - 1, -1, -1) if _ENGINE_LOGBACK_LINE.match(lines[i])), None
+    )
+    if anchor is not None and _ENGINE_ERROR_LINE.match(lines[anchor]):
+        return last_engine_error_line(log_path, start_offset)
+    block = lines[0 if anchor is None else anchor + 1 :]
+    fatal = next((ln for ln in reversed(block) if _ENGINE_FATAL_LINE.match(ln)), None)
+    return None if fatal is None else _reason_text(fatal)
+
+
 def last_supervisor_error_line(crash_log: Path, start_offset: int) -> str | None:
     """The supervisor's own start failure: the last ``Error: ...`` line the
     ``--foreground`` command wrote to its crash-channel log at or after

@@ -2655,6 +2655,40 @@ class TestExitReasonReaders:
         assert ssd.last_engine_error_line(log, log.stat().st_size) is None
         assert ssd.last_supervisor_error_line(tmp_path / "absent.log", 0) is None
 
+    _INFO = "2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - shutdown complete"
+
+    def test_boot_failure_reason_reports_only_a_final_error(self, tmp_path: Path) -> None:
+        """nexus-pbway: ``nx doctor`` finds the engine down some time later. The log's end must be the error
+        (with its trace), not an old ERROR followed by a clean stop."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._ERR + "\n\tat dev.nexus.service.Main.main(Main.java:166)\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) == self._ERR
+        log.write_text(self._ERR + "\n" + self._INFO + "\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None, "an old ERROR before a clean stop"
+        log.write_text(self._ERR + "\n" + self._INFO + "\nShutting down...\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None, "a plain-text tail is no reason"
+        log.write_text(self._INFO + "\n" + self._ERR + "\nCaused by: java.io.IOException: disk\n", encoding="utf-8")
+        reason = ssd.engine_boot_failure_reason(log)
+        assert reason is not None and reason.startswith(self._ERR) and "java.io.IOException: disk" in reason
+
+    def test_boot_failure_reason_reads_a_fatal_line_outside_the_logback_format(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._INFO + '\nException in thread "main" java.lang.IllegalStateException: no pg\n'
+            "\tat dev.nexus.service.Main.main(Main.java:9)\n",
+            encoding="utf-8",
+        )
+        assert ssd.engine_boot_failure_reason(log) == 'Exception in thread "main" java.lang.IllegalStateException: no pg'
+        log.write_text('Exception in thread "main" java.lang.Error: x\nShutting down...\n', encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) == 'Exception in thread "main" java.lang.Error: x'
+        log.write_text("Shutting down...\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None
+        assert ssd.engine_boot_failure_reason(tmp_path / "absent.log") is None
+
     def test_engine_exit_reason_picks_the_log_that_grew(self, tmp_path: Path) -> None:
         """A jar launch writes storage_service_jar.log; a native log left by an
         earlier install did not change and is not the source."""

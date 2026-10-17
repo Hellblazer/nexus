@@ -374,6 +374,35 @@ def test_a_doctor_failed_record_with_another_failing_row_still_outranks_a_down_s
     assert "nx doctor reported problems" in text and "Schema: behind" in text, text
 
 
+@pytest.mark.parametrize("record", [{"doctor_failing": []}, {}], ids=["empty-rows", "no-rows-key"])
+def test_a_doctor_failed_record_with_no_parsed_rows_does_not_mask_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder, record: dict[str, Any]
+) -> None:
+    """nexus-36qyh. A 7.82.0 record for a box with no git is ``doctor-failed`` with ``doctor_failing: []``:
+    that release's filter never matched the main sweep's failing row. Nothing says which row failed, so
+    the record cannot be read as that one tool alone; it must still not send the user to a terminal while
+    the installed service is down. The user is offered the restart instead."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    _recorded(tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False, doctor="fail", **record)
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    text = _call("setup_status")
+    assert "not running" in text and "mode local" in text and "downloads nothing" in text, text
+    assert "nx doctor" not in text and "terminal" not in text, text
+
+
+def test_a_doctor_failed_record_with_no_rows_and_no_provisioned_service_keeps_its_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    """The restart offer is for an installed service; with none provisioned the record is reported as it was."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _service(monkeypatch, False)
+    _recorded(tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False, doctor="fail", doctor_failing=[])
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    assert "nx doctor reported problems" in _call("setup_status")
+
+
 def test_status_keeps_a_failed_run_ahead_of_a_down_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
 ) -> None:

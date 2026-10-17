@@ -1211,8 +1211,10 @@ def _boot_failure_advisory() -> str | None:
     down there is no lease naming the launch kind, so the newer of the two
     files is the one the last launch wrote. A Liquibase changeset failure keeps
     its dedicated advisory; any other startup error (for instance
-    ``event=pg_session_env_invalid``) is the engine's own last error line, read
-    by :func:`nexus.daemon.storage_service_daemon.last_engine_error_line`.
+    ``event=pg_session_env_invalid``) is the engine's own last error line, but
+    only when that is the log's final output
+    (:func:`nexus.daemon.storage_service_daemon.engine_boot_failure_reason`):
+    an old ERROR followed by a clean stop is not why the engine is down.
 
     Guards cloud-mode / no-local-service installs (no log exists) and any
     resolution failure — degrades to ``None`` silently, never raises.
@@ -1220,10 +1222,8 @@ def _boot_failure_advisory() -> str | None:
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
         from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — failure path only
-            _ENGINE_ERROR_LINE,
-            _ENGINE_LOGBACK_LINE,
             ENGINE_LOG_STEMS,
-            last_engine_error_line,
+            engine_boot_failure_reason,
         )
 
         logs_dir = nexus_config_dir() / "logs"
@@ -1240,14 +1240,10 @@ def _boot_failure_advisory() -> str | None:
 
         detail = _last_boot_failure_detail(log_path)
         if detail is None:
-            reason = last_engine_error_line(log_path, 0)
-            # The reader falls back to the last output line when the engine
-            # logged no ERROR; a routine INFO/WARN tail (a clean stop) is not
-            # a reason for being unreachable.
-            if reason is not None and not (
-                _ENGINE_LOGBACK_LINE.match(reason) and not _ENGINE_ERROR_LINE.match(reason)
-            ):
-                detail = reason
+            # Only the engine's FINAL output is a reason: an old ERROR followed
+            # by a clean stop, or a plain-text "Shutting down...", is not why it
+            # is unreachable now.
+            detail = engine_boot_failure_reason(log_path)
     except Exception:  # noqa: BLE001 — best-effort: must never crash the reachability probe
         return None
     if detail is None:
@@ -1322,10 +1318,14 @@ def _check_vector_service() -> HealthResult:
         # nexus-4m6i0.7: the service can crash-loop before answering any
         # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
         # the root cause from the local service log when one is available,
-        # instead of leaving the operator to spelunk the engine log by hand. Strictly best-effort/soft: any failure here degrades
-        # silently back to the bare "not reachable" message. Only reached for
-        # transport failures now, so a boot advisory can never be scraped from
-        # a stale log while the service is actually up and answering.
+        # instead of leaving the operator to spelunk the engine log by hand.
+        # Strictly best-effort/soft: any failure here degrades silently back
+        # to the bare "not reachable" message. Only reached for transport
+        # failures, so a service that answers never gets an advisory. The log
+        # of a service that is down can be old: a Liquibase failure is read
+        # from anywhere in its tail, but any other error is reported only when
+        # it is the log's final output (nexus-pbway), so a stopped engine whose
+        # log ends in a clean shutdown stays a bare "not reachable".
         detail = "not reachable"
         boot_advisory = _boot_failure_advisory()
         if boot_advisory:
@@ -4796,7 +4796,23 @@ _SETUP_STALE_SECONDS = 60.0
 _SETUP_STATES = ("running", "done", "doctor-failed", "failed", "unsupported")
 _SETUP_TEXT_CHARS = 300
 _SETUP_DOCTOR_ROWS = 3
+#: The script's ``_DOCTOR_ROWS_MAX``: a record holding that many rows may have been cut.
+_SETUP_DOCTOR_ROWS_MAX = 20
+#: The script's ``_GIT_ROW``: a failing row of the check labelled exactly ``git`` (nexus-36qyh). A missing
+#: git is a warning now, but a setup run recorded by a CLI from before that change is ``doctor-failed`` over
+#: it alone, and the script's ``status_view`` reads that record as ``done``; this row must say the same.
+#: ``tests/test_doctor_setup_row.py`` compares the two on every fixture case and on a battery of rows.
+_SETUP_GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|$)")
 _SETUP_UNREADABLE = object()
+
+
+def _setup_only_git_failed(rows: object) -> bool:
+    """Whether a ``doctor-failed`` record's rows name the git check and nothing else: the script's
+    ``only_git_failed``. An empty list, a list at the cap and anything not a list of strings are not."""
+    return (
+        isinstance(rows, list) and 0 < len(rows) < _SETUP_DOCTOR_ROWS_MAX
+        and all(isinstance(row, str) and _SETUP_GIT_ROW.match(row.strip()) for row in rows)
+    )
 
 
 def _setup_text(value: object, limit: int = _SETUP_TEXT_CHARS) -> str:
@@ -4945,6 +4961,8 @@ def _setup_row(setup: Path) -> HealthResult:
             )
         return HealthResult(label=_SETUP_LABEL, ok=True, detail="not applicable: no plugin setup has run on this machine")
     state = status["state"]
+    if state == "doctor-failed" and _setup_only_git_failed(status.get("doctor_failing")):
+        state = "done"  # the script's view reads this record the same way (nexus-36qyh)
     mode = _setup_text(status.get("mode", "unknown"), 40)
     stage = _setup_text(status.get("stage", "unknown"), 40)
     again = f"call the `setup` tool again with mode {mode}"

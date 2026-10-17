@@ -148,6 +148,73 @@
       "view": {"state": "doctor-failed", "live": false},
       "row": {"outcome": "warn", "contains": ["nx doctor reported problems.", "T3: vector store unreachable", "{LOG}"]}
     },
+    "doctor-failed-git-only": {
+      "comment": "A run from before a missing git became a warning (nexus-36qyh): the one failing row is the git check. The script's view and the doctor row both read it as done.",
+      "setup_dir": true,
+      "status": {
+        "state": "doctor-failed", "stage": "verify", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "nx doctor reported problems.", "doctor": "fail",
+        "doctor_failing": ["✗ git: not found on PATH"],
+        "steps_done": ["build", "init"],
+        "next": "Show the user the failing rows and run nx doctor in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "done", "live": false},
+      "row": {"outcome": "ok", "contains": ["finished", "mode local", "2026-10-14T10:09:00Z"]}
+    },
+    "doctor-failed-git-hooks": {
+      "comment": "The git hooks rows are other checks and real failures: only a row labelled exactly git is the missing tool.",
+      "setup_dir": true,
+      "status": {
+        "state": "doctor-failed", "stage": "verify", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "nx doctor reported problems.", "doctor": "fail",
+        "doctor_failing": ["✗ git hooks (stanza drift): /r/.git/hooks/post-commit", "[✗] git hooks (malformed stanza): y"],
+        "steps_done": ["build", "init"],
+        "next": "Show the user the failing rows and run nx doctor in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "doctor-failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["nx doctor reported problems.", "git hooks (stanza drift)", "{LOG}"]}
+    },
+    "doctor-failed-git-and-another-row": {
+      "setup_dir": true,
+      "status": {
+        "state": "doctor-failed", "stage": "verify", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "nx doctor reported problems.", "doctor": "fail",
+        "doctor_failing": ["[✗] git: not found on PATH", "✗ Schema: behind"],
+        "steps_done": ["build", "init"],
+        "next": "Show the user the failing rows and run nx doctor in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "doctor-failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["nx doctor reported problems.", "Schema: behind", "{LOG}"]}
+    },
+    "doctor-failed-no-rows": {
+      "comment": "A 7.82.0 record for a box with no git has no rows: nothing says which check failed, so both readers keep it as doctor-failed (setup_status ranks it below a down service, nexus-36qyh).",
+      "setup_dir": true,
+      "status": {
+        "state": "doctor-failed", "stage": "verify", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "nx doctor reported problems.", "doctor": "fail",
+        "doctor_failing": [],
+        "steps_done": ["build", "init"],
+        "next": "Show the user the failing rows and run nx doctor in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "doctor-failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["nx doctor reported problems.", "{LOG}"]}
+    },
     "done": {
       "setup_dir": true,
       "status": {
