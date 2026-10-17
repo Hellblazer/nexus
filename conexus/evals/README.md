@@ -89,7 +89,12 @@ o01's regexes read the trace, so a retry counts in whichever non-test file the
 model writes it to (nexus-pztjj). Its judge reads only the final `src/embed.py`:
 `focus: trace` gives the judge the first and last messages of a run, and the live
 run's middle, retry edit included, was elided. A retry body in a helper module
-is therefore token-checked, never judged for the transient-only rule (nexus-ejdlu).
+is therefore token-checked, never judged for the transient-only rule. That is
+an accepted limit (nexus-ejdlu, closed on Sam's call): a probe on chas with
+Claude Code 2.1.300 showed no grader source reaches a new file's contents.
+The judge's `focus: files` receives only the new paths, `{source: file}`
+takes one exact path and refuses a glob, and `focus: trace` keeps the first
+and last 12 messages. In the 6 live o01 runs the model never wrote a helper.
 The regexes grade what the model attempted, not the file it ended with: a
 Write or Edit that failed, or a retry a later edit removed, still counts, and
 a write made through Bash is not seen. `files` targets carry paths only, so
