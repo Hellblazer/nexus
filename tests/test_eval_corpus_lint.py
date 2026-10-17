@@ -193,10 +193,15 @@ def _case_dirs() -> list[Path]:
 
 
 def test_every_case_is_named_for_its_grading_shape():
-    """p = a procedural skill must load, o = the outcome is graded, n = an absorption guard."""
+    """p = a procedural skill must load, a = an agent must be dispatched, o = the outcome is
+    graded, n = an absorption guard."""
     for case in _case_dirs():
-        assert re.fullmatch(r"[pon]\d\d-[a-z0-9-]+", case.name), case.name
-        kinds = {_frontmatter(g).get("type") for g in (case / "graders").glob("*.md")}
+        assert re.fullmatch(r"[paon]\d\d-[a-z0-9-]+", case.name), case.name
+        graders = [_frontmatter(g) for g in (case / "graders").glob("*.md")]
+        kinds = {g.get("type") for g in graders}
+        if case.name.startswith("a"):
+            assert any(g.get("tool") == "Agent" and g.get("min", 1) >= 1 for g in graders), (
+                f"{case.name}: an agent case asserts a dispatch (tool_used on Agent, min >= 1)")
         if case.name.startswith("o"):
             assert kinds & {"regex", "llm"}, f"{case.name}: an outcome case needs a regex or llm grader"
             assert (case / "case.yaml").exists(), f"{case.name}: an outcome case builds its project with a scaffold"
@@ -235,3 +240,50 @@ def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
         heads.append(subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True,
                                     capture_output=True, text=True).stdout.strip())
     assert heads[0] == heads[1], f"{case.name}: scaffold is not deterministic {heads}"
+
+
+# Crafted answers each regex grader must pass and must fail (nexus-dg7i6.7 critique). A grader that
+# passes a wrong or clearing answer, or misses a correct one in a common phrasing, fails here before
+# a paid run. The fail lists hold the critic's counterexamples verbatim.
+_REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
+    "o02-review-branch-before-pr/graders/finds-logged-api-key.md": (
+        ["embed() logs the API key at INFO, so it lands in every log file.",
+         "The Voyage API key is written to the logs on every call."],
+        ["The key is read via os.environ.get('VOYAGE_API_KEY','') and the batching logic is fine.",
+         "No secrets or credentials are logged anywhere in this diff."],
+    ),
+    "o02-review-branch-before-pr/graders/finds-shell-injection.md": (
+        ["--cache-path goes straight into os.system, so a crafted path runs shell commands.",
+         "Command injection: cache_path is concatenated into a shell string."],
+        ["Replace os.system('chmod 666 ...') with os.chmod(path, 0o600).",
+         "There are no injection concerns with --cache-path."],
+    ),
+    "o02-review-branch-before-pr/graders/finds-world-writable-cache.md": (
+        ["The cache is chmod 666, so it is world-writable.",
+         "Any local user can overwrite the cache file in /tmp."],
+        ["The cache path defaults to /tmp."],
+    ),
+    "o04-retry-coverage-verdict/graders/says-coverage-is-not-enough.md": (
+        ["I don't think the coverage is solid enough to open the PR yet.",
+         "No, the coverage isn't enough.", "The coverage is weak: one happy-path test."],
+        ["No reason to hold the PR, the retry path is solid.", "Coverage looks good to me."],
+    ),
+    "o05-intermittent-npe-race/graders/names-the-race.md": (
+        ["The pool has no locking, so two threads take the same slot.",
+         "It is a race between the check and the read in borrow()."],
+        ["Here is the stack trace of the NPE.", "Embrace a bigger pool size."],
+    ),
+    "o01-voyage-retry-wrapper/graders/bounded-attempts.md": (
+        ["for attempt in range(5):", "MAX_RETRIES = 4\nretries = 0", "for _ in range(3):", "@retry(stop=stop_after_attempt(3))"],
+        ["while True:\n    try:\n        return post()"],
+    ),
+}
+
+
+@pytest.mark.parametrize("rel", sorted(_REGEX_CONTROLS), ids=lambda r: r.split("/")[0])
+def test_regex_grader_controls(rel: str) -> None:
+    data = _frontmatter(EVALS / rel)
+    pat = re.compile(data["pattern"], re.I if "i" in str(data.get("flags", "")) else 0)
+    must_pass, must_fail = _REGEX_CONTROLS[rel]
+    assert [t for t in must_pass if not pat.search(t)] == [], f"{rel}: misses a correct answer"
+    assert [t for t in must_fail if pat.search(t)] == [], f"{rel}: passes a wrong or clearing answer"

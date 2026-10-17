@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '666|world[- ]writable|anyone (can|could) (read|write)|readable by (any|all)'
+pattern: '666|world[- ]writable|writable by (any|every|all)|(any|every|other) (local )?users? (can|could|may) (read|write|overwrite|modify|replace)'
 flags: i
 match: contains
 ---

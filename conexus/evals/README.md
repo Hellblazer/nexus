@@ -43,9 +43,10 @@ conexus/evals/
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-11 cases. The letter says how the case is graded:
+16 cases. The letter says how the case is graded:
 
 - `p<NN>`: a procedural skill must load (`tool_used` on `Skill`).
+- `a<NN>`: an agent must be dispatched (`tool_used` on `Agent`, `min` 1).
 - `o<NN>`: the outcome is graded (`regex` on the final message or a file,
   `llm` criteria), on a project the case's scaffold builds.
 - `n<NN>`: absorption guard, a skill or agent must stay silent
@@ -55,8 +56,13 @@ conexus/evals/
 |---|---|---|
 | p04-rdr-create-schema-decision | `rdr-create` loads | tool_used |
 | p06-orchestration-agent-choice | `orchestration` loads | tool_used |
+| p11-rdr-gate-complete-draft | `rdr-gate` (command) or `rdr-gate-checklist` loads on a complete draft RDR | tool_used |
+| p12-rdr-close-shipped | `rdr-close` loads for an accepted, shipped RDR | tool_used |
+| p13-continuation-handoff | `continuation` loads before a `/clear` | tool_used |
+| p14-phase-review-gate | `phase-review-gate` loads at a phase boundary | tool_used |
+| a01-review-gate-dispatch | the quality gate dispatches `code-review-expert` and `substantive-critic`, with "Ship when" in the brief | tool_used ×3 |
 | o01-voyage-retry-wrapper | `src/embed.py` gains a bounded retry on HTTP errors; only transient failures retried | regex ×2 (file), llm (file) |
-| o02-review-branch-before-pr | the review names the three planted defects: logged API key, `os.system` injection, world-writable cache | regex ×3 |
+| o02-review-branch-before-pr | the review names the three planted defects: logged API key, `os.system` injection, world-writable cache | regex ×3, llm |
 | o03-rdr-synthesis-ranking | all five RDRs covered; a ranked top three | regex, llm |
 | o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |
 | o05-intermittent-npe-race | the race in `ConnectionPool` named as the root cause; test-validator agent not dispatched | regex, llm, tool_used `0..0` |
@@ -70,25 +76,44 @@ conexus/evals/
 A case asserts that a skill loaded only when the skill carries a procedure
 or format the model cannot produce without it (`rdr-create`'s template,
 `orchestration`'s agent table). A task the model rightly does itself is
-graded on the result. This follows nexus-dg7i6.5: the five former
-p-cases for `using-nx-skills`, `code-review`, `query`, `test-validation`
-and `debugging` loaded their skill 0 times in 12 eval runs even with the
-premise true, while the model did the task well, and a 30-day census of
-509 real sessions had 0 model loads of those skills against 602
-`code-review-expert`, 153 `developer` and 27 `debugger` dispatches. Those
-skills were retired (nexus-dg7i6.6); the cases became o01 to o05. An
-absorption guard names a surface that still exists: the agent, or the
+graded on the result. This follows nexus-dg7i6.5: four of the five
+former p-cases (`using-nx-skills`, `code-review`, `query`,
+`test-validation`) loaded their skill 0 times in 12 eval runs even with
+the premise true, while the model did the task well. The fifth,
+`debugging`, did load (3/3 on the plain project, 2/3 with a true premise);
+it was retired on the real-use evidence alone: a 30-day census of 509
+sessions had 0 model loads of all six retired skills against 602
+`code-review-expert`, 153 `developer` and 27 `debugger` dispatches
+(nexus-dg7i6.6). The cases became o01 to o05. The procedural skills that
+do load in real use get p-cases (p11 to p14; census loads: rdr-gate 25,
+continuation 15, phase-review-gate 11, rdr-close 7), and the review gate
+that replaced the `code-review` skill gets a01.
+
+An absorption guard names a surface that still exists: the agent, or the
 `nx_answer` tool, never a retired skill, since `max: 0` on a name that
-cannot be called passes vacuously.
+cannot be called passes vacuously. The guards are regression guards with
+no observed base rate: no 2026-10-17 run dispatched any agent, so their
+passes show the surface stayed silent, not that the guard could fire.
+a01 is the positive control for the mechanism: it asserts an `Agent`
+dispatch with a `subagent_type`, the same encoding the guards assert
+absent.
 
 Outcome cases need `--scaffold` (below): without it the workspace is
 empty and every outcome grader fails. Each `fixture.sh` writes fixed
 content with fixed commit dates and no network, and
 `tests/test_eval_corpus_lint.py` builds each one twice and requires the
 same commit. Before a grader is trusted it must pass on answers where the
-defect or fact is present and fail where it is absent; for o02 to o04 that
-was checked on the skillroute harness runs of 2026-10-17 (15/15 with the
-defects present, 0/15 on the plain project without them).
+defect or fact is present and fail on wrong or clearing ones. Each regex
+grader has crafted must-pass and must-fail answers pinned in
+`test_regex_grader_controls` (the fail lists include the review critique's
+counterexamples: "no secrets are logged", "stack trace", "no reason to hold
+the PR, the retry path is solid"). On real answers, the skillroute harness
+runs of 2026-10-17 passed every o-case regex grader with the fixture
+present; the plain-project runs failed them, which shows only that an
+answer about nothing fails. The `llm` graders and the new schema shapes
+(`target: { source: file, path }`, `focus`, `case.yaml` scaffolds) were
+checked against the documentation and the harness's own scorer, not yet
+against `claude plugin eval` itself; the first scaffolded run does that.
 
 ### Dropped: n03, p07, p08 (nexus-dkotg, 2026-08-23)
 
@@ -138,7 +163,7 @@ stale copy, which was on `develop` and still carried the pre-fix
 
 Target `conexus/` specifically, never a parent that contains
 `.claude/worktrees/`. Verify by checking `suite.root` and the case count
-in the JSON report: this corpus is 11 cases with 11 unique names. It is
+in the JSON report: this corpus is 16 cases with 16 unique names. It is
 read-only — nothing was written into any worktree — but a run scored
 against a stale corpus is a wrong answer delivered confidently.
 
@@ -174,9 +199,13 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   file used to recommend, aborts at about 15% with exit 2 and reports a
   partial as though it were a run.
 
-- **Cost.** ~$0.45/case-run measured ($6.12 and $7.80 for 15 case-runs,
-  when the corpus was 15). At 11 cases, `--runs 3 --ablation none` is 33
-  case-runs, so budget **~$15** and set the ceiling above it, not at it.
+- **Cost.** ~$0.45/case-run was measured on the old one-turn
+  skill-trigger cases ($6.12 and $7.80 for 15 case-runs). The outcome and
+  agent cases are multi-turn agentic runs (30 to 60 s each on the
+  skillroute harness) plus llm judge votes, so that rate does not carry
+  over; the first scaffolded `--runs 3` run (48 case-runs) sets the real
+  figure. Set the ceiling well above the estimate, not at it: a ceiling
+  hit aborts with a partial report.
 
 - **Do not set `--threshold` yet.** The two structural failures (p07,
   p08) are gone, but no `--runs 3` baseline exists — every number this
@@ -247,13 +276,12 @@ authored against the documented format only, never against a live run:
 
    (`criteria` *was* the right field name for `llm`; that half of the
    guess was correct.)
-3. **`case.yaml` context scaffolds.** None of these 11 cases use one —
-   every prompt is judged answerable from the plugin's own skill
-   descriptions with no repo state dependency. If a real run shows a
-   skill firing (or not) differently depending on ambient repo context
-   (e.g., whether an RDR directory exists, whether a bead is
-   in_progress), add `case.yaml` scaffolds then; nothing here assumes
-   their absence is permanent.
+3. **RESOLVED 2026-10-17 — `case.yaml` context scaffolds are in use.**
+   The o-cases, a01 and p11 to p14 build their project with
+   `context.scaffold_script: fixture.sh`, which runs only under
+   `--scaffold`. nexus-dg7i6.5 showed why: on a project where the
+   prompt's premise was false, the model checked the repo and answered
+   without the skill, so repo state was part of what the case measured.
 4. **RESOLVED 2026-08-23 — repo-local skills are out of scope, and the
    cases are dropped.** This was filed as a hypothetical and was already
    a live defect: the sandbox never loaded `.claude/skills/`, so p07 and
@@ -262,16 +290,9 @@ authored against the documented format only, never against a live run:
    see "Dropped" above. Repo-local skill triggering is an explicit
    non-goal of this corpus.
 
-   The open item that survives: `debugging` and `debug` both exist under
-   `conexus/skills/` with overlapping descriptions ("tests fail,
-   exceptions occur" vs "debugging a failing code path"). n05 and p10's
-   negatives now match both. p09 has NO grader asserting `debug` stays
-   silent while `debugging` fires — that is a claim about where the
-   boundary sits, and it should be settled by watching a run rather than
-   asserted into the corpus. Same for `query` vs `plan-first`, whose
-   descriptions both say the answer "must be reduced from many
-   documents"; p05 covers `query` positively but nothing disambiguates
-   the pair.
+   The `debugging`/`debug` and `query`/`plan-first` disambiguation item
+   that used to follow here is moot: `debugging` and `query` were retired
+   by nexus-dg7i6.6, and the `debug` command is hidden from the model.
 5. **`experimental.evals` declaration.** `conexus/.claude-plugin/plugin.json`
    does not currently declare `experimental.evals`. This suite lives at
    the plugin-root convention (`conexus/evals/`) per the format spec,

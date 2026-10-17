@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: 'race|thread[- ]?safe|not thread|concurren|synchroni[sz]|atomic|\block(s|ed|ing)?\b|interleav|data race|visibility|BlockingQueue'
+pattern: '\brace\b|race condition|thread[- ]?safe|not thread|concurren|synchroni[sz]|atomic|\block(s|ed|ing)?\b|interleav|data race|visibility|BlockingQueue'
 flags: i
 match: contains
 ---

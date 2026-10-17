@@ -1,7 +1,7 @@
 ---
 type: regex
 target: { source: file, path: src/embed.py }
-pattern: '(attempts?|retries|max_tries|tries)\s*[=:]|range\(\s*\w*(attempt|retr|tries)'
+pattern: '(attempts?|retries|max_tries|tries)\s*[=:]|range\(\s*(\d+|\w*(attempt|retr|tries)\w*)|stop_after_attempt|max_retries'
 flags: i
 match: contains
 ---

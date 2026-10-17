@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '\b(not|isn.t|is not|don.t|doesn.t|no|nowhere near)\b[^.\n]{0,80}\b(enough|sufficient|solid|adequate)\b|\b(insufficient|inadequate|thin)\b'
+pattern: '\b(not|isn.t|aren.t|don.t|doesn.t|nowhere near)\b[^.\n]{0,60}\b(enough|sufficient|solid|adequate)\b|\b(insufficient|inadequate|incomplete|weak|thin)\b'
 flags: i
 match: contains
 ---
