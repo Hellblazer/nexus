@@ -43,7 +43,9 @@ def graders(case_dir: Path) -> list[dict]:
             if ":" in line and not line.startswith(" "):
                 k, v = line.split(":", 1)
                 v = v.strip()
-                fields[k.strip()] = v.strip("'\"") if k.strip() in ("input_match", "pattern") else v
+                if k.strip() in ("input_match", "pattern") and len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                    v = v[1:-1].replace("''", "'") if v[0] == "'" else v[1:-1]
+                fields[k.strip()] = v
         kind = fields.get("type")
         if kind == "tool_used":
             out.append({"name": g.stem, "kind": "guard" if fields.get("max") == "0" else "skill",
@@ -154,6 +156,10 @@ def main() -> int:
                 if not (run / "ids.json").exists():
                     continue
                 calls = tool_calls(run)
+                if not calls and not final_message(run):
+                    # A run with no transcript and no answer proves nothing; never let it pass a guard.
+                    problems.append(f"DEAD RUN {arm.name}/{case.name}/{run.name}: no tool calls and no final message")
+                    continue
                 skills = [i.get("skill", "?") for n, i in calls if n == "Skill"]
                 agents = [i.get("subagent_type", "?") for n, i in calls if n in ("Agent", "Task")]
                 if (names := listing_names(run)) is not None:

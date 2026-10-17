@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '(?:^|[.\n])(?![^.\n]*\b(?:no|not|never|nothing|none|isn.t|aren.t|without)\b)[^.\n]*?(?:(?:\blog(?:s|ged|ging)?\b|log\.info)[^.\n]{0,80}\b(?:api[ _-]?key|VOYAGE_API_KEY|key|secret|credential)|\b(?:api[ _-]?key|VOYAGE_API_KEY|secrets?|credentials?)\b[^.\n]{0,80}\b(?:logged|written to the logs?|in the logs?|leak))'
+pattern: '(?:^|[.\n])(?![^.\n]*\b(?:no|not|never|nothing|none|isn.t|aren.t|without)\b)[^.\n]*?(?:(?:\blog(?:s|ged|ging)?\b|log\.info)[^.\n]{0,80}\b(?:api[ _-]?key|VOYAGE_API_KEY|key|secret|credential)|\b(?:api[ _-]?key|VOYAGE_API_KEY|secrets?|credentials?)\b[^.\n]{0,80}\b(?:logged|written to the logs?|to the logs?|in the logs?|leak))'
 flags: i
 match: contains
 ---

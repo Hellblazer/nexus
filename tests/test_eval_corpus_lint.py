@@ -220,6 +220,8 @@ def test_case_yaml_names_an_executable_scaffold(case: Path):
 def test_regex_and_llm_graders_are_complete(path: Path):
     data = _frontmatter(path)
     if data.get("type") == "regex":
+        # The runner compiles JavaScript regexes and rejects inline flags; Python's re accepts them.
+        assert not re.search(r"\(\?[aiLmsux]+[):]", data["pattern"]), f"{path.name}: use flags:, not an inline (?i)"
         re.compile(data["pattern"], re.I if "i" in str(data.get("flags", "")) else 0)
         assert str(data.get("match", "contains")) in ("contains", "not_contains") or str(
             data["match"]).startswith("count:"), path.name
@@ -239,6 +241,10 @@ def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
                        capture_output=True, timeout=120)
         heads.append(subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True,
                                     capture_output=True, text=True).stdout.strip())
+        # Two builds in the same second agree even without pinned dates, so assert the pin itself.
+        dates = subprocess.run(["git", "-C", str(d), "log", "--format=%aI %cI"], check=True,
+                               capture_output=True, text=True).stdout.split()
+        assert set(dates) == {"2026-10-01T12:00:00Z"}, f"{case.name}: commit dates are not pinned {set(dates)}"
     assert heads[0] == heads[1], f"{case.name}: scaffold is not deterministic {heads}"
 
 
@@ -248,7 +254,8 @@ def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
 _REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
     "o02-review-branch-before-pr/graders/finds-logged-api-key.md": (
         ["embed() logs the API key at INFO, so it lands in every log file.",
-         "The Voyage API key is written to the logs on every call."],
+         "The Voyage API key is written to the logs on every call.",
+         "Line 14 writes the secret to the log."],
         ["The key is read via os.environ.get('VOYAGE_API_KEY','') and the batching logic is fine.",
          "No secrets or credentials are logged anywhere in this diff."],
     ),

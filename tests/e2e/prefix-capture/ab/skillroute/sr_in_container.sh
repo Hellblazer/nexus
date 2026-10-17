@@ -44,7 +44,7 @@ PLUGIN_ARGS=()
 case "$ARM" in
   S0) : ;;
   S1|S2) for d in /plugins/"$ARM"/*/; do PLUGIN_ARGS+=(--plugin-dir "${d%/}"); done ;;
-  [A-RT-Z]|[A-RT-Z]T)
+  [A-RU-Z]|[A-RU-Z]T)
     TREE=/plugins/${ARM:0:1}/conexus
     EVALS=$TREE/evals
     [ -f "$TREE/.claude-plugin/plugin.json" ] || { echo "no conexus tree at $TREE" >&2; exit 2; }
