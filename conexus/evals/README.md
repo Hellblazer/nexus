@@ -75,7 +75,7 @@ conexus/evals/
 | p13-continuation-handoff | `continuation` loads before a `/clear` | tool_used |
 | p14-phase-review-gate | `phase-review-gate` loads at a phase boundary | tool_used |
 | a01-review-gate-dispatch | the quality gate dispatches `code-review-expert` and `substantive-critic`, with "Ship when" in the brief | tool_used ×3 |
-| o01-voyage-retry-wrapper | `src/embed.py` gains a bounded retry on HTTP errors; only transient failures retried | regex ×2 (file), llm (file) |
+| o01-voyage-retry-wrapper | the Voyage call gains a bounded retry on HTTP errors, in `src/embed.py` or a helper module; only transient failures retried | regex ×2 (trace, anchored to a Write/Edit input), llm (trace) |
 | o02-review-branch-before-pr | the review names the three planted defects: logged API key, `os.system` injection, world-writable cache | regex ×3, llm |
 | o03-rdr-synthesis-ranking | all five RDRs covered; a ranked top three | regex, llm |
 | o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |

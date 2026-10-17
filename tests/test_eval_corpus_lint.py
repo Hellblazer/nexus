@@ -24,6 +24,7 @@ land the way nexus-dkotg did: found by a human running the corpus by hand.
 That is the control today, and it is a person remembering, not a gate."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -248,6 +249,37 @@ def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
     assert heads[0] == heads[1], f"{case.name}: scaffold is not deterministic {heads}"
 
 
+def _trace_line(content: list[dict]) -> str:
+    """One assistant message as `claude plugin eval` writes it to trace.jsonl: compact JSON."""
+    return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": content}},
+                      separators=(",", ":"))
+
+
+def _write(path: str, content: str) -> str:
+    return _trace_line([{"type": "tool_use", "id": "toolu_w", "name": "Write",
+                         "input": {"file_path": "/tmp/claude-eval-x/home/cwd/" + path, "content": content}}])
+
+
+def _edit(path: str, old: str, new: str) -> str:
+    return _trace_line([{"type": "tool_use", "id": "toolu_e", "name": "Edit",
+                         "input": {"file_path": "/tmp/claude-eval-x/home/cwd/" + path,
+                                   "old_string": old, "new_string": new}}])
+
+
+def _text(text: str) -> str:
+    return _trace_line([{"type": "text", "text": text}])
+
+
+def _hook(output: str) -> str:
+    """A hook's output line: its text is a JSON string, so any quotes in it arrive escaped."""
+    return json.dumps({"type": "system", "subtype": "hook_response", "output": output},
+                      separators=(",", ":"))
+
+
+# The scaffold's request line, which an Edit's old_string carries unchanged.
+_O01_EMBED_CALL = "    with urllib.request.urlopen(req, timeout=30) as resp:"
+
+
 # Crafted answers each regex grader must pass and must fail (nexus-dg7i6.7 critique). A grader that
 # passes a wrong or clearing answer, or misses a correct one in a common phrasing, fails here before
 # a paid run. The fail lists hold the critic's counterexamples verbatim.
@@ -280,9 +312,26 @@ _REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
          "It is a race between the check and the read in borrow()."],
         ["Here is the stack trace of the NPE.", "Embrace a bigger pool size."],
     ),
+    # o01 grades trace lines (nexus-pztjj), so its controls are trace lines: a write to any file
+    # passes; the same code in prose, an Edit that adds none of it, or hook text quoting a tool
+    # call does not.
     "o01-voyage-retry-wrapper/graders/bounded-attempts.md": (
-        ["for attempt in range(5):", "MAX_RETRIES = 4\nretries = 0", "for _ in range(3):", "@retry(stop=stop_after_attempt(3))"],
-        ["while True:\n    try:\n        return post()"],
+        [_write("src/retry.py", "for attempt in range(5):\n    try:"),
+         _write("src/embed.py", "MAX_RETRIES = 4\nretries = 0"),
+         _edit("src/embed.py", _O01_EMBED_CALL, "for _ in range(3):\n" + _O01_EMBED_CALL),
+         _write("src/retry.py", "@retry(stop=stop_after_attempt(3))\ndef embed(texts):")],
+        [_write("src/retry.py", "while True:\n    try:\n        return post()"),
+         _text("I would wrap it: for attempt in range(5): try the request, then back off."),
+         _edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
+         _hook('{"type":"tool_use","name":"Write","input":{"content":"retries = 3"}}')],
+    ),
+    "o01-voyage-retry-wrapper/graders/retries-on-http-errors.md": (
+        [_write("src/retry.py", "except urllib.error.HTTPError as e:\n    if e.code in (429, 503):"),
+         _edit("src/embed.py", _O01_EMBED_CALL, "if resp.status >= 500:\n    raise Transient()"),
+         _write("src/net/backoff.py", "TRANSIENT = {429, 500, 502, 503, 504}")],
+        [_text("Catch HTTPError and retry on a 503."),
+         _edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
+         _hook('{"type":"tool_use","name":"Edit","input":{"new_string":"except HTTPError:"}}')],
     ),
 }
 
