@@ -4366,16 +4366,39 @@ def reap_leaked_aspect_workers(
     ]
 
 
+def _pytest_root_is_live(root: Path) -> bool:
+    """True when *root*'s ``.lock`` names a process that is still running.
+
+    pytest writes ``<root>/.lock`` holding the creating pid (the xdist
+    controller under ``-n``; workers' basetemps nest inside it) and removes it
+    at exit, so a missing lock is a finished run and a lock naming a dead pid is
+    a killed one. Both are stale. A recycled pid reads as live and leaves a
+    stale root unreaped this time, which is the safe direction.
+    """
+    try:
+        pid = int((root / ".lock").read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def stale_pytest_roots(basetemp: Path) -> list[Path]:
-    """Sibling pytest session dirs from OTHER runs, newest-first.
+    """Sibling pytest session dirs from OTHER, finished runs, newest-first.
 
     pytest lays sessions out as ``<tmp>/pytest-of-<user>/pytest-<n>``. The
     current session's own dir is excluded -- reaping it would kill the run in
-    progress.
-
-    Assumes ONE pytest run at a time on a box, which is this project's standing
-    rule (feedback_no_parallel_tests). A second concurrent run's daemons would
-    be reaped by this. That is why every reap is PRINTED rather than silent.
+    progress -- and so is every sibling whose run is still going (2026-10-17):
+    several scoped runs at once is normal, and reaping a live
+    sibling's root SIGTERMs that run's test daemons mid-test. The
+    ``pytest-current`` symlink is skipped; it aliases a numbered root.
     """
     try:
         parent = Path(basetemp).resolve().parent
@@ -4387,7 +4410,8 @@ def stale_pytest_roots(basetemp: Path) -> list[Path]:
     try:
         sibs = [
             d for d in parent.iterdir()
-            if d.is_dir() and d.name.startswith("pytest-") and d.resolve() != current
+            if d.is_dir() and not d.is_symlink() and d.name.startswith("pytest-")
+            and d.resolve() != current and not _pytest_root_is_live(d)
         ]
     except Exception:  # noqa: BLE001 -- probe
         return []

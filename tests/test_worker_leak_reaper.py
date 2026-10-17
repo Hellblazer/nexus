@@ -28,6 +28,9 @@ about. These tests exist mostly to hold that boundary.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from tests.conftest import reap_leaked_aspect_workers
@@ -252,6 +255,25 @@ class TestStaleRootDiscovery:
 
     def test_survives_a_missing_root(self, tmp_path: Path) -> None:
         assert stale_pytest_roots(tmp_path / "nope" / "pytest-1") == []
+
+    def test_a_concurrent_live_run_is_not_stale(self, tmp_path: Path) -> None:
+        """Several scoped runs at once is normal. A sibling whose ``.lock``
+        names a running pid is a live run: reaping it SIGTERMs that run's test
+        daemons mid-test. A lock naming a dead pid (a killed run) and a missing
+        lock (pytest removes it at exit) are both stale."""
+        dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                              capture_output=True, text=True, check=True)
+        dead_pid = int(dead.stdout.strip())
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        for name in ("pytest-5", "pytest-6", "pytest-7", "pytest-8"):
+            (root / name).mkdir()
+        (root / "pytest-6" / ".lock").write_text(str(dead_pid))
+        (root / "pytest-7" / ".lock").write_text(str(os.getpid()))
+        (root / "pytest-current").symlink_to(root / "pytest-6")
+
+        found = [p.name for p in stale_pytest_roots(root / "pytest-8")]
+        assert found == ["pytest-6", "pytest-5"], found
 
 
 class TestPathsWithSpaces:
