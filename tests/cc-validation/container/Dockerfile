@@ -36,16 +36,19 @@ USER root
 # The Nexus CLI the conexus plugin's servers and mcp_tool hooks run (nx-mcp,
 # nx-hook). Without it the plugin loads but its SubagentStart hook fails with
 # "Unknown tool: 'hook_subagent_start'. Nexus is not installed." and scenario 12
-# measures nothing (nexus-spwp2). run.sh passes the version of the plugin it
-# stages, so the CLI and the plugin match; the default is only for a bare
-# `docker build`. Installed system-wide (the harness points HOME at its sandbox)
-# and found by the plugin's launcher through PATH.
-ARG NEXUS_CLI_VERSION=7.82.0
+# measures nothing (nexus-spwp2). It is built from cli-src/, which run.sh stages
+# from the SAME source tree whose plugins are under test (src/, pyproject.toml,
+# the package data the wheel force-includes), never fetched from PyPI by version:
+# a develop plugin then runs against the develop CLI, and a release branch works
+# before its version is published. Installed system-wide (the harness points HOME
+# at its sandbox) and found by the plugin's launcher through PATH.
+COPY cli-src /tmp/cli-src
 RUN mkdir -p /opt/uv-tools /opt/uv-python \
     && UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-       uv tool install "conexus==${NEXUS_CLI_VERSION}" \
+       uv tool install /tmp/cli-src \
     && chmod -R a+rX /opt/uv-tools /opt/uv-python \
-    && test -x /usr/local/bin/nx-mcp
+    && test -x /usr/local/bin/nx-mcp \
+    && rm -rf /tmp/cli-src
 # The harness points HOME at its sandbox, so ~/.local/bin/claude would no longer
 # resolve inside a scenario; put claude on the system PATH.
 RUN ln -s /home/nexus/.local/bin/claude /usr/local/bin/claude \

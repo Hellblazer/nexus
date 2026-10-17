@@ -61,26 +61,33 @@ if cc_plugin_require "$REPO_ROOT/sn" sn nexus-plugins; then
     # pipe test, so this scenario isolates the remaining question: does CC deliver
     # the SubagentStart JSON envelope into the subagent's context end-to-end.
     #
-    # nexus-spwp2: every token below is spelled in the prompt as two pieces to be
-    # joined ("SERENA" then "-OK-9F2K"), never whole. The pane shows the prompt
-    # itself, so a whole token written into it matches immediately and this
-    # scenario would pass (and its sentinel poll return) before the subagent
-    # answered; only the reply contains the joined spelling.
-    claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='sn hook check'. Prompt for the subagent: 'Look at the guidance injected into your context. On separate lines output: the word SERENA immediately followed by -OK-9F2K (no space) if your context contains the text project-from-cwd; the word DOCS immediately followed by -OK-9F2K (no space) if your context contains the text fetch current docs. If neither phrase is present, output the word NONE immediately followed by -OK-9F2K (no space). Then on a line by itself write the word PROBE immediately followed by -DONE-9F2K (no space).'"
+    # nexus-spwp2: nothing the reply is judged on appears whole in the prompt. The
+    # pane shows the prompt itself and the subagent sees its own prompt, so a
+    # phrase or token written whole into it is satisfiable without any injection
+    # (the review of 9a96128b7 found the first fix still wrote the two probe
+    # phrases whole). Each anchor phrase is given as two fragments the subagent
+    # must join, and each reply token is two pieces to be joined. The hook's text
+    # is fixed, so the pass also needs the debug log to show Claude Code accepted
+    # non-empty additionalContext from the plugin's SubagentStart hook
+    # (cc_hook_context_injected), and the subagent is told to use no tools so it
+    # cannot read the plugin files off disk.
+    claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='sn hook check'. Prompt for the subagent: 'Do not use any tools. Look at the guidance injected into your context, apart from this message. On separate lines output: the word SERENA immediately followed by -OK-9F2K (no space) if your context contains the text made by joining project-from and -cwd (no space); the word DOCS immediately followed by -OK-9F2K (no space) if your context contains the words fetch current followed by one space and the word docs. If neither is present, output the word NONE immediately followed by -OK-9F2K (no space). Then on a line by itself write the word PROBE immediately followed by -DONE-9F2K (no space).'"
 
-    # Poll for the sentinel — up to 300s. Subagent dispatch can take ~60s alone.
-    poll_for "PROBE-DONE-9F2K" 300 "subagent reply sentinel" || true
-    OUT=$(capture -500)
+    # Poll for the sentinel in the SUBAGENT's own reply (its transcript), up to
+    # 300s; the pane is the main agent's paraphrase and may omit, add or dispute
+    # a token (seen live, 2026-10-17, scenario 12).
+    cc_wait_subagent_reply "PROBE-DONE-9F2K" 300 || true
+    OUT=$(cc_subagent_replies)
     HAS_A=0
     HAS_B=0
     echo "$OUT" | grep -qE "SERENA-OK-9F2K" && HAS_A=1
     echo "$OUT" | grep -qE "DOCS-OK-9F2K" && HAS_B=1
 
     if [[ $HAS_A -eq 1 && $HAS_B -eq 1 ]]; then
-        if cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID"; then
-            pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent and the debug log shows the plugin's SubagentStart hook finished — JSON envelope works"
+        if cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID" && cc_hook_context_injected "SubagentStart" "subagent_start.py"; then
+            pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent, the debug log shows the plugin's SubagentStart hook finished and Claude Code accepted its additionalContext — JSON envelope works"
         else
-            fail "Both phrases reached the subagent but the debug log ($CC_DEBUG_FILE) shows no SubagentStart hook of $CC_PLUGIN_ID finishing — the content did not come from the plugin's hook"
+            fail "Both phrases reached the subagent but the debug log ($CC_DEBUG_FILE) does not show the SubagentStart hook of $CC_PLUGIN_ID finishing and delivering additionalContext — the content did not come from the plugin's hook"
         fi
     elif [[ $HAS_A -eq 1 && $HAS_B -eq 0 ]]; then
         fail "Serena section injected but Context7 missing — partial delivery"

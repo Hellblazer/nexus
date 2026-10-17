@@ -62,14 +62,25 @@ chmod -R a+rX "$STAGE"
 CC_VERSION="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$HERE/Dockerfile")"
 [ -n "$CC_VERSION" ] || { echo "no ARG CLAUDE_CODE_VERSION in the Dockerfile" >&2; exit 2; }
 
-# The Nexus CLI baked into the image is the version of the plugin staged here,
-# so the plugin's servers and mcp_tool hooks have the program they name.
-NEXUS_CLI_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$STAGE/harness/conexus/.claude-plugin/plugin.json")"
-[ -n "$NEXUS_CLI_VERSION" ] || { echo "no version in the staged conexus plugin.json" >&2; exit 2; }
+# The Nexus CLI baked into the image is built from THIS source tree (the one whose
+# plugins are staged above), not fetched from PyPI by the plugin's version. The
+# build context is a temp dir holding the Dockerfile and cli-src/: the files
+# hatchling needs to build the wheel (pyproject.toml's sdist/force-include
+# lists), taken as tracked-or-new files with working-tree content like the
+# harness stage.
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$STAGE/harness/conexus/.claude-plugin/plugin.json")"
+[ -n "$PLUGIN_VERSION" ] || { echo "no version in the staged conexus plugin.json" >&2; exit 2; }
+CTX="$STAGE/buildctx"
+mkdir -p "$CTX/cli-src"
+cp "$HERE/Dockerfile" "$CTX/Dockerfile"
+( cd "$ROOT" && git ls-files -z -co --exclude-standard -- src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml ) \
+    | tar -C "$ROOT" --null -T - -cf - | tar -x -C "$CTX/cli-src"
+[ -f "$CTX/cli-src/pyproject.toml" ] && [ -d "$CTX/cli-src/src/nexus" ] \
+    || { echo "cli-src staging is missing pyproject.toml or src/nexus" >&2; exit 2; }
 
 IMAGE="nexus-cc-val:local"
-echo "[build] $IMAGE (nexus CLI $NEXUS_CLI_VERSION)"
-docker build -q -t "$IMAGE" --build-arg "NEXUS_CLI_VERSION=$NEXUS_CLI_VERSION" "$HERE" > "$STAGE/docker-build.log" 2>&1 \
+echo "[build] $IMAGE (nexus CLI from this tree, plugin $PLUGIN_VERSION)"
+docker build -q -t "$IMAGE" "$CTX" > "$STAGE/docker-build.log" 2>&1 \
     || { tail -40 "$STAGE/docker-build.log" >&2; exit 1; }
 
 echo "[run] scenario $SCENARIO; evidence -> $EVID"

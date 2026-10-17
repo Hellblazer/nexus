@@ -18,6 +18,13 @@ log_inventory() {
     fi
 }
 
+# Positive control for 14b (nexus-spwp2 review): 14b's "inline mcpServers do NOT
+# load" reading is only a finding if, in THIS run, the same stub definition
+# loaded for a project-level agent (14a). Without that, "stub absent" is just as
+# likely a stub that cannot start in this environment (the container once lacked
+# the mcp package), so 14b is SKIP, not PASS.
+CTRL_14A_LOADED=0
+
 # ── 14a: inline mcpServers, NO tools: filter — does removing the filter fix it?
 scenario "14a inline_no_tools_filter: remove the tools: frontmatter restriction"
 
@@ -73,6 +80,7 @@ echo "    14a verdict: mcp_in_inv=$mcp_in_inv  stub_called=$log_called"
 # OR the call landing in STUB_LOG (stub_called=1). Both absent = server did not
 # load.
 if [[ $mcp_in_inv -eq 1 || $log_called -eq 1 ]]; then
+    CTRL_14A_LOADED=1
     pass "14a: inline mcpServers (no tools filter) LOADED for the agent (mcp_in_inv=$mcp_in_inv, stub_called=$log_called — either proves load)"
 else
     fail "14a: inline mcpServers did NOT load for the project-level subagent (tool neither listed nor callable)"
@@ -142,8 +150,10 @@ echo "    14b verdict: agent_ran=$agent_ran  mcp_in_inv=$mcp_in_inv  stub_called
 # reported as a SKIP only when agent14b did not run.
 if [[ $mcp_in_inv -eq 1 && $log_called -eq 1 ]]; then
     pass "14b: plugin-shipped agent inline mcpServers WORK (server loaded, tool used)"
-elif [[ $agent_ran -eq 1 && $mcp_in_inv -eq 0 ]]; then
+elif [[ $agent_ran -eq 1 && $mcp_in_inv -eq 0 && $CTRL_14A_LOADED -eq 1 ]]; then
     pass "14b: plugin-shipped agent inline mcpServers do NOT load (agent ran, stub absent from inventory) — vs 14a project-level which loads"
+elif [[ $agent_ran -eq 1 && $mcp_in_inv -eq 0 ]]; then
+    skip "14b: agent14b ran and its inventory lacks the stub tool, but 14a (the positive control: the same stub, project-level agent) did not show the stub loading in this run, so the stub may simply be unable to start here; not a verdict on plugin-agent mcpServers"
 elif [[ $agent_ran -eq 1 ]]; then
     skip "14b: agent14b (registered by the marketplace-installed plugin) ran and listed the stub tool but did not call it (deferred MCP tool schema not loaded, see the README); not a verdict on inline mcpServers"
 else

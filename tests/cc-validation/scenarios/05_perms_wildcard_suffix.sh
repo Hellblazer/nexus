@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# KNOWN LIMIT (nexus-qsmc5): this scenario pins defaultMode "default" in settings,
+# but claude_start (tests/e2e/lib.sh) launches with --dangerously-skip-permissions,
+# so "the tool ran" proves nothing about the permission rules here. Listed in
+# KNOWN_SKIP_PERMISSIONS in tests/test_cc_validation_plugin_install.py until the
+# scenario launches without that flag.
 # Scenario 05 — suffix wildcard mcp__server__* should grant permission interactively.
 
 scenario "05 perms_wildcard_suffix: mcp__stub__* should auto-allow"

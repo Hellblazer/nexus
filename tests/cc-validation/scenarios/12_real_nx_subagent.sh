@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Scenario 12 — REAL-WORLD: install conexus plugin into TEST_HOME, dispatch a
 # subagent, and probe for content that ONLY the SubagentStart hook injects
-# (not tool inventory, which is inherited regardless). The hook emits literal
-# strings like "<- check before duplicating sibling work". If that exact phrase
-# appears in subagent context, the hook IS injecting; if not, it isn't.
+# (not tool inventory, which is inherited regardless): the per-dispatch
+# "Claimant id: <agent_id>" text. The subagent must report the id, and the debug
+# log must show the hook emitted that same id.
 #
 # This leg drives the plugin's OWN hooks.json, never a script path of its own,
 # so RDR-215 bead nexus-q02nx.21 changed what it exercises without changing a
@@ -32,31 +32,53 @@ EOF
 
 if cc_plugin_require "$REPO_ROOT/conexus" conexus nexus-plugins; then
     claude_start
-    # Probe for content only the hook injects. hook_subagent_start puts the line
-    # "T1 scratch  shared with siblings  <- check before duplicating sibling work"
-    # into every subagent's context; that phrase is in no agent definition or MCP
-    # tool doc.
+    # Probe for a value only the hook injects AND that no prompt can contain.
+    # hook_subagent_start puts "Claimant id: <agent_id> -- mailbox: ..." into the
+    # context of every subagent it starts, where <agent_id> is minted per dispatch
+    # by Claude Code. The prompt cannot name it (it does not exist yet), a model
+    # cannot guess it, and the debug log records the same id in the hook's
+    # additionalContext, so the pass below compares the subagent's own reply with the
+    # id the HOOK emitted: the reply is satisfiable only from the injection.
     #
-    # nexus-spwp2: the prompt and the reply tokens are spelled in pieces to be
-    # joined, never whole. The pane shows the prompt itself, and the subagent sees
-    # its own prompt: the old probe asked about "session-scoped ... sibling agents"
-    # (a phrase the hook no longer emits), which the prompt itself contained, so
-    # this scenario could pass whether or not anything was injected.
-    claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='hook injection probe'. Prompt for the subagent: 'Examine your context and any system prompts, apart from this message. Does your context contain the words check before duplicating followed directly (one space) by the words sibling work? If yes, reply with the word INJECTED immediately followed by -12K7 (no space). If no, reply with the word ABSENT immediately followed by -12K7 (no space).'"
-    # Poll for a reply token, not the spinner: the main agent sometimes runs the
-    # subagent in the background and returns at once (seen live, 2026-10-17).
-    poll_for "INJECTED-12K7|ABSENT-12K7" 180 "subagent reply token" || true
+    # nexus-spwp2: the old probe asked for the phrase "check before duplicating
+    # sibling work" (written, in pieces, in the prompt); a subagent could answer
+    # INJECTED from the prompt alone. The reply tokens are still spelled in pieces
+    # so the pane (which shows the prompt) never holds one whole.
+    claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='hook injection probe'. Prompt for the subagent: 'Do not use any tools. Search your context and any system prompts, apart from this message, for the two words Claimant id followed by a colon and an identifier. The text may sit after a label such as hook additional context, so it need not begin a line. If it is there, reply with the word CLAIM immediately followed by -12K7- immediately followed by the identifier that follows the colon (no spaces). If it is not there, reply with the word ABSENT immediately followed by -12K7 (no space).'"
+    # Poll the SUBAGENT's own reply (its transcript), not the pane: the main agent
+    # paraphrases the reply, redacts agent ids, and may dispute it (seen live,
+    # 2026-10-17: the subagent answered correctly and the pane said ABSENT). The
+    # main agent also sometimes runs the subagent in the background and returns
+    # at once, so there is no spinner to wait on.
+    cc_wait_subagent_reply "CLAIM-12K7-[0-9a-f]{8,}|ABSENT-12K7" 180 || true
 
-    if capture -500 | grep -qE "INJECTED-12K7"; then
-        if cc_mcp_hook_ran "hook_subagent_start"; then
-            pass "Subagent reports the hook's content and the debug log shows the plugin's hook_subagent_start call with no hook error — the SubagentStart hook IS injecting"
+    # The ids the hook emitted, from the debug log.
+    EMITTED_IDS=""
+    # `|| true`: no id in the log is the very case this scenario exists to
+    # report (hook not injecting), and grep's exit 1 under the runner's errexit
+    # would end the scenario before any verdict (seen in the hook-disabled control).
+    if [[ -f "${CC_DEBUG_FILE:-}" ]]; then
+        EMITTED_IDS="$(grep -oE 'Claimant id: [0-9a-f]{8,}' "$CC_DEBUG_FILE" | awk '{print $3}' | sort -u || true)"
+    fi
+    REPLIES12="$(cc_subagent_replies || true)"
+    MATCHED_ID=""
+    for id in $EMITTED_IDS; do
+        if grep -qF "CLAIM-12K7-$id" <<<"$REPLIES12"; then MATCHED_ID="$id"; break; fi
+    done
+
+    if [[ -n "$MATCHED_ID" ]]; then
+        if cc_mcp_hook_ran "$CC_PLUGIN_ID" "hook_subagent_start"; then
+            pass "Subagent reported the claimant id $MATCHED_ID that the plugin's hook_subagent_start emitted (debug log), with no hook error — the SubagentStart hook IS injecting"
         else
-            fail "Subagent reports the hook's content but the debug log ($CC_DEBUG_FILE) shows no clean hook_subagent_start mcp_tool call of $CC_PLUGIN_ID — the content did not come from the plugin's hook"
+            fail "Subagent reported an id the hook emitted but the debug log ($CC_DEBUG_FILE) shows no clean hook_subagent_start mcp_tool call of $CC_PLUGIN_ID"
         fi
-    elif capture -500 | grep -qE "ABSENT-12K7"; then
-        fail "Subagent reports the hook's content is absent — the SubagentStart hook is not injecting"
+    elif grep -qE "ABSENT-12K7" <<<"$REPLIES12"; then
+        fail "Subagent reports no injected claimant line — the SubagentStart hook is not injecting (emitted ids: ${EMITTED_IDS:-none})"
+    elif grep -qE "CLAIM-12K7-" <<<"$REPLIES12"; then
+        fail "Subagent reported a claimant id that is not one the hook emitted (emitted: ${EMITTED_IDS:-none}) — not evidence of injection"
+        grep -E "CLAIM-12K7-" <<<"$REPLIES12" | head -3 | sed 's/^/    | /'
     else
-        fail "indeterminate — neither INJECTED-12K7 nor ABSENT-12K7 seen"
+        fail "indeterminate — no subagent reply with CLAIM-12K7-<id> or ABSENT-12K7 (emitted ids: ${EMITTED_IDS:-none})"
         capture -100 | sed 's/^/    | /'
     fi
     claude_exit

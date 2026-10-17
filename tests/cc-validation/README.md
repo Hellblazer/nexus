@@ -442,7 +442,8 @@ if cc_plugin_require "$REPO_ROOT/conexus" conexus nexus-plugins; then
     claude_start                                              # adds --debug-file when a plugin is installed
     ...probe...
     cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID"               # command hook: debug log says it finished with status 0
-    cc_mcp_hook_ran "hook_subagent_start"                     # mcp_tool hook: a call, and no mcp_tool hook error
+    cc_mcp_hook_ran "$CC_PLUGIN_ID" "hook_subagent_start"     # mcp_tool hook: THAT plugin's call, and no mcp_tool hook error
+    cc_hook_context_injected "SubagentStart" "subagent_start.py"   # Claude Code accepted non-empty additionalContext from it
     claude_exit
 fi
 cc_plugin_uninstall_all                                       # keeps evidence, restores the empty registry
@@ -462,14 +463,22 @@ goes to `$CC_VAL_EVIDENCE_DIR/<scenario>` when the container mounted one.
 
 Census (2026-10-17, 30 scenarios): plugin-dependent were 12, 13b, 14b, 18 and 32;
 the other 25 install nothing. The container carries what a loaded plugin needs:
-the Nexus CLI at the staged plugin's version (`nx-mcp`, `nx-hook`; without it the
-plugin loads and then its `mcp_tool` hooks fail with "Nexus is not installed"),
+the Nexus CLI built from the staged source tree, not fetched from PyPI by version
+(`nx-mcp`, `nx-hook`; without it the plugin loads and then its `mcp_tool` hooks
+fail with "Nexus is not installed"),
 the `sn` plugin tree, and the `mcp` package for the stub server.
 
 **Probes must not match their own prompt.** The pane shows the prompt, and the
 subagent sees it too, so a marker or reply token written whole in the prompt
-satisfies the grep at once. Scenarios 12, 13 and 18 spell tokens as two pieces
-("the word FOUND immediately followed by -13B") and grep the joined form.
+satisfies the grep at once. Scenarios 12, 13 and 18 spell tokens and probe phrases
+as pieces ("the word FOUND immediately followed by -13B") and grep the joined form;
+`tests/test_cc_validation_plugin_install.py` fails if any of their prompts holds a
+probe whole. A fixed phrase can still be answered from the prompt, so scenario 12
+asks for the per-dispatch `Claimant id` the hook emits and compares the subagent's
+reply with the id in the debug log. The reply is read from the subagent's own
+transcript (`cc_subagent_replies`), never the pane: the main agent paraphrases it,
+redacts agent ids and may dispute it (seen live). Scenario 14b passes its "does not
+load" reading only when 14a showed the same stub loading in that run; otherwise SKIP.
 
 ## Running in a container (and scenario 32's positive control)
 

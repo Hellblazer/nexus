@@ -30,6 +30,7 @@ claude_version_out=$(claude --version 2>&1)
 printf '%s\n' "${claude_version_out%%$'\n'*}" > /evidence/claude-version.txt
 echo "[container] claude $(cat /evidence/claude-version.txt) (pinned: ${CC_VAL_EXPECTED_CLAUDE_VERSION:-unset})"
 echo "[container] tmux $(tmux -V)"
+echo "[container] nexus CLI $(nx --version 2>&1 | head -1) (built from the staged source tree)"
 echo "[container] current plugin $(python3 -c 'import json;print(json.load(open("'"$REPO"'/conexus/.claude-plugin/plugin.json"))["version"])')"
 if [[ -d /control ]]; then
     export CC_VAL_CONTROL_PLUGIN_ROOT=/control/conexus

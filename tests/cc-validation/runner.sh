@@ -352,7 +352,9 @@ EOF
     HOME="$TEST_HOME" claude plugin install "$plugin@$mkt_name" --scope user >> "$TEST_HOME/plugin-install.log" 2>&1 || return 1
     HOME="$TEST_HOME" claude plugin list > "$list" 2>&1 || return 1
     grep -qF "$plugin@$mkt_name" "$list" || return 1
-    grep -qF "Version: $CC_PLUGIN_VERSION" "$list" || return 1
+    # The value after "Version:" must BE the declared version: a substring match
+    # read 7.82.01 and 17.82.0 as 7.82.0.
+    sed -n 's/^[[:space:]]*Version:[[:space:]]*//p' "$list" | grep -qxF "$CC_PLUGIN_VERSION" || return 1
     grep -qF "Status: ✔ enabled" "$list" || return 1
     ! grep -qiE "failed to load" "$list" || return 1
     CC_PLUGIN_INSTALLED_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plugins"][sys.argv[2]][0]["installPath"])' "$TEST_HOME/.claude/plugins/installed_plugins.json" "$plugin@$mkt_name" 2>/dev/null)" || return 1
@@ -378,6 +380,20 @@ cc_plugin_require() {
     return 1
 }
 
+# Copy one file into an evidence directory unless it holds a credential. Claude
+# Code's debug log and transcripts can echo the environment; a file containing
+# `sk-ant-` is refused (named on stderr, never its content), the same guard as
+# scenario 32's _s32_keep_evidence. The evidence directory is world-readable.
+_cc_evidence_copy() {
+    local src="$1" dest="$2"
+    [[ -n "$src" && -f "$src" ]] || return 0
+    if grep -q 'sk-ant-' "$src" 2>/dev/null; then
+        echo "    [evidence] refused to keep ${src##*/}: it contains a credential-shaped string" >&2
+        return 0
+    fi
+    cp "$src" "$dest/" 2>/dev/null || true
+}
+
 # Copy a plugin session's evidence (plugin list/install output, debug log,
 # settings, registry, transcripts) to $CC_VAL_EVIDENCE_DIR/<label> when the
 # container run.sh mounted one. $TEST_HOME is deleted at exit.
@@ -387,9 +403,11 @@ cc_keep_evidence() {
     mkdir -p "$d"
     for f in "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" "$TEST_HOME/.claude/settings.json" \
              "$TEST_HOME/.claude/plugins/installed_plugins.json" "${CC_DEBUG_FILE:-}"; do
-        [[ -n "$f" && -f "$f" ]] && cp "$f" "$d/" 2>/dev/null
+        _cc_evidence_copy "$f" "$d"
     done
-    find "$TEST_HOME/.claude/projects" -name '*.jsonl' -exec cp {} "$d/" \; 2>/dev/null
+    while IFS= read -r f; do
+        _cc_evidence_copy "$f" "$d"
+    done < <(find "$TEST_HOME/.claude/projects" -name '*.jsonl' 2>/dev/null)
     return 0
 }
 
@@ -411,16 +429,70 @@ cc_hook_ran() {
     grep -Eq "Hooks: ${event}[^[]*\[[^]]*${script}[^]]*\] \(plugin ${id}\) finished with status 0" "$CC_DEBUG_FILE"
 }
 
-# cc_mcp_hook_ran <tool>: the same for a `type: mcp_tool` hook, which the debug
-# log records differently (`Hooks: mcp_tool calling plugin:<p>:<server>/<tool>`,
-# and `Hooks: mcp_tool hook error: ...` on failure). 0 only when the call was
-# made and the log holds no mcp_tool hook error: a plugin whose CLI is absent
-# loads fine and then fails every such hook with "Nexus is not installed".
+# cc_mcp_hook_ran <plugin_id> <tool>: the same for a `type: mcp_tool` hook, which
+# the debug log records differently (`Hooks: mcp_tool calling
+# plugin:<plugin>:<server>/<tool>`, and `Hooks: mcp_tool hook error: ...` on
+# failure). 0 only when THAT plugin's call (plugin:<name of plugin_id>:) was made
+# and the log holds no mcp_tool hook error: a plugin whose CLI is absent loads
+# fine and then fails every such hook with "Nexus is not installed". The tool
+# name alone would accept another plugin's server exposing the same tool.
 cc_mcp_hook_ran() {
-    local tool="$1"
+    local id="$1" tool="$2" plugin
+    plugin="${id%@*}"
+    [[ -n "$plugin" && -n "$tool" ]] || return 1
     [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
-    grep -Eq "Hooks: mcp_tool calling plugin:[^ ]*/${tool}( |$)" "$CC_DEBUG_FILE" || return 1
+    grep -Eq "Hooks: mcp_tool calling plugin:${plugin}:[^ /]+/${tool}( |$)" "$CC_DEBUG_FILE" || return 1
     ! grep -q "Hooks: mcp_tool hook error" "$CC_DEBUG_FILE"
+}
+
+# cc_hook_context_injected <event> <hook-ere>: 0 when the debug log shows Claude
+# Code ACCEPTED non-empty additionalContext from a hook of <event> whose command
+# (or mcp_tool target) matches <hook-ere>: `Hook <Event> (<command>) provided
+# additionalContext (N chars)`. A hook that finishes with status 0 and prints
+# nothing, or prints text Claude Code drops, never logs this line, so it is the
+# delivery half of the evidence cc_hook_ran/cc_mcp_hook_ran cannot give.
+cc_hook_context_injected() {
+    local event="$1" hook="$2"
+    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
+    grep -Eq "Hook ${event} \([^)]*${hook}[^)]*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE"
+}
+
+# cc_subagent_replies: the text the dispatched subagents themselves answered,
+# read from their own transcripts (agent-<id>.jsonl under the session's
+# projects dir), one assistant text block per line group. The pane is NOT a
+# source for a subagent's answer: the main agent paraphrases it, redacts agent
+# ids ("internal ID - do not mention"), and sometimes disputes it, so a probe
+# token can be missing from the pane although the subagent said it (seen live,
+# 2026-10-17) or present there although the subagent did not.
+cc_subagent_replies() {
+    find "$TEST_HOME/.claude/projects" -name 'agent-*.jsonl' -print0 2>/dev/null | xargs -0 -r python3 -I -c '
+import json, sys
+for path in sys.argv[1:]:
+    for line in open(path, encoding="utf-8", errors="replace"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") != "assistant":
+            continue
+        content = (d.get("message") or {}).get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    print(block.get("text", ""))
+'
+}
+
+# cc_wait_subagent_reply <ere> [timeout-seconds]: poll the subagents' own
+# replies (cc_subagent_replies), not the pane, for <ere>.
+cc_wait_subagent_reply() {
+    local pat="$1" timeout="${2:-180}" i
+    for i in $(seq 1 $((timeout / 2))); do
+        sleep 2
+        if cc_subagent_replies | grep -qE "$pat"; then return 0; fi
+    done
+    echo "    TIMEOUT waiting for a subagent reply matching: $pat (${timeout}s)"
+    return 1
 }
 
 _cc_plugins_baseline
