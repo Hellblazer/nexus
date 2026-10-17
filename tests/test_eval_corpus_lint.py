@@ -24,7 +24,9 @@ land the way nexus-dkotg did: found by a human running the corpus by hand.
 That is the control today, and it is a person remembering, not a gate."""
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -175,3 +177,120 @@ def test_not_triggered_graders_assert_absence(path: Path):
         f"(got {data.get('min')!r}). min defaults to 1, which makes "
         f"'max: 0' alone unsatisfiable -- see nexus-dkotg."
     )
+
+
+# ---------------------------------------------------------------------------
+# nexus-dg7i6.7: outcome cases. The o-cases grade what the model produced
+# (regex over the final message or a file, llm criteria) on a project their
+# own scaffold builds, because the model rightly does those tasks without a
+# skill (nexus-dg7i6.5: 0 skill loads in 12 eval runs and 509 real sessions).
+# The pins below keep the scaffolds and the new grader kinds well formed; the
+# corpus score itself is still measured by hand (see the module docstring).
+
+
+def _case_dirs() -> list[Path]:
+    return sorted(p for p in EVALS.iterdir() if p.is_dir() and (p / "prompt.md").exists())
+
+
+def test_every_case_is_named_for_its_grading_shape():
+    """p = a procedural skill must load, a = an agent must be dispatched, o = the outcome is
+    graded, n = an absorption guard."""
+    for case in _case_dirs():
+        assert re.fullmatch(r"[paon]\d\d-[a-z0-9-]+", case.name), case.name
+        graders = [_frontmatter(g) for g in (case / "graders").glob("*.md")]
+        kinds = {g.get("type") for g in graders}
+        if case.name.startswith("a"):
+            assert any(g.get("tool") == "Agent" and g.get("min", 1) >= 1 for g in graders), (
+                f"{case.name}: an agent case asserts a dispatch (tool_used on Agent, min >= 1)")
+        if case.name.startswith("o"):
+            assert kinds & {"regex", "llm"}, f"{case.name}: an outcome case needs a regex or llm grader"
+            assert (case / "case.yaml").exists(), f"{case.name}: an outcome case builds its project with a scaffold"
+
+
+@pytest.mark.parametrize("case", [c for c in _case_dirs() if (c / "case.yaml").exists()], ids=lambda p: p.name)
+def test_case_yaml_names_an_executable_scaffold(case: Path):
+    data = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
+    assert data.get("schema_version") == "1.1", case.name
+    assert data.get("name"), case.name
+    script = case / data["context"]["scaffold_script"]
+    assert script.is_file() and script.stat().st_mode & 0o111, f"{case.name}: {script.name} missing or not executable"
+
+
+@pytest.mark.parametrize("path", _grader_files(), ids=lambda p: p.relative_to(EVALS).as_posix())
+def test_regex_and_llm_graders_are_complete(path: Path):
+    data = _frontmatter(path)
+    if data.get("type") == "regex":
+        # The runner compiles JavaScript regexes and rejects inline flags; Python's re accepts them.
+        assert not re.search(r"\(\?[aiLmsux]+[):]", data["pattern"]), f"{path.name}: use flags:, not an inline (?i)"
+        re.compile(data["pattern"], re.I if "i" in str(data.get("flags", "")) else 0)
+        assert str(data.get("match", "contains")) in ("contains", "not_contains") or str(
+            data["match"]).startswith("count:"), path.name
+    if data.get("type") == "llm":
+        assert len(str(data.get("criteria", ""))) > 40, f"{path.name}: llm criteria too thin to judge by"
+
+
+@pytest.mark.parametrize("case", [c for c in _case_dirs() if (c / "fixture.sh").exists()], ids=lambda p: p.name)
+def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
+    """Outcome graders read the scaffold's files, so two builds must be the same commit."""
+    heads = []
+    for i in (1, 2):
+        d = tmp_path / str(i)
+        d.mkdir()
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(d), "TERM": "dumb"}
+        subprocess.run(["bash", str(case / "fixture.sh")], cwd=d, env=env, check=True,
+                       capture_output=True, timeout=120)
+        heads.append(subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True,
+                                    capture_output=True, text=True).stdout.strip())
+        # Two builds in the same second agree even without pinned dates, so assert the pin itself.
+        dates = subprocess.run(["git", "-C", str(d), "log", "--format=%aI %cI"], check=True,
+                               capture_output=True, text=True).stdout.split()
+        assert set(dates) == {"2026-10-01T12:00:00Z"}, f"{case.name}: commit dates are not pinned {set(dates)}"
+    assert heads[0] == heads[1], f"{case.name}: scaffold is not deterministic {heads}"
+
+
+# Crafted answers each regex grader must pass and must fail (nexus-dg7i6.7 critique). A grader that
+# passes a wrong or clearing answer, or misses a correct one in a common phrasing, fails here before
+# a paid run. The fail lists hold the critic's counterexamples verbatim.
+_REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
+    "o02-review-branch-before-pr/graders/finds-logged-api-key.md": (
+        ["embed() logs the API key at INFO, so it lands in every log file.",
+         "The Voyage API key is written to the logs on every call.",
+         "Line 14 writes the secret to the log."],
+        ["The key is read via os.environ.get('VOYAGE_API_KEY','') and the batching logic is fine.",
+         "No secrets or credentials are logged anywhere in this diff."],
+    ),
+    "o02-review-branch-before-pr/graders/finds-shell-injection.md": (
+        ["--cache-path goes straight into os.system, so a crafted path runs shell commands.",
+         "Command injection: cache_path is concatenated into a shell string."],
+        ["Replace os.system('chmod 666 ...') with os.chmod(path, 0o600).",
+         "There are no injection concerns with --cache-path."],
+    ),
+    "o02-review-branch-before-pr/graders/finds-world-writable-cache.md": (
+        ["The cache is chmod 666, so it is world-writable.",
+         "Any local user can overwrite the cache file in /tmp."],
+        ["The cache path defaults to /tmp."],
+    ),
+    "o04-retry-coverage-verdict/graders/says-coverage-is-not-enough.md": (
+        ["I don't think the coverage is solid enough to open the PR yet.",
+         "No, the coverage isn't enough.", "The coverage is weak: one happy-path test."],
+        ["No reason to hold the PR, the retry path is solid.", "Coverage looks good to me."],
+    ),
+    "o05-intermittent-npe-race/graders/names-the-race.md": (
+        ["The pool has no locking, so two threads take the same slot.",
+         "It is a race between the check and the read in borrow()."],
+        ["Here is the stack trace of the NPE.", "Embrace a bigger pool size."],
+    ),
+    "o01-voyage-retry-wrapper/graders/bounded-attempts.md": (
+        ["for attempt in range(5):", "MAX_RETRIES = 4\nretries = 0", "for _ in range(3):", "@retry(stop=stop_after_attempt(3))"],
+        ["while True:\n    try:\n        return post()"],
+    ),
+}
+
+
+@pytest.mark.parametrize("rel", sorted(_REGEX_CONTROLS), ids=lambda r: r.split("/")[0])
+def test_regex_grader_controls(rel: str) -> None:
+    data = _frontmatter(EVALS / rel)
+    pat = re.compile(data["pattern"], re.I if "i" in str(data.get("flags", "")) else 0)
+    must_pass, must_fail = _REGEX_CONTROLS[rel]
+    assert [t for t in must_pass if not pat.search(t)] == [], f"{rel}: misses a correct answer"
+    assert [t for t in must_fail if pat.search(t)] == [], f"{rel}: passes a wrong or clearing answer"

@@ -324,6 +324,14 @@ class TestTheBootstrapBuild:
         assert probe.stdout.strip() == bootstrapped.running_version
         assert install_layout.read_receipt(generation).version == bootstrapped.running_version
 
+    def test_it_records_the_version_lockstep_marker(self, bootstrapped: Bootstrapped) -> None:
+        """The installer scripts build the CLI without the plugin's setup, which is what writes
+        this marker after a build (nexus-sv2wx.28). Without it the first Claude session
+        announces an upgrade and dispatches one. The subprocess ran with the sandbox home."""
+        assert bootstrapped.result.returncode == 0
+        marker = bootstrapped.world.root / "home" / ".config" / "nexus" / "cli_lockstep_marker"
+        assert marker.read_text(encoding="utf-8") == bootstrapped.running_version
+
     def test_the_cache_prune_does_not_run(self, bootstrapped: Bootstrapped) -> None:
         """``uv cache prune`` removes a file it does not know; the marker is still there."""
         assert bootstrapped.result.returncode == 0
@@ -1242,3 +1250,95 @@ class TestTheWindowsTwin:
             )
         assert "re-run the same bootstrap command" in exc.value.message
         assert "not changed" not in exc.value.message
+
+
+class TestTheLockstepMarker:
+    """``--bootstrap`` writes the marker through ``nexus.lockstep_marker`` (the one place the
+    CLI names that file), after the install and only then (nexus-sv2wx.28)."""
+
+    @pytest.fixture
+    def marker(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "marker-dir" / "cli_lockstep_marker"
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(path))
+        return path
+
+    def _invoke(self, world: World, monkeypatch: pytest.MonkeyPatch, *args: str):
+        for name in ("NX_TOOLS_DIR", "NX_BIN_DIR", "UV_TOOL_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("NX_TOOLS_DIR", str(world.tools))
+        monkeypatch.setenv("NX_BIN_DIR", str(world.bin))
+        monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
+        return CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap", *args])
+
+    def _finishable(self, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+        _receipted_generation(world, version=_running_version())
+        monkeypatch.setattr(self_cmd, "_flip_and_shim", lambda generation, **_: None)
+        monkeypatch.setattr(self_cmd, "_shim_names_of", lambda generation: ["nx"])
+
+    def test_a_finished_interrupted_install_records_the_running_version(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._finishable(world, monkeypatch)
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert marker.read_text(encoding="utf-8") == _running_version()
+
+    def test_a_fresh_build_records_the_running_version(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        built = world.tools / "gen-20260303T000000Z"  # not created: the build is stubbed
+        monkeypatch.setattr(self_cmd, "_build_flip_shims", lambda *a, **k: built)
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert marker.read_text(encoding="utf-8") == _running_version()
+
+    def test_a_dry_run_writes_no_marker(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._finishable(world, monkeypatch)
+        result = self._invoke(world, monkeypatch, "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert not marker.exists()
+
+    def test_a_refused_bootstrap_writes_no_marker(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(self_cmd, "_existing_install", lambda tools, bin_dir: "a uv tool install")
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code != 0
+        assert not marker.exists()
+
+    def test_a_failed_build_writes_no_marker(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def broken(*_a, **_k):
+            raise click.ClickException("the build failed")
+        monkeypatch.setattr(self_cmd, "_build_flip_shims", broken)
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code != 0
+        assert not marker.exists()
+
+    def test_the_plain_install_does_not_touch_the_marker(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the first-install path records it; an upgrade is the lockstep action's to confirm."""
+        generation = _receipted_generation(world, version=_running_version())
+        monkeypatch.setattr(self_cmd, "perform_self_install", lambda **_: generation)
+        monkeypatch.setattr(self_cmd, "prune_uv_cache", lambda: "pruned")
+        result = CliRunner().invoke(self_cmd.install_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert not marker.exists()
+
+    def test_a_marker_that_cannot_be_written_is_a_warning_not_a_failure(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The install is done and the CLI works; the cost of a missing marker is one spurious
+        upgrade nudge in the first session."""
+        blocker = tmp_path / "a-file"
+        blocker.write_text("x")
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(blocker / "marker"))
+        self._finishable(world, monkeypatch)
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert "lockstep marker" in result.output
+        assert "installed gen-" in result.output

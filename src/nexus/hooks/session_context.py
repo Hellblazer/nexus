@@ -195,7 +195,7 @@ def _build_capabilities_block() -> list[str]:
         "noise filter (results carry `chunk_text_hash`)",
         "`query` MCP tool: document-level, catalog-aware (`author`, `content_type`, "
         "`subtree`, `follow_links`, `depth`), taxonomy-boosted",
-        "`/conexus:query` skill: multi-step retrieval/analysis",
+        "`nx_answer` MCP tool: reduce many documents (minutes); `search`/`query`: lookups (seconds)",
         "`plan_save`/`plan_search` MCP tools: T2, project-scoped plan library",
         "`scratch` MCP tool: session-scoped, shared across agents",
         "`search`/`links`/`link` MCP tools (nexus-catalog): metadata-first; "
@@ -260,6 +260,22 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script neve
     if which('bd'):
         ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=cwd)
         output_lines.extend(_render_ready_beads(ready_output))
+        # --- bd prime, when the beads plugin's own hook will not run ---
+        # nexus-dg7i6.4: a project can disable the beads plugin to drop its
+        # skill-listing entries; its one load-bearing contribution, the
+        # SessionStart `bd prime`, is printed here instead.
+        # A bd that just failed or timed out on `bd ready` is not asked again.
+        try:
+            if ready_output is not None and (project_dir / '.beads').is_dir():
+                from nexus.beads_prime import beads_plugin_enabled  # noqa: PLC0415 — deferred: only a beads repo pays the import
+
+                if not beads_plugin_enabled(project_dir):
+                    prime_output = run_command(['bd', 'prime'], timeout=BD_TIMEOUT, cwd=cwd)
+                    if prime_output and prime_output.strip():
+                        output_lines.append(prime_output.strip())
+                        output_lines.append("")
+        except Exception:  # noqa: BLE001 — a hook must never fail; keep the sections already gathered
+            debug("bd prime section skipped")
     else:
         debug("bd command not found")
 

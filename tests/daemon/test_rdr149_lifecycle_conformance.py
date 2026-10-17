@@ -732,6 +732,17 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         "storage_service": "pass",
         "aspect_worker": "pass",
     },
+    "detached_spawn_stable_cwd": {
+        # nexus-x3m8e: a detached daemon must start in a stable cwd, never the
+        # caller's -- a session worktree that is deleted under a daemon took
+        # a MinerU server down (any getcwd()/abspath() in it or its libraries
+        # raised FileNotFoundError; the measured call was torch._dynamo.config's
+        # os.getcwd() at import) while its /health stayed 200. The helper lives in the shared
+        # primitive (detached_spawn_kwargs / enter_stable_daemon_cwd); both
+        # tiers' REAL spawn paths merge it in.
+        "storage_service": "pass",  # commands.daemon.ensure_storage_supervisor -> _supervisor_popen_kwargs
+        "aspect_worker": "pass",  # ensure_aspect_worker_daemon -> _supervisor_popen_kwargs
+    },
     "dead_owner_lease_reclaimed": {
         # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor_pid
         # (hard crash) must be reclaimed, not honored as live, so a
@@ -1030,6 +1041,92 @@ class TestTeardownStopsHolders:
         finally:
             stranger.kill()
             stranger.wait()
+
+
+def _spawn_kwargs_storage_service(config_dir: Path) -> dict[str, Any]:
+    """The kwargs the REAL ``ensure_storage_supervisor`` hands ``Popen``."""
+    from nexus.commands import daemon as daemon_mod
+
+    captured: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_popen(argv: list[str], **kw: Any) -> None:
+        captured.update(kw)
+        raise _Stop
+
+    with patch.object(daemon_mod, "_popen", fake_popen), pytest.raises(_Stop):
+        daemon_mod.ensure_storage_supervisor(config_dir, platform="linux")
+    return captured
+
+
+def _spawn_kwargs_aspect_worker(config_dir: Path) -> dict[str, Any]:
+    """The kwargs the REAL ``ensure_aspect_worker_daemon`` hands ``Popen``."""
+    from nexus.daemon import aspect_worker_daemon as awd
+
+    captured: dict[str, Any] = {}
+
+    class _FakePopen:
+        pid = 4242
+
+        def __init__(self, argv: list[str], **kw: Any) -> None:
+            captured["argv"] = argv
+            captured.update(kw)
+
+    awd._recent_spawn.clear()
+    try:
+        with patch.object(awd, "_claude_available", lambda: True):
+            awd.ensure_aspect_worker_daemon(
+                config_dir=config_dir, tenant="default", _popen=_FakePopen, _platform="linux",
+            )
+    finally:
+        awd._recent_spawn.clear()
+    return captured
+
+
+_SPAWN_PROBES = {
+    "storage_service": _spawn_kwargs_storage_service,
+    "aspect_worker": _spawn_kwargs_aspect_worker,
+}
+
+
+class TestDetachedSpawnStableCwd:
+    """The ``detached_spawn_stable_cwd`` property (nexus-x3m8e): each tier's
+    REAL spawn path hands its child the shared primitive's stable cwd, and the
+    caller's own cwd -- which may be deleted later -- is not it."""
+
+    def test_the_spawned_child_starts_in_the_stable_cwd_not_the_callers(
+        self, tier: str, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _maybe_xfail("detached_spawn_stable_cwd", tier)
+        launch = tmp_path / "session-worktree"
+        launch.mkdir()
+        monkeypatch.chdir(launch)
+        kw = _SPAWN_PROBES[tier](config_dir)
+        assert "cwd" in kw, f"{tier}: the detached spawn passes no cwd, so the child inherits the caller's"
+        cwd = Path(kw["cwd"])
+        assert cwd.is_absolute() and cwd.is_dir()
+        assert str(cwd) == os.path.abspath(os.sep), "the stable cwd is the filesystem root"
+        assert cwd.resolve() != launch.resolve()
+        assert kw.get("start_new_session") is True
+
+    def test_a_relative_config_dir_in_the_environment_is_pinned_for_the_child(
+        self, tier: str, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _maybe_xfail("detached_spawn_stable_cwd", tier)
+        launch = tmp_path / "launch"
+        (launch / "rel-cfg").mkdir(parents=True)
+        monkeypatch.chdir(launch)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", "rel-cfg")
+        kw = _SPAWN_PROBES[tier](launch / "rel-cfg")
+        assert Path(kw["env"]["NEXUS_CONFIG_DIR"]).resolve() == (launch / "rel-cfg").resolve(), (
+            "a relative NEXUS_CONFIG_DIR would name another directory from the child's new cwd"
+        )
+        assert os.path.isabs(kw["env"]["NEXUS_CONFIG_DIR"])
+
+    def test_every_tier_has_a_spawn_probe(self) -> None:
+        assert set(_SPAWN_PROBES) == set(TIERS), "a tier with no probe silently skips this property"
 
 
 class TestMatrixIsNotVacuous:

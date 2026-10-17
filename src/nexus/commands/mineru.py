@@ -192,20 +192,21 @@ def _stop_under_election() -> None:
     # Alive is not ours (nexus-5yrob): a pid file left by an unclean death
     # can name a pid the OS has reused, and the signal below goes to that
     # pid's whole process group. Judge the live command before signalling.
-    from nexus.upgrade_finish import _classify, process_command  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus._mineru_spawn import classify_server_pid  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    live_cmd = process_command(pid)
-    if not live_cmd:
-        # An empty read is inconclusive (a ps timeout looks the same as a
-        # vanished process), and deleting the pid file on it would orphan a
-        # server that is still ours. Keep the file, signal nothing, say so.
+    identity = classify_server_pid(pid)
+    if identity == "unreadable":
+        # An empty read is inconclusive (a slow process-table read looks the
+        # same as a vanished process), and deleting the pid file on it would
+        # orphan a server that is still ours. Keep the file, signal nothing,
+        # say so.
         click.echo(
             f"MinerU server PID {pid} is alive but its command line could not "
             "be read; not signalling and keeping the PID file. Re-run `nx "
             f"mineru stop`, or stop it yourself: kill -TERM -{pid}"
         )
         return
-    if _classify(live_cmd) != "mineru":
+    if identity != "mineru":
         click.echo(
             f"MinerU server not running (PID {pid} is no longer a mineru-api; "
             "removing the stale PID file)"
@@ -213,39 +214,30 @@ def _stop_under_election() -> None:
         pid_path.unlink(missing_ok=True)
         return
 
-    # SIGTERM the entire process group owned by *pid*. MinerU's
-    # multiprocessing workers and their ``resource_tracker`` children
-    # must receive the signal too — otherwise the tracker never gets
-    # to ``sem_unlink`` and POSIX named semaphores leak into the
-    # global namespace (bead nexus-ze2a root cause). ``start_new_session
-    # =True`` at spawn (mineru.py start) guarantees they share one
-    # killable pgid.
-    # Both signals go through safe_killpg for mock-guard + error-swallow
-    # consistency with every other subprocess cleanup site.
-    # On Windows neither half holds: there is no group, so only the server
-    # process is reached, and its SIGTERM is already TerminateProcess, so
-    # there is no grace window before the escalation (nexus-6y4e0).
-    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    # SIGTERM the entire process group owned by *pid*, escalating to a hard
+    # kill that SPARES the multiprocessing resource_tracker (nexus-x3m8e).
+    # The tracker ignores SIGTERM by design, so the polite pass reaches the
+    # workers and still lets it ``sem_unlink`` the group's POSIX named
+    # semaphores; a SIGKILL of the whole group killed it too and leaked every
+    # semaphore for good (bead nexus-ze2a's root cause, and the 2026-10-16
+    # machine-wide ENOSPC). ``start_new_session=True`` at spawn guarantees
+    # one killable pgid. The core is shared with the extractor's restart.
+    # On Windows there is no group, so only the server process is reached, and
+    # its SIGTERM is already TerminateProcess (nexus-6y4e0).
+    from nexus._mineru_spawn import stop_server_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    if not safe_killpg(pid, signal.SIGTERM):
+    outcome = stop_server_group(pid, grace=_STOP_TIMEOUT_SECONDS)
+    if outcome == "gone":
         # Process group already gone — nothing to do.
         pid_path.unlink(missing_ok=True)
         click.echo(f"MinerU server stopped (PID {pid})")
         return
-
-    # Poll until process exits (os.waitpid only works on child processes;
-    # the server was started by a different nx invocation).
-    deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if not _is_process_alive(pid):
-            break
-        time.sleep(0.2)
-    else:
-        # Escalate to SIGKILL on the group — same reason (reach workers).
-        safe_killpg(pid)  # the platform's hard kill (KILL_SIGNAL)
+    if outcome == "escalated":
         click.echo(
             f"Warning: MinerU server (PID {pid}) did not exit within "
-            f"{_STOP_TIMEOUT_SECONDS}s; escalated SIGKILL to process group",
+            f"{_STOP_TIMEOUT_SECONDS}s; escalated SIGKILL to process group "
+            "(its multiprocessing resource tracker was spared so POSIX "
+            "semaphores are reclaimed)",
             err=True,
         )
 
@@ -304,6 +296,24 @@ def status() -> None:
             processing = data.get("processing_tasks", "?")
             queued = data.get("queued_tasks", "?")
             completed = data.get("completed_tasks", "?")
+            # nexus-x3m8e: a 200 from /health is not health. A server whose
+            # cwd was deleted, on a machine out of semaphores, or whose every
+            # recent task failed, said "healthy" for hours while failing all
+            # work. Read those faults instead of trusting the 200.
+            from nexus._mineru_health import diagnose_server  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+            faults = diagnose_server(pid, data, info=info)
+            if faults:
+                lines = "\n".join(f"  - {fault}" for fault in faults)
+                click.echo(
+                    f"MinerU server UNHEALTHY (PID {pid}, port {port}): it "
+                    f"answers /health but cannot do work\n{lines}\n"
+                    f"  Processing: {processing}   Queued: {queued}   "
+                    f"Completed: {completed}   Failed: {data.get('failed_tasks', '?')}"
+                )
+                # Non-zero: a script that asks "is the server usable?" must not
+                # read a server that cannot do work as a yes.
+                raise click.exceptions.Exit(1)
             click.echo(
                 f"MinerU server running and healthy (PID {pid}, port {port})\n"
                 f"  Processing: {processing}   Queued: {queued}   "
@@ -314,8 +324,10 @@ def status() -> None:
                 f"MinerU server unhealthy (PID {pid}, port {port}, "
                 f"status {resp.status_code})"
             )
+            raise click.exceptions.Exit(1)
     except (httpx.ConnectError, httpx.TimeoutException):
         click.echo(
             f"MinerU server unhealthy (PID {pid}, port {port}, "
             f"health check failed)"
         )
+        raise click.exceptions.Exit(1)

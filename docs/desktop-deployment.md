@@ -46,10 +46,26 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 
 **Audience**: developers who already use Claude Code from the command line.
 
+There are two routes, and both end in the same install:
+
+1. **Route one, one command in a terminal.** `curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh` on macOS and Linux, or `irm https://hellblazer.github.io/nexus/install.ps1 | iex` in a normal PowerShell window on Windows. It installs `uv` if you do not have it, installs the CLI, adds the plugin to Claude Code when `claude` is on your `PATH`, and asks you one question before it downloads anything. With Local it asks a second, whether to start at login. The script's question has no Not now choice, because typing the command is your permission to install. To skip the question, add a flag (`--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`): after `sh -s --` on macOS and Linux, and on Windows as `& ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart`, because the `iex` form cannot take flags. The start-at-login question defaults to No. If you press Enter at the question, or the script has no terminal, it installs the `nx` command only. `/conexus:setup` in Claude Code, or `nx init` (Local) or `nx config init` (Cloud) in a terminal, sets up a service later. On Linux the script asks `uv` for the CPU build of torch. If your `uv` is older than 0.9.19, run `uv self update` first, or the build downloads about 4.5 GB of GPU libraries that Nexus does not use.
+2. **Route two, from inside Claude.** Install `uv` (and git, if you do not have it), add the plugin, and answer one question. When the install finishes, run `/reload-plugins` or start a new session, and in that session Claude asks it:
+
 ```bash
 /plugin marketplace add Hellblazer/nexus
 /plugin install conexus@nexus-plugins
 ```
+
+The question has four choices:
+
+| Choice | What happens | Download |
+|---|---|---|
+| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| Not now | Nothing is installed | none |
+
+The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. Besides Claude itself and git, `uv` is the one prerequisite of route two. Route two is described under "First run" below, and the commands that both routes run for you are under "Install by hand" at the end of that section.
 
 On first session start with the CLI installed, the plugin's SessionStart hook runs `nx upgrade --auto` (converging any pending migration) plus a preflight check. **It installs no daemon** — the T2 daemon it used to auto-install is retired (`nexus-i711w`). The storage service is provisioned by `nx init` and managed with `nx daemon service start|status|stop`.
 
@@ -57,13 +73,19 @@ Tool names: `mcp__plugin_conexus_nexus__*` and `mcp__plugin_conexus_nexus-catalo
 
 ### First run
 
-The plugin does not install the Nexus CLI, and the plugin's servers and most of its hooks are programs of the CLI. What a first session does depends on whether the CLI is there (RDR-228, Phase 1):
+The plugin installs the Nexus CLI only after you answer the question, and the plugin's servers and most of its hooks are programs of the CLI. What a first session does depends on whether the CLI is there (RDR-228, Phase 1):
 
 - **The CLI is installed and `nx init` has run.** The two Nexus servers start and connect, and the session-start hooks run. This is the working state.
 - **The CLI is installed and `nx init` has not run.** The servers start, and every tool that needs the service reports that it cannot reach it. Run `nx init`.
-- **The CLI is not installed.** Nothing is installed for you. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`. `setup` installs only after the model has asked you and acted on your answer (`local`, `cloud`, `cli-only` or `not-now`; `cloud` opens a page in your browser where you type the managed service's address, token and tenant yourself); it starts a background process, downloads up to about 1.3 GB, and `setup_status` follows it. Without the plugin's setup process, or on a host that cannot run it, the tools answer with the commands below and install nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
+- **The CLI is not installed.** Nothing is installed until you answer. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`. `setup` installs only after the model has asked you and acted on your answer (`local`, `cloud`, `cli-only` or `not-now`; `cloud` opens a page in your browser where you type the managed service's address, token and tenant yourself); it starts a background process, downloads up to about 1.3 GB, and `setup_status` follows it. Without the plugin's setup process, or on a host that cannot run it, the tools answer with the commands below and install nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
 
-The install is three terminal commands, then a reconnect of the `nexus` server (`/mcp`, the server, Reconnect) or a new session:
+When setup is done, in Claude Code reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. In Claude Desktop quit the app fully and open it again: Desktop keeps a plugin's server running across conversations and has no Reconnect, so a new conversation still talks to the stand-in. `/conexus:setup` runs the same question again for a user who answered Not now.
+
+The plugin's three local servers and all of its command hooks start through `uv`, so `uv` must be on the `PATH` the application starts with. Without `uv` none of them runs and the application shows the servers as failed. Skills, commands and the `sn` plugin's hosted server do not need it.
+
+### Install by hand
+
+When a route fails, or when you want each step yourself, the install is three terminal commands, then a reconnect of the `nexus` server or a new session:
 
 ```bash
 uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
@@ -73,18 +95,18 @@ nx init
 
 The commands are the same on Windows; [Installing nexus on Windows](windows-install.md) has that platform's prerequisites.
 
-The plugin's three local servers and all of its command hooks start through `uv`, so `uv` must be on the `PATH` the application starts with. Without `uv` none of them runs and the application shows the servers as failed. Skills, commands and the `sn` plugin's hosted server do not need it.
-
 ## Surface 2: Claude Desktop chat and Cowork (account plugin)
 
 **Audience**: Claude Desktop users who open chat or Cowork sessions.
 
 Claude Desktop keeps two plugin stores. Claude Code and the Desktop Code tab read `~/.claude`, which is where `claude plugin install` writes. Chat and Cowork read the plugins enabled on your claude.ai account, which Desktop downloads itself. A plugin installed only from the command line is not visible to chat or Cowork: on a clean Windows 11 machine with only the CLI plugin installed, the Code tab found the plugin and chat and Cowork found none (measured 2026-10-11, conexus 7.77.1, Claude Desktop 1.24012.9.0).
 
-Install:
+Install, with the same two routes as Surface 1:
 
-1. Install the `nx` CLI and provision the service first (`nx init`). The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has no Nexus tools (see "First run" under Surface 1).
-2. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it).
+1. **Route one.** Run the one command from Surface 1 in a terminal. It cannot reach the plugin store of your claude.ai account, so you still do the plugin step of route two in the application.
+2. **Route two.** Install `uv`. In Claude Desktop, open Customize → Plugins, add the marketplace `Hellblazer/nexus`, and install `conexus` (and `sn` if you want it). If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Then open a conversation and say "Set up Nexus". Claude calls the plugin's `setup` tool, shows the four choices from Surface 1, and asks which you want. Desktop shows no message when Nexus is missing, because the session-start hook runs in a cloud workspace and not on your machine (measured 2026-10-16: a Desktop conversation starts no local Claude Code session), so you have to ask. Do not type `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen on Claude Desktop 2.42304.0 on macOS). Desktop has no progress display: ask "Is Nexus set up yet?" and Claude reads the status with `setup_status`. When it says setup is done, start a new conversation.
+
+The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has only the two setup tools (see "First run" under Surface 1). To install the CLI by hand instead, see "Install by hand" under Surface 1.
 
 To upgrade after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 while 7.77.1 was current), and conexus could not be enabled from it until the marketplace was removed and added again. Why it does not follow new release tags is not yet understood.
 
@@ -97,6 +119,8 @@ State is shared with the host CLI Claude and any other session running against t
 ## Surface 3: Claude Desktop chat (Desktop Extension)
 
 **Audience**: Claude Desktop users who do NOT have Claude Code installed.
+
+The plugin route in Surface 2 is the one that installs the CLI for you. The extension is an alternative, and it needs the CLI and the service installed by hand first ("Install by hand" under Surface 1).
 
 Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 

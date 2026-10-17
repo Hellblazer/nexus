@@ -103,6 +103,11 @@ summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monosp
 details[open] summary::after{content:"–"}
 details p{margin:8px 0 4px;font-size:15px}
 .footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto;min-width:0}
+td:first-child{font-weight:500;white-space:nowrap}
 @media (prefers-reduced-motion:no-preference){.copy{transition:background .15s}}
 @media (max-width:480px){ol.steps>li{grid-template-columns:32px minmax(0,1fr)}ol.steps>li::before{font-size:22px}}
 </style>
@@ -124,7 +129,7 @@ details p{margin:8px 0 4px;font-size:15px}
 </div>
 <p class="who" data-for="code">You run <code>claude</code> in a terminal, and you install the <code>nx</code> command and a plugin that adds tools, agents, and skills to Claude Code.</p>
 <p class="who hidden" data-for="cli">You index and search from the terminal only, and you can add the Claude plugin later.</p>
-<p class="who hidden" data-for="desktop">You use the Claude Desktop app without Claude Code, and you install Nexus as an extension.</p>
+<p class="who hidden" data-for="desktop">You use the Claude Desktop app without Claude Code, and you add Nexus to it as a plugin.</p>
 
 <div class="oswrap" style="margin-top:14px">
   <span class="choose-label" style="margin:0">Operating system</span>
@@ -140,7 +145,7 @@ details p{margin:8px 0 4px;font-size:15px}
   <div><b>Mac, Linux, Windows</b><span>Apple Silicon Mac, Linux on x86-64 or arm64, Windows 11 on x64</span></div>
   <div><b>1.2 GB</b><span>memory when idle, about 4.5 GB while indexing</span></div>
   <div><b>No GPU</b><span>search runs on the CPU</span></div>
-  <div><b data-os-block="mac">~1.2 GB</b><b class="hidden" data-os-block="linux">~1.4 GB</b><b class="hidden" data-os-block="windows">~1.25 GB</b><span data-os-block="mac windows">download in total</span><span class="hidden" data-os-block="linux">download in total (about 1.3 GB on arm64)</span></div>
+  <div><b>~1.3 GB</b><span>download for the Local choice (all four choices are under The question)</span></div>
 </div>
 <p class="note">Nexus ships its own PostgreSQL, built for these platforms only, so an Intel Mac or Windows on ARM cannot run a local install and setup stops with an error. The memory figures come from an Apple Silicon Mac that indexed a medium-sized code repository. The first PDF you index downloads about 2.3 GB more, for the PDF models.</p>
 
@@ -151,7 +156,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <h3>Tools to have</h3>
 <ul class="tools">
 <li>
-  <p><strong>uv</strong> installs and runs the <code>nx</code> command. Check: <code>uv --version</code>. To install it:</p>
+  <p><strong>uv</strong> installs and runs the <code>nx</code> command. Route one installs it for you. Route two needs it first. Check: <code>uv --version</code>. To install it:</p>
   <div class="cmd" data-os-block="mac"><pre>brew install uv</pre><button class="copy" type="button">Copy</button></div>
   <div class="cmd hidden" data-os-block="linux"><pre>curl -LsSf https://astral.sh/uv/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
   <div class="cmd hidden" data-os-block="windows"><pre>powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</pre><button class="copy" type="button">Copy</button></div>
@@ -176,10 +181,152 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 </li>
 </ul>
 
+<h2 id="install">Install</h2>
+<p>There are two routes, and both end in the same install.</p>
+
+<h3 id="route-one">Route one: run one command</h3>
+<p data-for="code">The command installs uv if you do not have it, installs the <code>nx</code> command, and adds the plugin to Claude Code when <code>claude</code> is on your PATH. It asks you one question before it downloads anything.</p>
+<p class="hidden" data-for="cli">The command installs uv if you do not have it and installs the <code>nx</code> command. It adds the Claude Code plugin when <code>claude</code> is on your PATH. It asks you one question before it downloads anything.</p>
+<p class="hidden" data-for="desktop">The command installs uv if you do not have it, installs the <code>nx</code> command, and asks you one question before it downloads anything. It cannot reach the plugin store of your Claude account. Add the plugin in Claude Desktop, as step 2 of route two shows.</p>
+<div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd hidden" data-os-block="windows"><pre>irm https://hellblazer.github.io/nexus/install.ps1 | iex</pre><button class="copy" type="button">Copy</button></div>
+<p class="note">With Local, the script asks a second question before it downloads anything: whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
+<p class="note">If you press Enter at the question, or the script has no terminal, it installs the <code>nx</code> command only. <code>/conexus:setup</code> in Claude Code, or <code>nx init</code> (Local) or <code>nx config init</code> (Cloud) in a terminal, sets up a service later.</p>
+<p class="note hidden" data-os-block="linux">The script asks uv for the CPU build of torch. If your uv is older than 0.9.19, run <code>uv self update</code> first, or the build downloads about 4.5 GB of GPU libraries that Nexus does not use.</p>
+<p class="note" data-os-block="mac linux">To skip the question, add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example, this installs the service and does not start it at login:</p>
+<div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
+<p class="note hidden" data-os-block="windows">Run it in a normal PowerShell window, not an elevated one. The script itself does not need Git. Claude Code fetches the plugin with Git, so install Git first (see Tools to have) if you want the script to add the plugin.</p>
+<p class="note hidden" data-os-block="windows">The <code>iex</code> form cannot take flags. To skip the question, run the script as a script block and add the flags after it. The flags are <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example:</p>
+<div class="cmd hidden" data-os-block="windows"><pre>&amp; ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
+
+<h3 id="route-two">Route two: install uv, add the plugin, answer one question</h3>
+<p class="hidden" data-for="cli">This route needs Claude Code or Claude Desktop. If you use only the <code>nx</code> command, run route one, or follow the steps under <a href="#by-hand">Install by hand</a>.</p>
+<ol class="steps">
+<li><div class="step">
+  <h3>Install uv</h3>
+  <p>Install uv and git, as shown under <a href="#before">Before you start</a>. Besides Claude itself and git, uv is the one tool this route needs.</p>
+  <div class="hidden" data-for="desktop"><p class="note" data-os-block="mac linux">When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</p></div>
+</div></li>
+<li data-for="code cli"><div class="step">
+  <h3>Add the plugin</h3>
+  <p>Start <code>claude</code>. Type these two commands inside Claude Code, not in the terminal:</p>
+  <div class="cmd"><pre>/plugin marketplace add Hellblazer/nexus
+/plugin install conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
+</div></li>
+<li class="hidden" data-for="desktop"><div class="step">
+  <h3>Add the plugin</h3>
+  <p>In Claude Desktop, open Customize → Plugins, add the marketplace <code>Hellblazer/nexus</code>, and install <code>conexus</code>. Chat and Cowork read the plugins on your Claude account, not the ones that Claude Code installed, so do this even if you added the plugin in Claude Code. If you added <code>Hellblazer/nexus</code> before, remove it and add it again first. An older copy has no setup tool.</p>
+</div></li>
+<li data-for="code cli"><div class="step">
+  <h3>Answer the question</h3>
+  <p>When the install finishes, run <code>/reload-plugins</code> or start a new session. In that session Claude tells you that Nexus is not installed and asks the question below. Answer it. If you choose Local, Claude also asks whether the service should start when you log in.</p>
+  <p>Setup then runs in the background. For Local it takes from under two minutes on a fast connection to about seven on a slow one (an estimate), and you can ask Claude for progress. When Claude says setup is done, reconnect the Nexus server: type <code>/mcp</code>, choose <code>nexus</code>, and choose Reconnect. A new session works too.</p>
+  <p class="note">If you choose Not now, each session shows one line that names <code>/conexus:setup</code>, so you can answer later.</p>
+</div></li>
+<li class="hidden" data-for="desktop"><div class="step">
+  <h3>Ask Claude to set up Nexus</h3>
+  <p>Open a conversation and say this. Claude shows you the choices below and asks which you want. Claude Desktop does not tell you when Nexus is missing, so you have to ask. Desktop may ask you to allow the tool first.</p>
+  <div class="cmd"><pre>Set up Nexus.</pre><button class="copy" type="button">Copy</button></div>
+  <p>Setup runs in the background. To see progress, ask <em>"Is Nexus set up yet?"</em>. When Claude says setup is done, quit Claude Desktop fully and open it again. A new conversation is not enough: Desktop keeps the plugin's server running across conversations, and only a restart starts the installed one.</p>
+</div></li>
+</ol>
+
+<h3 id="question">The question</h3>
+<p>The route-one script asks this question without Not now, because typing the command is your permission to install. Route two asks it with all four choices:</p>
+<div class="tbl"><table>
+<tr><th>Choice</th><th>What happens</th><th>Download</th></tr>
+<tr><td>Local</td><td>Install the <code>nx</code> command and run a Nexus service on this machine</td><td>about 1.3 GB down, 2.4 to 3.1 GB on disk</td></tr>
+<tr><td>Cloud</td><td>Install the <code>nx</code> command and connect it to a managed service you have an address, token and tenant for</td><td>about 0.7 GB down, 2.1 to 2.3 GB on disk</td></tr>
+<tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.7 GB down, 2.1 to 2.3 GB on disk</td></tr>
+<tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
+</table></div>
+<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one you type them in the terminal. The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. uv also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. <code>uv cache clean</code> empties it but frees only the files the install does not share.</p>
+
+<h3 id="after">After the install</h3>
+<ol class="steps">
+<li><div class="step">
+  <h3>Check the install</h3>
+  <div class="cmd"><pre>nx doctor</pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">No line may show <span style="font-weight:600">✗</span>. A <span style="font-weight:600">⚠</span> line is a soft warning, so read it.</p>
+</div></li>
+<li><div class="step">
+  <h3>Index a repository and search it</h3>
+  <div class="cmd"><pre>cd your-project
+nx index repo .
+nx search "how does retry work"</pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">If you index the same repository again, Nexus skips files that did not change. For a large repository, add <code>--monitor</code> to see the progress for each file.</p>
+</div></li>
+</ol>
+
+<div class="callout ok"><p><strong>The install is complete.</strong> After you index a repository, Nexus finds its topics automatically, and <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>, the lessons for working inside Claude Code.</p></div>
+
+<h2 id="update">Update Nexus</h2>
+<p>Always run both of these commands:</p>
+<div class="cmd"><pre>nx self install   <span class="c"># install the new version next to the current one</span>
+nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
+<p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
+<p class="note hidden" data-for="desktop">In Claude Desktop, update the plugin by removing the <code>Hellblazer/nexus</code> marketplace in Customize → Plugins and adding it again. A marketplace that was added earlier stays at the release it was added at.</p>
+<p class="note hidden" data-os-block="windows">On Windows, <code>nx self install</code> also points the <code>NexusStorageService</code> logon task at the new version. The running storage service keeps its old version until it next starts, which happens at your next sign-in or after <code>nx daemon service stop</code> and <code>Start-ScheduledTask NexusStorageService</code>.</p>
+
+<h2 id="uninstall">Remove Nexus completely</h2>
+<p>Follow these four steps in this order. The first step is optional, and none of them touches a managed cloud tenant, because they remove only what is on this computer.</p>
+<ol class="steps">
+<li><div class="step">
+  <h3>Optional: keep a copy of your knowledge</h3>
+  <p>You can export the knowledge store to a file and import it into a later install, but you cannot export memory or scratch.</p>
+  <div class="cmd"><pre>nx store export --all -o <span class="ph">&lt;A-DIRECTORY-TO-KEEP&gt;</span>   <span class="c"># one .nxexp file per collection</span></pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">Later, <code>nx store import <span class="ph">&lt;FILE&gt;</span>.nxexp</code> restores a collection into a new install.</p>
+</div></li>
+<li><div class="step">
+  <h3>Remove the Claude integration</h3>
+  <p data-for="code cli">In Claude Code:</p>
+  <div class="cmd" data-for="code cli"><pre>/plugin uninstall conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
+  <p class="hidden" data-for="desktop">In Claude Desktop: Settings → Connectors → Desktop → Conexus → Uninstall. This removes the extension only, and steps 3 and 4 remove the service and the data.</p>
+  <p class="note">If you use both Claude Code and Claude Desktop, do both.</p>
+</div></li>
+<li><div class="step">
+  <h3>Stop the service and delete the data</h3>
+  <div class="cmd"><pre>nx uninstall                          <span class="c"># preview, changes nothing</span>
+nx uninstall --yes --remove-data      <span class="c"># stop the service and its workers, remove autostart, delete notes, plans, catalog, the database and the search models</span></pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">Without <code>--remove-data</code>, the service stops and autostart is removed, but your data stays in <code>~/.config/nexus</code>. Use that form if you plan to install again later.</p>
+</div></li>
+<li><div class="step">
+  <h3>Remove the program</h3>
+  <p><code>nx uninstall</code> does not remove <code>nx</code> itself or older versions kept side by side. Remove them by hand:</p>
+  <div class="cmd" data-os-block="mac linux"><pre>uv tool uninstall conexus 2&gt;/dev/null      <span class="c"># the uv install, if one exists</span>
+rm -rf ~/.local/share/nexus                <span class="c"># program versions, search model cache</span>
+rm -f ~/.local/bin/nx ~/.local/bin/nx-mcp ~/.local/bin/nx-mcp-catalog ~/.local/bin/nx-session-end-launcher ~/.local/bin/nx-hook</pre><button class="copy" type="button">Copy</button></div>
+  <div class="cmd hidden" data-os-block="windows"><pre>uv tool uninstall conexus
+Remove-Item -Recurse -Force "$HOME\.local\share\nexus" -ErrorAction SilentlyContinue
+Remove-Item -Force "$HOME\.local\bin\nx.exe", "$HOME\.local\bin\nx-mcp.exe", "$HOME\.local\bin\nx-mcp-catalog.exe", "$HOME\.local\bin\nx-session-end-launcher.exe", "$HOME\.local\bin\nx-hook.exe" -ErrorAction SilentlyContinue</pre><button class="copy" type="button">Copy</button></div>
+  <p class="note hidden" data-os-block="windows"><code>nx uninstall</code> in step 3 already stopped the background workers, removed <code>%LOCALAPPDATA%\nexus</code>, and took the folder that <code>nx self install</code> added off your user PATH. These lines remove the program itself, which <code>nx</code> cannot delete while it runs. If the uv copy from step 1 is still there, <code>uv tool uninstall conexus</code> removes it. If a Claude Code session or <code>nx self gc</code> already removed it, uv prints "<code>conexus</code> is not installed", which is also fine.</p>
+  <p class="note hidden" data-os-block="windows">The commands skip files that are already gone. Two engine cache folders stay: <code>%TEMP%\onnxruntime-java*</code> (about 11 MB) and <code>%USERPROFILE%\.djl.ai</code> (about 13 MB, a default location that other programs can also use, so check it first), and <code>Remove-Item -Recurse -Force "$env:TEMP\onnxruntime-java*", "$HOME\.djl.ai"</code> deletes them. uv itself, the Python 3.12 it downloaded, its download cache (about 4.8 GB, which <code>uv cache clean</code> empties), and PortableGit belong to you, not to Nexus, so they stay.</p>
+  <p class="note" data-os-block="mac linux">Releases older than 7.74.0 leave the search models in <code>~/.cache/nexus</code> after <code>--remove-data</code>, so on those also run <code>rm -rf ~/.cache/nexus</code>.</p>
+  <p class="note hidden" data-os-block="windows">Releases older than 7.74.0 also leave the search models, the aspect worker, <code>%LOCALAPPDATA%\nexus</code>, and the PATH entry, and the <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/windows-install.md#removing-nexus">Windows install guide</a> has the commands that remove them.</p>
+</div></li>
+</ol>
+<h3>Check</h3>
+<div class="cmd" data-os-block="mac"><pre>which nx                        <span class="c"># must print nothing</span>
+launchctl list | grep -i nexus  <span class="c"># must print nothing</span>
+ls ~/.config/nexus              <span class="c"># must not exist</span>
+ls ~/.cache/nexus               <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd hidden" data-os-block="linux"><pre>which nx                                          <span class="c"># must print nothing</span>
+systemctl --user list-unit-files | grep -i nexus  <span class="c"># must print nothing</span>
+ls ~/.config/nexus                                <span class="c"># must not exist</span>
+ls ~/.cache/nexus                                 <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd hidden" data-os-block="windows"><pre>Get-Command nx -ErrorAction SilentlyContinue                          <span class="c"># must print nothing</span>
+Get-ScheduledTask NexusStorageService -ErrorAction SilentlyContinue   <span class="c"># must print nothing</span>
+Test-Path "$HOME\.config\nexus"                                       <span class="c"># must print False</span>
+Test-Path "$HOME\.cache\nexus"                                        <span class="c"># must print False</span>
+Test-Path "$env:LOCALAPPDATA\nexus"                                   <span class="c"># must print False</span>
+Test-Path "$HOME\.local\share\nexus"                                  <span class="c"># must print False</span></pre><button class="copy" type="button">Copy</button></div>
+
+<h2 id="problems">Problems</h2>
+<details id="by-hand"><summary>Install by hand, step by step</summary>
 <!-- ===== Claude Code + CLI path ===== -->
 <section data-for="code cli">
-<h2>Install</h2>
-<p>Run the steps in this order. Each step is safe to run again.</p>
+<p>These are the commands that the one command and the setup tool run for you. Run them in this order. Each step is safe to run again.</p>
 <ol class="steps">
 <li><div class="step">
   <h3>Install the <code>nx</code> command</h3>
@@ -198,7 +345,7 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
 </div></li>
 <li><div class="step">
   <h3>Set up the storage service</h3>
-  <p>This command first asks whether the service should start at login. Answer yes. It then downloads the service program, the database, and the search model, and starts the service.</p>
+  <p>This command first asks whether the service should start at login. Answer yes to start it at each login. The one-command route defaults to no. It then downloads the service program, the database, and the search model, and starts the service.</p>
   <div class="cmd"><pre>nx init</pre><button class="copy" type="button">Copy</button></div>
   <div class="expect">
     <div><b data-os-block="mac linux">~700 MB</b><b class="hidden" data-os-block="windows">~580 MB</b><span>downloaded, first run only</span></div>
@@ -218,21 +365,14 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
 /plugin install conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
   <p class="note">Then run <code>/conexus:nx-preflight</code>, which checks that everything the plugin needs is present.</p>
 </div></li>
-<li><div class="step">
-  <h3>Index a repository and search it</h3>
-  <div class="cmd"><pre>cd your-project
-nx index repo .
-nx search "how does retry work"</pre><button class="copy" type="button">Copy</button></div>
-  <p class="note">If you index the same repository again, Nexus skips files that did not change. For a large repository, add <code>--monitor</code> to see the progress for each file.</p>
-</div></li>
 </ol>
+<p>Then follow <a href="#after">After the install</a>.</p>
 
-<div class="callout ok"><p><strong>The install is complete.</strong> After you index a repository, Nexus finds its topics automatically, and <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>, the lessons for working inside Claude Code.</p></div>
 </section>
 
 <!-- ===== Desktop path ===== -->
 <section class="hidden" data-for="desktop">
-<h2>Install</h2>
+<p>Steps 1 and 2 install uv, the <code>nx</code> command and the service by hand. After them, add the plugin as route two shows. Step 3 is the extension, an alternative to the plugin for Desktop users who do not have Claude Code. Do not install both, because you get two copies of the tools with different names.</p>
 <ol class="steps">
 <li><div class="step">
   <h3>Install uv</h3>
@@ -243,7 +383,7 @@ nx search "how does retry work"</pre><button class="copy" type="button">Copy</bu
   <p class="note" data-os-block="mac linux">When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</p>
 </div></li>
 <li><div class="step">
-  <h3>Set up the storage service</h3>
+  <h3>Install the <code>nx</code> command and set up the storage service</h3>
   <p>The extension does not start the service itself. Run these commands one time in a terminal.</p>
   <div class="cmd" data-os-block="mac"><pre>uv tool install conexus --python 3.12
 nx self install
@@ -267,71 +407,8 @@ nx doctor</pre><button class="copy" type="button">Copy</button></div>
   <p class="note hidden" data-os-block="windows">If the marketplace is already on your account from an earlier release, remove it and add it again to get the current version.</p>
 </div></li>
 </ol>
-<div class="callout"><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. If you already use the conexus plugin in Claude Code, do not install the extension, because Claude Desktop already sees the plugin's tools and with both you get two copies with different names.</p></div>
 </section>
-
-<h2 id="update">Update Nexus</h2>
-<p>Always run both of these commands:</p>
-<div class="cmd"><pre>nx self install   <span class="c"># install the new version next to the current one</span>
-nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy" type="button">Copy</button></div>
-<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
-<p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
-<p class="note hidden" data-os-block="windows">On Windows, <code>nx self install</code> also points the <code>NexusStorageService</code> logon task at the new version. The running storage service keeps its old version until it next starts, which happens at your next sign-in or after <code>nx daemon service stop</code> and <code>Start-ScheduledTask NexusStorageService</code>.</p>
-
-<h2 id="uninstall">Remove Nexus completely</h2>
-<p>Follow these four steps in this order. The first step is optional, and none of them touches a managed cloud tenant, because they remove only what is on this computer.</p>
-<ol class="steps">
-<li><div class="step">
-  <h3>Optional: keep a copy of your knowledge</h3>
-  <p>You can export the knowledge store to a file and import it into a later install, but you cannot export memory or scratch.</p>
-  <div class="cmd"><pre>nx store export --all -o <span class="ph">&lt;A-DIRECTORY-TO-KEEP&gt;</span>   <span class="c"># one .nxexp file per collection</span></pre><button class="copy" type="button">Copy</button></div>
-  <p class="note">Later, <code>nx store import <span class="ph">&lt;FILE&gt;</span>.nxexp</code> restores a collection into a new install.</p>
-</div></li>
-<li><div class="step">
-  <h3>Remove the Claude integration</h3>
-  <p data-for="code cli">In Claude Code:</p>
-  <div class="cmd" data-for="code cli"><pre>/plugin uninstall conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
-  <p data-for="desktop">In Claude Desktop: Settings → Connectors → Desktop → Conexus → Uninstall. This removes the extension only, and steps 3 and 4 remove the service and the data.</p>
-  <p class="note">If you use both Claude Code and Claude Desktop, do both.</p>
-</div></li>
-<li><div class="step">
-  <h3>Stop the service and delete the data</h3>
-  <div class="cmd"><pre>nx uninstall                          <span class="c"># preview, changes nothing</span>
-nx uninstall --yes --remove-data      <span class="c"># stop the service and its workers, remove autostart, delete notes, plans, catalog, the database and the search models</span></pre><button class="copy" type="button">Copy</button></div>
-  <p class="note">Without <code>--remove-data</code>, the service stops and autostart is removed, but your data stays in <code>~/.config/nexus</code>. Use that form if you plan to install again later.</p>
-</div></li>
-<li><div class="step">
-  <h3>Remove the program</h3>
-  <p><code>nx uninstall</code> does not remove <code>nx</code> itself or older versions kept side by side. Remove them by hand:</p>
-  <div class="cmd" data-os-block="mac linux"><pre>uv tool uninstall conexus 2&gt;/dev/null      <span class="c"># the uv install, if one exists</span>
-rm -rf ~/.local/share/nexus                <span class="c"># program versions, search model cache</span>
-rm -f ~/.local/bin/nx ~/.local/bin/nx-mcp ~/.local/bin/nx-mcp-catalog ~/.local/bin/nx-session-end-launcher ~/.local/bin/nx-hook</pre><button class="copy" type="button">Copy</button></div>
-  <div class="cmd hidden" data-os-block="windows"><pre>uv tool uninstall conexus
-Remove-Item -Recurse -Force "$HOME\.local\share\nexus" -ErrorAction SilentlyContinue
-Remove-Item -Force "$HOME\.local\bin\nx.exe", "$HOME\.local\bin\nx-mcp.exe", "$HOME\.local\bin\nx-mcp-catalog.exe", "$HOME\.local\bin\nx-session-end-launcher.exe", "$HOME\.local\bin\nx-hook.exe" -ErrorAction SilentlyContinue</pre><button class="copy" type="button">Copy</button></div>
-  <p class="note hidden" data-os-block="windows"><code>nx uninstall</code> in step 3 already stopped the background workers, removed <code>%LOCALAPPDATA%\nexus</code>, and took the folder that <code>nx self install</code> added off your user PATH. These lines remove the program itself, which <code>nx</code> cannot delete while it runs. If the uv copy from step 1 is still there, <code>uv tool uninstall conexus</code> removes it. If a Claude Code session or <code>nx self gc</code> already removed it, uv prints "<code>conexus</code> is not installed", which is also fine.</p>
-  <p class="note hidden" data-os-block="windows">The commands skip files that are already gone. Two engine cache folders stay: <code>%TEMP%\onnxruntime-java*</code> (about 11 MB) and <code>%USERPROFILE%\.djl.ai</code> (about 13 MB, a default location that other programs can also use, so check it first), and <code>Remove-Item -Recurse -Force "$env:TEMP\onnxruntime-java*", "$HOME\.djl.ai"</code> deletes them. uv itself, the Python 3.12 it downloaded, its download cache (about 2.5 GB, which <code>uv cache clean</code> empties), and PortableGit belong to you, not to Nexus, so they stay.</p>
-  <p class="note" data-os-block="mac linux">Releases older than 7.74.0 leave the search models in <code>~/.cache/nexus</code> after <code>--remove-data</code>, so on those also run <code>rm -rf ~/.cache/nexus</code>.</p>
-  <p class="note hidden" data-os-block="windows">Releases older than 7.74.0 also leave the search models, the aspect worker, <code>%LOCALAPPDATA%\nexus</code>, and the PATH entry, and the <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/windows-install.md#removing-nexus">Windows install guide</a> has the commands that remove them.</p>
-</div></li>
-</ol>
-<h3>Check</h3>
-<div class="cmd" data-os-block="mac"><pre>which nx                        <span class="c"># must print nothing</span>
-launchctl list | grep -i nexus  <span class="c"># must print nothing</span>
-ls ~/.config/nexus              <span class="c"># must not exist</span>
-ls ~/.cache/nexus               <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
-<div class="cmd hidden" data-os-block="linux"><pre>which nx                                          <span class="c"># must print nothing</span>
-systemctl --user list-unit-files | grep -i nexus  <span class="c"># must print nothing</span>
-ls ~/.config/nexus                                <span class="c"># must not exist</span>
-ls ~/.cache/nexus                                 <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
-<div class="cmd hidden" data-os-block="windows"><pre>Get-Command nx -ErrorAction SilentlyContinue                          <span class="c"># must print nothing</span>
-Get-ScheduledTask NexusStorageService -ErrorAction SilentlyContinue   <span class="c"># must print nothing</span>
-Test-Path "$HOME\.config\nexus"                                       <span class="c"># must print False</span>
-Test-Path "$HOME\.cache\nexus"                                        <span class="c"># must print False</span>
-Test-Path "$env:LOCALAPPDATA\nexus"                                   <span class="c"># must print False</span>
-Test-Path "$HOME\.local\share\nexus"                                  <span class="c"># must print False</span></pre><button class="copy" type="button">Copy</button></div>
-
-<h2 id="problems">Problems</h2>
+</details>
 <details><summary>The install fails with "No solution found when resolving dependencies"</summary><p>The hint names torch and <code>cp314</code> because you left <code>--python 3.12</code> off the install command and your <code>python3</code> is 3.14. Run the command again with the flag.</p></details>
 <details class="hidden" data-os-block="windows"><summary>Windows: uv tool install fails with "untrusted mount point (os error 448)"</summary><p>An old <code>python3.exe</code> in <code>%USERPROFILE%\.local\bin</code> hides the Python that uv manages. Add <code>--python-preference only-managed</code> to the install command and run it again.</p></details>
 <details data-os-block="mac linux"><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus --python 3.12</code> (on Linux, add <code>--torch-backend cpu</code>).</p></details>
@@ -339,7 +416,8 @@ Test-Path "$HOME\.local\share\nexus"                                  <span clas
 <details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Your install runs on Python 3.14, which does not work yet. Run these two commands in order: <code>uv tool install conexus --force --python 3.12</code> (on Linux, add <code>--torch-backend cpu</code>), then <code>nx self install</code>.<span class="hidden" data-os-block="windows"> On Windows, run <code>nx daemon service stop</code> first, because the install replaces files that the running service uses.</span></p></details>
 <details class="hidden" data-os-block="linux"><summary>Linux: uv says "unexpected argument '--torch-backend'"</summary><p>Your uv is older than 0.9.19. Run <code>uv self update</code>, or update uv with the package manager that installed it. Then run the install command again. Do not leave the option off: uv then installs the 4.3 GB GPU build of torch.</p></details>
 <details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If the index was interrupted, run <code>nx index repo .</code> again and it continues where it stopped. If you updated with <code>uv tool install</code>, see "Update Nexus" above.</p></details>
-<details><summary>Plugin installed but its tools never appear</summary><p>The usual cause is that the <code>nx</code> command is not installed. Run <code>/conexus:nx-preflight</code>. It tells you what is missing.</p></details>
+<details data-for="code cli"><summary>Plugin installed but its tools never appear</summary><p>The usual cause is that the <code>nx</code> command is not installed, that setup has not finished, or that you chose Not now. Type <code>/conexus:setup</code>. It shows what is missing and asks you before it installs anything. After setup is done, reconnect the <code>nexus</code> server with <code>/mcp</code>. <code>/conexus:nx-preflight</code> also lists what is missing.</p></details>
+<details class="hidden" data-for="desktop"><summary>Plugin added but Claude shows no Nexus tools</summary><p>The usual cause is that the <code>nx</code> command is not installed, or that setup has not finished. Say <em>Set up Nexus</em> in a conversation. Claude shows what is missing and asks you before it installs anything. After setup is done, quit Claude Desktop fully and open it again; a new conversation keeps the old server.</p></details>
 <details><summary>Nothing above helps</summary><p>Paste the <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a> as the first message of a Claude Code session, and Claude checks the install step by step and asks you before it changes any data.</p></details>
 
 <h2 id="what">What you installed</h2>
@@ -380,6 +458,8 @@ Test-Path "$HOME\.local\share\nexus"                                  <span clas
       if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,fail);}else{fail();}
     });
   });
+  function openHash(){var e=location.hash&&document.getElementById(location.hash.slice(1));if(e&&e.tagName==="DETAILS")e.open=true;}
+  openHash();addEventListener("hashchange",openHash);
   apply();
 })();
 </script>

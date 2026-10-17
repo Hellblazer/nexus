@@ -185,7 +185,8 @@ ul.plain li{margin:3px 0}
 </table></div></details>
 <details class="gloss"><summary>Claude Code</summary><div class="tbl"><table>
 <tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
-<tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/query/SKILL.md"><code>/conexus:query</code></a> starts it directly.</td></tr>
+<tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-create/SKILL.md"><code>/conexus:rdr-create</code></a> starts it directly.</td></tr>
+<tr><td>Agent</td><td>A helper that Claude starts for one job, such as debugging or code review. It works on its own and reports back.</td></tr>
 <tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
 <tr><td>Rendering</td><td>A readable document, in Markdown or as a web page, that Claude writes from what is in the stores at that time.</td></tr>
 <tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
@@ -210,16 +211,16 @@ ul.plain li{margin:3px 0}
 <tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
 </table></div>
 <p class="note">Not every project has every block. A project without the <code>bd</code> task tracker has no Ready Beads block, a project without RDRs has no RDR block, and a new install has an empty T2 Memory block and a short Knowledge Map. All of that is normal.</p>
-<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", part of the install is missing. Type <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/nx-preflight.md"><code>/conexus:nx-preflight</code></a> and it tells you which part.</p>
+<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", part of the install is missing. Type <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/nx-preflight.md"><code>/conexus:nx-preflight</code></a> and it tells you which part. If the <code>nx</code> command itself is missing, type <code>/conexus:setup</code> and answer its question.</p>
 
 <h3>Why Claude receives this context</h3>
 <p>Claude does not follow a fixed script. It reads the situation and chooses what to do, and the blocks above are what it chooses from.</p>
 <ul class="plain">
 <li>The memory block tells Claude what was decided before, so it does not decide again from zero.</li>
 <li>The capabilities block tells Claude which tools exist, so it searches the store instead of reading every file.</li>
-<li>A guidance block describes situations rather than commands: "something is broken", "a plan needs a check", "an answer must come from many documents". For each situation it names the skill that fits, and Claude matches your request to a situation and uses that skill by itself.</li>
+<li>A guidance block describes situations rather than commands: "something is broken", "a plan needs a check", "an answer must come from many documents". For each situation it names what fits (an agent, a skill or a tool), and Claude matches your request to a situation and uses it by itself.</li>
 </ul>
-<div class="callout rule"><p>Because of this, you describe what you want in your own words and do not learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and follows the debugging skill. If you say "is what the docs say about caching true in the code", Claude recognizes a question that needs many documents and plans a search. The <code>/conexus:…</code> commands in later lessons are shortcuts that start one skill directly, and they are never required.</p></div>
+<div class="callout rule"><p>Because of this, you describe what you want in your own words and do not learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and uses the debugger agent. If you say "is what the docs say about caching true in the code", Claude recognizes a question that needs many documents and plans a search. The <code>/conexus:…</code> commands in later lessons are shortcuts that start one skill or agent directly, and they are never required.</p></div>
 <p>The same routing adapts to how you write. A person who types short instructions and a person who thinks in long paragraphs get the same tools, chosen from what they said. The prompts in these lessons are examples of phrasing, and your own words work the same way.</p>
 
 <h3>The three stores</h3>
@@ -540,16 +541,16 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 9 ============ -->
 <section class="lesson" id="l9">
 <div class="lhead"><span class="lnum">9</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
-<p class="why">Some questions need more than one or two searches: compare what the documentation says with what the code does, or collect one pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
+<p class="why">Some questions need more than one or two searches: compare what the documentation says with what the code does, or collect one pattern from many files. For these, Claude has a tool that plans several steps and combines the results.</p>
 
 <div class="see">You might say</div>
-<div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 3&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 3&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, takes the relevant facts from each, compares them, and returns one answer with sources. This takes much longer than a normal search: half of these calls take about 80 seconds and one in twenty takes over three minutes, so start it and do something else.</p>
-<p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. You can also ask the large question in plain words, and Claude recognizes it and plans the search without the command.</p>
+<p class="note">Ask the large question in plain words when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. Claude plans the search, and you need no command.</p>
 
 <h3>Other commands to know</h3>
-<p>Each command below starts one skill directly. You can describe the task in your own words instead, and Claude chooses the same skill. The commands are for when you want to be sure which skill runs.</p>
+<p>Each command below starts one skill or agent directly. You can describe the task in your own words instead, and Claude chooses the same one. The commands are for when you want to be sure which one runs.</p>
 <div class="tbl"><table>
 <tr><th>Task</th><th>Command</th></tr>
 <tr><td>Understand a codebase that is new to you</td><td><code>/conexus:analyze-code</code></td></tr>
@@ -557,7 +558,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <tr><td>Review code before you commit it</td><td><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/review-code.md"><code>/conexus:review-code</code></a></td></tr>
 <tr><td>Debug a problem after two failed tries</td><td><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/debug.md"><code>/conexus:debug</code></a></td></tr>
 <tr><td>Hand the work to the next session</td><td><code>/conexus:continuation</code>, <a href="#l2">lesson 2</a></td></tr>
-<tr><td>Not sure which one</td><td>Ask Claude: <em>"Read the using-nx-skills skill and tell me which skill fits my task."</em></td></tr>
+<tr><td>Not sure which one</td><td>Ask Claude: <em>"Which conexus skill or agent fits my task? Check the orchestration skill."</em></td></tr>
 </table></div>
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a>: the four ways to search, and when to use each.</li>

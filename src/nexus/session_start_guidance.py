@@ -1,66 +1,41 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""SessionStart guidance-imperative delivery (nexus-h33x8.4).
+"""SessionStart guidance-imperative delivery (nexus-h33x8.4, .5; nexus-dg7i6.6).
 
-TIER B, not Tier C. Before this module existed, the guidance imperative
-reached every session as SessionStart hooks.json entry:
+TIER B, not Tier C. The guidance imperative used to reach every session as a
+SessionStart hooks.json entry that ran ``cat`` on a skill file inside
+``$CLAUDE_PLUGIN_ROOT``, which resolves to the PINNED, currently-installed
+plugin release tag, so every wording edit was inert until the next plugin
+release (Tier C). ``nx hook session-start`` is already a SessionStart
+hooks.json entry AND already a PyPI binary (Tier B): a wheel change reaches
+the maintainer at the next ``scripts/reinstall-tool.sh`` and every user at the
+next ordinary PyPI release.
 
-    cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md
+SessionStart is a cold channel read long before any routing decision exists,
+so volume here is pure cost (nexus-h33x8.5). GUIDANCE_IMPERATIVE carries the
+imperative, the trigger CONDITIONS (the "when"), and one short destination per
+condition: an agent or a skill name, no ``/conexus:`` command spelling and no
+tool-name prefix. The full routing table, the review gate, the skill routing
+menu and the working rules live in the ``orchestration`` skill.
 
-``$CLAUDE_PLUGIN_ROOT`` resolves to the PINNED, currently-installed plugin
-release tag, so every wording/ordering/trigger edit to that file was inert
-until the next plugin release (Tier C). ``nx hook session-start`` is
-already a SessionStart hooks.json entry AND already a PyPI binary (Tier
-B) -- a wheel change reaches the maintainer at the next
-``scripts/reinstall-tool.sh`` and every user at the next ordinary PyPI
-release, bypassing the PINNED PLUGIN TAG specifically (see nexus-h33x8's
-plan-audit correction: this is "PyPI-release-cadence", not
-"no-release-needed" -- neither tier skips a release entirely).
+nexus-dg7i6.6: the ``using-nx-skills`` skill this text used to point at was
+retired. A 30-day census found zero model loads of it, and an eval with a true
+premise loaded it 0 of 3 times: the model does the work inline or dispatches
+the agent the rules name. Its routing content moved to the ``orchestration``
+skill and to the destinations named here; the SessionStart text no longer sends
+the reader to a skill it would have to load first.
 
-GUIDANCE_IMPERATIVE was originally a VERBATIM copy of
-``conexus/skills/using-nx-skills/SKILL.md`` as it existed when this
-module was created (2026-08-08); nexus-h33x8.4 was channel-only and
-made no content change. nexus-h33x8.5 is the content inversion the .4
-docstring predicted: GUIDANCE_IMPERATIVE now DIVERGES from the Skill
-file on purpose. SessionStart is a cold channel an agent reads long
-before any routing decision exists -- volume there is pure cost, not
-capability, so it carries ONLY the imperative and its trigger
-CONDITIONS (the "when": what situations mean "route now"), full stop.
-Every destination LIST (the "what": which skill/command handles which
-situation, the MCP tool catalogue, the Common Mistakes and Red Flags
-tables, the RDR lifecycle chain) moved to the Skill body ONLY --
-``conexus/skills/using-nx-skills/SKILL.md``, read in full when
-``Skill`` is explicitly invoked on ``using-nx-skills``, which is
-exactly the progressive-disclosure contract every other conexus skill
-already follows. An agent that already knows it should route can look
-up WHERE by invoking the Skill; an agent that does not know it should
-route never gets there regardless of how much menu SessionStart
-carries, which is the whole rationale for cutting the menu from this
-channel rather than trying to compress it in place.
-
-The Skill file's own routing content is UNCHANGED by this bead (the
-nx_answer cost narrowing landed at 3a04da95c and stays exactly as
-narrowed) -- only ONE sentence was added there, pointing back at this
-short form so a reader who lands on the Skill body directly still
-knows a condensed version is what SessionStart actually emits.
-
-INTERIM DOUBLE-EMISSION GUARD (bead's own requirement, item 4). This
-Tier-B change ships to PyPI before the Tier-C hooks.json edit (which
-drops the legacy ``cat`` entry) is activated by a plugin release. During
-that window a session running under the OLD, still-pinned plugin would
-otherwise receive the SAME content TWICE per session: once from the
-legacy ``cat`` entry, once from this module -- doubling exactly the
-SessionStart volume the epic (nexus-h33x8) is measuring against.
-:func:`legacy_cat_channel_active` closes that gap: it reads the
-INSTALLED plugin's own ``hooks/hooks.json`` (via ``$CLAUDE_PLUGIN_ROOT``,
-NOT this repo's copy) and reports whether the legacy entry is still
-registered there. :func:`guidance_block` suppresses this module's
-emission whenever it is. The gate fails OPEN (emits) when it cannot be
-completed -- no ``$CLAUDE_PLUGIN_ROOT`` (bare CLI/dev/test invocation, no
-legacy channel to collide with), a missing pinned ``hooks.json``, or a
-parse failure -- because going permanently dark would be worse than a
-bounded, cosmetic double-emission window that self-closes at the next
-plugin release regardless.
+INTERIM DOUBLE-EMISSION GUARD (nexus-h33x8.4, item 4). A session running under
+an OLD, still-pinned plugin whose hooks.json still carries the legacy ``cat``
+entry would otherwise receive guidance TWICE: once from that entry, once from
+this module. :func:`legacy_cat_channel_active` reads the INSTALLED plugin's own
+``hooks/hooks.json`` (via ``$CLAUDE_PLUGIN_ROOT``, NOT this repo's copy) and
+reports whether the legacy entry is still registered there;
+:func:`guidance_block` suppresses this module's emission whenever it is. The
+gate fails OPEN (emits) when it cannot be completed -- no
+``$CLAUDE_PLUGIN_ROOT``, a missing pinned ``hooks.json``, or a parse failure --
+because going permanently dark would be worse than a bounded, cosmetic
+double-emission window that self-closes at the next plugin release.
 """
 from __future__ import annotations
 
@@ -68,44 +43,37 @@ import json
 import os
 from pathlib import Path
 
-#: nexus-h33x8.5: the SessionStart form of the using-nx-skills imperative.
-#: Deliberately NOT the Skill file's content -- no frontmatter (this is
-#: never parsed as a skill, only printed as SessionStart text), no
-#: routing table, no MCP tool catalogue, no Common Mistakes / Red Flags
-#: tables, no RDR lifecycle chain. Those are destination LISTS ("what")
-#: and live in conexus/skills/using-nx-skills/SKILL.md ONLY, read when
-#: `Skill` is invoked. What stays here is the imperative plus its
-#: trigger CONDITIONS ("when") -- the signal an agent needs to recognize
-#: "route now", not the menu of where. Keep this short on purpose; every
-#: byte here is paid by every session before any routing decision
-#: exists, unlike the Skill body which is paid only by a session that
-#: already decided to invoke it.
+#: nexus-h33x8.5, nexus-dg7i6.6: the SessionStart routing imperative. The
+#: imperative plus its trigger CONDITIONS ("when"), each with the one agent or
+#: skill that answers it. Not a menu: the table, the review gate and the skill
+#: routing live in the ``orchestration`` skill. Every byte here is paid by
+#: every session before any routing decision exists; the byte budget is
+#: pinned by tests/test_session_start_guidance.py and
+#: tests/hooks/test_session_start_combined_budget.py.
 GUIDANCE_IMPERATIVE = (
-    "Conexus skills carry this project's accumulated practice for "
-    "specific situations — which tools apply, which storage tier already "
-    "holds prior work, and the failure modes this project has already "
-    "paid for. When a situation below matches, invoking `Skill` is "
-    "usually cheaper than re-deriving the approach, and it is how a "
-    "session inherits what earlier ones learned.\n"
+    "Conexus skills and agents carry this project's accumulated practice "
+    "for specific situations: which tools apply, which storage tier holds "
+    "prior work, and failure modes already paid for. When one matches, "
+    "dispatch the agent or load the skill named; it is how a session "
+    "inherits what earlier ones learned.\n"
     "\n"
-    "Situations a conexus skill already covers:\n"
-    "- something is broken: a failure, an exception, or two failed fix "
-    "attempts\n"
-    "- implementation is about to start with no design of record\n"
-    "- work spans multiple steps, or needs cross-module design before "
-    "code\n"
-    "- code, a plan, or tests are ready and need a quality gate\n"
-    "- an answer has to be reduced from many documents rather than "
-    "looked up as a single fact\n"
-    "- research or exploration is starting without checking T1/T2/T3 for "
-    "prior work\n"
-    "- a validated finding is about to go unstored, or a phase/RDR "
-    "boundary is being crossed\n"
+    "- broken, or two failed fix attempts: `debugger` agent\n"
+    "- implementing with no design of record: `brainstorming-gate`; "
+    "multi-step or cross-module work: `strategic-planning`\n"
+    "- quality gate for code: `code-review-expert` AND `substantive-critic`, "
+    "after stating \"Ship when <X>\"; each finding is a blocker or a bead; "
+    "one confirmation round, then the user. Tests: `test-validator` if "
+    "coverage needs proof; a plan: `plan-validation`\n"
+    "- an answer reduced from many documents, not a lookup: `nx_answer` "
+    "(minutes); lookups: `search`, `query` (seconds)\n"
+    "- research starting: check T1/T2/T3 first (`scratch`, "
+    "`memory_search`, `search`)\n"
+    "- a validated finding about to go unstored, or a phase/RDR boundary: "
+    "`store_put`, `memory_put`; `phase-review-gate`\n"
     "\n"
-    "Which skill handles which situation, the MCP tool catalogue, and "
-    "the known failure modes live in the Skill body — invoke `Skill` on "
-    "`using-nx-skills` to read them. Skills change; check rather than "
-    "recalling a prior version.\n"
+    "Call sequential thinking before every decision. Routing table, review "
+    "gate, skill routing, working rules: `orchestration` skill. Skills "
+    "change; check, do not recall.\n"
 )
 
 
@@ -119,7 +87,7 @@ _LEGACY_ENTRY_MARKER = "using-nx-skills/SKILL.md"
 def legacy_cat_channel_active(plugin_root: str | None = None) -> bool:
     """Whether the INSTALLED (pinned) plugin still delivers the guidance
     imperative via the legacy ``cat .../using-nx-skills/SKILL.md``
-    SessionStart entry.
+    SessionStart entry (a skill file the current plugin no longer ships).
 
     Reads ``<plugin_root>/hooks/hooks.json`` -- the CURRENTLY INSTALLED
     plugin's registration, not this repo's working copy, which is the

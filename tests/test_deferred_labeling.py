@@ -74,6 +74,37 @@ class TestSpawnDeferredLabeling:
 
         assert (tmp_path / DEFERRED_LABELING_PID_NAME).read_text().strip() == "4242"
 
+    def test_the_run_starts_in_the_stable_cwd_and_is_handed_the_callers_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """nexus-x3m8e: the run outlives the session whose worktree launched it,
+        so it must not inherit that directory (a deleted cwd breaks every
+        getcwd() in it); but ``nx taxonomy label`` reads the per-repo
+        ``.nexus.yml`` through ``load_config()``, so the caller's directory
+        travels as NEXUS_REPO_ROOT, which ``load_config`` reads in place of the cwd."""
+        import os
+
+        calls: list[dict] = []
+
+        def fake_popen(cmd, **kw):
+            calls.append(kw)
+
+            class P:
+                pid = 4242
+
+            return P()
+
+        launch = tmp_path / "session-worktree"
+        launch.mkdir()
+        monkeypatch.chdir(launch)
+        monkeypatch.delenv("NEXUS_REPO_ROOT", raising=False)
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+        assert _spawn_deferred_labeling() is True
+        assert calls[0]["cwd"] == os.path.abspath(os.sep)
+        assert calls[0]["env"]["NEXUS_REPO_ROOT"] == os.getcwd()
+        assert calls[0]["start_new_session"] is True or "creationflags" in calls[0]
+
     def test_spawn_failure_returns_false_never_raises(self, monkeypatch) -> None:
         def boom(cmd, **kw):
             raise OSError("no fork for you")

@@ -2433,3 +2433,13 @@ def test_the_build_names_cpu_torch_on_linux_and_lets_the_user_choose() -> None:
     for platform in ("darwin", "win32"):
         assert "UV_TORCH_BACKEND" not in mod.build_env(platform, {"PATH": "/bin"})
     assert mod.build_env("linux", {"PATH": "/x"})["PATH"] == "/x", "the rest of the environment is kept"
+
+
+def test_a_finished_run_names_the_desktop_restart_as_its_next_step() -> None:
+    """A done record's next step is read on every surface, Claude Desktop included, where a new
+    chat keeps the stand-in and only quitting the app and opening it again starts the real server
+    (nexus-93xx0). Both done paths (cli-only and verified) use the one constant."""
+    mod = _load_module()
+    step = mod.RECONNECT_NEXT
+    assert "Claude Desktop" in step and "quit the app" in step and "a new chat" in step, step
+    assert "Reconnect the nexus server or start a new session." not in _SETUP.read_text(encoding="utf-8")

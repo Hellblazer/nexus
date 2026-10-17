@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -78,6 +79,7 @@ __all__ = [
     "InstallOutcome",
     "PrimeStatus",
     "beads_detected",
+    "beads_plugin_enabled",
     "install",
     "install_and_describe",
     "load_template",
@@ -234,6 +236,61 @@ def beads_detected(
         return True, f"beads plugin found under {cache_root}"
 
     return False, "bd not on PATH and no beads Claude Code plugin found"
+
+
+def _enabled_plugins(path: Path) -> dict:
+    """``enabledPlugins`` from one settings file; absent or unreadable is ``{}``."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    plugins = data.get("enabledPlugins") if isinstance(data, dict) else None
+    return plugins if isinstance(plugins, dict) else {}
+
+
+def beads_plugin_enabled(
+    project_dir: Path,
+    *,
+    claude_config_dir: Path | None = None,
+) -> bool:
+    """Is the beads Claude Code plugin effectively enabled for *project_dir*?
+
+    Follows Claude Code's precedence for ``enabledPlugins``: the project's
+    ``.claude/settings.local.json``, then its ``.claude/settings.json``, then
+    the user's ``settings.json`` (``CLAUDE_CONFIG_DIR`` honoured), merged per
+    ``beads@<marketplace>`` key. No key anywhere means not enabled. Used by ``session_context`` to print ``bd prime`` itself only
+    when the plugin's own SessionStart hook will not (nexus-dg7i6.4).
+    """
+    base = claude_config_dir if claude_config_dir is not None else _default_claude_config_dir()
+    effective: dict[str, bool] = {}
+    # Claude Code merges enabledPlugins per key: the highest-precedence file
+    # naming a key decides that key.
+    for path in (
+        project_dir / ".claude" / "settings.local.json",
+        project_dir / ".claude" / "settings.json",
+        base / "settings.json",
+    ):
+        for key, value in _enabled_plugins(path).items():
+            if str(key).startswith("beads@"):
+                effective.setdefault(str(key), bool(value))
+    return any(effective.values()) and _beads_plugin_installed(base)
+
+
+def _beads_plugin_installed(base: Path) -> bool:
+    """False only when ``installed_plugins.json`` is readable and has no beads entry.
+
+    An uninstall can leave a stale ``enabledPlugins`` key behind; a plugin that
+    is not installed runs no hook. When the install record cannot be read,
+    trust the settings.
+    """
+    try:
+        data = json.loads((base / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return True
+    return any(str(k).startswith("beads@") for k in plugins)
 
 
 def load_template() -> str:

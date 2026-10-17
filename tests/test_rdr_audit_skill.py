@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).parent.parent
 SKILL_PATH = REPO_ROOT / "conexus" / "skills" / "rdr-audit-checklist" / "SKILL.md"
 COMMAND_PATH = REPO_ROOT / "conexus" / "commands" / "rdr-audit.md"
 REGISTRY_PATH = REPO_ROOT / "conexus" / "registry.yaml"
-USING_SKILLS_PATH = REPO_ROOT / "conexus" / "skills" / "using-nx-skills" / "SKILL.md"
+ROUTING_PATH = REPO_ROOT / "conexus" / "skills" / "orchestration" / "reference.md"
 
 
 def test_skill_and_command_files_exist() -> None:
@@ -35,8 +35,8 @@ def test_skill_is_registered_and_routed() -> None:
         assert field in entry, f"registry entry missing field: {field}"
     assert entry["slash_command"] == "/rdr-audit"
     assert "deep-research-synthesizer" in entry["dispatches_to"]
-    assert "rdr-audit" in USING_SKILLS_PATH.read_text(), (
-        "rdr-audit must stay in the using-nx-skills routing table so it is discoverable each session"
+    assert "rdr-audit" in ROUTING_PATH.read_text(), (
+        "rdr-audit must stay in the orchestration skill's Skill Routing section so it is discoverable"
     )
 
 

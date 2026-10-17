@@ -161,6 +161,10 @@ class RecordingWriter:
         return None
 
     def add_batch(self, rows: Any, chunks: Any) -> None:
+        if self.finished:
+            # The real writer's _require_usable refuses more work once finish() returned
+            # (nexus-gjxkb: the uploader re-entered a finished writer in production).
+            raise ValueError("MultiBatchDocumentWriter: already finished")
         n = len(self.batches)
         self.batches.append(([dict(r) for r in rows], [dict(c) for c in chunks]))
         type(self).events.append(("add", n))
@@ -169,6 +173,8 @@ class RecordingWriter:
         self._held = n
 
     def finish(self, *, allow_empty: bool = False) -> DocumentWriteResult:
+        if self.finished:
+            raise ValueError("MultiBatchDocumentWriter: already finished")
         t3 = getattr(type(self), "forward_t3", None)
         if t3 is not None:
             chunks = [c for _, cs in self.batches for c in cs]

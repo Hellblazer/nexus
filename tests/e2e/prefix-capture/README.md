@@ -80,3 +80,49 @@ and `analyse_sq.py ab/seqthink/out` reports main-session and subagent
 sequential-thinking calls, the first turn that made one, ToolSearch and Agent
 counts, and cost per cell. Results of the 2026-10-15 run: T2
 `nexus/seqthink-uncued-real-guidance-2026-10-15`.
+
+## ab/skillroute/: skill routing under distractor plugins (nexus-dg7i6.1)
+
+Do conexus skills still load when other plugins' skills crowd the listing?
+`claude plugin eval` cannot answer this (its sandbox loads only the plugin
+under test), so this runs the `conexus/evals` case prompts as plain
+`claude -p` sessions on the seeded image, graded with the cases' own
+`tool_used` graders. Arms: `S0` is the image's conexus + sn with nexus tools as
+shipped (8 eager); `S1` adds the beads plugin; `S2` adds every other plugin
+enabled on the laptop except the LSP plugins. Extra plugins load with
+`--plugin-dir` from `ab/skillroute/plugins/`, which is not committed: build it
+on the laptop with `snapshot_plugins.sh` (copies from the installed plugin
+cache) and copy it to the chas worktree.
+
+`sr_batch.sh <REPS> <ARM>... [-- <case>...]` is the loop on chas (cases default
+to every `conexus/evals` case), `sr_detach.sh` starts it detached through the
+credentials helper, and `score_sr.py ab/skillroute/out <conexus/evals>`
+reports positive-grader pass rate, zero-load rate on positive cases,
+negative-grader pass rate, and the skill-listing size of each arm's first
+request (an arm S1 or S2 whose listing did not grow over S0 is flagged
+vacuous). The 2026-10-16 smoke run listed 76, 104 and 135 entries for S0, S1
+and S2.
+
+Arms `D` and `N` swap the conexus tree instead of adding plugins: the
+installed conexus is switched off in the container's settings and a tree is
+loaded with `--plugin-dir`, so the listing holds exactly one conexus. Each arm
+loads `plugins/<arm>/conexus`, which `export_conexus.sh <arm> <commit>`
+extracts from a commit fetched on chas: `N` the narrowed conexus of
+nexus-dg7i6.2, `D` that commit's parent, so the two differ by exactly the
+narrowing diff. The MCP servers of either tree hand off to
+the image's installed `nx`, so the nexus tools match S0. `score_sr.py` counts
+each arm's conexus entries, flags a listing name that appears twice, and takes
+markers `ARM:+name` / `ARM:-name` that must hold in every run of that arm, for
+example `D:+conexus:setup S0:-conexus:setup` (`setup` is a command develop has
+and the image's 7.79.0 does not).
+
+Any capital letter other than `S` is a tree arm loading
+`plugins/<arm>/conexus` (`export_conexus.sh <arm> <commit>`), and it reads
+the case prompts from that tree's `evals/`. Adding `T` (`DT`, `ET`) runs each
+case's own scaffold, `evals/<case>/fixture.sh`, in an empty project
+directory, the way `claude plugin eval --scaffold` does (nexus-dg7i6.5/.7);
+a case without one runs on the plain project. The session's final project
+is copied to `out/.../repo` so file-target graders can read it.
+`score_sr.py` grades `tool_used` and `regex` graders and lists `llm`
+graders as ungraded, on a separate line, so a pass count never mixes the
+two.

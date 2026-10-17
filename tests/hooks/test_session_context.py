@@ -140,7 +140,7 @@ class TestReadyBeadsAndCapabilitiesCarried:
             "`subtree`",
             "`follow_links`",
             "`depth`",
-            "`/conexus:query`",
+            "`nx_answer`",
             "`plan_save`",
             "`plan_search`",
             "`scratch`",

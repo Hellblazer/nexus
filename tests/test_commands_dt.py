@@ -949,9 +949,15 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
     SourceUriNotFoundError,
     UnchunkableContentError,
     UnextractableContentError,
+    UploadStalledError,
 )
 
 _MEMBER_KWARGS: dict[type, dict] = {
+    # nexus-gjxkb: the streaming uploader gave up on a chunk that never became readable.
+    UploadStalledError: {
+        "content_hash": "h1", "next_index": 2, "polls": 150, "chunks_created": 5, "embedded": 4,
+        "seconds": 300.0,
+    },
     # nexus-z0o2p.10: the RDR-223 writer's per-document failure fails that
     # record, never the rest of an nx dt index batch.
     BatchWriteFailedError: {"doc_id": "1.99.1", "batch": 1, "reason": "write_many named the document in failed_doc_ids"},
@@ -2897,3 +2903,92 @@ class TestEnrichUnchangedRecord:
         assert result.exit_code == 0, result.output
         assert "skipped: index fresh (use --force)" in result.output
         assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt"})]
+
+
+class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
+    """nexus-gjxkb: ``ValueError: MultiBatchDocumentWriter: already finished`` came up from deep in
+    ``index_pdf`` for one record and, being neither a survivable NexusError nor
+    (RuntimeError, ImportError), escaped the per-record catch and aborted every record after it.
+    An exception that is not a NexusError fails THAT record: the rest of the batch runs, the
+    failure is listed, and the run still exits non-zero, because an unexpected exception is a
+    defect and must not read as success. A NexusError outside PER_RECORD_SURVIVABLE_EXCEPTIONS is
+    a run-level condition by the tripwire's classification and still stops the run."""
+
+    def _file_backed(self, runner, monkeypatch, first_exc: BaseException):
+        from nexus.cli import main
+
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+        seq = [
+            lambda *a, **kw: (_ for _ in ()).throw(first_exc),
+            lambda *a, **kw: 4,
+        ]
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", lambda *a, **kw: seq.pop(0)(*a, **kw))
+        return runner.invoke(main, ["dt", "index", "--uuid", records[0][0]]), seq
+
+    def test_file_backed_branch(self, runner, monkeypatch) -> None:
+        result, seq = self._file_backed(
+            runner, monkeypatch, ValueError("MultiBatchDocumentWriter: already finished"))
+
+        assert not seq, "U2 was never dispatched: the batch aborted after U1's exception"
+        # The exception did not escape: the run ended through click's error exit. Its traceback
+        # is in the dt_index_unexpected_error log event, not a raw crash.
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert "U1\ta.pdf: ValueError: MultiBatchDocumentWriter: already finished" in result.output
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert "1 record(s) failed with an unexpected error" in result.output, result.output
+
+    @pytest.mark.parametrize("exc", [RuntimeError("extraction blew up"), ImportError("mineru is corrupt")],
+                             ids=["RuntimeError", "ImportError"])
+    def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(
+        self, runner, monkeypatch, exc,
+    ) -> None:
+        """The (RuntimeError, ImportError) catch still fails only that record and the batch
+        continues, but the run no longer exits 0 over a failed record: the same rule as the
+        unexpected-exception path above, which would otherwise be the only way to a non-zero
+        exit from a defect."""
+        result, seq = self._file_backed(runner, monkeypatch, exc)
+
+        assert not seq, "U2 was never dispatched: the batch aborted after U1's exception"
+        assert "Indexed 1 record(s)" in result.output, result.output
+        assert "1 failed" in result.output, result.output
+        assert f"{type(exc).__name__}: {exc}" in result.output
+        assert result.exit_code == 1, result.output
+        assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
+
+    def test_a_run_level_nexus_error_still_stops_the_run(self, runner, monkeypatch) -> None:
+        from nexus.errors import CredentialsMissingError
+
+        result, seq = self._file_backed(runner, monkeypatch, CredentialsMissingError("no key"))
+
+        assert isinstance(result.exception, CredentialsMissingError), repr(result.exception)
+        assert seq, "a run-level precondition failing for one record fails the run, as before"
+
+    def test_dt_content_branch(self, runner, fake_selectors, monkeypatch) -> None:
+        from nexus.cli import main
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+        fake_selectors["selection"].return_value = [
+            ("U-BAD", "x-devonthink-item://bad"),
+            ("U-OK", "x-devonthink-item://ok"),
+        ]
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
+            if uuid == "U-BAD":
+                raise KeyError("chunk_index")
+            return True
+
+        monkeypatch.setattr("nexus.commands.dt._index_dt_content_record", fake_index)
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
+
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert "Indexed 1 record(s)" in result.output, result.output  # U-OK still landed
+        assert "1 failed" in result.output, result.output
+        assert "KeyError" in result.output and "U-BAD" in result.output, result.output
+        assert result.exit_code == 1, result.output
+        assert "1 record(s) failed with an unexpected error" in result.output, result.output

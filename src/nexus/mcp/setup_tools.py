@@ -59,8 +59,8 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download, 2.4 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address, token and tenant for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
+    "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
+    "address, token and tenant for, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
     "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "
@@ -75,8 +75,9 @@ SETUP_STATUS_DESCRIPTION: str = (
     "user running /conexus:setup, fixes it. Read-only. The answer gives the stage, the log path and the next "
     "step. A full setup takes 2 to 8 minutes: the CLI build usually 1 to 3 minutes, the local service 2 to 5. "
     "Check again no sooner than the interval the answer names, and not in a loop: each call can ask the user "
-    "for approval. When the answer says setup is done, the user reconnects the nexus server or starts a new "
-    "session before the Nexus tools appear."
+    "for approval. When the answer says setup is done, the user reconnects the nexus server before the Nexus "
+    "tools appear: in Claude Code with /mcp or a new session; in Claude Desktop the user must quit the app and "
+    "open it again, because a new chat keeps the running server."
 )
 
 MODE_DESCRIPTION: str = (
@@ -256,8 +257,8 @@ def no_service_notice() -> str | None:
         "Nexus has no usable service on this machine: no service address is configured and no local service "
         "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
         "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software "
-        "(a local service: up to about 1.3 GB to download, 2.4 GB on disk; the CLI alone: up to about 0.7 GB to "
-        "download, 1.6 GB on disk) or connects a managed service the user has an address, token and tenant for (no service "
+        "(a local service: up to about 1.3 GB to download, 2.4 to 3.1 GB on disk; the CLI alone: up to about 0.7 GB to "
+        "download, 2.1 to 2.3 GB on disk) or connects a managed service the user has an address, token and tenant for (no service "
         "download; the user types them into a page that opens in their browser), so act only on the user's answer."
     )
 

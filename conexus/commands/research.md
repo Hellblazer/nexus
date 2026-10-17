@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Research topic using deep-research-synthesizer agent
+disable-model-invocation: true
 ---
 
 # Research Request

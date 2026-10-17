@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080)
+disable-model-invocation: true
 ---
 
 # Plan Audit Request

@@ -135,8 +135,6 @@ _VERB_SKILLS = [
 
 # Category 2: Pointer skills — delegate to a specific MCP tool.
 _POINTER_SKILLS = [
-    Case("query",              _META_PREFIX + "I have an analytical question: 'What did we decide about retrieval?'",
-         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("enrich-plan",        _META_PREFIX + "Enrich bead 'nexus-abc' with execution context.",
          ["nx_enrich_beads", "mcp__plugin_conexus_nexus__nx_enrich_beads"]),
     Case("knowledge-tidying",  _META_PREFIX + "Consolidate knowledge on topic 'chromadb quotas'.",
@@ -148,22 +146,14 @@ _POINTER_SKILLS = [
 # Category 3: Agent-dispatcher skills — invoke a specific agent.
 # NOTE: meta-prompt asks for agent name explicitly.
 _DISPATCHER_SKILLS = [
-    Case("code-review",           _META_PREFIX + "Review changes in this diff.",
-         ["code-review-expert"]),
-    Case("debugging",             _META_PREFIX + "Intermittent test failure in test_foo.",
-         ["debugger"]),
     Case("deep-analysis",         _META_PREFIX + "Investigate why latency tripled after refactor.",
          ["deep-analyst"]),
     Case("research-synthesis",    _META_PREFIX + "Research vector DB options and compare.",
          ["deep-research-synthesizer"]),
-    Case("test-validation",       _META_PREFIX + "Verify test coverage for the new module.",
-         ["test-validator"]),
     Case("strategic-planning",    _META_PREFIX + "Decompose feature 'add --foo flag' into tasks.",
          ["strategic-planner"]),
     Case("architecture",          _META_PREFIX + "Design architecture for a new event bus.",
          ["architect-planner"]),
-    Case("development",           _META_PREFIX + "Implement feature from bead nexus-abc (assume it exists).",
-         ["developer"]),
     Case("codebase-analysis",     _META_PREFIX + "Analyze module structure of a Python package.",
          ["codebase-deep-analyzer"]),
     Case("substantive-critique",  _META_PREFIX + "Critique an RDR draft for logical consistency.",
@@ -193,8 +183,6 @@ _RDR_SKILLS = [
 # Category 5: Infrastructure skills — domain-topical assertions.
 # NOTE: these describe themselves rather than dispatch; narrow tasks.
 _INFRA_SKILLS = [
-    Case("using-nx-skills",     _META_PREFIX + "What's the rule for invoking conexus skills?",
-         ["skill", "invoke", "before"]),
     Case("writing-nx-skills",   _META_PREFIX + "I want to create a new skill — what's the structure?",
          ["skill", "frontmatter", "SKILL.md"]),
     Case("brainstorming-gate",  _META_PREFIX + "I want to implement a new feature.",

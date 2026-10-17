@@ -57,7 +57,7 @@ retrieval plan.
 
 ## Pre-flight (mandatory — including tasks where the answer feels directly available)
 
-Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the using-nx-skills Red Flags table warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
+Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the Red Flags table in the orchestration skill's reference warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
 1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
@@ -90,7 +90,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -174,10 +174,10 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
 ## Beads Integration
 
-- Check /beads:ready for existing work before creating new plans
-- Create epic for major features: /beads:create "Epic Title" -t epic -p 1
-- Create tasks for each phase: /beads:create "Phase Task" -t task
-- Add dependencies: /beads:dep add <task-id> <blocker-id>
+- Check bd ready for existing work before creating new plans
+- Create epic for major features: bd create "Epic Title" -t epic -p 1
+- Create tasks for each phase: bd create "Phase Task" -t task
+- Add dependencies: bd dep add <task-id> <blocker-id>
 - Include bead IDs in all plan documentation
 - Never use markdown TODO lists - always use beads
 

@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Python 3.12 or 3.13** (3.14 is not yet supported — [upstream dependency issue](https://github.com/pydantic/pydantic/issues))
-- **[uv](https://docs.astral.sh/uv/)** — Python package manager
+- **[uv](https://docs.astral.sh/uv/)** — Python package manager. Route one under [Install](#install) installs it for you; route two needs it first.
 - **git**
 
 - **Hardware** — an Apple Silicon Mac (arm64), Linux on x86-64 or arm64, or
@@ -67,7 +67,53 @@ If you're on 3.14+, nothing extra is needed: the install command below names its
 
 ## Install
 
-See the [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) for the full install walkthrough: `uv tool install conexus --python 3.12`, `nx init` (**nexus-service** provisioning — the native Postgres + pgvector + bge-768 backend that serves every persistent tier), updating, and verifying with `nx doctor`.
+There are two routes, and both end in the same install. The [install guide on the site](https://hellblazer.github.io/nexus/) shows them per operating system.
+
+**Route one: run one command in a terminal.** It installs `uv` if you do not have it, installs the `nx` command, adds the plugin to Claude Code when `claude` is on your PATH, and asks you one question before it downloads anything. With Local it asks a second, whether to start at login.
+
+```bash
+curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh        # macOS and Linux
+```
+
+```powershell
+irm https://hellblazer.github.io/nexus/install.ps1 | iex             # Windows, normal PowerShell window
+```
+
+To skip the question, add a flag: `--local`, `--cloud` or `--cli-only`, and with `--local` also `--autostart` or `--no-autostart`. On macOS and Linux put the flags after `sh -s --`:
+
+```bash
+curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart
+```
+
+The `iex` form cannot take flags, so on Windows run the script as a script block:
+
+```powershell
+& ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart
+```
+
+When the script asks whether the service should start at login, the answer is No unless you type `y`. The script itself does not need Git, but Claude Code fetches the plugin with Git, so on Windows install Git first if you want the script to add the plugin. If you press Enter at the question, or the script has no terminal, it installs the `nx` command only. `/conexus:setup` in Claude Code, or `nx init` (Local) or `nx config init` (Cloud) in a terminal, sets up a service later. On Linux the script asks `uv` for the CPU build of torch. If your `uv` is older than 0.9.19, run `uv self update` first, or the build downloads about 4.5 GB of GPU libraries that Nexus does not use.
+
+**Route two: install `uv`, add the plugin, answer one question.** Install `uv` (and git, if you do not have it), then add the plugin in Claude Code:
+
+```
+/plugin marketplace add Hellblazer/nexus
+/plugin install conexus@nexus-plugins
+```
+
+When the install finishes, run `/reload-plugins` or start a new session. In that session Claude tells you that Nexus is not installed and asks the question. If you want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session.
+
+In Claude Desktop, add the plugin in Customize → Plugins, then say "Set up Nexus" in a conversation. When setup is done, quit Desktop fully and open it again; a new conversation keeps the old server. If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Do not type `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen on Claude Desktop 2.42304.0 on macOS). To update the plugin in Desktop, remove the `Hellblazer/nexus` marketplace and add it again.
+
+**The question.** Route two asks it with these four choices. The script asks the same question without Not now, because typing the command is your permission to install:
+
+| Choice | What happens | Download |
+|---|---|---|
+| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| Not now | Nothing is installed | none |
+
+The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The service is the **nexus-service**: the native Postgres + pgvector + bge-768 backend that serves every persistent tier. Check the result with `nx doctor`. The commands the routes run for you are under [Install by hand](#install-by-hand) in Troubleshooting. The [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) cover the work you do next, and updating is covered at the end of this page.
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document — pre-PG installs need a **two-hop** upgrade via `conexus==6.18.1` (the last migration-capable release); a direct jump to current migrates nothing.
 
@@ -128,7 +174,7 @@ The conexus plugin gives Claude Code agents access to all three storage tiers, 1
 /plugin install conexus@nexus-plugins
 ```
 
-After installing, run `/conexus:nx-preflight` to verify all plugin dependencies are present.
+With no `nx` command on the machine, the plugin asks the question under [Install](#install) in the first session after you add it and installs what you choose. After installing, run `/conexus:nx-preflight` to verify all plugin dependencies are present.
 
 See [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/conexus/README.md) for the full agent/skill reference. For local development from a repo checkout:
 
@@ -215,6 +261,23 @@ taxonomy:
 ```
 
 ## Troubleshooting
+
+### Install by hand
+
+Use these commands when a route under [Install](#install) fails, or when you want each step yourself.
+
+```bash
+uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+nx self install
+nx init
+nx doctor
+```
+
+The commands are the same on Windows; [Installing nexus on Windows](windows-install.md) has that platform's prerequisites. Then add the plugin with the two lines from route two.
+
+**The plugin is added but Claude shows no Nexus tools** — The `nx` command is not installed, or setup has not finished. In Claude Code type `/conexus:setup`. In Claude Desktop say "Set up Nexus". After setup is done, in Claude Code reconnect the `nexus` server (`/mcp`) or start a new session; in Claude Desktop quit the app fully and open it again, because a new conversation keeps the old server.
+
+### Other problems
 
 **`nx` command not found** — Make sure `~/.local/bin` is on your PATH; that is
 where both layouts put the `nx` entry point (`NX_BIN_DIR` overrides it on the

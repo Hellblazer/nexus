@@ -1,6 +1,6 @@
 ---
 name: orchestration
-description: Use when unsure which agent to use for a task, or when coordinating work across multiple agents in a pipeline
+description: Use when unsure which agent or skill fits a task, or when dispatching and gating agents (briefs, review gate, debugger escalation, pipelines)
 effort: low
 ---
 
@@ -18,7 +18,7 @@ Reference skill for agent routing and pipeline coordination. See [reference.md](
 
 ## How to Use
 
-1. Consult [reference.md](./reference.md) for the routing graph and decision framework
+1. Consult [reference.md](./reference.md) for the routing graph and decision framework, and for § Skill Routing (which skill fits a situation), § nx_answer, § Working Rules (sequential thinking, storage tiers, T2 ttl), § Common Mistakes and § Red Flags
 2. Match the request to the appropriate agent or pipeline
 3. Dispatch the agent directly using the relay format from [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md)
 
@@ -108,6 +108,59 @@ An agent with nothing checkable to claim (a pure read, a recommendation with no 
 
 The orchestrator re-runs each reported COMMAND once per round, before accepting the round — it never trusts the reported count. Reading the command line and re-running it yourself is the orchestrator's own job: a fabricated `rc=0 12 passed` line for a command that was never run, or a real but too-narrow command that would not have caught the regression it claims to verify, both read identically from the report alone.
 
+## Review Gate (caller side, MANDATORY on every implementation)
+
+The reviewers cannot dispatch and the developer does not commit, so you drive the gate. Do not stop at the developer's return.
+
+1. **State the acceptance bar** in the relay's Context Notes before either reviewer runs: "Ship when <X>." X is the condition that ends the gate, never "no criticals" (unfalsifiable against an adversarial reviewer). Example: "Ship when the local-upgrade path cannot wedge and the migration walk is proven atomic; anything else becomes a bead."
+2. **Run both reviewers**; they catch different, non-overlapping classes. `code-review-expert`: line-level bugs, security, missing edge cases, convention violations. `substantive-critic`: unvalidated assumptions, silent scope reduction, vacuous test assertions, spec-vs-implementation drift. A clean code review never excuses skipping the critic. Brief the critic with the locked spec (RDR `## Decision`, plan, phase boundary).
+3. **Round 1 is a full review and reports everything**: recall is the reviewer's job, triage is yours. Triage each finding as a ship-blocker against the bar, or a bead. Never both, never undecided, never re-litigated by a later round.
+4. **Round 2 only if a ship-blocker was fixed**: ONE confirmation pass per reviewer (template below), never a second full review. Round 3+ needs the human to ask for it by name (§ Review Rounds).
+5. Test-only, comment-only and prose-only fixes do not re-enter review, EXCEPT a test change that weakens, removes or vacuates an assertion: that changes the gate itself and re-enters like a behavioral fix.
+6. **Commit only after both reviewers are clean**: explicit paths, never `git add -A`, bead reference, then close the bead. A new check, gate, census or lint pastes its first live run into its bead before close, with the counts it examined and skipped, so a pass over input it never examined is visible when it ships.
+7. `test-validator` follows when coverage needs verifying; it is not automatic after Ship.
+
+**Model.** `code-review-expert` defaults to sonnet; pass `model: "opus"` for cycle-level or architectural diffs. Briefing rigour beats model choice: a named-suspect sonnet review outperforms an unbriefed opus one.
+
+**First-pass reviewer brief.** Friendly relays return friendly reviews, so name what to suspect:
+
+- Suspect categories for the diff class: ordering/race for concurrency, lock scope for transactions, vacuity for tests, handshake/boundary shapes for APIs, silent fallback for error paths.
+- The locked spec, so the reviewer checks implementation against spec, not style.
+- What was NOT changed on purpose, so scope creep is flagged instead of recommended.
+- Verification already run, so the reviewer checks claims instead of re-running suites.
+- Every added or modified test rated CAN FAIL or CANNOT FAIL, with the concrete production edit that would turn it red.
+
+**Confirmation-pass brief.** It names the findings under confirmation and asks whether each is closed. It does not name new suspect categories or ask the reviewer to pressure-test, enumerate paths or find what was missed; those instructions manufacture findings on any artifact.
+
+```markdown
+## Relay: code-review-expert — CONFIRMATION PASS (round 2 of at most 2)
+
+Confirming these findings, and nothing else:
+  1. <finding, verbatim from round 1> — fixed at <file:line>
+
+For each: emit CONFIRMED-CLOSED or NOT-CLOSED with the evidence line.
+Do not open new attack axes. Observations outside this list go in a final
+"For beads" section, one line each; they are never grounds for another round.
+ONE exception: a defect INTRODUCED by the fix under confirmation that is
+ship-blocking. Report it as a Critical and name the fix line that introduced it.
+```
+
+## Implementer and Debugger Dispatch
+
+**Implementer brief checklist.** A brief that says only WHAT to change leaves these to the reviewer, and each cost a fix round when omitted. Answer them in the brief, or write `UNKNOWN: resolve first` and the agent resolves it before its first edit (the SubagentStart hook injects the same five questions into every implementer dispatch):
+
+1. **Consumers.** Every caller and consumer of what changes, and which of them filter, re-rank or page after it.
+2. **Final point.** Where the output's real final order or display is decided (after boosts, caps, paging), and that the change acts there, not on a proxy.
+3. **Modes.** Behaviour in local and cloud mode, and which was measured. A mode nobody measured is measured first or left unchanged.
+4. **Bounds.** Which pool, permit, memory or thread limit the change draws on, and its size against that limit on small and large boxes.
+5. **State.** Every cache or shared state touched, who invalidates it, the invalidate-versus-in-flight-fill race, the first-write and empty cases, the test reset hooks.
+
+**Debugger.** Defaults to opus; pass `model: "sonnet"` for a single failure with a clear stack trace. Use `/conexus:serena-code-nav` for symbol-level tracing. Pass a failing test's error, hypotheses and what was tried in the relay.
+
+**Developer escalation.** If the developer returns `ESCALATION: Debugger Required` (scan for `<!-- ESCALATION -->`), its circuit breaker fired. Do not re-dispatch the developer. Guard first: `scratch(action="search", query="circuit-breaker-fired-for-<bead>")`. If found, this is the second firing: stop and report to the user that the debugger's fix did not hold and human investigation is needed. If not found, write that scratch entry (tag `escalation-guard`), then dispatch the debugger with the escalation's Failing test, Error, What I tried, Hypothesis and Diagnostic suggestion fields plus scratch entries tagged `failed-approach`. When it resolves, re-dispatch the developer with the debugger's one-sentence root cause, the files it touched, and "do not retry approaches listed under scratch tag `failed-approach`".
+
+**Link context.** When the work references an RDR or bead, seed T1 scratch tag `link-context` before dispatch so patterns the agent stores to T3 auto-link (`/conexus:catalog`). Skip for ad-hoc work.
+
 ## Review Rounds (MANDATORY)
 
 Before each reviewer dispatch, write the round marker:
@@ -117,8 +170,7 @@ nx scratch put "review-round bead=<id> n=<N> bar=<the acceptance bar, one line>"
 ```
 
 Include `round N of at most 2` in the reviewer's brief (the cap is `review-rounds.toml`'s, contract `code-review`; plan audits and RDR gates have their own rows there). A reviewer that knows
-it is a confirmation pass behaves like one (see `/conexus:code-review` §
-Confirmation Pass). N >= 3 requires the human to have asked for it in this
+it is a confirmation pass behaves like one (see § Review Gate above, confirmation-pass brief). N >= 3 requires the human to have asked for it in this
 session, by name; record the ask in the marker (`asked-by=human`). An
 orchestrator may not self-authorize round 3, with ONE carve-out: a
 ship-blocking defect INTRODUCED by the fix under confirmation (the
@@ -163,14 +215,13 @@ dispatch below.
 The pipeline order below is `registry.yaml`'s own `pipelines:` section, not a
 second copy — this table restates it for quick lookup; `registry.yaml` is
 the one place to change it. `feature`/`bug` there always run BOTH reviewers
-(non-interchangeable, see development/SKILL.md § Post-Implementation
-Review); an "Implement code" pipeline that omits either one is a stale
+(non-interchangeable, see § Review Gate above); an "Implement code" pipeline that omits either one is a stale
 drift, not a variant.
 
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
 | Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
-| Implement code | developer | -> code-review-expert -> substantive-critic -> test-validator |
+| Implement code | developer | -> code-review-expert -> substantive-critic -> (when coverage needs verifying) test-validator |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> substantive-critic (always, both reviewers — same gate as "Implement code" above) |
 | Research topic | deep-research-synthesizer | -> store_put (direct) |
@@ -223,8 +274,7 @@ subagent to verify your own work.
 
 This restraint does NOT apply to the two-reviewer gate
 (`code-review-expert` + `substantive-critic`, mandatory and non-
-interchangeable — see § Quick Routing above and development/SKILL.md §
-Post-Implementation Review + Commit) or to independent-state fork fleets
+interchangeable — see § Quick Routing and § Review Gate above) or to independent-state fork fleets
 (disjoint files, no shared mutable state). Both do genuinely more than "a
 handful of tool calls" worth of independent work, and serializing either
 buys no safety — the opposite case, sharing a mutable resource, IS where

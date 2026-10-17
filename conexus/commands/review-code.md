@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Review code changes using code-review-expert agent
+disable-model-invocation: true
 ---
 
 # Code Review Request
@@ -19,7 +20,7 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **code-review** skill with the following relay. Fill in dynamic fields from the context above:
+Dispatch the **code-review-expert** agent (Agent tool, `subagent_type: conexus:code-review-expert`) with the following relay. First state the acceptance bar in Context Notes ("Ship when <X>"); the `orchestration` skill's Review Gate section has the rounds, triage and the second reviewer (`substantive-critic`). Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: code-review-expert

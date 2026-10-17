@@ -47,11 +47,23 @@ POSIX, where ``start_new_session=True`` already contains the tree), and
 falls back to :func:`safe_killpg` otherwise -- the same degraded single-
 process reach as before this bead, for any site that spawned before
 ``contain`` existed or where a job could not be created.
+
+A HARD KILL SPARES THE RESOURCE TRACKER (nexus-x3m8e). Every POSIX hard
+group signal in nexus goes through this module, and this module never sends
+``SIGKILL`` to a ``multiprocessing`` resource tracker: the tracker is what
+``sem_unlink``s a process pool's named semaphores once the pool is dead, and a
+killed tracker leaks them for good (macOS cannot list or unlink them). That
+rule lives in :func:`_signal_group`, under :func:`safe_killpg`,
+:func:`safe_killpg_group` and :func:`kill_tree`, and
+``tests/test_process_group_killpg_lint.py`` forbids a raw ``os.killpg`` anywhere
+else in ``src/nexus``.
 """
 from __future__ import annotations
 
 import os
 import signal as _signal
+import threading
+import time
 from typing import Any
 
 import structlog
@@ -98,6 +110,9 @@ def safe_killpg(
     4. Where ``os.killpg`` does not exist (Windows), signals the process
        itself with ``os.kill``. The reach is weaker, one process instead of
        its tree, and ``True`` then means that process was signalled.
+    5. A hard signal (``SIGKILL``) reaches every member of the group except
+       its ``multiprocessing`` resource tracker (see the module docstring), so
+       ``True`` also means "only the tracker is left".
 
     ON WINDOWS THERE IS NO GRACEFUL SIGNAL. ``os.kill`` with anything but a
     console CTRL event is TerminateProcess, so a caller's ``signal.SIGTERM``
@@ -142,10 +157,9 @@ def safe_killpg(
             return False
     try:
         pgid = os.getpgid(pid)
-        killpg(pgid, sig)
-        return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+    return _signal_group(pgid, sig)
 
 
 def safe_killpg_group(pgid: Any, sig: int = KILL_SIGNAL) -> bool:
@@ -175,15 +189,177 @@ def safe_killpg_group(pgid: Any, sig: int = KILL_SIGNAL) -> bool:
     if pgid <= 1:
         _log.debug("safe_killpg_group_pgid_guard", pgid=pgid)
         return False
-    killpg = getattr(os, "killpg", None)
-    if killpg is None:
+    if getattr(os, "killpg", None) is None:
         _log.debug("safe_killpg_group_no_process_groups", pgid=pgid)
         return False
+    return _signal_group(pgid, sig)
+
+
+#: The command-line marker of CPython's ``multiprocessing.resource_tracker``
+#: process (``python -c 'from multiprocessing.resource_tracker import main;main(N)'``).
+RESOURCE_TRACKER_MARKER: str = "multiprocessing.resource_tracker"
+
+#: Signals that cannot be caught: the ones for which sparing the tracker
+#: matters. A catchable signal (``SIGTERM``) may go to the whole group, because
+#: the tracker ignores it by design and still unlinks the group's semaphores.
+_UNCATCHABLE_SIGNALS: frozenset[int] = frozenset(
+    s for s in (getattr(_signal, "SIGKILL", None),) if s is not None
+)
+
+#: Upper bound on scan-and-kill rounds in one sparing kill. Each round signals
+#: every non-tracker member the table shows; a round after the first exists for
+#: a member forked between the scan and the kill. A group that still has a live
+#: non-tracker member after this many rounds is being refilled faster than a
+#: SIGKILL empties it, and looping longer would not change that.
+_SPARE_MAX_ROUNDS: int = 6
+
+#: Pause between rounds, so the kernel has delivered the signals before the
+#: table is read again.
+_SPARE_ROUND_PAUSE_S: float = 0.05
+
+#: Set while this thread is inside a sparing kill. The table read and the
+#: per-pid state checks run ``ps`` through ``run_bounded``, whose own timeout
+#: handler hard-kills a group through this module; a hung ``ps`` would
+#: otherwise recurse here forever. A nested hard kill targets the ``ps`` child,
+#: which has no tracker, so it takes the plain group signal.
+_in_sparing_kill = threading.local()
+
+
+def _group_member_rows(pgid: int) -> list[tuple[int, str]] | None:
+    """``(pid, command)`` for every live member of process group *pgid*, or
+    ``None`` when the process table cannot be read.
+
+    The table comes from the shared reader (``service_registry.all_process_rows``:
+    ``ps -ww``, ``/proc`` where there is no ``ps``, a Win32 branch), so this
+    module grows no second process-table parser; membership is then asked of the
+    kernel per pid (``os.getpgid``), which needs no ``ps`` column. POSIX only:
+    its one caller is guarded on ``os.killpg``."""
+    from nexus.daemon.service_registry import all_process_rows  # noqa: PLC0415 — deferred: only the escalation path reads the table; the daemon package imports this module
+
     try:
-        killpg(pgid, sig)
+        table = all_process_rows()
+    except (RuntimeError, OSError):
+        return None
+    rows: list[tuple[int, str]] = []
+    for pid, _age, command in table:
+        if pid <= 1:
+            # macOS lists pid 0 (kernel_task), and os.getpgid(0) answers with the
+            # CALLER's group: reading it as a member would signal our own group.
+            continue
+        try:
+            if os.getpgid(pid) == pgid:
+                rows.append((pid, command))
+        except OSError:  # exited between the table read and here, or not ours to query
+            continue
+    return rows
+
+
+def _plain_killpg(pgid: int, sig: int) -> bool:
+    """The one raw ``os.killpg`` in ``src/nexus`` (``tests/test_process_group_killpg_lint.py``
+    forbids any other). ``True`` when the signal was delivered."""
+    try:
+        os.killpg(pgid, sig)
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+
+
+def _kill_group_sparing_tracker(
+    pgid: int,
+    sig: int,
+    *,
+    _rows: Any = None,
+    _running: Any = None,
+    _pause: Any = None,
+) -> bool:
+    """Hard-signal every member of process group *pgid* EXCEPT its
+    ``multiprocessing`` resource tracker, rescanning until none is left.
+
+    A group-wide ``SIGKILL`` takes the resource tracker down with the workers it
+    is supposed to clean up after. Python's named POSIX semaphores (spawn and
+    forkserver start methods, the macOS default, and what MinerU's
+    ``ProcessPoolExecutor`` uses) are unlinked only by the garbage collector of
+    the process that made them or by that tracker, so a killed tracker leaks
+    every semaphore of the group, permanently: macOS has
+    ``kern.posix.sem.max`` = 10000 and no way to list or unlink the names, and
+    ~9,940 leaked made ``mp.Lock()`` raise ``ENOSPC`` machine-wide. The tracker
+    ignores ``SIGTERM``/``SIGINT`` by design; it exits by itself, after
+    unlinking, once the last process holding its pipe is dead.
+
+    Returns ``True`` when a signal was delivered OR the only member left is the
+    tracker (the group is as dead as it may be made: that is success, not a
+    reason for a second, whole-group kill); ``False`` when the group had nothing
+    to signal. Where the table cannot be read, the tracker cannot be told from a
+    worker, so the whole group is signalled (the pre-nexus-x3m8e behaviour)
+    rather than left alive; that is the one case that can still leak.
+    """
+    rows_of = _rows if _rows is not None else _group_member_rows
+    running = _running if _running is not None else _pid_running
+    pause = _pause if _pause is not None else time.sleep
+    me = os.getpid()
+    signalled: set[int] = set()
+    delivered = False
+    tracker_left = False
+    _in_sparing_kill.active = True
+    try:
+        for round_no in range(_SPARE_MAX_ROUNDS):
+            rows = rows_of(pgid)
+            if rows is None:
+                if round_no == 0:
+                    _log.warning("process_group_table_unreadable_whole_group_kill", pgid=pgid)
+                    return _plain_killpg(pgid, sig)
+                break
+            tracker_left = any(RESOURCE_TRACKER_MARKER in cmd for _pid, cmd in rows)
+            victims = [
+                pid for pid, cmd in rows
+                if RESOURCE_TRACKER_MARKER not in cmd
+                and pid > 1
+                and pid != me
+                # A pid already signalled that is still listed is normally a
+                # zombie awaiting its parent's wait(); it is not a survivor.
+                and not (pid in signalled and not running(pid))
+            ]
+            if not victims:
+                break
+            for pid in victims:
+                try:
+                    os.kill(pid, sig)
+                except OSError:  # gone since the scan, or not ours
+                    continue
+                delivered = True
+                signalled.add(pid)
+            pause(_SPARE_ROUND_PAUSE_S)
+    finally:
+        _in_sparing_kill.active = False
+    return delivered or tracker_left
+
+
+def _pid_running(pid: int) -> bool:
+    from nexus.daemon.service_registry import pid_running  # noqa: PLC0415 — deferred: the daemon package imports this module
+
+    return pid_running(pid)
+
+
+def _signal_group(pgid: int, sig: int) -> bool:
+    """Signal process group *pgid* with *sig*; the single group-signalling
+    function behind :func:`safe_killpg` and :func:`safe_killpg_group`.
+
+    An uncatchable signal (``SIGKILL``) spares the ``multiprocessing`` resource
+    tracker (:func:`_kill_group_sparing_tracker`) so no kill path in nexus can
+    leak the group's POSIX named semaphores; any other signal goes to the whole
+    group. Where ``os.killpg`` does not exist (Windows) there is no group and
+    this returns ``False``; the callers handle that platform before they get
+    here."""
+    if getattr(os, "killpg", None) is None:
+        return False
+    if pgid == os.getpgrp():
+        # A caller handing in nx's own group is a caller bug; signalling it
+        # would take nx (or, sparing it, every sibling) down with the target.
+        _log.warning("process_group_refused_own_group", pgid=pgid, sig=sig)
+        return False
+    if sig in _UNCATCHABLE_SIGNALS and not getattr(_in_sparing_kill, "active", False):
+        return _kill_group_sparing_tracker(pgid, sig)
+    return _plain_killpg(pgid, sig)
 
 
 def isolation_popen_kwargs() -> dict[str, Any]:
@@ -279,6 +455,7 @@ def release(job: int | None) -> None:
 
 __all__ = [
     "KILL_SIGNAL",
+    "RESOURCE_TRACKER_MARKER",
     "contain",
     "isolation_popen_kwargs",
     "kill_tree",

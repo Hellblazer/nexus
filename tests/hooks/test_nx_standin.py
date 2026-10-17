@@ -173,9 +173,9 @@ def test_the_tool_descriptions_give_the_tables_sizes() -> None:
     description = mod.SETUP_DESCRIPTION
     rows = {
         m.group(1): (m.group(2), m.group(3))
-        for m in re.finditer(r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+) GB on disk \|", mod.QUESTION_TABLE)
+        for m in re.finditer(r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+(?: to [\d.]+)?) GB on disk \|", mod.QUESTION_TABLE)
     }
-    assert rows == {"Local": ("1.3", "2.4"), "Cloud": ("0.7", "1.6"), "CLI only": ("0.7", "1.6")}, rows
+    assert rows == {"Local": ("1.3", "2.4 to 3.1"), "Cloud": ("0.7", "2.1 to 2.3"), "CLI only": ("0.7", "2.1 to 2.3")}, rows
     local, cloud, cli = rows["Local"], rows["Cloud"], rows["CLI only"]
     assert f"up to about {local[0]} GB to download, {local[1]} GB on disk" in description
     assert f"up to about {cloud[0]} GB to download, {cloud[1]} GB on disk" in description
@@ -824,3 +824,26 @@ def test_the_tool_call_hands_the_broken_reason_to_both_tools(monkeypatch: pytest
         assert reply is not None
         text = reply["result"]["content"][0]["text"]
         assert reply["result"]["isError"] is True and mod.BROKEN_PHRASE in text and "not installed" not in text.lower(), name
+
+
+def _names_the_desktop_restart(text: str) -> bool:
+    return "Claude Desktop" in text and "quit the app" in text and "a new chat" in text
+
+
+def test_every_reconnect_instruction_names_the_desktop_restart() -> None:
+    """Claude Desktop starts a plugin's server once, when the app starts, and keeps it for every
+    new chat, with no Reconnect command; only quitting the app and opening it again replaces the
+    stand-in with the real server (nexus-93xx0, measured on hellmini 2026-10-16). So every text
+    that tells the user to reconnect also gives Desktop's step, not only Claude Code's."""
+    mod = _standin()
+    texts = {
+        "RECONNECT": mod.RECONNECT,
+        "instructions": mod.instructions(),
+        "instructions(broken)": mod.instructions(broken="the program exited 1"),
+        "setup_text": mod.setup_text(),
+        "setup_text(broken)": mod.setup_text(broken="the program exited 1"),
+        "setup_text(cloud)": mod.setup_text(mode="cloud"),
+        "SETUP_STATUS_DESCRIPTION": mod.SETUP_STATUS_DESCRIPTION,
+    }
+    missing = [name for name, text in texts.items() if not _names_the_desktop_restart(text)]
+    assert not missing, missing

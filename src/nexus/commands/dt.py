@@ -188,6 +188,26 @@ def _stamp_page_gap(uuid: str, missing: list[int]) -> bool:
         reader.close()
 
 
+def _fail_record_on_unexpected_error(
+    exc: Exception, *, uuid: str, path: str, failed: list[tuple[str, str, str]],
+) -> None:
+    """nexus-gjxkb: one record's indexing raised an exception that is not a NexusError (a defect
+    deep in the pipeline: ``ValueError: MultiBatchDocumentWriter: already finished`` aborted a
+    whole ``nx dt index`` batch). Fail THAT record and keep the traceback in the log; the command
+    still exits non-zero at the end, because an unexpected exception must not read as success.
+    A NexusError outside ``PER_RECORD_SURVIVABLE_EXCEPTIONS`` never reaches here: the tripwire
+    classifies those as run-level, and the callers re-raise them."""
+    _log.error(
+        "dt_index_unexpected_error",
+        uuid=uuid,
+        path=path,
+        error_type=type(exc).__name__,
+        error=str(exc),
+        exc_info=exc,
+    )
+    failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+
+
 def _index_record(
     uuid: str,
     path: str,
@@ -1108,8 +1128,16 @@ def index_cmd(
     # IndexRunVerifyRefused` clause.
     from nexus.errors import (  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
         IndexRunVerifyRefused,
+        NexusError,
         PER_RECORD_SURVIVABLE_EXCEPTIONS,
     )
+    # nexus-gjxkb: records failed by an exception that is not a NexusError (a defect); the run
+    # finishes the batch and then exits non-zero.
+    unexpected_failed = 0
+    # nexus-gjxkb: records failed by RuntimeError/ImportError (the extraction and corrupt-install
+    # cases the per-record catch below has always survived). The batch continues, but a run with
+    # failed records no longer exits 0 over them, the same rule as unexpected_failed.
+    errored_failed = 0
 
     # RDR-139 Layer D / nexus-fdk1x: probe DT reachability ONCE for
     # link-semantic/writeback/highlights (which now try HTTP then fall
@@ -1229,6 +1257,12 @@ def index_cmd(
                             error=str(exc),
                         )
                         failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+                    continue
+                except NexusError:
+                    raise  # run-level by the rlkgu classification: stops the run, as before
+                except Exception as exc:  # noqa: BLE001 — nexus-gjxkb: one record's defect must not abort the batch
+                    _fail_record_on_unexpected_error(exc, uuid=uuid, path=path, failed=failed)
+                    unexpected_failed += 1
                     continue
                 if content_indexed:
                     content_extracted += 1
@@ -1350,6 +1384,13 @@ def index_cmd(
                 error_type=type(exc).__name__,
             )
             failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+            errored_failed += 1
+            continue
+        except NexusError:
+            raise  # run-level by the rlkgu classification: stops the run, as before
+        except Exception as exc:  # noqa: BLE001 — nexus-gjxkb: one record's defect must not abort the batch
+            _fail_record_on_unexpected_error(exc, uuid=uuid, path=path, failed=failed)
+            unexpected_failed += 1
             continue
         # nexus-5xn3k.6 AC4: bucket on the indexer's OWN chunk count, not on
         # unconditional success — a chunks==0 return is the staleness gate's
@@ -1536,6 +1577,21 @@ def index_cmd(
         # bead — only a POSITIVE engine verdict or a write/identity
         # failure fails the run.
         raise_identity_drop_exception(subject="record")
+    if unexpected_failed or errored_failed:
+        parts = []
+        if unexpected_failed:
+            parts.append(
+                f"{unexpected_failed} record(s) failed with an unexpected error (see Failures above; "
+                "the 'dt_index_unexpected_error' log event carries the traceback)."
+            )
+        if errored_failed:
+            parts.append(
+                f"{errored_failed} record(s) failed with RuntimeError or ImportError (see Failures "
+                "above; the 'dt_index_failed' log event names each)."
+            )
+        raise click.ClickException(
+            " ".join(parts) + " The other records were indexed; the failed ones are retried by the next run."
+        )
     if coverage_failed:
         raise click.ClickException(
             f"{coverage_failed} record(s) failed page coverage (see Failures above); "

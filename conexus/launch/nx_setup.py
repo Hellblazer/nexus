@@ -276,6 +276,14 @@ COMPUTED_STATES: tuple[str, ...] = (INTERRUPTED, NONE, ERROR)
 #: Every value ``state`` can take in what ``status`` prints.
 ALL_STATES: tuple[str, ...] = (*STATES, *COMPUTED_STATES)
 
+#: A finished run's next step. Claude Desktop keeps a plugin's server for every new chat and has
+#: no Reconnect command, so there only quitting the app and opening it again starts the real
+#: server (nexus-93xx0).
+RECONNECT_NEXT: str = (
+    "Reconnect the nexus server: in Claude Code, /mcp or a new session; in Claude Desktop, quit the app "
+    "fully and open it again, because a new chat keeps the running server."
+)
+
 #: What the status file records about ``nx init``, across runs.
 INIT_BEGUN = "begun"
 INIT_FINISHED = "finished"
@@ -2135,7 +2143,7 @@ def _execute(run: _Run) -> int:
     if run.mode == MODE_CLI_ONLY:
         return run.end(
             DONE, "The Nexus CLI is installed. No service is set up.",
-            "Reconnect the nexus server or start a new session. To set up a service, ask the user first; if they agree, call setup with mode local.",
+            f"{RECONNECT_NEXT} To set up a service, ask the user first; if they agree, call setup with mode local.",
         )
 
     config = config_dir()
@@ -2152,7 +2160,7 @@ def _execute(run: _Run) -> int:
         run.step_done("verify")
         return run.end(
             DONE, "Nexus is installed and nx doctor passes.",
-            "Reconnect the nexus server or start a new session.", doctor="pass", doctor_failing=[],
+            RECONNECT_NEXT, doctor="pass", doctor_failing=[],
         )
     rows = _doctor_rows(text)
     return run.end(

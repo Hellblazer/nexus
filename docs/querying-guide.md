@@ -11,7 +11,7 @@ For the **tool catalog** (every tool, parameters, which server it lives on), see
 | `nx search` (CLI) | Quick chunk lookup from the terminal | Text chunks with topic grouping | < 1s |
 | `search()` MCP | Chunk search from agents, with topic scoping | Chunks grouped by topic, with boost | < 1s |
 | `query()` MCP | Document-level retrieval with catalog routing | Best snippet per document + metadata | < 2s |
-| `nx_answer` MCP / `/conexus:query` skill | Multi-step analytical queries | Synthesized answer | p50 80s, p95 217s |
+| `nx_answer` MCP | Multi-step analytical queries | Synthesized answer | p50 80s, p95 217s |
 
 `nx_answer`'s latency is measured, not estimated: p50 80.1s, p95 217.1s,
 p99 316.7s, mean 97.7s over 142 executed plans, with 0.7% finishing under 5s
@@ -33,7 +33,7 @@ User or Agent
      │                    │
      │                    └─ link graph traversal (follow_links)
      │
-     └─ nx_answer MCP / /conexus:query
+     └─ nx_answer MCP
               │
               ├─ Path 1: plan_match → plan_run
               ├─ Path 2: bundled operator chain
@@ -142,9 +142,9 @@ Catalog params (`author`, `content_type`, `follow_links`, `subtree`) require ser
 
 `search()` does **not** apply link boost; it does apply topic boost. Use `query()` when you want both the link graph and topic ranking to shape results.
 
-## /conexus:query skill → nx_answer MCP tool (analytical queries)
+## nx_answer MCP tool (analytical queries)
 
-For questions that require multiple retrieval steps — comparing sources, extracting structured data, generating from evidence — invoke the `nx_answer` MCP tool. The `/conexus:query` skill is a thin pointer to it (RDR-080 consolidation; replaces the earlier `query-planner` + `analytical-operator` agent pair).
+For questions that require multiple retrieval steps — comparing sources, extracting structured data, generating from evidence — invoke the `nx_answer` MCP tool (RDR-080 consolidation; replaces the earlier `query-planner` + `analytical-operator` agent pair). The `/conexus:query` skill that once pointed at it was retired: the model called the tool directly and never loaded the skill.
 
 ### The trunk: plan-match → plan-run → record
 
@@ -160,18 +160,20 @@ The verb skills (`/conexus:design-to-code-trace` [verb: research], `/conexus:dec
 
 ### Example analytical queries
 
+Ask these in plain words; Claude calls `nx_answer`.
+
 ```
 # Cross-source consistency
-/conexus:query Compare what the architecture docs say about caching with what the code actually does
+Compare what the architecture docs say about caching with what the code actually does
 
 # Citation chain analysis
-/conexus:query What papers does the Delos survey cite, and which of those are in our knowledge base?
+What papers does the Delos survey cite, and which of those are in our knowledge base?
 
 # Evidence-grounded extraction
-/conexus:query Extract all error handling patterns from the indexing pipeline code, with file locations
+Extract all error handling patterns from the indexing pipeline code, with file locations
 
 # Multi-corpus comparison
-/conexus:query How does our RDR process compare to what the literature recommends?
+How does our RDR process compare to what the literature recommends?
 ```
 
 ## Search quality features

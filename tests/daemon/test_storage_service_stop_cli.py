@@ -139,14 +139,20 @@ def _no_sweep(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def test_windows_supervisor_gets_its_own_group_and_a_hidden_console_never_detached() -> None:
     kw = daemon_mod._supervisor_popen_kwargs(platform="win32")
-    assert kw == {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
+    # nexus-x3m8e: every detached spawn also carries a stable cwd.
+    assert kw["creationflags"] == CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    assert set(kw) == {"creationflags", "cwd"}
     # DETACHED_PROCESS leaves no console to attach to, so CTRL_BREAK could not
     # reach the supervisor (T2 nexus_rdr/224-research-20).
     assert kw["creationflags"] & DETACHED_PROCESS == 0
 
 
-def test_posix_supervisor_spawn_is_unchanged() -> None:
-    assert daemon_mod._supervisor_popen_kwargs(platform="linux") == {"start_new_session": True}
+def test_posix_supervisor_spawn_adds_only_the_stable_cwd() -> None:
+    # nexus-x3m8e: new session as before, plus the stable cwd (and no env key
+    # unless NEXUS_CONFIG_DIR is relative).
+    kw = daemon_mod._supervisor_popen_kwargs(platform="linux")
+    assert kw["start_new_session"] is True
+    assert set(kw) == {"start_new_session", "cwd"}
 
 
 def test_ensure_storage_supervisor_spawns_with_those_kwargs(

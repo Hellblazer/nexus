@@ -38,7 +38,7 @@ REGISTRY_AGENTS: dict = REGISTRY.get("agents", {})
 _STANDALONE_SKILLS = {
     "cli-controller", "nexus",
     "brainstorming-gate", "orchestration",
-    "using-nx-skills", "writing-nx-skills",
+    "writing-nx-skills",
     "rdr-show", "rdr-create",
     # rdr-list has no skill any more (nexus-cnzei.4 fix round): skills/rdr-list
     # was deleted, not the command — its content depended on the command's
@@ -55,7 +55,7 @@ _STANDALONE_SKILLS = {
     # sharing one machine with them, no agent dispatch.
     "peer-messaging",
     # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
-    "query", "enrich-plan", "knowledge-tidying", "plan-validation",
+    "enrich-plan", "knowledge-tidying", "plan-validation",
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay
     # nexus-cnzei.4: "debug"/"research"/"review" renamed off their bare verb
     # names — those names collided with, respectively, the debugger-dispatch
@@ -114,15 +114,15 @@ def _collect_shared_links() -> list[tuple[Path, str]]:
     return results
 
 
-#: nexus-cnzei.6 fix round (CRE 4): the 8 skills that dedupe the
+#: nexus-cnzei.6 fix round (CRE 4): the 7 skills that dedupe the
 #: tier-aware-discipline preamble into conexus/resources/tier-discipline.md
 #: (see that file's own header) each carry a link to it; nothing pinned
-#: those links resolve, or that the exact set of 8 skills carrying the link
+#: those links resolve, or that the exact set of 7 skills carrying the link
 #: stays 8 (a 9th skill silently re-duplicating the full block inline,
 #: instead of linking, would go unnoticed).
 _TIER_DISCIPLINE_SKILLS = frozenset({
     "analyze", "design-to-code-trace", "deep-analysis", "document",
-    "knowledge-tidying", "query", "research-synthesis", "why-was-this-written",
+    "knowledge-tidying", "research-synthesis", "why-was-this-written",
 })
 
 
@@ -366,7 +366,7 @@ class TestSkillDescriptionCSO:
 
     def test_every_skill_frontmatter_is_valid(self) -> None:
         skills = skill_skill_mds()
-        assert len(skills) >= 40, f"only {len(skills)} skills examined"
+        assert len(skills) >= 38, f"only {len(skills)} skills examined"  # 39 after nexus-dg7i6.6 retired six; was 45
         offenders: list[str] = []
         for skill_path in skills:
             name = skill_path.parent.name
@@ -395,6 +395,16 @@ class TestSkillDescriptionCSO:
                 if kw in desc:
                     offenders.append(f"{name}/SKILL.md: description contains workflow keyword {kw!r}")
         assert not offenders, "\n".join(offenders)
+
+
+def _hides_from_model(path: Path) -> bool:
+    """True when the file's frontmatter carries `disable-model-invocation: true`.
+
+    A regex on the frontmatter block, not yaml.safe_load, for the same reason
+    as ``_description_bytes``: some command frontmatter is not strict YAML.
+    """
+    fm = re.match(r"^---\n(.*?)\n---", path.read_text(encoding="utf-8"), re.DOTALL)
+    return bool(fm and re.search(r"(?m)^disable-model-invocation:\s*true\s*$", fm.group(1)))
 
 
 class TestSkillListingByteBudget:
@@ -428,7 +438,13 @@ class TestSkillListingByteBudget:
         return len(m.group(1).strip().encode("utf-8")) if m else 0
 
     def test_total_description_bytes_under_budget(self) -> None:
-        paths = list(skill_skill_mds()) + command_files() + agent_files()
+        # nexus-dg7i6.2: an entry with `disable-model-invocation: true` is not in
+        # the model's listing at all, so its description is not counted here.
+        paths = [
+            p
+            for p in list(skill_skill_mds()) + command_files() + agent_files()
+            if not _hides_from_model(p)
+        ]
         assert paths, "no skill/command/agent files found — path resolution broke"
         total = sum(self._description_bytes(p) for p in paths)
         assert total < self._TOTAL_DESCRIPTION_BUDGET_BYTES, (
@@ -438,6 +454,197 @@ class TestSkillListingByteBudget:
             f"listing is at real risk of Claude Code dropping the least-"
             f"invoked skills' descriptions (injection audit S3)"
         )
+
+class TestModelHiddenCommands:
+    """nexus-dg7i6.2: ten commands are user-only, so the model's listing does
+    not carry them. nexus-dg7i6.6: four of them (debug, review-code,
+    test-validate, implement) wrapped a skill that was then retired, so they
+    now wrap their agent directly.
+
+    Agents load relevant skills less as the listing grows, and the description
+    of an entry that does not apply suppresses loading (T3 notes 1.11.758 and
+    1.11.759). Eight of these commands wrap a same-topic skill and had no
+    model-initiated invocation in 30 days; ``rdr-list`` and ``nx-preflight``
+    are user-only. ``disable-model-invocation: true`` removes the entry from
+    the model's context and keeps the ``/slash`` form for the user.
+
+    The cost of hiding a command is every place that told the model to run it:
+    the model cannot run it any more, so model-facing routing must name the
+    skill (or the CLI line) instead. User-facing documents (README, the
+    registry's ``slash_command`` fields) keep naming the commands.
+    """
+
+    #: command stem -> the skill or agent the model is routed to instead (None:
+    #: no wrapped destination; the model-facing alternative is a CLI line,
+    #: pinned below). A destination is a skill directory or an agent file; the
+    #: four agents are the ones whose wrapper skills nexus-dg7i6.6 retired.
+    HIDDEN: dict[str, str | None] = {
+        "debug": "debugger",
+        "review-code": "code-review-expert",
+        "test-validate": "test-validator",
+        "create-plan": "strategic-planning",
+        "implement": "developer",
+        "research": "research-synthesis",
+        "analyze-code": "codebase-analysis",
+        "plan-audit": "plan-validation",
+        "rdr-list": None,
+        "nx-preflight": None,
+    }
+
+    _TEXT_SUFFIXES = {".md", ".py", ".sh", ".json", ".yaml", ".yml", ".txt"}
+
+    def _model_facing_files(self) -> list[Path]:
+        """Everything the model reads as instruction: agents, skills, shared
+        resources, hook scripts, the commands that stay model-invocable, and the
+        wheel's own hook texts. README, CHANGELOG and registry.yaml are user-facing
+        documents and stay out."""
+        files: list[Path] = []
+        for sub in ("agents", "skills", "resources", "hooks"):
+            files += [
+                p for p in (PLUGIN_DIR / sub).rglob("*")
+                if p.is_file() and p.suffix in self._TEXT_SUFFIXES
+            ]
+        files += [p for p in command_files() if not _hides_from_model(p)]
+        src = REPO_ROOT / "src" / "nexus"
+        files += sorted((src / "hooks").glob("*.py")) + [src / "session_start_guidance.py"]
+        return files
+
+    def test_every_hidden_command_carries_the_flag(self) -> None:
+        missing = [
+            name for name in self.HIDDEN
+            if not _hides_from_model(COMMANDS_DIR / f"{name}.md")
+        ]
+        assert not missing, f"commands without `disable-model-invocation: true`: {missing}"
+
+    def test_no_other_command_is_hidden(self) -> None:
+        """The set is closed: the model does invoke continuation, setup,
+        pdf-process, devonthink-index and the rdr-* lifecycle commands."""
+        hidden = {p.stem for p in command_files() if _hides_from_model(p)}
+        assert hidden == set(self.HIDDEN), (
+            f"hidden commands differ from the audited set: extra={sorted(hidden - set(self.HIDDEN))} "
+            f"missing={sorted(set(self.HIDDEN) - hidden)}"
+        )
+
+    @staticmethod
+    def _is_agent(destination: str) -> bool:
+        return (AGENTS_DIR / f"{destination}.md").is_file()
+
+    def test_the_destination_each_hidden_command_wraps_exists(self) -> None:
+        for name, dest in self.HIDDEN.items():
+            if dest is not None:
+                assert self._is_agent(dest) or (SKILLS_DIR / dest / "SKILL.md").is_file(), (
+                    f"/{name} -> {dest!r} is neither a skill nor an agent any more"
+                )
+
+    def test_a_command_never_invokes_a_skill_that_is_gone(self) -> None:
+        """nexus-dg7i6.6: the commands for the retired wrapper skills dispatch
+        the agent by name. A body that still says "Invoke the **<skill>** skill"
+        for a skill with no directory would send the user's command nowhere."""
+        invoke = re.compile(r"Invoke the \*\*([\w-]+)\*\* skill")
+        offenders = []
+        for path in command_files():
+            for skill in invoke.findall(path.read_text(encoding="utf-8")):
+                if not (SKILLS_DIR / skill / "SKILL.md").is_file():
+                    offenders.append(f"{path.name}: skill {skill!r}")
+        assert not offenders, "\n".join(offenders)
+        for stem in ("debug", "review-code", "test-validate", "implement"):
+            text = (COMMANDS_DIR / f"{stem}.md").read_text(encoding="utf-8")
+            assert f"subagent_type: conexus:{self.HIDDEN[stem]}" in text, (
+                f"/{stem} no longer dispatches the {self.HIDDEN[stem]} agent"
+            )
+
+    def test_no_model_facing_text_names_a_hidden_command(self) -> None:
+        names = "|".join(re.escape(n) for n in self.HIDDEN)
+        # `(?![\w-])` keeps `/conexus:debugging` and `/conexus:rdr-list-foo` from matching `debug`.
+        ref = re.compile(rf"(?<![\w-])/(?:conexus|nx):({names})(?![\w-])")
+        offenders: list[str] = []
+        for path in self._model_facing_files():
+            for m in ref.finditer(path.read_text(encoding="utf-8")):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {m.group(0)}")
+        assert not offenders, (
+            "model-facing text routes the model to a command it can no longer run; "
+            "name the skill (see TestModelHiddenCommands.HIDDEN) or the CLI line instead:\n"
+            + "\n".join(sorted(offenders))
+        )
+
+    def test_the_routing_skill_names_the_destination_in_place_of_each_command(self) -> None:
+        """The orchestration skill replaced using-nx-skills as the routing
+        surface (nexus-dg7i6.6): a skill destination appears in its
+        ``/conexus:`` form in the reference, an agent destination by name."""
+        text = (SKILLS_DIR / "orchestration" / "reference.md").read_text(encoding="utf-8")
+        for name, dest in self.HIDDEN.items():
+            if dest is None:
+                continue
+            needle = dest if self._is_agent(dest) else f"/conexus:{dest}"
+            assert needle in text, (
+                f"orchestration/reference.md no longer routes to {dest!r} (was /conexus:{name})"
+            )
+        assert "nx rdr preamble rdr-list" in text, "the RDR list route lost its CLI line"
+
+    def test_the_registry_flag_matches_the_frontmatter(self) -> None:
+        entries = {**REGISTRY.get("utility_commands", {}), **REGISTRY.get("rdr_skills", {})}
+        checked = 0
+        for name, meta in entries.items():
+            path = COMMANDS_DIR / f"{name}.md"
+            if path.is_file() and "disable_model_invocation" in meta:
+                checked += 1
+                assert meta["disable_model_invocation"] == _hides_from_model(path), (
+                    f"registry.yaml {name}.disable_model_invocation "
+                    f"disagrees with {path.name}'s frontmatter"
+                )
+        for name in ("nx-preflight", "plan-audit", "rdr-list"):
+            assert entries[name].get("disable_model_invocation") is True, f"registry.yaml {name} lost its flag"
+        assert checked >= 5, f"only {checked} registry entries were compared; the walk found nothing to check"
+
+
+class TestRetiredWrapperSkillsLiveInTheOrchestrationSkill:
+    """nexus-dg7i6.6: code-review, debugging, development, test-validation,
+    query and using-nx-skills were retired (zero model loads in 30 days). What a
+    CALLER still needs from them moved into the orchestration skill. Each phrase
+    below is the anchor of one moved rule; a missing one means the rule was lost
+    in a later edit, not moved."""
+
+    _SKILL = (
+        "Ship when <X>", "never \"no criticals\"", "ship-blocker against the bar, or a bead",
+        "ONE confirmation pass per reviewer", "CONFIRMED-CLOSED", "weakens, removes or vacuates an assertion",
+        "first live run into its bead", "Run both reviewers", "UNKNOWN: resolve first",
+        "Consumers.", "Final point.", "Modes.", "Bounds.", "State.",
+        "ESCALATION: Debugger Required", "circuit-breaker-fired-for-", "escalation-guard",
+        "Suspect categories for the diff class", "What was NOT changed on purpose",
+        "link-context",
+        # The headings AGENTS.md and /review-code cite by name, and the How to Use
+        # line that sends a loader on to the reference.md sections below.
+        "## Review Gate", "## Review Rounds", "## Implementer and Debugger Dispatch",
+        "§ Skill Routing", "§ Working Rules", "§ Red Flags",
+    )
+    _REFERENCE = (
+        "Skill Routing", "REDUCED FROM MANY DOCUMENTS", "p50 80s", "Sequential thinking",
+        "T2 ttl", "Common Mistakes", "Red Flags", "phase-review-gate", "rdr-create",
+        "mcp__plugin_conexus_nexus__plan_search", "mcp__plugin_conexus_nexus__nx_answer",
+    )
+
+    def test_every_moved_rule_is_present(self) -> None:
+        skill = (SKILLS_DIR / "orchestration" / "SKILL.md").read_text(encoding="utf-8")
+        ref = (SKILLS_DIR / "orchestration" / "reference.md").read_text(encoding="utf-8")
+        missing = [a for a in self._SKILL if a not in skill] + [a for a in self._REFERENCE if a not in ref]
+        assert not missing, f"moved rules no longer in the orchestration skill: {missing}"
+
+    def test_the_retired_skills_are_gone_and_unregistered(self) -> None:
+        retired = ("code-review", "debugging", "development", "test-validation", "query", "using-nx-skills")
+        for name in retired:
+            assert not (SKILLS_DIR / name).exists(), f"skills/{name} came back"
+            assert name not in REGISTRY.get("standalone_skills", {}), f"registry lists retired skill {name}"
+        assert not {m.get("skill") for m in REGISTRY_AGENTS.values()} & set(retired)
+
+    def test_both_reviewers_flag_a_relay_with_no_acceptance_bar(self) -> None:
+        # The Review Gate loads only for an unsure caller; a caller who already
+        # chose a reviewer hears about a missing "Ship when" from the reviewer.
+        for agent in ("code-review-expert", "substantive-critic"):
+            text = (PLUGIN_DIR / "agents" / f"{agent}.md").read_text(encoding="utf-8")
+            assert "NO ACCEPTANCE BAR" in text, agent
+            front = text.split("---", 2)[1]
+            assert "Ship when <X>" in front, f"{agent} description does not ask for the bar"
+
 
 def _command_bash_block(text: str) -> str | None:
     """Return the body of the documented ```! fenced bash block, or None.
@@ -779,7 +986,7 @@ class TestPluginLinksResolve:
 class TestTierDisciplineLinks:
     """nexus-cnzei.6 fix round (CRE 4)."""
 
-    def test_exactly_the_known_eight_skills_carry_the_link(self) -> None:
+    def test_exactly_the_known_seven_skills_carry_the_link(self) -> None:
         linking_skill_names = {
             src.parent.name for src, _ in _collect_tier_discipline_links()
             if src.parent.parent == SKILLS_DIR

@@ -96,7 +96,7 @@ mcp__plugin_conexus_nexus-catalog__link_query(link_type="cites", created_by="bib
 **Link types**: `cites` (citation), `implements-heuristic` (auto code→RDR), `supersedes`, `quotes`, `relates`, `comments`, `implements` (manual).
 **Two graph views**: `mcp__plugin_conexus_nexus-catalog__links` returns live-document links only. `mcp__plugin_conexus_nexus-catalog__link_query` returns all links including orphans.
 Use catalog for: author queries, citation traversal, provenance chains, corpus-scoped search.
-The `/conexus:query` skill handles full catalog-aware plan execution.
+The `nx_answer` MCP tool handles full catalog-aware plan execution.
 
 ## Indexing (CLI only — no MCP equivalent)
 

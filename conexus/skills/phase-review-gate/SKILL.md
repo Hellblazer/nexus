@@ -27,7 +27,7 @@ Nothing enforces this. No command checks the list and nothing blocks the close. 
 ## Limits
 
 - It checks coverage, not correctness: a bead pointer passes even when that bead's acceptance criteria are weak. Open the evidence and read it.
-- It does not check that code paths between accounted-for items work together. RDR-112 Phase 3 (2026-05-18) covered every item and still shipped a production regression, caught only by a second code review that named boundary-spanning suspect categories. Where the phase ships integration-seam code (process spawning, supervisor interaction, RPC wiring, env-var resolution), also dispatch `code-review-expert` with the suspect categories from `/conexus:code-review` § Prompt rigour.
+- It does not check that code paths between accounted-for items work together. RDR-112 Phase 3 (2026-05-18) covered every item and still shipped a production regression, caught only by a second code review that named boundary-spanning suspect categories. Where the phase ships integration-seam code (process spawning, supervisor interaction, RPC wiring, env-var resolution), also dispatch `code-review-expert` with the suspect categories from the `orchestration` skill's Review Gate § first-pass reviewer brief.
 
 ## Relationship to Other Gates
 

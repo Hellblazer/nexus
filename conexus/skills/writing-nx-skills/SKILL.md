@@ -42,9 +42,9 @@ CI-enforced required sections (`test_plugin_structure.py` will fail without thes
 Also expected:
 - `## When This Skill Activates`
 
-**Hybrid skills** (e.g., query): Do significant direct work AND dispatch agents. These are still classified as agent-delegating — they must have all four CI-enforced sections above. If a skill dispatches agents at any point, it is agent-delegating.
+**Hybrid skills**: Do significant direct work AND dispatch agents. These are still classified as agent-delegating — they must have all four CI-enforced sections above. If a skill dispatches agents at any point, it is agent-delegating.
 
-**Standalone skills** (nexus, serena-code-nav, cli-controller, brainstorming-gate, using-nx-skills, writing-nx-skills): Provide guidance directly without agent delegation. Listed in `_STANDALONE_SKILLS` in `tests/test_plugin_structure.py`.
+**Standalone skills** (nexus, serena-code-nav, cli-controller, brainstorming-gate, writing-nx-skills): Provide guidance directly without agent delegation. Listed in `_STANDALONE_SKILLS` in `tests/test_plugin_structure.py`.
 Required sections:
 - `## When This Skill Activates`
 - `## Success Criteria` (optional for pure reference)
@@ -90,23 +90,21 @@ After creating a skill, update `conexus/registry.yaml`:
 - RDR: under `rdr_skills:` with slash_command and triggers
 - If slash command differs from skill name: add to `naming_aliases`
 
-### Updating using-nx-skills
+### Routing a new skill
 
-When adding a new skill, also add it to `conexus/skills/using-nx-skills/SKILL.md` routing tree so it is discoverable when the skill is explicitly invoked (`/conexus:using-nx-skills`).
-
-**SessionStart delivery is a separate copy as of nexus-h33x8.4.** The text actually injected at SessionStart no longer comes from a live `cat` of this file — it is `GUIDANCE_IMPERATIVE` in `src/nexus/session_start_guidance.py` (PyPI wheel, Tier B), moved there so guidance edits ship at reinstall/PyPI-release cadence instead of plugin-release cadence. Editing `SKILL.md` alone changes what an explicit `/conexus:using-nx-skills` invocation sees; it does **not** change what a fresh session sees until `GUIDANCE_IMPERATIVE` is updated too (`scripts/reinstall-tool.sh` to pick it up locally). nexus-h33x8.5 is expected to diverge the two on purpose (short imperative at SessionStart, full routing menu behind the Skill body) — until then, keep both in sync by hand for anything that should be session-visible.
+Add it to `conexus/skills/orchestration/reference.md` § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in `src/nexus/session_start_guidance.py`, PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget (`tests/test_session_start_guidance.py`, `tests/hooks/test_session_start_combined_budget.py`). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days (nexus-dg7i6.6).
 
 ## Known Pitfalls
 
-### /beads:update --description silently corrupts multi-line content
+### bd update --description silently corrupts multi-line content
 
-**Never** instruct agents to use `/beads:update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
+**Never** instruct agents to use `bd update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
 
 **Correct pattern**: Write content to a temp file via the Write tool, then use `--body-file`:
 
 ```
 Step 1 — Write enriched content using the Write tool (file_path: /tmp/bead-<id>.md)
-Step 2 — /beads:update <id> --body-file /tmp/bead-<id>.md
+Step 2 — bd update <id> --body-file /tmp/bead-<id>.md
 ```
 
 Short single-phrase values (e.g. `--design "revised scope"`) are safe. The bug only affects multi-line content with markdown formatting.
@@ -129,7 +127,7 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 **Convention (not CI-enforced but expected):**
 - [ ] `effort` matches skill type (low=reference, medium=workflow, high=analysis)
 - [ ] Added to `conexus/registry.yaml` (including `model_summary` for agent skills)
-- [ ] Added to `using-nx-skills` routing tree
+- [ ] Named in `orchestration/reference.md` § Skill Routing
 
 **Verify before committing:**
 ```bash

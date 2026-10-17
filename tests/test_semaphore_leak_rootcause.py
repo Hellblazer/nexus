@@ -1,18 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Process-group cleanup regressions for ``nexus-ze2a`` + ``nexus-dc57``.
+"""Process-group cleanup regressions for ``nexus-ze2a`` + ``nexus-dc57``
+(root cause corrected by nexus-x3m8e).
 
 Both bugs surface as ``[Errno 28] No space left on device`` on
-``_multiprocessing.SemLock()`` and share a single root cause:
+``_multiprocessing.SemLock()``.
 
-When a long-running Python subprocess (T1 ChromaDB / MinerU) dies
-uncleanly, its **worker children** get orphaned. Workers hold POSIX
-named semaphores allocated by ``multiprocessing``. Without a process-
-group kill that also reaches ``resource_tracker``, those semaphores
-are never ``sem_unlink()``-ed until reboot.
+THE ORIGINAL PREMISE WAS THE REVERSE OF THE TRUTH. It said a process-group kill
+must REACH ``resource_tracker`` so it can clean up. The tracker is the process
+that ``sem_unlink()``s a pool's named semaphores once the pool is dead (it
+ignores ``SIGTERM``/``SIGINT`` by design and exits by itself when the last
+process holding its pipe is gone); a group-wide ``SIGKILL`` takes it down with
+the workers, so every semaphore the group made is leaked until reboot, and
+macOS has a fixed table of 10,000 with no way to list or unlink the names.
+Measured with a real spawn-context pool: a whole-group ``SIGKILL`` leaked all 5
+of its semaphores and a kill that spares the tracker leaked none
+(``tests/test_process_group_sparing_tracker.py``).
 
-The fix: spawn with ``start_new_session=True`` (own process group) +
-cleanup via ``os.killpg(pgid, …)`` so SIGTERM / SIGKILL reaches the
-whole subtree.
+The rule now: spawn with ``start_new_session=True`` (own process group) so the
+whole subtree is one killable unit, and signal it ONLY through
+``nexus.util.process_group`` (``safe_killpg`` / ``safe_killpg_group`` /
+``kill_tree``): ``SIGTERM`` goes to the whole group (the tracker ignores it),
+and a hard kill reaches every member EXCEPT the tracker. A raw ``os.killpg``
+anywhere else in ``src/nexus`` is a lint failure
+(``tests/test_process_group_killpg_lint.py``).
 """
 from __future__ import annotations
 
@@ -194,3 +204,10 @@ def test_doctor_check_resources_surfaces_errno28(monkeypatch) -> None:
     assert result.exit_code == 2, result.output
     out = result.output.lower()
     assert "errno 28" in out or "semaphore" in out
+    # nexus-x3m8e: the remedy text must not promise what the stop no longer
+    # does (it used to say `nx mineru stop` "kills the whole process group";
+    # it now spares the resource tracker, and the sweep never SIGKILLs one).
+    flat = " ".join(out.split())
+    assert "kills the whole process group" not in flat
+    assert "spares its multiprocessing resource tracker" in flat
+    assert "never sigkills a tracker" in flat

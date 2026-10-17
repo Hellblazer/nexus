@@ -71,6 +71,13 @@ from nexus._winsec import (  # the SID lookup and the user-directory grant live 
 from nexus.bounded_subprocess import run_bounded
 from nexus.util import win_console
 from nexus.util.process_group import KILL_SIGNAL
+from nexus.util.stable_cwd import (  # noqa: F401 — re-exported: the detached-daemon cwd rule (nexus-x3m8e); stdlib-only so the hooks can share it, re-exported here as its home
+    REPO_ROOT_ENV,
+    current_project_root,
+    detached_spawn_kwargs,
+    enter_stable_daemon_cwd,
+    stable_daemon_cwd,
+)
 
 _log = structlog.get_logger(__name__)
 

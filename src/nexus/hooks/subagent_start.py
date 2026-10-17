@@ -281,7 +281,7 @@ _CATALOG_LINKING = (
     "chunk_text_hash.\n\n"
     "Link types: cites, implements, implements-heuristic, supersedes, quotes, "
     "relates, comments.\n\n"
-    "For full plan execution use /conexus:query.\n"
+    "For full plan execution call nx_answer.\n"
 )
 
 

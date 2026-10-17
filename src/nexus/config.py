@@ -1506,13 +1506,33 @@ def unset_credential(name: str) -> bool:
     return True
 
 
+def _per_repo_config_path(repo_root: Path | None) -> Path | None:
+    """Where the per-repo ``.nexus.yml`` is read from: *repo_root*, else the
+    directory named by ``NEXUS_REPO_ROOT`` (set by a spawner that moved a
+    detached child off its own launch directory, nexus-x3m8e), else the working
+    directory. ``None`` when none of them exists: a process whose working
+    directory was deleted has no per-repo config, and ``Path.cwd()`` raising
+    ``FileNotFoundError`` from every config read is exactly the fault class the
+    detached-daemon cwd rule exists to remove."""
+    if repo_root is not None:
+        return repo_root / ".nexus.yml"
+    named = os.environ.get("NEXUS_REPO_ROOT", "").strip()
+    if named and os.path.isabs(named) and os.path.isdir(named):
+        return Path(named) / ".nexus.yml"
+    try:
+        return Path.cwd() / ".nexus.yml"
+    except OSError:
+        return None
+
+
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     """Load and merge configuration.
 
     Precedence (highest last wins):
       1. Built-in defaults
       2. Global config   — ``~/.config/nexus/config.yml``
-      3. Per-repo config — ``<repo_root>/.nexus.yml`` (or cwd if repo_root is None)
+      3. Per-repo config — ``<repo_root>/.nexus.yml`` (or ``$NEXUS_REPO_ROOT``,
+         then cwd, if repo_root is None)
       4. Env vars        — ``NX_*`` variables
     """
     config = copy.deepcopy(_DEFAULTS)
@@ -1528,8 +1548,8 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
         config = _deep_merge(config, data)
 
     # Per-repo config
-    repo_config_path = (repo_root or Path.cwd()) / ".nexus.yml"
-    if repo_config_path.exists():
+    repo_config_path = _per_repo_config_path(repo_root)
+    if repo_config_path is not None and repo_config_path.exists():
         with repo_config_path.open(encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if not isinstance(data, dict):

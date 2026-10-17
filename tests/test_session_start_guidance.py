@@ -1,32 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""nexus-h33x8.4/.5: SessionStart guidance imperative — Tier B delivery
-and the content inversion.
+"""nexus-h33x8.4/.5, nexus-dg7i6.6: SessionStart guidance imperative -- Tier B
+delivery, the byte budget, and the destinations it names.
 
-Pins four things:
+Pins:
 
 1. Byte budget + imperative-first (nexus-h33x8.5 VERIFICATION 1):
-   ``GUIDANCE_IMPERATIVE`` is the SHORT, SessionStart-only form —
-   imperative + trigger conditions, no routing menu — and stays well
-   under its budget with the imperative sentence within the first 500
-   bytes. This is the mechanical, cheap, non-negotiable check the bead
-   calls for; ``TestGuidanceByteBudgetIntegration`` in test_hooks.py
-   pins the same property end-to-end through ``session_start()``.
-2. No content loss (nexus-h33x8.5 VERIFICATION 4): every routing
-   destination (``/conexus:*`` command, MCP tool) that the guidance
-   text named before this bead must still be reachable from the Skill
-   body (``SKILL.md`` is unchanged in content by this bead — see
-   ``test_all_destinations_still_reachable_from_skill_md``).
-3. ``GUIDANCE_IMPERATIVE`` intentionally DIVERGES from ``SKILL.md`` as
-   of this bead — the old byte-for-byte parity test pinned by
-   nexus-h33x8.4 is retired below (that assertion existed exactly to
-   be superseded here; see the .4/.5 module docstrings).
-4. ``legacy_cat_channel_active`` / ``guidance_block``: the interim
-   double-emission guard required by nexus-h33x8.4's item 4 — suppress
-   the wheel-side emission whenever the installed (pinned) plugin's own
-   ``hooks.json`` still carries the legacy ``cat .../SKILL.md`` entry,
-   fail OPEN (emit) whenever the check cannot be completed. Unaffected
-   by the .5 content inversion; re-pinned here unchanged.
+   ``GUIDANCE_IMPERATIVE`` is the SHORT SessionStart-only form -- imperative,
+   trigger conditions, and one short destination per condition -- under its
+   budget with the imperative sentence within the first 500 bytes.
+   ``TestGuidanceByteBudgetIntegration`` in test_hooks.py pins the same
+   property end-to-end through ``session_start()``.
+2. Destinations (nexus-dg7i6.6): ``using-nx-skills`` was retired, so the text
+   no longer points at a skill the reader must load first. Every skill or
+   agent it names must exist, and every trigger condition must still carry its
+   destination. The routing menu it used to hold lives in
+   ``conexus/skills/orchestration/reference.md``; every destination the
+   SessionStart channel ever named stays reachable from there
+   (``test_all_destinations_still_reachable_from_the_routing_reference``).
+3. ``legacy_cat_channel_active`` / ``guidance_block``: the interim
+   double-emission guard required by nexus-h33x8.4's item 4 -- suppress the
+   wheel-side emission whenever the installed (pinned) plugin's own
+   ``hooks.json`` still carries the legacy ``cat`` entry, fail OPEN (emit)
+   whenever the check cannot be completed.
 """
 from __future__ import annotations
 
@@ -41,7 +37,9 @@ from nexus.session_start_guidance import (
 )
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-SKILL_MD = REPO_ROOT / "conexus" / "skills" / "using-nx-skills" / "SKILL.md"
+SKILLS_DIR = REPO_ROOT / "conexus" / "skills"
+AGENTS_DIR = REPO_ROOT / "conexus" / "agents"
+ROUTING_MD = SKILLS_DIR / "orchestration" / "reference.md"
 
 #: Budget for the SessionStart-only imperative (nexus-h33x8.5 VERIFICATION
 #: 1: SessionStart total under 6,000 bytes). This constant carries only
@@ -49,62 +47,62 @@ SKILL_MD = REPO_ROOT / "conexus" / "skills" / "using-nx-skills" / "SKILL.md"
 #: also prefixes "Nexus ready (session: ...)." (~40-70 bytes) and an
 #: occasional best-effort stale-process NOTE — so 1,500 leaves headroom
 #: for both while keeping this the dominant, hard-pinned share of the
-#: budget the bead actually controls. The current text measures 1,140
-#: bytes (2026-08-20); a regression toward the old ~7,500-byte routing-
+#: budget the bead actually controls. The current text measures 1,135
+#: bytes (2026-10-17, nexus-dg7i6.6); a regression toward the old ~7,500-byte routing-
 #: menu copy would trip this long before the shared total budget did.
 _IMPERATIVE_BUDGET_BYTES = 1500
 
-#: The 39 routing destinations named by GUIDANCE_IMPERATIVE as it stood
-#: at nexus-h33x8.4 landing (2026-08-08), before the .5 content
-#: inversion — 36 ``/conexus:*`` commands + 3 ``mcp__...`` tool tokens.
-#: Frozen here (not re-derived from git history) as the VERIFICATION 4
-#: baseline: every one of these must still be reachable from SKILL.md
-#: after the inversion, even though none of them survive in the short
-#: SessionStart form any more.
+#: The routing destinations the SessionStart channel named at nexus-h33x8.4
+#: landing (2026-08-08), before the .5 content inversion: 36 ``/conexus:*``
+#: commands + 3 ``mcp__...`` tool tokens. Frozen here (not re-derived from the
+#: commit history) as the VERIFICATION 4 baseline: every one of them must stay
+#: reachable from the routing reference even though none survive in the short
+#: SessionStart form.
+#:
+#: nexus-dg7i6.2: nine command destinations became user-only
+#: (``disable-model-invocation: true``) and the routing named the skill each
+#: wrapped; ``/conexus:rdr-list`` became the CLI line ``nx rdr preamble
+#: rdr-list`` (pinned by ``TestModelHiddenCommands``).
+#: nexus-dg7i6.6: five of those skills (code-review, debugging, development,
+#: query, test-validation) were retired as wrappers the model never loaded. Their
+#: rows are gone: the agents they wrapped are dispatched directly (named in the
+#: reference's routing tables and in ``GUIDANCE_IMPERATIVE``), and ``nx_answer``
+#: replaced ``/conexus:query``. 33 rows remain.
 _PRE_INVERSION_DESTINATIONS = frozenset(
     {
         "/conexus:analyze",
-        "/conexus:analyze-code",
+        "/conexus:codebase-analysis",  # was /conexus:analyze-code (nexus-dg7i6.2)
         "/conexus:architecture",
         "/conexus:brainstorming-gate",
         "/conexus:catalog",
         "/conexus:cli-controller",
-        "/conexus:create-plan",
-        "/conexus:debug",
+        "/conexus:strategic-planning",  # was /conexus:create-plan (nexus-dg7i6.2)
         "/conexus:deep-analysis",
         "/conexus:document",
         "/conexus:enrich-plan",
         "/conexus:finishing-branch",
         "/conexus:git-worktrees",
-        "/conexus:implement",
-        # nexus-cnzei.4: /conexus:knowledge-tidy (command) was deleted and
-        # merged into the /conexus:knowledge-tidying skill, which is now the
-        # sole entry point — the destination moved, not dropped.
+        # nexus-cnzei.4: /conexus:knowledge-tidy (command) was merged into the
+        # /conexus:knowledge-tidying skill, the sole entry point now.
         "/conexus:knowledge-tidying",
         "/conexus:nexus",
         "/conexus:pdf-process",
         "/conexus:phase-review-gate",
-        "/conexus:plan-audit",
-        "/conexus:query",
+        "/conexus:plan-validation",  # was /conexus:plan-audit (nexus-dg7i6.2)
         "/conexus:rdr-accept",
         "/conexus:rdr-audit",
         "/conexus:rdr-close",
         "/conexus:rdr-create",
         "/conexus:rdr-gate",
-        "/conexus:rdr-list",
         "/conexus:rdr-research",
         "/conexus:rdr-show",
         "/conexus:receiving-review",
-        "/conexus:research",
-        # nexus-cnzei.4: the bare-verb "review" skill (nx_answer verb=review,
-        # decision-history retrieval) was renamed to decision-drift-review —
-        # "review" invited confusion with code review. Destination moved,
-        # not dropped.
+        "/conexus:research-synthesis",  # was /conexus:research (nexus-dg7i6.2)
+        # nexus-cnzei.4: the bare-verb "review" skill was renamed to
+        # decision-drift-review. Destination moved, not dropped.
         "/conexus:decision-drift-review",
-        "/conexus:review-code",
         "/conexus:serena-code-nav",
         "/conexus:substantive-critique",
-        "/conexus:test-validate",
         "/conexus:writing-nx-skills",
         "mcp__plugin_conexus_nexus__plan_save",
         "mcp__plugin_conexus_nexus__plan_search",
@@ -151,14 +149,15 @@ def test_routing_statement_within_first_500_bytes():
     routing helps, not preamble around it. Only the sentence it pins
     changed."""
     head = GUIDANCE_IMPERATIVE.encode("utf-8")[:500].decode("utf-8", errors="ignore")
-    assert "Conexus skills carry this project's accumulated practice" in head
+    assert "Conexus skills and agents carry this project's accumulated practice" in head
 
 
 def test_guidance_imperative_carries_no_routing_destinations():
-    """The inversion's whole point: destinations move OFF this channel.
-    None of the 39 pre-inversion destinations should appear verbatim in
-    the short SessionStart form any more — they're reachable from
-    SKILL.md instead (see test_all_destinations_still_reachable_from_skill_md)."""
+    """The inversion's whole point: the command-spelled destination LIST
+    stays off this channel. No ``/conexus:*`` spelling and no ``mcp__`` tool
+    token appears in the short SessionStart form; it names a handful of
+    agents and skills in bare form. The full list is in the routing
+    reference (see test_all_destinations_still_reachable_from_the_routing_reference)."""
     assert _destinations(GUIDANCE_IMPERATIVE) == set()
 
 
@@ -178,107 +177,80 @@ def test_guidance_imperative_retains_trigger_conditions():
         assert phrase in lowered, f"trigger condition {phrase!r} missing from GUIDANCE_IMPERATIVE"
 
 
-# ── nexus-h33x8.5 VERIFICATION 4: no content loss ───────────────────────────
+# ── nexus-dg7i6.6: destinations ─────────────────────────────────────────────
+
+#: (trigger-condition phrase, destination token that must sit in the same text).
+#: Each destination is a skill directory, an agent file, or an MCP tool the
+#: routing reference names. Do not "fix" a red run by deleting a row: either the
+#: text lost a destination or a destination was renamed.
+_TRIGGER_DESTINATIONS: tuple[tuple[str, str], ...] = (
+    ("failed fix attempt", "debugger"),
+    ("no design of record", "brainstorming-gate"),
+    ("cross-module", "strategic-planning"),
+    ("quality gate", "code-review-expert"),
+    ("quality gate", "substantive-critic"),
+    ("quality gate", "test-validator"),
+    ("quality gate", "plan-validation"),
+    ("reduced from many documents", "nx_answer"),
+    ("t1/t2/t3", "memory_search"),
+    ("go unstored", "store_put"),
+    ("phase/rdr boundary", "phase-review-gate"),
+)
 
 
-def test_all_destinations_still_reachable_from_skill_md():
+def _destination_exists(token: str) -> bool:
+    return (
+        (SKILLS_DIR / token / "SKILL.md").is_file()
+        or (AGENTS_DIR / f"{token}.md").is_file()
+        or token in ROUTING_MD.read_text(encoding="utf-8")
+    )
+
+
+def test_every_trigger_condition_still_carries_its_destination():
+    lowered = GUIDANCE_IMPERATIVE.lower()
+    for phrase, token in _TRIGGER_DESTINATIONS:
+        assert phrase in lowered, (
+            f"trigger-condition phrase {phrase!r} is missing from GUIDANCE_IMPERATIVE "
+            "(src/nexus/session_start_guidance.py)"
+        )
+        assert f"`{token}`" in GUIDANCE_IMPERATIVE, (
+            f"GUIDANCE_IMPERATIVE no longer names `{token}` for {phrase!r}"
+        )
+        assert _destination_exists(token), (
+            f"`{token}` (named for {phrase!r}) is neither a conexus skill, a conexus agent, "
+            "nor a term in orchestration/reference.md: the destination was renamed or retired"
+        )
+
+
+def test_the_routing_skill_it_points_at_exists():
+    assert "`orchestration`" in GUIDANCE_IMPERATIVE
+    assert (SKILLS_DIR / "orchestration" / "SKILL.md").is_file()
+    assert ROUTING_MD.is_file()
+
+
+def test_guidance_does_not_point_at_a_retired_skill():
+    """nexus-dg7i6.6: a 30-day census found zero model loads of these, and an
+    eval with a true premise loaded them 0 of 3. They are agents or rules now."""
+    for retired in ("using-nx-skills", "`code-review`", "`debugging`", "`development`", "`test-validation`"):
+        assert retired not in GUIDANCE_IMPERATIVE, f"{retired} is a retired skill (nexus-dg7i6.6)"
+        if retired.startswith("`"):
+            assert not (SKILLS_DIR / retired.strip("`")).exists(), f"skills/{retired} came back"
+    assert not (SKILLS_DIR / "using-nx-skills").exists()
+    assert not (SKILLS_DIR / "query").exists()
+
+
+def test_all_destinations_still_reachable_from_the_routing_reference():
     """Every destination the SessionStart channel used to name is still
-    reachable from the Skill body — moved, not dropped. SKILL.md's
-    routing content is unchanged by this bead (only a pointer sentence
-    was added), so this is currently a tautology by construction; it
-    stands as a regression guard against a FUTURE SKILL.md edit that
-    silently drops a destination without updating the callers."""
-    skill_destinations = _destinations(SKILL_MD.read_text(encoding="utf-8"))
-    missing = _PRE_INVERSION_DESTINATIONS - skill_destinations
-    assert not missing, f"destinations dropped from SKILL.md: {sorted(missing)}"
-
-
-def test_guidance_imperative_diverges_from_skill_md():
-    """The old nexus-h33x8.4 byte-for-byte parity assertion is
-    RETIRED here, by design (see module docstring item 3) — this bead
-    is exactly the intentional divergence that assertion's own comment
-    predicted. Pin the divergence instead of the old equality."""
-    assert GUIDANCE_IMPERATIVE != SKILL_MD.read_text(encoding="utf-8")
-    assert len(GUIDANCE_IMPERATIVE) < len(SKILL_MD.read_text(encoding="utf-8")) / 3
+    reachable from the routing reference -- moved, not dropped. A guard against
+    a future edit that drops a destination without updating its callers."""
+    reachable = _destinations(ROUTING_MD.read_text(encoding="utf-8"))
+    missing = _PRE_INVERSION_DESTINATIONS - reachable
+    assert not missing, f"destinations dropped from orchestration/reference.md: {sorted(missing)}"
+    assert len(_PRE_INVERSION_DESTINATIONS) == 33, "the frozen baseline changed size"
 
 
 def test_guidance_imperative_is_nonempty():
     assert 200 < len(GUIDANCE_IMPERATIVE) < _IMPERATIVE_BUDGET_BYTES
-
-
-# ── nexus-h33x8.5 fix-pass: bidirectional drift guard ───────────────────────
-#
-# The critic's Significant (T2 nexus/substantive-critique-h33x8.3-.5-2026-08-20,
-# [22935]): once the byte-parity pin was retired, GUIDANCE_IMPERATIVE (wheel)
-# and SKILL.md (plugin) can drift independently, and only ONE direction was
-# guarded (test_all_destinations_still_reachable_from_skill_md checks SKILL.md
-# doesn't silently drop a destination; nothing forced GUIDANCE_IMPERATIVE's
-# trigger-condition bullets to stay anchored to SKILL.md's routing content, or
-# vice versa). This section closes both directions for the imperative
-# sentence itself and for each trigger-condition bullet's anchor phrase(s) in
-# SKILL.md's routing content -- a content edit on EITHER side that breaks the
-# pairing fails here, naming the OTHER file in the assertion message.
-
-#: (GUIDANCE_IMPERATIVE trigger-bullet phrase, SKILL.md anchor phrase(s) that
-#: back it). Each anchor is a verbatim substring of the CURRENT SKILL.md
-#: (verified at authoring time); a future edit to either side that breaks
-#: the pairing is exactly what this test exists to catch, so do not "fix" a
-#: red run here by deleting a row -- fix the drift the row is reporting.
-_TRIGGER_ANCHOR_PAIRS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("no design of record", ("brainstorming-gate",)),
-    ("failed fix attempt", ("/conexus:debug",)),
-    ("cross-module design", ("/conexus:architecture", "/conexus:create-plan")),
-    ("quality gate", ("Quality gates",)),
-    ("reduced from many documents", ("REDUCED FROM MANY DOCUMENTS",)),
-    ("t1/t2/t3", ("Conexus Storage Tiers",)),
-    ("finding is about to go unstored", ("Findings not stored are findings lost",)),
-    ("phase/rdr boundary", ("RDR lifecycle", "phase-review-gate")),
-)
-
-
-def test_imperative_sentence_present_in_both_files():
-    """The one sentence that must never drift apart: GUIDANCE_IMPERATIVE's
-    hard-rule imperative and SKILL.md's own copy of it (SKILL.md line 9,
-    unchanged by this bead)."""
-    imperative = (
-        "Conexus skills carry this project's accumulated practice for "
-        "specific situations"
-    )
-    skill_text = SKILL_MD.read_text(encoding="utf-8")
-    assert imperative in GUIDANCE_IMPERATIVE, (
-        "the imperative sentence is missing from GUIDANCE_IMPERATIVE "
-        "(src/nexus/session_start_guidance.py) -- SKILL.md still has it, "
-        "the wheel-delivered SessionStart text has drifted"
-    )
-    assert imperative in skill_text, (
-        "the imperative sentence is missing from "
-        "conexus/skills/using-nx-skills/SKILL.md -- GUIDANCE_IMPERATIVE "
-        "still has it, the Skill body has drifted"
-    )
-
-
-def test_trigger_condition_anchors_stay_paired_with_skill_md():
-    """For each GUIDANCE_IMPERATIVE trigger-condition bullet, its SKILL.md
-    anchor phrase(s) must still exist -- catches a FUTURE SKILL.md edit
-    that silently drops or renames the routing content a SessionStart
-    trigger bullet refers agents onward to."""
-    skill_text = SKILL_MD.read_text(encoding="utf-8")
-    lowered_guidance = GUIDANCE_IMPERATIVE.lower()
-    for phrase, anchors in _TRIGGER_ANCHOR_PAIRS:
-        assert phrase in lowered_guidance, (
-            f"trigger-condition phrase {phrase!r} is missing from "
-            "GUIDANCE_IMPERATIVE (src/nexus/session_start_guidance.py) -- "
-            "either it was reworded (update this row's phrase to match) or "
-            "dropped (SKILL.md's matching routing content is now unreferenced "
-            "at SessionStart)"
-        )
-        assert any(anchor in skill_text for anchor in anchors), (
-            f"none of SKILL.md's anchor phrase(s) {anchors!r} for "
-            f"GUIDANCE_IMPERATIVE trigger {phrase!r} were found in "
-            "conexus/skills/using-nx-skills/SKILL.md -- the routing content "
-            "that trigger points agents toward has moved or been dropped; "
-            "update either SKILL.md or this row's anchor list"
-        )
 
 
 # ── legacy_cat_channel_active: the interim double-emission guard ───────────

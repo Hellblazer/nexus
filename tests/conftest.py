@@ -3209,6 +3209,27 @@ def _reset_aspect_worker_singleton() -> None:
     reset_worker_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _mineru_machine_probes_read_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MinerU health probes that look at THIS machine report "no fault".
+
+    nexus-x3m8e: ``nx mineru status`` and the extractor now ask the box whether
+    a server's cwd is gone (``lsof`` / ``/proc``) and whether a POSIX
+    semaphore can still be created. A status test that fixes a fake pid such as
+    12345 would otherwise read whatever that pid is on the machine running it,
+    and a box that is genuinely out of semaphores would turn every healthy-path
+    assertion red. Both are resolved from the module at call time, so patching
+    the module attributes covers every consumer. A test of the probes
+    themselves imports them at module top (the name binds before this runs)
+    and injects its own seams.
+    """
+    import nexus._mineru_health as health
+
+    monkeypatch.setattr(health, "process_cwd_state", lambda *a, **k: None)
+    monkeypatch.setattr(health, "process_cwd_path", lambda *a, **k: None)
+    monkeypatch.setattr(health, "semaphores_exhausted", lambda *a, **k: None)
+
+
 # NO _reap_spawned_daemons fixture: it SIGTERMed any T2/T3 daemon a test had
 # spawned into its own tmp NEXUS_CONFIG_DIR (nexus-scoo5 — real `nx upgrade`
 # runs reached `nx daemon t2 ensure-running`, which spawned a DETACHED

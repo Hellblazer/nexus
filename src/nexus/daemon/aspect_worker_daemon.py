@@ -759,8 +759,8 @@ def ensure_aspect_worker_daemon(
 
         argv = [
             *_resolve_nx_bin(), "daemon", "aspect-worker", "start",
-            "--config-dir", str(config_dir), "--tenant", tenant,
-        ]
+            "--config-dir", str(config_dir.absolute()), "--tenant", tenant,
+        ]  # absolute: the child starts in a stable cwd, not this one (nexus-x3m8e)
         _log.info(
             "aspect_worker_daemon.spawn_if_absent",
             tenant=tenant, argv=argv,
@@ -853,16 +853,16 @@ def run_aspect_worker_daemon(
     # The observed instance was a worktree removed after its branch merged --
     # a correct developer action. The daemon depending on it was the defect.
     #
-    # config_dir is the stable anchor: the daemon cannot run without it, and
-    # nothing in normal operation removes it while the daemon lives. Falls
-    # back to "/" (classic daemonization) if it is somehow unavailable, so a
-    # chdir failure can never itself be what stops the daemon starting.
-    for _anchor in (config_dir, Path("/")):
-        try:
-            os.chdir(_anchor)
-            break
-        except OSError:  # noqa: PERF203 — two candidates, clarity over micro-perf
-            continue
+    # nexus-x3m8e: the rule now lives in the shared primitive, where the
+    # supervisor and the MinerU server use it too. The directory is the
+    # filesystem root, not config_dir (a process whose cwd is a directory keeps
+    # that directory from being deleted on Windows, and config_dir can be
+    # relocated by `nx uninstall`); config_dir is made absolute FIRST so the
+    # daemon's own paths do not move with the cwd.
+    from nexus.daemon.service_registry import enter_stable_daemon_cwd  # noqa: PLC0415 — deferred; daemon-start only
+
+    config_dir = Path(config_dir).absolute()
+    enter_stable_daemon_cwd()
 
     _require_extraction_credentials()
     daemon = AspectWorkerDaemon(

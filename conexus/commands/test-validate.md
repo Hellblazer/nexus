@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Validate tests using test-validator agent
+disable-model-invocation: true
 ---
 
 # Test Validation Request
@@ -19,7 +20,7 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **test-validation** skill with the following relay. Fill in dynamic fields from the context above:
+Dispatch the **test-validator** agent (Agent tool, `subagent_type: conexus:test-validator`) with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: test-validator

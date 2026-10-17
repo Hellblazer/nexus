@@ -45,7 +45,10 @@ def _mineru_output_root() -> Path:
     # Nexus artifacts (T2, catalog, MinerU output) under one isolated tree.
     override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
     if override:
-        base = Path(override) / "mineru-output"
+        # Absolute: the server starts in the filesystem root (nexus-x3m8e), so a
+        # relative override would name a different directory for it, and the
+        # pid file records this path for `nx mineru stop` to clean up.
+        base = Path(os.path.abspath(override)) / "mineru-output"
     else:
         runtime = os.environ.get("XDG_RUNTIME_DIR")
         if runtime and Path(runtime).is_dir():
@@ -201,12 +204,29 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
         # qwentescence has a native Windows Python (nexus-6y4e0's own
         # closing report: only a broken uv trampoline and the Microsoft
         # Store install-alias stub are present there today).
+        # nexus-x3m8e: start in a STABLE cwd (the filesystem root), never the
+        # caller's. A server spawned from a session worktree that was later
+        # deleted answered every task with FileNotFoundError while /health said
+        # 200. The failing call, from the server's own traceback: importing
+        # torchvision.ops pulls in torch._dynamo.config, whose module body runs
+        # os.path.join(os.getcwd(), "torch_compile_debug"). Not CPython's
+        # import system (it guards getcwd for the '' sys.path entry): any
+        # getcwd/abspath/Path.cwd call in the server or its libraries.
+        # detached_spawn_kwargs also pins a relative NEXUS_CONFIG_DIR, which
+        # the child would otherwise resolve against its new cwd.
+        from nexus.daemon.service_registry import detached_spawn_kwargs  # noqa: PLC0415 — branch-local; only when spawning the server
+
+        stable = detached_spawn_kwargs()
+        env = _server_env(output_root)
+        if "env" in stable:
+            env["NEXUS_CONFIG_DIR"] = stable.pop("env")["NEXUS_CONFIG_DIR"]
         proc = subprocess.Popen(
             cmd,
-            env=_server_env(output_root),
+            env=env,
             stdout=server_log,
             stderr=server_log,
             start_new_session=True,
+            **stable,
         )
     except (FileNotFoundError, PermissionError):
         return None
@@ -240,5 +260,78 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
         "output_root": str(output_root),
         "mineru_version": _mineru_version,
         "python": sys.executable,
+        # nexus-x3m8e: the executable this server runs, beside the interpreter
+        # and output root above: `nx mineru status` stats all three, because a
+        # tool environment replaced under a running server takes its libraries
+        # (and every lazy import after it) away while /health still says 200.
+        "executable": mineru_bin,
     })
     return proc
+
+
+def classify_server_pid(pid: int) -> str:
+    """What the live process behind a recorded server *pid* is: ``"mineru"``
+    (a mineru-api server), ``"other"`` (the pid was recycled to something else)
+    or ``"unreadable"`` (alive but its command line could not be read, which is
+    inconclusive: a slow process-table read looks the same as a vanished
+    process).
+
+    The pid-recycle guard (nexus-5yrob) that EVERY stop of a pid-file server
+    runs before it signals the pid's whole process group: ``nx mineru stop`` and
+    the extractor's replacement of a broken server share it, so neither can
+    signal an unrelated process group that reused the pid."""
+    from nexus.upgrade_finish import _classify, process_command  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    live_cmd = process_command(pid)
+    if not live_cmd:
+        return "unreadable"
+    return "mineru" if _classify(live_cmd) == "mineru" else "other"
+
+
+#: Seconds the server group gets to exit on SIGTERM before the hard pass.
+STOP_GRACE_SECONDS: float = 10.0
+
+
+def stop_server_group(
+    pid: int,
+    *,
+    grace: float = STOP_GRACE_SECONDS,
+    _sleep=None,
+) -> str:
+    """Stop the mineru-api server group *pid* leads; the one stop core shared by
+    ``nx mineru stop`` and the extractor's restart (nexus-x3m8e).
+
+    SIGTERM to the whole group first (the multiprocessing resource tracker
+    ignores it by design, so it still cleans up). If the group is still alive
+    after *grace*, the hard pass SPARES the resource tracker: killing it
+    leaks every POSIX named semaphore the group made, for good (the 2026-10-16
+    machine-wide ENOSPC). Returns ``"gone"`` (no such group), ``"exited"`` or
+    ``"escalated"``. The caller owns the pid file.
+    """
+    import signal  # noqa: PLC0415 — branch-local
+    import time  # noqa: PLC0415 — branch-local
+
+    from nexus._mineru_pid import is_process_alive  # noqa: PLC0415 — deferred: patchable at the source module
+    from nexus.util.process_group import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        safe_killpg,
+        safe_killpg_group,
+    )
+
+    sleep = _sleep if _sleep is not None else time.sleep
+    if not safe_killpg(pid, signal.SIGTERM):
+        return "gone"
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not is_process_alive(pid):
+            return "exited"
+        sleep(0.2)
+    if getattr(os, "killpg", None) is None:
+        # Windows: no process group, the pid is the one process to terminate
+        # (job-object reach belongs to the spawning process, nexus-6y4e0).
+        safe_killpg(pid)
+    else:
+        # The hard pass spares the resource tracker by construction
+        # (util.process_group), and a group left with only its tracker counts
+        # as stopped: no second, whole-group kill follows it.
+        safe_killpg_group(pid)
+    return "escalated"

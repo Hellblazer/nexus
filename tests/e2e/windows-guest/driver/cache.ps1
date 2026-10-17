@@ -45,13 +45,47 @@ if (-not $pw) { throw 'nothing on stdin' }
 # plain text in a cmdlet parameter binding, which PowerShell module logging records when it is on.
 $sec = New-Object System.Security.SecureString; foreach ($c in $pw.ToCharArray()) { $sec.AppendChar($c) }; $sec.MakeReadOnly(); $pw = $null; $c = $null
 $cred = New-Object PSCredential($GuestUser, $sec)
+# guest-session: the same block in every script that opens a session (tests/test_windows_gate_driver.py).
+# Seconds after the guest restarted and an account signed in at the console, PowerShell Direct has failed to
+# open a session: "The credential is invalid" with the right password (nexus-bpzt7, cycles 1 and B of
+# 2026-10-16; not a lockout) and "A remote session might have ended" (the rerun of 2026-10-17). Causes unknown.
+# A failed open is retried every 10 s for 2 minutes while the guest is Running; a guest that is not Running
+# stops the script at once. After a failure, the guest's failed sign-ins (events 4625 and 4776) from a minute
+# before the first one are printed.
+# Everything it prints goes through Write-Host: its pipeline output is its return value, the session.
+function Open-GuestSession($Name) {
+    $since = $null
+    for ($i = 1; ; $i++) {
+        try { $sess = New-PSSession -VMName $Name -Credential $cred -ErrorAction Stop; break }
+        catch {
+            if ($i -gt 12 -or (Get-VM -Name $Name).State -ne 'Running') { throw }
+            if (-not $since) { $since = (Get-Date).AddMinutes(-1) }
+            $why = ("" + $_.Exception.Message).Split("`n")[0].Trim()
+            Write-Host "guest session open failed at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss')) ($why); retry $i of 12 in 10 s"
+            Start-Sleep 10
+        }
+    }
+    if ($since) {
+        $ev = @(Invoke-Command -Session $sess -ArgumentList $since {
+            param($t)
+            $fields = '^\s*(Account Name|Account For Which Logon Failed|Logon Account|Failure Reason|Status|Sub Status|Error Code|Logon Type|Caller Process Name|Source Workstation):'
+            Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625, 4776; StartTime = $t } -ErrorAction SilentlyContinue | ForEach-Object {
+                $keep = @($_.Message -split "`r?`n" | Where-Object { $_ -match $fields } | ForEach-Object { $_.Trim() -replace '\s+', ' ' })
+                $_.TimeCreated.ToUniversalTime().ToString('HH:mm:ss') + " event $($_.Id): " + ($keep -join '; ')
+            }
+        })
+        Write-Host "guest failed sign-ins since $($since.ToUniversalTime().ToString('HH:mm:ss')): $($ev.Count)"
+        foreach ($e in $ev) { Write-Host "  $e" }
+    }
+    $sess
+}
 New-Item -ItemType Directory -Force $root | Out-Null
 $have = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match '^(conexus|claude|models)=[A-Za-z0-9._+-]+$' })
 function ClaudeBin($v) { Join-Path $root "claude-$v-win32-x64.exe" }
 # Host to guest over PowerShell Direct (Sam, 2026-10-15: no host-side VM settings, so no Copy-VMFile).
 function ToGuest($src, $dst) { Copy-Item -ToSession $s -Path $src -Destination $dst -Force; "copied $(Split-Path $src -Leaf)" }
 $t0 = Get-Date
-$s = New-PSSession -VMName $VMName -Credential $cred -ErrorAction Stop
+$s = Open-GuestSession $VMName
 try {
     $prof = "C:\Users\$Account"
     if (-not (Invoke-Command -Session $s -ArgumentList $prof { param($p) Test-Path $p })) { 'NXG-RESULT: FAIL no profile for the account in the guest'; exit 3 }

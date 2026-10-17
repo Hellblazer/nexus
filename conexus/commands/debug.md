@@ -1,6 +1,7 @@
 ---
 allowed-tools: Bash
 description: Debug test failures using debugger agent
+disable-model-invocation: true
 ---
 
 # Debug Request
@@ -19,7 +20,7 @@ Gather project context using MCP tools:
 
 ## Action
 
-Invoke the **debugging** skill with the following relay. Fill in dynamic fields from the context above:
+Dispatch the **debugger** agent (Agent tool, `subagent_type: conexus:debugger`) with the following relay. Fill in dynamic fields from the context above:
 
 ```markdown
 ## Relay: debugger

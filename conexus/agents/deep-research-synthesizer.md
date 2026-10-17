@@ -58,7 +58,7 @@ retrieval plan.
 
 ## Pre-flight (mandatory — including tasks where the answer feels directly available)
 
-Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the using-nx-skills Red Flags table warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
+Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the Red Flags table in the orchestration skill's reference warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
 1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
@@ -91,7 +91,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `/beads:list` with status=in_progress
+4. Query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -170,7 +170,7 @@ If your project uses beads for task tracking, consider linking research findings
 - Knowledge gaps identified during research
 
 **Creating Tasks for Follow-Up**:
-- /beads:create "Implement: finding" -t task
+- bd create "Implement: finding" -t task
 - Reference research nx store titles in the design field
 
 **Consult CLAUDE.md**: Check if your project mandates beads integration for research tracking.
@@ -181,7 +181,7 @@ If your project uses beads for task tracking, consider linking research findings
 
 You MUST persist your research findings to the conexus knowledge store BEFORE returning — **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. In that case, honor the relay's target and skip the T3 default.
 
-**Why the default is T3**: for generic `/conexus:research` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Do not defer persistence — call `mcp__plugin_conexus_nexus__store_put` directly.
+**Why the default is T3**: for generic `/conexus:research-synthesis` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Do not defer persistence — call `mcp__plugin_conexus_nexus__store_put` directly.
 
 **When to override to T2 or T1**: when the dispatching skill is using this agent as a classifier or analyzer rather than as a research persister — for example, `/conexus:rdr-audit` dispatches this agent to run an audit whose output is a project-local audit record that belongs in T2 `rdr_process`, not in the permanent T3 knowledge graph. If the relay says "write findings to `<project>/<title>` via `memory_put`", do that instead and do not also redundantly store to T3.
 

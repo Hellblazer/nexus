@@ -252,7 +252,9 @@ class TestMineruStatus:
             with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
                  patch("nexus.commands.mineru.httpx.get", return_value=resp):
                 result = runner.invoke(main, ["mineru", "status"])
-        assert result.exit_code == 0
+        # an unhealthy server exits non-zero (nexus-x3m8e): a script asking
+        # whether the server is usable must not read a 503 as a yes
+        assert result.exit_code == (1 if setup == "unhealthy" else 0)
         assert any(t in result.output.lower() for t in expect_text.split("|"))
 
     def test_status_reports_the_servers_real_counters(self, runner, pid_file):
