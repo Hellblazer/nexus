@@ -231,11 +231,13 @@ def test_split_floor_catches_an_emptied_cc_validation_sweep(monkeypatch) -> None
 
 # ---- nexus-ca5rw: the two harnesses the 10-13..10-17 burst came from ---------
 #
-# conexus counted 251 one-ping installs from Sam's home egress: linux 7.79.0
-# from the skill-routing image's `claude plugin eval` runs and win32 from the
-# Windows gate guests. Probed on chas 2026-10-17: `claude -p` hands a stdio
-# MCP server the container's NX_NO_TELEMETRY=1, `claude plugin eval` does not
-# (the server saw None) unless the plugin's .mcp.json names it in `env`.
+# conexus counted 251 one-ping installs from Sam's home egress between 10-13
+# and 10-17, 190 of them linux 7.79.0 (the skill-routing image's nx) and the
+# rest mostly win32; these two harnesses fit both shapes, attributed by
+# platform and version, not by per-run timestamps. Probed on chas 2026-10-17:
+# `claude -p` (with --mcp-config or --plugin-dir) hands a stdio MCP server the
+# container's NX_NO_TELEMETRY=1; `claude plugin eval` does not (the server saw
+# None) unless the plugin's .mcp.json names it in `env`.
 
 WINDOWS_GUEST = E2E / "windows-guest"
 WINDOWS_DRIVER = WINDOWS_GUEST / "driver"

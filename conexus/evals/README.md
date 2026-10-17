@@ -201,6 +201,12 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   --max-cost-usd 100 --json report.json <path-to-conexus-plugin>
 ```
 
+- **Opt the run out of the install ping.** `claude plugin eval` hands a
+  plugin MCP server only the env its `.mcp.json` names, and every run gets
+  a fresh HOME, so each run of an installed `nx` counts as a new install.
+  Add `"env": {"NX_NO_TELEMETRY": "1"}` to each server in the copy you
+  evaluate, as `pe_in_container.sh` does (nexus-ca5rw); exporting the
+  variable in your shell does not reach the server.
 - **Tool grants are part of the measurement.** Without `--allow-tools`
   the runner removes Bash, Write and Edit, so o01 cannot edit its file
   and o02/o04 cannot read git or run the tests. Without `--mocks off` the
