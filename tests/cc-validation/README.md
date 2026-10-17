@@ -26,6 +26,7 @@ silently nullified scenarios for an hour-plus at least once.
 | `can't find pane: cc-val`, suite aborts mid-run | bare `tmux` instead of `_tmux` (wrong socket) | [tmux isolation](#tmux-isolation) |
 | Hook "runs" but writes nothing | PreToolUse hooks don't inherit harness env | [Hooks](#hooks) |
 | New `nx` subcommand: `No such command` | cc-val uses on-PATH `nx`, not repo source | [on-PATH nx](#on-path-nx) |
+| A scenario that installs the real plugin by writing `installed_plugins.json` sees no plugin hooks, agents or servers | Claude Code 2.1.302: `claude plugin list` reports `failed to load: Marketplace nexus-plugins not found`; install through a local-directory marketplace instead (scenario 32's `_s32_install_plugin`) and check `claude plugin list` before the session | [Container](#running-in-a-container-and-scenario-32s-positive-control) |
 
 ## Auth
 
@@ -427,11 +428,52 @@ workspace silently ignores the project's `permissions.allow` entries (pre-seed
 `echo` is auto-allowed in every mode, so it cannot show that an ask changed
 anything (use `touch` plus an allow rule).
 
+## Running in a container (and scenario 32's positive control)
+
+Claude Code runs only in a container on a Linux test host (chas), never on a
+laptop. `container/run.sh` stages the tracked harness plus the conexus plugin
+of the checkout, builds a toolchain image (Claude Code, tmux, uv), and runs a
+scenario inside it; `runner.sh` detects `NX_CC_VAL_IN_CONTAINER=1` and takes
+the token from the container's environment instead of the keychain.
+
+```bash
+python3 tests/e2e/lib/claude_credentials.py run --remote chas-test -- \
+    ~/src/nexus-wt/<ref>/tests/cc-validation/container/run.sh --scenario 32
+```
+
+The helper sends the automation token over the ssh channel's stdin and the
+script passes it to `docker run` as a bare `-e CLAUDE_CODE_OAUTH_TOKEN`. Do not
+put the script behind `lab-run`: the wrapper does not forward the environment,
+so the token would not arrive. Evidence (hook log, pane, transcripts, per
+session) lands in `$NX_CC_VAL_EVIDENCE` (default `$TMPDIR/cc-val-evidence-<stamp>`).
+
+**Scenario 32 has a positive control** (nexus-ueztp). It runs two sessions: 32a
+installs the current plugin and passes when the permission prompt reaches the
+pane; 32b installs the conexus plugin of git tag `v7.64.1` (the
+GHSA-mc84-6gjq-vm2p plugin, whose routing guards emit a blanket `allow`),
+extracted with `git archive` and version-checked, and is DECLARED to fail that
+same check: it passes only when the prompt is skipped, the command runs, and
+the old scripts' own stdout carries the `permissionDecision`. A control that
+shows the prompt anyway is a finding, not a flake: it means the real
+`hooks.json` entries do not govern the call here, so 32a's pass proves
+nothing. `tests/test_cc_validation_scenario32_control.py` pins the wiring.
+
+Two traps the first container runs found, both now handled in the scenario:
+the hand-written `installed_plugins.json` did not load the plugin (see the
+triage table), and in `defaultMode: auto` the classifier approves the harmless
+`echo` itself so neither plugin shows a prompt. Sessions run in `defaultMode:
+default`; `--s32-mode auto` restores the old mode, where 32b reports NOT
+INFORMATIVE. 32b also requires Claude Code's own transcript to show the
+v7.64.1 `hooks.json` entries emitting `permissionDecision: allow`, which is the
+direct observation of the real hooks the scenario header says earlier attempts
+could not get.
+
 ## Layout
 
 ```
 runner.sh                       # setup (isolated HOME, tmux server under run --), scenario loop
 scenarios/NN_*.sh               # one scenario each; source lib.sh helpers
+container/                      # Dockerfile + run.sh: how Claude Code runs (chas, in docker)
 fixtures/stub_server.py         # FastMCP stub (needs an interpreter with `mcp`)
 ../e2e/lib.sh                   # _tmux, claude_start, claude_prompt, claude_wait, capture
 ../e2e/lib/claude_credentials.py # shared credential helper (run/status); no file, ever (RDR-219)

@@ -22,7 +22,25 @@ ONLY_SCENARIO=""
 # login. Thin wrapper around the shared helper (nexus-galkv.19,
 # tests/e2e/lib/claude_credentials.py) so this file has one call site to
 # change if the helper's path ever moves.
+#
+# NX_CC_VAL_IN_CONTAINER=1 (set only by run_in_container.sh, inside its own
+# container, which has no keychain): the automation token already sits in this
+# process's environment, put there by `claude_credentials.py run -- docker run
+# -e CLAUDE_CODE_OAUTH_TOKEN`, so `run --` degrades to its own fail-loud gate
+# (an empty token stops the run before anything is started) and then execs the
+# command. Every other subcommand, and every run outside that container, goes
+# to the shared helper untouched.
 _cred_tool() {
+    if [[ "${NX_CC_VAL_IN_CONTAINER:-}" == "1" && "${1:-}" == "run" ]]; then
+        if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+            echo "[auth] no automation token in this container's environment -- start it with run_in_container.sh under claude_credentials.py run --" >&2
+            return 1
+        fi
+        shift
+        [[ "${1:-}" == "--" ]] && shift
+        "$@"
+        return
+    fi
     python3 "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
 }
 
