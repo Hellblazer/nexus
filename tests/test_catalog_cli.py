@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import click
@@ -2686,13 +2687,29 @@ class TestAgentIntegration:
         # Either exits cleanly (0) or with a non-zero code — must not raise
         assert result.exit_code in (0, 1)
 
-    def test_session_summary_shows_link_count(self, catalog_env):
-        """session-summary should print link graph total at the end."""
+    def test_session_summary_shows_link_count(self, catalog_env, tmp_path, monkeypatch):
+        """session-summary should print link graph total at the end.
+
+        The command runs the VCS log in the cwd under a 5 s bound and returns early
+        ("Could not determine recent file changes.") when that fails, before the link
+        count is printed. Run from the checkout, ``--since 99999`` walked the whole
+        history (56,000 file lines at this writing, most of the 4 s this test's call
+        took on a quiet host) and a loaded pool host hit the bound (nexus-ys8a4). The
+        test is about the link line, so it runs in a repo of its own with one commit:
+        the call is then milliseconds at any load, and the product bound stays 5 s.
+        """
+        repo = tmp_path / "summary-repo"
+        repo.mkdir()
+        (repo / "a.txt").write_text("a\n")
+        vcs = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(repo)]
+        for argv in (["init", "-q"], ["add", "a.txt"], ["commit", "-q", "-m", "one"]):
+            subprocess.run([*vcs, *argv], check=True, capture_output=True, timeout=60)
+        monkeypatch.chdir(repo)
         runner = CliRunner()
         self._make_catalog_with_links(catalog_env)
-        # Pass --since=99999 so we don't need git to have recent activity
         result = runner.invoke(main, ["catalog", "session-summary", "--since", "99999"])
         assert result.exit_code == 0
+        assert "Could not determine recent file changes" not in result.output, result.output
         # Should show link graph total
         assert "link" in result.output.lower()
 
