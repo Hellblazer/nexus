@@ -527,16 +527,40 @@ def test_hostile_input_gets_a_reply_and_the_server_lives(tmp_path: Path, line: b
     assert len(replies) == 2, replies
 
 
-def test_a_client_that_stops_reading_ends_the_server_quietly(tmp_path: Path) -> None:
+def test_bytes_that_are_not_utf8_are_a_parse_error_with_a_null_id(tmp_path: Path) -> None:
+    """Decoding with replacement characters would answer a different request than
+    the one sent (here a "Method not found" for id 1); the line must be refused."""
+    after = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode() + b"\n"
+    r = subprocess.run(
+        [sys.executable, str(_LAUNCH), "nx-mcp"],
+        input=_HOSTILE["bytes that are not UTF-8"] + after, capture_output=True, env=_env(_isolated(tmp_path)), timeout=60, check=False,
+    )
+    assert r.stderr == b""
+    replies = [_strict_loads(reply) for reply in r.stdout.decode("utf-8").splitlines()]
+    assert replies[0]["id"] is None, replies
+    assert replies[0]["error"]["code"] == -32700, replies
+    assert replies[1] == {"jsonrpc": "2.0", "id": 7, "result": {}}, replies
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n",
+        b'{"jsonrpc":"2.0","id":NaN,"method":"ping"}\n',
+    ],
+    ids=["a reply", "the fallback reply for an id that is not JSON"],
+)
+def test_a_client_that_stops_reading_ends_the_server_quietly(tmp_path: Path, line: bytes) -> None:
+    """BrokenPipeError at the write, and again when the interpreter flushes at exit.
+    The NaN id takes the fallback reply, whose write must be under the same handler."""
     proc = subprocess.Popen(
         [sys.executable, str(_LAUNCH), "nx-mcp"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_env(_isolated(tmp_path)),
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     proc.stdout.close()
-    ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
     try:
-        proc.stdin.write(ping * 2000)
+        proc.stdin.write(line * 2000)
         proc.stdin.close()
     except OSError:
         pass  # the server left before reading it all, which is the point

@@ -59,6 +59,67 @@ def test_hostile_input_gets_a_reply_and_the_server_lives(line: bytes) -> None:
     assert b"\r\n" not in r.stdout, "MCP stdio is newline-delimited, with bare newlines"
 
 
+def _replies(r: subprocess.CompletedProcess[bytes]) -> list[dict]:
+    return [_strict_loads(reply) for reply in r.stdout.decode("utf-8").splitlines()]
+
+
+def test_bytes_that_are_not_utf8_are_a_parse_error_with_a_null_id() -> None:
+    """Decoding with replacement characters would answer a different request than
+    the one sent (here a "Method not found" for id 1); the line must be refused."""
+    r = _run(_HOSTILE["bytes that are not UTF-8"] + _PING)
+    assert r.stderr == b""
+    replies = _replies(r)
+    assert replies[0]["id"] is None, replies
+    assert replies[0]["error"]["code"] == -32700, replies
+    assert replies[1] == {"jsonrpc": "2.0", "id": 7, "result": {}}, replies
+
+
+@pytest.mark.parametrize("field", ["thoughtNumber", "totalThoughts"])
+def test_an_integer_too_big_for_a_float_is_a_validation_error_not_an_internal_error(field: str) -> None:
+    """``float(10**400)`` raises OverflowError, which the catch-all answered as -32603."""
+    arguments = {"thought": "t", "nextThoughtNeeded": True, "thoughtNumber": 1, "totalThoughts": 1}
+    arguments[field] = int("9" * 400)  # type: ignore[assignment]
+    call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "sequentialthinking", "arguments": arguments}}
+    r = _run(json.dumps(call).encode() + b"\n" + _PING)
+    assert r.returncode == 0 and r.stderr == b""
+    replies = _replies(r)
+    assert "error" not in replies[0], replies
+    assert replies[0]["result"]["isError"] is True, replies
+    assert field in replies[0]["result"]["content"][0]["text"], replies
+    assert replies[1]["id"] == 7, replies
+
+
+_EXPLODING_WRAPPER = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("seq_under_test", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.handle
+def handle(state, message):
+    if isinstance(message, dict) and message.get("method") == "explode":
+        raise KeyError("a secret quoted from the client")
+    return real(state, message)
+mod.handle = handle
+raise SystemExit(mod.main())
+"""
+
+
+def test_an_unexpected_handler_error_is_an_internal_error_naming_only_its_class(tmp_path: Path) -> None:
+    """The catch-all keeps the server alive and says which class failed (so a
+    client log is diagnosable) without the message text, which may quote input,
+    and without a byte on stderr."""
+    wrapper = tmp_path / "wrap.py"
+    wrapper.write_text(_EXPLODING_WRAPPER, encoding="utf-8")
+    boom = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "explode"}).encode() + b"\n"
+    r = subprocess.run([sys.executable, str(wrapper), str(_SCRIPT)], input=boom + _PING, capture_output=True, timeout=60, check=False)
+    assert r.returncode == 0
+    assert r.stderr == b""
+    replies = _replies(r)
+    assert replies[0] == {"jsonrpc": "2.0", "id": 5, "error": {"code": -32603, "message": "Internal error", "data": {"exception": "KeyError"}}}, replies
+    assert replies[1] == {"jsonrpc": "2.0", "id": 7, "result": {}}, replies
+    assert b"secret" not in r.stdout
+
+
 @pytest.mark.parametrize(
     "line",
     [_PING, b'{"jsonrpc":"2.0","id":NaN,"method":"ping"}\n'],

@@ -58,8 +58,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - Description without angle brackets (nexus-0nskc): `conexus/commands/continuation.md` writes the path placeholder as PATH in its description, since Claude Desktop's plugin sync rejects angle brackets there.
 
-
-- sequential-thinking survives hostile stdio (nexus-rwv5i): `conexus/mcp/sequential_thinking.py` answers input that is not UTF-8, nested past the recursion limit, an integer too long to parse, or a lone surrogate or NaN in an id with a JSON-RPC error and goes on, leaves quietly when the client stops reading (at the write and again at interpreter exit) or when stdin or stdout is closed at start, and writes nothing to stderr in any of them. Replies are ASCII-escaped JSON. Carries over the fixes the RDR-228 stand-in review made (nexus-sv2wx.6).
+- sequential-thinking survives hostile stdio (nexus-rwv5i): `conexus/mcp/sequential_thinking.py` answers input that is not UTF-8 (each line is decoded strictly, so a bad byte is a parse error with a null id, never a guess), nested past the recursion limit, an integer too long to parse or too big for a float, or a lone surrogate or NaN in an id with a JSON-RPC error and goes on, leaves quietly when the client stops reading (at the write and again at interpreter exit) or when stdin or stdout is closed at start, and writes nothing to stderr in any of them. An unexpected handler error is -32603 naming only the exception class. Replies are ASCII-escaped JSON. Carries over the fixes the RDR-228 stand-in review made (nexus-sv2wx.6).
+- the setup stand-in reads stdin as strict UTF-8 and writes its NaN-id fallback under the dead-client handler (nexus-rwv5i): `conexus/launch/nx_standin.py` answers a line that is not UTF-8 with a parse error and a null id instead of a guess from replacement characters, and a client that stops reading while the reply is the NaN-id fallback now ends the server quietly instead of with a BrokenPipe traceback.
 
 
 ## Deferred to the next client release

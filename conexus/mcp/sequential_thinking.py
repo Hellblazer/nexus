@@ -173,7 +173,7 @@ def _as_positive_int(name: str, value: Any) -> int:
         raise InvalidArguments(f"{name}: expected an integer >= 1, received {value!r}")
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: an int too big for a float
         raise InvalidArguments(f"{name}: expected an integer >= 1, received {value!r}") from None
     if not number.is_integer() or number < 1:
         raise InvalidArguments(f"{name}: expected an integer >= 1, received {value!r}")
@@ -232,8 +232,11 @@ def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+def _error(request_id: Any, code: int, message: str, data: Any = None) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
 def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
@@ -283,18 +286,22 @@ def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
             return _error(request_id, -32601, f"Method not found: {method}")
 
 
-def _answer(state: SequentialThinking, line: str) -> dict[str, Any] | None:
-    """The reply to one input line. Never raises: an uncaught error would be a
-    traceback on standard error and the end of the server."""
+def _answer(state: SequentialThinking, line: bytes) -> dict[str, Any] | None:
+    """The reply to one input line, as the bytes read. Never raises: an uncaught
+    error would be a traceback on standard error and the end of the server."""
     try:
-        message = json.loads(line)
-    except (ValueError, RecursionError):  # bad JSON, a 5000-digit integer, deep nesting
+        # Strict UTF-8: a replacement character would answer a different request
+        # (another method name, id or thought) than the one the client sent.
+        message = json.loads(line.decode("utf-8"))
+    except (ValueError, RecursionError):  # not UTF-8 (UnicodeDecodeError), bad JSON, a 5000-digit integer, deep nesting
         return _error(None, -32700, "Parse error")
     try:
         return handle(state, message)
-    except Exception:  # noqa: BLE001 -- see the docstring
+    except Exception as exc:  # noqa: BLE001 -- see the docstring
         request_id = message.get("id") if isinstance(message, dict) else None
-        return _error(request_id, -32603, "Internal error")
+        # The class name only: the message may quote the client's input, and
+        # nothing goes to stderr.
+        return _error(request_id, -32603, "Internal error", {"exception": type(exc).__name__})
 
 
 def _send(stdout: Any, reply: dict[str, Any]) -> None:
@@ -309,9 +316,9 @@ def _send(stdout: Any, reply: dict[str, Any]) -> None:
 
 
 def serve(stdin: Any = None, stdout: Any = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin until EOF, or until the client
-    stops reading."""
-    stdin = stdin if stdin is not None else sys.stdin
+    """Read newline-delimited JSON-RPC from stdin (a binary stream, one request per
+    line) until EOF, or until the client stops reading."""
+    stdin = stdin if stdin is not None else sys.stdin.buffer
     stdout = stdout if stdout is not None else sys.stdout
     state = SequentialThinking()
     for line in stdin:
@@ -338,13 +345,12 @@ def _client_gone() -> int:
 
 
 def main() -> int:
-    if sys.stdin is None or sys.stdout is None:  # started with a stream closed
+    if sys.stdin is None or sys.stdout is None or getattr(sys.stdin, "buffer", None) is None:  # a stream closed
         return 0
-    # Text-mode stdio on Windows would translate "\n" to "\r\n" and decode with
-    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Bytes that are
-    # not UTF-8 become a replacement character in their line, not the end of the
-    # server.
-    sys.stdin.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    # Text-mode stdout on Windows would translate "\n" to "\r\n" and encode with
+    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Standard input
+    # is read as bytes and each line decoded strictly in _answer: bytes that are
+    # not UTF-8 are a parse error for their line, not the end of the server.
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
     try:
         return serve()

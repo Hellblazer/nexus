@@ -687,12 +687,14 @@ def handle(server: StandIn, message: Any) -> dict[str, Any] | None:
             return _error(request_id, -32601, f"Method not found: {method}")
 
 
-def _answer(server: StandIn, line: str) -> dict[str, Any] | None:
-    """The reply to one input line. Never raises: an uncaught error would be a
-    traceback on standard error and the end of the server."""
+def _answer(server: StandIn, line: bytes) -> dict[str, Any] | None:
+    """The reply to one input line, as the bytes read. Never raises: an uncaught
+    error would be a traceback on standard error and the end of the server."""
     try:
-        message = json.loads(line)
-    except (ValueError, RecursionError):  # bad JSON, a 5000-digit integer, deep nesting
+        # Strict UTF-8: a replacement character would answer a different request
+        # (another method name, id or argument) than the one the client sent.
+        message = json.loads(line.decode("utf-8"))
+    except (ValueError, RecursionError):  # not UTF-8 (UnicodeDecodeError), bad JSON, a 5000-digit integer, deep nesting
         return _error(None, -32700, "Parse error")
     try:
         return handle(server, message)
@@ -701,10 +703,21 @@ def _answer(server: StandIn, line: str) -> dict[str, Any] | None:
         return _error(request_id, -32603, "Internal error")
 
 
+def _send(stdout: Any, reply: dict[str, Any]) -> None:
+    # ASCII output: a lone surrogate echoed in an id cannot be encoded, and
+    # U+2028 inside a string must not read as a line end.
+    try:
+        line = json.dumps(reply, allow_nan=False)
+    except ValueError:  # an id of NaN or Infinity is not JSON
+        line = json.dumps(_error(None, -32600, "Invalid Request"))
+    stdout.write(line + "\n")  # the write and flush stay under the caller's OSError handler
+    stdout.flush()
+
+
 def serve(server: StandIn, stdin: Any = None, stdout: Any = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin until EOF, or until the client
-    stops reading."""
-    stdin = stdin if stdin is not None else sys.stdin
+    """Read newline-delimited JSON-RPC from stdin (a binary stream, one request
+    per line) until EOF, or until the client stops reading."""
+    stdin = stdin if stdin is not None else sys.stdin.buffer
     stdout = stdout if stdout is not None else sys.stdout
     for line in stdin:
         if not line.strip():
@@ -713,13 +726,7 @@ def serve(server: StandIn, stdin: Any = None, stdout: Any = None) -> int:
         if reply is None:
             continue
         try:
-            # ASCII output: a lone surrogate echoed in an id cannot be encoded, and
-            # U+2028 inside a string must not read as a line end.
-            stdout.write(json.dumps(reply, allow_nan=False) + "\n")
-            stdout.flush()
-        except ValueError:  # an id of NaN or Infinity is not JSON
-            stdout.write(json.dumps(_error(None, -32600, "Invalid Request")) + "\n")
-            stdout.flush()
+            _send(stdout, reply)
         except OSError:  # the client went away
             return _client_gone()
     return 0
@@ -738,12 +745,12 @@ def _client_gone() -> int:
 def main(program: str, broken: str | None = None) -> int:
     """Serve the stand-in for the CLI server *program* on this process's stdio.
     *broken* is why the CLI was found and cannot start (``None``: it was not found)."""
-    if sys.stdin is None or sys.stdout is None:  # started with a stream closed
+    if sys.stdin is None or sys.stdout is None or getattr(sys.stdin, "buffer", None) is None:  # a stream closed
         return 0
-    # Text-mode stdio on Windows would translate "\n" to "\r\n" and decode with
-    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Bytes that are
-    # not UTF-8 become a parse error for their line, not the end of the server.
-    sys.stdin.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    # Text-mode stdout on Windows would translate "\n" to "\r\n" and encode with
+    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Standard input
+    # is read as bytes and each line decoded strictly in _answer: bytes that are
+    # not UTF-8 are a parse error for their line, not the end of the server.
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
     try:
         return serve(stand_in(program, broken))
