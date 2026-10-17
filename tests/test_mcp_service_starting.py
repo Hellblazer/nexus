@@ -35,6 +35,7 @@ from tests._epipe_server import (
     order_rst_before_the_first_write,
     record_transport_reasons,
     resetting_server,
+    skip_on_windows,
 )
 
 _NO_COLLECTIONS = "No collections match corpus"
@@ -171,12 +172,13 @@ def test_search_on_a_service_that_resets_the_connection_says_it_is_not_answering
         mcp_infra.reset_singletons()
 
 
+@skip_on_windows
 def test_search_on_a_service_that_breaks_the_pipe_says_it_is_not_answering(monkeypatch):
     """nexus-40fjk: a client that writes its request after the restarting service's RST gets EPIPE
     (BrokenPipeError), not ECONNRESET. Same restart, same text. tests/_epipe_server.py says how the
-    EPIPE is pinned on macOS and Linux without sleeps or load."""
+    EPIPE is ordered on macOS and Linux without sleeps."""
     with resetting_server() as server:
-        order_rst_before_the_first_write(monkeypatch)
+        order_rst_before_the_first_write(monkeypatch, server)
         reasons = record_transport_reasons(monkeypatch)
         monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (server.base_url, "tok"))
         monkeypatch.setattr(hvc, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0))

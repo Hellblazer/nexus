@@ -13,6 +13,7 @@ from nexus.db.http_vector_client import (
     is_vector_service_mode,
     reset_http_vector_client_for_tests,
 )
+from tests._epipe_server import skip_on_windows
 from tests._module_seam import module_time
 
 
@@ -4174,7 +4175,7 @@ class TestUpdateChunksMissing:
 
 class TestBrokenPipeIsARestartSignature:
     """A request written after the restarting service's RST fails with EPIPE, not ECONNRESET
-    (tests/_epipe_server.py says how the EPIPE is pinned on macOS and Linux). It takes the same
+    (tests/_epipe_server.py says how the EPIPE is ordered on macOS and Linux). It takes the same
     single idempotent retry as a reset."""
 
     def test_broken_pipe_is_classified_retryable(self) -> None:
@@ -4185,6 +4186,27 @@ class TestBrokenPipeIsARestartSignature:
         assert _is_retryable_endpoint_error(BrokenPipeError(32, "Broken pipe"))
         assert _is_retryable_endpoint_error(urllib.error.URLError(BrokenPipeError(32, "Broken pipe")))
 
+    def test_the_harness_leaves_a_connection_to_any_other_port_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A foreign connection in the same process (another test's thread, an unrelated client) must
+        # neither take the armed slot nor wait on this server's RST.
+        import http.client
+        import socket
+
+        from tests._epipe_server import order_rst_before_the_first_write, resetting_server
+
+        with resetting_server() as server, socket.socket() as other:
+            other.bind(("127.0.0.1", 0))
+            other.listen(1)
+            order_rst_before_the_first_write(monkeypatch, server)
+            conn = http.client.HTTPConnection("127.0.0.1", other.getsockname()[1], timeout=2)
+            try:
+                conn.connect()  # would raise on the harness's 5 s select if it touched this one
+                assert conn.sock is not None
+                assert server.accepted == 0
+            finally:
+                conn.close()
+
+    @skip_on_windows
     def test_a_write_after_the_rst_is_retried_once_and_the_second_attempt_succeeds(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -4197,7 +4219,7 @@ class TestBrokenPipeIsARestartSignature:
 
         rows = [{"name": "knowledge__x__minilm__v1", "count": 3}]
         with resetting_server(reset_first=1, payload=rows) as server:
-            order_rst_before_the_first_write(monkeypatch, connections=1)
+            order_rst_before_the_first_write(monkeypatch, server)
             reasons = record_transport_reasons(monkeypatch)
             monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (server.base_url, "tok"))
             monkeypatch.setattr(hvc, "_wait_for_lease_republication", lambda: None)
