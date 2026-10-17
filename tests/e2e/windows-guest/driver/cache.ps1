@@ -52,6 +52,8 @@ $cred = New-Object PSCredential($GuestUser, $sec)
 # A failed open is retried every 10 s for 2 minutes while the guest is Running; a guest that is not Running
 # stops the script at once. After a failure, the guest's failed sign-ins (events 4625 and 4776) from a minute
 # before the first one are printed.
+# It then sets NX_NO_TELEMETRY=1 in the guest, Machine-wide so the as-user scheduled task's new logon gets it
+# too: a restored guest is a fresh install, and every run used to send conexus an install ping (nexus-ca5rw).
 # Everything it prints goes through Write-Host: its pipeline output is its return value, the session.
 function Open-GuestSession($Name) {
     $since = $null
@@ -77,6 +79,9 @@ function Open-GuestSession($Name) {
         Write-Host "guest failed sign-ins since $($since.ToUniversalTime().ToString('HH:mm:ss')): $($ev.Count)"
         foreach ($e in $ev) { Write-Host "  $e" }
     }
+    Invoke-Command -Session $sess {
+        [Environment]::SetEnvironmentVariable('NX_NO_TELEMETRY', '1', 'Machine'); $env:NX_NO_TELEMETRY = '1'
+    } | Out-Null
     $sess
 }
 New-Item -ItemType Directory -Force $root | Out-Null

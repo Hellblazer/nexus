@@ -28,8 +28,11 @@ check -- see the sweep's own record in T2 project ``nexus``, title
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -224,3 +227,43 @@ def test_split_floor_catches_an_emptied_cc_validation_sweep(monkeypatch) -> None
     )
     with pytest.raises(AssertionError, match="CC_VALIDATION_EXPORTING_HARNESSES is empty"):
         test_harness_entry_point_sweep_is_non_vacuous()
+
+
+# ---- nexus-ca5rw: the two harnesses the 10-13..10-17 burst came from ---------
+#
+# conexus counted 251 one-ping installs from Sam's home egress: linux 7.79.0
+# from the skill-routing image's `claude plugin eval` runs and win32 from the
+# Windows gate guests. Probed on chas 2026-10-17: `claude -p` hands a stdio
+# MCP server the container's NX_NO_TELEMETRY=1, `claude plugin eval` does not
+# (the server saw None) unless the plugin's .mcp.json names it in `env`.
+
+WINDOWS_DRIVER = E2E / "windows-guest" / "driver"
+SESSION_SCRIPTS = ("restore.ps1", "stduser.ps1", "cache.ps1", "guest-run.ps1")
+_GUEST_OPT_OUT = "[Environment]::SetEnvironmentVariable('NX_NO_TELEMETRY', '1', 'Machine'); $env:NX_NO_TELEMETRY = '1'"
+
+
+@pytest.mark.parametrize("name", SESSION_SCRIPTS)
+def test_every_windows_guest_session_opts_the_guest_out(name: str) -> None:
+    text = (WINDOWS_DRIVER / name).read_text()
+    start = text.index("function Open-GuestSession")
+    body = text[start : text.index("\n}\n", start)]
+    # Machine scope: the as-user step runs nx through a scheduled task, a new logon that never
+    # sees a variable set only in the PowerShell Direct session.
+    assert _GUEST_OPT_OUT in body, f"{name}: Open-GuestSession must set NX_NO_TELEMETRY=1 Machine-wide"
+
+
+def test_every_script_that_opens_a_guest_session_is_listed() -> None:
+    openers = sorted(p.name for p in WINDOWS_DRIVER.glob("*.ps1") if "New-PSSession" in p.read_text())
+    assert openers == sorted(SESSION_SCRIPTS)
+
+
+def test_the_plugin_eval_tree_export_names_the_opt_out_for_every_server(tmp_path: pathlib.Path) -> None:
+    script = (E2E / "prefix-capture" / "ab" / "skillroute" / "export_conexus.sh").read_text()
+    m = re.search(r"python3 - \"\$DEST/conexus/\.mcp\.json\" <<'PY'\n(.*?)\nPY\n", script, re.S)
+    assert m, "export_conexus.sh no longer rewrites the extract's .mcp.json"
+    mcp = tmp_path / ".mcp.json"
+    mcp.write_text((REPO / "conexus" / ".mcp.json").read_text())
+    subprocess.run([sys.executable, "-c", m.group(1), str(mcp)], check=True)
+    servers = json.loads(mcp.read_text())
+    assert len(servers) >= 3, "the shipped .mcp.json lost its servers; the check would pass on nothing"
+    assert {n: s.get("env", {}).get("NX_NO_TELEMETRY") for n, s in servers.items()} == dict.fromkeys(servers, "1")
