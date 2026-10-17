@@ -2178,7 +2178,15 @@ def storage_service_stack_matcher(
     flagless command, or a live default-dir ``stop`` would sweep an
     unrelated isolated stack and vice versa.
 
-    Known, DOCUMENTED limitation, ASYMMETRIC (not merely "unresolvable" —
+    RESOLVED for the sweeps (nexus-oacd3): the limitation below is closed by
+    :func:`storage_service_member_check`, the second stage every sweep applies
+    to a flagless candidate. It reads the process's own ``NEXUS_CONFIG_DIR``
+    / ``HOME`` and accepts the process only when they resolve to *config_dir*;
+    an unreadable environment fails closed. This function itself still matches
+    on text alone, so a caller that signals what it returns must apply the
+    check too.
+
+    Known, DOCUMENTED limitation (historical, see above), ASYMMETRIC (not merely "unresolvable" —
     nexus-cd1k0 review round 2, finding stated precisely rather than
     understated): this matcher sees only argv (the process table's
     ``command`` string), never a process's environment. A process that
@@ -2362,6 +2370,143 @@ def _is_bare_supervisor_head(command: str) -> bool:
     )
 
 
+def process_environment_values(
+    pid: int, names: tuple[str, ...], *, platform: str | None = None,
+) -> dict[str, str] | None:
+    """The values of *names* in *pid*'s environment as it was at exec, or
+    ``None`` when the environment cannot be read (nexus-oacd3).
+
+    Only the requested names are returned and nothing else is kept or
+    logged, so a caller never holds another process's secrets. Linux reads
+    ``/proc/<pid>/environ``; macOS reads the process's ``KERN_PROCARGS2``
+    block through ``sysctl``, which hands back the one block and needs no
+    ``ps`` option that dumps a whole environment. Both work only for a
+    process of the same user, which is every stack member a stop may
+    signal. Windows has no equivalent here, and a vanished or foreign
+    process is unreadable: ``None``, never a guess. A name that is absent
+    from a readable environment is simply missing from the returned dict.
+    """
+    if _is_windows(platform):
+        return None
+    try:
+        if _procfs_available():
+            blob = (PROCFS_ROOT / str(pid) / "environ").read_bytes()
+            entries: list[bytes] | None = blob.split(b"\x00")
+        elif (platform if platform is not None else sys.platform) == "darwin":
+            entries = _darwin_procargs_environment(pid)
+        else:
+            return None
+    except (OSError, ValueError):
+        return None
+    if entries is None:
+        return None
+    wanted = {name.encode(): name for name in names}
+    out: dict[str, str] = {}
+    for entry in entries:
+        key, sep, value = entry.partition(b"=")
+        if sep and key in wanted:
+            out[wanted[key]] = value.decode("utf-8", "replace")
+    return out
+
+
+def _darwin_procargs_environment(pid: int) -> list[bytes] | None:
+    """The environment entries from macOS ``KERN_PROCARGS2`` for *pid*.
+
+    Layout: ``int32 argc``, the exec path, NUL padding, ``argc`` argv
+    strings, then the environment strings, each NUL-terminated. ``None``
+    when the sysctl refuses (a process of another user, or gone).
+    """
+    import ctypes  # noqa: PLC0415 — deferred: only the macOS branch needs it
+    import struct  # noqa: PLC0415 — deferred: only the macOS branch needs it
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+    size = ctypes.c_size_t(0)
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 4:
+        return None
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return None
+    data = buf.raw[: size.value]
+    (argc,) = struct.unpack_from("i", data, 0)
+    parts = data[4:].split(b"\x00")
+    index = 1  # parts[0] is the exec path
+    while index < len(parts) and parts[index] == b"":
+        index += 1  # padding between the exec path and argv[0]
+    index += argc
+    return [part for part in parts[index:] if part]
+
+
+def process_config_dir(
+    pid: int,
+    *,
+    platform: str | None = None,
+    environment_of: Callable[[int, tuple[str, ...]], dict[str, str] | None] | None = None,
+) -> Path | None:
+    """The config directory *pid* itself resolves to, or ``None`` when its
+    environment cannot be read (nexus-oacd3).
+
+    The same rule ``nexus.config.nexus_config_dir`` applies inside the
+    process: its ``NEXUS_CONFIG_DIR`` when set and non-empty, else
+    ``$HOME/.config/nexus`` under its own ``HOME``. A flagless command line
+    carries no directory, so this is the only honest way to say which
+    directory such a process belongs to.
+    """
+    read = environment_of if environment_of is not None else (
+        lambda target, names: process_environment_values(target, names, platform=platform)
+    )
+    env = read(pid, ("NEXUS_CONFIG_DIR", "HOME"))
+    if env is None:
+        return None
+    override = env.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override).resolve(strict=False)
+    home = env.get("HOME", "").strip()
+    return (Path(home) if home else Path.home()).joinpath(".config", "nexus").resolve(strict=False)
+
+
+def _is_flagless_start_command(command: str) -> bool:
+    """True for a ``daemon service start`` command line with no ``--config-dir``
+    token: the directory it serves is decided by its environment, not its text."""
+    return "daemon service start" in command and "--config-dir" not in command
+
+
+def storage_service_member_check(
+    config_dir: Path,
+    *,
+    platform: str | None = None,
+    environment_of: Callable[[int, tuple[str, ...]], dict[str, str] | None] | None = None,
+) -> Callable[[int, str], bool]:
+    """``(pid, command) -> bool`` second stage for
+    :func:`storage_service_stack_matcher` (nexus-oacd3).
+
+    The matcher decides from command-line text, and a flagless ``nx daemon
+    service start`` has no directory in its text: it matched ANY default-dir
+    stop, so a stop for one directory signalled a start that belongs to
+    another (the release battery's local-service gate, exit 143). For that
+    shape this asks the process which directory it resolves to and accepts
+    it only when that equals *config_dir*. An environment that cannot be
+    read fails closed: the process is left alone and a real supervisor is
+    still stopped through its lease. Every other command (an explicit
+    ``--config-dir`` supervisor, the engine) is accepted unchanged.
+    """
+    target = Path(config_dir).resolve(strict=False)
+
+    def _check(pid: int, command: str) -> bool:
+        if not _is_flagless_start_command(command):
+            return True
+        owner = process_config_dir(pid, platform=platform, environment_of=environment_of)
+        if owner is None:
+            _log.info("stack_member_flagless_owner_unreadable", pid=pid, command=command[:120])
+            return False
+        if owner != target:
+            _log.info("stack_member_flagless_other_dir", pid=pid, command=command[:120])
+            return False
+        return True
+
+    return _check
+
+
 def ancestor_pids(pid: int, *, limit: int = 64) -> frozenset[int]:
     """The pids of *pid*'s parent chain, up to *limit* hops (nexus-mqfu0).
 
@@ -2417,6 +2562,7 @@ def sweep_matching_processes(
     *,
     exclude_pid: int | None = None,
     grace_s: float = 10.0,
+    member_check: Callable[[int, str], bool] | None = None,
 ) -> ProcessSweepResult:
     """Find OS processes whose command line satisfies *matcher*, terminate
     them (SIGTERM -> SIGKILL via :func:`terminate_pids`), and report what
@@ -2463,6 +2609,11 @@ def sweep_matching_processes(
             continue
         if pid in ancestors:
             _log.info("sweep_matching_processes_ancestor_skipped", pid=pid, command=command[:120])
+            continue
+        # nexus-oacd3: a flagless command line names no directory, so a
+        # caller-supplied check (storage_service_member_check) asks the
+        # process which directory it serves before it is signalled.
+        if member_check is not None and not member_check(pid, command):
             continue
         current = process_command(pid)
         # An unreadable argv (permissions, zombie mid-reap) is not evidence

@@ -976,6 +976,10 @@ class TestServiceStackPidsSeesUnitLaunchedSupervisor:
                 sys.executable, str(fake_nx),
                 "daemon", "service", "start", "--foreground",
             ],
+            # nexus-oacd3: a flagless command line names no directory, so the
+            # sweep asks the process; a unit-launched supervisor sets neither
+            # NEXUS_CONFIG_DIR nor anything but its HOME.
+            env={"PATH": os.environ.get("PATH", ""), "HOME": str(fake_home)},
         )
         # nexus-mqfu0: a real process that only CARRIES the verb's text (the
         # shape of a shell running `nx daemon service stop && nx daemon

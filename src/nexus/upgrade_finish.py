@@ -48,6 +48,7 @@ from nexus.daemon.service_registry import (
     process_command,
     process_state,
     request_graceful_stop,
+    storage_service_member_check,
     storage_service_stack_matcher,
     terminate_pids,
 )
@@ -1438,10 +1439,13 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
     from nexus.daemon import service_registry as _registry  # noqa: PLC0415 — module access, so one test seam covers every sweep
 
     ancestors = _registry.ancestor_pids(me)
+    # nexus-oacd3: a flagless `daemon service start` names no directory, so
+    # the process is asked which one it serves.
+    member = storage_service_member_check(config_dir)
     return [
         (pid, command)
         for pid, _age, command in all_process_rows()
-        if pid != me and pid not in ancestors and matcher(command)
+        if pid != me and pid not in ancestors and matcher(command) and member(pid, command)
     ]
 
 

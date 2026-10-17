@@ -3691,6 +3691,7 @@ def _stop_marked_service(
     """The signalling half of :func:`stop_storage_service`, run with the stop
     marker already on disk (Windows)."""
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        storage_service_member_check,
         storage_service_stack_matcher,
         sweep_matching_processes,
     )
@@ -3848,6 +3849,9 @@ def _stop_marked_service(
         matcher,
         exclude_pid=os.getpid(),
         grace_s=_GRACEFUL_STOP_TIMEOUT,
+        # nexus-oacd3: a flagless start names no directory; it is stopped
+        # only when its own environment says it serves *config_dir*.
+        member_check=storage_service_member_check(config_dir, platform=platform),
     )
 
     if not sweep.available:
