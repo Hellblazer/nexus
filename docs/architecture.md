@@ -1349,8 +1349,9 @@ transcript session's live lease, fails loud on an explicit session id
 with no lease (nexus-f7xyq), and falls through to a shared CLI identity
 only on a bare invocation. `~/.config/nexus/current_session` is a
 machine-wide last-writer-wins file, never a per-conversation value, and an
-MCP server that Claude Code did not start (Cursor, Codex, Gemini) does not
-read it (nexus-xs7fp). Consequences: durable
+MCP server that Claude Code did not start (Cursor, Codex, Gemini) never
+takes its T1 scope from it (nexus-xs7fp; T2 attribution still reads it for a
+label, nexus-d8yul). Consequences: durable
 write-back goes to T2, and an agent's write-back is declared lost only
 after the agent has terminated.
 

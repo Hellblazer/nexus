@@ -157,7 +157,10 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
        Claude Code" is the ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT``
        environment (:func:`started_by_claude_code`); the gate applies only
        to a process that called :func:`mark_mcp_server_process`, so a bare
-       ``nx`` in a terminal and the hooks keep the file.
+       ``nx`` in a terminal and the hooks keep the file. The gate is this
+       resolver's only: ``read_claude_session_id`` callers outside it (T2
+       attribution, operator dispatch) still read the file for a label
+       (nexus-d8yul).
     5. ``None``.
 
     Returns ``None`` when nothing in the chain resolves. Callers choose
@@ -194,6 +197,13 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     claude_code_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     if claude_code_env:
         return claude_code_env
+    # nexus-xs7fp: no host-local id is minted in place of the file's. The
+    # locked nexus-4lkmz decision 2 (mcp/core.py, _t1_lifespan Branch 0) is
+    # "never a shared identity, never a silent private store": an
+    # unresolvable server fails loud ("T1 unavailable this process") and the
+    # host names a scope with NX_SESSION_ID. A host started from inside a
+    # Claude Code shell inherits CLAUDE_CODE_SESSION_ID and is answered by
+    # tier 3 above, before this line; this gate cannot close that case.
     if _mcp_server_process and not started_by_claude_code():
         return None
     file_id = read_claude_session_id()

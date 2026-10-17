@@ -118,6 +118,8 @@ Both Nexus servers (`nexus` and `nexus-catalog`) connected from the account plug
 
 State is shared with the host CLI Claude and any other session running against the same service. `tests/test_cowork_sdk_bridge.py` covers the host-side round trip through T2.
 
+Session scratch (T1) is not available in a Desktop chat. The chat's Nexus server has no session id (Claude Desktop sets none, and the server does not borrow the last Claude Code session's), so the `scratch` tools report that T1 is unavailable for the process; search, memory, store and catalog work as usual, and T2 (`memory_put`) is the store that carries notes across conversations. A server you configure yourself can be given a scratch scope by setting `NX_SESSION_ID` in its environment; the account plugin's server entry is not editable, so there T1 stays unavailable.
+
 ## Surface 3: Claude Desktop chat (Desktop Extension)
 
 **Audience**: Claude Desktop users who do NOT have Claude Code installed.

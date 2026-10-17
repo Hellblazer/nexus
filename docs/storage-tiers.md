@@ -102,15 +102,25 @@ uses the flat-file fallback. Concurrent independent Claude Code windows
 stay isolated because each has its own session-id.
 
 An MCP server that Claude Code did not start (`nx-mcp` under Cursor, Codex
-CLI, Gemini CLI, or a Claude Desktop chat) never reads the flat file
-(nexus-xs7fp): the file names whichever Claude session wrote it last, which
-that host has no claim on and which may already have ended. "Started by
-Claude Code" means the process environment carries `CLAUDECODE` or
-`CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets on every subprocess,
+CLI, Gemini CLI, or a Claude Desktop chat) never takes its T1 scope from
+the flat file (nexus-xs7fp): the file names whichever Claude session wrote
+it last, which that host has no claim on and which may already have ended.
+"Started by Claude Code" means the process environment carries `CLAUDECODE`
+or `CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets on every subprocess,
 MCP servers included. Such a server has no session id, so its `scratch`
 tools report that T1 is unavailable for the process and every other tool is
 unaffected. Set `NX_SESSION_ID` in the server's environment to give it a
 scratch scope. A bare `nx` in a terminal and the hooks still use the file.
+No host-local id is minted in its place: nexus-4lkmz decision 2 is "never a
+shared identity, never a silent private store".
+
+The file is still read in that server for a label: T2 attribution
+(`memory_put`, plan writes) and operator dispatch stamp the last Claude
+session's id as a `session` label, which touches no scratch scope
+(nexus-d8yul tracks it). One case the gate cannot close: a host launched
+from inside a Claude Code shell inherits that shell's
+`CLAUDE_CODE_SESSION_ID`, which the resolver answers (tier 3) before the
+gate is consulted, so that host keeps the launching session's scope.
 
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
 lease discovery) retired with the chroma substrate. The in-process

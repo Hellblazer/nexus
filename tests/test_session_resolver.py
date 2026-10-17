@@ -439,3 +439,126 @@ class TestFlatFileFallbackIsClaudeOnlyForTheMcpServer:
             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
         }
         assert "mark_mcp_server_process" in called, f"{module_name}.main() does not mark the process"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-xs7fp review: order, not presence, and the operator-facing message
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Calls main() may make before it marks the process. isolate_stdin only moves
+#: the stdio protocol off fd 0 and never resolves a session.
+_ALLOWED_BEFORE_MARK = {"isolate_stdin"}
+
+
+def _call_name(call: "ast.Call") -> str:
+    import ast
+
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else "?"
+
+
+def _main_marking_problems(main_source: str) -> list[str]:
+    """Problems with where main() marks the process: not an unconditional
+    top-level statement of main(), or any call ahead of it other than the
+    allowed ones (so a session resolution could run unmarked)."""
+    import ast
+
+    fn = ast.parse(main_source).body[0]
+    mark_index = next(
+        (
+            i
+            for i, stmt in enumerate(fn.body)
+            if isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and _call_name(stmt.value) == "mark_mcp_server_process"
+        ),
+        None,
+    )
+    if mark_index is None:
+        return ["mark_mcp_server_process() is not an unconditional top-level statement of main()"]
+    problems = []
+    for stmt in fn.body[:mark_index]:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _call_name(node) not in _ALLOWED_BEFORE_MARK:
+                problems.append(f"{_call_name(node)}() runs before the process is marked")
+    return problems
+
+
+def _module_level_resolver_calls(module_source: str) -> list[str]:
+    """Calls to a session reader at import time (outside any def): they would
+    run before main() can mark the process."""
+    import ast
+
+    readers = {"resolve_active_session_id", "read_claude_session_id"}
+    found = []
+    for stmt in ast.parse(module_source).body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _call_name(node) in readers:
+                found.append(_call_name(node))
+    return found
+
+
+class TestTheProcessIsMarkedBeforeAnySessionIsResolved:
+    @pytest.mark.parametrize("module_name", ["nexus.mcp.core", "nexus.mcp.catalog"])
+    def test_main_marks_the_process_before_anything_else_runs(self, module_name):
+        import importlib
+        import inspect
+
+        main = importlib.import_module(module_name).main
+        assert _main_marking_problems(inspect.getsource(main).lstrip()) == []
+
+    @pytest.mark.parametrize("module_name", ["nexus.mcp.core", "nexus.mcp.catalog"])
+    def test_no_session_is_resolved_at_import_time(self, module_name):
+        import importlib
+        import inspect
+
+        module = importlib.import_module(module_name)
+        assert _module_level_resolver_calls(inspect.getsource(module)) == []
+
+    def test_the_ordering_check_can_fail(self):
+        """The check itself, against sources that are wrong in each way."""
+        late = (
+            "def main():\n"
+            "    resolve_active_session_id()\n"
+            "    mark_mcp_server_process()\n"
+        )
+        conditional = (
+            "def main():\n"
+            "    if x:\n"
+            "        mark_mcp_server_process()\n"
+        )
+        missing = "def main():\n    isolate_stdin()\n"
+        fine = (
+            "def main():\n"
+            "    isolate_stdin()\n"
+            "    mark_mcp_server_process()\n"
+            "    resolve_active_session_id()\n"
+        )
+        assert _main_marking_problems(late) == ["resolve_active_session_id() runs before the process is marked"]
+        assert _main_marking_problems(conditional) != []
+        assert _main_marking_problems(missing) != []
+        assert _main_marking_problems(fine) == []
+        assert _module_level_resolver_calls("x = resolve_active_session_id()\n") == ["resolve_active_session_id"]
+        assert _module_level_resolver_calls("def f():\n    resolve_active_session_id()\n") == []
+
+
+class TestTheUnavailableMessageNamesTheRemedy:
+    def _message(self) -> str:
+        from nexus.mcp.core import T1UnavailableThisProcessError, _raise_t1_unavailable_this_process
+
+        with pytest.raises(T1UnavailableThisProcessError) as exc:
+            _raise_t1_unavailable_this_process()
+        return str(exc.value)
+
+    def test_it_names_nx_session_id_as_the_remedy(self):
+        msg = self._message()
+        remedy = msg.split("Remedy:", 1)[1]
+        assert "NX_SESSION_ID" in remedy
+
+    def test_it_says_the_flat_file_is_deliberately_skipped(self):
+        assert "current_session" in self._message().split("Remedy:", 1)[0]
+
+    def test_it_no_longer_sends_a_desktop_user_to_a_claude_code_session(self):
+        assert "Claude Code session" not in self._message().split("Remedy:", 1)[1]

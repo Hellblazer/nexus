@@ -705,15 +705,16 @@ def _raise_t1_unavailable_this_process() -> None:
     raise T1UnavailableThisProcessError(
         "T1 unavailable this process: no resolvable session id for this "
         "MCP server instance (neither NX_SESSION_ID nor "
-        "CLAUDE_CODE_SESSION_ID resolved one). This affects T1 scratch "
+        "CLAUDE_CODE_SESSION_ID resolved one, and the machine-wide "
+        "current_session file is deliberately skipped for a server Claude "
+        "Code did not start). This affects T1 scratch "
         "only — every other nexus tool (search, memory, store, catalog) "
         "is unaffected. A sub-agent that inherited a LIVE minted token "
         "from its parent is unaffected too (checked before this hook "
-        "would ever be consulted). Remedy: reconnect the conexus "
-        "MCP/extension from a Claude Code session that stamps a "
-        "resolvable session id; on another MCP host (Cursor, Codex, "
-        "Gemini) set NX_SESSION_ID in the server's environment to name "
-        "the scratch scope; or run `nx doctor --check-t1`."
+        "would ever be consulted). Remedy: set NX_SESSION_ID in this "
+        "server's environment (the env block of its entry in the host's "
+        "MCP configuration) to name the scratch scope, then restart the "
+        "server; or run `nx doctor --check-t1`."
     )
 
 
@@ -6621,8 +6622,11 @@ def memory_put(
         agent_arg = agent if agent else None
         # Resolve session at the MCP layer so NX_SESSION_ID env wins
         # over MemoryStore's legacy getsid-file fall-back. Subagents
-        # carry NX_SESSION_ID set by claude_dispatch (RDR-094); the
-        # legacy file is only present in non-MCP contexts.
+        # carry NX_SESSION_ID set by claude_dispatch (RDR-094). The legacy
+        # current_session file is NOT absent in an MCP server: when this
+        # branch leaves session_arg None, MemoryStore.put falls through to
+        # resolve_attribution, which reads it (even in a server Claude Code
+        # did not start, see nexus-d8yul).
         if session:
             session_arg: str | None = session
         else:

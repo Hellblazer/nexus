@@ -2759,6 +2759,7 @@ nexus-d7a3
 nexus-d7xuj
 nexus-d8mts
 nexus-d8qvr
+nexus-d8yul
 nexus-d977b
 nexus-d977b.1
 nexus-d9dba
@@ -4423,6 +4424,7 @@ nexus-k54nk
 nexus-k5hxw
 nexus-k5sdi
 nexus-k5sdi.1
+nexus-k66o5
 nexus-k6bs
 nexus-k6gzp
 nexus-k6q9
@@ -4693,6 +4695,7 @@ nexus-lhxz4
 nexus-liir
 nexus-lj1ey
 nexus-lj2l
+nexus-lkj2k
 nexus-lkwes
 nexus-lky6
 nexus-lky6.1
@@ -6960,6 +6963,7 @@ nexus-vu9wc.1
 nexus-vuiid
 nexus-vupim
 nexus-vuus1
+nexus-vv068
 nexus-vvek6
 nexus-vw3bp
 nexus-vw594

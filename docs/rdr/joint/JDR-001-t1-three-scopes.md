@@ -32,8 +32,8 @@ one it means:
 3. **`~/.config/nexus/current_session`** is a machine-wide last-writer-wins
    file, the tier-4 fallback of `resolve_active_session_id()`. Any
    concurrent session can own it; it is never a per-conversation value.
-   An MCP server that Claude Code did not start does not read it
-   (nexus-xs7fp, below).
+   An MCP server that Claude Code did not start never takes its T1 scope
+   from it (nexus-xs7fp, below).
 
 Consequences every owner relies on: a `claude -p` subprocess defaults to
 its own leased scope (`owned`) and opts into the parent's with
@@ -146,7 +146,7 @@ ran before the writing agent had terminated, and the write landed moments
 later in the scope already checked (T2 [21373] reproduces the class).
 Confirm an agent has terminated before declaring its write-back lost.
 
-## Scope 3 is for Claude Code hosts only, for an MCP server (nexus-xs7fp, 2026-10-17)
+## Scope 3 is a T1 source for Claude Code hosts only, for an MCP server (nexus-xs7fp, 2026-10-17)
 
 `nx-mcp` under Cursor, Codex CLI or Gemini CLI has neither `NX_SESSION_ID`
 nor `CLAUDE_CODE_SESSION_ID`, so tier 4 used to hand it whichever Claude
@@ -159,23 +159,39 @@ none of them. So tier 3 already answers for every Claude Code MCP server
 and tier 4 was never what served them.
 
 An MCP server process (it calls `session.mark_mcp_server_process()` from
-`main()`) now consults the file only when `CLAUDECODE` or
+`main()`) now takes a T1 session id from the file only when `CLAUDECODE` or
 `CLAUDE_CODE_ENTRYPOINT` is set, which keeps a Claude Code launch that
 drops `CLAUDE_CODE_SESSION_ID` working. Otherwise it resolves no session
 id and takes the existing fail-loud branch of `_t1_lifespan` ("T1
 unavailable this process"); `NX_SESSION_ID` in the host's server entry
 names a scope. The CLI in a terminal, the hooks and `claude -p` children
-are not MCP server processes and keep the file. Rejected: gating the
-resolver for every process (a bare `nx scratch` beside a Claude session
-relies on the file); a liveness check (the file carries no per-conversation
-liveness signal, and a live session is still not this host's); a
-host-local minted id (new scope semantics nobody asked for); walking the
-process tree for a `claude` ancestor (the binary's process name is its
-version number on some installs).
+are not MCP server processes and keep the file.
 
-Residual: a host launched from inside a Claude Code shell inherits
-`CLAUDECODE` and still reads the file; Claude Desktop chat, which has no
-Claude Code session, now gets T1 unavailable instead of borrowing one.
+The gate sits in `resolve_active_session_id` tier 4 only. Raw readers of
+the file inside the server process are untouched: T2 attribution
+(`resolve_attribution`, reached by `memory_put` and plan writes) and
+operator dispatch (the `NX_SESSION_ID` injected into `claude -p` children)
+still stamp the last Claude session's id as a `session` label on rows. That
+is a label on shared rows, not a read or write into another conversation's
+scratch scope; it is its own bead, nexus-d8yul. Operator dispatch's read
+stays load-bearing meanwhile: a child `claude -p` with no `NX_SESSION_ID`
+makes its SessionStart hook overwrite the file.
+
+Rejected: gating the resolver for every process (a bare `nx scratch` beside
+a Claude session relies on the file); a liveness check (a live session is
+still not this host's); a host-local minted id (the locked nexus-4lkmz
+decision 2 is "never a shared identity, never a silent private store", and
+a host-local id is either shared across that host's servers or private to
+one process); walking the process tree for a `claude` ancestor (the
+binary's process name is its version number on some installs).
+
+Residual: a host launched from inside a Claude Code shell inherits that
+shell's `CLAUDE_CODE_SESSION_ID` (Claude Code sets it on every subprocess,
+Bash included), so tier 3 serves it before the file or this gate is
+consulted, and it keeps the launching session's scope as it did before.
+The gate cannot close that case; it is the cost of an env-based
+discriminator. Claude Desktop chat, which has no Claude Code session, now
+gets T1 unavailable instead of borrowing one (Cowork was not measured).
 
 ## Owners
 
@@ -220,7 +236,8 @@ Claude Code session, now gets T1 unavailable instead of borrowing one.
   set, which it had never done. Recorded here rather than only in the
   bead because this file is the rule and its enumeration was short by one.
   conexus was notified the same day (the joint half of this record).
-- 2026-10-17: Scope 3 is read only by Claude Code hosts, for an MCP
-  server (bead nexus-xs7fp): `nx-mcp` under Cursor, Codex or Gemini no
+- 2026-10-17: Scope 3 is a T1 source for Claude Code hosts only, for an
+  MCP server (bead nexus-xs7fp): `nx-mcp` under Cursor, Codex or Gemini no
   longer borrows the last Claude session's scope through
-  `current_session`. See "Scope 3 is for Claude Code hosts only".
+  `current_session`. T2 attribution still reads the file for a label
+  (nexus-d8yul). See "Scope 3 is a T1 source for Claude Code hosts only".
