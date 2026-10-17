@@ -461,7 +461,8 @@ def test_a_kill_through_the_primitive_leaks_no_semaphore(door) -> None:
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups")
 def test_the_primitive_refuses_to_signal_nx_s_own_group(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list[tuple[int, int]] = []
-    monkeypatch.setattr(pg.os, "killpg", lambda g, s: sent.append((g, s)))
+    monkeypatch.setattr(pg, "_plain_killpg", lambda g, s: sent.append((g, s)) or True)
+    monkeypatch.setattr(pg, "_kill_group_sparing_tracker", lambda g, s: sent.append((g, s)) or True)
     own = os.getpgrp()
     assert pg._signal_group(own, signal.SIGTERM) is False
     assert pg._signal_group(own, signal.SIGKILL) is False

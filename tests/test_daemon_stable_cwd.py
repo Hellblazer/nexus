@@ -510,7 +510,7 @@ def test_the_supervisor_argv_is_absolute_when_path_holds_a_relative_entry(
     from nexus.commands import daemon as daemon_cmd
 
     monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
-    monkeypatch.setattr(daemon_cmd.shutil, "which", lambda name: "rel/bin/nx")
+    setattr_in(monkeypatch, daemon_cmd, "shutil.which", lambda name: "rel/bin/nx")
     monkeypatch.chdir(tmp_path)
     argv = daemon_cmd._resolve_nx_bin()
     assert len(argv) == 1 and Path(argv[0]).is_absolute()
