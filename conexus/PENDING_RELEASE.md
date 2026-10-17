@@ -45,7 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- 6.18.1 upgrade path measured (nexus-6g218): `conexus/skills/upgrade/SKILL.md` says aiming the 6.18.1 pin at a managed endpoint never works against a current engine (it stops before writing, and older engines reported success while dropping every Chroma-era pointer), replacing "unmeasured".
+- 6.18.1 upgrade path measured (nexus-6g218): `conexus/skills/upgrade/SKILL.md` says aiming the 6.18.1 pin at a managed endpoint failed in every case measured (it stops before writing against a current engine; on the last staging-era build a same-model store with no aspects was reported verified while its pointers were discarded), replacing "unmeasured".
 - `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-ehg1y): with a missing or stale `cli_lockstep_marker` (a hand install never writes one; a pip or dev-tree install cannot have the action rewrite it) the lockstep hook runs `nx --version` (3 s bound) and treats a CLI not older than the plugin as in lockstep, by the action's own `satisfies` rule, so a matching CLI no longer gets a false nudge and an upgrade dispatch. A marker equal to the plugin's version still decides alone, with no subprocess.
 - `conexus/launch/nx_setup.py` (nexus-ehg1y): a docstring in `_record_lockstep` now names what the lockstep hook does when the marker is missing; no behaviour change.
 
