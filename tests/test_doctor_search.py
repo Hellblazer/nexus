@@ -355,6 +355,51 @@ class TestRetrievalQualityProbe:
         assert results[0].raw_count == 4
         assert results[0].kept_count == 0
 
+    @staticmethod
+    def _probe_with_kept(per_col_row: tuple, kept: dict[str, int]):
+        """Run the probe on one collection whose diagnostics carry an explicit
+        ``kept`` (nexus-079ly): ``per_col_row`` is the engine's
+        ``(raw, dropped, threshold, top_distance)``."""
+        from nexus.doctor_search import run_retrieval_quality_probe
+        from nexus.search_engine import SearchDiagnostics
+
+        def _fn(query, collections, n_results, t3, *, diagnostics_out=None, **_):
+            diagnostics_out.append(
+                SearchDiagnostics(per_collection={"c": per_col_row}, kept=kept)
+            )
+            return []
+
+        return run_retrieval_quality_probe(
+            t3=None,
+            collections=["c"],
+            search_fn=_fn,
+            model_for=lambda col: "m",
+            metadata_fn=lambda col: {"embedding_model": "m"},
+        )[0]
+
+    def test_matched_when_the_explicit_kept_is_positive_though_every_row_was_dropped(
+        self,
+    ) -> None:
+        """raw == dropped (the old ``raw - dropped`` read 0 = threshold_drop)
+        but a lexical row rescued the collection: kept 1."""
+        r = self._probe_with_kept((3, 3, 0.45, 0.6), {"c": 1})
+        assert r.outcome == "matched"
+        assert r.kept_count == 1
+
+    def test_matched_not_empty_when_only_a_lexical_row_contributed(self) -> None:
+        """raw 0 (the engine's vector leg found nothing) with kept 1 from the
+        lexical leg is a hit, not an empty collection."""
+        r = self._probe_with_kept((0, 0, 0.45, None), {"c": 1})
+        assert r.outcome == "matched"
+        assert r.kept_count == 1
+
+    def test_a_pool_cut_with_no_threshold_drop_is_not_a_threshold_drop(self) -> None:
+        """raw 3, dropped 0, kept 0: the pool limit cut the rows; no threshold
+        claim may be made."""
+        r = self._probe_with_kept((3, 0, 0.45, None), {"c": 0})
+        assert r.outcome != "threshold_drop"
+        assert r.outcome == "matched"
+
     def test_model_drift_when_metadata_disagrees(self) -> None:
         """Registered embedding_model doesn't match expected for prefix."""
         from nexus.doctor_search import run_retrieval_quality_probe

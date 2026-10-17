@@ -17,11 +17,13 @@ dispatch:
 ``search_cross_corpus`` call per registered collection with a canned
 query; classifies each as:
 
-- ``matched``        — raw>0 AND kept>0. Healthy.
-- ``empty``          — raw==0. Empty or corrupt.
-- ``threshold_drop`` — the collection's nearest real neighbours fall past
-  its threshold (nexus-rc45 class, silent threshold-drop). A WARNING, not
-  an exit-2 failure; see below.
+- ``matched``        — kept>0 (rows the collection contributed to the
+  engine's candidate pool), or raw>0 with nothing dropped by the threshold
+  (a pool-limit cut alone is not a threshold problem). Healthy.
+- ``empty``          — raw==0 AND kept==0. Empty or corrupt.
+- ``threshold_drop`` — kept==0 with dropped>0: the collection's nearest real
+  neighbours fall past its threshold (nexus-rc45 class, silent
+  threshold-drop). A WARNING, not an exit-2 failure; see below.
 - ``model_drift``    — registered ``embedding_model`` metadata
   disagrees with :func:`corpus.voyage_model_for_collection`.
   Regression.
@@ -433,11 +435,15 @@ def run_retrieval_quality_probe(
         # per-collection route is not raw - dropped (the global limit cut and
         # the lexical union both move it).
         kept = diag.kept_for(col)
-        if raw == 0 and kept == 0:
+        if kept > 0:
+            outcome = "matched"
+        elif raw == 0:
             outcome = "empty"
-        elif kept == 0:
+        elif dropped > 0:
             outcome = "threshold_drop"
         else:
+            # Rows came back and the threshold dropped none of them, so the
+            # collection answers; only the pool limit cut them.
             outcome = "matched"
         out.append(
             ProbeResult(

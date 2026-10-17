@@ -890,7 +890,12 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Insert per-call threshold-filter telemetry in a single transaction.
 
         Row tuple layout: ``(ts, query_hash, collection, raw_count,
-        kept_count, top_distance, threshold)``.
+        kept_count, top_distance, threshold)``. *kept_count* is the rows the
+        collection contributes to the engine's candidate pool (before the topic
+        filter, the enrichment cap and the page cut; the pool limit is at least
+        300 rows, not ``--limit``), so ``zero_hit_rate`` over a window mixes
+        the batched route (rows kept after the threshold) and the
+        per-collection route (rows kept after the pool cut) (nexus-079ly).
         Calls ``POST /v1/telemetry/search/batch``.
         """
         if not rows:

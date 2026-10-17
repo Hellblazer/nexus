@@ -66,19 +66,25 @@ class SearchDiagnostics:
     distances because smaller cosine distance = higher rank.
 
     ``kept`` maps name → the number of rows that collection contributes to the
-    result set this call returns (nexus-079ly); read it through
-    :meth:`kept_for`. *raw* and *dropped* are the engine's per-collection
-    counts, taken BEFORE the global ``limit`` cut: on the per-collection route
-    a collection can hold ``raw > 0`` and ``dropped == 0`` yet contribute
-    nothing because the global limit cut all its rows. A ``--lexical`` row
-    may duplicate a vector row the engine dropped by threshold; the engine
-    reports no dropped ids, so that overlap is not corrected and lexical rows
-    never touch *raw* or *dropped*. On the batched route *kept* is
-    ``raw - dropped``, as it always was. On the per-collection route
-    ``kept == 0`` therefore means "contributed no rows to the answer" (so
-    ``zero_hit_rate`` in search telemetry counts a collection cut entirely by
-    the global limit as a zero hit), not "the threshold dropped everything";
-    ``worst_offender`` requires both.
+    engine's candidate pool (nexus-079ly): the rows it holds after the
+    engine's global cut and the lexical union, BEFORE the topic post-filter,
+    the enrichment cap and the caller's page slice. Read it through
+    :meth:`kept_for`. The cut that decides it is the
+    engine pool limit (at least 300 rows, 1000 with rerank), not
+    ``--limit``/``-n``: a collection whose rows all rank below ``-n`` still counts
+    as kept. *raw* and *dropped* are the engine's per-collection counts, taken
+    BEFORE that cut: on the per-collection route a collection can hold
+    ``raw > 0`` and ``dropped == 0`` yet contribute nothing because the pool
+    limit cut all its rows. A ``--lexical`` row may duplicate a vector row the
+    engine dropped by threshold; the engine reports no dropped ids, so that
+    overlap is not corrected and lexical rows never touch *raw* or *dropped*.
+    On the batched route *kept* is ``raw - dropped``, as it always was. On the
+    per-collection route ``kept == 0`` therefore means "contributed no rows to
+    the candidate pool" (so ``zero_hit_rate`` in search telemetry counts a
+    collection cut entirely by the pool limit as a zero hit), not "the
+    threshold dropped everything"; ``worst_offender`` requires both.
+    ``zero_hit_rate`` mixes the two meanings across its window until the
+    per-collection route is the only one.
 
     The struct is populated by ``search_cross_corpus`` when the caller passes
     ``diagnostics_out=[]``; the CLI reads ``worst_offender()`` to emit the
@@ -88,19 +94,19 @@ class SearchDiagnostics:
     per_collection: dict[str, tuple[int, int, float | None, float | None]] = field(
         default_factory=dict,
     )
-    #: name → rows contributed to the returned result set (nexus-079ly). Empty
-    #: for a hand-built struct; :meth:`kept_for` then falls back to
-    #: ``raw - dropped``.
-    kept: dict[str, int] = field(default_factory=dict)
     total_dropped: int = 0
     total_raw: int = 0
     # nexus-pebfx.8: collections the backend refused to serve (e.g. service-mode
     # HTTP 400 on an embedding-space mismatch), name → error text. These are
     # excluded from ``per_collection`` so threshold telemetry stays clean.
     failed_collections: dict[str, str] = field(default_factory=dict)
+    #: name → rows contributed to the engine's candidate pool (nexus-079ly).
+    #: Last field so positional construction stays additive. Empty for a
+    #: hand-built struct; :meth:`kept_for` then falls back to ``raw - dropped``.
+    kept: dict[str, int] = field(default_factory=dict)
 
     def kept_for(self, name: str) -> int:
-        """Rows *name* contributes to the returned result set.
+        """Rows *name* contributes to the engine's candidate pool.
 
         The explicit ``kept`` figure when the search recorded one, else
         ``raw - dropped`` for a struct built without it.
@@ -119,7 +125,7 @@ class SearchDiagnostics:
         """Return ``(name, threshold, top_distance)`` for the worst offender.
 
         Worst offender = collection where every candidate was dropped and
-        which contributed no row to the answer, with the highest
+        which contributed no row to the candidate pool, with the highest
         ``top_distance`` among those. ``None`` when no collection had every
         candidate filtered.
         """
@@ -1178,14 +1184,18 @@ def search_cross_corpus(
     candidates for that collection (kept or dropped), not just the
     dropped subset — see ``SearchDiagnostics`` for the dropped-only
     variant. *kept_count* is the number of rows the collection contributes
-    to the returned result set (nexus-079ly). On the batched route that is
-    ``raw_count`` minus the threshold-dropped rows; on the per-collection
-    route *raw_count* and the dropped count are the engine's per-collection
-    counts before the global limit cut (a ``--lexical`` row may duplicate a
-    dropped vector row: the engine reports no dropped ids, so this is not
-    corrected), and *kept_count* is what survived that cut and the lexical
-    union. ``zero_hit_rate`` there means "contributed no rows to the answer",
-    so a collection cut entirely by the global limit counts as a zero hit.
+    to the engine's candidate pool (nexus-079ly), counted before the topic
+    post-filter, the enrichment cap and the caller's page slice. On the
+    batched route that is ``raw_count`` minus the threshold-dropped rows; on
+    the per-collection route *raw_count* and the dropped count are the
+    engine's per-collection counts before the global cut (a ``--lexical`` row
+    may duplicate a dropped vector row: the engine reports no dropped ids, so
+    this is not corrected), and *kept_count* is what survived that cut and the
+    lexical union. The cut is the engine pool limit (at least 300 rows, 1000
+    with rerank), not ``--limit``. ``zero_hit_rate`` there means "contributed
+    no rows to the candidate pool", so a collection cut entirely by the pool
+    limit counts as a zero hit; it mixes route meanings across its window
+    until the per-collection route is the only one.
 
     *content_chars* (nexus-tao37) asks the per-collection route to cap each
     row's text at that many code points. Pass it only when every reader of
@@ -1640,7 +1650,10 @@ def search_cross_corpus(
         the batched path runs it (same batches, same per-batch size). Its rows
         are unioned in here, threshold-exempt, with the vector copy winning a
         tie; a lexical row counts toward ``kept`` only (nexus-079ly): ``raw``
-        and ``dropped`` stay the engine's per-collection counts.
+        and ``dropped`` stay the engine's per-collection counts. ``kept`` is
+        the rows the collection holds after the engine's pool-limit cut and
+        the lexical union (before the topic filter, the enrichment cap and the
+        page cut); the pool limit is at least 300 rows, not ``--limit``.
         """
         if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
             chunks = [

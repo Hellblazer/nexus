@@ -2764,7 +2764,7 @@ Renders four sections: distance histogram, top-5 cross-projections, orphan chunk
 | `--sort COLUMN` | Sort the table by a named column (`name`, `chunk_count`, `last_indexed`, `zero_hit_rate_30d`, `median_query_distance_30d`, `cross_projection_rank`, `orphan_catalog_rows`, `hub_domination_score`). Default: `name` |
 | `--format {table,json}` | Output format (default: `table`). `--format=json` returns `{generated_at, collections: [...]}` for dashboards and CI gates |
 
-`zero_hit_rate_30d` is the share of searches in which the collection contributed no rows to the answer; on the per-collection search route a collection whose rows all lose the global result limit counts as a zero hit although no threshold dropped them (nexus-079ly).
+`zero_hit_rate_30d` is the share of searches in which the collection contributed no rows to the engine's candidate pool (counted before the topic filter, the enrichment cap and the page cut; the pool limit is at least 300 rows, not `--limit`). On the per-collection search route a collection whose rows all lose that pool limit counts as a zero hit although no threshold dropped them; the batched route counts rows kept after the threshold, so the 30-day figure mixes both meanings until the per-collection route is the only one (nexus-079ly).
 
 Chunk counts come from T3's live `coll.count()` (same source as `nx collection list`) so the two surfaces cannot disagree — catalog-sourced counts were historically drifting to 0 on tenants that predated the catalog's `chunk_count` column (fixed 4.9.0, nexus-39zi).
 
@@ -5332,7 +5332,7 @@ figures were hand-assembled by composing several existing readers on
    per-collection `zero_hit_rate` — looping the existing `search/stats`
    route over every T3 collection (the same enumeration `nx collection
    health` performs; `zero_hit_rate` costs no extra round trip — it is
-   already on every response). Always rendered as a **LOWER BOUND**: a
+   already on every response; it is the share of searches in which the collection contributed no rows to the engine's candidate pool, and it mixes the batched and per-collection route meanings across its window, nexus-079ly). Always rendered as a **LOWER BOUND**: a
    collection absent from the enumeration is invisible independent of
    any per-call error, so the caveat is unconditional, not gated on
    `errors > 0`. The text form prints the two worst (highest)
