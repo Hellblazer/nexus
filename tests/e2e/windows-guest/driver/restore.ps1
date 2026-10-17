@@ -27,19 +27,22 @@ if (-not $pw) { throw 'nothing on stdin' }
 $sec = New-Object System.Security.SecureString; foreach ($c in $pw.ToCharArray()) { $sec.AppendChar($c) }; $sec.MakeReadOnly(); $pw = $null; $c = $null
 $cred = New-Object PSCredential($GuestUser, $sec)
 # guest-session: the same block in every script that opens a session (tests/test_windows_gate_driver.py).
-# PowerShell Direct has refused the right password with "The credential is invalid" seconds after the guest
-# restarted and an account signed in at the console (nexus-bpzt7, cycles 1 and B of 2026-10-16; not a lockout,
-# cause unknown). That one error is retried every 10 s for 2 minutes; any other error stops the script. After a
-# refusal, the guest's failed sign-ins (events 4625 and 4776) from a minute before the first one are printed.
+# Seconds after the guest restarted and an account signed in at the console, PowerShell Direct has failed to
+# open a session: "The credential is invalid" with the right password (nexus-bpzt7, cycles 1 and B of
+# 2026-10-16; not a lockout) and "A remote session might have ended" (the rerun of 2026-10-17). Causes unknown.
+# A failed open is retried every 10 s for 2 minutes while the guest is Running; a guest that is not Running
+# stops the script at once. After a failure, the guest's failed sign-ins (events 4625 and 4776) from a minute
+# before the first one are printed.
 # Everything it prints goes through Write-Host: its pipeline output is its return value, the session.
 function Open-GuestSession($Name) {
     $since = $null
     for ($i = 1; ; $i++) {
         try { $sess = New-PSSession -VMName $Name -Credential $cred -ErrorAction Stop; break }
         catch {
-            if ($_.Exception.Message -notmatch 'credential is invalid' -or $i -gt 12) { throw }
+            if ($i -gt 12 -or (Get-VM -Name $Name).State -ne 'Running') { throw }
             if (-not $since) { $since = (Get-Date).AddMinutes(-1) }
-            Write-Host "guest sign-in refused (credential is invalid) at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss')); retry $i of 12 in 10 s"
+            $why = ("" + $_.Exception.Message).Split("`n")[0].Trim()
+            Write-Host "guest session open failed at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss')) ($why); retry $i of 12 in 10 s"
             Start-Sleep 10
         }
     }

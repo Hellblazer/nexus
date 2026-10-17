@@ -151,10 +151,12 @@ def test_every_guest_session_opens_through_one_identical_retry_block() -> None:
         assert re.search(r"^\$s = Open-GuestSession \$(VMName|vm)$", code, re.M), name
 
 
-def test_the_retry_takes_only_the_credential_error_and_is_bounded() -> None:
+def test_the_retry_is_bounded_and_stops_for_a_guest_that_is_not_running() -> None:
     block = _guest_session_block("cache.ps1")
-    # cycles 1 and B of 2026-10-16 were refused this way seconds after the console sign-in
-    assert "-notmatch 'credential is invalid' -or $i -gt 12) { throw }" in block
+    # cycles 1 and B of 2026-10-16 ("The credential is invalid") and the 2026-10-17 rerun ("A remote session
+    # might have ended") failed to open a session seconds after the console sign-in: any open failure is
+    # retried, 12 times, unless the guest is no longer Running
+    assert "if ($i -gt 12 -or (Get-VM -Name $Name).State -ne 'Running') { throw }" in block
     assert "Start-Sleep 10" in block
     assert "Id = 4625, 4776" in block, "a refusal must print the guest's failed sign-in events"
     # the function's pipeline output is its return value: everything it prints goes through Write-Host
