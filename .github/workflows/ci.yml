@@ -18,13 +18,16 @@ on:
     branches: [main, develop]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # Cancel superseded runs on PRs AND develop pushes (2026-07-06 CI-cost
-  # pass): back-to-back develop pushes were stacking full ~20-min runs for
-  # commits already made stale by the next push. The old "never cancel
-  # main" concern (tag pushes cancelling version-bump CI) is moot now that
-  # main is not a push trigger at all and tags run a different workflow
-  # with its own concurrency group.
+  # One group per commit on develop, one per ref elsewhere (Sam,
+  # 2026-10-17): with several sessions pushing, the next push cancelled the
+  # last one's run and many develop commits never got a finished run. Every
+  # develop push now gets a run that finishes; sessions batch their commits
+  # and push less often instead. cancel-in-progress: false alone would not
+  # do it, because GitHub keeps one pending run per group and a third push
+  # still cancels the second's queued run. On PRs the 2026-07-06 CI-cost
+  # rule still holds: a newer push cancels the run it supersedes. main is
+  # not a push trigger, and tags run a different workflow.
+  group: ci-${{ github.ref == 'refs/heads/develop' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:

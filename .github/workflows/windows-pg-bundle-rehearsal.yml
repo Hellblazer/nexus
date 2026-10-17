@@ -190,7 +190,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-pg-bundle-rehearsal
+  # Per commit on develop, per ref elsewhere (Sam, 2026-10-17): every
+  # develop push gets a finished Windows run; a PR push still cancels the
+  # run it supersedes. Runs queue on the Windows runner.
+  group: windows-pg-bundle-rehearsal-${{ github.ref == 'refs/heads/develop' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:

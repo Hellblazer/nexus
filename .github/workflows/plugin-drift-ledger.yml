@@ -52,7 +52,8 @@ on:
     paths: *surface
 
 concurrency:
-  group: plugin-drift-ledger-${{ github.ref }}
+  # Per commit on develop, per ref elsewhere (Sam, 2026-10-17), as ci.yml.
+  group: plugin-drift-ledger-${{ github.ref == 'refs/heads/develop' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
