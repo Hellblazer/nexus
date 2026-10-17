@@ -115,3 +115,12 @@ each arm's conexus entries, flags a listing name that appears twice, and takes
 markers `ARM:+name` / `ARM:-name` that must hold in every run of that arm, for
 example `D:+conexus:setup S0:-conexus:setup` (`setup` is a command develop has
 and the image's 7.79.0 does not).
+
+Arms `DT` and `NT` are `D` and `N` on true-premise projects
+(nexus-dg7i6.5): after the project's first commit, `fixtures/<case>.sh` adds
+what the case prompt talks about (the outbound Voyage call, a feature branch
+with a diff against `main`, a just-written retry wrapper with a thin test,
+five pgvector RDRs). On the plain project those premises are false, and the
+model checks the repo, finds nothing, and answers without a skill, so a case
+that never loads there measures the premise, not the skill's description.
+Cases without a fixture run on the plain project.

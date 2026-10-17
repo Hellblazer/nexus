@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#   sr_batch.sh <REPS> <ARM>... [-- <case>...]   ARM = S0|S1|S2|D|N; cases default to every conexus/evals case
+#   sr_batch.sh <REPS> <ARM>... [-- <case>...]   ARM = S0|S1|S2|D|N|DT|NT; cases default to every conexus/evals case
 # Results: ab/skillroute/out/<ARM>/<case>/r<rep>/
 set -uo pipefail
 REPS=${1:?REPS}; shift

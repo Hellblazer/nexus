@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Skill routing under distractor plugins (nexus-dg7i6.1). One container run.
-# Env: ARM (S0|S1|S2|D|N), CASE (a conexus/evals case directory name), ANTHROPIC_MODEL.
+# Env: ARM (S0|S1|S2|D|N|DT|NT), CASE (a conexus/evals case directory name), ANTHROPIC_MODEL.
 #   S0  the image's installed conexus + sn, nexus tools as shipped (8 eager)
 #   S1  S0 + every plugin under /plugins/S1 (the beads plugin)
 #   S2  S0 + every plugin under /plugins/S2 (the rest of the laptop's enabled set)
@@ -10,6 +10,9 @@
 #   N   the same with /plugins/N/conexus, the narrowed conexus (nexus-dg7i6.2)
 #   Both trees are extracted from commits by export_conexus.sh, so D and N
 #   differ by exactly the narrowing diff.
+#   DT, NT  D and N on the true-premise project: fixtures/<case>.sh runs in it
+#       after the first commit, so the code, branch, tests or RDRs the prompt
+#       talks about exist (nexus-dg7i6.5)
 # D and N change only the plugin tree: its MCP servers hand off to the image's
 # installed nx, so the nexus tools are the ones S0 has.
 # /plugins is ab/skillroute/plugins (not committed; built by snapshot_plugins.sh).
@@ -39,8 +42,8 @@ PLUGIN_ARGS=()
 case "$ARM" in
   S0) : ;;
   S1|S2) for d in /plugins/"$ARM"/*/; do PLUGIN_ARGS+=(--plugin-dir "${d%/}"); done ;;
-  D|N)
-    TREE=/plugins/$ARM/conexus
+  D|N|DT|NT)
+    TREE=/plugins/${ARM%T}/conexus
     [ -f "$TREE/.claude-plugin/plugin.json" ] || { echo "no conexus tree at $TREE" >&2; exit 2; }
     # Exactly one conexus in the listing: the installed one is switched off.
     python3 - /home/nexus/.claude/settings.json <<'PY'
@@ -65,6 +68,11 @@ git -C "$REPO" init -q && git -C "$REPO" config user.email ab@example.invalid \
   && git -C "$REPO" config user.name ab && git -C "$REPO" add -A \
   && git -C "$REPO" commit -qm "Add ingest batching with an injected clock"
 cd "$REPO" || exit 1
+FIXTURE=/harness/ab/skillroute/fixtures/$CASE.sh
+if [ "${ARM: -1}" = T ] && [ -f "$FIXTURE" ]; then
+  bash "$FIXTURE" > "$OUT/fixture.log" 2>&1 || { echo "fixture $CASE failed" >&2; exit 2; }
+  echo "fixture=$CASE head=$(git rev-parse --short HEAD) branch=$(git branch --show-current)" >> "$OUT/setup.txt"
+fi
 SID=$(python3 -c 'import uuid;print(uuid.uuid4())')
 echo "{\"S\":\"$SID\"}" > "$OUT/ids.json"
 t0=$(date +%s)
