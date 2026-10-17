@@ -24,8 +24,11 @@ now". An investigation the same day (T2 `nexus/voyage-local-mode-investigation-2
 but only as a switch for the whole engine, and that one engine cannot serve both
 kinds of collection. On 2026-10-17 Sam decided to build this RDR, reversing a
 same-day choice of Alternative 1, and answered the draft's six open questions
-(T2 `nexus_rdr/210-open-questions-sam-2026-10-17`). Every code citation below was
-re-read at develop e34467fdb (drift audit: T2 `nexus_rdr/210-drift-audit-2026-10-17`).
+(T2 `nexus_rdr/210-open-questions-sam-2026-10-17`). The research findings that
+settle the draft's open technical questions are T2 `nexus_rdr/210-research-10` to
+`-19` (four of them spikes on chas). Every code citation below was re-read at
+4d08d3861, on develop 6cd90aab5 (drift audit: T2
+`nexus_rdr/210-drift-audit-2026-10-17`).
 
 Terms used throughout:
 
@@ -67,7 +70,7 @@ A local user who has both bge-768 collections and Voyage collections can have
 only one kind searchable at a time. Restarting the engine with a key makes every
 bge-768 collection fail with HTTP 422, and the same restart without a key does
 the same to every Voyage collection. By default the key never reaches the engine
-at all, and re-running `nx init` quietly undoes a Voyage opt-in. Several client
+at all. Several client
 decisions, including one that deletes data, read the engine's single mode string
 and would misfire on an engine that holds both. Nothing moves an existing
 collection onto a new model without re-indexing it from source.
@@ -92,23 +95,21 @@ search the client no longer hides this: since nexus-vply6 (e1614fda3,
 fine (`search_engine.py:1948-1981`). The search is loud, but it still cannot
 return the other family's hits.
 
-#### Gap 2: The key does not reach the engine by default, and init reverts the opt-in
+#### Gap 2: The key does not reach the engine by default
 
 The supervisor (`storage_service_daemon.py:1544-1590`) passes a configured key
 only when `local.embed_model` names a Voyage model or records no choice at all
 (the guard is `:1565`, the credential lookup `:1573`). That guard (nexus-r5f3c)
 exists because of Gap 1: a key flipped the engine Voyage-only and broke the
-user's bge collections. On develop, `nx init` writes `local.embed_model = bge`
-on every local provision (`init.py:96`, inside `_provision_service_embedder_step`
-at `init.py:54`, called from `provision_service_stack` at `init.py:765`), and so
-does the upgrade ladder's provision leg (`upgrade_ladder/provisioning.py:293,
-381-384`), which reaches the same function. A user who opted into Voyage and
-later re-runs `nx init` loses the opt-in at the next service restart.
+user's bge collections.
 
-The init half is fixed separately and lands ahead of this RDR: branch
-`feature/nexus-ddmfg-init-keeps-voyage` (nexus-ddmfg, c03352a2a) keeps a Voyage
-value and writes bge only otherwise, which also covers the ladder. It is not
-scope here. The supervisor half (the r5f3c guard) is.
+The init half is fixed and on develop (nexus-ddmfg, c03352a2a..6cd90aab5):
+`_provision_service_embedder_step` (`init.py:54`, called from
+`provision_service_stack` at `init.py:787`) keeps a Voyage `local.embed_model`
+(`init.py:100-102`) and writes bge only otherwise (`init.py:118`). The upgrade
+ladder's provision leg (`upgrade_ladder/provisioning.py:293, 381-384`) reaches
+the same function, so it is covered too. It is not scope here. The supervisor
+half (the r5f3c guard) is.
 
 #### Gap 3: The profile has no input for choosing between two available models
 
@@ -126,13 +127,13 @@ of `getenv("NX_` in `service/src/main/java`, include none for the profile).
 
 `t3_collection_name` (`corpus.py:1213`) returns one name. Once a Voyage sibling
 exists it returns that sibling (`corpus.py:1406-1410`), and it probes for the bge
-sibling only when the promoted name is missing (`corpus.py:1484-1500`). This is
+sibling only when the promoted name is missing (`corpus.py:1483-1499`). This is
 pinned by `tests/test_rdr_109_phase2_dispatch.py:258`
 (`test_read_path_prefers_voyage_over_bge_once_voyage_sibling_exists`).
 
 This gap is narrower than the draft said. A bare content-type corpus
 (`--corpus code`) already fans out to every live collection of that content type
-(`resolve_corpus` stage 2, `corpus.py:2428-2451`), the search engine groups the
+(`resolve_corpus` stage 2, `corpus.py:2427-2452`), the search engine groups the
 result by model (`search_engine.py:595-625`), and each group goes to the engine
 as its own request. What still reads one sibling is every path that goes through
 the single-name resolver: an owner-scoped corpus, `--collection`, and the store
@@ -144,18 +145,33 @@ RDR-157 and RDR-160 state that the local engine makes no outbound HTTP. Sam
 decided on 2026-06-15 (nexus-umm29) that the Voyage embed and rerank call is a
 sanctioned exception, bounded by a guard or test so a later change cannot add
 other outbound calls under it. The wording landed in f7cae33ec (2026-09-15:
-RDR-157, RDR-160, RDR-204, the privacy policy). The guard does not exist, and a
-guard written as drafted ("outbound HTTP only in the Voyage classes") would fail
-on the day it lands. A grep of `service/src/main/java` for
-`HttpClient.newBuilder`, `HttpClient.newHttpClient`, `openConnection(` and
-`new Socket(` finds four construction sites: `VoyageEmbedder.java:309`,
-`CceEmbedder.java:359`, `VoyageReranker.java:152` and
-`HttpsSchemeHandler.java:46`. The fourth fetches any `https://` URI on request
-behind `POST /v1/vectors/resolve` and is registered unconditionally
-(`NexusService.java:648-649`). `EgressProxy.java` builds no client; it supplies a
-proxy selector to the three Voyage classes (`EgressProxy.java:7-35`). (T2
-210-research-6. The grep above is this revision's; the full egress census,
-covering forms it does not match, is pending 210-research-egress-census.)
+RDR-157, RDR-160, RDR-204, the privacy policy). The guard does not exist, and no
+scan covers outbound networking today. The egress census (T2 210-research-10;
+patterns: `java.net.http`, `URL.openConnection`/`openStream`,
+`Socket`/`ServerSocket`/`SocketChannel`, `ProxySelector`, `DriverManager`,
+`ProcessBuilder`/`exec`, DJL and ONNX runtime, `https` literals) finds eight
+outbound paths in the engine:
+
+- **Path 1.** `HttpsSchemeHandler` (`HttpsSchemeHandler.java:45-48`, redirects followed),
+   registered unconditionally for `POST /v1/vectors/resolve`
+   (`NexusService.java:648`, `:654`): fetches any caller-supplied `https` URI.
+   Sam ruled it removed in every mode (nexus-3t0jv, landing ahead of this RDR).
+- **Paths 2 to 4.** `VoyageEmbedder` (`:309`), `CceEmbedder` (`:359`) and `VoyageReranker`
+   (`:152`), each to `api.voyageai.com` (URL constants `VoyageEmbedder.java:101`,
+   `CceEmbedder.java:115`, `VoyageReranker.java:63`), built only when keyed.
+- **Path 5.** `EgressProxy` (`EgressProxy.java:49`) routes 2 to 4 through an
+   operator-configured proxy; it builds no client.
+- **Paths 6 and 7.** DJL inside the tokenizer library (used by `Bge768Embedder`,
+   `CrossEncoderReranker`, `OnnxEmbedder`): a call to the cloud instance-metadata
+   address at every tokenizer build, and a native-library download on GPU hosts.
+   Library code, not visible to a main-source scan (210-research-10; not re-read
+   here). Both are closed by nexus-17jvq (ba8422171), which is not on develop.
+- **Path 8.** JDBC to `NX_DB_URL`: the pool, `PciBuilderSession.java:243`,
+   `BackendReaper.java:122`, `PoolerModeCheck.java:131`.
+
+No raw socket, `openConnection`, `openStream` or `ProcessBuilder` appears in main
+source. Liquibase is 4.29.0 (`service/pom.xml:29`), older than its analytics
+beacon; a bump to 4.30 or later would add an outbound path.
 
 #### Gap 6: No test or gate runs a keyed local engine, let alone a dual one
 
@@ -187,34 +203,46 @@ the terminal, keeps no cursor, and reports nothing while it runs.
 #### Gap 8: Client decisions key off one engine-wide mode string
 
 The engine's mode string is `onnx-local` when the router has no Voyage embedder
-and `voyage` otherwise (`EmbedderRouter.java:162-169`), reported on `/version`
-(`VersionHandler.java:478-490`) and `/v1/status` (`StatusHandler.java:338-347`).
-A `git grep` of the non-test, non-doc tree for `"onnx-local"`, `== "voyage"` and
-`embedding_mode` finds these client branches on it:
+and `voyage` otherwise (`EmbedderRouter.java:168-169`), reported on `/version`
+beside the served model set `embedding_models` (`VersionHandler.java:479-489`)
+and on `/v1/status` (`StatusHandler.java:338`), and used in the 422 refusal text
+(`EmbedderRouter.java:552`, `:588`). The census (T2 210-research-15, extending
+-7) examined 29 site groups, about 70 line cites; 22 need a change and 7 do not.
+No telemetry field carries the mode, and `conexus/` has no code consumer. The
+groups that decide something, by consequence:
 
-- `http_vector_client.py:1061`: the per-request chunk cap is the ONNX memory cap
-  for every collection when the mode is `onnx-local`.
-- `http_vector_client.py:1175`: the Voyage byte budget is off when the mode is
-  `onnx-local`.
-- `http_vector_client.py:6049`: the probe memo accepts only the two known values.
-- `search_engine.py:580`: Voyage-calibrated similarity thresholds apply only when
-  the mode is `voyage`.
-- `commands/collection.py:601-650`: `_active_embedding_dim` turns the mode into
-  ONE active dimension (1024 for `voyage`, the local model's for `onnx-local`).
+- **Deletes data.** `_active_embedding_dim` (`commands/collection.py:601-649`)
+  turns the mode into ONE active dimension (1024 for `voyage`, `:638-639`).
   `_find_dimension_mismatched_collections` (`:664`) lists every collection whose
-  name declares another dimension, and `nx collection prune --yes` (`:722`)
-  deletes them. `nx doctor` reuses the same finder (`health.py:8224-8244`).
-- `http_engine_status.py:154`: a display branch.
+  name declares another dimension, `nx collection prune --yes` (`prune_cmd`,
+  `:725`) deletes them, and the doctor's dimension-orphan row reuses the finder
+  and recommends that prune (`health.py:8224-8275`). Under `voyage`, every served
+  bge collection would be listed and deleted. It is already wrong today in one
+  case: a keyless engine lists every Voyage collection as an orphan, although a
+  key would serve it.
+- **Memory and request shape.** `http_vector_client.py:1061` applies the ONNX
+  memory cap (nexus-33hpq) to every collection when the mode is `onnx-local`;
+  `:1175` turns the Voyage byte budget off on the same test; `:1250-1259`
+  (`_serving_embedding_mode`) feeds both.
+- **Ranking.** `search_engine.py:552-580` applies Voyage-calibrated thresholds
+  only when the mode is `voyage`.
+- **Memo and probe.** `http_vector_client.py:6049` accepts only the two known
+  values; `:3277` and `:5777` carry the single value.
+- **Write model.** The client picks the write model from `local.embed_model`
+  (`local_embed_model_is_voyage`, `config.py:708`, read at `corpus.py:420-443`,
+  `:546`, `:689`, `:1488`), the second one-family assumption.
+- **Remedy and display text.** `errors.py:258-261`, `search_engine.py:1972-1974`,
+  `mcp/core.py:3928`, `http_vector_client.py:1592`,
+  `db/http_engine_status.py:134`, `commands/doctor.py:3745-3800`,
+  `health.py:8371`.
+- **Gates.** `tests/e2e/cloud-client-path-gate.sh:705` asserts the mode is one
+  of the two values.
+- **Engine.** `modeName`, the refusal text (`EmbedderRouter.java:507-590`), and
+  `local_embed_activity`, wired only in the keyless branch (`Main.java:309`).
 
-The rest are display or log only (`errors.py:252-265`, `commands/daemon.py:1778`,
-`commands/init.py:872`, `commands/service_cmd.py:57`,
-`storage_service_daemon.py:1582`). On an engine that holds both families, any
-single value is wrong for half the collections (T2 210-research-7; the full
-census of mode-string consumers is pending 210-research-ca3-census, and the list
-above is this revision's own grep until it lands). The pruner is the dangerous one:
-under `voyage` it would list every served bge collection for deletion. It is
-already wrong today in one case: a keyless engine lists every Voyage collection
-as a dimension orphan, although adding the key would serve it.
+A pattern that already works for two families exists:
+`verify_voyage_capability` (`upgrade_ladder/provisioning.py:171-218`) reads
+`embedding_models`, not the mode.
 
 #### Gap 9: The client's profile check refuses writes to an existing off-profile collection
 
@@ -243,7 +271,7 @@ client although the engine would accept it.
 | RDR-192 | Constraint | live(c) decides when moved chunks become visible, and the reaper's grace and floor decide what happens to the source's chunks after the move (Technical Design, re-embed section). |
 | RDR-227 | Adjacent (closed) | Its reconciler builds a per-collection index for any live, unsuperseded collection above its row threshold and drops it when `superseded_by` is set (rdr-227:366-370, :418-428). A re-embed target therefore gets its index while the job runs, and the source's index goes at supersede. No change needed. |
 | RDR-224 | Adjacent (closed) | Native Windows runs bge on the Windows ONNX runtime (rdr-224:289, :322), with the ORT init gate and temp sweep at boot (`Main.java:67`, `:71`). The dual boot must hold on Windows; the coexistence spike (Phase 1 Step 1) includes the win-x64 image. |
-| RDR-228 | Adjacent (closed) | Plugin setup runs `nx init --yes` unattended when no service is provisioned, and reruns an unfinished one (rdr-228:677-683, :1600-1601). The init keep-voyage fix landing ahead covers that caller too; nothing here changes it. |
+| RDR-228 | Adjacent (closed) | Plugin setup runs `nx init --yes` unattended when no service is provisioned, and reruns an unfinished one (rdr-228:677-683, :1600-1601). The init keep-voyage fix, now on develop, covers that caller too; nothing here changes it. |
 
 Searched `docs/rdr/README.md` and the RDR collection for "dual", "local voyage",
 "embedder router", "embed_model" and "re-embed"; no other RDR covers serving two
@@ -290,21 +318,36 @@ Source reading at a9551ee21 (T2 [25872]) and 9172348a0 (T2
 at e34467fdb (T2 `nexus_rdr/210-drift-audit-2026-10-17`), recorded as research
 findings `nexus_rdr/210-research-5` (copy against the ownership guard), `-6`
 (egress against `HttpsSchemeHandler`), `-7` (mode-string sites, CA-3), `-8`
-(cutover does not cascade collection-keyed state) and `-9` (the drift list). For
-this revision the cited lines were re-read at e34467fdb; where the audit and the
-code disagreed, the code is what is cited. Further research is in progress in
-another session; where this RDR depends on a result not yet recorded, the text
-says "pending 210-research-<topic>".
+(cutover does not cascade collection-keyed state) and `-9` (the drift list).
+A second pass settled the questions the first left open:
+
+| Record | Method | Subject | Result |
+| --- | --- | --- | --- |
+| 210-research-10 | Source search | Egress census | Eight outbound paths (Gap 5); the guard needs a source scan and a runtime witness |
+| 210-research-11 | Source search | CA-1, source half | Both families are in today's binary; no router can hold both |
+| 210-research-12 | Source search | Re-embed options | A guard-exempt copy then cross-model rename is possible; per-document manifests are one-collection |
+| 210-research-13 | Source search | CA-2, which surfaces rerank | Rerank runs on two surfaces only; the rest merge by distance or `hybrid_score` |
+| 210-research-14 | Source search | Cutover cascade | The cross-model rename repoints 2 of the collection-scoped tables |
+| 210-research-15 | Source search | CA-3 census | 29 site groups, 22 to change; the wire value must be `dual` |
+| 210-research-16 | Spike | Voyage rerank across requests | Comparable (Kendall tau 0.991-0.995 against a noise floor of 0.9955) |
+| 210-research-17 | Spike | bge calibration | Factor about 1.38, not the 0.818 default; per-collection thresholds required |
+| 210-research-18 | Spike, 17 of 17 | Copy versus per-document move | The move holds under the guard; the copy has a race; satellite tables move with neither |
+| 210-research-19 | Spike, linux-amd64 | CA-1 in JVM and native image | One process holds both families; memory within noise of bge-only |
+
+The spikes ran on local branches (`spike/nexus_911-rdr210-copy-cutover`
+0d3ebc1b8, `spike/nexus_911-rdr210-dual-native` a86b4d0d1), not on develop.
+Every cited line was re-read at 4d08d3861; where a record and the code disagree,
+the code is cited and the disagreement is noted.
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| Engine router and boot (`Main`, `EmbedderRouter`) | Yes | Posture from key presence; no router holds bge and Voyage except the test-only `EmbedderRouter(OnnxEmbedder, String, String)` (`:111-127`), typed to the retired MiniLM embedder. |
+| Engine router and boot (`Main`, `EmbedderRouter`) | Yes | Posture from key presence; no router holds bge and Voyage except the test-only `EmbedderRouter(OnnxEmbedder, String, String)` (`:111`), typed to the retired MiniLM embedder. |
 | Catalog write path (`CatalogRepository`, `CombinedWriteService`) | Yes | Per-document transaction writes chunks then replaces the document's manifest rows (`CatalogRepository.java:5182-5260`). |
 | Reaper (`ChunkReaper`, vectors-021, vectors-030) | Yes | 30-day grace; move floor 0.25 from 100 chunks. |
-| onnxruntime 1.20.0 with GraalVM native image, alongside the Voyage HTTP clients | No | Coexistence in one native process is Critical Assumption 1; a spike, not a source search, settles it. |
-| Voyage API | No (RDR-195 verified the input-count cap via Context7) | Not re-read; the engine's retry loop is `VoyageRetryLoop`. |
+| onnxruntime 1.20.0 with GraalVM native image, alongside the Voyage HTTP clients | Spike (210-research-19) | One native process holds both on linux-amd64; other platforms are Phase 1 Step 1. |
+| Voyage API | Spike for rerank (210-research-16); RDR-195 verified the input-count cap via Context7 | Rerank scores are pointwise and comparable across requests. |
 
 ### Key Discoveries
 
@@ -330,11 +373,12 @@ says "pending 210-research-<topic>".
   new engine class. `OwnershipGuardCoverageScan` fails when any main-source file
   other than `VectorHandler` calls one of the four guarded repository methods
   (`:35-36`, rule `:121-145`); its allowed-callers map is empty on purpose
-  (`:38-39`) and admits only a caller "it cannot write an ownerless chunk". SQL
-  functions that insert chunks are governed separately by
+  (`:38-39`) and admits only a caller with "a reason it cannot write an ownerless
+  chunk" (`:30-31`). SQL functions that insert chunks are governed separately by
   `_CHUNK_INSERTER_ALLOWLIST` (`tests/test_changelog_chunk_inserter_lint.py:49`).
-  Together with the live(c) finding above, this refutes the 2026-09-16 copy
-  design. *Source: T2 210-research-5.*
+  A guard-exempt copy is therefore possible only by an entry the rule's own text
+  forbids (210-research-12 proposed one; the spike's stub caller turned
+  `OwnerlessWriteRefusalTest` red, 210-research-18). *Source: T2 210-research-5.*
 - **✅ Verified** (source search) — The combined write already moves a document.
   `writeManifestRows` (`CatalogRepository.java:5182-5260`), inside one per-document
   transaction under the target collection's sweep gate: upserts the resolved
@@ -354,41 +398,125 @@ says "pending 210-research-<topic>".
   inside `reaper_quarantine_chunks`, vectors-030 `:1953`). Exemptions exist only
   as an environment list (`NX_REAPER_FLOOR_EXEMPT_COLLECTIONS`,
   `ChunkReaper.java:133`). A superseded source whose documents all moved is 100%
-  reapable after 30 days and is refused every pass.
-- **✅ Verified** (source search) — Cross-model rename leaves stores behind. The
-  copy branch of `renameCollectionTxn` (`CatalogRepository.java:9124-9165`)
-  repoints `catalog_documents.physical_collection` and the manifest's collection
-  and model; its own comment (`:9149-9152`) says topic assignments and orphan
-  stamps keep naming the source's chunks. The client's cascade for the other
-  stores, `remap_collection_references` (`collection_rename.py:174`), has no
-  caller outside its module (grep of `src/nexus`). The engine tables it touches
-  are listed in `T2Database.rename_collection_cascade`
-  (`db/t2/__init__.py:347-355`); one of them, `nexus.chash_index`, no longer
-  exists (dropped, `rdr187-001-drop-chash-index.xml:58-60`). *Source: T2
-  210-research-8; the full census of collection-keyed state is pending
-  210-research-cutover-cascade-census.*
+  reapable after 30 days and is refused every pass; the spike confirmed the
+  refusal at floor 0.25 (210-research-18). Orphan stamps are written only for
+  chunks last written more than an hour ago (the trigger's guard,
+  vectors-030 `:3024`, `:3040`, `:3044`), so a source chunk written within the
+  hour gets no stamp when its document moves; its reap clock then runs from
+  `last_written_at` (`chunk_is_reapable` takes the later of the two,
+  vectors-021 `:26`, `:432`), at most an hour earlier.
+- **✅ Verified** (source search, then spike) — Collection-scoped state, census
+  complete. `COLLECTION_SCOPED_TABLES` registers 14 tables
+  (`CatalogRepository.java:8804-8823`); `chunk_orphaned_at` is a documented
+  exclusion carried by its chunk foreign key's cascade
+  (`tests/catalog/test_collection_scoped_tables_schema_parity.py:139-152`), and
+  that gate asks `information_schema` for every collection column, so the 15 are
+  all of them. The same-model rename re-homes all 14; the cross-model branch of
+  `renameCollectionTxn` (`:9122-9168`) updates only `catalog_documents` and
+  `catalog_document_chunks`, and its own comment (`:9149-9152`) says topic
+  assignments and orphan stamps stay. The spike found the same of the
+  per-document move: aspects, highlights, the aspect queue and topic rows all
+  still name the source after it (210-research-18). `deleteCollection(source)`
+  then deletes them by collection (`CatalogRepository.java:8369` topic
+  assignments, `:8430-8445` topics, meta and centroids, `:8448-8450` aspects,
+  highlights and queue). The client cascade `remap_collection_references`
+  (`collection_rename.py:174`) has no production caller (210-research-14).
+  *Source: T2 210-research-8, -14, -18.*
+- **✅ Verified** (source search) — How each satellite joins its document.
+  `document_aspects` and `aspect_extraction_queue` are unique on (tenant,
+  collection, source_path) and carry a nullable `doc_id` tumbler
+  (`aspects-001-baseline.xml:56-75`, `:153-167`; nullable from
+  `fk-001-catalog-cross-store.xml:148-149`, `:239-240`); `document_highlights` is
+  unique on (tenant, doc_id) with a nullable `collection`
+  (`aspects-001-baseline.xml:111-121`). All three cascade from
+  `catalog_documents` on `doc_id` (`fk-001-catalog-cross-store.xml:158-162`,
+  `:199-203`, `:249-253`). `topic_assignments.doc_id` is a chunk chash; the row
+  references the source chunk on (tenant, source_collection, doc_id,
+  embedding_model) with ON DELETE CASCADE (vectors-030 `:1032-1036`) and its
+  topic on (tenant, topic_id) with ON DELETE CASCADE
+  (`taxonomy-014-topics-tenant-unique.xml:270-273`).
 - **✅ Verified** (source search) — `/version` already reports the served model
-  set as `embedding_models` beside `embedding_mode` (`VersionHandler.java:478-487`).
+  set as `embedding_models` beside `embedding_mode` (`VersionHandler.java:479-489`).
 - **✅ Verified** (git grep) — No production client calls `POST /v1/vectors/resolve`:
   its one client method, `HttpVectorClient.resolve_content`
   (`http_vector_client.py:4155`), has no caller outside tests, and the client has
-  its own `https` reader (`aspect_readers.py:748`). That the handler exists and
-  breaks the drafted guard is T2 210-research-6; the full egress census is
-  pending 210-research-egress-census.
-- **✅ Verified, draft corrected** (source search) — Batch numbers: Voyage batches
-  are planned under a token budget up to 1,000 inputs (`VoyageEmbedder.java:124`);
-  the 300-row write cap is a client convention (`limits.py:60`) the engine does
-  not enforce on `upsert-chunks`; the existing re-embed verb uses 100 so a request
-  fits the managed edge's 55-second limit (`commands/collection.py:1438-1444`).
-  *Source: T2 210-research-3, re-read.*
+  its own `https` reader (`aspect_readers.py:748`).
+- **✅ Verified** (source search) — Batch numbers: Voyage batches are planned
+  under a token budget up to 1,000 inputs (`VoyageEmbedder.java:124`); the
+  existing re-embed verb sends 100 chunks per request so one fits the managed
+  edge's 55-second limit (`commands/collection.py:1438-1444`). *Source: T2
+  210-research-3.*
 - **✅ Verified** (source search) — The engine runs periodic work on one scheduler
-  registered at construction (`NexusService.java:686`, `:700`, reaper at `:729`),
-  each run stateless or holding state in process; there is no persisted job table.
-  *Source: T2 210-research-4, re-read.*
-- **✅ Verified** (source search) — Drift since 9172348a0: `embed_migrate.py`
-  and `rdr195-voyage-mvv.sh` deleted, the verb renamed and its batch 100, the
-  content-type fan-out already spanning siblings, the nexus-vply6 named error,
-  and RDR-223, RDR-225 and RDR-192 load-bearing. *Source: T2 210-research-9.*
+  registered at construction (`NexusService.java:686`, `:700`, reaper at `:729`);
+  there is no persisted job table. *Source: T2 210-research-4.*
+- **✅ Verified** (source search) — An engine-internal caller has no request
+  deadline. The deadline is a thread-local the HTTP filter sets per request
+  (`RequestContext.java:62`, `setDeadlineNanos` `:82-83`), and the embed path's
+  probe reads "never expires" when none is set (`RequestDeadlineProbe.java:27`,
+  `:33-36`). The request default is 300 s, capped at 900 s
+  (`RequestDeadline.java:64`, `:83`). A job on the scheduler sets its own.
+- **✅ Verified** (source search) — A precondition failure inside the batched
+  write has no typed reason today. The per-document catch classifies SQL errors
+  and passes through only `IllegalArgumentException`,
+  `TombstonedDocumentException` and `DocumentNotFoundException`; anything else
+  becomes "internal error (ClassName)" (`failureDetail`,
+  `CatalogRepository.java:6372-6414`, allowlist `:6406-6407`). The spike's
+  `MovePreconditionFailed` came back that way (210-research-18).
+- **✅ Verified** (source search) — Which surfaces rerank (210-research-13, cites
+  re-read). Collections are grouped by model (`search_engine.py:595-624`), one
+  engine request per group, reranked inside that request
+  (`RerankStage.java:127`). `nx search` reranks only with more than one target
+  collection or `--lexical` (`search_cmd.py:462-466`); MCP `search` only with
+  `lexical=true` (`mcp/core.py:3049`). On both, rows with a rerank score lead and
+  rows of a degraded group follow them (`search_cmd.py:658-680`,
+  `mcp/core.py:3089-3093`), with a warning (`search_cmd.py:646-657`,
+  `mcp/core.py:3094-3097`), so a rate limit on one group sinks that whole
+  family. MCP `query`'s plain path orders by `hybrid_score`
+  (`apply_ranking_boosts`, `mcp/core.py:5111-5116`), a min-max over calibrated
+  distance whose factor table knows only the two Voyage models
+  (`scoring.py:76-79`); any other model gets 0.45/0.55 = 0.818 (`:81`, `:84-104`).
+  The catalog-routed tools (`search_metadata_scoped`, `search_graph_hop`, the
+  catalog branch of `query`) merge groups by raw distance
+  (`_grouped_combined_query`, `mcp/core.py:3881-3946`), and `nx_answer` retrieves
+  through them. Thresholds are keyed by name prefix (`search_engine.py:541-549`)
+  and gated on the engine mode (`:552-580`), though the request already carries
+  them per collection (`:1637-1646`).
+- **✅ Verified** (spike, 210-research-16) — Voyage rerank scores are comparable
+  across requests. Split-merge against one request over 60-chunk pools, 20
+  known-item queries, rerank-2.5 with the engine's request shape: Kendall tau
+  0.991-0.995 (min 0.980), top-10 overlap 0.99-1.0, mean absolute score
+  difference 3.2e-4 to 4.5e-4, against a noise floor (one request against itself
+  shuffled) of tau 0.9955 and 3.4e-4. Top-1 identical 20 of 20. Scoring is
+  pointwise. Not measured: through the engine route, under a 429, other corpora.
+- **✅ Verified** (spike, 210-research-17) — bge-768's calibration factor is about
+  1.38 (bootstrap 1.36-1.48), from the method behind the existing factors
+  (0.45 over the model's best-F1 threshold; the method reproduces
+  voyage-context-3's recorded 0.65 as 0.641, and gives bge 0.325). With the 0.818
+  default, an irrelevant chunk of the other family outranked the best relevant
+  chunk in 12 of 20 queries one way (9 of 10 inversions sink a relevant Voyage
+  chunk) and 5 of 20 the other; factor 1.0 gave 7 and 2; factors 1.15 to 1.30
+  gave 3 and 1. The Voyage 0.65 threshold applied to bge distances admits every
+  bge result (off-topic bge top-10 minimum distance 0.369). Not measured:
+  voyage-code-3 and code collections, other corpora; n = 20.
+- **✅ Verified** (spike, 210-research-18) — The per-document move works under
+  the guard with no exemption: the composite foreign key held, the ownership
+  guard, its coverage scan and the chunk-inserter lint stayed green; mid-move the
+  source held 8 and the target 8 of 16 documents with no overlap; a document a
+  client changed between read and move was skipped and the next pass moved it;
+  `store_put` notes moved. One search request naming both siblings is refused
+  (mixed dimensions 768 and 384, `requireHomogeneousModel`,
+  `PgVectorRepository.java:2399`). Median throughput 130.7 chunks/s (123.2 to
+  146.0) against 177.9 (139.8 to 192.1) for the guard-exempt copy, about 25%
+  slower, on 500 chunks with a MiniLM target that dominates the time.
+- **✅ Verified** (spike, 210-research-19, linux-amd64, GraalVM 25.0.3) — One
+  engine process, JVM and native image, builds bge-768, the cross-encoder, a dual
+  router, the three Voyage embedders and the Voyage reranker (dummy key, no
+  Voyage call), serves bge embeds and a cross-encoder rerank, and exits 143 on
+  SIGTERM with no SEGV, also during bge initialisation (exit deferred 1.6 to
+  3.2 s by `OrtInitGate`). Native peak VmHWM, median of 3: bge-only 1796 MB, dual
+  1901 MB after one 64-chunk embed and one 60-candidate rerank, within
+  run-to-run noise (bge-only range 1688 to 1867). A keyed boot with no bge files
+  skips bge, never loads ONNX runtime, and boots at 161 MB native.
 - **Documented**: posture is chosen once, from key presence (`Main.java:238, 251`).
 - **Documented**: the profile is rewritten on every boot from the posture
   (`EmbedderRouter.java:264-272`, `:356-378`).
@@ -399,39 +527,48 @@ says "pending 210-research-<topic>".
 
 ### Critical Assumptions
 
-- [ ] **CA-1.** A bge-768 embedder and the Voyage embedders and reranker can be
-  built in one native-image process without conflict on macOS arm64, Linux x64
-  and Windows x64, and the bge files' presence can be checked without creating an
-  ONNX session. — **Status**: Unverified, pending 210-research-ca1 — **Method**:
-  Spike (Phase 1 Step 1). The presence half is already true in source: the
-  constructor's file and size checks throw before ONNX runtime is touched
-  (`Bge768Embedder.java:226-255`).
-- [ ] **CA-2.** A merged result list from a bge-768 collection and a Voyage
-  collection ranks soundly, because every result of a keyed engine passes the
-  Voyage reranker, which scores query and text directly, and its scores are
-  comparable across the per-model requests the client sends. — **Status**:
-  Unverified, pending 210-research-ca2-q2 — **Method**: Source Search (does every mixed-family path carry
-  rerank scores to the client merge?), then Spike (measure, Phase 4 Step 3).
-  Sam's 2026-10-17 answer (one reranker per engine) narrows it; it does not
-  verify it.
+- [x] **CA-1.** A bge-768 embedder, the cross-encoder, and the Voyage embedders
+  and reranker can be built and served in one engine process without conflict,
+  and the bge files' presence can be checked without creating an ONNX session.
+  — **Status**: Verified for linux-amd64, JVM and native image (T2
+  210-research-19); the presence half by source (the constructor's file and size
+  checks throw before ONNX runtime is touched, `Bge768Embedder.java:226-255`).
+  Unmeasured, and checked in Phase 1 Step 1 with pass/fail criteria: macOS arm64
+  and Windows x64, Voyage serving in the dual process, peak memory under
+  concurrent load, and nexus-8ool4's native-library extraction on keyed boots.
+  — **Method**: Spike.
+- [x] **CA-2.** A merged result list from a bge-768 collection and a Voyage
+  collection ranks soundly. — **Status**: Verified on rerank-on surfaces of a
+  Voyage-profile engine, because Voyage rerank scores are comparable across the
+  per-model requests (210-research-16). Refuted for rerank-off surfaces as the
+  code stands: MCP `query`, the catalog-routed tools and `nx_answer` merge by
+  distance or `hybrid_score`, and bge's default factor inverts results in 12 of
+  20 queries (210-research-13, -17). The design adds a measured bge factor and
+  per-collection thresholds (Technical Design 12). Inferred, not measured: the
+  cross-encoder's scores on a bge-profile engine are comparable across requests
+  too (raw logits per document, no per-batch normalisation,
+  `CrossEncoderReranker.java:32-33`, `:304-307`); Phase 4 Step 3 measures it.
+  — **Method**: Source Search, then Spike.
 - [x] **CA-3.** No other code path assumes "keyed means no local embedder".
-  — **Status**: Refuted (T2 210-research-7; the full site census is pending
-  210-research-ca3-census) — **Method**: Source Search.
-  Gap 8 lists the client branches; the design adds a third mode value and moves
-  per-collection decisions to the collection's own model (Technical Design 10),
-  shipped before any engine reports the new value (Phase 1).
+  — **Status**: Refuted, census complete (T2 210-research-7, -15): 22 of 29 site
+  groups change (Gap 8). — **Method**: Source Search. The design reports a new
+  mode value `dual`, makes `embedding_models` the authority for every
+  per-collection decision (Technical Design 10), and ships the client half
+  before any engine reports `dual` (Phase 1).
 - [x] **CA-4.** Writing a document's chunks into the target collection through
   the combined write moves the document whole: its manifest rows leave the source
   in the same transaction that writes the target's chunks, so no chunk is
-  ownerless at any commit. — **Status**: Verified for the write itself; whether
-  it is the mechanism to build is pending 210-research-reembed-copy-options
-  — **Method**: Source Search (`CatalogRepository.java:5182-5260`, manifest key
-  `catalog-001-baseline.xml:181`).
-- [ ] **CA-5.** An engine-internal caller of `CombinedWriteService` runs without
+  ownerless at any commit. — **Status**: Verified by source
+  (`CatalogRepository.java:5182-5260`, manifest key
+  `catalog-001-baseline.xml:181`) and by spike (210-research-18); it is the
+  re-embed mechanism. It does not move the document's satellite rows; the design
+  adds that (re-embed section). — **Method**: Source Search, then Spike.
+- [x] **CA-5.** An engine-internal caller of `CombinedWriteService` runs without
   a request deadline and outside the edge's 55-second limit, so its batch bound is
-  the job's own. — **Status**: Unverified — **Method**: Source Search (Phase 6
-  Step 1). Inferred, not read: the deadline is installed per request by the HTTP
-  layer (`RequestDeadline.java:46`, read from `AuthFilter`).
+  the job's own. — **Status**: Verified (source search): the deadline is a
+  per-request thread-local and reads "never expires" when unset (Key
+  Discoveries). The job therefore sets a per-batch deadline itself. — **Method**:
+  Source Search.
 
 ## Proposed Solution
 
@@ -444,9 +581,11 @@ were made with, and nothing the machine can serve is refused. The user's
 `local.embed_model` becomes the profile input that picks the model for new
 collections. The engine reports a third mode value, `dual`, and the client stops
 making per-collection decisions from the engine-wide mode. The supervisor passes
-the key whenever one is configured. Client reads span every model sibling. A
-re-embed job moves a collection onto the profile's model document by document,
-through the same atomic write the indexers use.
+the key whenever one is configured. Client reads span every model sibling, and
+results from two families merge by rerank score where a surface reranks and by
+calibrated distance where it does not. A re-embed job moves a collection onto the
+profile's model document by document, through the same atomic write the indexers
+use, carrying the document's aspects and highlights with it.
 
 ### Technical Design
 
@@ -473,21 +612,34 @@ through the same atomic write the indexers use.
 4. **Supervisor.** Pass the configured key regardless of `local.embed_model` and
    retire the nexus-r5f3c branch (`storage_service_daemon.py:1544-1572`), whose
    reason (Gap 1) is gone.
-5. **init and the ladder.** Landing ahead on nexus-ddmfg; not scope here.
+5. **init and the ladder.** Landed on develop (nexus-ddmfg, Gap 2); not scope here.
 6. **Client reads.** The single-name resolver returns every live sibling of the
    owner's corpus, not one; callers that need one name for a write keep the write
    resolver. Searches already split per model and merge client-side.
-7. **Egress guard (nexus-umm29).** A main-source scan, shaped like
-   `OwnershipGuardCoverageScan`: every construction of an outbound client
-   (`HttpClient.newBuilder`, `HttpClient.newHttpClient`, `openConnection(`,
-   `new Socket(`, `SocketChannel.open`) must be in a file on an allowlist that
-   carries a reason per entry, and the scan asserts it found at least as many
-   sites as the allowlist names (non-vacuity). The Voyage entries also pin the
-   host: their URL constants must name `api.voyageai.com`. The allowlist is the
-   three Voyage classes, subject to pending 210-research-egress-census finding
-   no other site. `HttpsSchemeHandler` and `POST /v1/vectors/resolve` are
-   removed in every mode (Sam, 2026-10-17; nexus-3t0jv, landing ahead of this
-   RDR), so the guard's allowlist stays Voyage-only.
+7. **Egress allowlist and guard (nexus-umm29).** The carve-out is stated as an
+   allowlist: *the local engine connects only to the Voyage API
+   (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and
+   `VoyageReranker`, and only when keyed, optionally through the operator's proxy
+   (`EgressProxy`); and to its database at `NX_DB_URL` over JDBC. Nothing else.*
+   That covers census paths 2 to 5 and 8 (Gap 5). Path 1 is removed in every mode
+   (Sam, 2026-10-17; nexus-3t0jv, landing ahead). Paths 6 and 7 are closed by
+   nexus-17jvq, which must land before the guard. Two tests hold it:
+   - **Source census.** A main-source scan, shaped like
+     `OwnershipGuardCoverageScan`: strip comments, then every outbound construct
+     (`HttpClient.newBuilder`, `HttpClient.newHttpClient`, `openConnection(`,
+     `openStream(`, `new Socket(`, `ServerSocket`, `SocketChannel.open`,
+     `DriverManager.getConnection`, `ProcessBuilder`, `Runtime.getRuntime().exec`)
+     must sit in a file on an allowlist that carries a reason per entry. The scan
+     asserts it found at least as many sites as the allowlist names
+     (non-vacuity), and that each Voyage class's URL constant names
+     `api.voyageai.com`. It also reads `service/pom.xml` and fails on a Liquibase
+     version of 4.30 or later unless its analytics are configured off. If
+     nexus-17jvq's own scan lands first, this extends it.
+   - **Runtime witness.** A child JVM that installs a `URLStreamHandlerFactory`
+     refusing any non-`file`/`jar` stream, then builds the bge embedder and the
+     cross-encoder (the tokenizer builds) and runs one embed and one rerank. It
+     catches library code the source scan cannot see (paths 6 and 7). It does not
+     see `java.net.http`, which is why the source census covers `HttpClient`.
 8. **Java comments.** The stale router comments are corrected here, since they
    describe the router this RDR changes: `Main.java:35-38` (says an ONNX fallback
    exists when keyed), the class javadoc at `EmbedderRouter.java:33-47`, and the
@@ -496,34 +648,72 @@ through the same atomic write the indexers use.
 10. **Mode string and per-collection decisions.** `modeName()` returns
     `onnx-local` (bge only), `voyage` (Voyage only) or `dual` (both). The two
     existing values keep their meaning, so a cloud engine and a keyless engine
-    report what they report today. The client changes, all landing before any
-    engine can report `dual`:
+    report what they report today. `embedding_models` (`VersionHandler.java:479-489`)
+    becomes the authority for every per-collection decision, read the way
+    `verify_voyage_capability` already reads it; `embedding_mode` is kept for
+    display. The client changes cover the 22 site groups of Gap 8 and all land
+    before any engine can report `dual`:
     - The chunk cap and the byte budget follow the target collection's model: a
       bge collection gets the ONNX memory cap, a Voyage collection the Voyage
-      rules (`http_vector_client.py:1061, 1175`).
-    - Similarity thresholds apply to hits from Voyage collections, whatever the
-      engine's mode (`search_engine.py:580`).
+      rules (`http_vector_client.py:1061`, `:1175`, `:1250-1259`).
+    - Thresholds and cross-family ranking: Technical Design 12.
     - The probe memo accepts `dual` (`http_vector_client.py:6049`).
+    - Remedy and display text names the family the collection needs, not the
+      engine's mode (the remedy and display sites in Gap 8).
+    - The gate assertion accepts `dual` (`cloud-client-path-gate.sh:705`).
     - The dimension-orphan finder compares each collection's declared model with
       the set of models this install can serve: the engine's `embedding_models`
-      (`VersionHandler.java:478-487`) plus every Voyage model, which a key would
+      plus every Voyage model, which a key would
       serve. A collection is listed only when its model is in neither. A served
       collection can then never be listed, and a Voyage collection on a keyless
       engine is reported as "needs the key", not as an orphan. When
       `embedding_models` is absent (an engine older than that field), the finder
       reports "cannot verify" and lists nothing, as it does for an unknown mode
       today.
-    - An old client against a dual engine fails closed: it does not recognise
-      `dual`, so `_active_embedding_dim` answers unknown and prune lists nothing
-      (`commands/collection.py:635-650`, `:745-760`). Reporting `voyage` instead
-      would make an old client list every bge collection for deletion; that is
-      why the value is new rather than reused.
+    - An old client against a dual engine is safe for deletion: it does not
+      recognise `dual`, so `_active_embedding_dim` answers unknown and prune
+      lists nothing (any value but the two returns `(None, "unknown")`,
+      `commands/collection.py:632-643`; prune skips, `:744-753`). Reporting
+      `voyage` would make an old client delete every bge collection, and
+      `onnx-local` would flag every Voyage one; that is why the value is new.
+      It is not safe for the chunk cap: an old client treats anything but
+      `onnx-local` as Voyage and sends Voyage-sized requests to bge collections
+      (210-research-15). Inferred, not read: the engine's own per-group bound on
+      padded token area (`Bge768Embedder.java:92-99`) holds whatever the request
+      size, so the cost is latency, not the nexus-33hpq memory blowup. Phase 1
+      Step 1 measures it; if it fails, the `dual` entry in the wire ledger
+      carries a minimum client version and the engine refuses older clients.
 11. **Profile seam (Gap 9).** The client's registration check skips the profile
     comparison when the row already exists with the same model; it reads the row
     first, as the implicit path already does for the superseded check
-    (`corpus.py:2110-2114`). The engine needs no change: an existing row is never
-    re-pointed by the profile (`CatalogRepository.java:7906-7930`). A new
-    engine test pins that behaviour so the client fix cannot drift from it.
+    (`corpus.py:2100-2112`, refusal `:2115-2119`). The engine needs no change: an
+    existing row is never re-pointed by the profile
+    (`CatalogRepository.java:7906-7930`). A new engine test pins that behaviour so
+    the client fix cannot drift from it.
+12. **Cross-family ranking (CA-2).** Each surface gets one rule:
+    - *Rerank-on surfaces* (`nx search` with more than one collection or
+      `--lexical`, MCP `search` with `lexical=true`) keep merging per-model groups
+      by `rerank_score`. That is sound on a Voyage-profile engine
+      (210-research-16) and inferred sound on a bge-profile one (CA-2). When some
+      groups are reranked and others degrade, the merge stops sorting scored rows
+      ahead of unscored ones (`search_cmd.py:658-680`, `mcp/core.py:3089-3093`)
+      and orders every row by calibrated `hybrid_score` instead, keeping the
+      warning; otherwise one rate-limited group sinks a whole family.
+    - *Rerank-off surfaces* (MCP `query`'s plain path, the catalog-routed tools,
+      and so `nx_answer`) merge by calibrated distance. `scoring.py`'s table gains
+      `bge-base-en-v15-768` at the measured 0.325, a factor of 0.45/0.325 = 1.38
+      (`scoring.py:76-79`); `_grouped_combined_query` (`mcp/core.py:3881-3946`)
+      sorts across groups by distance times that factor, not raw distance. An
+      unmeasured model keeps the default and logs that it did. The record
+      reports inversion counts for 1.15 to 1.30 but not for the derived 1.38,
+      so Phase 1 Step 5 counts them at 1.38 before the entry is set.
+    - *Thresholds* are chosen per collection by its model, not by the engine's
+      mode (`search_engine.py:552-580`): a Voyage collection gets its Voyage
+      threshold on any engine, and a bge collection gets none, as on a keyless
+      engine today, because the Voyage value admits every bge result and the
+      measured bge threshold's absolute F1 (0.47) is too low to filter on
+      (210-research-17). The request already carries thresholds per collection
+      (`search_engine.py:1637-1646`).
 
 ### Re-embed to the profile default
 
@@ -557,28 +747,47 @@ transaction. So the job writes nothing ownerless at any commit, needs no entry
 in `OwnershipGuardCoverageScan`'s allowed callers, adds no SQL chunk inserter,
 and does not touch `renameCollectionTxn`.
 
-**Status of this choice: pending 210-research-reembed-copy-options.** A
-comparison of the copy options under the guard is in progress in the research
-pass: an engine job writing chunks plus target manifest rows per batch (the
-option above is that one, done per document because the manifest key allows one
-collection per document), a guard-exempt write followed by a repoint
-(Alternative 3), and re-index from source as RDR-225 describes. The rest of this
-section assumes the per-document move and is revised if that comparison picks
-another option.
+The spike ran this mechanism under the guard in enforce mode with no exemption
+(210-research-18, Key Discoveries), so it is the design. The alternatives are a
+guard-exempt copy followed by a cross-model rename (Alternative 3, rejected for a
+race) and re-index from source (Briefly Rejected). What the job's internal call
+adds to today's `writeManifestMany`, as the spike's overloads did
+(`CatalogRepository.writeManifestMany` with a move-from collection and expected
+chashes, `CombinedWriteService.moveDocsCombined`; local branch, not on develop):
+a precondition, `physical_collection` in the same transaction, the satellite
+re-home below, and a typed refusal. The refusal is a new exception added to
+`failureDetail`'s pass-through list (`CatalogRepository.java:6406-6407`) with the
+reason `move_precondition_failed`; the job counts that reason as a skip and any
+other as a failed batch. The move takes the sweep gate on the target only.
 
 **When target chunks become readable.** At the commit of their document's move,
 and not before. From that commit the document is in the target only; before it,
-in the source only. A reader that spans both siblings (bare content-type corpora
-today, every resolver after Phase 4) sees each live document exactly once
-throughout. A reader still on the single-name resolver sees whichever sibling it
-picks, which is why Phase 4 comes before Phase 6.
+in the source only. One search request naming both siblings is refused for mixed
+dimensions, so a reader queries each sibling in its own request and takes the
+union, which the per-model grouping (`search_engine.py:595-624`) already does for
+content-type corpora and Phase 4 extends to the single-name resolver. Such a
+reader sees each live document exactly once throughout. A reader still on the
+single-name resolver sees whichever sibling it picks, which is why Phase 4 comes
+before Phase 6.
 
-**Concurrent writes.** The job's per-document call carries a precondition: the
-document's current manifest chashes and collection are what the job read. When
-they are not (a client re-indexed or deleted the document since), the job skips
-it and counts the skip; the next pass sees it wherever the client put it. A
-client re-index in the dual world already writes to the profile's sibling and
-moves the document itself, through the same transaction.
+**Concurrent writes.** The precondition is that the document's current manifest
+chashes and collection are what the job read. When they are not (a client
+re-indexed or deleted the document since), the job skips it with the typed
+reason and counts the skip; the next pass sees it wherever the client put it. A
+client write in flight that holds the index-run lock blocks that document's move,
+which then skips it (the spike measured the block at over 5 s). A client
+re-index in the dual world writes to the profile's sibling and moves the document
+itself, through the same transaction. A client that writes an already-moved
+document back into the source (an old client, or a `--collection` pin) moves its
+manifest back, and the next pass moves it again. Inferred, not read or measured:
+whether that client write also sets `physical_collection` back, since today it
+is set by a separate call (`updateDocumentCollection`,
+`CatalogRepository.java:3365-3370`); Phase 6 Step 1 tests it.
+
+**Throughput.** The move is about 25% slower than the bulk copy of Alternative 3
+(Key Discoveries), the price of one transaction per document. The spike's
+absolute rates came from a MiniLM target and do not transfer to bge-768 or
+Voyage; the Phase 6 gate records the real rate.
 
 **Idempotent.** Documents already in the target have no source manifest rows and
 are not candidates. Chunks shared by two documents are embedded once (the
@@ -593,37 +802,71 @@ nothing.
 - *Ownerless chunks* in the source (no live manifest row) are invisible today and
   are not moved. The plan reports their count.
 
-**Cutover and what the move leaves behind.** The list below is from this
-revision's reading and T2 210-research-8; the full census of collection-keyed
-state is pending 210-research-cutover-cascade-census.
+**Every collection-scoped table's disposition.** The 15 tables of the census
+(Key Discoveries), plus the gate's other documented exclusions. REPOINT rows move
+to the target inside the document's move transaction; REBUILD rows are made
+again for the target after the job; LEAVE rows stay naming the source.
+
+| Table | Disposition | Reason |
+| --- | --- | --- |
+| `catalog_documents` | REPOINT `physical_collection` | New in the move transaction; today a separate call (`updateDocumentCollection`, `CatalogRepository.java:3365-3370`) |
+| `catalog_document_chunks` | REPOINT (rows replaced) | The combined write already does it (`:5222-5236`) |
+| `chunks` | Target written by the move; source LEAVE until the job deletes the source | The reaper floor refuses a fully reapable source |
+| `chunk_orphaned_at` | LEAVE | Carried by the chunk foreign key's cascade; goes with the source's chunks |
+| `document_aspects` | REPOINT | Otherwise deleted with the source (`:8448`) and re-extracted at LLM cost |
+| `aspect_extraction_queue` | REPOINT | Otherwise deleted (`:8450`), or a pending item extracts against a superseded name |
+| `document_highlights` | REPOINT | Otherwise deleted (`:8449`) and lost |
+| `topic_assignments` | REBUILD | See below |
+| `topics`, `taxonomy_meta`, `taxonomy_centroids` | REBUILD | Centroids are vectors in the source model's space |
+| `relevance_log`, `search_telemetry`, `hook_failures`, `gc_audit` | LEAVE | History; `deleteCollection` does not touch them (`CatalogRepository.java:8341-8468`) |
+| `pdf_pipeline`, `chash_remap` | LEAVE | The gate's documented exclusions (transient queue; permanent ledger, nexus-4nll0) |
+
+The three REPOINT satellites are found per document: `document_highlights` by
+`doc_id`; `document_aspects` and `aspect_extraction_queue` by `doc_id` equal to the
+document's tumbler, or by an empty `doc_id` and a `source_path` equal to the
+document's path (inferred, not read: that `source_path` is the path of the
+document's `source_uri`; Phase 6 Step 1 confirms it). Where the target already
+holds a row with the same unique key, the target row stands and the source row
+is deleted. A parity test beside `COLLECTION_SCOPED_TABLES` lists a cross-model
+disposition for every registered table and fails on a new table without one, as
+the schema-parity gate does for the registry itself; `remap_collection_references`,
+which has no production caller, is deleted.
+
+**topic_assignments: rebuilt, not copied.** 210-research-14 recommended copying
+the assignments by chash under the target's model. A copied row keeps its
+`topic_id`, which names one of the source's topics, and that foreign key cascades
+on delete (`taxonomy-014-topics-tenant-unique.xml:270-273`); the job's source
+delete removes the source's topics (`CatalogRepository.java:8430`) and with them
+every copy. Keeping the copies alive would mean re-homing the topics as well, and
+their centroids cannot follow: they place vectors of the source model, not the
+target's, so the re-homed taxonomy could not assign one new target chunk. The
+spike found the topic rows unmoved under both mechanisms (210-research-18), so
+nothing today carries them either. `nx taxonomy discover` on the target builds
+topics, meta, centroids and assignments together in the target's space, and it is
+what `nx index` already runs after indexing (`commands/index.py:674-690`). The
+cost is a window: from a document's move until discover runs, topic-scoped search
+and topic boosts miss it, which they would do anyway, since its source chunks are
+invisible from the move. The verb runs discover for the target when it waits on a
+job to `done` (`--wait`); otherwise the `done` report names the command
+(`taxonomy_cmd.py:694`) and the doctor's drift row says so until a discover has
+run.
+
+**Cutover.**
 - *Source row.* When the source holds no live document, the job supersedes it
   (`supersedeCollection`, `CatalogRepository.java:8492`). The routing listing
   then leaves it out (`:8213-8217`), and RDR-227's reconciler drops its index.
-- *Source chunks.* Each moved document's source chunks become ownerless at that
-  document's commit and are stamped orphaned by the manifest triggers. They are
-  invisible from that moment. The reaper will not drain them: once all documents
-  have moved, the source is entirely reapable and the move floor refuses it every
-  pass (Research Findings). The source is therefore removed explicitly through
-  the existing delete (`CatalogRepository.deleteCollection`, `:8280`), and only
+- *Source chunks and the source delete.* Each moved document's source chunks are
+  ownerless and invisible from its commit. The reaper will not drain them: a
+  fully moved source is entirely reapable and the move floor refuses it every
+  pass, which agrees with Sam's ruling that the job deletes it. The job removes
+  it through the existing delete (`CatalogRepository.deleteCollection`, `:8280`)
   once it holds no document row at all, tombstoned ones included, since the
-  delete removes documents by `physical_collection` (`:8465`). The job runs that
-  delete itself once the condition holds; `--keep-source` opts out (Sam,
+  delete removes documents by `physical_collection` (`:8465`). By then the
+  satellites are re-homed, so the delete takes only the source's taxonomy (being
+  rebuilt) and rows no document owned. `--keep-source` opts out (Sam,
   2026-10-17).
-- *Aspects, the aspect queue and highlights* (`document_aspects`,
-  `aspect_extraction_queue`, `document_highlights`, each with a `collection`
-  column, `aspects-001-baseline.xml:56-60, 111-116, 153-157`) describe the
-  document, not its vectors. The job updates their `collection` for the moved
-  document in the same per-document transaction. Inferred, not read: the join
-  from a document to its aspect rows is by source path and to its highlights by
-  `doc_id`; Phase 6 Step 1 confirms it.
-- *Topics and topic assignments* are model-bound (centroids are partitioned by
-  model). The source's assignments go with the source's chunks when the source is
-  deleted (`topic_assignments_chunk_fk` cascades, vectors-030 `:1033`). The job's
-  `done` report names `nx taxonomy discover` (`taxonomy_cmd.py:694`) for the
-  target, and the doctor's drift row says so until it is run.
-- *Search telemetry and hook failures* are history. They keep naming the source.
 - *Client caches.* The registration and collection-row caches already treat a
-  superseded row as stale (`corpus.py:2093-2097`).
+  superseded row as stale (`corpus.py:2090-2095`).
 - *The 30-day reap grace* still protects a job that stops halfway: nothing it
   wrote is ownerless, and the source's documents not yet moved still own their
   chunks.
@@ -631,9 +874,12 @@ state is pending 210-research-cutover-cascade-census.
 **Batched.** A batch is whole documents up to 100 chunks; a document with more
 than 100 chunks is a batch of its own, because a document moves in one
 transaction. 100 matches the existing verb's bound (`commands/collection.py:1444`),
-whose reason (the managed edge's 55-second limit) applies when the job runs in
-the managed engine; locally the bound only keeps one batch's embed short (CA-5).
-Voyage requests are planned by the engine's own batching up to 1,000 inputs.
+whose reason (the managed edge's 55-second limit) does not reach an engine-internal
+job (CA-5); the bound keeps one batch's embed short. The job sets each batch's
+deadline itself (`RequestContext.setDeadlineNanos`, `RequestContext.java:82-83`)
+to the request default of 300 s (`RequestDeadline.java:64`), so a stuck Voyage
+call fails the batch instead of hanging the runner. Voyage requests are planned by
+the engine's own batching up to 1,000 inputs.
 
 **Managed.** The job is a row in a new engine table, `reembed_jobs` (tenant,
 source, target, state, document cursor, documents moved, documents skipped,
@@ -658,7 +904,8 @@ verb:
   `bge-base-en-v15-768` (`:1436`).
 - `--status [JOB]`, `--pause JOB`, `--resume JOB` and `--abort JOB` act on job
   rows. Abort stops the runner; documents already moved stay moved, and a later
-  run continues from what remains in the source.
+  run continues from what remains in the source. `--wait` blocks until the job
+  is `done` or `failed` and, on `done`, runs taxonomy discover for the target.
 
 **Monitored.** `GET /v1/vectors/reembed/status` returns every job row for the
 tenant. `nx doctor` extends the existing off-profile row (`health.py:8436-8458`,
@@ -683,17 +930,20 @@ it. bge re-embeds have no cap; the plan states the time estimate instead (Sam, Q
 | Dual router | `EmbedderRouter(OnnxEmbedder, String, String)` (`:111-127`) | Extend: retype to `Embedder`, nullable key; delete the MiniLM-typed form |
 | bge presence probe | `Bge768Embedder` constructor checks (`:226-255`) | Extend: the same checks as a non-throwing static probe |
 | Profile input | `seedEmbeddingProfile` (`EmbedderRouter.java:264-272`) | Extend: seed from `NX_EMBED_PROFILE` |
-| Mode string | `modeName()` (`:162-169`) | Extend: add `dual` |
+| Mode string | `modeName()` (`:168-169`) | Extend: add `dual` |
 | Key plumbing | `storage_service_daemon.py:1544-1590` | Replace the r5f3c branch |
-| Per-collection caps, budget, thresholds | `http_vector_client.py:1061, 1175`; `search_engine.py:580` | Extend: key on the collection's model |
+| Per-collection caps and budget | `http_vector_client.py:1061`, `:1175` | Extend: key on the collection's model |
+| Thresholds and cross-family merge | `search_engine.py:552-580`; `scoring.py:76-79`; `_grouped_combined_query` (`mcp/core.py:3881-3946`); scored-first merge (`search_cmd.py:658-680`, `mcp/core.py:3089-3093`) | Extend: per-collection thresholds, a bge factor, calibrated cross-group sort, degrade fallback |
 | Orphan finder | `_active_embedding_dim` / `_find_dimension_mismatched_collections` (`commands/collection.py:601-720`) | Replace the single-dimension rule with the served-model-set rule |
-| Profile seam | `ensure_collection_registered` (`corpus.py:2116-2120`) | Extend: skip for an existing same-model row |
-| Sibling reads | `t3_collection_name` (`corpus.py:1213`); `resolve_corpus` stage 2 (`:2428-2451`) | Extend the single-name resolver; stage 2 already spans siblings |
-| Egress guard | none | New source scan |
-| Document move | `CombinedWriteService.writeManyCombined` (`:202`), `CatalogRepository.writeManifestRows` (`:5182`) | Reuse, with a precondition and a `physical_collection` parameter for the job's internal call |
+| Profile seam | `ensure_collection_registered` (`corpus.py:2115-2119`) | Extend: skip for an existing same-model row |
+| Sibling reads | `t3_collection_name` (`corpus.py:1213`); `resolve_corpus` stage 2 (`:2427-2452`) | Extend the single-name resolver; stage 2 already spans siblings |
+| Egress guard | none | New source census and runtime witness |
+| Document move | `CombinedWriteService.writeManyCombined` (`:202`), `CatalogRepository.writeManifestRows` (`:5182`), `failureDetail` (`:6372`) | Extend for the job's internal call: precondition, `physical_collection`, satellite re-home, typed refusal |
+| Cross-model dispositions | `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:8804`) | New: a disposition per table, with a parity test |
 | Cutover | `supersedeCollection` (`:8492`), `deleteCollection` (`:8280`) | Reuse unchanged |
-| Cross-model rename | `renameCollectionTxn` copy branch (`:9124-9165`) | Not used by this RDR |
-| Client reference cascade | `remap_collection_references` (`collection_rename.py:174`) | Not used: the engine moves the per-document stores in the move transaction |
+| Taxonomy rebuild | `discover_for_collection` (`taxonomy_cmd.py:274`), as `nx index` calls it (`commands/index.py:674-690`) | Reuse from `re-embed --wait` |
+| Cross-model rename | `renameCollectionTxn` copy branch (`:9122-9168`) | Not used by this RDR |
+| Client reference cascade | `remap_collection_references` (`collection_rename.py:174`) | Delete: no production caller, and it would violate `topic_assignments_chunk_fk` (210-research-14) |
 | Re-embed verb | `nx collection re-embed` (`commands/collection.py:1659`) | Extend: `--all`, cross-model `--to` starts the job, job controls |
 | Job table and runner | none; scheduler at `NexusService.java:686-729` | New Liquibase changeset `reembed_jobs`; runner on the existing scheduler |
 | Doctor rows | off-profile row (`health.py:8436-8458`) | Extend; one new job row |
@@ -708,8 +958,10 @@ and a single-name choice that existed to route around Gap 1. Gap 8 has to land
 first, because a dual engine reporting either old value would mislead a client
 that branches on it, and one of those branches deletes data. For the re-embed,
 the per-document move reuses the one write that RDR-223 made atomic, so it keeps
-the ownership invariant without an exception and keeps search whole without a
-cutover window.
+the ownership invariant without an exception, keeps search whole without a
+cutover window, and its per-document precondition turns a concurrent writer into
+a skipped document rather than the split state the bulk rename leaves (the race
+that rules out the faster copy).
 
 ## Alternatives Considered
 
@@ -741,26 +993,40 @@ reversed the choice the same day.
 
 **Reason for rejection**: already decided against.
 
-### Alternative 3: Re-embed by copying, then one cross-model rename
+### Alternative 3: Guard-exempt copy, then one cross-model rename
 
-**Description**: The 2026-09-16 draft. Copy every live chunk into the target with
-no manifest rows, then repoint all manifests at once through
-`renameCollectionTxn`'s copy branch, then supersede.
+**Description**: The 2026-09-16 draft, in the form 210-research-12 made workable.
+An engine job calls `upsertChunks` with no guard (an `ALLOWED_CALLERS` entry in
+`OwnershipGuardCoverageScan`), copying every live chunk into the target, then
+repoints all manifests at once through `renameCollectionTxn`'s cross-model branch
+(`CatalogRepository.java:9122-9168`) and supersedes the source. The composite
+foreign key aborts the repoint if the source gained a chash after the copy, so it
+doubles as the parity check: copy the delta and retry. The spike confirmed all of
+that (210-research-18).
+
+**Pros**:
+
+- About 36% faster at the median than the per-document move (177.9 against
+  130.7 chunks/s), and the cutover itself took about 0.07 s.
 
 **Cons**:
 
-- Every copied chunk is ownerless until the end, so the copy needs a write that
-  the ownership guard refuses and that `OwnershipGuardCoverageScan` forbids
-  outside `VectorHandler`. An exception would have to be granted to a caller that
-  does write ownerless chunks, which is the one thing the scan's allowed-callers
-  rule says an entry may not do.
+- A race. A source writer paused mid-transaction holds only the shared sweep gate
+  and the index-run lock, neither of which blocks the rename (15 ms in the
+  spike). When it resumes it rewrites its manifest naming the source, leaving the
+  document's `physical_collection` on the target and its new chunk absent from
+  the target. Exclusive gates or row locks close the race but block the rename
+  with no timeout.
+- The copy writes ownerless chunks, which is the one thing the coverage scan's
+  allowed-callers rule says an entry may not do (`OwnershipGuardCoverageScan.java:30-31`).
 - The rename repoints tombstoned documents too, so their chunks must also be
-  copied (paying to embed the trash) or the foreign key aborts the repoint.
-- Target chunks are invisible until the final transaction, and that transaction
-  repoints the whole collection at once.
+  copied or the foreign key aborts the repoint.
+- Target chunks are invisible until the final transaction, which repoints the
+  whole collection at once.
+- It moves no satellite rows either, so it saves none of the per-table work.
 
-**Reason for rejection**: the per-document move gets the same result through an
-existing atomic write with none of these.
+**Reason for rejection**: the race. The per-document move pays about a quarter
+of the throughput for having none of these.
 
 ### Briefly Rejected
 
@@ -768,7 +1034,7 @@ existing atomic write with none of these.
   two supervisors for one install, to work around a dispatch table.
 - **Re-index from source (RDR-225's "registers a new collection")**: cannot move
   a chunk with no source file (notes, DEVONthink content), which is Gap 7's
-  point; under evaluation in pending 210-research-reembed-copy-options.
+  point.
 - **A side table of target vectors inserted at cutover**: brings back the staging
   RDR-223 deleted, adds a SQL chunk inserter to the lint allowlist, and inserts a
   whole collection with its index maintenance in one transaction.
@@ -782,25 +1048,32 @@ existing atomic write with none of these.
   engine still reranks locally (Technical Design 3), so the key causes Voyage
   traffic only to embed for and search existing Voyage collections.
 - The engine holds the bge model in memory on keyed installs that have it on
-  disk, even if they use only Voyage.
+  disk, even if they use only Voyage (measured cost: Cross-Cutting Concerns,
+  memory).
 - A re-embed holds both copies of a moved document's chunks until the source is
-  deleted, and spends Voyage tokens once per distinct chunk; the plan says how
-  much before the job starts.
-- A re-embed leaves the target without topics until `nx taxonomy discover` runs.
+  deleted, spends Voyage tokens once per distinct chunk (the plan says how much
+  before the job starts), and moves about a quarter slower than a bulk copy
+  would.
+- A re-embed leaves the target without topics until taxonomy discover runs.
 
 ### Risks and Mitigations
 
 - **Risk**: results merged across families rank badly.
-  **Mitigation**: CA-2, measured in Phase 4 before re-embed ships.
+  **Mitigation**: per-surface rules and a measured bge factor (Technical Design
+  12); Phase 4 Step 3 re-measures before the re-embed ships.
 - **Risk**: the cloud engine constructs an ONNX session and segfaults.
   **Mitigation**: the non-throwing presence probe, and a native-image smoke with
-  no model on disk (Phase 2 Step 2).
+  no model on disk (Phase 2 Step 2). The spike's keyed boot without model files
+  never loaded ONNX runtime (CA-1).
 - **Risk**: an old client prunes a dual engine's collections.
   **Mitigation**: the `dual` value fails closed in old clients (Technical Design
   10), and the client fix ships first.
-- **Risk**: native image cannot hold ONNX runtime and the Voyage clients together.
-  **Mitigation**: Phase 1 Step 1 is the spike; on failure the RDR goes back to
-  planning before any other step.
+- **Risk**: an old client sends Voyage-sized requests to a dual engine's bge
+  collections. **Mitigation**: measured in Phase 1 Step 1; a minimum client
+  version on failure (Technical Design 10).
+- **Risk**: the dual process fails on a platform the spike did not cover.
+  **Mitigation**: Phase 1 Step 1 runs macOS arm64 and Windows x64 first; on
+  failure the RDR goes back to planning before any engine step.
 
 ### Failure Modes
 
@@ -810,20 +1083,28 @@ both families, the profile's choice and the reranker. A profile choice the engin
 cannot serve stops the boot with that reason in the service log. A re-embed batch
 that fails leaves the job `failed` with the cursor at the last committed document
 and the error in the row; the documents not yet moved are still served from the
-source, so search is whole. A skipped document (precondition failed) is counted
-in the row and in `--status`.
+source, so search is whole. A skipped document (reason
+`move_precondition_failed`) is counted in the row and in `--status`. When one
+model group's rerank degrades and another's does not, the merge falls back to
+calibrated order and warns (Technical Design 12).
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] CA-1 verified (Phase 1 Step 1). CA-2 and CA-5 are verified inside their
-  phases, before the phase that depends on them ships.
+- [x] CA-1 verified on linux-amd64 (210-research-19); the remaining platforms and
+  loads are Phase 1 Step 1, which gates every engine step.
+- [x] CA-5 verified by source; CA-2 verified where it is used, its residuals
+  measured in Phase 4 Step 3 before Phase 6 ships.
 - [x] Non-engine doc sweep and the nexus-umm29 wording landed (f7cae33ec).
-- [ ] The init keep-voyage fix (nexus-ddmfg branch) merged to develop.
+- [x] The init keep-voyage fix landed on develop (nexus-ddmfg,
+  c03352a2a..6cd90aab5).
 - [x] Open Questions 1-3 decided (Sam, 2026-10-17).
-- [ ] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv)
-  before Phase 2 Step 6.
+- [ ] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv,
+  claimed by another session) before Phase 2 Step 6.
+- [ ] The DJL instance-metadata and native-download paths closed (nexus-17jvq,
+  ba8422171, not on develop) before Phase 2 Step 6, whose runtime witness would
+  otherwise fail on them.
 
 ### Minimum Viable Validation
 
@@ -831,30 +1112,58 @@ A local engine booted with a real key and the bge model, one bge-768 collection
 and one Voyage collection: write to and search both, restart, search both again,
 and one search over both returns hits from both. Then `re-embed --all` moves the
 bge collection (one source-backed document and one `store_put` note) to its
-Voyage sibling, search returns the same documents before and after, and a second
+Voyage sibling, search returns the same documents before and after, the
+source-backed document's aspects survive the source delete, and a second
 `re-embed --all` plans zero documents. This is the Phase 5 gate script's body
 plus the Phase 6 scenarios.
 
 ### Phase 1: Spike and client prerequisites
 
-#### Step 1: Native-image coexistence spike (CA-1)
+#### Step 1: CA-1 residual checks
 
-Build the native image on macOS arm64, Linux x64 and Windows x64 with a spike
-`Main` that constructs `Bge768Embedder` and the three Voyage classes in one
-process, the Voyage ones pointed at a loopback stub through their URL-taking
-constructors. **Pass**: on all three targets the image builds, boots, returns a
-768-dimension bge vector and a 1024-dimension vector from each Voyage class, and
-exits 143 on SIGTERM sent during bge initialisation. **Fail**: any build error,
-reflection or JNI conflict, crash or wrong exit code on any target; stop and
-revise the RDR. Record the result as a research finding.
+linux-amd64 passed in JVM and native image (210-research-19). This step runs what
+that spike did not, from its branch (`spike/nexus_911-rdr210-dual-native`
+a86b4d0d1) or its successor. Each check records VmHWM (or the platform's peak
+working set) and is a research finding. Any fail stops the engine phases and
+sends the RDR back to planning.
 
-#### Step 2: Mode string audit and per-collection decisions
+- **Platforms.** Native image on macOS arm64 and Windows x64 (the RDR-224 runtime
+  with its ORT init gate and temp sweep). **Pass**: the image builds and boots
+  dual, returns a 768-dimension bge vector, a cross-encoder rerank and, through a
+  loopback stub on the URL-taking constructors, a 1024-dimension vector from each
+  Voyage class; exits 143 on SIGTERM, also during bge initialisation, with no
+  crash report; a keyed boot without model files never loads ONNX runtime.
+  **Fail**: any build error, reflection or JNI conflict, crash or wrong exit code.
+- **Voyage serving in the dual process.** linux-amd64, a real key from the
+  operator's credential chain. **Pass**: one embed through each Voyage class and
+  one Voyage rerank return results while bge serves in the same process, and peak
+  memory stays within the bge-only run's range plus 10%.
+- **Concurrent load.** linux-amd64, three concurrent writers to a bge collection
+  (`flush_concurrency=3`) with reranks running alongside. **Pass**: the dual
+  process's peak is within 10% of a bge-only process under the same load, and
+  under the 3.03 GB measured for bge-only at that concurrency
+  (`Bge768Embedder.java:101-105`).
+- **Old-client request shape.** The same load sent with the Voyage chunk cap and
+  byte budget a pre-`dual` client would use (Technical Design 10). **Pass**: the
+  same bound as the concurrent-load check. **Fail**: the wire ledger entry for
+  `dual` carries a minimum client version instead.
+- **Native-library extraction (nexus-8ool4).** If nexus-8ool4 (c62708f91,
+  `OrtNativeDir.applyAtBoot` on every boot) has landed by then, a keyed boot with
+  no model files. **Pass**: boot memory within 10% of the spike's 161 MB, and
+  either nothing extracted or the extraction recorded as accepted in the bead.
+  Not applicable while nexus-8ool4 is off develop (no `OrtNativeDir` in main at
+  4d08d3861).
 
-Change the client branches in Gap 8 to the rules in Technical Design 10: chunk
-cap and byte budget by collection model, thresholds by collection model, the memo
-accepts `dual`. **Test**: unit tests with a fake `/version` reporting each of
-`onnx-local`, `voyage` and `dual`, asserting the cap, budget and threshold for a
-bge collection and a Voyage collection under each.
+#### Step 2: Mode string and per-collection decisions
+
+Change the 22 site groups of Gap 8 to the rules in Technical Design 10: chunk cap
+and byte budget by collection model, the memo and the gate accept `dual`, remedy
+text by collection family, `embedding_models` as the authority. **Test**: unit
+tests with a fake `/version` reporting each of `onnx-local`, `voyage` and `dual`,
+asserting the cap and budget for a bge collection and a Voyage collection under
+each; a test that enumerates the Gap 8 sites by the census patterns
+(`"onnx-local"`, `== "voyage"`, `embedding_mode`) over `src/nexus` and fails on a
+site outside the reviewed list, with a non-vacuity floor of the sites it expects.
 
 #### Step 3: Orphan finder by served model set
 
@@ -872,6 +1181,29 @@ same-model row. **Test**: a Python test where the profile says Voyage and an
 existing bge row is written to (passes), and a new bge name is registered
 (refused, as today); a Java test pinning `upsertCollection`'s existing-row branch
 against a profile that names another model.
+
+#### Step 5: Cross-family ranking
+
+Implement Technical Design 12. It is client-only and lands here, before any
+engine can return two families to one search. **Tests**:
+- `scoring.py`: the bge factor is 0.45/0.325 within 1e-6; an unlisted model
+  still gets the default and logs it.
+- `apply_hybrid_scoring` over a fixture of one bge and one Voyage group (the
+  210-research-17 distances, recorded as test data): count the queries where an
+  irrelevant chunk of one family outranks the best relevant chunk of the other.
+  At 1.38 the count must be below the 0.818 default's (12 and 5 of 20) in both
+  directions, and the test pins the observed count as its regression bound. The
+  record measured 1.15 to 1.30 at 3 and 1 but did not report 1.38; if 1.38 counts
+  more than that on the fixture, the step stops and Phase 4 Step 3 picks the
+  value before the table entry is set.
+- `_grouped_combined_query`: rows from two groups interleave by calibrated
+  distance, not raw distance.
+- Rerank-on merge: two groups both scored merge by `rerank_score`; one scored
+  and one degraded fall back to calibrated order and carry the warning, on both
+  `nx search` and MCP `search`.
+- Thresholds: on fake engines reporting `voyage` and `dual`, a Voyage collection
+  is filtered by its threshold and a bge collection is not; on `onnx-local`
+  neither is, as today.
 
 ### Phase 2: Engine
 
@@ -896,9 +1228,13 @@ asserting the seeded rows or the boot refusal.
 
 #### Step 4: Rerank, banner and status
 
-One reranker by posture; banner names both families, the profile and the
-reranker; `local_embed_activity` is reported whenever bge is built. **Test**:
-`StatusHandler` and `VersionHandler` tests for the dual shape.
+One reranker, chosen by the profile (Technical Design 3); the search route's
+rerank stage dispatches to it for every group. The banner names both families,
+the profile and the reranker; `local_embed_activity` is reported whenever bge is
+built, not only in the keyless branch (`Main.java:309`). **Test**:
+`StatusHandler` and `VersionHandler` tests for the dual shape; a test that a
+bge-profile engine with a key reranks with the cross-encoder and makes no Voyage
+rerank call.
 
 #### Step 5: Dual journey test
 
@@ -908,10 +1244,16 @@ rewritten test itself.
 
 #### Step 6: Egress guard
 
-Add the source scan with its allowlist and non-vacuity count, and the host pin.
-The allowlist is the three Voyage classes; `HttpsSchemeHandler` is already gone
-(nexus-3t0jv). **Test**: the scan, plus a negative test
-that a fixture file constructing an `HttpClient` fails it.
+After nexus-3t0jv and nexus-17jvq are on develop. Add both tests of Technical
+Design 7: the source census (allowlist with a reason per entry, non-vacuity
+count, Voyage host pin, Liquibase version check) and the child-JVM runtime
+witness. Amend the carve-out wording in RDR-157, RDR-160 and the privacy policy
+to the allowlist sentence. **Test**: the two tests themselves, plus negative
+fixtures: a file constructing an `HttpClient` outside the allowlist fails the
+census; a Voyage URL constant naming another host fails it; a `liquibase.version`
+of 4.30 without analytics off fails it; a tokenizer build that opens an `http`
+URL stream fails the witness. Paste the census's first live run (sites found,
+allowlist entries, files scanned) into the bead before close.
 
 #### Step 7: Java comments and the engine tag
 
@@ -943,16 +1285,24 @@ The read resolver returns every live sibling; write resolution is unchanged.
 **Test**: replace the pin at `tests/test_rdr_109_phase2_dispatch.py:258` with one
 asserting both siblings are read once a Voyage sibling exists.
 
-#### Step 2: Merge across families
+#### Step 2: Single-name reads merge by the same rules
 
-Searches over siblings of two models merge their reranked results. **Test**: a
-merge test with hits from a bge and a Voyage collection.
+Reads that now span siblings through the single-name resolver merge by
+Technical Design 12, shipped in Phase 1 Step 5. **Test**: a `--collection` read
+over a bge and a Voyage sibling returns hits from both in calibrated order.
 
-#### Step 3: Ranking measurement (CA-2)
+#### Step 3: Ranking measurement (CA-2 residuals)
 
-Source search for every mixed-family path to the merge; then a measured run on a
-keyed local engine over a fixed query set, comparing the merged list with each
-family's own list. Record the result as a research finding before Phase 6.
+On a dual local engine, through the engine's search route (not the spike's direct
+Voyage calls), over a fixed query set that includes a code collection: re-derive
+the bge factor with the 210-research-17 method; measure cross-request rank
+stability of the cross-encoder on a bge-profile engine the way 210-research-16
+measured Voyage's (split-merge against one request, Kendall tau against the
+noise floor); and count cross-family inversions on each surface. **Pass**: the
+bge factor's bootstrap interval overlaps 1.36 to 1.48; the cross-encoder's
+split-merge tau is within 0.01 of its noise floor; inversions on every surface no
+worse than the Phase 1 Step 5 fixture bound. **Fail**: revise Technical Design 12 before
+Phase 6. Record the result as a research finding.
 
 ### Phase 5: Gates
 
@@ -973,13 +1323,22 @@ It runs in the release battery and by hand only, never nightly (Sam, Q3).
 
 #### Step 1: Internal call and precondition
 
-An engine-internal entry to `CombinedWriteService` that takes the precondition
-and sets `physical_collection` in the per-document transaction, and moves the
-aspect, queue and highlight rows. Confirm CA-5 and the aspect joins by source
-reading first. **Test**: engine integration tests: a document moves whole
-(chunks, manifest, `physical_collection`, aspects); a document changed after the
-read is skipped; a tombstoned document is refused; a chunk shared by two
-documents is embedded once.
+An engine-internal entry to `CombinedWriteService` that takes the precondition,
+sets `physical_collection` and re-homes the aspect, queue and highlight rows in
+the per-document transaction, and refuses with the typed reason. Confirm the
+aspect join on `source_path` by source reading first. Add the cross-model
+disposition list beside `COLLECTION_SCOPED_TABLES` and its parity test; delete
+`remap_collection_references`. **Test**: engine integration tests on real
+Postgres: a document moves whole (chunks, manifest, `physical_collection`, its
+aspects, queue item and highlight, including a doc-less aspect row matched by
+path); a target row with the same unique key stands and the source row goes; a
+document changed after the read is skipped with `move_precondition_failed`, not
+"internal error"; a tombstoned document is refused; a chunk shared by two
+documents is embedded once; a client write of a moved document back into the
+source leaves manifest and `physical_collection` naming the same collection, and
+the next pass moves it; a mid-move search through the client returns each
+document once, one request per sibling; the disposition parity test fails on a
+fixture table added to the registry without a disposition.
 
 #### Step 2: Job table and runner
 
@@ -996,9 +1355,13 @@ plan, the cap refusal, and each control.
 #### Step 4: Cutover and source removal
 
 Supersede at zero live documents; the job deletes the source once it holds no
-document row, unless `--keep-source`. **Test**: after the last move the source
-is superseded and out of the routing listing; it is deleted only when it holds
-no document row, and kept with `--keep-source`.
+document row, unless `--keep-source`; `--wait` runs taxonomy discover for the
+target on `done`. **Test**: after the last move the source is superseded and out
+of the routing listing; it is deleted only when it holds no document row, and
+kept with `--keep-source`; after the delete, no aspect, highlight or queue row of
+a moved document names the source, and the moved documents' aspects are intact;
+after `--wait`, the target has a `taxonomy_meta` row and topic assignments for
+its chunks; without `--wait`, the doctor's drift row names the discover command.
 
 #### Step 5: Doctor rows and paired release
 
@@ -1048,6 +1411,13 @@ None open. Resolved by Sam on 2026-10-17 (T2
 - **Scenario**: client against fake engines reporting `onnx-local`, `voyage` and
   `dual` — **Verify**: chunk cap, byte budget and thresholds follow each
   collection's model.
+- **Scenario**: a merged list from a bge and a Voyage collection on a rerank-off
+  surface (MCP `query`, a catalog-routed tool) — **Verify**: ordered by calibrated
+  distance with the bge factor; cross-family inversions within the Phase 1 Step 5
+  bound.
+- **Scenario**: one model group's rerank degrades, the other's does not —
+  **Verify**: calibrated order with the warning; the degraded family is not sunk
+  below every scored row.
 - **Scenario**: `nx collection prune --yes` against a dual engine — **Verify**: no
   served collection is listed or deleted; a minilm-384 collection is listed.
 - **Scenario**: old client (no `dual` support) against a dual engine — **Verify**:
@@ -1056,8 +1426,9 @@ None open. Resolved by Sam on 2026-10-17 (T2
   **Verify**: accepted by client and engine; a new bge name is refused.
 - **Scenario**: corpus with both siblings, read through `--collection` and
   through a bare content type — **Verify**: hits from both.
-- **Scenario**: engine source adds a new outbound HTTP client — **Verify**: the
-  egress guard fails.
+- **Scenario**: engine source adds a new outbound HTTP client, or a library opens
+  an `http` URL stream during a tokenizer build — **Verify**: the source census or
+  the runtime witness fails.
 - **Scenario**: dual gate with no key — **Verify**: FAIL, not skip.
 - **Scenario**: `re-embed --all` on two stale collections, one holding only
   `store_put` notes — **Verify**: every live document is in its Voyage sibling,
@@ -1066,7 +1437,11 @@ None open. Resolved by Sam on 2026-10-17 (T2
 - **Scenario**: search during a re-embed — **Verify**: each live document appears
   once, from whichever sibling holds it.
 - **Scenario**: a client re-indexes a document while the job runs — **Verify**:
-  the job skips it and counts the skip; the client's version stands.
+  the job skips it with `move_precondition_failed` and counts the skip; the
+  client's version stands; the next pass finds nothing left to move for it.
+- **Scenario**: a moved document with aspects, a queued extraction and a
+  highlight, then the source delete — **Verify**: all three name the target and
+  survive; the target's topics exist after `--wait`.
 - **Scenario**: engine restart mid-job — **Verify**: the job resumes from its
   cursor; no document is in both or neither collection.
 - **Scenario**: `re-embed --all` twice — **Verify**: the second run plans zero
@@ -1083,66 +1458,88 @@ None open. Resolved by Sam on 2026-10-17 (T2
 
 ### Contradiction Check
 
-Three contradictions were found and resolved in this revision. First, the draft's
-re-embed upserted copied chunks through the public write route; Research Findings
-show that route's ownership guard refuses a chunk with no manifest row in the
-target, and local engines enforce it. The design now moves documents through the
-combined write, which writes the chunk and its owner together. Second, the draft
-said source chunks drain through the ordinary quarantine sweep; the reaper's move
-floor refuses a collection that is more than a quarter reapable, so a fully moved
-source never drains. The re-embed job deletes the source once it holds no
-document row (Sam, 2026-10-17).
-Third, Critical Assumption 3 was refuted: the client branches on the engine's mode
-string in six places, one of which deletes data; Technical Design 10 and Phase 1
-answer it. The tension between always passing the key and one Voyage reranker
-per keyed engine is resolved by choosing the reranker from the profile (Sam,
-2026-10-17; Technical Design 3). No other contradictions were found between research findings,
-design principles, and the proposed solution.
+Five contradictions between the drafts and the research were found and resolved.
+
+1. The 2026-09-16 re-embed upserted copied chunks through the public write
+   route, which the ownership guard refuses on local engines. The design moves
+   documents through the combined write, which writes the chunk and its owner
+   together; the spike ran it in enforce mode (210-research-18).
+2. That draft said source chunks drain through the quarantine sweep. The
+   reaper's move floor refuses a fully reapable source; the job deletes it (Sam,
+   2026-10-17), which the spike's reaper refusal confirms.
+3. CA-3 was refuted: 22 client and engine site groups read the single mode
+   string, one of which deletes data. Technical Design 10 and Phase 1 answer it.
+4. The previous revision assumed aspects, highlights and the queue could ride the
+   move, and that topic assignments needed only a discover. The spike refuted the
+   first: no satellite row moves with the document, and the source delete
+   destroys them. The design re-homes three tables in the move transaction and
+   rebuilds the taxonomy (the disposition table). 210-research-14's own
+   recommendation to copy topic assignments by chash contradicts the
+   topic foreign key's cascade and is not followed (re-embed section).
+5. CA-2 as first written assumed every keyed-engine result passes the reranker.
+   Two surfaces rerank; the rest merge by distance with an uncalibrated bge
+   factor that inverts results (210-research-13, -17). Technical Design 12 sets a
+   rule per surface.
+
+The tension between always passing the key and one Voyage reranker per keyed
+engine is resolved by choosing the reranker from the profile (Sam, 2026-10-17;
+Technical Design 3). No other contradictions were found between research
+findings, design principles, and the proposed solution.
 
 ### Assumption Verification
 
-CA-3 is refuted (T2 210-research-7) and the design adjusted; its full site
-census is pending 210-research-ca3-census, and Phase 1 Step 2 takes its list
-from that census when it lands. CA-4 is verified by source reading as a property
-of the write; whether it is the re-embed mechanism is pending
-210-research-reembed-copy-options. CA-1 is unverified (pending
-210-research-ca1) and is the first step of the plan, with a pass/fail criterion
-on three targets; nothing else starts until it passes. CA-2 is unverified
-(pending 210-research-ca2-q2); Phase 4 Step 3 measures it before the re-embed,
-which is the first feature that puts mixed-family results in front of most
-users. CA-5 is unverified and is read in Phase 6 Step 1 before the batch bound is
-fixed. This RDR is not ready to pass the gate while those pending results are
-open; they are named so the gate can check each one.
+- **CA-1**: verified for linux-amd64 by spike (210-research-19). The untested
+  platforms and loads are Phase 1 Step 1, each with a pass/fail criterion, and
+  gate every engine step.
+- **CA-2**: verified for rerank-on surfaces of Voyage-profile engines by spike
+  (210-research-16); refuted for rerank-off surfaces as the code stands
+  (210-research-13, -17) and answered by Technical Design 12, whose factor is a
+  measurement. The cross-encoder's comparability is inferred from its pointwise
+  scoring and measured in Phase 4 Step 3 before Phase 6.
+- **CA-3**: refuted, census complete (210-research-15); the design is built on
+  the census.
+- **CA-4**: verified by source and spike (210-research-18); it is the mechanism.
+- **CA-5**: verified by source (`RequestContext.java:62`,
+  `RequestDeadlineProbe.java:27-36`).
+
+No assumption the design rests on is open without a step that measures it and a
+criterion that stops the plan on failure.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `EmbedderRouter.resolveEmbedderStrict`, `modeName`, `availableModels` | nexus engine | Source Search |
-| `CombinedWriteService.writeManyCombined` / `CatalogRepository.writeManifestRows` | nexus engine | Source Search |
+| `CombinedWriteService.writeManyCombined` / `CatalogRepository.writeManifestRows`, `failureDetail` | nexus engine | Source Search; move overloads by spike (210-research-18) |
 | `CatalogRepository.supersedeCollection`, `deleteCollection`, `upsertCollection` | nexus engine | Source Search |
 | `GET /version` `embedding_mode`, `embedding_models` | nexus engine | Source Search |
 | `Bge768Embedder` constructor checks | nexus engine | Source Search |
-| ONNX runtime and Voyage clients in one native image | onnxruntime 1.20.0, GraalVM | Spike (Phase 1 Step 1, pending) |
-| Voyage rerank score comparability across requests | Voyage API | Spike (Phase 4 Step 3, pending) |
+| ONNX runtime, cross-encoder and Voyage clients in one process | onnxruntime 1.20.0, GraalVM 25.0.3 | Spike, linux-amd64 (210-research-19); other platforms Phase 1 Step 1 |
+| Voyage rerank score comparability across requests | Voyage rerank-2.5 | Spike (210-research-16) |
+| `apply_hybrid_scoring` with a bge factor | nexus client | Spike through the real function (210-research-17) |
 
 ### Scope Verification
 
 The MVV is in scope and executed: its first half is the body of
 `tests/e2e/dual-embedder-gate.sh` (Phase 5 Step 1), a release battery leg; its
 second half is the Phase 6 Step 5 scenarios added to the same script. The init
-keep-voyage fix is out of scope (nexus-ddmfg, landing ahead), and so is any
+keep-voyage fix is out of scope and already on develop (nexus-ddmfg), the https
+fetcher's removal is out of scope and lands ahead (nexus-3t0jv), and so is any
 change to the managed engine's posture: the cloud boots Voyage-only exactly as
 today.
 
 ### Cross-Cutting Concerns
 
 - **Versioning**: `dual` is a new wire value on `/version` and `/v1/status`,
-  recorded in `docs/wire-contract-pending.md`. Old clients fail closed on it
-  (Technical Design 10). Local installs run the engine their client was built
-  with; the managed engine never reports `dual`.
-- **Build tool compatibility**: the native image must carry ONNX runtime and the
-  Voyage clients together on three targets (CA-1).
+  recorded in `docs/wire-contract-pending.md`. Old clients fail closed on it for
+  deletion; the chunk-cap case is measured in Phase 1 Step 1, with a minimum
+  client version as the fallback (Technical Design 10). The managed engine never
+  reports `dual`.
+- **Build tool compatibility**: one process holds ONNX runtime and the Voyage
+  clients on linux-amd64 (CA-1); macOS arm64 and Windows x64 are Phase 1 Step 1.
+  The spike's build needed zlib static libraries that chas lacked, worked around
+  locally and not committed (210-research-19); the CI image is unaffected
+  (inferred, not read: CI builds native images today).
 - **Licensing**: N/A; no new dependency.
 - **Deployment model**: local engines only change posture; the managed engine is
   unchanged, and the re-embed job runs in both (in the managed engine it moves
@@ -1156,37 +1553,48 @@ today.
   whenever present. Rotation is a service restart, as today. An ambient key on a
   bge profile causes no rerank traffic (Technical Design 3).
 - **Memory management**: a keyed engine with bge files holds the bge model
-  (about 416 MB on disk, `Bge768Embedder.java:243-250`) in addition to the Voyage
-  clients. A re-embed batch holds at most one batch of chunk text and vectors, or
-  one large document's; the bound is the batch rule above.
+  (about 416 MB on disk, `Bge768Embedder.java:243-250`) and the cross-encoder
+  (about 87 MB, 210-research-11) beside the Voyage clients. The dual process's
+  measured peak is within noise of bge-only (CA-1, Key Discoveries);
+  concurrent-load peaks are Phase 1 Step 1. A re-embed
+  batch holds at most one batch of chunk text and vectors, or one large
+  document's; the bound is the batch rule above.
 
 ### Proportionality
 
-The document is long because it carries two designs: the dual engine (Phases 1
-to 5) and the re-embed (Phase 6). They could be two RDRs; they stay together
-because the re-embed's correctness depends on the dual engine's reads and
-profile, and splitting would duplicate the context section. The Key Discoveries
-list is the place to trim before locking: once the gate passes, the bullets that
-only correct the 2026-09-16 draft can move to Revision History.
+The document carries two designs: the dual engine (Phases 1 to 5) and the
+re-embed (Phase 6). They stay together because the re-embed's correctness
+depends on the dual engine's reads, profile and merge rules, and splitting would
+duplicate the context section. This revision cut what the research superseded:
+the "pending" markers, the draft's provisional mode-string list (replaced by the
+census), the copy-options placeholder, and Key Discovery bullets that only
+re-stated drift. What remains long is evidence the gate needs: the census lists
+and the per-table dispositions.
 
 ## References
 
 - T2 `nexus/voyage-local-mode-investigation-2026-09-15` [25872]
-- T2 `nexus_rdr/210-research-1` to `-9`; `nexus_rdr/210-drift-audit-2026-10-17`;
-  `nexus_rdr/210-open-questions-sam-2026-10-17`
-- Beads nexus-ddmfg, nexus-umm29, nexus-r5f3c, nexus-35ok4, nexus-vply6
+- T2 `nexus_rdr/210-research-1` to `-19`; `nexus_rdr/210-drift-audit-2026-10-17`;
+  `nexus_rdr/210-open-questions-sam-2026-10-17`;
+  `nexus_rdr/210-ca2-spikes-rerank-and-bge-calibration-2026-10-17` (raw spike data)
+- Beads nexus-ddmfg, nexus-umm29, nexus-r5f3c, nexus-35ok4, nexus-vply6,
+  nexus-3t0jv, nexus-17jvq, nexus-8ool4
 - `service/src/main/java/dev/nexus/service/Main.java:232-350`
 - `service/src/main/java/dev/nexus/service/vectors/EmbedderRouter.java`
 - `service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java:597-935`
-- `service/src/main/java/dev/nexus/service/db/CatalogRepository.java:5182-5260, 7873-7990, 8280, 8492, 9018-9165`
+- `service/src/main/java/dev/nexus/service/db/CatalogRepository.java:5182-5260, 6372-6414, 7873-7990, 8280-8468, 8492, 8804-8823, 9018-9168`
 - `service/src/main/java/dev/nexus/service/db/CombinedWriteService.java`
 - `service/src/main/java/dev/nexus/service/ChunkReaper.java`
+- `service/src/main/java/dev/nexus/service/http/RequestContext.java`, `vectors/RequestDeadlineProbe.java`
 - `service/src/test/java/dev/nexus/service/OwnershipGuardCoverageScan.java`
+- `service/src/main/resources/db/changelog/aspects-001-baseline.xml`, `fk-001-catalog-cross-store.xml`, `taxonomy-014-topics-tenant-unique.xml`, `vectors-030-model-tenant-partition-functions.xml`
+- `tests/catalog/test_collection_scoped_tables_schema_parity.py`
 - `src/nexus/daemon/storage_service_daemon.py:1479-1590`
-- `src/nexus/commands/init.py:54-96, 737-765`
-- `src/nexus/corpus.py:1213-1500, 2085-2135, 2373-2451`
+- `src/nexus/commands/init.py:54-118, 759-787`
+- `src/nexus/corpus.py:1213-1500, 2085-2135, 2372-2452`
 - `src/nexus/commands/collection.py:601-760, 1436-1745`
 - `src/nexus/db/http_vector_client.py:1050-1262, 3275-3330, 6040-6052`
+- `src/nexus/scoring.py:60-104`, `src/nexus/search_engine.py:536-624, 1625-1650`, `src/nexus/mcp/core.py:3030-3120, 3881-3946, 5100-5120`, `src/nexus/commands/search_cmd.py:455-680`
 - `tests/e2e/local-service-gate.sh`, `tests/e2e/release-battery.sh`
 - `docs/cli-reference.md` "Local mode with Voyage"
 
@@ -1222,3 +1630,16 @@ only correct the 2026-09-16 draft can move to Revision History.
   research pass are marked "pending 210-research-<topic>" (ca1, ca2-q2,
   ca3-census, egress-census, cutover-cascade-census, reembed-copy-options).
 - 2026-10-17: Sam resolved the revised draft's three Open Questions: remove the engine https fetcher and resolve route in every mode (nexus-3t0jv), a bge-profile engine reranks with the cross-encoder even when keyed, and the re-embed job deletes the superseded source (`--keep-source` opts out). Record: T2 nexus_rdr/210-open-questions-sam-2026-10-17.
+- 2026-10-17: research findings 210-research-10 to -19 folded in, every
+  "pending" marker replaced, cites re-read at 4d08d3861 (develop 6cd90aab5).
+  Gap 2's init half marked landed; Gap 5 carries the eight-path egress census and
+  Technical Design 7 an allowlist with a source census and a runtime witness
+  (nexus-17jvq now a prerequisite); Gap 8 carries the CA-3 census. CA-1 verified
+  on linux-amd64, its residuals turned into Phase 1 Step 1 checks with pass/fail
+  criteria; CA-2 split by surface, with Technical Design 12 (bge factor 1.38,
+  per-collection thresholds, degrade fallback) and Phase 4 tests; CA-4 and CA-5
+  verified. The per-document move is confirmed as the design, with a typed
+  precondition reason and a disposition for every collection-scoped table: the
+  aspect tables re-homed in the move transaction, topic assignments rebuilt by
+  discover rather than copied. Alternative 3 rewritten around the spike's race.
+  Finalization Gate answered against this content.
