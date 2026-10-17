@@ -13,6 +13,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The test HOME fence shadows everything and mirrors only six toolchain caches** (nexus-ld3aa). `tests/_fence_home.py` and `tests/e2e/lib/fence_home.sh` used to link every entry of the operator's real home into the test home and shadow a denylist, so a new dotfile was mirrored by default, and a mirrored path fails silently (a global identity file overwritten 2026-09-12; a live `nexus-service` unit replaced on qwentescence 2026-09-30) where a missing one fails loudly. The test home now starts empty and links through only `.m2 .gradle .docker .cargo .rustup .testcontainers.properties` (one allowlist per twin, pinned equal by `tests/test_fence_home_twins_agree.py`, which also pins that no credential store, `.config`, `.local`, `.claude` or `Library` is ever mirrored). The ONNX model roots and the ONNX Runtime native-library root (`NX_ONNX_MODEL_DIR`, `NX_MINILM_CACHE_DIR`, `NX_ORT_NATIVE_DIR`) are pinned by env to the real home's read-mostly cache, as uv's roots already were. `fence_home` and `install_fence` lose their shadow argument.
+
 - **Every push to develop gets a CI run that finishes** (Sam, 2026-10-17). With several sessions pushing, the next push cancelled the last one's run in `ci.yml`, the Windows rehearsal and the plugin drift ledger, so many develop commits never got a finished run. Those three workflows now take one concurrency group per commit on develop and one per ref elsewhere, so a PR push still cancels the run it supersedes. Sessions batch their commits and push less often. Test: `tests/test_ci_develop_runs_finish.py`.
 
 ### Fixed

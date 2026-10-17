@@ -8,10 +8,9 @@ paths and cannot depend on a Python import) and ``tests/_fence_home.py`` for the
 unit suite. Two copies of one rule drift until the stale one wins an argument it
 should not, so this pins the contract rather than trusting the comments.
 
-The rule: mirror EVERY top-level entry of the real home, recreate ``.config``
-as a real directory mirroring its own entries, and shadow ``.config/nexus``,
-``.config/systemd`` and ``Library/LaunchAgents`` (nexus-q81g7: the OS autostart
-unit dirs) as fresh empty directories.
+The rule (nexus-ld3aa): the fenced home starts EMPTY and only the entries of one
+declared allowlist (``MIRRORED_ENTRIES`` / ``FENCE_MIRRORED_ENTRIES``) that the
+real home has are linked through. Credential stores are never on it.
 """
 from __future__ import annotations
 
@@ -22,33 +21,39 @@ from unittest.mock import patch
 
 import pytest
 
-from tests._fence_home import fence_home
+from tests._fence_home import MIRRORED_ENTRIES, NEVER_MIRRORED, fence_home
 from tests._module_seam import patch_in, setattr_in
 
 _SHELL_FENCE = Path(__file__).parent / "e2e" / "lib" / "fence_home.sh"
 
 
 def _seed(real: Path) -> None:
-    """A home containing the entries that actually mattered on 2026-08-24."""
-    for rel in (".docker/run", ".m2/repository", ".cache/uv", ".local/bin",
-                ".claude/plugins", ".config/nexus", ".config/gh", "Documents",
-                ".config/systemd/user", "Library/LaunchAgents", "Library/Caches"):
+    """A home holding the allowlisted caches AND the things the fence must hide."""
+    for rel in (".docker/run", ".m2/repository", ".gradle/caches", ".cargo/registry", ".rustup/toolchains",
+                ".cache/uv", ".local/bin", ".local/state/nexus", ".claude/plugins", ".claude/agents",
+                ".config/nexus", ".config/gh", ".config/op", ".config/1Password", ".config/git",
+                ".config/systemd/user", "Library/LaunchAgents", "Library/Caches", "Library/Keychains",
+                ".ssh", ".aws", ".gnupg", ".kube", ".dolt", ".beads", "Documents"):
         (real / rel).mkdir(parents=True, exist_ok=True)
     (real / ".testcontainers.properties").write_text("testcontainers.ryuk.disabled=true\n")
+    for rel in (".gitconfig", ".netrc", ".npmrc", ".claude.json"):
+        (real / rel).write_text("secret\n")
     (real / ".config" / "nexus" / "last_seen_version").write_text("7.18.0\n")
 
 
 def _shape(home: Path) -> set[str]:
-    """(name, is-symlink) for the mirror's top level plus its .config level."""
+    """Every top-level entry of the fenced home as ``name:link|dir|file``."""
     out = set()
     for p in sorted(home.iterdir()):
-        out.add(f"{p.name}:{'link' if p.is_symlink() else 'dir'}")
-    for top in (".config", "Library"):
-        d = home / top
-        if d.is_dir():
-            for p in sorted(d.iterdir()):
-                out.add(f"{top}/{p.name}:{'link' if p.is_symlink() else 'dir'}")
+        out.add(f"{p.name}:{'link' if p.is_symlink() else 'dir' if p.is_dir() else 'file'}")
     return out
+
+
+def _shell_fence(real: Path, gate: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_home "{real}" "{gate}"'],
+        capture_output=True, text=True,
+    )
 
 
 @pytest.mark.skipif(not _SHELL_FENCE.exists(), reason="fence_home.sh missing")
@@ -58,13 +63,10 @@ def test_shell_and_python_fences_produce_identical_shapes(tmp_path: Path) -> Non
     _seed(real)
 
     py_home = tmp_path / "py"
-    fence_home(real, py_home, ".config/nexus")
+    fence_home(real, py_home)
 
     sh_home = tmp_path / "sh"
-    r = subprocess.run(
-        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_home "{real}" "{sh_home}" ".config/nexus"'],
-        capture_output=True, text=True,
-    )
+    r = _shell_fence(real, sh_home)
     assert r.returncode == 0, f"shell fence failed: {r.stderr}"
 
     py, sh = _shape(py_home), _shape(sh_home)
@@ -73,20 +75,26 @@ def test_shell_and_python_fences_produce_identical_shapes(tmp_path: Path) -> Non
         f"  python only: {sorted(py - sh)}\n"
         f"  shell only:  {sorted(sh - py)}"
     )
+    # the substance, so agreement on two empty homes cannot pass
+    assert py == {f"{n}:link" for n in MIRRORED_ENTRIES}
 
 
-def test_python_fence_shadows_only_the_nexus_config_and_the_autostart_dirs(tmp_path: Path) -> None:
+def test_python_fence_mirrors_exactly_the_allowlist(tmp_path: Path) -> None:
     real = tmp_path / "real"; real.mkdir(); _seed(real)
-    home = fence_home(real, tmp_path / "fenced", ".config/nexus")
+    home = fence_home(real, tmp_path / "fenced")
 
-    # the shadowed leaf is a REAL empty dir, not a passthrough
-    shadowed = home / ".config" / "nexus"
-    assert shadowed.is_dir() and not shadowed.is_symlink()
-    assert not (shadowed / "last_seen_version").exists()
-    # everything else passes through
-    for entry in (".docker", ".testcontainers.properties", ".m2", ".cache",
-                  ".local", ".claude", "Documents", ".config/gh"):
-        assert (home / entry).exists(), f"{entry} did not survive the mirror"
+    for entry in MIRRORED_ENTRIES:
+        assert (home / entry).is_symlink() and (home / entry).exists(), f"{entry} was not mirrored"
+    assert sorted(p.name for p in home.iterdir()) == sorted(MIRRORED_ENTRIES)
+
+
+def test_an_allowlist_entry_the_real_home_lacks_is_skipped(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    (real / ".m2").mkdir(parents=True)
+    py = fence_home(real, tmp_path / "py")
+    r = _shell_fence(real, tmp_path / "sh")
+    assert r.returncode == 0, r.stderr
+    assert _shape(py) == _shape(tmp_path / "sh") == {".m2:link"}
 
 
 def test_install_fence_is_idempotent_and_records_the_real_home(
@@ -123,48 +131,93 @@ import os  # noqa: E402 — used by the idempotence test above
 _MANAGER_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DOCKER_HOST")
 
 
-def _shell_shadows() -> set[str]:
+def _shell_mirrored() -> list[str]:
     r = subprocess.run(
-        ["bash", "-c", f'source "{_SHELL_FENCE}"; printf "%s\\n" "${{FENCE_ALWAYS_SHADOWS[@]}}"'],
+        ["bash", "-c", f'source "{_SHELL_FENCE}"; printf "%s\\n" "${{FENCE_MIRRORED_ENTRIES[@]}}"'],
         capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
-    return {line for line in r.stdout.splitlines() if line}
+    return [line for line in r.stdout.splitlines() if line]
 
 
-def test_the_shadow_lists_agree_and_never_mirror_a_credential_store() -> None:
-    from tests._fence_home import ALWAYS_SHADOWS
+def test_the_two_allowlists_are_equal() -> None:
+    shell = _shell_mirrored()
+    assert len(shell) == len(set(shell)), f"duplicate in the shell allowlist: {shell}"
+    assert sorted(shell) == sorted(MIRRORED_ENTRIES)
+    # non-vacuity: the measured toolchain caches, not an empty pair
+    for name in (".m2", ".gradle", ".docker", ".cargo", ".rustup", ".testcontainers.properties"):
+        assert name in shell
 
-    assert _shell_shadows() == set(ALWAYS_SHADOWS)
-    for must_not_mirror in (".aws", ".gnupg", ".kube", ".ssh", ".config/gh", ".config/op"):
-        assert must_not_mirror in ALWAYS_SHADOWS, f"{must_not_mirror} would be mirrored"
-    for interim in (".local/state", ".claude/agents", ".claude/projects"):
-        assert interim in ALWAYS_SHADOWS
+
+def test_no_credential_store_is_on_either_allowlist() -> None:
+    """The allowlist entries are the ONLY mirrors, and none is, or sits under,
+    a credential store or one of the trees whose mirroring cost a live service."""
+    for credential in (".ssh", ".aws", ".gnupg", ".kube", ".netrc", ".npmrc", ".gitconfig",
+                       ".claude", ".config/gh", ".config/op", ".config/1Password", ".config/git",
+                       ".dolt", ".beads", "Library/Keychains"):
+        assert credential in NEVER_MIRRORED, f"{credential} missing from NEVER_MIRRORED"
+    for allowed in (*MIRRORED_ENTRIES, *_shell_mirrored()):
+        assert "/" not in allowed, f"{allowed!r}: the allowlist is top-level names only"
+        for never in NEVER_MIRRORED:
+            assert allowed != never and not allowed.startswith(never + "/") and not never.startswith(allowed + "/"), (
+                f"allowlist entry {allowed!r} is, or overlaps, never-mirrored {never!r}"
+            )
 
 
-def test_credential_stores_are_empty_in_both_fences(tmp_path: Path) -> None:
+def test_a_seeded_credential_store_is_never_visible_in_either_fence(tmp_path: Path) -> None:
+    """Behavioural: seed every credential store with a file, fence through both
+    twins, and require that nothing but the allowlisted entries exists in the
+    result, and that no seeded secret is reachable at any depth."""
     real = tmp_path / "real"
     real.mkdir()
-    for rel in (".aws", ".ssh", ".gnupg", ".kube", ".config/gh", ".config/op",
-                ".local/state/nexus", ".local/bin", ".claude/agents", ".claude/projects",
-                ".claude/plugins"):
-        (real / rel).mkdir(parents=True)
+    _seed(real)
+    for rel in (".ssh", ".aws", ".gnupg", ".kube", ".config/gh", ".config/op", ".config/1Password",
+                ".config/git", ".dolt", ".beads", ".claude", "Library/Keychains"):
+        (real / rel).mkdir(parents=True, exist_ok=True)
         (real / rel / "secret").write_text("x")
-    py = fence_home(real, tmp_path / "py", ".config/nexus")
-    sh = tmp_path / "sh"
-    r = subprocess.run(
-        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_home "{real}" "{sh}" ".config/nexus"'],
-        capture_output=True, text=True,
-    )
+
+    py = fence_home(real, tmp_path / "py")
+    r = _shell_fence(real, tmp_path / "sh")
     assert r.returncode == 0, r.stderr
-    for home in (py, sh):
-        for rel in (".aws", ".ssh", ".gnupg", ".kube", ".config/gh", ".config/op",
-                    ".local/state", ".claude/agents", ".claude/projects"):
-            d = home / rel
-            assert d.is_dir() and not d.is_symlink() and list(d.iterdir()) == [], f"{home}: {rel}"
-        # siblings of a shadowed leaf still mirror through
-        assert (home / ".local" / "bin" / "secret").exists()
-        assert (home / ".claude" / "plugins" / "secret").exists()
+    for home in (py, tmp_path / "sh"):
+        assert sorted(p.name for p in home.iterdir()) == sorted(MIRRORED_ENTRIES)
+        for never in NEVER_MIRRORED:
+            assert not (home / never).exists() and not (home / never).is_symlink(), f"{home}: {never} visible"
+        assert not any(home.rglob("secret")), f"{home}: a credential file is reachable"
+
+
+_CACHE_KEYS = ("NX_ONNX_MODEL_DIR", "NX_MINILM_CACHE_DIR", "NX_ORT_NATIVE_DIR")
+
+
+@pytest.mark.parametrize("outer", [{}, {"NX_ONNX_MODEL_DIR": "/m"},
+                                   {"NX_ONNX_MODEL_DIR": "", "NX_MINILM_CACHE_DIR": "", "NX_ORT_NATIVE_DIR": ""}])
+def test_the_model_cache_pin_agrees_between_the_twins(outer: dict[str, str], tmp_path: Path) -> None:
+    from tests._fence_home import fence_cache_env
+
+    real = tmp_path / "real"
+    with patch.dict(os.environ):
+        for k in _CACHE_KEYS:
+            os.environ.pop(k, None)
+        os.environ.update(outer)
+        fence_cache_env(real)
+        py = {k: os.environ.get(k) for k in _CACHE_KEYS}
+
+    env = {k: v for k, v in os.environ.items() if k not in _CACHE_KEYS}
+    env.update(outer)
+    script = (
+        f'source "{_SHELL_FENCE}"; fence_cache_env "{real}"; '
+        'printf "NX_ONNX_MODEL_DIR=%s\\nNX_MINILM_CACHE_DIR=%s\\nNX_ORT_NATIVE_DIR=%s\\n" '
+        '"$NX_ONNX_MODEL_DIR" "$NX_MINILM_CACHE_DIR" "$NX_ORT_NATIVE_DIR"'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    sh = dict(line.split("=", 1) for line in r.stdout.splitlines())
+    assert py == sh
+    assert all(py.values()), py
+    if not outer:
+        assert py["NX_ONNX_MODEL_DIR"] == str(real / ".cache" / "nexus" / "onnx_models")
+        assert py["NX_MINILM_CACHE_DIR"] == str(real / ".cache" / "chroma" / "onnx_models")
+        assert py["NX_ORT_NATIVE_DIR"] == str(real / ".cache" / "nexus" / "ort_native")
 
 
 def _python_manager_env(tmp_path: Path, real_runtime: Path, platform: str, docker_host: str | None):
@@ -256,7 +309,9 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
     import tests._fence_home as fh
 
     real = tmp_path / "real"
-    (real / "proj").mkdir(parents=True)
+    (real / ".m2").mkdir(parents=True)
+    (real / ".testcontainers.properties").write_text("x")
+    (real / "proj").mkdir()
     (real / ".gitconfig").write_text("x")
 
     def refuse(self: Path, target: Path, *a: object, **k: object) -> None:
@@ -266,10 +321,10 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
     monkeypatch.setattr(Path, "symlink_to", refuse)
     monkeypatch.setattr(fh, "_windows_link", lambda link, entry: linked.append((link.name, entry.name)))
     setattr_in(monkeypatch, fh, "sys.platform", "win32")
-    fh.fence_home(real, tmp_path / "gate", ".config/nexus")
-    assert sorted(linked) == [(".gitconfig", ".gitconfig"), ("proj", "proj")]
+    fh.fence_home(real, tmp_path / "gate")
+    assert sorted(linked) == [(".m2", ".m2"), (".testcontainers.properties", ".testcontainers.properties")]
 
     # Off Windows the same refusal is not swallowed.
     setattr_in(monkeypatch, fh, "sys.platform", "linux")
     with pytest.raises(OSError):
-        fh.fence_home(real, tmp_path / "gate2", ".config/nexus")
+        fh.fence_home(real, tmp_path / "gate2")

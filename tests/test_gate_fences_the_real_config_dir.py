@@ -42,7 +42,7 @@ _SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 
 def _run_fence(real_home: Path, gate_home: Path) -> subprocess.CompletedProcess:
     """Invoke the REAL fence_home implementation."""
-    script = f'source "{_FENCE_LIB}"; fence_home "{real_home}" "{gate_home}" ".config/nexus"'
+    script = f'source "{_FENCE_LIB}"; fence_home "{real_home}" "{gate_home}"'
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
 
@@ -99,13 +99,12 @@ def test_the_fenced_home_moves_the_config_dir_off_the_real_one(mirrored) -> None
             os.environ["HOME"] = env_home
 
 
-def test_the_shadowed_config_dir_is_empty_not_the_real_one(mirrored) -> None:
-    """The fenced path must be a FRESH directory. A symlink through would make
-    every layer above cosmetic."""
+def test_the_config_dir_is_absent_from_the_fenced_home_not_the_real_one(mirrored) -> None:
+    """The fenced path must not exist, let alone resolve to the real one. A
+    symlink through would make every layer above cosmetic."""
     real, gate = mirrored
-    shadowed = gate / ".config" / "nexus"
-    assert shadowed.is_dir() and not shadowed.is_symlink()
-    assert not (shadowed / "last_seen_version").exists(), (
+    assert not (gate / ".config").exists() and not (gate / ".config").is_symlink()
+    assert not (gate / ".config" / "nexus" / "last_seen_version").exists(), (
         "the real config dir leaked into the fenced home"
     )
     assert (real / ".config" / "nexus" / "last_seen_version").exists(), (
@@ -122,36 +121,28 @@ def test_the_shadowed_config_dir_is_empty_not_the_real_one(mirrored) -> None:
         (".docker", "holds the daemon socket at ~/.docker/run/docker.sock"),
         (".testcontainers.properties", "carries testcontainers.ryuk.disabled=true"),
         (".m2", "the Maven repository the jar rebuild resolves from"),
-        (".cache", "71GB uv cache + the 504MB nexus model cache"),
-        (".local", "fastembed cache and the installed tool"),
-        (".claude", "plugin-install-mode fixtures health.py reads"),
-        (".config/xtool", "an unrelated ~/.config tenant that must not be collateral"),
     ],
 )
-def test_the_mirror_passes_through(mirrored, entry: str, why: str) -> None:
-    """The allowlist design broke on the SECOND thing it touched: the Maven
-    rebuild died on absent .testcontainers.properties and .docker. Enumerating
-    "what HOME is for" cannot be completed, so the mirror is a denylist and
-    these cases are the proof."""
+def test_the_allowlisted_caches_pass_through(mirrored, entry: str, why: str) -> None:
+    """The first allowlist (nexus-pfuns) broke the Maven rebuild on absent
+    .testcontainers.properties and .docker. The inverted fence (nexus-ld3aa)
+    names exactly these; they are the proof the allowlist covers what the jar
+    rebuild measured it needs."""
     _real, gate = mirrored
     target = gate / entry
     assert target.exists(), f"{entry} did not survive the mirror — {why}"
 
 
-def test_only_the_nexus_config_is_shadowed(mirrored) -> None:
-    """Positive control on the SCOPE. A mirror that shadowed all of ~/.config
-    would pass every passthrough case above except the xtool one, and would
-    silently break any other tool keeping state there."""
+@pytest.mark.parametrize(
+    "entry",
+    [".cache", ".local", ".claude", ".config", ".config/xtool", "Documents"],
+)
+def test_everything_off_the_allowlist_is_shadowed(mirrored, entry: str) -> None:
+    """Positive control on the POLICY. The old fence mirrored all of these. A
+    path a fenced run needs is given to it explicitly (an env pin, a fixture),
+    never by widening the mirror."""
     _real, gate = mirrored
-    assert (gate / ".config" / "xtool" / "hosts.yml").exists()
-    assert not (gate / ".config" / "nexus" / "last_seen_version").exists()
-
-
-def test_top_level_non_dotfiles_are_mirrored_too(mirrored) -> None:
-    """dotglob must not become the whole glob — a mirror that copied only
-    dotfiles would drop everything else in HOME."""
-    _real, gate = mirrored
-    assert (gate / "Documents").exists()
+    assert not (gate / entry).exists() and not (gate / entry).is_symlink(), f"{entry} is visible in the fenced home"
 
 
 # ── Layer 2: a bare `nx` must fail loudly, not succeed quietly ──────────────
@@ -203,10 +194,13 @@ def test_the_gate_sources_and_calls_the_real_fence(mirrored) -> None:
     passing if the GATE stopped calling it. This is the one that notices."""
     body = _GATE.read_text()
     assert "lib/fence_home.sh" in body, "the gate no longer sources the fence helper"
-    assert 'fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"' in body
+    assert 'fence_home "$REAL_HOME" "$GATE_HOME"\n' in body
     assert 'export HOME="$GATE_HOME"' in body
     # nexus-q81g7: the manager half of the fence, after HOME is exported
     assert 'fence_home_env "$GATE_HOME"' in body
+    # nexus-ld3aa: the model roots are pinned by env, after HOME is exported
+    assert 'fence_cache_env "$REAL_HOME"' in body
+    assert body.index('export HOME="$GATE_HOME"') < body.index('fence_cache_env "$REAL_HOME"')
     assert body.index('export HOME="$GATE_HOME"') < body.index('fence_home_env "$GATE_HOME"')
     assert 'export PATH="$GATE_SHIM:$PATH"' in body
 

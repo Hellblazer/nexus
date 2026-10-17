@@ -276,21 +276,19 @@ echo "[gate] scratch config: $SCRATCH"
 #               INSTALLED tool's version, not the tree under test -- reddening a
 #               release leg in which all 560 tests passed.
 #
-# THE MIRROR IS A DENYLIST, NOT AN ALLOWLIST, and that distinction is the whole
-# design. The first attempt symlinked a hand-picked set (.cache/.local/.claude)
-# back into a fresh HOME and broke on the SECOND thing it touched: the Maven
-# jar rebuild died because ~/.testcontainers.properties (which carries
-# ``testcontainers.ryuk.disabled=true``) and ~/.docker (which holds the socket
-# at ~/.docker/run/docker.sock) were both absent, so testcontainers fell back
-# to its ryuk-enabled default and could not reach the daemon. An allowlist of
-# "things HOME is for" cannot be completed by enumeration -- every tool that
-# reads $HOME would have to be known in advance.
-#
-# So: mirror EVERYTHING, shadow ONE path. Every top-level entry of the real
-# HOME is symlinked through; ~/.config is recreated as a real directory whose
-# entries are likewise symlinked through EXCEPT ``nexus``, which becomes a
-# fresh empty scratch dir. Net effect: exactly one path in the whole home is
-# fenced, and any tool needing anything else is unaffected by construction.
+# THE HOME IS EMPTY, WITH A SHORT ALLOWLIST (nexus-ld3aa). The first attempt
+# (nexus-pfuns) symlinked a hand-picked set (.cache/.local/.claude) and broke on
+# the SECOND thing it touched: the Maven jar rebuild died because
+# ~/.testcontainers.properties (``testcontainers.ryuk.disabled=true``) and
+# ~/.docker (the socket at ~/.docker/run/docker.sock) were absent. The remedy
+# then was to mirror everything and shadow a denylist, but a mirrored entry
+# fails SILENTLY and destructively (2026-09-12 a global identity file overwritten;
+# 2026-09-30 a live nexus-service unit replaced) while a missing one fails
+# loudly on the first run. So the fence is inverted: the home starts empty and
+# only the measured read-mostly toolchain caches in FENCE_MIRRORED_ENTRIES
+# (lib/fence_home.sh) are linked through. uv's roots and the ONNX model root
+# are pinned by env (fence_uv_env, fence_cache_env), not mirrored. A leg that
+# needs anything else is given it explicitly; the mirror is never widened.
 #
 # NOT A LAYER: sandbox-exec. An earlier revision created a Seatbelt profile
 # denying file-write* under the real config dir, printed "real-config writes
@@ -303,7 +301,7 @@ echo "[gate] scratch config: $SCRATCH"
 
 REAL_HOME="$HOME"
 
-# LAYER 1 -- HOME mirror, shadowing only ~/.config/nexus. The implementation
+# LAYER 1 -- an empty HOME plus the toolchain-cache allowlist. The implementation
 # lives in lib/fence_home.sh so the test suite drives THIS code rather than a
 # reimplementation of it.
 # shellcheck source=tests/e2e/lib/fence_home.sh
@@ -312,7 +310,7 @@ source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-
 # shellcheck source=./scripts/lib/release-props-lease.sh disable=SC1091
 source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
 GATE_HOME="$SCRATCH/home"
-fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
+fence_home "$REAL_HOME" "$GATE_HOME"
 export HOME="$GATE_HOME"
 # nexus-q81g7: the service manager is not isolated by HOME. Empty
 # XDG_RUNTIME_DIR / no bus address (Linux) and NX_FENCED_HOME, which makes every
@@ -323,6 +321,8 @@ fence_home_env "$GATE_HOME"
 # builds .venv on a path inside $SCRATCH, which dangles once cleanup() deletes
 # it (nexus-t0pke; see fence_uv_env).
 fence_uv_env "$REAL_HOME"
+# The ONNX model root is shared by env, not by mirroring ~/.cache (nexus-ld3aa).
+fence_cache_env "$REAL_HOME"
 
 # LAYER 2 -- PATH. A bare ``nx`` resolves to the INSTALLED tool, a different
 # build from the tree under test: the 2026-08-24 stamp read 7.16.3 while the
@@ -344,7 +344,7 @@ export PATH="$GATE_SHIM:$PATH"
 # NOTE: no "nx <word>" sequence in this string. tests/test_release_artifact_verb_rot.py
 # extracts `nx <verb>` from release artifacts and checks the verb exists; prose like
 # a bare tool name followed by a word parses as a verb and reddens develop (it did).
-echo "[gate] fenced: HOME mirrored to $HOME, only ~/.config/nexus shadowed; PATH shim active"
+echo "[gate] fenced: HOME is an empty scratch dir at $HOME (toolchain caches only); PATH shim active"
 
 # .env does NOT auto-load anywhere in the suite; source it explicitly, and
 # BEFORE the service starts — the supervisor plumbs VOYAGE_API_KEY ->

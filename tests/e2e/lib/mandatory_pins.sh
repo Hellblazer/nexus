@@ -7,8 +7,9 @@
 # a pin ends up run by neither.
 #
 # WHY THEY LEAVE THE LOCAL-SERVICE GATE. The gate runs under a fenced HOME that never mirrors
-# ~/.config/gh (tests/e2e/lib/fence_home.sh, FENCE_ALWAYS_SHADOWS: a credential store is never
-# mirrored into a gate that provisions and discards things), so `gh auth status` fails there and
+# ~/.config/gh (tests/e2e/lib/fence_home.sh: the home is empty bar the FENCE_MIRRORED_ENTRIES toolchain
+# caches, so a credential store is never mirrored into a gate that provisions and discards things),
+# so `gh auth status` fails there and
 # every GitHub-backed pin skips, and tests/conftest.py holds a skipped pin to
 # NX_MANDATORY_PIN_SKIP_BUDGET (default 0). The gate therefore read FAILED on every run, and it
 # carries the cut battery's positive control. Sam's decision (2026-10-01): move the pins out of the

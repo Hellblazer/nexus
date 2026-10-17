@@ -7,6 +7,8 @@ pipeline stitches together correctly without requiring API keys or network acces
 AC-S1 through AC-S6 from RDR-011.
 AC-S7 through AC-S8 from RDR-012 (pdfplumber tier).
 """
+import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -555,6 +557,31 @@ class TestFFLigatureHelper:
 
 # ── nexus-2fyb: real-fixture formula-preservation regression guard ──────────
 
+def _give_mineru_its_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hand a real MinerU run the operator's model locations explicitly (nexus-ld3aa).
+
+    The suite's HOME fence is empty, so MinerU finds neither ``~/mineru.json``
+    (its ``models-dir``) nor ``~/.cache/huggingface`` and would download 2-3 GB
+    of weights on every run, then time out. Mirroring either into the fence is
+    what the fence no longer does: ``mineru.json`` also carries an
+    ``llm-aided-config`` block that can hold a provider key. So the test builds a
+    config of its own holding only the model locations, and points the HF cache
+    at the real one. Nothing is written to the real home.
+    """
+    real_home = Path(os.environ.get("NX_REAL_HOME") or Path.home())
+    real_cfg = real_home / "mineru.json"
+    if real_cfg.is_file():
+        real = json.loads(real_cfg.read_text())
+        cfg = tmp_path / "mineru.json"
+        cfg.write_text(json.dumps({
+            key: real[key] for key in ("config_version", "model-source", "models-dir") if key in real
+        }))
+        monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", str(cfg))
+    hf = real_home / ".cache" / "huggingface"
+    if hf.is_dir():
+        monkeypatch.setenv("HF_HOME", str(hf))
+
+
 class TestFormulaPreservationOnRealPdf:
     """End-to-end formula extraction on a real math paper.
 
@@ -679,7 +706,9 @@ class TestFormulaPreservationOnRealPdf:
         assert "--extractor docling" in msg
 
     @pytest.mark.slow
-    def test_mineru_path_preserves_formulas(self) -> None:
+    def test_mineru_path_preserves_formulas(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
         """End-to-end formula extraction on a real math paper. All assertions
         are EXACT against locked empirical values.
 
@@ -728,6 +757,7 @@ class TestFormulaPreservationOnRealPdf:
         be present, not something the shakedown or CI currently wires.
         """
         mineru_importorskip()
+        _give_mineru_its_models(monkeypatch, tmp_path)
         from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
 
         result = PDFExtractor().extract(self._FIXTURE, extractor="auto")
