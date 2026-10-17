@@ -151,6 +151,35 @@ class MineruMemoryError(RuntimeError):
     """
 
 
+# nexus-x3m8e: the machine-level MinerU failure type lives with the health
+# probes; re-exported here so callers catch it from the extractor module.
+from nexus._mineru_health import MineruMachineResourceError  # noqa: E402
+
+# A server found broken is replaced at most once per
+# ``_mineru_health.BROKEN_RESTART_COOLDOWN_S``, MACHINE-wide (a timestamp file
+# next to mineru.pid, ``claim_broken_restart``), so a task error that a restart
+# cannot fix never turns into a restart loop across a batch of PDFs, and N
+# parallel indexers never restart the one shared server N times.
+
+
+def _http_error_text(exc: httpx.HTTPStatusError) -> str:
+    """The server's own account of a failed task: the JSON ``error`` /
+    ``detail`` / ``message`` fields when the body is JSON, else the raw text."""
+    try:
+        resp = exc.response
+        try:
+            body = resp.json()
+        except ValueError:
+            return resp.text or ""
+        if isinstance(body, dict):
+            parts = [str(body[k]) for k in ("error", "detail", "message") if body.get(k)]
+            if parts:
+                return " ".join(parts)
+        return str(body)
+    except Exception:  # noqa: BLE001 — classification input only; empty means "unknown"
+        return ""
+
+
 # nexus-2fyb code-review R1-I3: progress messages are interactive UX for
 # long-running PDF extractions (Docling layout pass, MinerU per-page
 # inference). They MUST also go through structlog so non-interactive
@@ -1573,6 +1602,9 @@ class PDFExtractor:
                 f"`{reinstall}`. To bypass formula "
                 f"extraction entirely, rerun with `--extractor docling`."
             ) from exc
+        except MineruMachineResourceError:
+            # The machine, not this PDF: say so plainly, unwrapped (nexus-x3m8e).
+            raise
         except Exception as exc:
             # MinerU is installed but extraction failed — subprocess timeout,
             # OOM kill, mineru-api server error, etc. Do NOT advise reinstall;
@@ -2047,6 +2079,26 @@ class PDFExtractor:
                        error=f"{type(exc).__name__}: {exc}")
             return False, f"{type(exc).__name__}: {exc}"
 
+    def _replace_server_with_deleted_cwd(self, url: str) -> None:
+        """A ``/health`` 200 from a server whose working directory was deleted is
+        not health: every task it takes fails (nexus-x3m8e). When the registered
+        server serving *url* is in that state, replace it once, before any task
+        is wasted on it. Best-effort: any failure leaves the server as found."""
+        try:
+            from nexus._mineru_health import server_is_broken  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            from nexus._mineru_pid import read_pid_file  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+            info = read_pid_file()
+            # No error text yet: only the registered server on exactly this
+            # URL, with its working directory gone, qualifies.
+            if info is None or not server_is_broken(url, "", info):
+                return
+            _log.warning("mineru_server_cwd_gone", pid=info["pid"], url=url)
+            if self._restart_broken_mineru_server(info):
+                _progress("  MinerU server had a deleted working directory — restarted it.")
+        except Exception:  # noqa: BLE001 — a diagnostic must never break extraction
+            _log.debug("mineru_cwd_check_failed", exc_info=True)
+
     def _mineru_server_available(self) -> bool:
         """Check if the MinerU API server is reachable.
 
@@ -2142,6 +2194,7 @@ class PDFExtractor:
 
         ok, first_reason = self._probe_mineru_health(first_url)
         if ok:
+            self._replace_server_with_deleted_cwd(first_url)
             self._mineru_server_up = True
             self._mineru_server_checked = True
             return True
@@ -2283,7 +2336,7 @@ class PDFExtractor:
 
     _MINERU_MAX_RESTARTS: int = 2
 
-    def _restart_mineru_server(self) -> bool:
+    def _restart_mineru_server(self, replace_pid: int | None = None) -> bool:
         """Attempt to restart the MinerU server after a crash.
 
         Returns True if the server was restarted and is healthy.
@@ -2339,6 +2392,36 @@ class PDFExtractor:
             port = None
             with registry.election(_SPAWN_SCOPE):
                 info = read_pid_file()
+                if (
+                    info is not None
+                    and replace_pid is not None
+                    and info["pid"] == replace_pid
+                    and is_process_alive(replace_pid)
+                ):
+                    # nexus-x3m8e: the registered server is the broken one;
+                    # stop it (sparing its resource tracker so its semaphores
+                    # are reclaimed) and fall through to the spawn below.
+                    # The pid came from a file that outlives its server, and
+                    # the stop signals the pid's whole process group, so the
+                    # live command is judged first, exactly as `nx mineru
+                    # stop` does (nexus-5yrob): a pid the OS has recycled to
+                    # an unrelated process is a stale file, not a server.
+                    from nexus._mineru_spawn import classify_server_pid, stop_server_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+                    identity = classify_server_pid(replace_pid)
+                    if identity == "unreadable":
+                        # Inconclusive: signal nothing, keep the file.
+                        _log.warning("mineru_replace_pid_unreadable", pid=replace_pid)
+                        return False
+                    if identity == "mineru":
+                        outcome = stop_server_group(replace_pid)
+                        _log.warning("mineru_broken_server_stopped",
+                                     pid=replace_pid, outcome=outcome)
+                    else:
+                        _log.warning("mineru_replace_pid_recycled_not_signalled",
+                                     pid=replace_pid)
+                    _pid_file_path().unlink(missing_ok=True)
+                    info = None
                 if info is not None and is_process_alive(info["pid"]):
                     # A concurrent trigger already restarted — probe it below.
                     port = info["port"]
@@ -2410,8 +2493,75 @@ class PDFExtractor:
             except httpx.HTTPStatusError as exc:
                 _log.warning("mineru_server_error", path=str(pdf_path),
                              pages=f"{start}–{end}", error=str(exc))
-                return self._mineru_run_subprocess(pdf_path, start, end)
+                return self._mineru_after_server_error(pdf_path, start, end, exc)
         return self._mineru_run_subprocess(pdf_path, start, end)
+
+    def _mineru_after_server_error(
+        self, pdf_path: Path, start: int, end: int | None,
+        exc: httpx.HTTPStatusError,
+    ) -> tuple[str, list[dict], list[dict]]:
+        """Decide what a server-reported task failure means (nexus-x3m8e).
+
+        * ENOSPC on a machine with no POSIX semaphores left is the MACHINE's
+          fault: raise :class:`MineruMachineResourceError` (not a
+          ``RuntimeError``, so the bisect ladder does not retry halves of a
+          failure no page split can fix). A full disk also says ENOSPC, so the
+          claim is made only after a probe on this box fails to create one.
+        * A ``FileNotFoundError`` from the REGISTERED server that is about the
+          server, not the request, restarts it ONCE from a stable cwd and
+          retries this range: the failing URL must be the pid file's server
+          (an operator-pinned or remote server is not ours to kill), and its
+          working directory must be gone or the error must name a path the
+          server owns (:func:`nexus._mineru_health.server_is_broken`). A
+          missing PDF names neither, so it restarts nothing: it used to kill
+          the machine-shared server and every other indexer's in-flight work.
+          Bounded by a machine-wide cooldown and the restart budget, never a
+          loop.
+        * Anything else degrades to the subprocess path, as before.
+        """
+        from nexus._mineru_health import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            is_server_file_not_found,
+            looks_like_enospc,
+            semaphores_exhausted,
+            server_is_broken,
+        )
+        from nexus._mineru_pid import read_pid_file  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        error_text = _http_error_text(exc)
+        if looks_like_enospc(error_text):
+            machine = semaphores_exhausted()
+            if machine is not None:
+                _log.error("mineru_semaphores_exhausted", path=str(pdf_path),
+                           server_error=error_text[:300])
+                raise MineruMachineResourceError(machine) from exc
+        if is_server_file_not_found(error_text):
+            try:
+                failing_url = str(exc.request.url)
+            except Exception:  # noqa: BLE001 — an exception built without a request: not attributable to a server
+                failing_url = ""
+            info = read_pid_file()
+            if server_is_broken(failing_url, error_text, info) and self._restart_broken_mineru_server(info):
+                try:
+                    return self._mineru_run_via_server(pdf_path, start, end)
+                except Exception as retry_exc:  # noqa: BLE001 — one retry; the subprocess path is the fallback
+                    _log.warning("mineru_retry_after_restart_failed",
+                                 path=str(pdf_path), error=str(retry_exc))
+        return self._mineru_run_subprocess(pdf_path, start, end)
+
+    def _restart_broken_mineru_server(self, info: dict | None) -> bool:
+        """Replace the registered server *info* describes, found up but broken.
+        Bounded: one replacement per ``BROKEN_RESTART_COOLDOWN_S`` across the
+        whole machine (``claim_broken_restart``), and only inside
+        ``_MINERU_MAX_RESTARTS``. Logged."""
+        from nexus._mineru_health import claim_broken_restart  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        if info is None or not isinstance(info.get("pid"), int):
+            return False
+        if not claim_broken_restart():
+            _log.warning("mineru_broken_restart_in_cooldown")
+            return False
+        _log.warning("mineru_server_broken_restarting", pid=info["pid"])
+        return self._restart_mineru_server(replace_pid=info["pid"])
 
     def _mineru_run_subprocess(
         self, pdf_path: Path, start: int, end: int | None,
@@ -2481,10 +2631,13 @@ class PDFExtractor:
             # (killpg + the Gap 5 OOM classification below).
             from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+            from nexus.util.stable_cwd import stable_daemon_cwd  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
             proc = subprocess.Popen(
                 [
                     sys.executable, "-c", _MINERU_WORKER_SCRIPT,
-                    str(pdf_path), result_dir,
+                    # Absolute: the worker starts in the filesystem root below.
+                    os.path.abspath(pdf_path), result_dir,
                     # Inclusive, like the server path: the worker passes this
                     # straight to do_parse's end_page_id.
                     str(start), "none" if end is None else str(_mineru_end_page_id(end)),
@@ -2493,6 +2646,11 @@ class PDFExtractor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
+                # nexus-x3m8e: not the caller's directory, which may be a
+                # disposable worktree deleted under a long page run (any
+                # getcwd() in MinerU or torch then raises). Short-lived and
+                # bounded, but it imports the same libraries the server does.
+                cwd=stable_daemon_cwd(),
                 **isolation_popen_kwargs(),  # own process group (POSIX) / job object (Windows)
             )
             # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
@@ -2536,6 +2694,12 @@ class PDFExtractor:
                 # this call would then hang on a worker that was never
                 # actually killed. Matches the fallback the other three
                 # contain() call sites already use.
+                #
+                # nexus-x3m8e: on POSIX both calls below are hard group kills
+                # that spare the group's multiprocessing resource tracker (it
+                # is what unlinks the pool's named semaphores once the worker,
+                # which os._exit()s, is gone); that rule lives in
+                # nexus.util.process_group, not here.
                 if not kill_tree(proc, worker_job):
                     with contextlib.suppress(Exception):
                         proc.kill()

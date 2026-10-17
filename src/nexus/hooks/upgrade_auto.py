@@ -158,6 +158,15 @@ def _spawn_detached(argv: list[str], stderr: IO[bytes] | int = subprocess.DEVNUL
         "stderr": stderr,
         "close_fds": True,
     }
+    # nexus-x3m8e: the child outlives the session whose cwd launched it, and a
+    # session worktree is routinely deleted, so it starts in the filesystem
+    # root, not here. ``nexus.util.stable_cwd`` is stdlib-only, so the hook
+    # stays import-light. ``nx upgrade`` reads the per-repo ``.nexus.yml``
+    # through ``load_config()``; the session's directory travels as
+    # NEXUS_REPO_ROOT so that read is unchanged.
+    from nexus.util.stable_cwd import current_project_root, detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only, function-level so the hook module itself stays import-light
+
+    common.update(detached_spawn_kwargs(project_root=current_project_root()))
     if not _IS_WINDOWS:
         return subprocess.Popen(argv, start_new_session=True, **common)  # noqa: S603 — argv list, resolved binary, no shell
     base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP

@@ -228,6 +228,22 @@ def _daemonize_and_run() -> None:
     except OSError:
         pass
 
+    # nexus-x3m8e: leave the launch directory. The grandchild outlives the
+    # session whose (disposable) worktree it was started in, and a deleted
+    # cwd makes every getcwd()/abspath() in the cleanup raise. The cleanup
+    # reads the per-repo ``.nexus.yml``, so the old directory travels as
+    # NEXUS_REPO_ROOT. Stdlib-only module; this is past both forks, off the
+    # pre-fork budget.
+    try:
+        from nexus.util.stable_cwd import (  # noqa: PLC0415 — deliberate function-scoped import; post-fork only (module docstring)
+            current_project_root,
+            enter_stable_daemon_cwd,
+        )
+
+        enter_stable_daemon_cwd(project_root=current_project_root())
+    except Exception:  # noqa: BLE001 — a cwd problem must never stop the cleanup; stdio is the null device
+        pass
+
     _run_session_end_synchronously()
     os._exit(0)
 
@@ -266,8 +282,13 @@ def _spawn_detached_cleanup() -> bool:
     import subprocess  # noqa: PLC0415 — deferred: off the POSIX pre-fork path (module docstring)
     import warnings  # noqa: PLC0415 — deferred with subprocess, for the same reason
 
+    from nexus.util.stable_cwd import current_project_root, detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only; off the POSIX pre-fork path (module docstring)
+
     argv = [sys.executable, "-c", _DETACHED_CHILD_CODE]
     base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
+    # nexus-x3m8e: the child starts in the filesystem root, not the hook's
+    # (disposable) directory, which travels as NEXUS_REPO_ROOT.
+    stable = detached_spawn_kwargs(project_root=current_project_root())
     for flags in (base | _CREATE_BREAKAWAY_FROM_JOB, base):
         try:
             child = subprocess.Popen(
@@ -277,6 +298,7 @@ def _spawn_detached_cleanup() -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
+                **stable,
             )
         except (OSError, ValueError):
             continue

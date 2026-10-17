@@ -219,6 +219,17 @@ def session_end_detach_cmd() -> None:
     except OSError:
         pass
 
+    # nexus-x3m8e: leave the hook's launch directory, which is a session
+    # worktree that may be deleted while this grandchild runs (every getcwd()
+    # in the cleanup would then raise). The per-repo config the cleanup reads
+    # travels as NEXUS_REPO_ROOT.
+    try:
+        from nexus.util.stable_cwd import current_project_root, enter_stable_daemon_cwd  # noqa: PLC0415 — deferred, stdlib-only: detached grandchild only
+
+        enter_stable_daemon_cwd(project_root=current_project_root())
+    except Exception:  # noqa: BLE001 — a cwd problem must never stop the cleanup
+        pass
+
     # Now do the real work. Exceptions are swallowed — we're detached
     # and nothing can observe us anyway.
     try:

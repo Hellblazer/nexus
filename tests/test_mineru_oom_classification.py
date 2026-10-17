@@ -8,6 +8,7 @@ keys / model weights — MinerU and docling boundaries are mocked.
 from __future__ import annotations
 
 import contextlib
+import os
 import signal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -89,6 +90,9 @@ def test_windows_shaped_kill_tree_failure_falls_back_to_proc_kill() -> None:
     proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="worker", timeout=1), 0]
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
+        # Windows shape: contain() returns a job, whose close is the tree kill;
+        # (the POSIX worker has no job and takes the group kill, which spares the tracker).
+        stack.enter_context(patch("nexus.util.process_group.contain", return_value=object()))
         stack.enter_context(patch("nexus.util.process_group.kill_tree", return_value=False))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
@@ -102,20 +106,19 @@ def test_windows_shaped_kill_tree_failure_falls_back_to_proc_kill() -> None:
     proc.kill.assert_called_once()
 
 
-def test_an_interrupted_wait_still_kills_the_worker_tree() -> None:
-    """nexus-6y4e0 measurement review: an exception from the bounded wait
-    other than TimeoutExpired must still close the job and kill the
-    worker tree before propagating, like the other three contain() sites'
-    unconditional release."""
+def _interrupted_wait_kills(*, job: object | None) -> tuple[MagicMock, MagicMock]:
+    """Drive an interrupted bounded wait with ``contain`` returning *job*; return
+    the (kill_tree, safe_killpg_group) mocks."""
     ext = PDFExtractor()
     proc = MagicMock(pid=4321)
     proc.wait.side_effect = KeyboardInterrupt()
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
+        stack.enter_context(patch("nexus.util.process_group.contain", return_value=job))
         kill_tree = stack.enter_context(
             patch("nexus.util.process_group.kill_tree", return_value=True),
         )
-        stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
+        group = stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
             "nexus.config.get_mineru_page_timeout_s", return_value=180,
         ))
@@ -124,7 +127,21 @@ def test_an_interrupted_wait_still_kills_the_worker_tree() -> None:
         ))
         with pytest.raises(KeyboardInterrupt):
             ext._mineru_run_subprocess(Path("/tmp/does-not-matter.pdf"), 0, 1)
+    return kill_tree, group
+
+
+@pytest.mark.parametrize("job", [None, object()], ids=["posix-group", "windows-job"])
+def test_an_interrupted_wait_still_kills_the_worker_tree(job: object | None) -> None:
+    """nexus-6y4e0 measurement review: an exception from the bounded wait other
+    than TimeoutExpired must still kill the worker tree before propagating.
+    nexus-x3m8e: on POSIX the hard group kill that ``kill_tree`` and
+    ``safe_killpg_group`` send spares the multiprocessing resource tracker BY
+    CONSTRUCTION (``util.process_group``), so this site needs no sparing pass of
+    its own and the contract is the original one: both are called, the second by
+    the recorded group id so it reaches a worker that already exited."""
+    kill_tree, group = _interrupted_wait_kills(job=job)
     kill_tree.assert_called_once()
+    group.assert_called_once_with(4321)
 
 
 @pytest.mark.parametrize("returncode,ceiling", [

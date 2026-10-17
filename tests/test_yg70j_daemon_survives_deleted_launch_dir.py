@@ -112,9 +112,12 @@ def test_daemon_chdirs_off_the_launch_directory(tmp_path: Path) -> None:
     )
 
 
-def test_the_anchor_is_the_config_dir_not_an_arbitrary_place(tmp_path: Path) -> None:
-    """Positive control on WHERE it lands. A chdir to somewhere useless would
-    pass the test above while leaving relative-path resolution nonsensical."""
+def test_the_anchor_is_the_filesystem_root_not_the_config_dir(tmp_path: Path) -> None:
+    """Positive control on WHERE it lands (nexus-x3m8e superseded the config
+    dir: a process whose cwd is a directory keeps that directory from being
+    deleted on Windows, and ``nx uninstall`` removes the config dir). The root
+    always exists, nothing deletes it, and no module lives there for ``''`` on
+    ``sys.path`` to shadow."""
     cfg = tmp_path / "cfg"
     cfg.mkdir()
     repo = Path(__file__).parent.parent
@@ -135,10 +138,10 @@ def test_the_anchor_is_the_config_dir_not_an_arbitrary_place(tmp_path: Path) -> 
             m.run_aspect_worker_daemon(config_dir=pathlib.Path({str(cfg)!r}), tenant="t")
         except SystemExit:
             pass
-        sys.exit(0 if os.getcwd() == os.path.realpath({str(cfg)!r}) else 1)
+        sys.exit(0 if os.getcwd() == os.path.abspath(os.sep) else 1)
         """
     )
     r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert r.returncode == 0, (
-        f"daemon should anchor on config_dir.\nstdout={r.stdout}\nstderr={r.stderr}"
+        f"daemon should anchor on the filesystem root.\nstdout={r.stdout}\nstderr={r.stderr}"
     )

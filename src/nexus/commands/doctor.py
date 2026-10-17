@@ -3299,20 +3299,17 @@ def _probe_semaphore_namespace() -> tuple[bool, str]:
 
     Separated from the CLI handler so tests can monkeypatch it.
     """
-    import os as _os  # noqa: PLC0415 — deferred to keep CLI startup fast
-    try:
-        from _multiprocessing import SemLock  # type: ignore[attr-defined]  # noqa: PLC0415 — deferred to keep CLI startup fast
-    except ImportError:
-        return True, "SemLock probe unavailable on this platform"
-    probe_name = f"/nx-doctor-probe-{_os.getpid()}"
-    try:
-        lock = SemLock(0, 0, 1, name=probe_name, unlink=True)
-        # SemLock ctor created and owns the semaphore; unlink happens
-        # via the ``unlink=True`` flag on close.
-        del lock
-        return True, "POSIX named-semaphore namespace has headroom"
-    except OSError as exc:
+    # nexus-x3m8e: ONE probe, shared with `nx mineru status` and the extractor
+    # (nexus._mineru_health.probe_semaphore): it creates a throwaway named
+    # semaphore, unlinks it in the same call, and registers nothing with a
+    # resource tracker. This function only applies the doctor's policy: any
+    # OSError is a failure here, where the MinerU check cares about ENOSPC alone.
+    from nexus._mineru_health import probe_semaphore  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    exc = probe_semaphore()
+    if exc is not None:
         return False, f"{exc!r}"
+    return True, "POSIX named-semaphore namespace has headroom"
 
 
 def _count_orphan_trackers(*, platform: str | None = None) -> int | None:
@@ -3361,6 +3358,8 @@ def _run_check_resources() -> None:
       :func:`_count_orphan_trackers`. Warns above 100 (advisory)
       and 1000 (urgent). Bead nexus-9h1s.
     """
+    import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
     ok, msg = _probe_semaphore_namespace()
     orphan_count = _count_orphan_trackers()
     if ok:
@@ -3402,16 +3401,27 @@ def _run_check_resources() -> None:
     click.echo(
         "Known sources of POSIX semaphore exhaustion on this project:\n"
         "  - nexus-ze2a: MinerU workers leak semaphores.\n"
-        "    Workaround: `nx mineru stop` (kills the whole process group).\n"
+        "    Workaround: `nx mineru stop` (stops the server's process group but\n"
+        "    spares its multiprocessing resource tracker, which unlinks the\n"
+        "    group's semaphores as it exits; a tracker that survives is reported,\n"
+        "    never SIGKILLed, because killing it leaks them).\n"
         "  - nexus-dc57: orphan chroma children from earlier nexus sessions.\n"
         "    Workaround: kill orphan chromas (`ps aux | grep 'chroma run'`).\n"
         "  - nexus-9h1s: multiprocessing.resource_tracker subprocesses\n"
         "    re-parented to init (PPID=1) after ungraceful MCP shutdowns.\n"
+        "    A tracker ignores SIGTERM by design and exits once the workers\n"
+        "    holding its pipe are gone; the sweep kills the workers, waits,\n"
+        "    and never SIGKILLs a tracker.\n"
         "    Reap with: python -c 'from nexus.session import "
         "sweep_orphan_resource_trackers; "
         "print(sweep_orphan_resource_trackers())'\n"
-        "If the count does not recover, reboot — macOS does not unlink\n"
-        "leaked named semaphores until the next boot.",
+        + (
+            "On Linux the leaked names are files: `ls /dev/shm/sem.*`; remove\n"
+            "the ones no running process holds open (`lsof /dev/shm/sem.*`)."
+            if _sys.platform.startswith("linux")
+            else "If the count does not recover, reboot — macOS does not unlink\n"
+            "leaked named semaphores until the next boot."
+        ),
         err=True,
     )
     raise click.exceptions.Exit(2)

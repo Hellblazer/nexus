@@ -30,7 +30,6 @@ _FORBIDDEN: frozenset[tuple[str, str]] = frozenset(
 #: module path (relative to src/nexus) -> the guard that makes it safe.
 _ALLOWED: dict[str, str] = {
     "util/process_group.py": "the helper itself; every use is behind getattr(os, 'killpg', None)",
-    "bounded_subprocess.py": "kill_child_and_descendants returns before any reference when getattr(os, 'killpg', None) is None",
     "pdeathsig.py": "Linux-only: the prctl call is gated on sys.platform",
 }
 

@@ -2523,6 +2523,7 @@ def _spawn_deferred_labeling() -> bool:
     import sys  # noqa: PLC0415 — spawn-only branch
 
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance, mirrors _registry_path above
+    from nexus.daemon.service_registry import current_project_root, detached_spawn_kwargs  # noqa: PLC0415 — spawn-only branch
     from nexus.util.process_group import isolation_popen_kwargs  # noqa: PLC0415 — spawn-only branch
 
     try:
@@ -2554,6 +2555,13 @@ def _spawn_deferred_labeling() -> bool:
             stdout=log,
             stderr=log,
             **isolation_popen_kwargs(),
+            # nexus-x3m8e: not the caller's cwd (a session worktree deleted
+            # mid-run broke every getcwd() the run makes). The run does read
+            # the per-repo ``.nexus.yml`` (``nx taxonomy label`` calls
+            # ``load_config()`` for ``taxonomy.local_exclude_collections``), so
+            # the caller's directory is handed over as NEXUS_REPO_ROOT, which
+            # load_config reads where it used to read the cwd.
+            **detached_spawn_kwargs(project_root=current_project_root()),
         )
         from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME  # noqa: PLC0415 — spawn-only branch
 

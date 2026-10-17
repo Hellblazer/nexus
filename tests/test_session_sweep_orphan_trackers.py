@@ -260,7 +260,9 @@ class TestKillOrphanTrackerPidsGoneShapes:
         monkeypatch.setattr(
             registry, "hard_kill_pid", lambda pid: hard.append(pid) or True
         )
-        assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 1
+        assert session._kill_orphan_tracker_pids(
+            [4242], grace_seconds=0.0, _command=lambda pid: "python -m multiprocessing.spawn",
+        ) == 1
         assert sigterms == [4242]
         assert hard == [4242], "the escalation must use service_registry.hard_kill_pid"
 
@@ -303,5 +305,65 @@ class TestKillOrphanTrackerPidsGoneShapes:
             registry, "hard_kill_pid",
             functools.partial(registry.hard_kill_pid, platform=platform),
         )
-        assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 1
+        assert session._kill_orphan_tracker_pids(
+            [4242], grace_seconds=0.0, _command=lambda pid: "python -m multiprocessing.spawn",
+        ) == 1
         assert len(calls) == 2, calls  # both the SIGTERM and the hard kill hit the fake
+
+
+class TestAResourceTrackerIsNeverSigkilled:
+    """nexus-x3m8e. A resource tracker ignores SIGTERM by design and is the
+    process that ``sem_unlink``s its workers' named semaphores; the SIGKILL this
+    sweep used to send every survivor killed it before it could, leaking those
+    semaphores until reboot: the exhaustion the sweep exists to relieve."""
+
+    def test_a_tracker_survivor_is_reported_not_killed(self, monkeypatch):
+        import nexus.daemon.service_registry as registry
+        import nexus.session as session
+
+        hard: list[int] = []
+        setattr_in(monkeypatch, session, "os.kill", lambda pid, sig: None)
+        monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
+        monkeypatch.setattr(registry, "hard_kill_pid", lambda pid: hard.append(pid) or True)
+        commands = {
+            101: "python -c from multiprocessing.resource_tracker import main;main(9)",
+            102: "python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=9)",
+        }
+        assert session._kill_orphan_tracker_pids(
+            [101, 102], grace_seconds=0.0, _command=lambda pid: commands[pid],
+        ) == 2
+        assert hard == [102], "the worker may be hard-killed, the tracker never"
+
+    def test_a_survivor_whose_command_cannot_be_read_is_left_alone(self, monkeypatch):
+        import nexus.daemon.service_registry as registry
+        import nexus.session as session
+
+        setattr_in(monkeypatch, session, "os.kill", lambda pid, sig: None)
+        monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
+        monkeypatch.setattr(
+            registry, "hard_kill_pid", lambda pid: pytest.fail("killed a process it could not identify"),
+        )
+        assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0, _command=lambda pid: "") == 1
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+    def test_a_real_tracker_that_ignores_sigterm_is_still_alive_after_the_sweep(self):
+        """The real shape: a process whose command carries the tracker marker and
+        which ignores SIGTERM. Before the fix the escalation SIGKILLed it."""
+        from nexus.session import _kill_orphan_tracker_pids
+
+        marker = "multiprocessing" + ".resource_tracker"
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)  # {marker}",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        try:
+            time.sleep(0.5)  # the handler is installed
+            assert _kill_orphan_tracker_pids([proc.pid], grace_seconds=0.6) == 1
+            assert proc.poll() is None, "the sweep SIGKILLed a resource tracker"
+        finally:
+            if proc.poll() is None:
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5.0)

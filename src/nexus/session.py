@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -446,12 +447,26 @@ def _kill_orphan_tracker_pids(
     pids: list[int],
     *,
     grace_seconds: float = 3.0,
+    _command: Callable[[int], str] | None = None,
 ) -> int:
-    """SIGTERM each PID in *pids*; escalate to SIGKILL after
-    *grace_seconds* for any survivor. Returns the count of PIDs we
-    successfully signalled (SIGTERM-step). Best-effort: missing
-    PIDs and EPERM are skipped silently. Pure side effects + return
-    count; testable independently of the parser.
+    """SIGTERM each PID in *pids*; after *grace_seconds* hard-kill the
+    survivors that are NOT a ``multiprocessing`` resource tracker, then wait
+    for the trackers to exit on their own. Returns the count of PIDs we
+    successfully signalled (SIGTERM-step). Best-effort: missing PIDs and EPERM
+    are skipped silently.
+
+    A resource tracker is never sent ``SIGKILL`` (nexus-x3m8e). It ignores
+    ``SIGTERM`` by design, and it is the process that ``sem_unlink``s the
+    named semaphores its workers made; a ``SIGKILL`` after the grace period,
+    which is what this function used to send every survivor, killed it before
+    it could and leaked those semaphores until reboot, the exhaustion this sweep
+    exists to relieve. A tracker exits by itself once the last process holding
+    its pipe is gone, so the sweep kills the workers (``multiprocessing.spawn``
+    children, which are not trackers and may be hard-killed), waits, and
+    REPORTS a tracker that is still there (a warning naming the pids), rather
+    than killing it. A survivor whose command line cannot be read is left alone
+    for the same reason: the cost of leaving a process is a warning, the cost of
+    killing a tracker is permanent.
 
     Unreachable from the production sweep on Windows (it returns before it
     lists anything), but correct for a direct caller there: a gone pid is an
@@ -459,8 +474,10 @@ def _kill_orphan_tracker_pids(
     ``service_registry.hard_kill_pid`` (RDR-224, nexus-f9bgu.44)."""
     # Deferred, like the other service_registry import in this module: keeps
     # nexus.session's import cost flat for the hooks.
-    from nexus.daemon.service_registry import hard_kill_pid  # noqa: PLC0415
+    from nexus.daemon.service_registry import hard_kill_pid, process_command  # noqa: PLC0415
+    from nexus.util.process_group import RESOURCE_TRACKER_MARKER  # noqa: PLC0415
 
+    command = _command if _command is not None else process_command
     signalled = 0
     for pid in pids:
         try:
@@ -474,14 +491,30 @@ def _kill_orphan_tracker_pids(
             # exited raises a plain OSError (WinError 87), not that subclass.
             continue
 
-    deadline = time.time() + grace_seconds
-    while time.time() < deadline:
-        if not any(_is_pid_alive(pid) for pid in pids):
-            break
-        time.sleep(0.1)
+    def _wait_all_gone(targets: list[int]) -> None:
+        deadline = time.time() + grace_seconds
+        while time.time() < deadline:
+            if not any(_is_pid_alive(pid) for pid in targets):
+                break
+            time.sleep(0.1)
+
+    _wait_all_gone(pids)
+    trackers: list[int] = []
     for pid in pids:
-        if _is_pid_alive(pid):
-            hard_kill_pid(pid)  # never raises for a pid that is gone
+        if not _is_pid_alive(pid):
+            continue
+        cmd = command(pid)
+        if RESOURCE_TRACKER_MARKER in cmd:
+            trackers.append(pid)
+        elif cmd:
+            hard_kill_pid(pid)  # a worker: never raises for a pid that is gone
+        else:
+            _log.debug("sweep_orphan_tracker_unreadable_command_left_alone", pid=pid)
+    if trackers:
+        _wait_all_gone(trackers)
+        left = [pid for pid in trackers if _is_pid_alive(pid)]
+        if left:
+            _log.warning("sweep_orphan_trackers_survivors_not_killed", pids=left)
     return signalled
 
 

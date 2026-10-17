@@ -514,7 +514,9 @@ def service_uninstall_cmd(autostart: bool) -> None:
 def _supervisor_popen_kwargs(platform: str | None = None) -> dict[str, object]:
     """``Popen`` kwargs for the detached supervisor spawn.
 
-    POSIX: ``start_new_session=True``, as before. Windows (RDR-224,
+    POSIX: ``start_new_session=True``, as before. Both platforms also carry
+    ``cwd`` (and ``env`` only when ``NEXUS_CONFIG_DIR`` is relative) from
+    ``service_registry.detached_spawn_kwargs`` (nexus-x3m8e). Windows (RDR-224,
     nexus-f9bgu.17): ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW``. The new
     group gives ``nx daemon service stop`` a group to send ``CTRL_BREAK`` to
     without reaching anything else; the hidden console is what the stopper
@@ -524,13 +526,21 @@ def _supervisor_popen_kwargs(platform: str | None = None) -> dict[str, object]:
     logon-task launcher (``nexus.daemon.windows_autostart``, nexus-f9bgu.23)
     spawns its supervisor through this same function.
     """
+    # nexus-x3m8e: every detached daemon starts in a stable cwd, never the
+    # caller's (a session worktree that is later deleted took a MinerU server
+    # down this way). The helper lives in the shared primitive; the supervisor,
+    # the aspect worker and the Windows launcher all spawn through this function.
+    from nexus.daemon.service_registry import detached_spawn_kwargs  # noqa: PLC0415 — deferred: keeps the CLI import path light
+
+    stable = detached_spawn_kwargs()
     if (platform if platform is not None else sys.platform) == "win32":
         from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
 
         return {
             "creationflags": win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW,
+            **stable,
         }
-    return {"start_new_session": True}
+    return {"start_new_session": True, **stable}
 
 
 def _supervisor_argv(config_dir: Path, *, nx_bin: list[str] | None = None) -> list[str]:
@@ -950,6 +960,12 @@ def service_start_cmd(
         # and the engine itself use this dir, not ~/.config/nexus.
         if config_dir_str:
             os.environ["NEXUS_CONFIG_DIR"] = str(config_dir.resolve())
+        # nexus-x3m8e: detach from the launch directory (a deleted worktree
+        # would otherwise break every lazy import the supervisor makes).
+        from nexus.daemon.service_registry import enter_stable_daemon_cwd  # noqa: PLC0415 — deferred import — foreground path only
+
+        config_dir = config_dir.absolute()  # a relative path must not be re-read from the new cwd
+        enter_stable_daemon_cwd()
         try:
             code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:

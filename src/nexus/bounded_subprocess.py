@@ -116,7 +116,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from typing import IO, Any, Literal
@@ -180,8 +179,7 @@ def kill_child_and_descendants(
     what caught it; a test that only asserted ``TimeoutExpired`` would have
     passed on the broken version.
     """
-    killpg = getattr(os, "killpg", None)
-    if killpg is None:
+    if getattr(os, "killpg", None) is None:
         # Windows. No process group -- but nexus-6y4e0 (job): if run_bounded
         # obtained a job object at spawn, closing it reaches the whole tree.
         from nexus.util.process_group import kill_tree  # noqa: PLC0415 — deferred: avoids import-time cost on the POSIX-only path above
@@ -197,22 +195,22 @@ def kill_child_and_descendants(
             return "none"
         return "process"
 
+    # nexus-x3m8e: the group kill goes through nexus.util.process_group, the
+    # one module that sends a hard group signal, because a SIGKILL of the whole
+    # group also kills the group's multiprocessing resource tracker before it
+    # can sem_unlink the pool's named semaphores. It spares the tracker.
+    from nexus.util.process_group import safe_killpg, safe_killpg_group  # noqa: PLC0415 — deferred: avoids import-time cost on the common path
+
     # Ask the OS for the group while the child is still alive to be asked.
-    try:
-        killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    if safe_killpg(proc):
         return "group"
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
 
     # The child is a zombie (macOS) or otherwise unlookupable. Under the
     # caller contract above its pid IS its pgid, and the group can still
     # hold live grandchildren, so signal it directly rather than giving up
     # on the group.
-    try:
-        killpg(proc.pid, signal.SIGKILL)
+    if safe_killpg_group(proc.pid):
         return "group"
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
 
     try:
         proc.kill()

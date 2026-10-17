@@ -81,12 +81,30 @@ _EXEMPT: dict[str, str] = {}
 # are unpacks into a watched call that names no ``encoding`` and sets no text
 # mode of its own, so what they carry decides whether the child is decoded.
 _KWARGS_READ: dict[str, str] = {
-    "src/nexus/hooks/upgrade_auto.py:162": (
+    "src/nexus/hooks/upgrade_auto.py:171": (
         "``common`` is a literal dict of stdin/stdout/stderr (DEVNULL or a binary "
-        "log handle) and close_fds; the child is detached and nothing reads it as text"
+        "log handle), close_fds and, since nexus-x3m8e, ``cwd`` and (only when a "
+        "project directory is handed over or NEXUS_CONFIG_DIR is relative) ``env``, "
+        "from ``stable_cwd.detached_spawn_kwargs``; the child is detached and "
+        "nothing reads it as text"
     ),
-    "src/nexus/hooks/upgrade_auto.py:165": "same ``common`` dict as :162",
-    "src/nexus/hooks/upgrade_auto.py:168": "same ``common`` dict as :162",
+    "src/nexus/hooks/upgrade_auto.py:174": "same ``common`` dict as :171",
+    "src/nexus/hooks/upgrade_auto.py:177": "same ``common`` dict as :171",
+    "src/nexus/_mineru_spawn.py:223": (
+        "``stable`` is ``service_registry.detached_spawn_kwargs()`` minus its ``env``: a "
+        "lone ``cwd`` key (nexus-x3m8e); stdout and stderr are the child log handle, "
+        "binary, and the server is detached"
+    ),
+    "src/nexus/_session_end_launcher.py:294": (
+        "``stable`` is ``stable_cwd.detached_spawn_kwargs(project_root=...)``: ``cwd`` and "
+        "an ``env`` copy carrying NEXUS_REPO_ROOT (nexus-x3m8e); stdio is the null "
+        "device and nothing reads the child as text"
+    ),
+    "src/nexus/commands/index.py:2552": (
+        "``**isolation_popen_kwargs()`` (inert flags) plus ``**detached_spawn_kwargs()``, "
+        "which holds only ``cwd`` (and an ``env`` copy when NEXUS_CONFIG_DIR is relative; "
+        "nexus-x3m8e); stdout and stderr are a binary log handle, nothing reads it as text"
+    ),
     "tests/test_mcpb_bootstrap.py:187": (
         "a test double for ``bootstrap._sync_with_retry``'s ``run`` argument: the kwargs are the "
         "bootstrap's own, which carry encoding='utf-8' and errors='replace' and no text "
