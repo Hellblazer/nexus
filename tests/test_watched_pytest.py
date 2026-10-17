@@ -19,7 +19,7 @@ import pytest
 
 from tests._child_process import sigint_default
 
-SCRIPT =Path(__file__).parent.parent / "scripts" / "watched_pytest.py"
+SCRIPT = Path(__file__).parent.parent / "scripts" / "watched_pytest.py"
 spec = importlib.util.spec_from_file_location("watched_pytest", SCRIPT)
 assert spec is not None and spec.loader is not None
 wp = importlib.util.module_from_spec(spec)
