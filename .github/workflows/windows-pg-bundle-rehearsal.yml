@@ -382,9 +382,15 @@ jobs:
       # The stop-order logic it pins is platform-independent and stays covered on POSIX, so it is
       # left out of this set rather than widening the skip ceiling, which exists to catch a suite
       # that quietly stopped running.
+      # tests/daemon/test_stop_flagless_start_real_processes.py (nexus-oacd3) is the same case: real
+      # child processes whose environment is read from /proc or KERN_PROCARGS2, 14 skips on win32.
+      # Its platform-independent siblings (the procargs parser, the fail-closed reader, the Windows
+      # no-reader contract, the owner-directory rules) are test_stop_leaves_other_dirs_flagless_start.py
+      # and stay in the set. Develop at 49149186a (run 39072125530) skipped 157; with that module run
+      # here it skipped 171 against the ceiling of 163 (run 39075798391).
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
