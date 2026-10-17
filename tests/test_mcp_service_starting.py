@@ -412,3 +412,19 @@ def test_a_cache_invalidation_forgets_the_remembered_failure(engine, monkeypatch
     engine.stats_rows = [{"name": _ROW_NAME, "count": 3, "content_type": "code", "owner_id": "o"}]
     assert mcp_infra.get_collection_row(_ROW_NAME) is not None
     assert engine.stats_hits > after_first
+
+
+def test_a_good_cache_install_forgets_the_remembered_failure(engine, monkeypatch):
+    # A listing that succeeds elsewhere inside the window (prime_collections_cache, or a
+    # concurrent refresh) must not leave a forced listing re-raising the stale failure.
+    monkeypatch.setattr(mcp_infra, "_COLLECTIONS_REFRESH_FAILURE_MEMO", 60.0)
+    engine.stats_status = 503
+    assert mcp_infra.get_collection_row(_ROW_NAME) is None
+    after_first = engine.stats_hits
+
+    row = {"name": _ROW_NAME, "count": 3, "content_type": "code", "owner_id": "o"}
+    mcp_infra.prime_collections_cache([row])
+    engine.stats_status = 200
+    engine.stats_rows = [row]
+    assert mcp_infra.get_collection_counts(max_age=0) == {_ROW_NAME: 3}
+    assert engine.stats_hits > after_first

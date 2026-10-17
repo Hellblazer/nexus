@@ -1011,10 +1011,13 @@ def _install_collections_cache(
     60 s names refresh never discards counts that are good for 15 minutes.
     """
     global _collections_cache, _collections_counts_loaded, _collections_counts_ts
+    global _collections_refresh_failure
     cache = _collections_cache_tuple_from_rows(rows)
     with _collections_cache_lock:
         if generation is not None and generation != _collections_cache_generation:
             return _collections_cache
+        # A listing that succeeded supersedes a remembered failure.
+        _collections_refresh_failure = None
         if _rows_carry_counts(rows):
             _collections_counts_loaded = True
             _collections_counts_ts = cache[3]
