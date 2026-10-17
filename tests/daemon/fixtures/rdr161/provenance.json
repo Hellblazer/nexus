@@ -1,6 +1,7 @@
 {
   "release_tag": "engine-service-v0.1.160",
   "signed_by": "engine-service-release.yml@refs/tags/engine-service-v0.1.160",
+  "refresh_when": "Re-publish these bundles and sha256s from a newer engine-service release only if engine-service-release.yml is renamed, CERT_IDENTITY_REGEXP in binary_install.py changes, or this release is withdrawn.",
   "note": "Genuine Sigstore bundles published beside the release assets. The test downloads each asset, checks the sha256 here, and runs the real verify_signature. The nexus-pg archives stand in for the 160 MB nexus-service binary: same workflow, same signing identity, 5 MB.",
   "assets": {
     "linux-amd64": {"asset": "nexus-pg-linux-amd64.txz", "sha256": "4b6c02fce0719f9de266b33c8a99ce85cba3fa86d49a36d1d42a60d77f2947d7", "size": 5417412},
