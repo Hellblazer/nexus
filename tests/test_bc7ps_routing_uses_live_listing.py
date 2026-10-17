@@ -273,10 +273,9 @@ _ALLOWED = {
     ("commands/search_cmd.py", "db.list_collections(routing=True) if isinstance(db, HttpVectorClient)"),
     ("commands/search_cmd.py", "else db.list_collections()"),
     ("commands/taxonomy_cmd.py", "for c in t3._client.list_collections():"),
-    # the MCP collection_list TOOL is the inventory surface (twin of
-    # `nx collection list`), not a routing read; the fan-out in the same
-    # module goes through the live projection.
-    ("mcp/core.py", "cols = _get_t3().list_collections()"),
+    # (the MCP collection_list TOOL is the inventory surface, twin of `nx collection list`, not a
+    # routing read. It lists through mcp_infra.list_collections_or_not_ready since nexus-5rs3i,
+    # which is not a bare call by name, so it needs no exemption here.)
 }
 
 

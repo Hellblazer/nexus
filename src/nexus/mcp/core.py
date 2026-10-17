@@ -172,14 +172,16 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     suffix ``HttpScratchStore`` threads into the exception text, rather than
     stating one inference as observed fact for every case.
     """
-    _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
     text = str(e)
 
-    # nexus-5rs3i: a service that has not come up yet is told as such (and as not being an empty
-    # store), not given the "may be unreachable, check the daemon" hint below, which sends the
-    # reader to debug a service that is only starting.
+    # nexus-5rs3i: a service that is not answering is a state, not a fault in this tool, so it
+    # logs one warning without a traceback. The text already says it is not an empty store and
+    # points to `nx doctor`; the generic "may be unreachable" hint below would repeat it.
     if isinstance(e, _ServiceNotReadyError):
+        _log.warning(f"mcp_{tool}_service_not_ready", error=text)
         return f"Error: {text}"
+
+    _log.error(f"mcp_{tool}_failed", error=text, exc_info=True)
 
     from nexus.db.http_scratch_store import (  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
         HEAL_ADOPTED_SUFFIX,

@@ -1030,23 +1030,30 @@ def _counts_are_fresh(max_age: float) -> bool:
 
 
 class ServiceNotReadyError(RuntimeError):
-    """The configured nexus service is not answering yet (nexus-5rs3i): connection refused, or a
-    502/503/504 from an engine that is up but not serving. The message is written for the person
-    or agent reading a tool result, so it says the service is starting and to retry.
+    """The configured nexus service is not answering (nexus-5rs3i): connection refused or reset,
+    or a 502/503/504 from an engine that is up but not serving. The message is written for the
+    person or agent reading a tool result, for any operation (a search, a listing, a write).
 
     It is raised, never returned as ``[]``: an empty collection list is an answer ("this store
-    holds nothing"), and a service that has not come up yet has given none. A plugin server that
-    starts at login, beside the start-at-login service, hits this window routinely.
+    holds nothing"), and a service that has not answered has given none. It does not claim the
+    service is starting: a refused connection is also what a stopped or crashed service gives.
+    A plugin server that starts at login, beside the start-at-login service, hits this window
+    routinely, so the local text covers that case and points to ``nx doctor`` for the rest.
     """
 
-    MESSAGE = (
-        "The nexus service is not answering yet; it is probably still starting (this happens "
-        "right after login or a restart). This is not an empty store: nothing was searched. "
-        "Retry in a few seconds."
+    LOCAL_MESSAGE = (
+        "The nexus service is not answering{detail}. This is not an empty store. If this was "
+        "just after login or a restart, retry in a few seconds; if it persists, run `nx doctor`."
+    )
+    #: A managed endpoint has no login or restart of ours behind it.
+    CLOUD_MESSAGE = (
+        "The managed nexus endpoint did not answer{detail}. This is not an empty store. "
+        "Retry shortly; if it persists, run `nx doctor`."
     )
 
-    def __init__(self, detail: str = "") -> None:
-        super().__init__(f"{self.MESSAGE} ({detail})" if detail else self.MESSAGE)
+    def __init__(self, detail: str = "", *, cloud: bool = False) -> None:
+        template = self.CLOUD_MESSAGE if cloud else self.LOCAL_MESSAGE
+        super().__init__(template.format(detail=f" ({detail})" if detail else ""))
 
 
 #: The statuses an engine that is up but not serving answers with (the vector routes answer 503
@@ -1082,27 +1089,82 @@ def list_collections_or_not_ready(t3: Any, *, routing: bool) -> list[dict]:
         # A refused or reset connection (URLError wraps the socket error): the service is not
         # listening yet. The vector client already re-resolved the endpoint and retried once on
         # these (nexus-pebfx.1). Any other transport failure (a bad host, a timeout from a slow
-        # service) is not "starting".
+        # service) is not "not answering".
         return (
             exc is not None
             and not isinstance(exc, urllib.error.HTTPError)
             and _is_retryable_endpoint_error(exc)  # type: ignore[arg-type]
         )
 
+    def transport_detail(exc: BaseException) -> str:
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, ConnectionRefusedError):
+            return "connection refused"
+        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError)):
+            return "connection reset"
+        return type(reason).__name__
+
+    def not_ready(detail: str) -> ServiceNotReadyError:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import (config)
+
+        try:
+            cloud = not is_local_mode()
+        except Exception:  # noqa: BLE001 — a mode read must not turn a not-ready answer into another error
+            cloud = False
+        return ServiceNotReadyError(detail, cloud=cloud)
+
     try:
         return t3.list_collections(routing=routing, strict=True)
     except VectorServiceError as exc:
         if exc.code in _NOT_READY_HTTP_CODES:
-            raise ServiceNotReadyError(f"HTTP {exc.code}") from exc
+            raise not_ready(f"HTTP {exc.code}") from exc
         # An explicit endpoint reframes a connection failure as a code-less VectorServiceError
         # chained to the transport error (nexus-kf679).
         if exc.code is None and refused_or_reset(exc.__cause__):
-            raise ServiceNotReadyError(type(exc.__cause__).__name__) from exc
+            raise not_ready(transport_detail(exc.__cause__)) from exc
         raise
     except (urllib.error.URLError, ConnectionError) as exc:
         if not refused_or_reset(exc):
             raise
-        raise ServiceNotReadyError(type(exc).__name__) from exc
+        raise not_ready(transport_detail(exc)) from exc
+
+
+#: How long a failed collection-listing refresh is remembered (nexus-5rs3i). The vector client
+#: spends 2 + 5 + 10 s on a 502/503/504 before giving up, so without this a burst of per-write
+#: row lookups during an outage would each pay that again. Short, so a service that comes up
+#: is seen within seconds.
+_COLLECTIONS_REFRESH_FAILURE_MEMO = 5.0
+
+#: ``(monotonic time, cache generation, error)`` of the last failed refresh, or ``None``.
+_collections_refresh_failure: tuple[float, int, Exception] | None = None
+
+
+def _list_collections_remembering_failure(t3: Any, *, routing: bool) -> list[dict]:
+    """:func:`list_collections_or_not_ready`, with a failure remembered for
+    :data:`_COLLECTIONS_REFRESH_FAILURE_MEMO` seconds and raised again to callers inside that window
+    without another request. Only the errors a caller might tolerate are remembered
+    (:class:`ServiceNotReadyError` and the engine's own ``VectorServiceError``); anything else
+    propagates fresh every time. A cache invalidation (any committed write, a reset) forgets it.
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+
+    global _collections_refresh_failure
+    generation = _cache_generation()
+    with _collections_cache_lock:
+        remembered = _collections_refresh_failure
+    if (
+        remembered is not None
+        and remembered[1] == generation
+        and _now() - remembered[0] < _COLLECTIONS_REFRESH_FAILURE_MEMO
+    ):
+        raise remembered[2].with_traceback(None)
+    try:
+        return list_collections_or_not_ready(t3, routing=routing)
+    except (ServiceNotReadyError, VectorServiceError) as exc:
+        with _collections_cache_lock:
+            if generation == _collections_cache_generation:
+                _collections_refresh_failure = (_now(), generation, exc)
+        raise
 
 
 def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
@@ -1127,7 +1189,7 @@ def _refresh_collections_cache_if_stale(*, need_counts: bool = False) -> None:
         # nexus-mz9jv: names and registry rows are all most readers of this cache use, so the
         # real client is asked for the catalog-only listing; any other handle has no such
         # listing and gives the full one.
-        rows = list_collections_or_not_ready(t3, routing=not need_counts)
+        rows = _list_collections_remembering_failure(t3, routing=not need_counts)
         # A routing row has no count; an engine that ignored the request answered with the
         # full rows, which do.
         _install_collections_cache(rows, generation=generation)
@@ -1230,7 +1292,7 @@ def get_collection_counts(max_age: float | None = None) -> dict[str, int]:
         # which replaces the cache with a superset.
         generation = _cache_generation()
         _install_collections_cache(
-            list_collections_or_not_ready(get_t3(), routing=False), generation=generation,
+            _list_collections_remembering_failure(get_t3(), routing=False), generation=generation,
         )
     with _collections_cache_lock:
         return _collections_cache[1]
@@ -1269,7 +1331,15 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     unregistered collection anyway.
     """
     if refresh:
-        _refresh_collections_cache_if_stale()
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+
+        try:
+            _refresh_collections_cache_if_stale()
+        except (ServiceNotReadyError, VectorServiceError):
+            # nexus-5rs3i: this is the identity read of the write path, corpus resolution and
+            # gc, which have always treated a listing that failed as "no row" and fallen back
+            # (to the name, or to no cap). Only the names readers surface the failure.
+            return None
     row = _collections_cache[2].get(name)
     if not row or "content_type" not in row:
         return None
@@ -1450,9 +1520,10 @@ def invalidate_collections_cache() -> None:
     write sites in ``nexus.mcp.core``.
     """
     global _collections_cache, _collections_counts_loaded, _collections_counts_ts
-    global _collections_cache_generation
+    global _collections_cache_generation, _collections_refresh_failure
     with _collections_cache_lock:
         _collections_cache = ([], {}, {}, 0.0)
+        _collections_refresh_failure = None
         _collections_counts_loaded = False
         _collections_counts_ts = 0.0
         _collections_cache_generation += 1
