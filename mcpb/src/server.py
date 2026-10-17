@@ -17,8 +17,11 @@ environment.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 _RELEASE_URL = "https://github.com/Hellblazer/nexus/releases/latest"
@@ -59,10 +62,6 @@ def _check_stale_install() -> None:
         return  # editable / unusual install layout; skip silently
 
     try:
-        import json
-        import urllib.error
-        import urllib.request
-
         req = urllib.request.Request(
             _PYPI_URL,
             headers={"User-Agent": f"conexus-mcpb/{installed}"},

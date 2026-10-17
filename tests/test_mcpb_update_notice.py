@@ -14,6 +14,8 @@ import io
 import json
 from pathlib import Path
 
+from tests._module_seam import setattr_in
+
 _SERVER = Path(__file__).resolve().parent.parent / "mcpb" / "src" / "server.py"
 
 
@@ -38,7 +40,7 @@ def _run_check(monkeypatch, capsys, *, installed: str, latest: str) -> str:
     monkeypatch.delenv("NX_MCPB_SKIP_UPDATE_CHECK", raising=False)
     monkeypatch.setattr(mod, "_pkg_version", lambda _name: installed)
     body = json.dumps({"info": {"version": latest}}).encode()
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp(body))
+    setattr_in(monkeypatch, mod, "urllib.request.urlopen", lambda *a, **k: _Resp(body))
     mod._check_stale_install()
     return capsys.readouterr().err
 
@@ -71,6 +73,6 @@ def test_opt_out_variable_silences_the_notice(monkeypatch, capsys) -> None:
     def _boom(*a, **k):
         raise AssertionError("opt-out must not touch the network")
 
-    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    setattr_in(monkeypatch, mod, "urllib.request.urlopen", _boom)
     mod._check_stale_install()
     assert capsys.readouterr().err == ""
