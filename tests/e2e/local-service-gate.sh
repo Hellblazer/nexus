@@ -590,7 +590,10 @@ else
   echo "       or export NEXUS_SERVICE_BIN=<native binary>" >&2
   exit 2
 fi
-env "${START_ENV[@]}" uv run nx daemon service start
+# --config-dir is explicit (nexus-oacd3): a flagless start carries no directory
+# in its command line, so a sibling leg's `nx daemon service stop` could read it
+# as its own and SIGTERM it (the 7.78.0 battery, exit 143).
+env "${START_ENV[@]}" uv run nx daemon service start --config-dir "$SCRATCH"
 
 # 4. Read the lease.
 LEASE_JSON="$(cat "$SCRATCH"/storage_service_addr.*)"
