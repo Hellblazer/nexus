@@ -35,6 +35,17 @@ import os
 import sys
 from typing import Any
 
+# The stdio loop is shared with the setup stand-in (conexus/launch/nx_standin.py) and
+# lives beside it, in conexus/launch/: both are started from the plugin directory, so
+# this finds it from this file's own location and not from the working directory or
+# sys.path[0] (an interpreter run with -I or PYTHONSAFEPATH has neither). No .pyc is
+# written into the plugin directory.
+sys.dont_write_bytecode = True
+_LAUNCH_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "launch")
+if _LAUNCH_DIR not in sys.path:
+    sys.path.insert(0, _LAUNCH_DIR)
+import _stdio_loop  # noqa: E402 -- must follow the sys.path insert
+
 SERVER_NAME: str = "sequential-thinking-server"
 SERVER_VERSION: str = "1.0.0"
 #: Protocol revisions this server speaks; the newest is offered when the client
@@ -228,33 +239,22 @@ class SequentialThinking:
         }
 
 
-def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _error(request_id: Any, code: int, message: str, data: Any = None) -> dict[str, Any]:
-    error: dict[str, Any] = {"code": code, "message": message}
-    if data is not None:
-        error["data"] = data
-    return {"jsonrpc": "2.0", "id": request_id, "error": error}
-
-
 def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
     """Answer one JSON-RPC message; None for a notification or a response."""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-        return _error(None, -32600, "Invalid Request")
+        return _stdio_loop.error(None, -32600, "Invalid Request")
     method = message.get("method")
     if "id" not in message or message.get("id") is None:
         return None  # a notification (initialized, cancelled, ...) or a stray response
     request_id = message["id"]
     if not isinstance(method, str):
-        return None if ("result" in message or "error" in message) else _error(request_id, -32600, "Invalid Request")
+        return None if ("result" in message or "error" in message) else _stdio_loop.error(request_id, -32600, "Invalid Request")
     params = message.get("params") or {}
     match method:
         case "initialize":
             asked = params.get("protocolVersion") if isinstance(params, dict) else None
             version = asked if asked in SUPPORTED_PROTOCOL_VERSIONS else SUPPORTED_PROTOCOL_VERSIONS[0]
-            return _result(
+            return _stdio_loop.result(
                 request_id,
                 {
                     "protocolVersion": version,
@@ -263,19 +263,19 @@ def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
                 },
             )
         case "ping":
-            return _result(request_id, {})
+            return _stdio_loop.result(request_id, {})
         case "tools/list":
-            return _result(request_id, {"tools": [TOOL]})
+            return _stdio_loop.result(request_id, {"tools": [TOOL]})
         case "tools/call":
             if not isinstance(params, dict) or params.get("name") != TOOL_NAME:
                 name = params.get("name") if isinstance(params, dict) else None
-                return _error(request_id, -32602, f"Unknown tool: {name!r}")
+                return _stdio_loop.error(request_id, -32602, f"Unknown tool: {name!r}")
             try:
                 payload = state.process(params.get("arguments") or {})
             except InvalidArguments as exc:
                 text = json.dumps({"error": str(exc), "status": "failed"}, indent=2)
-                return _result(request_id, {"content": [{"type": "text", "text": text}], "isError": True})
-            return _result(
+                return _stdio_loop.result(request_id, {"content": [{"type": "text", "text": text}], "isError": True})
+            return _stdio_loop.result(
                 request_id,
                 {
                     "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
@@ -283,79 +283,13 @@ def handle(state: SequentialThinking, message: Any) -> dict[str, Any] | None:
                 },
             )
         case _:
-            return _error(request_id, -32601, f"Method not found: {method}")
-
-
-def _answer(state: SequentialThinking, line: bytes) -> dict[str, Any] | None:
-    """The reply to one input line, as the bytes read. Never raises: an uncaught
-    error would be a traceback on standard error and the end of the server."""
-    try:
-        # Strict UTF-8: a replacement character would answer a different request
-        # (another method name, id or thought) than the one the client sent.
-        message = json.loads(line.decode("utf-8"))
-    except (ValueError, RecursionError):  # not UTF-8 (UnicodeDecodeError), bad JSON, a 5000-digit integer, deep nesting
-        return _error(None, -32700, "Parse error")
-    try:
-        return handle(state, message)
-    except Exception as exc:  # noqa: BLE001 -- see the docstring
-        request_id = message.get("id") if isinstance(message, dict) else None
-        # The class name only: the message may quote the client's input, and
-        # nothing goes to stderr.
-        return _error(request_id, -32603, "Internal error", {"exception": type(exc).__name__})
-
-
-def _send(stdout: Any, reply: dict[str, Any]) -> None:
-    # ASCII output: a lone surrogate echoed in an id cannot be encoded, and
-    # U+2028 inside a string must not read as a line end.
-    try:
-        line = json.dumps(reply, allow_nan=False)
-    except ValueError:  # an id of NaN or Infinity is not JSON
-        line = json.dumps(_error(None, -32600, "Invalid Request"))
-    stdout.write(line + "\n")
-    stdout.flush()
-
-
-def serve(stdin: Any = None, stdout: Any = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin (a binary stream, one request per
-    line) until EOF, or until the client stops reading."""
-    stdin = stdin if stdin is not None else sys.stdin.buffer
-    stdout = stdout if stdout is not None else sys.stdout
-    state = SequentialThinking()
-    for line in stdin:
-        if not line.strip():
-            continue
-        reply = _answer(state, line)
-        if reply is None:
-            continue
-        try:
-            _send(stdout, reply)
-        except OSError:  # the client went away
-            return _client_gone()
-    return 0
-
-
-def _client_gone() -> int:
-    """Leave quietly after a failed write: point fd 1 at the null device so the
-    interpreter's own flush at exit does not report the dead pipe."""
-    try:
-        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
-    except OSError:
-        pass
-    return 0
+            return _stdio_loop.error(request_id, -32601, f"Method not found: {method}")
 
 
 def main() -> int:
-    if sys.stdin is None or sys.stdout is None or getattr(sys.stdin, "buffer", None) is None:  # a stream closed
-        return 0
-    # Text-mode stdout on Windows would translate "\n" to "\r\n" and encode with
-    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Standard input
-    # is read as bytes and each line decoded strictly in _answer: bytes that are
-    # not UTF-8 are a parse error for their line, not the end of the server.
-    sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
-    try:
-        return serve()
-    except KeyboardInterrupt:
-        return 0
+    state = SequentialThinking()
+    # ``handle`` is looked up at each message, so a test can replace it.
+    return _stdio_loop.serve_stdio(lambda message: handle(state, message))
 
 
 if __name__ == "__main__":

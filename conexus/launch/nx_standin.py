@@ -49,8 +49,10 @@ describes: a ``done`` from an earlier setup says nothing about a Python pruned s
 
 Transport: MCP stdio, newline-delimited JSON-RPC 2.0 on stdin/stdout. It writes
 nothing to stderr: Claude Code records every stderr line of a stdio server as an
-``error`` entry in its MCP log. Standard library and the plugin's own ``_cli_lookup``
-(also standard library only), and no ``nexus`` import.
+``error`` entry in its MCP log. The loop that reads stdin and answers is shared with the
+sequential-thinking server (``_stdio_loop.py``, beside this file), which owns what it does with
+hostile input; this file supplies the handler. Standard library and the plugin's own
+``_stdio_loop`` and ``_cli_lookup`` (also standard library only), and no ``nexus`` import.
 """
 from __future__ import annotations
 
@@ -59,6 +61,16 @@ import os
 import subprocess
 import sys
 from typing import Any
+
+# The stdio loop is shared with the sequential-thinking server and sits beside this
+# file. Found from this file's own location, because the importers differ: the launcher
+# and the session-start hook have put this directory on sys.path, a test that loads this
+# file by path has not. No .pyc is written into the plugin directory.
+sys.dont_write_bytecode = True
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import _stdio_loop  # noqa: E402 -- must follow the sys.path insert
 
 SERVER_VERSION: str = "1.0.0"
 
@@ -638,24 +650,16 @@ def stand_in(program: str, broken: str | None = None) -> StandIn:
 STAND_INS: dict[str, StandIn] = {program: stand_in(program) for program in ("nx-mcp", "nx-mcp-catalog")}
 
 
-def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-
-
 def handle(server: StandIn, message: Any) -> dict[str, Any] | None:
     """Answer one JSON-RPC message; None for a notification or a response."""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-        return _error(None, -32600, "Invalid Request")
+        return _stdio_loop.error(None, -32600, "Invalid Request")
     method = message.get("method")
     if "id" not in message or message.get("id") is None:
         return None  # a notification (initialized, cancelled, ...) or a stray response
     request_id = message["id"]
     if not isinstance(method, str):
-        return None if ("result" in message or "error" in message) else _error(request_id, -32600, "Invalid Request")
+        return None if ("result" in message or "error" in message) else _stdio_loop.error(request_id, -32600, "Invalid Request")
     params = message.get("params") or {}
     match method:
         case "initialize":
@@ -668,94 +672,31 @@ def handle(server: StandIn, message: Any) -> dict[str, Any] | None:
             }
             if server.instructions:
                 result["instructions"] = server.instructions
-            return _result(request_id, result)
+            return _stdio_loop.result(request_id, result)
         case "ping":
-            return _result(request_id, {})
+            return _stdio_loop.result(request_id, {})
         case "tools/list":
-            return _result(request_id, {"tools": list(server.tools)})
+            return _stdio_loop.result(request_id, {"tools": list(server.tools)})
         case "tools/call":
             name = params.get("name") if isinstance(params, dict) else None
             if not any(tool["name"] == name for tool in server.tools):
-                return _error(request_id, -32602, f"Unknown tool: {name!r}. Nexus is not installed.")
+                return _stdio_loop.error(request_id, -32602, f"Unknown tool: {name!r}. Nexus is not installed.")
             arguments = params.get("arguments") if isinstance(params, dict) else None
             try:
                 text = run_setup(arguments if arguments is not None else {}, server.broken) if name == "setup" else run_status(server.broken)
             except SetupError as exc:
-                return _result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
-            return _result(request_id, {"content": [{"type": "text", "text": text}]})
+                return _stdio_loop.result(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+            return _stdio_loop.result(request_id, {"content": [{"type": "text", "text": text}]})
         case _:
-            return _error(request_id, -32601, f"Method not found: {method}")
-
-
-def _answer(server: StandIn, line: bytes) -> dict[str, Any] | None:
-    """The reply to one input line, as the bytes read. Never raises: an uncaught
-    error would be a traceback on standard error and the end of the server."""
-    try:
-        # Strict UTF-8: a replacement character would answer a different request
-        # (another method name, id or argument) than the one the client sent.
-        message = json.loads(line.decode("utf-8"))
-    except (ValueError, RecursionError):  # not UTF-8 (UnicodeDecodeError), bad JSON, a 5000-digit integer, deep nesting
-        return _error(None, -32700, "Parse error")
-    try:
-        return handle(server, message)
-    except Exception:  # noqa: BLE001 -- see the docstring
-        request_id = message.get("id") if isinstance(message, dict) else None
-        return _error(request_id, -32603, "Internal error")
-
-
-def _send(stdout: Any, reply: dict[str, Any]) -> None:
-    # ASCII output: a lone surrogate echoed in an id cannot be encoded, and
-    # U+2028 inside a string must not read as a line end.
-    try:
-        line = json.dumps(reply, allow_nan=False)
-    except ValueError:  # an id of NaN or Infinity is not JSON
-        line = json.dumps(_error(None, -32600, "Invalid Request"))
-    stdout.write(line + "\n")  # the write and flush stay under the caller's OSError handler
-    stdout.flush()
-
-
-def serve(server: StandIn, stdin: Any = None, stdout: Any = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin (a binary stream, one request
-    per line) until EOF, or until the client stops reading."""
-    stdin = stdin if stdin is not None else sys.stdin.buffer
-    stdout = stdout if stdout is not None else sys.stdout
-    for line in stdin:
-        if not line.strip():
-            continue
-        reply = _answer(server, line)
-        if reply is None:
-            continue
-        try:
-            _send(stdout, reply)
-        except OSError:  # the client went away
-            return _client_gone()
-    return 0
-
-
-def _client_gone() -> int:
-    """Leave quietly after a failed write: point fd 1 at the null device so the
-    interpreter's own flush at exit does not report the dead pipe."""
-    try:
-        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
-    except OSError:
-        pass
-    return 0
+            return _stdio_loop.error(request_id, -32601, f"Method not found: {method}")
 
 
 def main(program: str, broken: str | None = None) -> int:
     """Serve the stand-in for the CLI server *program* on this process's stdio.
     *broken* is why the CLI was found and cannot start (``None``: it was not found)."""
-    if sys.stdin is None or sys.stdout is None or getattr(sys.stdin, "buffer", None) is None:  # a stream closed
-        return 0
-    # Text-mode stdout on Windows would translate "\n" to "\r\n" and encode with
-    # the ANSI code page; MCP stdio is UTF-8 with bare newlines. Standard input
-    # is read as bytes and each line decoded strictly in _answer: bytes that are
-    # not UTF-8 are a parse error for their line, not the end of the server.
-    sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
-    try:
-        return serve(stand_in(program, broken))
-    except KeyboardInterrupt:
-        return 0
+    server = stand_in(program, broken)
+    # ``handle`` is looked up at each message, so a test can replace it.
+    return _stdio_loop.serve_stdio(lambda message: handle(server, message))
 
 
 if __name__ == "__main__":
