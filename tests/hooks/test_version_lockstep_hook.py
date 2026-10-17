@@ -54,6 +54,9 @@ def mod():
     (RDR-228, ``TestNoCli`` below), and a test host has none installed."""
     module = _load_module()
     module.cli_present = lambda: True
+    # No ambient `nx --version` subprocess: None means "CLI version unknown",
+    # which keeps the marker comparison the only skew signal (nexus-ehg1y).
+    module.read_cli_version = lambda: None
     return module
 
 
@@ -213,6 +216,131 @@ class TestMainOrchestration:
         assert capsys.readouterr().out.strip() == ""
 
 
+class TestHandInstallNoMarker:
+    """nexus-ehg1y (found in RDR-228 MVV row 4). A hand install
+    (``uv tool install conexus`` then ``nx init``) writes no
+    ``cli_lockstep_marker``, so a marker-only check read the matching CLI as
+    skew, told the model so and dispatched an upgrade. With no marker the hook
+    now compares the plugin version with the CLI's own ``nx --version``; a
+    real mismatch still nudges and dispatches, and a marker, when present,
+    still decides alone."""
+
+    def _arm(self, mod, plugin_root, tmp_path, monkeypatch, cli_version, *, marker_text=None):
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        marker = tmp_path / "marker"
+        if marker_text is not None:
+            marker.write_text(marker_text, encoding="utf-8")
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
+        calls: list[int] = []
+
+        def fake_cli_version() -> str | None:
+            calls.append(1)
+            return cli_version
+
+        monkeypatch.setattr(mod, "read_cli_version", fake_cli_version)
+        return dispatched, calls, marker
+
+    def test_matching_cli_without_marker_is_silent_and_dispatches_nothing(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        dispatched, _calls, marker = self._arm(mod, plugin_root, tmp_path, monkeypatch, "9.9.9")
+        mod.main()
+        assert capsys.readouterr().out.strip() == ""
+        assert dispatched == []
+        assert not marker.exists(), "the hook never writes the marker"
+
+    def test_mismatched_cli_without_marker_still_nudges_and_dispatches(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The control: without it the test above passes on a hook that never
+        reports skew without a marker."""
+        dispatched, _calls, _marker = self._arm(mod, plugin_root, tmp_path, monkeypatch, "9.9.8")
+        mod.main()
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert dispatched == ["9.9.9"]
+
+    def test_unreadable_cli_version_without_marker_still_nudges_and_dispatches(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        dispatched, _calls, _marker = self._arm(mod, plugin_root, tmp_path, monkeypatch, None)
+        mod.main()
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert dispatched == ["9.9.9"]
+
+    def test_stale_marker_decides_alone_and_the_cli_is_not_asked(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """A marker that disagrees is skew even when the CLI reports the plugin's
+        version (the action rewrites the marker); no subprocess is paid."""
+        dispatched, calls, _marker = self._arm(
+            mod, plugin_root, tmp_path, monkeypatch, "9.9.9", marker_text="1.0.0"
+        )
+        mod.main()
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert dispatched == ["9.9.9"]
+        assert calls == []
+
+    def test_matching_marker_does_not_ask_the_cli(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        dispatched, calls, _marker = self._arm(
+            mod, plugin_root, tmp_path, monkeypatch, "1.0.0", marker_text="9.9.9"
+        )
+        mod.main()
+        assert capsys.readouterr().out.strip() == ""
+        assert dispatched == [] and calls == []
+
+
+class TestReadCliVersion:
+    @pytest.fixture()
+    def mod(self):
+        """The real ``read_cli_version`` (the shared fixture stubs it)."""
+        return _load_module()
+
+    class _Done:
+        def __init__(self, returncode: int, stdout: str) -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def _run_with(self, mod, monkeypatch, result):
+        monkeypatch.setattr(mod._cli_lookup, "resolve", lambda name: "/fake/nx")
+        seen: dict = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"], seen["kw"] = cmd, kw
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
+        return seen
+
+    def test_parses_click_version_output(self, mod, monkeypatch) -> None:
+        seen = self._run_with(mod, monkeypatch, self._Done(0, "nx, version 9.9.9\n"))
+        assert mod.read_cli_version() == "9.9.9"
+        assert seen["cmd"] == ["/fake/nx", "--version"]
+        assert 0 < seen["kw"]["timeout"] <= 10, "the hook runs every session start: bounded"
+
+    def test_nonzero_exit_is_none(self, mod, monkeypatch) -> None:
+        self._run_with(mod, monkeypatch, self._Done(1, "nx, version 9.9.9\n"))
+        assert mod.read_cli_version() is None
+
+    def test_garbage_output_is_none(self, mod, monkeypatch) -> None:
+        self._run_with(mod, monkeypatch, self._Done(0, "no version here\n"))
+        assert mod.read_cli_version() is None
+
+    @pytest.mark.parametrize("exc", [OSError("boom"), subprocess.TimeoutExpired("nx", 5)])
+    def test_failures_are_quiet_none(self, mod, monkeypatch, exc) -> None:
+        self._run_with(mod, monkeypatch, exc)
+        assert mod.read_cli_version() is None
+
+    def test_no_cli_is_none(self, mod, monkeypatch) -> None:
+        monkeypatch.setattr(mod._cli_lookup, "resolve", lambda name: None)
+        assert mod.read_cli_version() is None
+
+
 class TestNoCli:
     """RDR-228 Gap 2 (nexus-sv2wx.8, residual nexus-j8ebc item 4). With no CLI
     the hook told the model "an extras-preserving upgrade has been dispatched",
@@ -236,6 +364,7 @@ class TestNoCli:
     def test_no_cli_is_silent_and_starts_nothing(self, plugin_root, tmp_path, monkeypatch, capsys, drift) -> None:
         module = _load_module()
         module.cli_present = lambda: False
+        module.read_cli_version = lambda: None
         calls = self._arm(module, plugin_root, tmp_path, monkeypatch, drift=drift)
         module.main()
         assert capsys.readouterr().out == ""
@@ -247,6 +376,7 @@ class TestNoCli:
         dispatches at all."""
         module = _load_module()
         module.cli_present = lambda: True
+        module.read_cli_version = lambda: None
         calls = self._arm(module, plugin_root, tmp_path, monkeypatch, drift=drift)
         module.main()
         assert capsys.readouterr().out.strip()

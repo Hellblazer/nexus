@@ -110,6 +110,7 @@ if sys.version_info < (3, 12):
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -317,6 +318,40 @@ def read_marker() -> str | None:
         return marker_path().read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
+
+
+#: Seconds ``nx --version`` may take before the hook gives up on it. The hook
+#: runs at every session start, so this is a bound, not an expectation.
+_CLI_VERSION_TIMEOUT_S = 5.0
+
+_CLI_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?)")
+
+
+def read_cli_version() -> str | None:
+    """The CLI's own version from ``nx --version`` (``nx, version 5.7.0``), or
+    None when nx does not resolve, fails, times out or prints no version.
+
+    Only asked when there is no marker (nexus-ehg1y): a hand install
+    (``uv tool install conexus`` then ``nx init``) never writes one, and the
+    marker alone read that matching CLI as skew. Any failure is quiet and
+    means "unknown", which keeps the old behaviour (skew)."""
+    exe = _cli_lookup.resolve("nx")
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "--version"],
+            # nx writes UTF-8 to its pipes on Windows (nexus.cli reconfigures at import).
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_CLI_VERSION_TIMEOUT_S,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        debug(f"`nx --version` failed: {exc}")
+        return None
+    if proc.returncode != 0:
+        return None
+    m = _CLI_VERSION_RE.search(proc.stdout)
+    return m.group(1) if m else None
 
 
 def _wrap_context(msg: str) -> str:
@@ -709,7 +744,13 @@ def main() -> None:
             debug("no Nexus CLI resolves, or it cannot start; nothing to keep in lockstep")
             return
         plugin_version = read_plugin_version()
-        version_mismatch = bool(plugin_version) and read_marker() != plugin_version
+        marker = read_marker()
+        # A marker decides alone. With none (a hand install never writes one,
+        # nexus-ehg1y), the CLI's own version stands in: equal to the plugin's
+        # is lockstep, anything else, or unknown, is skew as before.
+        version_mismatch = bool(plugin_version) and (
+            marker != plugin_version if marker is not None else read_cli_version() != plugin_version
+        )
         if version_mismatch:
             dispatch_action(plugin_version)  # type: ignore[arg-type]
         else:

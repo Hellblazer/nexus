@@ -45,6 +45,8 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-ehg1y): with no `cli_lockstep_marker` (a hand install never writes one) the lockstep hook compares the plugin version with `nx --version` before it reports skew, so a CLI that matches the plugin no longer gets a false nudge and an upgrade dispatch. A marker, when present, still decides alone.
+
 
 
 ## Deferred to the next client release
