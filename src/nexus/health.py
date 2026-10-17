@@ -1406,13 +1406,20 @@ def _check_t3_cloud() -> list[HealthResult]:
 def _check_tools() -> list[HealthResult]:
     results: list[HealthResult] = []
 
-    # git
+    # git: a warning when absent, never a failure (nexus-36qyh). Nothing that
+    # serves search needs it; it is for indexing repositories and for Claude
+    # Code's plugin marketplace. A Claude Desktop-only user has no git, and a
+    # failing row ended the setup verify step (the exit code of this sweep) in
+    # doctor-failed on a box whose service, logon task and search all worked.
     git_path = shutil.which("git")
     r = HealthResult(
         label="git",
         ok=bool(git_path),
-        detail=git_path or "not found on PATH",
-        fatal=True,
+        detail=git_path or (
+            "not found on PATH — needed only for indexing repositories "
+            "and Claude Code's plugin marketplace"
+        ),
+        warn=not git_path,
     )
     if not git_path:
         # Windows: Git for Windows' installer always asks for elevation, through

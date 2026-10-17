@@ -706,6 +706,81 @@ def test_doctor_failing_rows_are_recorded_in_a_terminal_status(box: Box) -> None
     assert not (box.setup / "lock").exists()
 
 
+def test_the_main_sweeps_failing_rows_are_recorded(box: Box) -> None:
+    """``nx doctor``'s main sweep prints ``  ✗ label: detail`` with no brackets; only the supplementary
+    checks print ``[✗]``. A filter on ``[✗]`` alone recorded no rows for a real failure (nexus-36qyh)."""
+    box.layout()
+    box.provision()
+    box.behave([{
+        "prog": "nx", "match": ["doctor"], "exit": 1,
+        "out": "Nexus health check:\n\n  ✓ T2: ok\n  ✗ T3: vector store unreachable\n    Fix: nx init\n  ⚠ soft: x\n",
+    }])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed"
+    assert done["doctor_failing"] == ["✗ T3: vector store unreachable"]
+
+
+def test_a_missing_vcs_tool_does_not_fail_the_verify_step(box: Box) -> None:
+    """nexus-36qyh. A Claude Desktop-only Windows user has no git. A doctor that exits 0 with git
+    a warning ends ``done`` with ``doctor`` pass; a doctor from before that change exits 1 with git
+    as its only failing row and the plugin must still call the run done, because the plugin updates
+    independently of the CLI it finds."""
+    box.layout()
+    box.provision()
+    for out, code in (
+        ("  ⚠ git: not found on PATH — needed only for indexing repositories and Claude Code's plugin marketplace\n", 0),
+        ("  ✗ git: not found on PATH\n    Fix: brew install git\n", 1),
+    ):
+        box.behave([{"prog": "nx", "match": ["doctor"], "exit": code, "out": out}])
+        box.start("local")
+        done = box.wait_terminal()
+        assert done["state"] == "done", (out, done)
+        assert done["doctor"] == "pass" and done["doctor_failing"] == []
+
+
+def test_a_missing_vcs_tool_with_another_failing_row_still_fails_the_verify_step(box: Box) -> None:
+    box.layout()
+    box.provision()
+    box.behave([{
+        "prog": "nx", "match": ["doctor"], "exit": 1,
+        "out": "  ✗ git: not found on PATH\n  ✗ Service: not running\n",
+    }])
+    box.start("local")
+    done = box.wait_terminal()
+    assert done["state"] == "doctor-failed"
+    assert done["doctor_failing"] == ["✗ git: not found on PATH", "✗ Service: not running"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (["✗ git: not found on PATH"], "done"),
+        (["[✗] git: not found on PATH"], "done"),
+        (["✗ git: not found on PATH", "[✗] git: x"], "done"),
+        (["✗ git: not found on PATH", "✗ Service: not running"], "doctor-failed"),
+        (["✗ gitea: unreachable"], "doctor-failed"),
+        ([], "doctor-failed"),
+    ],
+    ids=["only-the-tool", "bracketed", "twice", "plus-another", "a-different-prefix", "no-rows-recorded"],
+)
+def test_a_recorded_doctor_failure_over_one_optional_tool_reads_done(
+    box: Box, monkeypatch: pytest.MonkeyPatch, rows: list[str], expected: str
+) -> None:
+    """nexus-36qyh, the status ranking. A record written before the fix (a 7.82.0 run on a box with no git)
+    must not outrank "the installed service is not running": it reads ``done``. A record naming any other
+    failing row, or no row at all, keeps its state."""
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    record = {"state": "doctor-failed", "stage": "verify", "mode": "local", "doctor": "fail", "doctor_failing": rows}
+    (box.setup / "status.json").write_text(json.dumps(record), encoding="utf-8")
+    view = mod.status_view(box.setup)
+    assert view["state"] == expected
+    if expected == "done":
+        assert view["terminal"] is True and view["doctor_failing"] == [] and view["doctor"] == "pass"
+        assert "Nexus is installed" in view["message"]
+
+
 # -- the lock and the status lifecycle ------------------------------------------------------
 
 

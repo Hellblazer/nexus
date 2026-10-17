@@ -339,6 +339,12 @@ _CHILD = "child"  # in the lock directory: the pid of the child program the run 
 _DOCTOR_ROWS_MAX = 20
 _DOCTOR_ROW_CHARS = 300
 
+#: A failing row of ``nx doctor`` naming the ``git`` check: ``  ✗ git: ...`` (the main sweep) or ``[✗] git: ...``
+#: (the supplementary checks). Git is needed only to index repositories and by Claude Code's plugin marketplace,
+#: so a Claude Desktop-only user has none, and ``nx doctor`` reports it as a warning (nexus-36qyh). A CLI from
+#: before that change fails the row, and the plugin updates independently of the CLI it finds.
+_GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|\s|$)")
+
 #: ``nx --version`` of the Nexus CLI (click's ``version_option(prog_name="nx")``).
 _VERSION_LINE = re.compile(r"nx, version [0-9][0-9A-Za-z.+!_-]*")
 
@@ -1983,8 +1989,24 @@ class _Run:
 
 
 def _doctor_rows(text: str) -> list[str]:
-    rows = [line.strip()[:_DOCTOR_ROW_CHARS] for line in text.splitlines() if "[✗]" in line]
+    """The failing rows of ``nx doctor``'s output. The main sweep prints ``  ✗ label: detail`` and the
+    supplementary checks print ``[✗] label: detail``; a filter on the brackets alone recorded no row for a
+    failure of the main sweep (nexus-36qyh)."""
+    rows = [
+        line.strip()[:_DOCTOR_ROW_CHARS]
+        for line in text.splitlines()
+        if "[✗]" in line or line.lstrip().startswith("✗ ")
+    ]
     return rows[:_DOCTOR_ROWS_MAX]
+
+
+def only_git_failed(rows: object) -> bool:
+    """Whether *rows* (a record's ``doctor_failing``) name the ``git`` check and nothing else. An empty list,
+    a list at the cap (rows may have been cut) and anything that is not a list of strings are not."""
+    return (
+        isinstance(rows, list) and 0 < len(rows) < _DOCTOR_ROWS_MAX
+        and all(isinstance(row, str) and _GIT_ROW.match(row.strip()) for row in rows)
+    )
 
 
 def _is_nexus_cli(run: _Run, hit: str) -> bool:
@@ -2157,13 +2179,13 @@ def _execute(run: _Run) -> int:
         code, text = run.cmd([nx, "doctor"])
     except OSError as exc:
         return run.fail("verify", f"nx doctor could not start: {exc}")
-    if code == 0:
+    rows = _doctor_rows(text)
+    if code == 0 or (code is not None and only_git_failed(rows)):
         run.step_done("verify")
         return run.end(
             DONE, "Nexus is installed and nx doctor passes.",
             RECONNECT_NEXT, doctor="pass", doctor_failing=[],
         )
-    rows = _doctor_rows(text)
     return run.end(
         DOCTOR_FAILED, "nx doctor reported problems." if code is not None else "nx doctor timed out.",
         f"Run `nx doctor` in a terminal to see the failing rows.{_CLOUD_DOCTOR_NOTE if run.mode == MODE_CLOUD else ''} "
@@ -2552,6 +2574,13 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
                 f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. {_LOST_NEXT} "
                 f"Log: {setup / _LOG}"
             )
+    if state == DOCTOR_FAILED and only_git_failed(data.get("doctor_failing")):
+        # A run from before a missing git became a warning: the only failing row is one that does not matter
+        # to a Claude Desktop-only user, and it must not outrank "the installed service is not running".
+        state = DONE
+        data.update(
+            message="Nexus is installed and nx doctor passes.", next=RECONNECT_NEXT, doctor="pass", doctor_failing=[],
+        )
     data.setdefault("next", _NEXT_NONE)
     data.update(state=state, live=live, terminal=state in TERMINAL_STATES, not_now=(setup / _MARKER).exists())
     if setup.exists():

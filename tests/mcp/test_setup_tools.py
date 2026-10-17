@@ -340,6 +340,40 @@ def test_status_says_a_provisioned_service_is_down_not_done(
     assert "downloads nothing" in text and "Reconnect" not in text and "Setup is done" not in text, text
 
 
+def test_a_doctor_failed_record_over_one_optional_tool_does_not_mask_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    """nexus-36qyh, cascade of the Windows MVV (nexus-sv2wx.24): the doctor-failed record from a box with no
+    git outranked "the service is not running, setup starts it" after a reboot, and sent the user to a
+    terminal. The view is the real ``status_view`` over a recorded status file."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    _recorded(
+        tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False,
+        doctor="fail", doctor_failing=["✗ git: not found on PATH"],
+    )
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    text = _call("setup_status")
+    assert "not running" in text and "mode local" in text and "downloads nothing" in text, text
+    assert "nx doctor" not in text and "terminal" not in text, text
+
+
+def test_a_doctor_failed_record_with_another_failing_row_still_outranks_a_down_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
+) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _provision(tmp_path)
+    _service(monkeypatch, False)
+    _recorded(
+        tmp_path, state="doctor-failed", stage="verify", mode="local", autostart=False,
+        doctor="fail", doctor_failing=["✗ git: not found on PATH", "✗ Schema: behind"],
+    )
+    recorder.views(status=NX_SETUP.status_view(tmp_path / "setup"))
+    text = _call("setup_status")
+    assert "nx doctor reported problems" in text and "Schema: behind" in text, text
+
+
 def test_status_keeps_a_failed_run_ahead_of_a_down_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorder: Recorder
 ) -> None:
