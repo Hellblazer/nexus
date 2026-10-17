@@ -87,7 +87,19 @@ def test_work_removed_on_success(tmp_path: Path) -> None:
 
 def test_work_removed_on_failure_but_logs_survive(tmp_path: Path) -> None:
     tmpdir = _long_tmpdir(tmp_path)
-    tail = 'echo bulky > "$WORK/venv-stand-in"\necho leg-log > "$LOGS/leg.log"\n_fail boom\n'
+    tail = (
+        'echo bulky > "$WORK/venv-stand-in"\n'
+        'echo leg-log > "$LOGS/leg.log"\n'
+        # Service-side root causes live under the sandbox HOME (item 2).
+        'mkdir -p "$HOME_DIR/.config/nexus/logs" "$HOME_DIR/.config/nexus/postgres"\n'
+        'echo engine-root-cause > "$HOME_DIR/.config/nexus/logs/storage_service.log"\n'
+        'echo hs-err > "$HOME_DIR/.config/nexus/logs/hs_err_1234.log"\n'
+        'echo pg-root-cause > "$HOME_DIR/.config/nexus/postgres/pg.log"\n'
+        'echo ctl-out > "$HOME_DIR/.config/nexus/postgres/pg_ctl.out"\n'
+        'echo "token: SECRET-CONFIG" > "$HOME_DIR/.config/nexus/config.yml"\n'
+        'echo SECRET-CRED > "$HOME_DIR/.config/nexus/postgres/pg_credentials"\n'
+        '_fail boom\n'
+    )
     res, work = _run_block(tmpdir, tail)
     assert res.returncode == 1
     assert "FRESH-INSTALL MVV FAILED: boom" in res.stderr
@@ -96,6 +108,19 @@ def test_work_removed_on_failure_but_logs_survive(tmp_path: Path) -> None:
     assert (evidence / "leg.log").read_text() == "leg-log\n"
     assert str(evidence) in res.stderr
     assert not (evidence / "venv-stand-in").exists()
+    # Engine and PG logs survive, and the message names what was kept.
+    assert (evidence / "engine-logs" / "storage_service.log").read_text() == "engine-root-cause\n"
+    assert (evidence / "engine-logs" / "hs_err_1234.log").exists()
+    assert (evidence / "pg.log").read_text() == "pg-root-cause\n"
+    assert (evidence / "pg_ctl.out").read_text() == "ctl-out\n"
+    for kept in ("legs", "engine-logs", "pg.log", "pg_ctl.out"):
+        assert kept in res.stderr, res.stderr
+    # Config and credentials are never copied, anywhere in the evidence tree.
+    leaked = [
+        str(f) for f in evidence.rglob("*")
+        if f.is_file() and ("SECRET" in f.read_text(errors="replace") or f.name in ("config.yml", "pg_credentials"))
+    ]
+    assert leaked == []
 
 
 def test_keep_knob_preserves_the_whole_tree_on_failure(tmp_path: Path) -> None:
@@ -133,6 +158,110 @@ def test_journey_creates_no_unix_socket() -> None:
     start = start[: start.index("timeout=_PG_CTL_WAIT_TIMEOUT_S")]
     assert '"-k"' not in start
     script = _text()
-    for needle in ("AF_UNIX", ".s.PGSQL", "unix_socket", "-type s"):
+    for needle in ("AF_UNIX", ".s.PGSQL", "unix_socket"):
         for line in script.splitlines():
             assert needle not in line.split("#", 1)[0], f"{needle!r}: {line}"
+
+
+# ── postmaster reaping before the rm (item 3) ───────────────────────────────
+
+_PERL = "/usr/bin/perl"
+
+
+def test_cleanup_reaps_a_postmaster_under_work_before_removing_it(tmp_path: Path) -> None:
+    """The service stop is `|| true`; a postmaster left over a deleted datadir
+    holds a SysV shm segment. A stand-in whose command line reads
+    `postgres -D $WORK` must be dead and WORK gone after the exit."""
+    assert Path(_PERL).exists(), "non-vacuity: the stand-in process needs perl"
+    tmpdir = _long_tmpdir(tmp_path)
+    pidfile = Path(tmpdir) / "stand-in.pid"
+    tail = (
+        f'{_PERL} -e \'sleep 60\' "postgres -D $WORK/home/.config/nexus/postgres" &\n'
+        f'echo $! > "{pidfile}"\n'
+        "sleep 0.5\n"
+        "GATE_OK=1\nexit 0\n"
+    )
+    res, work = _run_block(tmpdir, tail)
+    try:
+        assert res.returncode == 0, res.stderr
+        pid = int(pidfile.read_text())
+        alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+        assert not alive, "the stand-in postmaster survived cleanup"
+        assert work and not Path(work).exists()
+    finally:
+        if pidfile.exists():
+            subprocess.run(["kill", "-KILL", pidfile.read_text().strip()], capture_output=True)
+
+
+def test_cleanup_keeps_work_and_says_why_when_a_postmaster_survives(tmp_path: Path) -> None:
+    """A stub `pgrep` that always reports a pid models a postmaster that
+    outlives INT and KILL: removing the tree would orphan it, so WORK stays."""
+    tmpdir = _long_tmpdir(tmp_path)
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    pgrep = stub / "pgrep"
+    pgrep.write_text("#!/bin/sh\necho 2147483646\n")
+    pgrep.chmod(0o755)
+    res, work = _run_block(
+        tmpdir, "GATE_OK=1\nexit 0\n", PATH=f"{stub}:/usr/bin:/bin",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "WORK KEPT" in res.stderr and "postmaster" in res.stderr
+    assert work and Path(work).exists()
+
+
+# ── the no-socket census (item 4) ───────────────────────────────────────────
+
+
+def _census() -> str:
+    text = _text()
+    start = text.index("NO_SOCKET_CENSUS=")
+    end = text.index("\nGATE_OK=1\n", start)
+    assert end > start
+    return text[start:end]
+
+
+def test_census_sits_immediately_before_the_gate_is_marked_ok() -> None:
+    text = _text()
+    assert text.count("find \"$WORK\" -type s") == 1
+    assert text.index("find \"$WORK\" -type s") < text.index("\nGATE_OK=1\n", text.index("NO_SOCKET_CENSUS="))
+
+
+def _run_census(work: Path) -> subprocess.CompletedProcess:
+    prog = (
+        "set -euo pipefail\n"
+        '_fail() { echo "FRESH-INSTALL MVV FAILED: $*" >&2; exit 1; }\n'
+        f'WORK="{work}"\n' + _census() + "\necho CENSUS-PASSED\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", prog], capture_output=True, text=True, timeout=30,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+
+
+def test_census_passes_on_a_socketless_tree(tmp_path: Path) -> None:
+    (tmp_path / "w" / "home").mkdir(parents=True)
+    (tmp_path / "w" / "home" / "f.txt").write_text("x")
+    res = _run_census(tmp_path / "w")
+    assert res.returncode == 0 and "CENSUS-PASSED" in res.stdout, res.stderr
+
+
+def test_census_fails_naming_a_socket_under_work(tmp_path: Path) -> None:
+    import os
+    import socket
+
+    work = tmp_path / "w"
+    (work / "home").mkdir(parents=True)
+    cwd = os.getcwd()
+    os.chdir(work / "home")  # relative bind keeps sun_path under the limit
+    try:
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind("s.sock")
+    finally:
+        os.chdir(cwd)
+    try:
+        res = _run_census(work)
+    finally:
+        sock.close()
+    assert res.returncode == 1, res.stdout
+    assert "FRESH-INSTALL MVV FAILED" in res.stderr and "s.sock" in res.stderr

@@ -19,9 +19,14 @@ honestly names which layer ran (the honest-recording concern from the
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "tests" / "e2e" / "fresh-install-mvv.sh"
@@ -29,6 +34,45 @@ SCRIPT = REPO_ROOT / "tests" / "e2e" / "fresh-install-mvv.sh"
 
 def _text() -> str:
     return SCRIPT.read_text(encoding="utf-8")
+
+
+_SENTINEL = "operator-file-that-must-survive.txt"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tmpdir(tmp_path_factory, monkeypatch):
+    """nexus-0tqr7: the script's work tree and failure evidence now land under
+    ``$TMPDIR``. Every script run in this file inherits a throwaway TMPDIR (all
+    the env dicts below derive from ``os.environ``), and a sentinel file in it
+    must survive the test: the old cleanup did ``rmtree(evidence.parent)``,
+    which after the move IS the TMPDIR, and deleted an operator's scratch dir.
+    """
+    tmpdir = tmp_path_factory.mktemp("mvv-tmpdir")
+    sentinel = tmpdir / _SENTINEL
+    sentinel.write_text("keep\n")
+    monkeypatch.setenv("TMPDIR", str(tmpdir))
+    yield tmpdir
+    assert sentinel.read_text() == "keep\n", "a test or the script wiped the TMPDIR"
+
+
+def _remove_evidence(stderr: str) -> None:
+    """Remove the failure-evidence dir the script printed, and ONLY that.
+
+    Refuses unless the path is ``<TMPDIR>/fresh-mvv-*-logs`` with this test's
+    own TMPDIR as its parent, so a changed message format can never turn this
+    into a delete of the TMPDIR itself or of anything outside it.
+    """
+    match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", stderr)
+    if not match:
+        return
+    evidence = Path(os.path.realpath(match.group(1)))
+    tmpdir = Path(os.path.realpath(os.environ["TMPDIR"]))
+    if (
+        evidence.parent == tmpdir
+        and fnmatch.fnmatch(evidence.name, "fresh-mvv-*-logs")
+        and evidence.is_dir()
+    ):
+        shutil.rmtree(evidence, ignore_errors=True)
 
 
 def test_script_exists_and_is_executable() -> None:
@@ -177,11 +221,10 @@ def test_published_install_scrubs_ambient_uv_tool_env(tmp_path) -> None:
         ):
             assert line in seen, f"decoy env leaked into uv tool install: {seen}"
     finally:
-        # Best-effort cleanup of the preserved-on-failure sandbox WORK dir
-        # (the script deliberately keeps failure evidence — see cleanup()).
-        match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", result.stderr)
-        if match:
-            shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)
+        # Best-effort cleanup of the preserved-on-failure evidence dir (the
+        # script deliberately keeps it, see cleanup()); guarded, see
+        # _remove_evidence.
+        _remove_evidence(result.stderr)
 
 
 def test_published_install_failure_is_named_not_skip_passed() -> None:
@@ -275,11 +318,43 @@ def test_retry_signature_parity_with_mcpb_bootstrap() -> None:
 
 
 def _cleanup_preserved_evidence(result) -> None:
-    match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", result.stderr)
-    if match:
-        import shutil
+    _remove_evidence(result.stderr)
 
-        shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)
+
+def test_evidence_cleanup_removes_only_the_evidence_dir_never_the_tmpdir(
+    _isolated_tmpdir: Path,
+) -> None:
+    """Regression (nexus-0tqr7 review): the printed evidence path is
+    ``<TMPDIR>/fresh-mvv-*-logs``; removing its parent removed the TMPDIR."""
+    ev = _isolated_tmpdir / "fresh-mvv-AbC123-logs"
+    ev.mkdir()
+    (ev / "leg.log").write_text("x")
+    _remove_evidence(f"FAILURE EVIDENCE PRESERVED: {ev} (kept: legs)\n")
+    assert not ev.exists()
+    assert (_isolated_tmpdir / _SENTINEL).exists()
+
+
+@pytest.mark.parametrize("name", ["fresh-mvv-AbC123", "other-logs"])
+def test_evidence_cleanup_refuses_a_path_that_is_not_the_evidence_dir(
+    _isolated_tmpdir: Path, name: str,
+) -> None:
+    victim = _isolated_tmpdir / name
+    victim.mkdir()
+    _remove_evidence(f"FAILURE EVIDENCE PRESERVED: {victim}\n")
+    assert victim.exists()
+    assert (_isolated_tmpdir / _SENTINEL).exists()
+
+
+def test_evidence_cleanup_refuses_the_tmpdir_itself(_isolated_tmpdir: Path) -> None:
+    _remove_evidence(f"FAILURE EVIDENCE PRESERVED: {_isolated_tmpdir}\n")
+    assert (_isolated_tmpdir / _SENTINEL).exists()
+
+
+def test_evidence_cleanup_refuses_a_dir_outside_the_tmpdir(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "fresh-mvv-ZZZ-logs"
+    elsewhere.mkdir()
+    _remove_evidence(f"FAILURE EVIDENCE PRESERVED: {elsewhere}\n")
+    assert elsewhere.exists()
 
 
 def _write_stub_git(stub_dir, tag_verdict: str) -> None:
