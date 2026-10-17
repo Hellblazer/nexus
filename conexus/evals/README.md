@@ -20,13 +20,27 @@ The earlier "not enabled on this box" was accurate; the implied
 "therefore unrunnable" was not, and it cost this corpus two release
 cycles of being repaired against documentation instead of against a run.
 
-Three full runs to date, all `--runs 1 --ablation none`, 15 cases:
+Full runs to date (the first three `--runs 1 --ablation none` on the 15-case corpus):
 
 | Corpus state | Passed | Score | Cost |
 |---|---|---|---|
 | v7.16.0 | 11/15 | 0.833 | $6.69 |
 | v7.16.1 (nine graders unsatisfiable) | 4/15 | 0.333 | $7.80 |
 | nexus-dkotg (`min: 0` added) | 12/15 | 0.867 | $6.12 |
+| nexus-dg7i6.7 (outcome-graded, 16 cases, `--runs 3 --scaffold`) | 13/16 | 0.955 | $19.59 |
+
+The 2026-10-17 run (claude 2.1.300, claude-opus-5-5, chas docker,
+subscription OAuth, so the dollar figure is the runner's notional
+`costUsd`, not spend) passed p04, p06, p11 to p14, o01, o02, o05 and the
+four n-cases 3/3. Below 1.0: a01 2/3 (one run dispatched no reviewer),
+o03 2/3 on the llm ranking criterion, and o04 1/3 on the verdict regex
+while its llm grader passed 3/3; a rerun of o04 with `--keep-temp`
+passed 3/3 and showed the answers, so no grader defect was found. One
+caveat on that run: inside docker, Claude Code's Bash sandbox could start
+bubblewrap but not apply its seccomp filter, so every shell command
+failed and the model worked by reading files. Read the run as a
+shell-less baseline; a run on a host with a working sandbox (or a
+container allowed to apply seccomp) is still owed.
 
 ## Layout
 

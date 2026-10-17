@@ -17,8 +17,11 @@ ARGS=(--runs "${RUNS:-3}" --ablation none --scaffold --trust-plugin --no-publish
       --max-cost-usd "${MAX_COST:-100}" --json "$OUT/report.json"
       --output-dir "$OUT/results" --report "$OUT/report.html")
 [ -n "${CASE_GLOB:-}" ] && ARGS+=(--case "$CASE_GLOB")
+[ -n "${KEEP_TEMP:-}" ] && ARGS+=(--keep-temp)
 t0=$(date +%s)
 CLAUDE_CODE_WALNUT_SPIRE=1 timeout 10800 claude plugin eval "${ARGS[@]}" "$PLUGIN" > "$OUT/eval.log" 2>&1
 echo "eval exit=$? wall=$(( $(date +%s) - t0 ))" > "$OUT/exit.txt"
+# With KEEP_TEMP the runs' traces and scaffold dirs survive the container.
+[ -n "${KEEP_TEMP:-}" ] && cp -R /tmp/claude-eval-* "$OUT/" 2>/dev/null
 chmod -R a+rwX "$OUT" 2>/dev/null
 exit 0
