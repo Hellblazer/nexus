@@ -867,15 +867,17 @@ class TestServiceLocalEmbedder:
         assert "Kept" in result.output
         assert f"nx config set local.embed_model {_TIER1_MODEL}" in result.output
         assert f"Saved: local.embed_model = {_TIER1_MODEL}" not in result.output
-        assert "RDR-210" in result.output  # points at the dual-mode plan, claims no guard
-        # the bge ONNX is still fetched (a dual-mode engine and a keyless restart need it)
+        assert "until you switch back or re-index them" in result.output
+        assert "RDR-210" not in result.output  # a draft RDR is not promised to users
+        # the bge ONNX is still fetched (a later keyless restart needs it)
         assert calls == ["fetch"]
 
     def test_kept_voyage_line_adds_the_missing_key_sentence_only_without_a_key(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A kept voyage-* model with no resolvable voyage_api_key fails every
-        write (LocalVoyageCredentialMissingError); init must say so. With a key
+        """A kept voyage-* model with no resolvable voyage_api_key fails a write
+        that needs a new collection (LocalVoyageCredentialMissingError; existing
+        bge collections still take writes); init must say so. With a key
         the Kept line stands alone. Real tmp-path config; the key value is never
         printed."""
         from nexus.config import CREDENTIALS

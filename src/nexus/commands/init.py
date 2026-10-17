@@ -74,8 +74,8 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
     next restart. The bge ONNX is still fetched either way. A keyed boot
     builds no ONNX embedder (service ``Main.java`` local-vs-keyed branch), so
     a kept voyage install does not need the file today; the fetch stays
-    because RDR-210's dual-mode engine will need it, and a later keyless
-    restart (key removed) boots the bge embedder and fails without it.
+    because a later keyless restart (key removed) boots the bge embedder and
+    fails without it.
     """
     from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         SERVICE_BGE_DOWNLOAD_HINT,
@@ -101,16 +101,18 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         click.echo(
             f"\nKept: {_EMBED_MODEL_KEY} = {_config.local_embed_model_choice()} "
             f"(not reset to the bge-768 default). To switch on purpose: "
-            f"`nx config set {_EMBED_MODEL_KEY} {_TIER1_MODEL}` (collections "
+            f"`nx config set {_EMBED_MODEL_KEY} {_TIER1_MODEL}`; collections "
             f"embedded with the other model stop serving after the restart "
-            f"until RDR-210's dual-mode engine lands)."
+            f"until you switch back or re-index them."
         )
         # Same lookup the supervisor and corpus.py use; the value is never printed.
         if not _config.get_credential("voyage_api_key"):
             click.echo(
-                f"No Voyage API key is configured, so writes will fail until you "
-                f"run `nx config set voyage_api_key <key>` (then restart the "
-                f"service) or switch {_EMBED_MODEL_KEY} back to {_TIER1_MODEL}."
+                f"No Voyage API key is configured: a write that needs a new "
+                f"collection fails (existing bge collections still take writes) "
+                f"until you set the key with `nx config set voyage_api_key --stdin` "
+                f"and restart the service, or switch {_EMBED_MODEL_KEY} back to "
+                f"{_TIER1_MODEL}."
             )
     else:
         set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
@@ -733,7 +735,7 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
     """The full ``nx init --service`` service sequence — also the ladder's
     provisioning precondition (``upgrade_ladder/provisioning.py``).
 
-    Provision PG, then (LOCAL mode only) lock the embedder + provision the bge-768
+    Provision PG, then (LOCAL mode only) record the embedder + provision the bge-768
     ONNX the service reads, acquire the native binary, and start the persistent
     supervisor. Returns the live ``LeaseRecord`` on the local-serving path, or
     ``None`` in cloud mode (embeddings run server-side via Voyage; there is no
@@ -1064,7 +1066,7 @@ def init_cmd(
     in P1.2, nexus-r2auz).
 
     ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
-    step (minilm-384 gets an advisory — this step always provisions bge-768).
+    step (minilm-384 gets an advisory — this step always fetches the bge-768 ONNX).
     A separate opt-in (nexus-umm29) switches the running service to Voyage
     instead — see docs/cli-reference.md "Local mode with Voyage" for the
     ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later

@@ -2904,12 +2904,14 @@ headless host where the unit can't activate) a session supervisor starts instead
 **Local mode** provisions the bge-768 embedder (`BAAI/bge-base-en-v1.5`, 768-dim)
 the service reads and records it in `~/.config/nexus/config.yml` under
 `local.embed_model`. The RDR-144 two-choice picker (bge-768 / minilm-384) was
-removed at RDR-174 P1.3, so `nx init` asks no embedder question. The local
-engine serves bge-768 only: MiniLM is not loaded on the local path, and a
-collection that is not bge-768 is refused (422). A fresh, bge or minilm
+removed at RDR-174 P1.3, so `nx init` asks no embedder question. A keyless
+local engine serves bge-768 only and a keyed one serves Voyage only; MiniLM is
+never served locally, and a collection the running engine cannot embed for is
+refused (422). A fresh, bge or minilm
 `local.embed_model` is stamped `BAAI/bge-base-en-v1.5` (one-time ~140 MB model
 download). If `local.embed_model` already holds a `voyage-*` value, `nx init`
-keeps it and says so (nexus-ddmfg); rerunning `nx init`, or the upgrade
+keeps it and says so, adding a second line when no Voyage key is configured
+(nexus-ddmfg); rerunning `nx init`, or the upgrade
 ladder's provision step, does not reset a local-Voyage install to bge-768.
 
 In local mode `nx init` also:
@@ -2997,7 +2999,8 @@ bge-data-after-a-keyed-write case, not just the engine-restart case.
 
 **Re-running `nx init` keeps this opt-in (nexus-ddmfg).** When `local.embed_model`
 already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision
-leg leave it alone and print one line saying so; they used to write it back to
+leg leave it alone and say so (with a second line when no Voyage key is
+configured); they used to write it back to
 bge-768, which stranded the Voyage collections at the next service restart. To
 go back to bge-768 on purpose, run `nx config set local.embed_model
 BAAI/bge-base-en-v1.5` and restart the service; nothing checks first, and the
