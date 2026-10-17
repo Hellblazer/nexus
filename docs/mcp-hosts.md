@@ -10,10 +10,12 @@ The host starts `nx-mcp` from your install, so install Nexus first. The commands
 
 ```bash
 uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+nx self install
 nx init
+nx doctor
 ```
 
-`nx init` provisions the storage service. Without it the servers start and every tool that needs storage reports that it cannot reach the service.
+`nx self install` moves the install to the layout Nexus manages. `nx init` provisions the storage service: without it the servers start and every tool that needs storage reports that it cannot reach the service. `nx doctor` is the check that the install and the service are healthy.
 
 Check that the host will find the commands:
 
@@ -21,7 +23,7 @@ Check that the host will find the commands:
 command -v nx-mcp nx-mcp-catalog          # Windows: Get-Command nx-mcp
 ```
 
-A host launched from a desktop icon often does not inherit your shell's `PATH`. If it reports the server as failed or connection closed, replace `nx-mcp` in the snippets with the absolute path that command printed (for example `/Users/you/.local/bin/nx-mcp`; on Windows the full path to `nx-mcp.exe`, with backslashes doubled inside JSON).
+On Windows `nx self install` puts `tools\current\bin` first on your user `PATH`; a host that was already open keeps the old `PATH`, so quit it fully and reopen it. A host launched from a desktop icon often does not inherit your shell's `PATH` either. If it reports the server as failed or connection closed, replace `nx-mcp` in the snippets with the absolute path that command printed (for example `/Users/you/.local/bin/nx-mcp`; on Windows the full path to `nx-mcp.exe`, with backslashes doubled inside JSON).
 
 ## The two servers
 
@@ -55,7 +57,7 @@ Source: Cursor docs, [MCP](https://cursor.com/docs/mcp) and [CLI MCP](https://cu
 
 ## OpenAI Codex CLI
 
-Config lives in `~/.codex/config.toml`, or `.codex/config.toml` in a trusted project. The ChatGPT desktop app, Codex CLI and IDE extension share it.
+Config lives in `~/.codex/config.toml`, or `.codex/config.toml` in a trusted project. The ChatGPT desktop app, Codex CLI and IDE extension share it, per the Codex docs.
 
 ```toml
 [mcp_servers.nexus]
@@ -72,9 +74,15 @@ codex mcp add nexus -- nx-mcp
 codex mcp add nexus-catalog -- nx-mcp-catalog
 ```
 
-Verify: `codex mcp list` shows configured servers; type `/mcp` in the Codex TUI to see the active ones. Codex limits how long it waits for a server to start; if `nexus` is marked failed at first launch, raise `startup_timeout_sec` on its table.
+Verify: `codex mcp list` shows configured servers; type `/mcp` in the Codex TUI to see the active ones. Codex limits how long it waits for a server to start; if `nexus` is marked failed at first launch, raise `startup_timeout_sec` on its table. The Codex default is 10 seconds, and `nx-mcp` imports a large Python package before it answers, so it may need more on a cold start; try 30:
 
-Source: OpenAI, [Connect Codex to an MCP server](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and the Codex repository's config types (`codex-rs/config/src/mcp_types.rs`) for `startup_timeout_sec`. Config per Codex docs, not run here.
+```toml
+[mcp_servers.nexus]
+command = "nx-mcp"
+startup_timeout_sec = 30
+```
+
+Source: OpenAI, [Connect Codex to an MCP server](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), which gives `startup_timeout_sec` (default 10) and `tool_timeout_sec` (default 60). The 30 is a suggestion, not a measured value. Config per Codex docs, not run here.
 
 ## Gemini CLI
 
@@ -98,9 +106,13 @@ gemini mcp add --scope user nexus-catalog nx-mcp-catalog
 
 Verify: `gemini mcp list` prints each server with its connection status; `/mcp` inside a session shows the servers and the tools each one provides.
 
-Two Gemini behaviours matter here. A stdio server shows as connected only in a trusted folder; run `gemini trust` in the folder if it shows disconnected. And Gemini removes host environment variables whose names match `*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*AUTH*` or `*CREDENTIAL*` before starting a server, unless you name them in the server's `env` block. If you give Nexus a credential through such a variable (for example `NX_VOYAGE_API_KEY`), add `"env": { "NX_VOYAGE_API_KEY": "$NX_VOYAGE_API_KEY" }` to the entry.
+Two Gemini behaviours matter here. A stdio server shows as connected only in a trusted folder. Accept the trust dialog the first time you run Gemini in the folder, or change it later with `/permissions` inside the CLI; for one session, start with `--skip-trust` or set `GEMINI_CLI_TRUST_WORKSPACE=true`. (The MCP servers page says `gemini trust`; the trusted-folders page, which documents the mechanisms above, lists no such command.)
 
-Source: Gemini CLI docs, [MCP servers](https://geminicli.com/docs/tools/mcp-server) and [configuration](https://geminicli.com/docs/reference/configuration). Config per Gemini CLI docs, not run here.
+And Gemini removes host environment variables whose names match `*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*AUTH*` or `*CREDENTIAL*` before starting a server, unless you name them in the server's `env` block. That includes `NX_SERVICE_TOKEN`-style variables, so in cloud mode list every secret-shaped `NX_*` variable the server needs in the entry, for example `"env": { "NX_VOYAGE_API_KEY": "$NX_VOYAGE_API_KEY" }`.
+
+Google moved unpaid-tier and Google One users from Gemini CLI to Antigravity CLI on 2026-06-18, per the Gemini CLI MCP servers page; this section describes Gemini CLI.
+
+Source: Gemini CLI docs, [MCP servers](https://geminicli.com/docs/tools/mcp-server), [trusted folders](https://geminicli.com/docs/cli/trusted-folders) and [configuration](https://geminicli.com/docs/reference/configuration). Config per Gemini CLI docs, not run here.
 
 ## VS Code and GitHub Copilot agent mode
 
@@ -115,7 +127,7 @@ Config lives in `.vscode/mcp.json` in a workspace, or in your user profile (run 
 }
 ```
 
-A workspace can instead hold a `.mcp.json` at the project root in the portable `mcpServers` shape used by the Cursor snippet above.
+The VS Code docs also describe a `.mcp.json` at the workspace root in the portable `mcpServers` shape, which they say Copilot harness sessions read. They do not say the Chat view reads it, so use `.vscode/mcp.json` above.
 
 Verify: run **MCP: List Servers** from the Command Palette. It lists each server and offers start, stop, restart and **Show Output**. VS Code asks you to trust a server the first time it starts. Then open the Chat view with the Agent picker selected and choose **Configure Tools** to see the tools and toggle them.
 
@@ -142,8 +154,9 @@ You get the MCP tools and the storage behind them. These Claude Code features ar
 - **Hooks.** The session-start preflight and `nx upgrade --auto`, the subagent-start guidance injection, and the session-end cleanup are Claude Code hooks. After you update the CLI, run `nx upgrade` yourself.
 - **Skills, agents and slash commands.** The `/conexus:*` commands, the conexus skills and the `developer` and reviewer agents ship in the Claude plugin. Nothing on these hosts calls them.
 - **The setup stand-in.** When the CLI is missing, the Claude plugin starts a stand-in server with two `setup` tools. A host running `nx-mcp` directly just fails to start if `nx-mcp` is not installed. The `setup` tool on a real `nx-mcp` installs nothing without the plugin's setup script and answers with the install commands.
-- **Session scratch (T1).** T1 needs a session id that Claude Code supplies. On other hosts the `scratch` tools report that T1 is unavailable for the process, and every other tool is unaffected. Setting `NX_SESSION_ID` in the server's environment gives it one, and that value names the scratch scope.
-- **`nx_answer` and the plan steps that summarize, rank or generate.** These run through `claude -p`, so they need the Claude CLI installed and signed in on the same machine. Search, query, store, memory, catalog and tuple tools do not.
+- **Session scratch (T1).** T1 needs a session id. The server takes the first of `NX_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, and the id Claude Code last wrote to `~/.config/nexus/current_session`. With none of them, the `scratch` tools report that T1 is unavailable for the process and every other tool is unaffected. On a machine where Claude Code has run, a host without its own id can therefore pick up the last Claude session's scratch scope. Set `NX_SESSION_ID` in each host's server entry (a different value per host) to keep its scratch separate.
+- **`nx_answer`, `nx_tidy`, `nx_plan_audit`, `nx_enrich_beads` and the operator plan steps (summarize, rank, generate and the others in [MCP Servers](mcp-servers.md)).** These run through `claude -p`, so they need the Claude CLI installed and signed in on the same machine. Search, query, store, memory, catalog and tuple tools do not.
+- **Working directory.** The Claude plugin's launcher starts `nx-mcp` in your project directory. Other hosts start it in their own working directory, which matters because `nx_answer` names the plans it saves after the directory it runs in. Launch the host from the project directory, or set `cwd` where the host's config allows it.
 - **The other plugin servers.** The `sequential-thinking` entry and the `sn` plugin's Serena and Context7 servers are separate and are not part of Nexus.
 
 State is shared. A host reading the same service sees the same T2 memory, T3 knowledge and catalog as Claude Code and the `nx` CLI on that machine ([Storage Tiers](storage-tiers.md)).
