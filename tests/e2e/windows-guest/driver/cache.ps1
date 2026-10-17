@@ -16,6 +16,17 @@
 #                  a model file it finds in place. The engine binary and the
 #                  PostgreSQL bundle are never cached: their sha256 and
 #                  signature checks stay on the gated download path.
+#                  The install step's own downloads come from payloads\ the same
+#                  way (nexus-bpzt7), each keyed by its own version in keys.txt:
+#                  uv=<version> (uv's release zip), portablegit=<version>,
+#                  winget-git=<version> (Git for Windows' installer) and
+#                  python=<archive name> (the Python archive uv downloads). The
+#                  guest is told where they are and checks each one itself
+#                  against the upstream's published sha256 before it uses it;
+#                  a missing or mismatching one is downloaded as before. When
+#                  uv's cache holds exactly this -Key (a published version, not
+#                  a candidate wheel), a marker file lets inst.ps1 install
+#                  conexus from that cache with uv --offline.
 #   -Mode harvest  after a successful install: copy that account's uv cache,
 #                  installed claude.exe and onnx_models back to the host when the
 #                  cache does not yet hold this install (keys.txt: conexus=<-Key>,
@@ -23,6 +34,13 @@
 #                  sha256 when it downloaded them. They are keyed by -Key because
 #                  nx init reuses a model by size alone, so an archive from an
 #                  older release must not stand in for a changed pinned model.
+#                  The payloads the install step recorded as downloaded or
+#                  mismatching (payloads\record.txt in the guest) are filled
+#                  the same way: PortableGit and the Python archive are copied
+#                  from the guest, uv's zip and the Git installer are downloaded
+#                  by the host, each checked against the sha256 the guest
+#                  recorded from the upstream; a version other than the new one
+#                  is removed from the cache.
 # Host writes stay under C:\build\guest\cache; files there are replaced or
 # removed by exact name only. In the guest: the account's uv cache folder,
 # nx-gate\claude-cache, and one archive file in nx-gate, removed after use.
@@ -39,6 +57,7 @@ $root = 'C:\build\guest\cache'
 $uvTar = Join-Path $root 'uv-cache.tar'
 $keys = Join-Path $root 'keys.txt'
 $modelsTar = Join-Path $root 'models.tar'
+$payloads = Join-Path $root 'payloads'
 $pw = [Console]::In.ReadLine()
 if (-not $pw) { throw 'nothing on stdin' }
 # The characters go into the SecureString one by one: ConvertTo-SecureString -AsPlainText would put the
@@ -86,8 +105,38 @@ function Open-GuestSession($Name) {
     $sess
 }
 New-Item -ItemType Directory -Force $root | Out-Null
-$have = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match '^(conexus|claude|models)=[A-Za-z0-9._+-]+$' })
+$have = @(Get-Content $keys -ErrorAction SilentlyContinue | Where-Object { $_ -match '^(conexus|claude|models|uv|portablegit|winget-git|python)=[A-Za-z0-9._+-]+$' })
 function ClaudeBin($v) { Join-Path $root "claude-$v-win32-x64.exe" }
+# One cached install payload per kind, named by its own version: the path under payloads\ that keys.txt's
+# "<kind>=<value>" line stands for (the same relative path in the guest's nx-gate\payloads).
+function PayRel($kind, $v) {
+    switch ($kind) {
+        'uv' { "uv-$v\uv-x86_64-pc-windows-msvc.zip" }
+        'portablegit' { "PortableGit-$v-64-bit.7z.exe" }
+        'winget-git' { "Git-$v-64-bit.exe" }
+        'python' { "python\$v" }
+    }
+}
+function HostPay($kind, $v) { Join-Path $payloads (PayRel $kind $v) }
+function Sha($p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+# True when keys.txt names this payload, its file is there, and (when a sha256 is given) the file has it.
+function HavePay($kind, $v, $sha) {
+    $f = HostPay $kind $v
+    ($have -contains "$kind=$v") -and (Test-Path -LiteralPath $f) -and (-not $sha -or (Sha $f) -eq $sha)
+}
+# Move a checked temp file into place as the one cached payload of its kind, and remove the other versions
+# of that kind by exact name (uv's version folder is removed only when it is empty).
+function PlacePay($kind, $v, $tmp) {
+    $dst = HostPay $kind $v
+    New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+    Move-Item -LiteralPath $tmp -Destination $dst -Force
+    foreach ($o in @($script:keep | Where-Object { $_ -like "$kind=*" } | ForEach-Object { $_.Substring($kind.Length + 1) })) {
+        if ($o -eq $v) { continue }
+        Remove-Item -LiteralPath (HostPay $kind $o) -Force -ErrorAction SilentlyContinue
+        if ($kind -eq 'uv') { Remove-Item -LiteralPath (Split-Path (HostPay $kind $o)) -ErrorAction SilentlyContinue }
+    }
+    $script:keep = @($script:keep | Where-Object { $_ -notlike "$kind=*" }) + "$kind=$v"
+}
 # Host to guest over PowerShell Direct (Sam, 2026-10-15: no host-side VM settings, so no Copy-VMFile).
 function ToGuest($src, $dst) { Copy-Item -ToSession $s -Path $src -Destination $dst -Force; "copied $(Split-Path $src -Leaf)" }
 $t0 = Get-Date
@@ -97,6 +146,7 @@ try {
     if (-not (Invoke-Command -Session $s -ArgumentList $prof { param($p) Test-Path $p })) { 'NXG-RESULT: FAIL no profile for the account in the guest'; exit 3 }
     $guestTar = "$prof\nx-gate\uv-cache.tar"
     $guestCc = "$prof\nx-gate\claude-cache"
+    $guestPay = "$prof\nx-gate\payloads"
     if ($Mode -eq 'seed') {
         if (Test-Path $uvTar) {
             ToGuest $uvTar $guestTar
@@ -127,10 +177,28 @@ try {
                 Get-ChildItem "$d\onnx_models" -Recurse -File | ForEach-Object { 'seeded model file {0} {1:N0} MB' -f $_.FullName.Substring($d.Length + 1), ($_.Length / 1MB) }
             }
         } else { "seeded models: none for $Key" }
+        # Install payloads (nexus-bpzt7): every one keys.txt names and the host still has. Their presence in the
+        # guest is also what tells inst.ps1 the cache is on, so the folder is made even when nothing goes in it.
+        Invoke-Command -Session $s -ArgumentList $guestPay { param($d) New-Item -ItemType Directory -Force "$d\python" | Out-Null }
+        $nPay = 0
+        foreach ($k in @($have | Where-Object { $_ -match '^(uv|portablegit|winget-git|python)=' })) {
+            $kind = $k.Substring(0, $k.IndexOf('=')); $val = $k.Substring($k.IndexOf('=') + 1)
+            $rel = PayRel $kind $val
+            if (-not (Test-Path -LiteralPath (HostPay $kind $val))) { "seeded payload ${k}: the file is missing on the host"; continue }
+            Invoke-Command -Session $s -ArgumentList "$guestPay\$rel" { param($f) New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null }
+            ToGuest (HostPay $kind $val) "$guestPay\$rel"
+            $nPay++
+        }
+        "seeded payloads: $nPay"
+        # uv --offline is only right when uv's cache holds exactly this published version's install.
+        if ($Key -notlike 'w-*' -and $have -contains "conexus=$Key" -and (Test-Path $uvTar)) {
+            Invoke-Command -Session $s -ArgumentList "$guestPay\uv-offline.txt", "conexus=$Key" { param($f, $v) Set-Content -LiteralPath $f -Value $v -Encoding ASCII }
+            "seeded uv-offline marker: conexus=$Key"
+        } else { 'seeded uv-offline marker: none' }
         # The installing account writes its own uv cache (locks, new entries): make it the owner of what was copied in.
-        Invoke-Command -Session $s -ArgumentList $Account, "$prof\AppData\Local\uv", $guestCc, "$prof\.cache" {
-            param($a, $u, $c, $m)
-            foreach ($d in @($u, $c, $m)) { if (Test-Path $d) { icacls $d /setowner $a /T /C /Q | Out-Null; icacls $d /grant "${a}:(OI)(CI)F" /T /C /Q | Out-Null } }
+        Invoke-Command -Session $s -ArgumentList $Account, "$prof\AppData\Local\uv", $guestCc, "$prof\.cache", $guestPay {
+            param($a, $u, $c, $m, $y)
+            foreach ($d in @($u, $c, $m, $y)) { if (Test-Path $d) { icacls $d /setowner $a /T /C /Q | Out-Null; icacls $d /grant "${a}:(OI)(CI)F" /T /C /Q | Out-Null } }
         }
     } else {
         $claudeVer = Invoke-Command -Session $s -ArgumentList $prof {
@@ -177,6 +245,55 @@ try {
                 'harvested models: {0:N0} MB' -f ((Get-Item $modelsTar).Length / 1MB)
             }
         } else { "harvest: the models archive already holds models=$Key" }
+        # Install payloads (nexus-bpzt7). Each is filled on its own and a failure only skips that one.
+        $gp = Invoke-Command -Session $s -ArgumentList $guestPay {
+            param($d)
+            @{
+                record = @(Get-Content "$d\record.txt" -ErrorAction SilentlyContinue)
+                python = @(Get-ChildItem "$d\python" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object Name)
+            }
+        }
+        $ProgressPreference = 'SilentlyContinue'
+        # the newest archive in the guest's folder that the host does not hold yet (uv put it there)
+        $pyName = @($gp.python | Where-Object { $_ -match '^[A-Za-z0-9._+-]+$' -and -not (HavePay 'python' $_ '') } | Select-Object -First 1)
+        if ($pyName.Count -eq 1) {
+            try {
+                $tmp = Join-Path $root 'payload.new'
+                Copy-Item -FromSession $s -Path "$guestPay\python\$($pyName[0])" -Destination $tmp -Force -ErrorAction Stop
+                PlacePay 'python' $pyName[0] $tmp
+                "harvested python archive $($pyName[0])"
+            } catch { Remove-Item -LiteralPath (Join-Path $root 'payload.new') -Force -ErrorAction SilentlyContinue; "harvest python: $($_.Exception.Message)" }
+        } else { 'harvest: no new python archive in the guest' }
+        foreach ($line in @($gp.record | Sort-Object -Unique)) {
+            $rec = "$line"
+            try {
+                if ($rec -match '^portablegit=([A-Za-z0-9._+-]+)\|([0-9a-f]{64})$') {
+                    $ver = $Matches[1]; $sha = $Matches[2]
+                    if (HavePay 'portablegit' $ver $sha) { "harvest: PortableGit $ver already cached"; continue }
+                    $tmp = Join-Path $root 'payload.new'
+                    Copy-Item -FromSession $s -Path "$guestPay\$(PayRel 'portablegit' $ver)" -Destination $tmp -Force -ErrorAction Stop
+                    if ((Sha $tmp) -ne $sha) { Remove-Item -LiteralPath $tmp -Force; throw "the copied PortableGit $ver is not the sha256 the guest recorded" }
+                    PlacePay 'portablegit' $ver $tmp
+                    "harvested PortableGit $ver"
+                } elseif ($rec -match '^uv=([0-9]+\.[0-9]+\.[0-9]+)\|([0-9a-f]{64})$') {
+                    $ver = $Matches[1]; $sha = $Matches[2]
+                    if (HavePay 'uv' $ver $sha) { "harvest: uv $ver already cached"; continue }
+                    $tmp = Join-Path $root 'payload.new'
+                    Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/astral-sh/uv/releases/download/$ver/uv-x86_64-pc-windows-msvc.zip" -OutFile $tmp -ErrorAction Stop
+                    if ((Sha $tmp) -ne $sha) { Remove-Item -LiteralPath $tmp -Force; throw "the downloaded uv $ver zip is not the published sha256" }
+                    PlacePay 'uv' $ver $tmp
+                    "harvested uv $ver"
+                } elseif ($rec -match '^winget-git=([A-Za-z0-9._+-]+)\|(https://github\.com/git-for-windows/git/releases/download/[A-Za-z0-9._/+-]+)\|([0-9a-f]{64})$') {
+                    $ver = $Matches[1]; $url = $Matches[2]; $sha = $Matches[3]
+                    if (HavePay 'winget-git' $ver $sha) { "harvest: Git installer $ver already cached"; continue }
+                    $tmp = Join-Path $root 'payload.new'
+                    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp -ErrorAction Stop
+                    if ((Sha $tmp) -ne $sha) { Remove-Item -LiteralPath $tmp -Force; throw "the downloaded Git installer $ver is not the sha256 winget names" }
+                    PlacePay 'winget-git' $ver $tmp
+                    "harvested Git installer $ver"
+                }
+            } catch { Remove-Item -LiteralPath (Join-Path $root 'payload.new') -Force -ErrorAction SilentlyContinue; "harvest payload ($rec): $($_.Exception.Message)" }
+        }
         $keep | Sort-Object -Unique | Set-Content -Encoding UTF8 $keys
     }
 } finally { Remove-PSSession $s }

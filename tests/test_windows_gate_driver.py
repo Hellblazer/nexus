@@ -259,7 +259,7 @@ def test_powershell_5_1_only_syntax() -> None:
 def test_installs_follow_the_passing_run() -> None:
     inst = _read("inst.ps1")
     assert "uv tool install --python 3.12" in inst
-    assert inst.count("--python 3.12") == 3  # wheel, PyPI, PyPI retry
+    assert inst.count("--python 3.12") == 4  # wheel, PyPI offline (cache), PyPI, PyPI retry
     assert '"conexus==$Version"' in inst
     assert "https://astral.sh/uv/install.ps1" in inst and "https://claude.ai/install.ps1" in inst
     assert "winget install --id Git.Git -e --source winget" in inst
@@ -1304,7 +1304,7 @@ def test_the_cache_script_writes_only_under_its_folder_and_removes_by_exact_name
         assert "-LiteralPath" in ln and "-Recurse" not in ln and not re.search(r"Remove-Item[^\n]*[*?]", ln), ln
     # host-side writes name a path built from $root (or the guest session, -ToSession/-FromSession)
     for ln in (ln.strip() for ln in _code_lines(text) if re.search(r"Set-Content|Move-Item|New-Item -ItemType Directory -Force \$root", ln)):
-        assert "$root" in ln or "$keys" in ln or "$uvTar" in ln or "$tmp" in ln, ln
+        assert "$root" in ln or "$keys" in ln or "$uvTar" in ln or "$tmp" in ln or "-Session $s" in ln, ln
     assert "Checkpoint-VM" not in code and "Restore-VM" not in code
 
 
@@ -1333,6 +1333,212 @@ def test_the_cached_claude_binary_is_used_only_when_it_is_the_latest_releases_by
     step = step[:step.index("\n}\n")]
     # anything but a used cached binary runs the official installer
     assert "if (-not $used) { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://claude.ai/install.ps1 | iex' }" in step
+
+
+# ---- install-step payloads (nexus-bpzt7) --------------------------------------
+#
+# inst.ps1 downloads uv's zip, Git (PortableGit, or Git for Windows' installer by way of winget), the Python
+# archive, and conexus with its dependencies. With --cache on cache.ps1 seeds nx-gate\payloads and each one is
+# used from there only when its sha256 is the upstream's; --cache off leaves no folder and none of it runs.
+
+
+def _between(text: str, start: str, end: str) -> str:
+    i = text.index(start)
+    return text[i:text.index(end, i + len(start))]
+
+
+def _inst_parts() -> dict[str, str]:
+    inst = _read("inst.ps1")
+    return {
+        "inst": inst,
+        "uv_fn": _between(inst, "function CachedUv", "Step 'uv'"),
+        "uv_step": _between(inst, "Step 'uv'", "\n}\n"),
+        "wrapper": _between(inst, "$portableWrapper = @'", "\n'@\n"),
+        "git_fn": _between(inst, "function CachedWingetGit", "Step 'git (winget)'"),
+        "git_step": _between(inst, "Step 'git (winget)'", "Step 'plugin'"),
+        "conexus_step": _between(inst, 'Step "conexus $source"', "# run-gate.sh --cache on (nexus-bpzt7): when cache.ps1 left a binary"),
+    }
+
+
+def test_cache_off_runs_the_fresh_download_commands_and_reads_no_payload() -> None:
+    p = _inst_parts()
+    inst = p["inst"]
+    # the one switch: the folder cache.ps1 seeds, absent with --cache off
+    assert '$pay = "$b\\payloads"' in inst and "$cacheOn = Test-Path -LiteralPath $pay" in inst
+    assert inst.index("$cacheOn = Test-Path") < inst.index("function CachedUv")
+    # every fresh-download command is still there, character for character, reachable without the cache
+    assert "    if (-not $used) { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://astral.sh/uv/install.ps1 | iex' }" in p["uv_step"]
+    assert '            uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc (attempt 1)"' in p["conexus_step"]
+    assert "Start-Sleep 90; uv tool install --python 3.12 \"conexus==$Version\" 2>&1 | Select-Object -Last 6; \"uv exit=$LASTEXITCODE (attempt 2)\"" in p["conexus_step"]
+    git = p["git_step"]
+    cache_branch, stock_branch = git.split("        } else {\n            # stock: the guide's block, as written\n")
+    assert 'powershell -NoProfile -ExecutionPolicy Bypass -File "$b\\portable-git.ps1"; "portable-git exit=$LASTEXITCODE"' in stock_branch.split("\n")[0]
+    assert "if ($cacheOn) {" in cache_branch and "portable-git-cache.ps1" in cache_branch
+    assert "        if (-not $used) { winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity; \"winget exit=$LASTEXITCODE\" }" in git
+    # a cache function is called only behind $cacheOn
+    for ln in _code_lines(inst):
+        if re.search(r"\b(CachedUv|CachedWingetGit)\b", ln) and not ln.startswith("function "):
+            assert "$cacheOn" in ln, ln
+    # and every other line that names the payload folder is the folder's own definition, behind $cacheOn, or in the wrapper branch
+    outside = inst
+    for key in ("uv_fn", "git_fn", "wrapper"):
+        outside = outside.replace(p[key], "")
+    for ln in _code_lines(outside):
+        if "$pay" in ln:
+            assert "$cacheOn" in ln or "portable-git-cache.ps1" in ln or ln.startswith(("$pay = ", "function Record")), ln
+    # nothing in the other scripts seeds the folder unless the cache step does
+    for name in ALL_PS:
+        if name != "cache.ps1":
+            assert "nx-gate\\payloads" not in "\n".join(_code_lines(_read(name))), name
+
+
+def test_uv_comes_from_the_cache_only_when_its_zip_has_the_published_sha256() -> None:
+    p = _inst_parts()
+    fn = p["uv_fn"]
+    # the version is the one the installer script names; the hash is the one published beside that release
+    assert "app_version = '([0-9]+\\.[0-9]+\\.[0-9]+)'" in fn
+    assert "https://github.com/astral-sh/uv/releases/download/$ver/uv-x86_64-pc-windows-msvc.zip.sha256" in fn
+    # a miss and a mismatch each return before the installer is pointed at the file, and each is recorded for the harvest
+    miss = fn.index("if (-not (Test-Path -LiteralPath $zip))")
+    mismatch = fn.index("if ($got -ne $want)")
+    assert miss < fn.index("Get-FileHash") < mismatch < fn.index("$env:UV_DOWNLOAD_URL = ") < fn.index("irm https://astral.sh/uv/install.ps1 | iex")
+    assert fn.count('Record "uv=$ver|$want"; return') == 2
+    assert "return \"uv-cache: no cached uv $ver\"" in fn and "is not the published $want\"" in fn
+    # the official installer script runs, against a file: URL for the cached zip, and the variable does not outlive it
+    assert "([Uri]\"$dir\\\").AbsoluteUri" in fn and "finally { Remove-Item -LiteralPath Env:\\UV_DOWNLOAD_URL" in fn
+    # the result is checked before it is called used; anything else lets the step run the stock installer
+    assert fn.index("-notlike \"uv $ver*\"") < fn.index("return \"uv-cache: used uv $ver")
+    assert "-like 'uv-cache: used *'" in p["uv_step"] and "if (-not $used)" in p["uv_step"]
+    # the pattern really reads the installer script's line (astral.sh/uv/install.ps1, 2026-10-17)
+    pat = re.search(r'-match "(app_version = [^"]+)"', fn)
+    assert pat
+    assert re.search(pat.group(1), "$app_version = '0.13.1'\n").group(1) == "0.13.1"
+    assert not re.search(pat.group(1), "$app_version = 'latest'\n")
+
+
+def test_portablegit_is_copied_from_the_cache_only_inside_the_guides_own_block_and_its_digest_check() -> None:
+    p = _inst_parts()
+    w = p["wrapper"]
+    # the guide's block runs unchanged; only Invoke-WebRequest is shadowed, and only for the PortableGit file
+    assert w.count('. "$PSScriptRoot\\portable-git.ps1"') == 1
+    assert w.index("function Invoke-WebRequest") < w.index('. "$PSScriptRoot\\portable-git.ps1"')
+    shim = _between(w, "function Invoke-WebRequest", '. "$PSScriptRoot')
+    assert "$Use -eq 'yes'" in shim and "Test-Path -LiteralPath $hit" in shim and "Copy-Item -LiteralPath $hit -Destination $OutFile" in shim
+    assert "'^PortableGit-.*-64-bit\\.7z\\.exe$'" in shim
+    # a miss or a --Use no pass goes to the real cmdlet, with the same arguments
+    assert "Microsoft.PowerShell.Utility\\Invoke-WebRequest @PSBoundParameters" in shim
+    assert shim.index("return") < shim.index("Microsoft.PowerShell.Utility\\Invoke-WebRequest")
+    # the file name carries the version, so a cached file is for that version alone
+    leaf = re.search(r"\$leaf -match '(\^PortableGit-[^']+)'", shim).group(1)
+    assert re.match(leaf, "PortableGit-2.56.0.2-64-bit.7z.exe")
+    assert not re.match(leaf, "PortableGit-2.56.0.2-arm64.7z.exe")
+    assert re.match(r"^PortableGit-(.+)-64-bit\.7z\.exe$", "PortableGit-2.56.0.2-64-bit.7z.exe").group(1) == "2.56.0.2"
+    # a download that happened (the block passed its digest check) is kept and recorded with its own hash
+    tail = w[w.index('. "$PSScriptRoot'):]
+    assert "$script:fetched" in tail and "portablegit=$ver|" in tail and "Get-FileHash -Algorithm SHA256" in tail
+    # run as the account, cache first and the network once if that failed; the stock block is the other branch
+    git = p["git_step"]
+    assert "-Pay $pay -Use yes; $rc = $LASTEXITCODE" in git
+    assert "if ($rc -ne 0)" in git and "-Pay $pay -Use no; $rc = $LASTEXITCODE" in git
+    assert git.index("-Use yes") < git.index("-Use no") < git.index("# stock: the guide's block")
+    # the staged block is still the guide's text (test_no_admin_git_stages_the_install_guides_own_portablegit_block)
+    assert "Get-Content" not in w and "-replace" not in w
+
+
+def test_the_winget_git_installer_is_cached_by_winget_s_own_sha256_and_falls_back_to_winget() -> None:
+    p = _inst_parts()
+    fn = p["git_fn"]
+    # version, URL and sha256 come from winget's record of the package, not from the cache
+    assert "winget show --id Git.Git -e --source winget" in fn
+    assert "Installer Url:" in fn and "Installer SHA256:" in fn
+    assert "https://github.com/git-for-windows/git/releases/download/*" in fn
+    # the hash is compared before the installer runs; a miss and a mismatch are recorded for the harvest
+    assert fn.index("if (-not (Test-Path -LiteralPath $f))") < fn.index("Get-FileHash") < fn.index("if ($got -ne $sha)") < fn.index("Start-Process")
+    assert fn.count('Record "winget-git=$ver|$url|$sha"') == 2
+    # the switches are the Git.Git manifest's silent ones, and the install is not winget
+    assert "'/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'" in fn
+    assert "winget install" not in fn
+    assert fn.index("-ne 0") < fn.index("return \"git-cache: used")
+    # it counts as used only if Git is then there; anything else runs the stock winget install
+    step = p["git_step"]
+    assert "-like 'git-cache: used *'" in step and "-and [bool](GitDir)" in step
+    assert step.index("$used = ") < step.index("# stock: winget") < step.index("if (-not $used) { winget install --id Git.Git")
+    # the installer's file name carries the version
+    assert re.match(r"^Git-(.+)-64-bit\.exe$", "Git-2.55.0.5-64-bit.exe").group(1) == "2.55.0.5"
+
+
+def test_conexus_installs_offline_only_from_a_cache_filled_for_that_published_version() -> None:
+    p = _inst_parts()
+    inst = p["inst"]
+    off = next(ln for ln in inst.splitlines() if ln.startswith("$offline = "))
+    # the marker names this version, a candidate wheel never qualifies, and the folder must be there at all
+    assert "$cacheOn" in off and "-not $Wheel" in off and '-eq "conexus=$Version"' in off and "uv-offline.txt" in off
+    step = p["conexus_step"]
+    assert step.count("uv tool install --offline") == 1 and step.count("--offline ") == 1
+    assert step.index("if ($offline) {") < step.index("uv tool install --offline --python 3.12") < step.index("if (-not $done) {")
+    # Python first (from the archive cache, or downloaded), so --offline is never short of an interpreter
+    assert step.index("uv python install 3.12") < step.index("uv tool install --offline")
+    # the offline result must report the version, or PyPI is asked as usual
+    assert "$done = ($rc -eq 0) -and" in step and "*version $Version*" in step
+    assert "resolving against PyPI as usual" in step
+    # the Python archive uv downloads is kept in the payload folder, only with the cache on
+    py = next(ln for ln in inst.splitlines() if "UV_PYTHON_CACHE_DIR" in ln and not ln.startswith("#"))
+    assert py.startswith("if ($cacheOn) {") and '$env:UV_PYTHON_CACHE_DIR = "$pay\\python"' in py
+
+
+def test_seed_copies_each_payload_the_keys_name_and_marks_uv_offline_only_for_a_matching_published_key() -> None:
+    code = "\n".join(_code_lines(_read("cache.ps1")))
+    seed = code[code.index("if ($Mode -eq 'seed')"):code.index("} else {\n        $claudeVer")]
+    # the payload folder exists whether or not anything is cached: inst.ps1 reads its presence as "cache on"
+    assert seed.index("New-Item -ItemType Directory -Force \"$d\\python\"") < seed.index("foreach ($k in")
+    assert "'^(uv|portablegit|winget-git|python)='" in seed
+    assert "Test-Path -LiteralPath (HostPay $kind $val)" in seed and "ToGuest (HostPay $kind $val) \"$guestPay\\$rel\"" in seed
+    # the marker: a published version (not w-<sha>), keys.txt holds that exact conexus key, the uv archive exists
+    marker = _between(seed, "if ($Key -notlike 'w-*'", "else { 'seeded uv-offline marker: none' }")
+    assert "$have -contains \"conexus=$Key\"" in marker and "(Test-Path $uvTar)" in marker
+    assert "Set-Content -LiteralPath $f -Value $v" in marker and "uv-offline.txt" in marker
+    # the account that installs owns what was copied in
+    assert "$guestCc, \"$prof\\.cache\", $guestPay" in seed and "foreach ($d in @($u, $c, $m, $y))" in seed
+    # the host-side file for a kind is named by its own version
+    paths = _between(code, "function PayRel", "function HostPay")
+    for kind, name in (("uv", "uv-$v\\uv-x86_64-pc-windows-msvc.zip"), ("portablegit", "PortableGit-$v-64-bit.7z.exe"), ("winget-git", "Git-$v-64-bit.exe"), ("python", "python\\$v")):
+        assert f"'{kind}' {{ \"{name}\" }}" in paths, kind
+    assert "$Key" not in paths
+
+
+def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_one_of_each() -> None:
+    code = "\n".join(_code_lines(_read("cache.ps1")))
+    assert "'^(conexus|claude|models|uv|portablegit|winget-git|python)=[A-Za-z0-9._+-]+$'" in code
+    harvest = _between(code, "$gp = Invoke-Command", "$keep | Sort-Object -Unique | Set-Content")
+    # none of the new keys is the conexus version: each is the payload's own (the models' mistake, not repeated)
+    assert "$Key" not in harvest
+    # the guest tells what it downloaded (record.txt) and which Python archive it has
+    assert "record.txt" in harvest and "\\python\"" in harvest
+    for kind in ("python", "portablegit", "uv", "winget-git"):
+        assert f"PlacePay '{kind}'" in harvest, kind
+    # a copied or downloaded file is compared with the sha256 the guest recorded before it is placed
+    for kind, fetch in (("portablegit", "Copy-Item -FromSession"), ("uv", "Invoke-WebRequest"), ("winget-git", "Invoke-WebRequest")):
+        seg = harvest[harvest.index(f"$rec -match '^{kind}="):harvest.index(f"PlacePay '{kind}'")]
+        assert seg.index(fetch) < seg.index("if ((Sha $tmp) -ne $sha)"), kind
+    # a payload already held with that hash is not fetched again, and a failure skips only that payload
+    assert harvest.count("HavePay ") == 4 and harvest.count("catch {") == 2
+    # PlacePay: move in, remove the other versions by exact name, then name the new key
+    place = _between(code, "function PlacePay", "function ToGuest")
+    assert place.index("Move-Item -LiteralPath $tmp -Destination $dst -Force") < place.index("Remove-Item -LiteralPath (HostPay $kind $o)") < place.index('"$kind=$v"')
+    assert "if ($o -eq $v) { continue }" in place
+    # the formats inst.ps1 records are the ones the harvest reads
+    inst = _read("inst.ps1")
+    for fmt in ('"uv=$ver|$want"', '"winget-git=$ver|$url|$sha"', '("portablegit=$ver|"'):
+        assert fmt in inst, fmt
+    sha = "a" * 64
+    for line, pat in (
+        (f"portablegit=2.56.0.2|{sha}", r"\^portablegit="),
+        (f"uv=0.13.1|{sha}", r"\^uv="),
+        (f"winget-git=2.55.0.5|https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe|{sha}", r"\^winget-git="),
+    ):
+        rx = next(m for m in re.findall(r"-match '(\^[^']+)'", harvest) if re.match(pat, m))
+        assert re.match(rx, line), (line, rx)
+    assert not re.match(next(m for m in re.findall(r"-match '(\^uv=[^']+)'", harvest)), f"uv=latest|{sha}")
 
 
 def test_updates_go_off_inside_the_guest_at_first_contact_and_nothing_changes_on_the_host() -> None:
