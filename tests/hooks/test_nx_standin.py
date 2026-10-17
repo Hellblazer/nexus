@@ -173,9 +173,9 @@ def test_the_tool_descriptions_give_the_tables_sizes() -> None:
     description = mod.SETUP_DESCRIPTION
     rows = {
         m.group(1): (m.group(2), m.group(3))
-        for m in re.finditer(r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+) GB on disk \|", mod.QUESTION_TABLE)
+        for m in re.finditer(r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+(?: to [\d.]+)?) GB on disk \|", mod.QUESTION_TABLE)
     }
-    assert rows == {"Local": ("1.3", "2.4"), "Cloud": ("0.7", "1.6"), "CLI only": ("0.7", "1.6")}, rows
+    assert rows == {"Local": ("1.3", "2.4 to 3.1"), "Cloud": ("0.7", "2.1 to 2.3"), "CLI only": ("0.7", "2.1 to 2.3")}, rows
     local, cloud, cli = rows["Local"], rows["Cloud"], rows["CLI only"]
     assert f"up to about {local[0]} GB to download, {local[1]} GB on disk" in description
     assert f"up to about {cloud[0]} GB to download, {cloud[1]} GB on disk" in description
