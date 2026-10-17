@@ -354,7 +354,9 @@ EOF
     grep -qF "$plugin@$mkt_name" "$list" || return 1
     # The value after "Version:" must BE the declared version: a substring match
     # read 7.82.01 and 17.82.0 as 7.82.0.
-    sed -n 's/^[[:space:]]*Version:[[:space:]]*//p' "$list" | grep -qxF "$CC_PLUGIN_VERSION" || return 1
+    local listed_versions
+    listed_versions="$(sed -n 's/^[[:space:]]*Version:[[:space:]]*//p' "$list")"
+    grep -qxF "$CC_PLUGIN_VERSION" <<<"$listed_versions" || return 1
     grep -qF "Status: ✔ enabled" "$list" || return 1
     ! grep -qiE "failed to load" "$list" || return 1
     CC_PLUGIN_INSTALLED_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plugins"][sys.argv[2]][0]["installPath"])' "$TEST_HOME/.claude/plugins/installed_plugins.json" "$plugin@$mkt_name" 2>/dev/null)" || return 1
@@ -489,7 +491,9 @@ cc_wait_subagent_reply() {
     local pat="$1" timeout="${2:-180}" i
     for i in $(seq 1 $((timeout / 2))); do
         sleep 2
-        if cc_subagent_replies | grep -qE "$pat"; then return 0; fi
+        local replies
+        replies="$(cc_subagent_replies)"
+        if grep -qE "$pat" <<<"$replies"; then return 0; fi
     done
     echo "    TIMEOUT waiting for a subagent reply matching: $pat (${timeout}s)"
     return 1
