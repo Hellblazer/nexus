@@ -18,7 +18,7 @@ Reference skill for agent routing and pipeline coordination. See [reference.md](
 
 ## How to Use
 
-1. Consult [reference.md](./reference.md) for the routing graph and decision framework
+1. Consult [reference.md](./reference.md) for the routing graph and decision framework, and for § Skill Routing (which skill fits a situation), § nx_answer, § Working Rules (sequential thinking, storage tiers, T2 ttl), § Common Mistakes and § Red Flags
 2. Match the request to the appropriate agent or pipeline
 3. Dispatch the agent directly using the relay format from [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md)
 
@@ -221,7 +221,7 @@ drift, not a variant.
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
 | Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
-| Implement code | developer | -> code-review-expert -> substantive-critic -> test-validator |
+| Implement code | developer | -> code-review-expert -> substantive-critic -> (when coverage needs verifying) test-validator |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> substantive-critic (always, both reviewers — same gate as "Implement code" above) |
 | Research topic | deep-research-synthesizer | -> store_put (direct) |

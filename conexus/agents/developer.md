@@ -312,6 +312,8 @@ Output this exactly (fill in the bracketed fields):
 
 **This is not optional.** The debugger agent solves these problems in minutes. Continuing past 2 failures wastes time.
 
+For the caller reading this block: do not re-dispatch the developer. Search scratch for `circuit-breaker-fired-for-<bead>` first; if it exists, this is the second firing, so stop and report to the user. Otherwise write it (tag `escalation-guard`) and dispatch the debugger (orchestration skill § Implementer and Debugger Dispatch).
+
 ## Automatic Escalation Triggers
 
 For conditions NOT covered by the Circuit Breaker (which handles test failures), recommend via Next Step output:

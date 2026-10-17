@@ -366,7 +366,7 @@ class TestSkillDescriptionCSO:
 
     def test_every_skill_frontmatter_is_valid(self) -> None:
         skills = skill_skill_mds()
-        assert len(skills) >= 35, f"only {len(skills)} skills examined"  # 39 after nexus-dg7i6.6 retired six; was 45
+        assert len(skills) >= 38, f"only {len(skills)} skills examined"  # 39 after nexus-dg7i6.6 retired six; was 45
         offenders: list[str] = []
         for skill_path in skills:
             name = skill_path.parent.name
@@ -612,6 +612,10 @@ class TestRetiredWrapperSkillsLiveInTheOrchestrationSkill:
         "ESCALATION: Debugger Required", "circuit-breaker-fired-for-", "escalation-guard",
         "Suspect categories for the diff class", "What was NOT changed on purpose",
         "link-context",
+        # The headings AGENTS.md and /review-code cite by name, and the How to Use
+        # line that sends a loader on to the reference.md sections below.
+        "## Review Gate", "## Review Rounds", "## Implementer and Debugger Dispatch",
+        "§ Skill Routing", "§ Working Rules", "§ Red Flags",
     )
     _REFERENCE = (
         "Skill Routing", "REDUCED FROM MANY DOCUMENTS", "p50 80s", "Sequential thinking",
@@ -631,6 +635,15 @@ class TestRetiredWrapperSkillsLiveInTheOrchestrationSkill:
             assert not (SKILLS_DIR / name).exists(), f"skills/{name} came back"
             assert name not in REGISTRY.get("standalone_skills", {}), f"registry lists retired skill {name}"
         assert not {m.get("skill") for m in REGISTRY_AGENTS.values()} & set(retired)
+
+    def test_both_reviewers_flag_a_relay_with_no_acceptance_bar(self) -> None:
+        # The Review Gate loads only for an unsure caller; a caller who already
+        # chose a reviewer hears about a missing "Ship when" from the reviewer.
+        for agent in ("code-review-expert", "substantive-critic"):
+            text = (PLUGIN_DIR / "agents" / f"{agent}.md").read_text(encoding="utf-8")
+            assert "NO ACCEPTANCE BAR" in text, agent
+            front = text.split("---", 2)[1]
+            assert "Ship when <X>" in front, f"{agent} description does not ask for the bar"
 
 
 def _command_bash_block(text: str) -> str | None:
