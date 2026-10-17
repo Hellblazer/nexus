@@ -180,7 +180,8 @@ machinery that performed that migration no longer ships:
      nexus-z0o2p.27), answered the first landing call with HTTP 404 and
      nothing was written. On the last build that still had those routes, a
      store whose collections keep their embedding model and has no document
-     aspects was reported "Migration VERIFIED" while every catalog manifest
+     aspects was reported "Migration VERIFIED" (on a rerun, after the first run
+     failed with a taxonomy HTTP 422) while every catalog manifest
      row, topic assignment, frecency and relevance_log row keyed by the 16- and
      32-hex ids measured was discarded; a store built by 6.18.1's own seeder,
      with aspects and model-changing collections, failed loudly instead (HTTP
