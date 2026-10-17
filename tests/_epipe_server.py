@@ -49,8 +49,13 @@ class ResettingServer:
     An answered connection reads the request head and replies 200 with *payload* as JSON.
     """
 
-    def __init__(self, reset_first: int | None = None, payload: object = None) -> None:
+    def __init__(
+        self, reset_first: int | None = None, payload: object = None, *, after_request: bool = False,
+    ) -> None:
         self._reset_first = reset_first
+        # after_request: read the request head, THEN reset. The client is by then waiting on its read,
+        # so it meets ECONNRESET on macOS and Linux alike, and the RST can never land inside connect().
+        self._after_request = after_request
         self._payload = [] if payload is None else payload
         self._listener = socket.socket()
         self._listener.bind(("127.0.0.1", 0))
@@ -87,10 +92,24 @@ class ResettingServer:
                     self._held[client_port] = conn if reset else None
                     self._held_cv.notify_all()
             if reset:
-                if not self._hold:
+                if self._after_request:
+                    self._read_head(conn)
+                    self._rst(conn)
+                elif not self._hold:
                     self._rst(conn)
                 continue
             self._answer(conn)
+
+    @staticmethod
+    def _read_head(conn: socket.socket) -> bytes:
+        conn.settimeout(5)
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            head += chunk
+        return head
 
     @staticmethod
     def _rst(conn: socket.socket) -> None:
@@ -142,8 +161,10 @@ class ResettingServer:
 
 
 @contextmanager
-def resetting_server(reset_first: int | None = None, payload: object = None) -> Iterator[ResettingServer]:
-    server = ResettingServer(reset_first, payload)
+def resetting_server(
+    reset_first: int | None = None, payload: object = None, *, after_request: bool = False,
+) -> Iterator[ResettingServer]:
+    server = ResettingServer(reset_first, payload, after_request=after_request)
     server._thread.start()
     try:
         yield server

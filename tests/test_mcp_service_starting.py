@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import socket
-import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -135,41 +134,26 @@ def test_search_on_a_service_that_is_not_listening_yet_says_it_is_not_answering(
 
 
 def test_search_on_a_service_that_resets_the_connection_says_it_is_not_answering(monkeypatch):
-    """A connection dropped mid-request (the supervisor killed the JVM): the server accepts and
-    closes with an RST, which the client sees as a ConnectionResetError."""
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(8)
-    port = listener.getsockname()[1]
-    stop = threading.Event()
-
-    def reset_every_connection():
-        listener.settimeout(0.2)
-        while not stop.is_set():
-            try:
-                conn, _ = listener.accept()
-            except OSError:
-                continue
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-            conn.close()
-
-    thread = threading.Thread(target=reset_every_connection, daemon=True)
-    thread.start()
-    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "tok"))
-    monkeypatch.setattr(hvc, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0))
-    monkeypatch.setattr(hvc, "_wait_for_lease_republication", lambda: None)
-    monkeypatch.setattr(mcp_infra, "_COLLECTIONS_REFRESH_FAILURE_MEMO", 0.0)
-    mcp_infra.reset_singletons()
-    mcp_infra.inject_t3(hvc.HttpVectorClient(tenant=hvc._process_default_tenant()))
-    try:
-        text = core._search_render("anything", corpus="knowledge")
-        _assert_not_answering_message(text)
-        assert "(connection reset)" in text
-    finally:
-        stop.set()
-        thread.join(timeout=5)
-        listener.close()
+    """A connection dropped mid-request (the supervisor killed the JVM): the server reads the request,
+    then closes with an RST, which the client, already waiting on its read, sees as a
+    ConnectionResetError. Resetting on accept instead raced connect() and setsockopt (EINVAL on
+    macOS, 3 of 80 runs at 8-wide in the nexus-40fjk confirmation)."""
+    with resetting_server(after_request=True) as server:
+        reasons = record_transport_reasons(monkeypatch)
+        monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (server.base_url, "tok"))
+        monkeypatch.setattr(hvc, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0))
+        monkeypatch.setattr(hvc, "_wait_for_lease_republication", lambda: None)
+        monkeypatch.setattr(mcp_infra, "_COLLECTIONS_REFRESH_FAILURE_MEMO", 0.0)
         mcp_infra.reset_singletons()
+        mcp_infra.inject_t3(hvc.HttpVectorClient(tenant=hvc._process_default_tenant()))
+        try:
+            text = core._search_render("anything", corpus="knowledge")
+            _assert_not_answering_message(text)
+            assert "(connection reset)" in text
+            # Non-vacuity: the classifier saw the read-side reset this test is about.
+            assert reasons and set(reasons) == {ConnectionResetError}, reasons
+        finally:
+            mcp_infra.reset_singletons()
 
 
 @skip_on_windows
