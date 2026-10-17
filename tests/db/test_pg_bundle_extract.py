@@ -337,6 +337,7 @@ def test_discover_pg_binaries_finds_bundle_without_env(tmp_path, monkeypatch, ma
 
 
 @pytest.mark.integration
+@pytest.mark.no_service_jar  # drives the PG bundle only; the CA-3 job builds no service jar
 def test_ensure_real_bundle_discovers_and_has_pgvector(tmp_path, monkeypatch) -> None:
     """First-run orchestration end to end on a GENUINE artifact.
 

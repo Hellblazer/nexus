@@ -54,6 +54,9 @@ COVERED_ELSEWHERE: dict[str, str] = {
     "tests/db/test_pg_bundle_relocation.py": (
         "ca3-pgvector-bundle jobs, path-filtered on this file, with the source-built bundle"
     ),
+    "tests/db/test_pg_bundle_extract.py": (
+        "ca3-pgvector-bundle jobs, path-filtered on this file, with NEXUS_PG_BUNDLE set to the built .txz"
+    ),
     "tests/db/test_write_seam_gate_integration.py": (
         "write-seam-gate job, path-filtered on this file and the seam sources"
     ),

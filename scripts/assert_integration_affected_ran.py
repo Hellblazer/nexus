@@ -25,16 +25,13 @@ import xml.etree.ElementTree as ET
 
 #: Integration files that execute nothing in this job. A file not listed
 #: here that skips every test fails the job: that is the silent coverage loss
-#: this job exists to catch. Two entries are runner limits. The other is a
-#: test no gate arms yet, with a bead; remove the entry when the bead
+#: this job exists to catch. Both entries are runner limits. A test no gate
+#: arms yet gets an entry naming its bead; remove the entry when the bead
 #: lands.
 ALL_SKIP_ALLOWED: dict[str, str] = {
     "tests/test_dt_mcp_stdio_transport.py": "runner limit: DEVONthink MCP binary, macOS only",
     "tests/test_search_fanout_recall_parity.py": (
         "runner limit: needs a real nexus config pointing at the live cloud engine"
-    ),
-    "tests/db/test_pg_bundle_extract.py": (
-        "unarmed everywhere (nexus-zfynv): no workflow exports NEXUS_PG_BUNDLE"
     ),
 }
 

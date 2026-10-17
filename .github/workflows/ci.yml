@@ -1727,7 +1727,10 @@ jobs:
               - 'src/nexus/db/pg_provision.py'
               - 'tests/db/test_pg_provision_ca3_bundle.py'
               - 'tests/db/test_pg_bundle_relocation.py'
+              - 'tests/db/test_pg_bundle_extract.py'
+              - 'src/nexus/db/pg_bundle.py'
               - 'scripts/assert_ca3_ran.py'
+              - 'scripts/assert_integration_affected_ran.py'
               - 'scripts/build_pg_bundle.sh'
               - 'scripts/liquibase_bundle_smoke.sh'
               - '.github/workflows/ci.yml'
@@ -1889,6 +1892,23 @@ jobs:
           # Reuse the CA-3 non-vacuity asserter (keys on the shared
           # "no CA-3 bundle" skip phrase + the CREATE EXTENSION core test).
           uv run python scripts/assert_ca3_ran.py reloc.xml
+          # First-run locate/extract/select path on the .txz this job just built
+          # (nexus-zfynv). NEXUS_PG_BUNDLE was exported by no gate, so the test
+          # skipped everywhere. Same non-vacuity checker as the affected-
+          # integration job: a skip of the file's only integration test fails.
+          export NEXUS_PG_BUNDLE="$txz"
+          printf '%s\n' tests/db/test_pg_bundle_extract.py > extract-selected.txt
+          set +e
+          uv run pytest tests/db/test_pg_bundle_extract.py -o addopts="" -m integration \
+            --collect-only -q > extract-collect.txt
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then cat extract-collect.txt; echo "::error::collect-only exited $rc"; exit 1; fi
+          collected="$(grep -cE '^[^ ]+\.py::' extract-collect.txt || true)"
+          uv run pytest tests/db/test_pg_bundle_extract.py \
+            -o addopts="" -m integration -q -rs --junit-xml=extract.xml
+          python3 scripts/assert_integration_affected_ran.py \
+            --junit extract.xml --selected extract-selected.txt --collected "$collected"
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
         if: steps.gate.outputs.run == 'true'
