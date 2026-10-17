@@ -65,6 +65,21 @@ class SearchDiagnostics:
     format (the "top of the ranking"); internally it is a ``min`` over dropped
     distances because smaller cosine distance = higher rank.
 
+    ``kept`` maps name → the number of rows that collection contributes to the
+    result set this call returns (nexus-079ly); read it through
+    :meth:`kept_for`. *raw* and *dropped* are the engine's per-collection
+    counts, taken BEFORE the global ``limit`` cut: on the per-collection route
+    a collection can hold ``raw > 0`` and ``dropped == 0`` yet contribute
+    nothing because the global limit cut all its rows. A ``--lexical`` row
+    may duplicate a vector row the engine dropped by threshold; the engine
+    reports no dropped ids, so that overlap is not corrected and lexical rows
+    never touch *raw* or *dropped*. On the batched route *kept* is
+    ``raw - dropped``, as it always was. On the per-collection route
+    ``kept == 0`` therefore means "contributed no rows to the answer" (so
+    ``zero_hit_rate`` in search telemetry counts a collection cut entirely by
+    the global limit as a zero hit), not "the threshold dropped everything";
+    ``worst_offender`` requires both.
+
     The struct is populated by ``search_cross_corpus`` when the caller passes
     ``diagnostics_out=[]``; the CLI reads ``worst_offender()`` to emit the
     silent-zero stderr note. The engine itself never emits stderr.
@@ -73,12 +88,27 @@ class SearchDiagnostics:
     per_collection: dict[str, tuple[int, int, float | None, float | None]] = field(
         default_factory=dict,
     )
+    #: name → rows contributed to the returned result set (nexus-079ly). Empty
+    #: for a hand-built struct; :meth:`kept_for` then falls back to
+    #: ``raw - dropped``.
+    kept: dict[str, int] = field(default_factory=dict)
     total_dropped: int = 0
     total_raw: int = 0
     # nexus-pebfx.8: collections the backend refused to serve (e.g. service-mode
     # HTTP 400 on an embedding-space mismatch), name → error text. These are
     # excluded from ``per_collection`` so threshold telemetry stays clean.
     failed_collections: dict[str, str] = field(default_factory=dict)
+
+    def kept_for(self, name: str) -> int:
+        """Rows *name* contributes to the returned result set.
+
+        The explicit ``kept`` figure when the search recorded one, else
+        ``raw - dropped`` for a struct built without it.
+        """
+        if name in self.kept:
+            return self.kept[name]
+        raw, dropped = self.per_collection.get(name, (0, 0))[:2]
+        return raw - dropped
 
     def collections_with_drops(self) -> int:
         return sum(
@@ -88,14 +118,16 @@ class SearchDiagnostics:
     def worst_offender(self) -> tuple[str, float | None, float] | None:
         """Return ``(name, threshold, top_distance)`` for the worst offender.
 
-        Worst offender = collection where every candidate was dropped, with
-        the highest ``top_distance`` among those. ``None`` when no collection
-        had every candidate filtered.
+        Worst offender = collection where every candidate was dropped and
+        which contributed no row to the answer, with the highest
+        ``top_distance`` among those. ``None`` when no collection had every
+        candidate filtered.
         """
         candidates = [
             (name, threshold, top_dist)
             for name, (raw, dropped, threshold, top_dist) in self.per_collection.items()
-            if raw > 0 and dropped == raw and top_dist is not None
+            if raw > 0 and dropped == raw and self.kept_for(name) == 0
+            and top_dist is not None
         ]
         if not candidates:
             return None
@@ -1145,7 +1177,15 @@ def search_cross_corpus(
     *top_distance* is the minimum (best-ranked) distance across ALL raw
     candidates for that collection (kept or dropped), not just the
     dropped subset — see ``SearchDiagnostics`` for the dropped-only
-    variant.
+    variant. *kept_count* is the number of rows the collection contributes
+    to the returned result set (nexus-079ly). On the batched route that is
+    ``raw_count`` minus the threshold-dropped rows; on the per-collection
+    route *raw_count* and the dropped count are the engine's per-collection
+    counts before the global limit cut (a ``--lexical`` row may duplicate a
+    dropped vector row: the engine reports no dropped ids, so this is not
+    corrected), and *kept_count* is what survived that cut and the lexical
+    union. ``zero_hit_rate`` there means "contributed no rows to the answer",
+    so a collection cut entirely by the global limit counts as a zero hit.
 
     *content_chars* (nexus-tao37) asks the per-collection route to cap each
     row's text at that many code points. Pass it only when every reader of
@@ -1229,6 +1269,7 @@ def search_cross_corpus(
     want_embeddings = cluster_by == "semantic" and taxonomy is None
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
+    diag_kept: dict[str, int] = {}
     failed_collections: dict[str, str] = {}
     total_dropped = 0
     total_raw = 0
@@ -1527,6 +1568,7 @@ def search_cross_corpus(
                 "error": None,
                 "results": results,
                 "raw_count": len(col_raw),
+                "kept": len(results),
                 "dropped": dropped,
                 "threshold": threshold,
                 "min_dropped_distance": min_dropped_distance,
@@ -1597,7 +1639,8 @@ def search_cross_corpus(
         ``--lexical``: the lexical leg stays on ``/hybrid-search`` exactly as
         the batched path runs it (same batches, same per-batch size). Its rows
         are unioned in here, threshold-exempt, with the vector copy winning a
-        tie; the diagnostics count each added row as raw.
+        tie; a lexical row counts toward ``kept`` only (nexus-079ly): ``raw``
+        and ``dropped`` stay the engine's per-collection counts.
         """
         if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
             chunks = [
@@ -1719,6 +1762,7 @@ def search_cross_corpus(
                 "error": None,
                 "results": results,
                 "raw_count": raw_count,
+                "kept": len(results),
                 "dropped": dropped,
                 "threshold": _threshold_for(col),
                 "min_dropped_distance": min_dropped,
@@ -1763,11 +1807,8 @@ def search_cross_corpus(
                     # in here: lexical rows are threshold-exempt, so the row
                     # is kept, as the batched path keeps it.
                     part["results"].append(_to_result(r, col))
-                    part["raw_count"] += 1
-                    d = r["distance"]
-                    if part["min_raw_distance"] is None or d < part["min_raw_distance"]:
-                        part["min_raw_distance"] = d
             for col, part in live.items():
+                part["kept"] = len(part["results"])
                 part["lexical_ids"] = {
                     x.id for x in part["results"] if x.id in lexical_by_col[col]
                 }
@@ -1919,6 +1960,7 @@ def search_cross_corpus(
             part["raw_count"], part["dropped"], part["threshold"],
             part["min_dropped_distance"],
         )
+        diag_kept[col] = part["kept"]
         min_raw_per_collection[col] = part["min_raw_distance"]
         if rerank_meta_out is not None and part.get("rerank_meta"):
             rerank_meta_out[col] = part["rerank_meta"]
@@ -1991,6 +2033,7 @@ def search_cross_corpus(
     if diagnostics_out is not None:
         diagnostics_out.append(SearchDiagnostics(
             per_collection=diag_per_collection,
+            kept=diag_kept,
             total_dropped=total_dropped,
             total_raw=total_raw,
             failed_collections=failed_collections,
@@ -2009,9 +2052,9 @@ def search_cross_corpus(
         rows = [
             (
                 ts, query_hash, col,
-                raw_count, raw_count - dropped_count, min_raw_per_collection[col], thr,
+                raw_count, diag_kept[col], min_raw_per_collection[col], thr,
             )
-            for col, (raw_count, dropped_count, thr, _dropped_min)
+            for col, (raw_count, _dropped_count, thr, _dropped_min)
             in diag_per_collection.items()
         ]
         try:

@@ -2764,6 +2764,8 @@ Renders four sections: distance histogram, top-5 cross-projections, orphan chunk
 | `--sort COLUMN` | Sort the table by a named column (`name`, `chunk_count`, `last_indexed`, `zero_hit_rate_30d`, `median_query_distance_30d`, `cross_projection_rank`, `orphan_catalog_rows`, `hub_domination_score`). Default: `name` |
 | `--format {table,json}` | Output format (default: `table`). `--format=json` returns `{generated_at, collections: [...]}` for dashboards and CI gates |
 
+`zero_hit_rate_30d` is the share of searches in which the collection contributed no rows to the answer; on the per-collection search route a collection whose rows all lose the global result limit counts as a zero hit although no threshold dropped them (nexus-079ly).
+
 Chunk counts come from T3's live `coll.count()` (same source as `nx collection list`) so the two surfaces cannot disagree — catalog-sourced counts were historically drifting to 0 on tenants that predated the catalog's `chunk_count` column (fixed 4.9.0, nexus-39zi).
 
 **`delete` flags:**

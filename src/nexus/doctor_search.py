@@ -429,8 +429,11 @@ def run_retrieval_quality_probe(
         diag = diag_list[0]
         per_col = diag.per_collection.get(col, (0, 0, None, None))
         raw, dropped = per_col[0], per_col[1]
-        kept = raw - dropped
-        if raw == 0:
+        # nexus-079ly: rows the collection contributed, which on the
+        # per-collection route is not raw - dropped (the global limit cut and
+        # the lexical union both move it).
+        kept = diag.kept_for(col)
+        if raw == 0 and kept == 0:
             outcome = "empty"
         elif kept == 0:
             outcome = "threshold_drop"

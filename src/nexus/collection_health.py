@@ -9,6 +9,12 @@ and topic-assignment signals into a single per-collection view:
     median_query_distance_30d, cross_projection_rank,
     orphan_catalog_rows, stale_source_ratio, hub_domination_score
 
+``zero_hit_rate_30d`` is the share of searches in which the collection
+contributed no rows to the answer (``kept_count`` 0 in ``search_telemetry``). On
+the engine's per-collection search route a collection whose rows all lose the
+global ``limit`` cut counts as a zero hit, though nothing was dropped by a
+threshold (nexus-079ly).
+
 ``stale_source_ratio`` is the fraction of a collection's documents last indexed
 more than 30 days ago (``catalog._STALE_SOURCE_AGE_DAYS``; nexus-agsq7) — an INDEX-AGE proxy for
 staleness, computed DB-only from ``indexed_at``. A true "source modified since
