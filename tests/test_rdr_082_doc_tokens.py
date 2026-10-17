@@ -107,6 +107,45 @@ class TestTokenParse:
         toks = parse_tokens(md)
         assert len(toks) == 1 and toks[0].key == "real"
 
+    def test_token_inside_inline_code_skipped(self) -> None:
+        """nexus-9bl2f: a doc quoting the token syntax in backticks
+        (single or multi-backtick) renders it literally, the same as
+        citations and catalog links. Tokens outside code still resolve,
+        and their span/lineno/col stay valid against the real text."""
+        from nexus.doc.tokens import parse_tokens
+
+        md = (
+            "Write `{{bd:quoted.status}}` to embed a status.\n"
+            "Or ``{{bd:double.status}}`` with two ticks.\n"
+            "Real: `code` then {{rdr:082.status}} after `{{bd:x.y}}` end.\n"
+        )
+        toks = parse_tokens(md)
+        assert [(t.namespace, t.key) for t in toks] == [("rdr", "082")]
+        t = toks[0]
+        assert t.lineno == 3
+        assert md[t.span[0]:t.span[1]] == "{{rdr:082.status}}" == t.raw
+        line3 = md.splitlines()[2]
+        assert t.col == line3.index("{{rdr") + 1
+
+    def test_token_straddling_a_code_span_is_not_a_token(self) -> None:
+        from nexus.doc.tokens import parse_tokens
+
+        assert parse_tokens("{{bd:`x`.status}} and {{bd:`y` ok}}") == []
+
+    def test_render_text_leaves_inline_code_token_literal(self) -> None:
+        from nexus.doc.render import render_text
+        from nexus.doc.resolvers import ResolverRegistry
+
+        class _R:
+            def resolve(self, key, field, filters):
+                return "RESOLVED"
+
+        reg = ResolverRegistry()
+        reg.register("bd", _R())
+        out, n, misses = render_text("`{{bd:a.status}}` vs {{bd:b.status}}", reg)
+        assert out == "`{{bd:a.status}}` vs RESOLVED"
+        assert n == 1 and misses == []
+
     def test_span_reports_line_and_col(self) -> None:
         from nexus.doc.tokens import parse_tokens
 
