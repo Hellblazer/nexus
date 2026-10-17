@@ -51,6 +51,7 @@ together at the next client release rather than split across two.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import os
@@ -523,6 +524,178 @@ def phase2_deferral_check(
     )
 
 
+#: Where the plugin tree lives, and the file whose entries start its scripts.
+PLUGIN_ROOT = "conexus/"
+_PLUGIN_ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}/"
+#: Scripts here are started by the launcher (``launch/nx_launch.py``) or by
+#: ``.mcp.json`` entries that go through it, so each one is a starter too.
+LAUNCH_DIR = "conexus/launch/"
+
+
+def _starter_scripts(paths: set[str], read: Callable[[str], str | None]) -> list[str]:
+    """Plugin scripts a ``.mcp.json`` entry or the launcher starts.
+
+    ``.mcp.json`` args name a script as ``${CLAUDE_PLUGIN_ROOT}/<rel>.py``;
+    everything under :data:`LAUNCH_DIR` is added because the launcher starts
+    those without naming them in ``.mcp.json``. Raises :class:`CutRefused`
+    when ``.mcp.json`` is present and not JSON: a check that cannot read its
+    starters would pass over input it never examined.
+    """
+    starters = {p for p in paths if p.startswith(LAUNCH_DIR) and p.endswith(".py")}
+    text = read(f"{PLUGIN_ROOT}.mcp.json")
+    if text is not None:
+        try:
+            servers = json.loads(text)
+        except ValueError as exc:
+            raise CutRefused(
+                f"import coupling guard: {PLUGIN_ROOT}.mcp.json is not JSON, "
+                f"so the scripts it starts cannot be listed ({exc})"
+            ) from exc
+        for server in servers.values() if isinstance(servers, dict) else ():
+            for arg in server.get("args", ()) if isinstance(server, dict) else ():
+                if isinstance(arg, str) and arg.startswith(_PLUGIN_ROOT_VAR) and arg.endswith(".py"):
+                    rel = PLUGIN_ROOT + arg[len(_PLUGIN_ROOT_VAR):]
+                    if rel in paths:
+                        starters.add(rel)
+    return sorted(starters)
+
+
+def _imported_module_names(source: str) -> set[str]:
+    """Top-level names of every module a script imports, at any depth."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def _edits_sys_path(source: str) -> bool:
+    """True when a script inserts into or appends to ``sys.path``."""
+    return bool(re.search(r"\bsys\.path\.(?:insert|append)\s*\(", source))
+
+
+def plugin_import_edges(
+    paths: set[str], read: Callable[[str], str | None]
+) -> dict[str, set[str]]:
+    """Sibling plugin imports reachable from every starter script.
+
+    Returns importer path -> the plugin ``.py`` paths it imports, for every
+    starter and, transitively, every plugin script a starter pulls in. A name
+    resolves to ``<script dir>/<name>.py`` when that exists; when the script
+    also edits ``sys.path`` (the idiom a plugin script uses to reach a sibling
+    directory from its own location), to the one other plugin file of that
+    name. A name with several candidates under ``sys.path`` editing resolves
+    to all of them: refusing too much is the safe error here. Standard-library
+    and third-party names match no plugin file and drop out.
+    """
+    by_stem: dict[str, list[str]] = {}
+    for path in paths:
+        if path.startswith(PLUGIN_ROOT) and path.endswith(".py"):
+            by_stem.setdefault(path.rsplit("/", 1)[-1][:-3], []).append(path)
+    edges: dict[str, set[str]] = {}
+    pending = _starter_scripts(paths, read)
+    while pending:
+        script = pending.pop()
+        if script in edges:
+            continue
+        source = read(script) or ""
+        here = script.rsplit("/", 1)[0] + "/"
+        found: set[str] = set()
+        for name in _imported_module_names(source):
+            beside = f"{here}{name}.py"
+            if beside in paths:
+                found.add(beside)
+            elif _edits_sys_path(source):
+                found.update(c for c in by_stem.get(name, ()) if c != script)
+        edges[script] = found
+        pending.extend(found - edges.keys())
+    return edges
+
+
+def coupling_violations(
+    edges: dict[str, set[str]], shipping: set[str], held_back: set[str]
+) -> list[tuple[str, str]]:
+    """(importer, importee) pairs where the importer ships and the importee is held back."""
+    return sorted(
+        (importer, importee)
+        for importer, importees in edges.items()
+        if importer in shipping
+        for importee in importees
+        if importee in held_back
+    )
+
+
+def import_coupling_check(
+    repo: Path, reference: str, source_ref: str, ledger_text: str
+) -> str:
+    """Refuse a cut that ships a script while holding back a module it imports.
+
+    The sequential-thinking server (``mcp/sequential_thinking.py``, loaded in
+    every session) imports ``launch/_stdio_loop.py``. A bead that moves them
+    can be split by the ledger: a DEFERRED entry holds its paths back from the
+    cut (``_hold_back_deferred_paths``), and the importer ships on its own
+    into a plugin that dies with ``ModuleNotFoundError`` at server start.
+    This finds every script a ``.mcp.json`` entry or the launcher starts
+    (:func:`plugin_import_edges`), and raises :class:`CutRefused` naming each
+    (importer, importee) pair where the importer differs from *reference* and
+    is not deferred while the importee differs from *reference* and IS
+    deferred. A deferred importer with a shipping importee is safe: dead
+    weight, no failure. Returns a one-line account of what it examined.
+    """
+    for ref in (reference, source_ref):
+        if _git(repo, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+                check=False).returncode != 0:
+            raise CutRefused(
+                f"import coupling guard: {ref} does not resolve, so what "
+                "imports what is unknown"
+            )
+    paths = {
+        line.strip()
+        for line in _git(
+            repo, "ls-tree", "-r", "--name-only", source_ref, "--", PLUGIN_ROOT
+        ).stdout.splitlines()
+        if line.strip()
+    }
+    cache: dict[str, str | None] = {}
+
+    def read(path: str) -> str | None:
+        if path not in cache:
+            shown = _git(repo, "show", f"{source_ref}:{path}", check=False)
+            cache[path] = shown.stdout if shown.returncode == 0 else None
+        return cache[path]
+
+    edges = plugin_import_edges(paths, read)
+    differing = {
+        line.strip()
+        for line in _git(
+            repo, "diff", "--name-only", "--no-renames", reference, source_ref,
+            "--", PLUGIN_ROOT,
+        ).stdout.splitlines()
+        if line.strip()
+    }
+    deferred = deferred_paths(ledger_text)
+    bad = coupling_violations(edges, differing - deferred, differing & deferred)
+    if bad:
+        raise CutRefused(
+            "a plugin cut would ship a script and hold back a module it "
+            "imports; the shipped plugin would fail at start with "
+            "ModuleNotFoundError. Defer the importer too, or move the "
+            "importee out of 'Deferred to the next client release':\n  "
+            + "\n  ".join(f"{a} imports {b}" for a, b in bad)
+        )
+    count = sum(len(v) for v in edges.values())
+    return (
+        f"import coupling guard: {len(edges)} script(s) examined, {count} "
+        f"sibling import(s), none ships without its importee"
+    )
+
+
 def attribute_entry(entry: str) -> str:
     """One bead per entry, by the rule that needs no interpreting.
 
@@ -845,6 +1018,14 @@ def perform_cut(
         develop_ledger_text.stdout if develop_ledger_text.returncode == 0 else "",
     )
     print(phase2_check)
+    # Like the Phase 2 guard, not the seam: a stubbed split check must not
+    # be able to skip it.
+    print(
+        import_coupling_check(
+            repo, "origin/main", "origin/develop",
+            develop_ledger_text.stdout if develop_ledger_text.returncode == 0 else "",
+        )
+    )
     split_check(repo, base_tag, changed)
 
     branch = f"plugin-release/{version}-{n}"

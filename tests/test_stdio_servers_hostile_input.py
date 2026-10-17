@@ -70,6 +70,7 @@ class Server:
     argv: tuple[str, ...]
     env: dict[str, str]
     script: Path
+    server_name: str
     main_args: tuple[str, ...] = ()
 
     def run(self, payload: bytes) -> subprocess.CompletedProcess[bytes]:
@@ -80,11 +81,11 @@ class Server:
 
 
 def _sequential_thinking(tmp_path: Path) -> Server:
-    return Server("sequential-thinking", (sys.executable, str(_SEQ)), _env(tmp_path), _SEQ)
+    return Server("sequential-thinking", (sys.executable, str(_SEQ)), _env(tmp_path), _SEQ, "sequential-thinking-server")
 
 
 def _stand_in(tmp_path: Path) -> Server:
-    return Server("stand-in", (sys.executable, str(_LAUNCH), "nx-mcp"), _env(tmp_path), _STANDIN, ("nx-mcp",))
+    return Server("stand-in", (sys.executable, str(_LAUNCH), "nx-mcp"), _env(tmp_path), _STANDIN, "nexus-not-installed", ("nx-mcp",))
 
 
 @pytest.fixture(params=[_sequential_thinking, _stand_in], ids=["sequential-thinking", "stand-in"])
@@ -105,6 +106,19 @@ _HOSTILE = {
 
 def _replies(r: subprocess.CompletedProcess[bytes]) -> list[dict]:
     return [_strict_loads(reply) for reply in r.stdout.decode("utf-8").splitlines()]
+
+
+def test_each_fixture_starts_the_server_it_names(server: Server) -> None:
+    """The hostile-input cases prove nothing about a server that was not the one
+    started: the launcher serves the stand-in only when no CLI is found, and a
+    developer's own install would be answered instead. ``initialize`` names who
+    answered."""
+    initialize = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode() + b"\n"
+    r = server.run(initialize)
+    assert r.returncode == 0
+    assert r.stderr == b""
+    (reply,) = _replies(r)
+    assert reply["result"]["serverInfo"]["name"] == server.server_name, reply
 
 
 @pytest.mark.parametrize("line", list(_HOSTILE.values()), ids=list(_HOSTILE))
