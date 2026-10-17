@@ -65,7 +65,8 @@ Everything else is automatic.
 `rdr192-manifest-backfill` censuses every collection for legacy notes that
 have a catalog document but no manifest row (the engine hides them from search
 since RDR-192) and backfills them. It records completion, per tenant, only after
-a fresh census reads zero; the engine's reaper refuses to run on a tenant
+a census reads zero (each collection read in that session or kept from one at
+most 24 hours earlier); the engine's reaper refuses to run on a tenant
 without that record; that refusal is complete only for a tenant with no earlier
 record (an older record still stands, and the reaper's own in-engine census is
 what covers that case). When some note cannot be backfilled the rung DEFERS
