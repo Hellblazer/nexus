@@ -244,6 +244,30 @@ def test_gated_commits_key_on_the_bare_number(rdr_hook_mod, monkeypatch) -> None
     assert mod._load_gated_commits("nexus") == {"105": "abc1234", "97": "def5678"}
 
 
+def test_the_hook_reads_the_same_statuses_and_gates_from_the_whole_project_and_the_narrow_one(rdr_hook_mod, monkeypatch) -> None:
+    """nexus-pxp44: the fetch now asks the engine for the status and gate-latest
+    rows only; an older engine still answers the whole project. Same data, same
+    output, either way."""
+    mod = rdr_hook_mod
+    status_titles = ["042", "7", "RDR-105"]
+    gate_titles = ["042-gate-latest", "RDR-105-gate-latest"]
+    other_titles = ["042-research", "RDR-105-notes", "42-final", "plain title", "gate-latest-not"]
+    whole = [
+        {"id": i, "title": t, "content": "status: accepted\n" if t in status_titles else f"commit: abc{i}\n"}
+        for i, t in enumerate(status_titles + gate_titles + other_titles)
+    ]
+    narrow = [r for r in whole if r["title"] in status_titles + gate_titles]
+
+    def load(rows):
+        monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+        return mod._load_all_t2_statuses("nexus"), mod._load_gated_commits("nexus")
+
+    assert load(whole) == load(narrow)
+    statuses, gated = load(narrow)
+    assert statuses == {"42": "accepted", "7": "accepted", "105": "accepted"}
+    assert gated == {"42": "abc3", "105": "abc4"}
+
+
 def test_uncommitted_rdr_file_is_not_reported(rdr_hook_mod, tmp_path) -> None:
     mod = rdr_hook_mod
     (tmp_path / "docs" / "rdr").mkdir(parents=True)

@@ -473,9 +473,10 @@ def _fetch_rdr_rows(repo_name: str) -> list[dict]:
     it the project reads as empty for this run, lands in :data:`_T2_LATE` so
     :func:`run` can say so, and is logged as ``rdr_hook_t2_late`` with the
     time it had taken, so the rate of degraded sessions is countable from
-    ``hook.log`` instead of from transcripts. The fetch is the whole project
-    because the engine has no narrower read: ``/v1/memory/list`` carries no
-    content and ``/v1/memory/all`` no title filter (nexus-pxp44)."""
+    ``hook.log`` instead of from transcripts. The fetch is the two row kinds
+    the loaders read (status and ``*-gate-latest``), not the project:
+    ``/v1/memory/all`` filters by title kind (nexus-pxp44). An older engine
+    answers the whole project and the loaders skip what they do not read."""
     if repo_name in _T2_ROWS_CACHE:
         return _T2_ROWS_CACHE[repo_name]
     rows: list[dict] = []

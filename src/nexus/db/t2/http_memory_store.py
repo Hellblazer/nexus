@@ -38,12 +38,17 @@ Client-composed (pure-Python logic over server-side data):
 from __future__ import annotations
 
 import contextlib
+import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import httpx
+import structlog
 
 # ── Constants ──────────────────────────────────────────────────────────────────
+
+_log = structlog.get_logger(__name__)
 
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
@@ -542,10 +547,39 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 "have been returned instead of this error)"
             ) from exc
 
-    def get_all(self, project: str) -> list[dict[str, Any]]:
-        """Return all entries for *project* with full column data."""
-        resp = self._get("/v1/memory/all", params={"project": project})
-        return [_normalize(r) for r in resp]
+    def get_all(
+        self,
+        project: str,
+        *,
+        title_kinds: Collection[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all entries for *project* with full column data.
+
+        *title_kinds* (nexus-pxp44) narrows the read to rows whose title is
+        any of the named kinds in :data:`TITLE_KINDS`: ``rdr_status`` (the bare
+        number or ``RDR-<n>``) and ``gate_latest`` (any ``...-gate-latest``).
+        The engine filters, so a project of 1,500 rows of which 380 are wanted
+        crosses the wire as 380. ``None`` or empty reads every row.
+
+        An engine older than the parameter ignores it and answers every row, so
+        the result is cut here too: callers get exactly the matching rows either
+        way, only the cost differs. An engine that answers the parameter with a
+        400 is read again without it, for the same reason. An unknown kind
+        raises ``ValueError`` before any request.
+        """
+        kinds = _validated_title_kinds(title_kinds)
+        params: dict[str, Any] = {"project": project}
+        if not kinds:
+            return [_normalize(r) for r in self._get("/v1/memory/all", params=params)]
+        params["title_kinds"] = ",".join(kinds)
+        try:
+            resp = self._get("/v1/memory/all", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            _log.warning("memory_all_title_kinds_refused", project=project, kinds=list(kinds))
+            resp = self._get("/v1/memory/all", params={"project": project})
+        return [row for row in map(_normalize, resp) if _title_matches_any(row, kinds)]
 
     # ── Delete ─────────────────────────────────────────────────────────────────
 
@@ -866,6 +900,36 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
 
 # ── Normalisation helpers ──────────────────────────────────────────────────────
+
+#: The named title shapes :meth:`HttpMemoryStore.get_all` can narrow a read to
+#: (nexus-pxp44), as the engine names them on ``/v1/memory/all?title_kinds=``.
+TITLE_KINDS: tuple[str, ...] = ("rdr_status", "gate_latest")
+
+#: Client-side mirror of the engine's per-kind title test, so an engine that
+#: ignores the parameter yields the same rows. The status pattern is the
+#: engine's regex, ASCII digits only, applied to the whole title.
+_TITLE_KIND_TESTS: dict[str, Callable[[str], bool]] = {
+    "rdr_status": lambda title: re.fullmatch(r"(?:RDR-)?[0-9]+", title) is not None,
+    "gate_latest": lambda title: title.endswith("-gate-latest"),
+}
+
+
+def _validated_title_kinds(kinds: Collection[str] | None) -> tuple[str, ...]:
+    """*kinds* as a de-duplicated tuple in :data:`TITLE_KINDS` order, or raise."""
+    if not kinds:
+        return ()
+    if isinstance(kinds, str):
+        raise ValueError("title_kinds must be a collection of kind names, not one string")
+    unknown = sorted(set(kinds) - set(TITLE_KINDS))
+    if unknown:
+        raise ValueError(f"unknown title kind(s) {unknown}; known kinds: {list(TITLE_KINDS)}")
+    return tuple(k for k in TITLE_KINDS if k in set(kinds))
+
+
+def _title_matches_any(row: dict[str, Any], kinds: tuple[str, ...]) -> bool:
+    title = row.get("title") or ""
+    return any(_TITLE_KIND_TESTS[k](title) for k in kinds)
+
 
 def _normalize(row: dict[str, Any] | None) -> dict[str, Any] | None:
     """Convert a service response row to MemoryStore-compatible dict.

@@ -579,10 +579,57 @@ public final class MemoryRepository {
      * timestamp descending. Mirrors Python get_all.
      */
     public List<MemoryRecord> getAll(String tenant, String project) {
+        return getAll(tenant, project, Set.of());
+    }
+
+    /**
+     * nexus-pxp44: the named row kinds {@code /v1/memory/all?title_kinds=} can
+     * narrow a read to. A kind is a title shape, expressed as a jOOQ condition,
+     * so the caller never supplies a pattern: there is nothing to escape and no
+     * regex of the caller's to run. The rdr SessionStart hook needs exactly two
+     * kinds of row from a project of over a thousand.
+     */
+    public enum TitleKind {
+        /** A status record: the bare number ({@code 42}, {@code 042}) or {@code RDR-42}. */
+        RDR_STATUS("rdr_status", MEMORY.TITLE.likeRegex("^(RDR-)?[0-9]+$")),
+        /** A gate record: any title ending {@code -gate-latest}. */
+        GATE_LATEST("gate_latest", MEMORY.TITLE.like("%-gate-latest"));
+
+        private final String wireName;
+        private final Condition condition;
+
+        TitleKind(String wireName, Condition condition) {
+            this.wireName = wireName;
+            this.condition = condition;
+        }
+
+        public String wireName() { return wireName; }
+
+        /** The kind named on the wire, or an {@link IllegalArgumentException} naming the valid ones. */
+        public static TitleKind fromWireName(String name) {
+            for (TitleKind k : values()) {
+                if (k.wireName.equals(name)) return k;
+            }
+            throw new IllegalArgumentException("query param 'title_kinds' has unknown kind '" + name
+                + "'; known kinds: rdr_status, gate_latest");
+        }
+    }
+
+    /**
+     * {@link #getAll(String, String)} narrowed to rows whose title is any of
+     * {@code kinds}; an empty set is every row, the unfiltered read. The
+     * quarantine predicate and the order are the same on both paths.
+     */
+    public List<MemoryRecord> getAll(String tenant, String project, Set<TitleKind> kinds) {
+        Condition kindFilter = kinds.stream()
+            .map(k -> k.condition)
+            .reduce(Condition::or)
+            .orElse(noCondition());
         return tenantScope.withTenant(tenant,
                 ctx -> ctx.selectFrom(MEMORY)
                           .where(MEMORY.PROJECT.eq(project)
-                              .and(NOT_QUARANTINED))
+                              .and(NOT_QUARANTINED)
+                              .and(kindFilter))
                           .orderBy(MEMORY.TIMESTAMP.desc())
                           .fetch());
     }

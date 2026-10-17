@@ -23,13 +23,19 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["rdr_rows"]
+__all__ = ["RDR_ROW_KINDS", "rdr_rows"]
+
+#: The two row kinds the rdr hook reads: status rows and ``*-gate-latest`` rows.
+RDR_ROW_KINDS: tuple[str, ...] = ("rdr_status", "gate_latest")
 
 
 def rdr_rows(project: str) -> list[dict[str, Any]]:
-    """Every T2 row in *project*, or an empty list if T2 is unreachable.
+    """The status and gate-latest T2 rows in *project*, or an empty list if
+    T2 is unreachable.
 
-    One ``get_all`` per call. ``nexus.hooks.rdr_verb`` caches the result
+    One ``get_all`` per call, narrowed by the engine to the two kinds of row
+    the hook reads (nexus-pxp44): ``nexus_rdr`` is 1,527 rows and 4.6 MB, of
+    which 378 are wanted. ``nexus.hooks.rdr_verb`` caches the result
     for the life of a hook run and shares it between the status and gate
     loaders — code review [24883] finding 5 measured two full fetches of a
     1000-row project inside a 10s SessionStart budget.
@@ -43,6 +49,6 @@ def rdr_rows(project: str) -> list[dict[str, Any]]:
 
     try:
         with T2Database(default_db_path()) as db:
-            return list(db.get_all(project=project))
+            return list(db.get_all(project=project, title_kinds=RDR_ROW_KINDS))
     except Exception:  # noqa: BLE001 — the hook must never fail; see the docstring
         return []
