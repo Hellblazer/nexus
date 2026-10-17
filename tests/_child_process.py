@@ -24,12 +24,13 @@ or a bare ``"bin" / "java"`` anywhere else in ``tests/`` outside a frozen allowl
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,29 @@ def group_popen_kwargs() -> dict[str, Any]:
     if _POSIX:
         return {"preexec_fn": os.setsid}
     return {"creationflags": win_job.CREATE_NEW_PROCESS_GROUP}
+
+
+@contextlib.contextmanager
+def sigint_default() -> Iterator[None]:
+    """Run the body with SIGINT at its default disposition, then put back the prior one.
+
+    A suite started with ``&`` from a non-interactive shell (nohup, a pool launcher) inherits
+    SIGINT=SIG_IGN, and a child inherits it across exec, where bash cannot trap a signal that
+    was ignored on entry (nexus-frfeh). A test that sends the child a SIGINT, or asserts on the
+    disposition, wraps its spawn in this. ``signal.getsignal`` returns ``None`` for a handler
+    not installed from Python and ``signal.signal`` raises ``ValueError`` off the main thread;
+    in either case there is nothing to change or restore and the body runs as it is.
+    """
+    before = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+    except ValueError:
+        before = None
+    try:
+        yield
+    finally:
+        if before is not None:
+            signal.signal(signal.SIGINT, before)
 
 
 def popen_in_group(

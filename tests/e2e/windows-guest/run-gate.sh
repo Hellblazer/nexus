@@ -432,6 +432,10 @@ on_exit() {
     exit "$rc"
 }
 trap on_exit EXIT
+# INT cleanup applies only when INT was not ignored at launch: bash cannot trap a signal
+# that was ignored on entry. A backgrounded launch (cmd & from a non-interactive shell)
+# inherits SIGINT=SIG_IGN, so Ctrl-C-style INT then does nothing here; TERM and HUP
+# still run the cleanup (nexus-frfeh).
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP

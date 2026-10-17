@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._child_process import kill_group, popen_in_group, signal_group
+from tests._child_process import kill_group, popen_in_group, sigint_default, signal_group
 
 REPO: Path = Path(__file__).resolve().parent.parent
 GUEST_DIR: Path = REPO / "tests" / "e2e" / "windows-guest"
@@ -620,20 +620,12 @@ class Harness:
         cases then waited out the 60 s fake sleep (nexus-frfeh), which a real terminal's
         Ctrl-C never meets.
         """
-        before = signal.getsignal(signal.SIGINT)
-        try:
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
-        except ValueError:  # not the main thread: the disposition cannot be changed here
-            before = None
-        try:
+        with sigint_default():
             return popen_in_group(
                 [_bash(), str(self.script), *args], env=self._env(verdict, fail_step, env),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 cwd=self.root,
             )
-        finally:
-            if before is not None:
-                signal.signal(signal.SIGINT, before)
 
     def end_calls(self) -> list[str]:
         path = self.root / "end.log"

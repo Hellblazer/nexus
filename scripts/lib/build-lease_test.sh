@@ -134,6 +134,7 @@ else
     # process actually terminates -- this is what should release the lease
     # WITHOUT needing stale-pid reclaim.
     kill -TERM "$holder4" 2>/dev/null
+    term4_at=$SECONDS
     for _ in $(seq 1 150); do
         [[ ! -d "$leasedir4" ]] && break
         sleep 0.1
@@ -141,7 +142,10 @@ else
     if [[ ! -d "$leasedir4" ]]; then
         ok "lease released by the holder's own EXIT trap after SIGTERM"
     else
-        bad "lease dir still present after SIGTERM'd holder should have released it"
+        # Elapsed seconds tell the two causes apart: well past the 15 s the poll nominally
+        # allows means the host starved the loop itself; about 15 s means the trap really
+        # did not release.
+        bad "lease dir still present $((SECONDS - term4_at)) s after SIGTERM (polled up to 15 s); the holder should have released it"
     fi
     # A fresh acquire must now succeed cleanly, with NO stale-reclaim
     # WARNING (the lease was released properly, not left stale).

@@ -57,17 +57,21 @@ _SCAN_PROBE = (
     "sys.stdout.write(out)\n"
 )
 
-#: The same probe with ``HttpMemoryStore.get`` wrapped so each call reports the
-#: ``timeout`` and ``retry_read_timeout`` it was handed. The clamp is a property of
-#: those arguments, not of how long a loaded host takes to run the scan around them.
+#: The same probe with ``HttpMemoryStore._get`` (the request layer BELOW ``get``)
+#: wrapped so each ``/v1/memory/get`` request reports the ``timeout`` and
+#: ``retry_read_timeout`` it was handed. Recording below ``get`` makes a ``get`` that
+#: drops or rewrites the timeout visible. The clamp is a property of those
+#: arguments, not of how long a loaded host takes to run the scan around them.
 _SCAN_PROBE_RECORDING_GET = (
     "import sys\n"
     "from nexus.db.t2.http_memory_store import HttpMemoryStore\n"
-    "_real_get = HttpMemoryStore.get\n"
-    "def _get(self, *a, timeout=None, retry_read_timeout=True, **kw):\n"
-    "    sys.stderr.write('\\nGET_CALL timeout=%r retry=%r\\n' % (timeout, retry_read_timeout))\n"
-    "    return _real_get(self, *a, timeout=timeout, retry_read_timeout=retry_read_timeout, **kw)\n"
-    "HttpMemoryStore.get = _get\n"
+    "_real_get = HttpMemoryStore._get\n"
+    "def _get(self, path, params=None, **kw):\n"
+    "    if path == '/v1/memory/get':\n"
+    "        sys.stderr.write('\\nGET_CALL timeout=%r retry=%r\\n' % (\n"
+    "            kw.get('timeout'), kw.get('retry_read_timeout', True)))\n"
+    "    return _real_get(self, path, params, **kw)\n"
+    "HttpMemoryStore._get = _get\n"
 ) + _SCAN_PROBE
 
 
@@ -258,19 +262,22 @@ def _run(
         f"scan exit {result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
     _last_scan_seconds[0] = float(re.findall(r"SCAN_SECONDS=([0-9.]+)", result.stderr)[-1])
-    _last_get_calls[:] = [
-        (float(t), r == "True")
-        for t, r in re.findall(r"GET_CALL timeout=([0-9.]+) retry=(True|False)", result.stderr)
-    ]
+    # Raw tokens, not floats: a None or non-numeric timeout must reach the
+    # test as itself and fail it, not drop out of a numeric-only regex.
+    _last_get_calls[:] = re.findall(r"GET_CALL timeout=(\S+) retry=(\S+)", result.stderr)
+    _last_get_call_markers[0] = result.stderr.count("GET_CALL")
     return result.stdout
 
 
 #: How long the last ``_run``'s ``scan()`` took inside the child.
 _last_scan_seconds: list[float] = [0.0]
 
-#: ``(timeout, retry_read_timeout)`` of each ``HttpMemoryStore.get`` call in the last
-#: ``_run`` that used ``_SCAN_PROBE_RECORDING_GET``.
-_last_get_calls: list[tuple[float, bool]] = []
+#: (timeout, retry_read_timeout) as the raw repr tokens the probe wrote, one per
+#: /v1/memory/get request in the last _run that used _SCAN_PROBE_RECORDING_GET, plus
+#: the count of GET_CALL markers on stderr (so a line the regex cannot parse is a
+#: count mismatch, not a silent omission).
+_last_get_calls: list[tuple[str, str]] = []
+_last_get_call_markers: list[int] = [0]
 
 
 def _engine_env(engine: _MockMemoryEngine, **extra: str) -> dict[str, str]:
@@ -517,13 +524,27 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
     )
     assert time.monotonic() - t0 < 30  # the child as a whole: a hang guard only
     assert "entry-0" in out  # the freshest entry's title still renders
-    assert _last_get_calls, "the probe saw no get() call; the scenario no longer exercises the clamp"
-    for timeout, retry in _last_get_calls:
-        assert timeout <= 1.5, (
-            f"get() was handed timeout={timeout}s — not clamped to the remaining "
-            "scan budget (<= 1.5s) but closer to the 3.0s configured ceiling"
-        )
-        assert retry is False, "a clamped timeout must not be retried (it would double the wait)"
+    # Exactly one request: the 5.0s sleep always outlasts the 1.5s clamp, so the
+    # first snippet attempt spends the whole budget and the per-entry deadline gate
+    # renders the other two entries title-only. A second request means the gate is gone.
+    assert _last_get_call_markers[0] == len(_last_get_calls), (
+        f"{_last_get_call_markers[0]} GET_CALL lines on stderr but {len(_last_get_calls)} "
+        "parsed; a timeout or retry token the probe wrote is malformed"
+    )
+    assert len(_last_get_calls) == 1, (
+        f"expected exactly 1 /v1/memory/get request, saw {_last_get_calls}; the scan "
+        "budget is spent after the first attempt, so later entries must render title-only"
+    )
+    ((raw_timeout, raw_retry),) = _last_get_calls
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        pytest.fail(f"the get request carried timeout={raw_timeout}: the clamp was dropped")
+    assert timeout <= 1.5, (
+        f"the get request was handed timeout={timeout}s, not clamped to the remaining "
+        "scan budget (<= 1.5s) but closer to the 3.0s configured ceiling"
+    )
+    assert raw_retry == "False", "a clamped timeout must not be retried (it would double the wait)"
 
 
 # ── Scoped to what is rendered (nexus-fow78) ─────────────────────────────────

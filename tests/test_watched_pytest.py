@@ -17,7 +17,9 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).parent.parent / "scripts" / "watched_pytest.py"
+from tests._child_process import sigint_default
+
+SCRIPT =Path(__file__).parent.parent / "scripts" / "watched_pytest.py"
 spec = importlib.util.spec_from_file_location("watched_pytest", SCRIPT)
 assert spec is not None and spec.loader is not None
 wp = importlib.util.module_from_spec(spec)
@@ -116,16 +118,12 @@ def test_quiet_output_is_refused(tmp_path: Path) -> None:
 def test_the_watcher_ignores_console_ctrl_only_on_windows() -> None:
     """On Windows the watcher must outlive the break that killed the run, or nobody
     reports it. On POSIX it must not ignore SIGINT: the child would inherit that."""
-    before = signal.getsignal(signal.SIGINT)
-    try:
-        # A run started with '&' from a non-interactive shell inherits SIGINT=SIG_IGN;
-        # start from the default so the assertion checks the function, not the inheritance.
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # A run started with '&' from a non-interactive shell inherits SIGINT=SIG_IGN;
+    # start from the default so the assertion checks the function, not the inheritance.
+    with sigint_default():
         wp._ignore_console_ctrl()
         ignored = signal.getsignal(signal.SIGINT) is signal.SIG_IGN
-        assert ignored is (sys.platform == "win32")
-    finally:
-        signal.signal(signal.SIGINT, before)
+    assert ignored is (sys.platform == "win32")
 
 
 def test_the_hung_test_is_tracked_from_v_lines() -> None:

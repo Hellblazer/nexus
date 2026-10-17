@@ -2701,7 +2701,10 @@ class TestAgentIntegration:
         repo = tmp_path / "summary-repo"
         repo.mkdir()
         (repo / "a.txt").write_text("a\n")
-        vcs = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(repo)]
+        vcs = [
+            "git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "-c", "commit.gpgsign=false", "-C", str(repo),
+        ]
         for argv in (["init", "-q"], ["add", "a.txt"], ["commit", "-q", "-m", "one"]):
             subprocess.run([*vcs, *argv], check=True, capture_output=True, timeout=60)
         monkeypatch.chdir(repo)
@@ -2710,8 +2713,8 @@ class TestAgentIntegration:
         result = runner.invoke(main, ["catalog", "session-summary", "--since", "99999"])
         assert result.exit_code == 0
         assert "Could not determine recent file changes" not in result.output, result.output
-        # Should show link graph total
-        assert "link" in result.output.lower()
+        # The link graph line itself, not any "link" ("No linked RDRs found" also matches)
+        assert "Link graph:" in result.output, result.output
 
 
 class TestGcCommand:
