@@ -96,6 +96,7 @@ _WHOLE_FILE = {
     "prefix-capture/ab/tuplespace/ts_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
     "prefix-capture/ab/seqthink/sq_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
     "prefix-capture/ab/skillroute/sr_in_container.sh": "runs inside the A/B image built from the prefix-capture image",
+    "prefix-capture/ab/skillroute/pe_in_container.sh": "runs inside the A/B sandbox image built from the prefix-capture image",
     "lib/python_test.sh": "the resolver's own test: python3 is a stub's name there",
     "lib/python.sh": "the resolver: it names python3 as a candidate",
 }
