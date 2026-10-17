@@ -78,11 +78,14 @@ def _check_stale_install() -> None:
     msg = (
         f"[conexus-mcpb] installed conexus={installed}, latest on PyPI={latest}. "
         "This .mcpb extension does not update itself. The recommended Desktop "
-        "route is the conexus plugin: "
-        "in Claude Desktop open Customize -> Plugins, add the marketplace "
-        "Hellblazer/nexus, install conexus, then say \"Set up Nexus\". Afterwards "
-        "remove the Conexus extension (Settings -> Connectors) so two servers "
-        f"do not run. To stay on the .mcpb, re-download it from {_RELEASE_URL} "
+        "route is the conexus plugin: it runs the nx you have installed, so "
+        "`nx self install` updates Nexus for it. In Claude Desktop open "
+        "Customize -> Plugins, add the marketplace Hellblazer/nexus (if you "
+        "added it before, remove it and add it again, because the plugin copy "
+        "does not follow new releases), install conexus, say \"Set up Nexus\", "
+        "then quit Claude Desktop fully and open it again. Afterwards remove "
+        "the Conexus extension (Settings -> Connectors) so two servers do not "
+        f"run. To stay on the .mcpb, re-download it from {_RELEASE_URL} "
         "and re-install it. (Set NX_MCPB_SKIP_UPDATE_CHECK=1 to silence.)"
     )
     print(msg, file=sys.stderr, flush=True)

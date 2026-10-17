@@ -2,8 +2,10 @@
 """The .mcpb server's launch-time update notice points at the plugin (nexus-qkb9v).
 
 The .mcpb never updates itself, so the notice an out-of-date user sees must
-name the self-updating route (the conexus plugin from the Hellblazer/nexus
-marketplace) and how to switch, and keep the opt-out variable.
+name the recommended route (the conexus plugin from the Hellblazer/nexus
+marketplace, which runs the installed nx) and how to switch, say how the
+plugin copy itself is refreshed (remove and re-add the marketplace), and keep
+the release URL fallback and the opt-out variable.
 """
 from __future__ import annotations
 
@@ -51,6 +53,9 @@ def test_stale_notice_names_the_plugin_route(monkeypatch, capsys) -> None:
     assert "install conexus" in err
     assert "remove the Conexus extension" in err
     assert "two servers" in err
+    assert "remove it and add it again" in err
+    assert "nx self install" in err
+    assert "releases/latest" in err
     assert "NX_MCPB_SKIP_UPDATE_CHECK=1" in err
 
 
