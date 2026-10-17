@@ -6,6 +6,7 @@ import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.LocalTokenizers;
 import dev.nexus.service.vectors.OrtInitGate;
 import dev.nexus.service.vectors.OrtTempSweep;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -47,6 +48,9 @@ public final class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
+        // nexus-17jvq: FIRST, before anything can load a DJL class. DJL's tokenizer build calls home to the
+        // AWS metadata address and its CUDA path downloads a JNI library; the engine loads only local files.
+        LocalTokenizers.goOffline();
         // nexus-rph82: one clock for the whole process, pinned before any
         // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.
         // nexus-9gaj7: the pin asserts itself and fails loud (System.exit(1))
