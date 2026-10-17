@@ -210,10 +210,12 @@ def ask_envelope(reason: str, context: str = "") -> str:
     MEASURED BEHAVIOUR WITH NO HUMAN PRESENT (nexus-mcfaj, Claude Code
     2.1.302, haiku, real ``claude -p`` sessions in a container on chas;
     harness ``tests/cc-validation/hook-ask-headless/``, recorded runs in its
-    ``evidence/cc-2.1.302/``). Each ask row is paired with a control that
-    differs only by the hook emitting no decision, and the control ran the
-    command every time (an allow rule pre-approves it; the auto-mode no-rule
-    pair leaves only the classifier to approve it):
+    ``evidence/cc-2.1.302/``; one run per row). Each direct-mode ask row is
+    paired with a control that differs only by the hook emitting no decision,
+    and the control ran the command (an allow rule pre-approves it; the
+    auto-mode no-rule pair leaves only the classifier to approve it). The
+    background-subagent row has no control of its own; its denial is
+    attributed to the ask by the hook-sourced ``permission_denied`` event:
 
     ========================================  =========================
     session                                   an ask ...
@@ -225,7 +227,7 @@ def ask_envelope(reason: str, context: str = "") -> str:
     background subagent inside a ``-p`` run   DENIES the subagent's call
     ========================================  =========================
 
-    * Nothing hung: every run exited 0 in under 10 s. Nothing was approved:
+    * Nothing hung: every recorded run exited 0 in under 10 s. Nothing was approved:
       the auto-mode classifier does NOT approve past a hook ask, with or
       without an allow rule behind it (the documented v2.1.211 behaviour,
       confirmed live at 2.1.302). An ask also beats an allow rule.

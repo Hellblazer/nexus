@@ -223,6 +223,9 @@ def test_recorded_evidence_matches_the_documented_claim() -> None:
     assert all(r["outcome"] == "DENIED" for r in asks), {r["id"]: r["outcome"] for r in asks}
     assert all(r["outcome"] == "RAN" for r in controls), {r["id"]: r["outcome"] for r in controls}
     assert all(r["rc"] == 0 for r in rows.values())
+    assert all(
+        int((EVIDENCE / name / "elapsed").read_text().strip()) < 10 for name in rows
+    ), "the docstring says every recorded run finished in under 10 s"
     assert rows["a_bgsub"]["callers"] == ["subagent"]
     lib = (ROUTING / "_lib.py").read_text()
     version = {r["version"] for r in rows.values()}
