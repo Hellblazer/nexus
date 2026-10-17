@@ -52,6 +52,19 @@ fails, a single level succeeds). No container flag fixes that; a run
 with a shell needs that sysctl relaxed on the host, or a host whose
 sandbox is not bubblewrap (macOS).
 
+On macOS (hellmini, 2026-10-17, `tests/e2e/prefix-capture/ab/skillroute/pe_mac.sh`,
+nexus-fi1qg) the shell works: two full runs scored 15/16 (0.990) and
+14/16 (0.976), with 92 and 105 Bash calls succeeding and no sandbox
+errors. git does not: inside Claude Code's macOS sandbox a bare `git`
+resolves to the `/usr/bin/git` shim even with Homebrew first on `PATH`
+(a probe printed `command -v git` = `/usr/bin/git`), and the shim fails
+there ("Failed to locate 'git'"; `xcrun -f git` cannot find it;
+`DEVELOPER_DIR` does not reach the sandbox). Calling
+`/Library/Developer/CommandLineTools/usr/bin/git` or
+`/opt/homebrew/bin/git` by full path works, and the models that needed
+history fell back to that or to reading files. Read these as runs with a
+shell but without git; accepted as the baseline (Sam, 2026-10-17).
+
 ## Layout
 
 ```
