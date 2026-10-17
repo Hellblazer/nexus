@@ -464,9 +464,12 @@ through the same atomic write the indexers use.
    refuses to boot on a choice it cannot serve (`voyage` with no key, `bge` with
    no bge files), naming the missing piece. Unset keeps today's rule: keyed means
    Voyage (Sam, 2026-10-17, Q1).
-3. **Rerank.** One reranker per engine (Sam, Q2): a keyed engine reranks every
-   search with Voyage, including bge-only results; a keyless engine uses the
-   cross-encoder. On a keyed engine the cross-encoder is not built.
+3. **Rerank.** One reranker per engine, chosen by the profile (Sam,
+   2026-10-17, Q2 and its refinement): an engine whose profile names Voyage
+   reranks every search with Voyage, including bge-only results; an engine whose
+   profile is bge reranks with the cross-encoder even when keyed, and uses the
+   key only to serve existing Voyage collections. A keyless engine uses the
+   cross-encoder. Nothing is sent to Voyage for a user who did not choose it.
 4. **Supervisor.** Pass the configured key regardless of `local.embed_model` and
    retire the nexus-r5f3c branch (`storage_service_daemon.py:1544-1572`), whose
    reason (Gap 1) is gone.
@@ -482,9 +485,9 @@ through the same atomic write the indexers use.
    sites as the allowlist names (non-vacuity). The Voyage entries also pin the
    host: their URL constants must name `api.voyageai.com`. The allowlist is the
    three Voyage classes, subject to pending 210-research-egress-census finding
-   no other site. `HttpsSchemeHandler` is Open Question 1: the
-   recommendation is that a supervisor-spawned local engine does not register
-   the `https` scheme, so the guard's allowlist stays Voyage-only.
+   no other site. `HttpsSchemeHandler` and `POST /v1/vectors/resolve` are
+   removed in every mode (Sam, 2026-10-17; nexus-3t0jv, landing ahead of this
+   RDR), so the guard's allowlist stays Voyage-only.
 8. **Java comments.** The stale router comments are corrected here, since they
    describe the router this RDR changes: `Main.java:35-38` (says an ONNX fallback
    exists when keyed), the class javadoc at `EmbedderRouter.java:33-47`, and the
@@ -603,8 +606,9 @@ state is pending 210-research-cutover-cascade-census.
   pass (Research Findings). The source is therefore removed explicitly through
   the existing delete (`CatalogRepository.deleteCollection`, `:8280`), and only
   once it holds no document row at all, tombstoned ones included, since the
-  delete removes documents by `physical_collection` (`:8465`). When that happens
-  is Open Question 3.
+  delete removes documents by `physical_collection` (`:8465`). The job runs that
+  delete itself once the condition holds; `--keep-source` opts out (Sam,
+  2026-10-17).
 - *Aspects, the aspect queue and highlights* (`document_aspects`,
   `aspect_extraction_queue`, `document_highlights`, each with a `collection`
   column, `aspects-001-baseline.xml:56-60, 111-116, 153-157`) describe the
@@ -774,10 +778,9 @@ existing atomic write with none of these.
 ### Consequences
 
 - A keyed local install keeps serving its bge-768 collections.
-- A key the supervisor can find now always reaches the engine. With Sam's rerank
-  rule, a user whose profile is bge and who has `VOYAGE_API_KEY` exported for any
-  reason gets every search reranked by Voyage, which sends query and result text
-  to Voyage. Today the r5f3c guard withholds that key. See Open Question 2.
+- A key the supervisor can find now always reaches the engine. A bge-profile
+  engine still reranks locally (Technical Design 3), so the key causes Voyage
+  traffic only to embed for and search existing Voyage collections.
 - The engine holds the bge model in memory on keyed installs that have it on
   disk, even if they use only Voyage.
 - A re-embed holds both copies of a moved document's chunks until the source is
@@ -818,8 +821,9 @@ in the row and in `--status`.
   phases, before the phase that depends on them ships.
 - [x] Non-engine doc sweep and the nexus-umm29 wording landed (f7cae33ec).
 - [ ] The init keep-voyage fix (nexus-ddmfg branch) merged to develop.
-- [ ] Open Question 1 decided before Phase 2 Step 6; Open Question 3 before
-  Phase 6 Step 4.
+- [x] Open Questions 1-3 decided (Sam, 2026-10-17).
+- [ ] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv)
+  before Phase 2 Step 6.
 
 ### Minimum Viable Validation
 
@@ -905,8 +909,8 @@ rewritten test itself.
 #### Step 6: Egress guard
 
 Add the source scan with its allowlist and non-vacuity count, and the host pin.
-Apply Sam's answer to Open Question 1 (recommended: the supervisor-spawned engine
-does not register the `https` scheme). **Test**: the scan, plus a negative test
+The allowlist is the three Voyage classes; `HttpsSchemeHandler` is already gone
+(nexus-3t0jv). **Test**: the scan, plus a negative test
 that a fixture file constructing an `HttpClient` fails it.
 
 #### Step 7: Java comments and the engine tag
@@ -991,9 +995,10 @@ plan, the cap refusal, and each control.
 
 #### Step 4: Cutover and source removal
 
-Supersede at zero live documents; remove the source per Open Question 3. **Test**:
-after the last move the source is superseded and out of the routing listing; the
-source is deleted only when it holds no document row.
+Supersede at zero live documents; the job deletes the source once it holds no
+document row, unless `--keep-source`. **Test**: after the last move the source
+is superseded and out of the routing listing; it is deleted only when it holds
+no document row, and kept with `--keep-source`.
 
 #### Step 5: Doctor rows and paired release
 
@@ -1015,35 +1020,19 @@ None.
 
 ## Open Questions
 
-1. **The engine's `https` fetcher in local mode.** `HttpsSchemeHandler` is a live
-   outbound client (`HttpsSchemeHandler.java:46`, registered at
-   `NexusService.java:648-649`) that fetches any public URL a request names. Either
-   (a) the egress allowlist names it as a second carve-out, which needs its own
-   amendment to RDR-157, RDR-160 and the privacy policy, or (b) a
-   supervisor-spawned local engine does not register the `https` scheme, and the
-   allowlist is the three Voyage classes. **Recommendation: (b).** No production
-   client calls the route (`resolve_content` has no caller outside tests), the
-   client already reads `https` sources itself (`aspect_readers.py:748`), and the
-   carve-out Sam approved is for Voyage embed and rerank only.
-2. **An ambient key and Voyage rerank on a bge profile.** With the key always
-   passed and one reranker per engine, a user whose profile is bge but who has
-   `VOYAGE_API_KEY` in the environment gets every search reranked by Voyage, so
-   local text leaves the machine. Today the r5f3c guard withholds that key.
-   Options: (a) accept it and make it visible (the boot banner and an `nx doctor`
-   row "Voyage egress: embed for N collections, rerank for every search"); (b) a
-   bge-profile engine reranks with the cross-encoder even when keyed, and uses the
-   key only to serve existing Voyage collections. **Recommendation: (b).** It
-   keeps Sam's "one reranker per engine" rule (the choice follows the profile, not
-   the request), sends nothing to Voyage for a user who never chose Voyage, and
-   the cross-encoder scores text directly, so merged lists rank the same way.
-3. **When the superseded source is deleted.** Its chunks never drain on their own
-   (the reaper's move floor). Options: (a) the job deletes it as soon as it holds
-   no document row, tombstoned included, with `--keep-source` to opt out; (b) the
-   job leaves it superseded and the user deletes it; (c) a waiver of the reaper
-   floor for superseded collections. **Recommendation: (a).** Nothing is lost that
-   cannot be rebuilt (the target holds every live chunk's text), the wait on the
-   trash protects restores, and (c) grows the floor logic Sam has asked not to
-   grow.
+None open. Resolved by Sam on 2026-10-17 (T2
+`nexus_rdr/210-open-questions-sam-2026-10-17`):
+
+1. **The engine's `https` fetcher.** `HttpsSchemeHandler` and
+   `POST /v1/vectors/resolve` are removed in every mode, with no hardening
+   (nexus-3t0jv). No production client calls the route and the client reads
+   `https` sources itself (`aspect_readers.py:748`).
+2. **An ambient key on a bge profile.** The reranker follows the profile: a
+   bge-profile engine reranks with the cross-encoder even when keyed
+   (Technical Design 3).
+3. **The superseded source.** The re-embed job deletes it once it holds no
+   document row, tombstoned included; `--keep-source` opts out. No reaper floor
+   waiver.
 
 ## Test Plan
 
@@ -1101,13 +1090,13 @@ target, and local engines enforce it. The design now moves documents through the
 combined write, which writes the chunk and its owner together. Second, the draft
 said source chunks drain through the ordinary quarantine sweep; the reaper's move
 floor refuses a collection that is more than a quarter reapable, so a fully moved
-source never drains. The design removes the source explicitly (Open Question 3).
+source never drains. The re-embed job deletes the source once it holds no
+document row (Sam, 2026-10-17).
 Third, Critical Assumption 3 was refuted: the client branches on the engine's mode
 string in six places, one of which deletes data; Technical Design 10 and Phase 1
-answer it. One tension remains open rather than resolved: always passing the key
-plus one Voyage reranker per keyed engine sends local text to Voyage for users who
-did not choose Voyage, which the 2026-06-15 carve-out did not obviously intend
-(Open Question 2). No other contradictions were found between research findings,
+answer it. The tension between always passing the key and one Voyage reranker
+per keyed engine is resolved by choosing the reranker from the profile (Sam,
+2026-10-17; Technical Design 3). No other contradictions were found between research findings,
 design principles, and the proposed solution.
 
 ### Assumption Verification
@@ -1164,8 +1153,8 @@ today.
   families; only single-name reads stay on one sibling.
 - **Secret/credential lifecycle**: the key keeps its one source (the credential
   chain, then `NX_VOYAGE_API_KEY` at spawn); what changes is that it is passed
-  whenever present. Rotation is a service restart, as today. Open Question 2
-  covers the ambient-key consequence.
+  whenever present. Rotation is a service restart, as today. An ambient key on a
+  bge profile causes no rerank traffic (Technical Design 3).
 - **Memory management**: a keyed engine with bge files holds the bge model
   (about 416 MB on disk, `Bge768Embedder.java:243-250`) in addition to the Voyage
   clients. A re-embed batch holds at most one batch of chunk text and vectors, or
@@ -1232,3 +1221,4 @@ only correct the 2026-09-16 draft can move to Revision History.
   Research findings 210-research-5 to -9 cited; results still pending in the
   research pass are marked "pending 210-research-<topic>" (ca1, ca2-q2,
   ca3-census, egress-census, cutover-cascade-census, reembed-copy-options).
+- 2026-10-17: Sam resolved the revised draft's three Open Questions: remove the engine https fetcher and resolve route in every mode (nexus-3t0jv), a bge-profile engine reranks with the cross-encoder even when keyed, and the re-embed job deletes the superseded source (`--keep-source` opts out). Record: T2 nexus_rdr/210-open-questions-sam-2026-10-17.
