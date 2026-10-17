@@ -575,6 +575,133 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "for d in a b; do git status; ls " + D + "d/.git/hooks/post-commit; done",
         "for s in 1; do git diff-tree --no-commit-id -r " + D + "s; done",
     ],
+    # nexus-dsr6a: repo-config writes. `core.hooksPath` redirects which hook
+    # code runs on the orchestrator's later commits and checkouts; `user.*`
+    # rewrites authorship (the 2026-09-12 identity-overwrite class). Every
+    # spelling that can WRITE denies; the read spellings are in
+    # config_reads_stay_allowed.
+    "config_writes": [
+        "git config user.name x",
+        "git config user.email a@b.c",
+        "git config core.hooksPath /tmp/x",
+        "git config --local core.hooksPath /tmp/x",
+        "git config --worktree core.hooksPath /tmp/x",
+        "git config --unset core.hooksPath",
+        "git config --unset-all user.name",
+        "git config --add remote.origin.fetch +refs/heads/x:refs/remotes/o/x",
+        "git config --replace-all user.name x",
+        "git config --rename-section user.old user.new",
+        "git config --remove-section user",
+        "git config -e",
+        "git config --edit",
+        "git config set user.name x",
+        "git config set --append user.name x",
+        "git config unset user.name",
+        "git config unset --all user.name",
+        "git config rename-section user.old user.new",
+        "git config remove-section user",
+        "git config edit",
+        "git config --bool core.bare true",
+        "git config --type=bool core.bare true",
+        "git config --comment why user.name x",
+        "git config user.name 'a b'",
+        'git config user.name ""',
+        "git config user.name ''",
+        "git config alias.x 'log --oneline'",
+        # Placement: global flags between git and the verb, wrappers, spellings.
+        "git -C {repo} config user.name y",
+        "git -c a.b=c config user.name y",
+        "git --git-dir={repo}/.git config user.name y",
+        "git --no-pager config user.name y",
+        "git-config user.name x",
+        "/usr/lib/git-core/git-config user.name x",
+        "git.exe config user.name x",
+        "FOO=1 git config user.name x",
+        "env GIT_DIR=x git config user.name x",
+        "command git config user.name x",
+        "sudo git config user.name x",
+        "git config " + BS + "\nuser.name x",
+        # --global / --system rewrite identity and hooks for EVERY repo on the box.
+        "git config --global user.name x",
+        "git config --global user.email a@b.c",
+        "git config --global core.hooksPath /tmp/x",
+        "git config --global --unset user.name",
+        "git config --global -e",
+        "git config --global edit",
+        "git config --system core.hooksPath /tmp/x",
+        "git config set --global user.name x",
+        # --file / -f / --blob: a text-only guard cannot prove the path is outside
+        # the repo, and `.git/config`, `~/.gitconfig` and `.gitmodules` are all
+        # reachable through them. Writes deny; reads are in the allow family.
+        "git config --file /tmp/x/cfg user.name x",
+        "git config -f /tmp/x/cfg user.name x",
+        "git config --file={repo}/.git/config core.hooksPath /tmp/x",
+        "git config --file ~/.gitconfig user.name x",
+        "git config --file /tmp/x/cfg --unset user.name",
+        "git config --file --get user.name x",
+        "git config --blob HEAD:.gitmodules user.name x",
+        # git stops reading options at the first positional (measured on git
+        # 2.53): a trailing flag is the VALUE, so each of these writes.
+        "git config user.name --global",
+        "git config a.b.c --type=bool",
+        "git config --local sect.key --get-colorbool remove-section",
+        "git config user.name --get",
+        # Abbreviated long options are accepted by git; only exact read flags pass.
+        "git config --unse core.hooksPath",
+        "git config --repl-all user.name x",
+        "git config --ed",
+        # A write after a read, in every join shape.
+        "git config --get user.name; git config user.name x",
+        "git config --get user.name && git config user.name x",
+        "git status && git config user.name x",
+        "git config user.name x && git config --get user.name",
+        "git config --list; git config --global user.name x",
+        "(git config user.name x)",
+        "{ git config user.name x; }",
+        "git config user.name x 2>/dev/null",
+        "git config user.name x > /dev/null",
+        "git config --get a --unset b",
+        "git config --list --add a b",
+        # An alias that expands to config, carried on the command line or in env.
+        "git -c alias.c=config c user.name y",
+        "git -c alias.c='config user.name' c y",
+        "git -c 'alias.c=!git config user.name' c y",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=config git c user.name y",
+    ],
+    # The verb built by the shell. A config verb that the text does not spell
+    # whole is read like every other verb: the read exemptions apply only to a
+    # command that cannot rebuild text, so none of these is excused.
+    "config_manufactured": [
+        "git " + D + "(echo config) user.name x",
+        "git " + D + "(printf config) user.name x",
+        "git " + D + "(basename /config) user.name x",
+        "git " + BT + "echo config" + BT + " user.name x",
+        "git " + D + "{x:-config} user.name x",
+        "git " + D + "{x:=config} user.name x",
+        "git c" + D + "(echo onfig) user.name x",
+        "git conf" + D + "{x}ig user.name x",
+        "git con''fig user.name x",
+        'git con"fig" user.name x',
+        "git conf" + BS + "ig user.name x",
+        "git " + D + "'conf" + BS + "x69g' user.name x",
+        "git -C " + D + "(pwd) config user.name x",
+        "git config --get " + D + "(cat keyfile)",
+        "git config " + D + "(echo --unset) user.name",
+        "git config " + D + "{k} " + D + "{v}",
+        "git config user.name " + D + "(whoami)",
+        "echo " + D + "(git config user.name)",
+        "x=" + D + "(git config --get user.name)",
+        "printf 'git config user.name x' | sh",
+        "eval 'git config user.name x'",
+        "sh -c 'git config user.name x'",
+        "echo 'git config user.name x' | bash",
+        "git config --get user.name | sh",
+        "git config --get user.name > out.txt",
+        "git config --get user.name | xargs git config user.email",
+        "for k in a b; do git config --get " + D + "k; done",
+        "git status; git " + D + "(echo config) user.name x",
+        "git config --get a; git " + BT + "echo config" + BT + " b c",
+    ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
@@ -588,6 +715,17 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "make i${n}t",
         "ls ~/git/ && echo add",
         "cd ~/git && echo add",
+        # nexus-dsr6a: `config` is read as a verb wherever the text can rebuild
+        # a word, and as a subcommand-with-arguments otherwise, so a bare
+        # `config` word that is only an argument of another git command still
+        # denies once a flag, a second path or a pipe follows it.
+        "git grep config src tests",
+        "git log -S config --oneline",
+        "git log --grep=config --oneline",
+        "echo git config user.name x",
+        "git config --get user.name | sort",
+        "git diff -- src/config.py | sort",
+        "git log -- conexus/config/ | awk 1",
         # nexus-0l6zh: the same no-position-analysis price for gh and hub.
         "echo 'gh pr checkout' > notes.txt",
         "gh pr view 5 && echo pr checkout",
@@ -632,6 +770,98 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "git diff -- \"" + D + "(pwd)/f\"",
         "git log " + D + "REV",
         "git st" + D + "(echo a)tus",
+    ],
+    # nexus-dsr6a: reading config stays allowed, in a command that cannot
+    # rebuild text. A subagent needs `git config --get remote.origin.url` and
+    # `git config user.name` to do its work; the writes are denied above.
+    "config_reads_stay_allowed": [
+        "git config user.name",
+        "git config core.hooksPath",
+        "git config remote.origin.url",
+        "git config --get user.name",
+        "git config --get-all remote.origin.fetch",
+        "git config --get-regexp remote",
+        "git config --get-regexp '^remote" + BS + ".'",
+        "git config --get-urlmatch http.sslVerify https://example.com",
+        "git config --list",
+        "git config -l",
+        "git config --list --show-origin",
+        "git config --list --show-scope",
+        "git config --show-origin user.name",
+        "git config --show-origin --show-scope --get user.name",
+        "git config --name-only --get-regexp remote",
+        "git config --null --list",
+        "git config -z -l",
+        "git config --bool core.bare",
+        "git config --type=bool --get core.bare",
+        "git config --type bool --get core.bare",
+        "git config --get --default fallback user.name",
+        "git config --includes --get user.name",
+        "git config --get remote.origin.fetch '^+'",
+        # a command substitution of a literal is resolved before the scan, so
+        # this text spells a plain read
+        "git config --get " + D + "(echo user.name)",
+        # scope flags with a read
+        "git config --global --get user.name",
+        "git config --global user.name",
+        "git config --global --list",
+        "git config --system -l",
+        "git config --local --get remote.origin.url",
+        "git config --worktree --list",
+        # --file / -f with a read (a write through them denies)
+        "git config --file {repo}/.git/config --get user.name",
+        "git config --file={repo}/.git/config --list",
+        "git config -f /tmp/x/cfg -l",
+        "git config --blob HEAD:.gitmodules --list",
+        # the git 2.46 subcommand forms
+        "git config get user.name",
+        "git config get --all remote.origin.fetch",
+        "git config get --regexp remote",
+        "git config get --show-names --regexp remote",
+        "git config get --default x user.name",
+        "git config get --global user.name",
+        "git config list",
+        "git config list --show-origin",
+        "git config list --global",
+        "git config list --name-only",
+        # placement and wrappers
+        "git -C {repo} config --get remote.origin.url",
+        "git -C {repo} config user.name",
+        "git -c a.b=c config --get user.name",
+        "git --no-pager config --list",
+        "FOO=1 git config --get user.name",
+        # redirects to /dev/null, safe sinks and joins
+        "git config --get remote.origin.url 2>/dev/null",
+        "git config --get remote.origin.url &>/dev/null",
+        "git config --get remote.origin.url 2>&1",
+        "git config --list | grep user",
+        "git config --list | head -20",
+        "git config --list | grep -c remote | tr -d ' '",
+        "git config --get a; git config --get b",
+        "git config --get a && git status",
+        "git status && git config --get user.name",
+        "git config --get user.name || echo unset",
+        "(git config --get user.name)",
+        "{ git config --get user.name; }",
+        "git config --get user.name < /dev/null",
+        # `config` as a path, a word or a non-git command's argument
+        "git log --grep config",
+        "git grep config src/",
+        "git log -- config",
+        "git ls-files config",
+        "git diff -- src/config.py",
+        "git diff -- pyproject.toml conexus/config/settings.yaml",
+        "git log --oneline -- conexus/config/",
+        "git show HEAD:src/config.yaml",
+        "git status && cat .git/config",
+        "cat .git/config",
+        "echo config && git status",
+        "nx config get x",
+        "uv run nx config list | head",
+        "grep -rn config src tests",
+        "git status; grep config a b",
+        "ls .config/git/config",
+        "cat ~/.gitconfig",
     ],
     "not_git": [
         "ls -la && echo commit",
@@ -880,6 +1110,37 @@ def test_the_spliced_expansion_deny_names_the_reconstructed_fragment(shared_repo
     assert "reset" in out["permissionDecisionReason"], out["permissionDecisionReason"]
 
 
+def test_the_config_deny_names_config_and_says_what_stays_allowed(shared_repo):
+    out = _verdict("git config core.hooksPath /tmp/x", shared_repo)
+    assert out["permissionDecision"] == "deny"
+    reason = out["permissionDecisionReason"]
+    assert "config" in reason and "--get" in reason and "--list" in reason, reason
+    assert "hooksPath" in reason and "user.*" in reason, reason
+
+
+def test_documented_residual_config_named_by_a_variable_assigned_earlier(shared_repo):
+    """A config verb that never appears after `git` in the text (the word was
+    assigned on an earlier line, so the text after `git` is `$c`) is the same
+    named residual as a variable-held `checkout`: nothing to anchor on."""
+    cmd = "c=config; git " + D + "c user.name x"
+    assert not _denied(cmd, shared_repo), cmd
+
+
+def test_a_config_write_in_a_linked_worktree_and_by_the_main_conversation_passes(
+    shared_repo, linked_worktree,
+):
+    """The exemptions are the guard's, not config's own: the orchestrator and a
+    proven linked worktree may write config, as they may commit. Known gap,
+    pinned so closing it is a deliberate change: a plain `git config` in a
+    linked worktree writes the COMMON config file, which the primary reads too,
+    exactly as `git branch -D` and `git push` from a worktree already reach it
+    (nexus-dsr6a left the uniform worktree exemption alone)."""
+    cmd = "git config user.name x"
+    assert "permissionDecision" not in _verdict(cmd, shared_repo, agent=False)
+    assert "permissionDecision" not in _verdict(cmd, linked_worktree)
+    assert _denied(cmd, shared_repo)
+
+
 # ---------------------------------------------------------------------------
 # Fail-open at the hook level, and scan cost.
 # ---------------------------------------------------------------------------
@@ -970,6 +1231,17 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     ("git log " + ".git/hooks/post-commit " * 15_000, False),
     ("git merge-base " + "a/" * 40_000 + "b", False),
     ("git merge-base " + "a|" * 20_000 + "b", True),
+    # nexus-dsr6a: the config walk re-reads a segment's arguments for each
+    # `config` word, so a segment of repeated `config` words is capped (past the
+    # cap it denies) and a long run of arguments or segments is one pass.
+    ("git " + "config " * 6_000 + "x", True),
+    ("git " + "config " * 6_000 + "; git status", True),
+    ("git config --get " + "a " * 20_000, False),
+    ("git config --list " + "-z " * 12_000, False),
+    ("git config --get a; " * 2_000, False),
+    ("git status; " * 3_000 + "git config user.name x", True),
+    ("git log " + "x/config " * 5_000, False),
+    ("git config user.name " + "x " * 12_000, True),
 ]
 
 
