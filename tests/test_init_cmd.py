@@ -867,8 +867,43 @@ class TestServiceLocalEmbedder:
         assert "Kept" in result.output
         assert f"nx config set local.embed_model {_TIER1_MODEL}" in result.output
         assert f"Saved: local.embed_model = {_TIER1_MODEL}" not in result.output
-        # the bge ONNX is still fetched: the service boot reads it regardless
+        assert "RDR-210" in result.output  # points at the dual-mode plan, claims no guard
+        # the bge ONNX is still fetched (a dual-mode engine and a keyless restart need it)
         assert calls == ["fetch"]
+
+    def test_kept_voyage_line_adds_the_missing_key_sentence_only_without_a_key(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A kept voyage-* model with no resolvable voyage_api_key fails every
+        write (LocalVoyageCredentialMissingError); init must say so. With a key
+        the Kept line stands alone. Real tmp-path config; the key value is never
+        printed."""
+        from nexus.config import CREDENTIALS
+
+        env_var = CREDENTIALS.get("voyage_api_key", "VOYAGE_API_KEY")
+        for var in {env_var, "VOYAGE_API_KEY", "NX_VOYAGE_API_KEY"}:
+            monkeypatch.delenv(var, raising=False)
+        self._patch_common(monkeypatch)
+        cfg = cfg_dir / "config.yml"
+        cfg.write_text("local:\n  embed_model: voyage-context-3\n", encoding="utf-8")
+
+        keyless = CliRunner().invoke(init_cmd, ["--service"])
+        assert keyless.exit_code == 0, keyless.output
+        assert "Kept" in keyless.output
+        assert "No Voyage API key is configured" in keyless.output
+        assert "nx config set voyage_api_key" in keyless.output
+
+        secret = "pa-test-secret-value-1234"
+        cfg.write_text(
+            "local:\n  embed_model: voyage-context-3\n"
+            f"credentials:\n  voyage_api_key: {secret}\n",
+            encoding="utf-8",
+        )
+        keyed = CliRunner().invoke(init_cmd, ["--service"])
+        assert keyed.exit_code == 0, keyed.output
+        assert "Kept" in keyed.output
+        assert "No Voyage API key" not in keyed.output
+        assert secret not in keyed.output
 
     @pytest.mark.parametrize(
         "seed",

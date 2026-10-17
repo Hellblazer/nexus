@@ -2857,15 +2857,15 @@ running pre-swap code, until this bead's deferred PART 3 removes it.
 
 ## nx init
 
-Guided first-run setup for the local embedder (RDR-144). Distinct from
-`nx config init` (the cloud-credentials wizard): `nx init` chooses and
-provisions the on-device embedding model for local mode.
+First-run setup for local mode. Distinct from `nx config init` (the
+cloud-credentials wizard): `nx init` provisions the local service stack and the
+bge-768 embedding model it reads.
 
 ```
 nx init                       # local: provision + interactively offer autostart (default yes)
 nx init --yes                 # accept service-autostart registration, no prompt
 nx init --no-autostart        # provision + start a session supervisor only; register no unit
-nx init --embedder minilm-384 # pick a specific embedder, no prompt
+nx init --embedder minilm-384 # advisory only: the service path provisions bge-768 either way
 nx init --service             # DEPRECATED — plain `nx init` now does this by default
 ```
 
@@ -2904,15 +2904,13 @@ headless host where the unit can't activate) a session supervisor starts instead
 **Local mode** provisions the bge-768 embedder (`BAAI/bge-base-en-v1.5`, 768-dim)
 the service reads and records it in `~/.config/nexus/config.yml` under
 `local.embed_model`. The RDR-144 two-choice picker (bge-768 / minilm-384) was
-removed at RDR-174 P1.3, so `nx init` asks no embedder question. If
-`local.embed_model` already holds a `voyage-*` value, `nx init` keeps it and
-says so (nexus-ddmfg); rerunning `nx init`, or the upgrade ladder's provision
-step, does not reset a local-Voyage install to bge-768.
-
-| Model | Value in `local.embed_model` | Dim | Notes |
-|-------|------------------------------|-----|-------|
-| bge-768 | `BAAI/bge-base-en-v1.5` | 768 | What `nx init` stamps. One-time ~140 MB model download. |
-| minilm-384 | `all-MiniLM-L6-v2` | 384 | Bundled, lower quality. Not stamped by `nx init`. |
+removed at RDR-174 P1.3, so `nx init` asks no embedder question. The local
+engine serves bge-768 only: MiniLM is not loaded on the local path, and a
+collection that is not bge-768 is refused (422). A fresh, bge or minilm
+`local.embed_model` is stamped `BAAI/bge-base-en-v1.5` (one-time ~140 MB model
+download). If `local.embed_model` already holds a `voyage-*` value, `nx init`
+keeps it and says so (nexus-ddmfg); rerunning `nx init`, or the upgrade
+ladder's provision step, does not reset a local-Voyage install to bge-768.
 
 In local mode `nx init` also:
 
@@ -2928,12 +2926,12 @@ In local mode `nx init` also:
    stable Java-read path). An offline failure is fatal for `nx init --service`,
    because the service cannot boot without the file; re-run when online.
 3. **Migrates nothing.** The safe 384-to-768 collection migration it once
-   offered went with the picker (RDR-174 P1.3). Moving `local.embed_model`
-   between bge, minilm and voyage-* is a separate step,
-   `nx config set local.embed_model <model>`, which lists the collections the
-   switch strands and asks before changing anything. Re-index the sources under
-   the new model, then remove the old collections (`nx collection prune --yes`).
-   Details under "Local mode with Voyage" below.
+   offered went with the picker (RDR-174 P1.3). `nx init` never re-embeds or
+   deletes a collection. The engine serves one embedding family per boot, so
+   collections embedded with the other family stop serving after a restart
+   until it is switched back or they are re-indexed; RDR-210 tracks the
+   dual-mode engine that serves both side by side. Details under "Local mode
+   with Voyage" below.
 
 **Cloud mode** is a no-op: embeddings run server-side via Voyage. `nx init`
 points you at `nx config init` for credentials.
@@ -3002,8 +3000,9 @@ already holds a `voyage-*` value, `nx init` and the upgrade ladder's provision
 leg leave it alone and print one line saying so; they used to write it back to
 bge-768, which stranded the Voyage collections at the next service restart. To
 go back to bge-768 on purpose, run `nx config set local.embed_model
-BAAI/bge-base-en-v1.5`, which lists what the switch strands first. The engine
-still serves one posture per boot; RDR-210 tracks the dual-mode engine.
+BAAI/bge-base-en-v1.5` and restart the service; nothing checks first, and the
+Voyage collections stop serving until you switch back. The engine still serves
+one posture per boot; RDR-210 tracks the dual-mode engine.
 
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on

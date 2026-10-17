@@ -14,8 +14,8 @@ call is the only one the local service makes). This module stamps
 ``local.embed_model`` to bge-768 on a fresh or bge/minilm install, but KEEPS
 a value that is already voyage-* (nexus-ddmfg): re-running ``nx init`` or the
 upgrade ladder's provision leg must not revert a Voyage posture, which would
-strand its collections at the next restart. Switching on purpose goes through
-``nx config set local.embed_model``, which lists what the switch strands.
+strand its collections at the next restart. The engine still serves one
+embedding family per boot; RDR-210 tracks the dual-mode engine.
 
 This module DOES perform network and install work on the LOCAL path (PG
 provisioning, native-binary acquisition, bge-768 ONNX download) — the RDR-144
@@ -71,8 +71,11 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
     a voyage-* value (nexus-ddmfg): a local-Voyage install that reruns
     ``nx init`` or whose upgrade ladder runs this step keeps its posture, and
     the step says so. Reverting would strand its voyage collections at the
-    next restart. The bge ONNX is still fetched either way; the service boot
-    reads it regardless.
+    next restart. The bge ONNX is still fetched either way. A keyed boot
+    builds no ONNX embedder (service ``Main.java`` local-vs-keyed branch), so
+    a kept voyage install does not need the file today; the fetch stays
+    because RDR-210's dual-mode engine will need it, and a later keyless
+    restart (key removed) boots the bge embedder and fails without it.
     """
     from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         SERVICE_BGE_DOWNLOAD_HINT,
@@ -97,10 +100,18 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
     if _config.local_embed_model_is_voyage():
         click.echo(
             f"\nKept: {_EMBED_MODEL_KEY} = {_config.local_embed_model_choice()} "
-            f"(not reset to the bge-768 default). To switch on purpose, run "
-            f"`nx config set {_EMBED_MODEL_KEY} {_TIER1_MODEL}`; it lists the "
-            f"collections the switch strands first."
+            f"(not reset to the bge-768 default). To switch on purpose: "
+            f"`nx config set {_EMBED_MODEL_KEY} {_TIER1_MODEL}` (collections "
+            f"embedded with the other model stop serving after the restart "
+            f"until RDR-210's dual-mode engine lands)."
         )
+        # Same lookup the supervisor and corpus.py use; the value is never printed.
+        if not _config.get_credential("voyage_api_key"):
+            click.echo(
+                f"No Voyage API key is configured, so writes will fail until you "
+                f"run `nx config set voyage_api_key <key>` (then restart the "
+                f"service) or switch {_EMBED_MODEL_KEY} back to {_TIER1_MODEL}."
+            )
     else:
         set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
         click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service default; Voyage is a separate opt-in)")
