@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.82.0] - 2026-10-17
+
+Pairs with engine-service-v0.1.160 (`REQUIRED_ENGINE_VERSION` unchanged). RDR-228 follow-through: a one-command installer (`install.sh`, `install.ps1`), install pages around two routes, measured install sizes, and Desktop told to quit and reopen after setup. The conexus skill listing shrinks: ten commands hidden from the model, six wrapper skills retired into agents and rules, the review and planning procedure carried in the agents, and `bd prime` printed by the session-start hook when the beads plugin is off. Fixes: the streaming PDF index race, Windows first-session hook timeouts, and the MinerU semaphore leak.
+
 ### Added
 
 - **`web/install.sh` and `web/install.ps1` install the CLI, the plugin and, on request, the service in one command** (RDR-228 Phase 3, nexus-sv2wx.26; published at hellblazer.github.io/nexus/install.sh and install.ps1). The script installs `uv` when it is missing, runs `uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap` when no CLI resolves (and says it is skipping the build when one does), adds the plugin when `claude` is on the `PATH`, then sets up the service. With no flag it asks one question on the terminal, before any download; with no terminal and no flag it builds the CLI only and says so. `--local`, `--cloud` and `--cli-only` choose the service; `--autostart` and `--no-autostart` choose the login unit. The autostart default (nexus-omlpd): with `--local` and neither flag the script asks "Start the service at login? [y/N]" when a terminal is attached and passes `nx init --no-autostart` when none is; it never passes `--yes` by default. All of `install.sh` is inside one function called on its last line, so a cut-short download runs nothing. Tests: `tests/test_install_sh.py`, `tests/test_install_ps1.py`.
