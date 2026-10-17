@@ -110,7 +110,7 @@ Install, with the same two routes as Surface 1:
 
 The plugin runs `nx-mcp` from the CLI install, so the account plugin alone is not enough: without the CLI each Nexus server entry starts a stand-in that has only the two setup tools (see "First run" under Surface 1). To install the CLI by hand instead, see "Install by hand" under Surface 1.
 
-The plugin copy does not follow release tags. To upgrade it after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 through 15 releases, while Desktop synced every 20 minutes), and conexus could not be enabled from it until the marketplace was removed and added again (RDR-228 Key Discovery 6). Why it does not follow new release tags is not yet understood. Nexus itself is updated by the CLI (`nx self install`), which the plugin runs.
+The plugin copy does not follow release tags. To upgrade it after a new release, remove the `Hellblazer/nexus` marketplace in Customize → Plugins and add it again. On the measured machines an account marketplace that was added earlier stayed at the release it was added at (7.67.0 through 15 releases, while Desktop synced every 20 minutes), and conexus could not be enabled from it until the marketplace was removed and added again (RDR-228 Key Discovery 6). Why it does not follow new release tags is not yet understood. Nexus itself is updated through the CLI: run `nx self install`, and the plugin then runs whichever CLI is installed.
 
 Having both the account plugin and the CLI plugin is fine. The Code tab logged that the plugin exists in both places and used the account copy, so there is one set of tools.
 
