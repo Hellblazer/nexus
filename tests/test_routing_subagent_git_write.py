@@ -343,6 +343,101 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git reflog ${x}expire --all",
         "git cherry-${x}pick abc",
     ],
+    # nexus-7mgnd: the verb-side lookbehind drops a verb glued to a path
+    # character. Every spelling that makes the verb its OWN argv word must
+    # keep denying, whatever precedes it.
+    "verb_is_its_own_word": [
+        "git -C x commit",
+        "git -C . add f",
+        "git -C ./ checkout f",
+        "git -C ../x reset --hard",
+        "git --git-dir=.git --work-tree=. add f",
+        "git -c a=b/c commit -m x",
+        "git" + chr(9) + "commit",
+        "git  commit",
+        "git   -C x   commit",
+        "FOO=1 git commit",
+        "(git commit)",
+        ";git commit",
+        "$(git commit)",
+        "x=$(git commit)",
+        "true&&git commit",
+        "true||git commit",
+        "echo hi|git add x",
+        "'git' 'commit'",
+        '"git" "commit" -m x',
+        'git "-C" x "commit"',
+        "git '-C' x 'commit' -m m",
+        "git -C 'x y' commit",
+        # a read-only look at a path first does not excuse the real verb
+        "git log feature/x-add-thing && git add f",
+        "git status; ls .git/hooks/post-commit; git commit -m x",
+        "git merge-base HEAD main && git merge topic",
+        "git merge-tree a b c; git merge topic",
+        # braces and globs that expand to a bare verb word
+        "git {,x/}commit",
+        "git {x,commit} f",
+        "git {.,}commit",
+        "git {a/,}commit",
+        # only merge-base / merge-tree are read-only
+        "git merge-file a b c",
+        "git merge-base-foo",
+        "git merge-tree.sh a b",
+        "git merge-recursive a b",
+        # the dispatch spelling keeps its hyphen-glued verb
+        "git-commit -m x",
+        "/usr/lib/git-core/git-add f",
+        "x=1 /usr/lib/git-core/git-commit -m x",
+        "cd ~/git/nexus && /usr/lib/git-core/git-checkout f",
+        "git log a-git-add; git-add f",
+        "git-merge-file a b c",
+    ],
+    # nexus-0l6zh: wrappers that move HEAD or rewrite the working tree of the
+    # checkout they run in, without a `git` word in the command.
+    "head_moving_wrappers": [
+        "gh pr checkout 123",
+        "gh pr co 123",
+        "gh pr checkout https://github.com/Hellblazer/nexus/pull/9 --detach",
+        "gh repo sync",
+        "gh repo sync --force",
+        "gh repo sync -b develop",
+        "gh pr merge 12 --delete-branch",
+        "gh pr merge 12 -d",
+        "gh pr merge 12 -sd",
+        # flags between the command word and the subcommand
+        "gh pr -R Hellblazer/nexus checkout 5",
+        "gh pr --repo Hellblazer/nexus co 5",
+        "gh pr --repo=Hellblazer/nexus checkout 5",
+        "gh -R Hellblazer/nexus pr checkout 5",
+        "gh pr -R Hellblazer/nexus merge 5 -d",
+        "gh issue -R Hellblazer/nexus develop 5 -c",
+        "gh repo --help sync",
+        "gh pr merge --squash --delete-branch 12",
+        "gh issue develop 12 --checkout",
+        "gh issue develop 12 -c",
+        "gh  pr   checkout 5",
+        "gh" + chr(9) + "pr checkout 5",
+        "/opt/homebrew/bin/gh pr checkout 5",
+        "./gh pr checkout 5",
+        "gh.exe pr checkout 5",
+        "FOO=1 gh pr checkout 5",
+        "cd {repo} && gh pr checkout 5",
+        "(gh pr checkout 5)",
+        ";gh pr checkout 5",
+        "x=$(gh pr checkout 5)",
+        "'gh' 'pr' 'checkout' 5",
+        "gh pr view 5 && gh pr checkout 5",
+        "printf 'gh pr checkout 5' | sh",
+        "sh -c 'gh pr checkout 5'",
+        "hub checkout https://github.com/Hellblazer/nexus/pull/9",
+        "hub sync",
+        "hub merge https://github.com/Hellblazer/nexus/pull/9",
+        "hub am https://github.com/Hellblazer/nexus/pull/9",
+        "hub.exe checkout x",
+        "/usr/local/bin/hub reset --hard",
+        "FOO=1 hub checkout x",
+        "hub pull-request && hub checkout x",
+    ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
@@ -356,6 +451,11 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "make i${n}t",
         "ls ~/git/ && echo add",
         "cd ~/git && echo add",
+        # nexus-0l6zh: the same no-position-analysis price for gh and hub.
+        "echo 'gh pr checkout' > notes.txt",
+        "gh pr view 5 && echo pr checkout",
+        "cd ~/bin/gh && echo repo sync",
+        "echo hub checkout",
     ],
 }
 
@@ -417,6 +517,55 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "python git.py add",
         "ls nexus-git-policy.py file${i}.txt",
     ],
+    # nexus-7mgnd: a real git command, then a verb that is only part of a path,
+    # branch name or hook file name. A subcommand is always its own argv word.
+    "verb_glued_to_a_path": [
+        "git config core.hooksPath",
+        "git config core.hooksPath; ls .git/hooks/post-commit",
+        "git status && ls .git/hooks/post-commit",
+        "git rev-parse --git-dir && cat .git/hooks/post-checkout",
+        "git -C x status && cat hooks/post-merge",
+        "git status && ls /Users/x/git/nexus-96-restore",
+        "git log feature/x-add-thing",
+        "git log origin/feature/add-thing",
+        "git log -- scripts/nexus-96-restore",
+        "git diff docs/add.md",
+        "git show HEAD:src/commit.py",
+        "git ls-files '*.add'",
+        "git log ~/commit",
+        "git log ./checkout",
+        "git log a-git-add",
+        "git merge-base --is-ancestor HEAD origin/develop",
+        "git merge-base HEAD origin/develop",
+        "git merge-tree HEAD origin/develop topic",
+        "git merge-base HEAD main; echo merge-base",
+        "nx hooks status; git status; ls .git/hooks/post-merge",
+    ],
+    # nexus-0l6zh: gh and hub work that leaves HEAD and the tree alone.
+    "gh_and_hub_that_do_not_move_head": [
+        "gh pr view 5",
+        "gh pr -R Hellblazer/nexus view 5",
+        "gh pr --repo Hellblazer/nexus comment 5 --body checkout",
+        "gh pr list --state open",
+        "gh pr checks 5",
+        "gh pr diff 5",
+        "gh pr create --fill",
+        "gh pr merge 12 --squash",
+        "gh pr merge 12 --auto --merge",
+        "gh pr comment 5 -b 'checkout later'",
+        "gh issue develop 12",
+        "gh issue develop 12 --name my-branch-d",
+        "gh repo view Hellblazer/nexus",
+        "gh repo clone Hellblazer/nexus",
+        "gh api repos/Hellblazer/nexus/pulls/5",
+        "gh run view 123 --log",
+        "ls ~/gh/pr/checkout",
+        "cat docs/gh-pr-checkout.md",
+        "ls ~/hub && echo checkout",
+        "ls docs/github && echo reset",
+        "hub --version",
+        "hub pr list",
+    ],
     # Ordinary interpolation, nothing git-shaped for it to reconstruct.
     "ordinary_expansions": [
         "echo file${i}.txt",
@@ -463,6 +612,11 @@ _EXEMPTION_PROBES = [
     "git clean -fd",
     "git switch main",
     "git ch$VARckout -- t3.py",
+    "gh pr checkout 5",
+    "gh repo sync",
+    "gh pr merge 5 --delete-branch",
+    "gh issue develop 5 --checkout",
+    "hub checkout x",
 ]
 
 
@@ -510,7 +664,10 @@ def test_the_process_cwd_is_never_the_project(linked_worktree):
     assert _hso(proc).get("permissionDecision") == "deny", proc.stdout
 
 
-@pytest.mark.parametrize("cmd", ["git commit -m msg", "git add -A", "git checkout -- x.py"])
+@pytest.mark.parametrize(
+    "cmd",
+    ["git commit -m msg", "git add -A", "git checkout -- x.py", "gh pr checkout 5", "gh repo sync"],
+)
 def test_an_undeterminable_worktree_fails_closed(cmd, tmp_path):
     """A non-repo cwd makes ``git rev-parse`` fail. Not being able to tell
     whether the tree is shared earns no pass, for index writers and
@@ -597,6 +754,29 @@ def test_a_hostile_300kb_command_is_scanned_in_linear_time(shared_repo):
     elapsed = time.monotonic() - t0
     assert out.get("permissionDecision") == "deny"
     assert elapsed < 10, f"scan of a {len(big)}-byte command took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        # many flags in the gh flag gap, ending in a non-subcommand: the gap
+        # pattern must not backtrack exponentially
+        "gh pr" + " -a b" * 50_000 + " view",
+        "gh pr" + " --a" * 50_000 + " view",
+        "gh " + "pr merge " * 30_000,
+        "gh " + "issue develop " * 20_000,
+        # a verb glued to a path, 50k times, then a real git
+        "git " + "a/commit " * 40_000,
+        "git " + "x-add-y " * 40_000,
+    ],
+    ids=["gh_value_flags", "gh_bool_flags", "gh_pr_merge_no_flag", "gh_develop_no_flag", "slash_verbs", "hyphen_verbs"],
+)
+def test_hostile_gh_and_lookbehind_inputs_are_scanned_in_linear_time(hostile, shared_repo):
+    t0 = time.monotonic()
+    out = _verdict(hostile, shared_repo)
+    elapsed = time.monotonic() - t0
+    assert "permissionDecision" not in out, f"a harmless command was denied: {hostile[:60]!r}"
+    assert elapsed < 10, f"scan of a {len(hostile)}-byte command took {elapsed:.1f}s"
 
 
 # --- The chas carve-out (nexus-yc7fs) ---------------------------------------
