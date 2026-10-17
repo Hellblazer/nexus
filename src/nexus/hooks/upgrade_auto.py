@@ -71,9 +71,11 @@ upgrade --auto``: after ``NX_UPGRADE_AUTO_DEADLINE_SECONDS`` (default 900) it
 stops starting new work at safe points (between census calls, backfill
 collections and ladder rungs), logs ``upgrade_auto_deadline_reached`` or
 ``rdr192_backfill_deadline_reached`` to the child log and exits 0, and the
-next session's run resumes. It does not bound a call already in flight (so a
-wedged call is still bounded only by the HTTP timeouts inside ``nx upgrade``),
-the "finish" pass the root CLI group runs before ``upgrade()``, or the service
+next session's run resumes. It does not bound (a) a census call already in flight, up to its HTTP
+timeout, or (b) one collection's entire backfill once it has started (many
+calls in a per-document loop; on a large collection it can run well past the
+limit), so a wedged call is bounded only by the HTTP timeouts inside ``nx
+upgrade``; nor the "finish" pass the root CLI group runs before ``upgrade()``, or the service
 stop/start cycle after the ladder (about 60 s each); the spawn event and the
 stderr log are how a wedged child is found.
 """

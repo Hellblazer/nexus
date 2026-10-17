@@ -110,7 +110,7 @@ from typing import Any, Protocol
 import structlog
 
 from nexus.upgrade_ladder.completion import CompletionRecord
-from nexus.upgrade_ladder.deadline import active_expired
+from nexus.upgrade_ladder.deadline import active_deadline, active_expired
 from nexus.upgrade_ladder.protocol import (
     CompletionLedger,
     ConvergeOutcome,
@@ -681,6 +681,9 @@ class Rdr192ManifestBackfillRung:
                     )
                 try:
                     return self._converge_locked(report)
+                except CensusDeadlineReached as exc:
+                    self._log_deadline_reached("during the census")
+                    return ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
                 except CensusUnavailable as exc:
                     return ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
         except OSError as exc:
@@ -814,8 +817,19 @@ class Rdr192ManifestBackfillRung:
             f"the `nx upgrade --auto` time limit passed {where}; "
             "the next `nx upgrade` continues from what is already backfilled"
         )
-        _log.warning("rdr192_backfill_deadline_reached", where=where)
+        self._log_deadline_reached(where)
         return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
+
+    @staticmethod
+    def _log_deadline_reached(where: str) -> None:
+        """One event for every cut, census or backfill: where it stopped and
+        how long the run had been going (nexus-dcbof)."""
+        deadline = active_deadline()
+        _log.warning(
+            "rdr192_backfill_deadline_reached",
+            where=where,
+            elapsed_s=None if deadline is None else round(deadline.elapsed(), 1),
+        )
 
     def _completed(self, reading: CensusReading) -> ConvergeResult:
         self.memo.clear()

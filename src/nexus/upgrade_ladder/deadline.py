@@ -22,8 +22,11 @@ run re-detects and resumes. Backfill progress persists in the database, so a
 resumed run's census skips what is already done; census progress does not
 persist (the census is a read, about 51 s over 98 collections).
 
-What the ceiling does NOT bound: a single call already in flight (one census
-or backfill HTTP call, up to its own timeout), the "finish" pass the root CLI
+What the ceiling does NOT bound: (a) a census call already in flight, up to
+its own HTTP timeout, and (b) one collection's entire backfill once it has
+started (``backfill_manifest_for_collection`` makes many calls in a
+per-document loop and can run well past the limit on a large collection); and
+also the "finish" pass the root CLI
 group runs before ``upgrade()`` starts (the clock starts in ``upgrade()``), and
 the service stop/start cycle that runs in ``upgrade()``'s ``finally`` after the
 ladder (about 60 s each).

@@ -260,12 +260,14 @@ class LadderRunner:
     def _would_do_work(self, rung: Rung) -> bool:
         """Read-only: would walking *rung* now converge or verify something?
         False for a rung that is not applicable or already converged AND
-        recorded. A detect that raises counts as work, so the walk reports the
-        failure through :meth:`_run_rung` instead of hiding it."""
+        recorded. A detect that raises is not work to defer: it returns False so
+        the walk does not stop at the deadline, and :meth:`_run_rung` calls
+        detect again and reports the failure as FAILED instead of hiding it
+        behind a deferral."""
         try:
             status = rung.detect()
         except Exception:  # noqa: BLE001 — surfaced by _run_rung, which reports the detect failure
-            return True
+            return False
         if not status.applicable:
             return False
         return not (status.converged and rung.name in self._store.verified_rungs())

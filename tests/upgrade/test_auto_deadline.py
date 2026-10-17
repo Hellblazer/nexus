@@ -173,6 +173,30 @@ class TestRunnerBoundary:
         assert ledger.verified_rungs() == frozenset({"a", "b", "c"})
 
 
+class RaisingDetectRung:
+    name = "raiser"
+
+    def detect(self) -> RungStatus:
+        raise RuntimeError("detect blew up")
+
+    def converge(self, report: object) -> ConvergeResult:  # pragma: no cover - never reached
+        raise AssertionError("converge must not run")
+
+    def verify(self) -> bool:  # pragma: no cover - never reached
+        return False
+
+
+class TestRaisingDetectAfterDeadline:
+    def test_a_raising_detect_is_reported_failed_not_deferred(self) -> None:
+        clock = FakeClock()
+        deadline = Deadline(5.0, clock=clock)
+        clock.now = 5.0  # already past the ceiling
+        report = _runner((RaisingDetectRung(),), Ledger(), deadline).run()
+        assert _outcomes(report) == [("raiser", RungOutcome.FAILED)]
+        assert "detect raised" in report.runs[0].detail
+        assert report.hard_failed
+
+
 class TestEnvParsing:
     def test_default_is_fifteen_minutes(self) -> None:
         assert DEFAULT_AUTO_DEADLINE_S == 900.0
@@ -447,10 +471,15 @@ class TestRealRegistryShape:
         registry, rung = _real_rung(monkeypatch, engine, lambda c: backfilled.append(c) or 0)
         ledger = Ledger()
 
-        report = _walk(registry, ledger, clock, 900.0)
+        with structlog.testing.capture_logs() as logs:
+            report = _walk(registry, ledger, clock, 900.0)
 
         assert _outcomes(report) == [("rdr192-manifest-backfill", RungOutcome.DEFERRED)]
         assert not report.hard_failed
+        (cut,) = [e for e in logs if e["event"] == "rdr192_backfill_deadline_reached"]
+        assert cut["log_level"] == "warning"
+        assert cut["where"] == "during the census"
+        assert 900.0 <= cut["elapsed_s"] <= 930.0
         # 98 calls at 30 s is 2940 s uninterrupted; the walk stopped at the
         # first check at or past 900 s, so it made exactly 900 / 30 calls.
         assert len(engine.censused) == 30
@@ -493,9 +522,13 @@ class TestRealRegistryShape:
         registry, rung = _real_rung(monkeypatch, engine, backfill)
         ledger = Ledger()
 
-        first = _walk(registry, ledger, clock, 900.0)
+        with structlog.testing.capture_logs() as logs:
+            first = _walk(registry, ledger, clock, 900.0)
 
         assert _outcomes(first) == [("rdr192-manifest-backfill", RungOutcome.DEFERRED)]
+        (cut,) = [e for e in logs if e["event"] == "rdr192_backfill_deadline_reached"]
+        assert cut["where"] == "in pass 1 before backfilling knowledge__c"
+        assert cut["elapsed_s"] == 1000.0
         assert backfilled == ["knowledge__a", "knowledge__b"], "c is not started once 1000 s > 900 s"
         assert engine.legacy == {"knowledge__a": 0, "knowledge__b": 0, "knowledge__c": 5}
         assert rung.memo.saves == 0 and ledger.verified_rungs() == frozenset()
