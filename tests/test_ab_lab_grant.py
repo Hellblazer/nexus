@@ -78,9 +78,9 @@ def test_the_census_names_every_foreground_launcher() -> None:
     none may detach the container itself: it would outlive the grant."""
     found = {
         str(p.relative_to(AB)) for p in AB.rglob("*.sh")
-        if re.search(r"docker run ", p.read_text(encoding="utf-8"))
+        if re.search(r"^[^#\n]*docker run ", p.read_text(encoding="utf-8"), re.M)
     }
     assert found == set(BATCH_SCRIPTS), found
     for rel in found:
-        for run in re.findall(r"^.*docker run .*$", (AB / rel).read_text(encoding="utf-8"), re.M):
+        for run in re.findall(r"^[^#\n]*docker run .*$", (AB / rel).read_text(encoding="utf-8"), re.M):
             assert not re.search(r"setsid|nohup|\s-d\b|--detach", run), f"{rel}: {run.strip()}"
