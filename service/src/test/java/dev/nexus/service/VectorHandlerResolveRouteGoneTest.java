@@ -24,8 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * nexus-3t0jv: {@code POST /v1/vectors/resolve} and its https fetcher are removed in every
- * mode (Sam, 2026-10-17). The route fetched any caller-supplied https URL, following redirects,
- * with no destination filter, and returned the body. What is pinned here is the route's absence:
+ * mode (Sam, 2026-10-17). The route fetched caller-supplied https URLs. What is pinned here is the route's absence:
  * with a valid token the path falls through to {@code VectorHandler}'s default arm and answers
  * 404, for both request forms the deleted handler took and for a loopback URL (the case the
  * fetcher would have served from inside the engine host).
@@ -86,16 +85,24 @@ class VectorHandlerResolveRouteGoneTest {
             .build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    private static final String DEFAULT_ARM_BODY = "{\"error\":\"not found\"}";
+
     @Test
     void everyRequestForm_answers404() throws Exception {
+        // The body is pinned too: VectorHandler's default arm answers {"error":"not found"}.
+        // The deleted handler's 404s carried its own text ("no chunk found for collection=..."),
+        // so a restored handler fails the (collection, chash) form here, not only the URI form.
         var byUri = post("{\"source_uri\":\"https://example.invalid/doc\"}");
         assertThat(byUri.statusCode()).as("body: %s", byUri.body()).isEqualTo(404);
+        assertThat(byUri.body()).isEqualTo(DEFAULT_ARM_BODY);
 
         var byChash = post("{\"collection\":\"knowledge__rrg__voyage-context-3__v1\","
             + "\"chash\":\"" + "a".repeat(64) + "\"}");
         assertThat(byChash.statusCode()).as("body: %s", byChash.body()).isEqualTo(404);
+        assertThat(byChash.body()).isEqualTo(DEFAULT_ARM_BODY);
 
         var loopback = post("{\"source_uri\":\"https://127.0.0.1:" + service.getPort() + "/v1/status\"}");
         assertThat(loopback.statusCode()).as("body: %s", loopback.body()).isEqualTo(404);
+        assertThat(loopback.body()).isEqualTo(DEFAULT_ARM_BODY);
     }
 }

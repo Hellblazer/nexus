@@ -1950,6 +1950,7 @@ text or the build that had not been recorded as a decision of Sam; none changes 
   This is a deliberate exception to Gap 2: a permalink to a chunk of a trashed or superseded
   document keeps resolving, and that chunk's text stays readable through it until `purge_trash`
   or the reaper reclaims it (M7, option A, 2026-10-01; ratified by Sam, 2026-10-04).
+  2026-10-17: POST /v1/vectors/resolve was removed in every mode, nexus-3t0jv. `fetchChunkText` is deleted; (c) is moot.
 - (d) The sweeps and the reaper answer R8 (a manifest-less current note) differently by design:
   the sweeps keep it through the retained notes-guard arm, and `reapable(c)` selects it with the
   reaper's census gate as the protection (MVV (d); Sam, 2026-10-04).
@@ -2089,6 +2090,7 @@ section's earlier cross-walk depends on them.
   collection whose chunks are all hidden is not dormant until its chunks are
   purged. Predicate 9 keeps its own shape; Migration order item 3 records the
   difference from `live(c)` on R3 and R9 and the matrix's P9 column pins it.
+  [2026-10-17: POST /v1/vectors/resolve was removed in every mode, nexus-3t0jv; `fetchChunkText` is deleted.]
   Plan evidence for the topic-scoped, hybrid, gate-probe, by-chash and
   `collection_vector_stats` paths, taken as `nexus_svc` under RLS, is in T2
   `nexus/rdr-192-live-c-explain-evidence-2026-10-01`;
