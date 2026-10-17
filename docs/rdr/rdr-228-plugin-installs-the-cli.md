@@ -45,6 +45,16 @@ user who never opens a terminal cannot get there at all. Sam's requirement,
 quoted in RDR-218, is that a CLI must not be an installation prerequisite.
 No platform meets it today.
 
+This record meets the requirement for the CLI and keeps two prerequisites
+(disposition at close, 2026-10-17). A user with no terminal can get a working
+Nexus once `uv` and `git` are on the machine. `uv` stays a hard prerequisite
+by Sam's decision of 2026-10-13 ("Briefly Rejected", the plugin installs `uv`
+itself). `git` stays because Claude Code fetches the plugin from its
+marketplace with `git`. The install pages still use a terminal for `uv` and
+`git` (close critique, T2 `nexus_rdr/228-close-critique-2026-10-17`); the
+one-command installer script installs `uv` for a user who starts in a
+terminal.
+
 ### Enumerated gaps
 
 #### Gap 1: The plugin names programs it does not provide
@@ -88,6 +98,11 @@ one live conversation measured on today's Desktop build ran no local session
 and no hook on the laptop (Discovery 7), so no user is known to pay this wait now. This
 record does not change the hook for that launch. It does make sure its own
 design never causes the same wait; see "The connect wait".
+Disposition at close (2026-10-17, `nexus_rdr/228-research-39`): on Desktop
+2.42304.0 neither a plain conversation with plugin tools nor a task that works
+with local files started a local agent session, so no case was found in which a
+Desktop user pays the wait; the Code tab and Cowork were not tried, and Gap 4
+stays recorded and not closed.
 
 ## Relationship to Prior RDRs
 
@@ -254,16 +269,30 @@ assumed (`-13`, replaced by the Windows run in `-14`).
   cannot install the CLI there (Discovery 7). A plugin server does run on the
   machine.
 
-- **CA-8 (Assumed).** Each Claude application asks the user before it runs a
-  plugin's tool. It is verified on no surface, and a Claude Code user who has
-  allowed all of the plugin's tools has turned it off for themselves. What
-  rests on it is stated once, in "Consent". *Verify:* the Minimum Viable
-  Validation notes on each surface whether a prompt appears for `setup`.
-- **CA-9 (Assumed).** A setup process started detached from a server on
-  Windows outlives that server. The repository's existing Windows server
-  launcher ties its children to a job that kills them when it closes
-  (`mcpb/src/bootstrap.py`), so this may be false for a process started the
-  plain way. *Verify:* in Phase 2, before the setup process ships on Windows.
+- **CA-8 (Verified on three of four cells, 2026-10-15 and 2026-10-16).** Each
+  Claude application asks the user before it runs a plugin's tool. Claude Code
+  2.1.301 in its default permission mode asked before `setup` ran, on Windows
+  (`nexus_rdr/228-mvv-2026-10-15`) and on macOS
+  (`nexus_rdr/228-mvv-2026-10-16-macos`). Claude Desktop 2.42304.0 on macOS
+  asked before each plugin tool in one live conversation; the tool asked for
+  was `collection_list`, not `setup` (`nexus_rdr/228-mvv-2026-10-16-desktop`).
+  Desktop on Windows is not measured. A Claude Code user who has allowed all
+  of the plugin's tools has turned the prompt off for themselves. What rests
+  on it is stated once, in "Consent".
+- **CA-9 (Verified with conditions, 2026-10-14, native Windows, one host).** A
+  setup process started detached from a server on Windows outlives that
+  server only when it is started in the right way. Claude Code 2.1.296 and
+  Claude Desktop 1.24012.9.0 put their servers in a job that kills its members
+  when it closes and allows silent breakaway, so a server's child is outside
+  that job (`nexus_rdr/228-research-33`, `-35`). Claude Code also ends a
+  server that is still alive about 350 ms after its input closes with a
+  process-tree kill, which kills a plain child. A double launch (an
+  intermediate process starts the setup process and exits, so the tree kill
+  cannot reach it) survived 4 of 4 runs. Under a kill-on-close job that allows
+  breakaway only when asked, only `CREATE_BREAKAWAY_FROM_JOB` gets the child
+  out, and no creation flag gets it out of a job that allows no breakaway
+  (`nexus_rdr/228-research-32`). The rule that follows is in "Where the setup
+  process lives". Desktop's graceful quit was not measured.
 
 ## Proposed Solution
 
@@ -279,8 +308,9 @@ for a local service whether it starts at login. One answer starts one
 background process that does all of it. Nothing is installed
 that the user did not agree to (Sam, 2026-10-12). A one-command installer script
 ships with the same work for terminal users, and it is the one path that also
-installs `uv`. For everyone else `uv` and the plugin are the only two things a
-user installs.
+installs `uv`. For everyone else the user installs `uv` and `git`, the two
+prerequisites, and then adds the plugin; from there no terminal is needed
+(disposition under "Problem Statement").
 
 ### Technical Design
 
@@ -354,7 +384,15 @@ install done by hand at any time is used at the next launch.
 
 The stand-in is served only while there is no CLI or the CLI cannot start. It
 does not try to swap itself for the real server inside one connection; when the
-build is done its status says to reconnect the server or start a new session.
+build is done its status says to reconnect the server or start a new session
+in Claude Code, and in Claude Desktop to quit the app fully and open it again.
+Desktop reuses a running plugin server across chats and has no Reconnect, so
+a new chat keeps the stand-in (`nexus-93xx0`, found 2026-10-16, fixed in
+conexus 7.82.0; the text is `RECONNECT_HOW` in `conexus/launch/nx_standin.py`).
+A stand-in that replaces itself with the real server in place was considered
+and not taken: Desktop's code showed no handler for the
+`notifications/tools/list_changed` message such a swap would rely on, and its
+log shows plugin tools announced only when a server connects.
 `setup_status` asks the lookup again at each poll, in both modes, of the same
 program the launcher judged, because the setup record is never cleared and
 outlives the install it describes: a `done` from a setup months ago says
@@ -366,8 +404,9 @@ be read as a finished repair: a `done` on record "did not repair this", and a
 `failed` run says the last run failed and gives the log. While no CLI is found,
 the answer opens "not installed", and a `done` on record is an install that is
 gone, so the one question is put again. Once the CLI can start, the answer is
-the record and the reconnect step once (a `done` record's own next step is that
-step; any other record's next step predates the CLI and is dropped). (One limit: when the launcher fell into the
+the record and the reconnect step once, which names Desktop's quit and reopen
+as well (a `done` record's own next step is that step; any other record's next
+step predates the CLI and is dropped). (One limit: when the launcher fell into the
 cannot-start mode because the system refused to run a program the files say is
 fine, nothing in the files can show the problem gone, so the poll then reads the
 CLI as startable.) The hook's state 2 gives the same statement and offer.
@@ -420,10 +459,12 @@ call is made by a model that the hook, the server instructions and the tool
 description have each told to ask the user first and to act only on the
 answer. That instruction is the control this design owns, and it is a
 request to a model, so it can fail. The application's own prompt before a
-plugin tool runs is a second check that this record has not verified on any
-surface (CA-8). If the Minimum Viable Validation finds a surface that shows
-no prompt, consent on that surface rests on the model alone, and whether the
-setup tools ship there is Sam's decision before release.
+plugin tool runs is a second check (CA-8). The Minimum Viable Validation found
+it on every cell it measured: Claude Code asked before `setup` on macOS and on
+Windows, and Desktop on macOS asked before each plugin tool. It found no
+surface that shows no prompt, so the branch where consent rests on the model
+alone did not arise there. Desktop on Windows is not measured, and a Claude
+Code user who allowed all of the plugin's tools has no prompt.
 
 **A usable service.** One definition, used by the hook, the setup process and
 the real server. A service is *usable* when the CLI would resolve an endpoint:
@@ -587,6 +628,15 @@ that was not started by this launcher has no such variable; its setup tools
 then start nothing and answer with the terminal commands for the same work.
 The plugin parts that name the real server's tools ship in the client
 release that carries those tools, never in a plugin-only cut ahead of it.
+
+On Windows the setup process is started by a double launch (CA-9,
+`nexus_rdr/228-research-32`, `-33`, `-35`): a short-lived intermediate starts
+it with `DETACHED_PROCESS`, `CREATE_NEW_PROCESS_GROUP` and
+`CREATE_BREAKAWAY_FROM_JOB`, and exits, so a process-tree kill of the server
+cannot reach the setup process. When the host's job refuses breakaway, the
+same double launch is tried without it, unless that job would kill the child
+when it closes; then `setup` reports that it cannot detach on this host
+(`detach` in `conexus/launch/nx_setup.py`).
 
 **The setup process** (`setup`). One detached process per call, logging to one
 file and writing its stage to the status file after each step. The tool
@@ -835,7 +885,8 @@ step is removed.
   installs drift, and the terminal `nx` a user later runs would be a different
   one from the plugin's.
 - **Block the first session until the install finishes.** Hooks time out in 5
-  to 30 seconds and a server must answer its handshake in about that long. The
+  to 30 seconds (35 to 60 seconds for the session-start entries since 7.82.0,
+  nexus-3ya9d) and a server must answer its handshake in about that long. The
   install takes minutes.
 
 ## Trade-offs
@@ -846,8 +897,11 @@ step is removed.
   nine terminal steps go away. A terminal user can run one command instead.
 - The first session has no Nexus tools until setup ends, from under two
   minutes on a fast connection to about seven on a slow one for local mode,
-  and needs a reconnect once the CLI is built. The Desktop application has no
-  progress display; the status tool is the only view.
+  and needs a reconnect once the CLI is built: in Claude Code the server's
+  Reconnect or a new session, in Claude Desktop quitting the app and opening
+  it again, because Desktop keeps the running server across chats and has no
+  Reconnect (`nexus-93xx0`). The Desktop application has no progress display;
+  the status tool is the only view.
 - A user who says no keeps a plugin whose only tools are the two setup
   tools, with one line per session naming `/conexus:setup`.
 - The real `nx-mcp` gains two tools in every session, 46 where there were
@@ -855,7 +909,15 @@ step is removed.
 - The plugin now opens a listening port on the loopback address for up to ten
   minutes during cloud setup.
 - Every server start and seven hook entries gain one `uv` launch, about 20 ms
-  each by measurement.
+  each on macOS (Discovery 4). On Windows the cost is larger, because `uv`'s
+  Python there is a pair of processes for every launch: each session-start
+  entry ran 0.2 to 1.1 s slower through the launcher, and each server runs six
+  processes deep under the application (`nexus_rdr/228-research-25`,
+  `nexus_rdr/228-p1-gate-record`). Sam accepted that cost at the Phase 1 gate.
+  In the same gate one `preflight` entry was cancelled at its 5 s timeout;
+  that entry's timeout went to 10 s (`799bc4b13`), and conexus 7.82.0 gave every
+  session-start entry its own work budget plus a 30 s allowance for a cold
+  `uv` start (`nexus-3ya9d`, `9cc549363`).
 - The plugin now carries a launcher that must keep working against every CLI
   version in the field, the same compatibility duty `nx_hook_shim.py` already
   has.
@@ -871,8 +933,10 @@ step is removed.
   `nx upgrade --auto` among them. Whether that interferes with a running
   `nx init` is not tested; Phase 2 Step 2 tests it, and the remedy if it does
   is for those verbs to exit early while the setup lock is held.
-- **The setup process dies with its server on Windows** (CA-9). Phase 2
-  Step 2 measures it before the Windows setup path ships.
+- **The setup process dies with its server on Windows** (CA-9). Measured in
+  Phase 2 Step 2: a plain child dies in Claude Code's process-tree kill, and a
+  double launch survives it. The setup process is started by a double launch
+  ("Where the setup process lives").
 - **A reboot leaves the local service down.** With start at login declined,
   this is expected: the server and the hook say the service is down, and
   `/conexus:setup` starts it (hook state 7).
@@ -884,12 +948,14 @@ step is removed.
 - **A Desktop user is never told.** With no hook and no `instructions`, the
   notice there is the two tool descriptions, which the model reads only when
   it considers the tools. The install page tells Desktop users to ask "set up
-  Nexus" after adding the plugin. Whether Desktop offers plugin commands such
-  as `/conexus:setup` in a conversation was not measured.
+  Nexus" after adding the plugin. Desktop offers plugin skills in a
+  conversation, not plugin commands, so `/conexus:setup` is not available
+  there (measured, T2 `nexus_rdr/228-research-38`).
 - **The model does not ask, or asks badly.** If the model stays silent,
   nothing is installed and the next session says the same thing. If it calls
   `setup` unasked, what stands between that call and an install is the
-  application's own prompt, which is unverified (CA-8); see "Consent".
+  application's own prompt, verified on every cell measured except Desktop on
+  Windows (CA-8); see "Consent".
 - **Another local user or program reaches the credentials page.** Loopback is
   reachable by every user on a shared machine, so the one-time path is the
   only protection. That is why the address is kept off the command line and
@@ -933,7 +999,8 @@ step is removed.
 - Build killed midway: the generation has no receipt, so nothing treats it as
   an install, and the next `setup` builds a new one.
 - Stand-in server still running after the build: its status tool says to
-  reconnect. It never serves a Nexus tool. The next launch runs the real
+  reconnect, and in Claude Desktop to quit the app and open it again, since a
+  new chat keeps the running stand-in. It never serves a Nexus tool. The next launch runs the real
   server, because the CLI now resolves.
 - Setup process killed midway: its heartbeat goes stale, hook state 4 reports
   it, and `setup` resumes.
@@ -957,7 +1024,8 @@ plugin. Each row starts from an image with `uv` and nothing else. Rows 1 to
 3 and 5 use no terminal at all after the plugin is added; rows 4 and 6 use
 one on purpose.
 
-1. Answer "local, start at login". Reconnect. One search returns a result.
+1. Answer "local, start at login". Reconnect (in Claude Desktop, quit the
+   app and open it again). One search returns a result.
    Reboot; the search still works.
 2. Answer "local, no". Reboot. The session says the service is down;
    `/conexus:setup` starts it, and offers start at login again.
@@ -1216,8 +1284,10 @@ application.
 
 ### Performance Expectations
 
-No more than 30 ms added per launcher call (measured 19 to 22 ms for the same
-form). Setup hook under 100 ms in every state. Measured on a fast connection
+No more than 30 ms added per launcher call on macOS and Linux (measured 19 to
+22 ms for the same form). On Windows the measured cost is 0.2 to 1.1 s per
+session-start entry, accepted by Sam (Consequences). Setup hook under 100 ms in
+every state. Measured on a fast connection
 with a warm package cache: CLI build 40 seconds, local provisioning 46
 seconds. On a home connection with nothing cached, expect about two minutes
 for the 0.7 GB CLI download and two to five for the service, from the
@@ -1288,8 +1358,8 @@ ask for something Nexus does. The install page carries the instruction.
 | CA-5 `uv` launch form on Windows | verified on native Windows; Desktop by log | spike, log |
 | CA-6 unattended `nx init` | verified | spike |
 | CA-7 Desktop shell is not on the machine | verified, one conversation | live conversation |
-| CA-8 applications ask before a plugin tool runs | assumed | noted per surface in the Minimum Viable Validation |
-| CA-9 a detached setup process outlives its server on Windows | assumed | measured first in Phase 2 Step 2 |
+| CA-8 applications ask before a plugin tool runs | verified: Claude Code on macOS and Windows (before `setup`), Desktop on macOS (before each plugin tool, one conversation); Desktop on Windows not measured | Minimum Viable Validation, `228-mvv-2026-10-15`, `228-mvv-2026-10-16-macos`, `228-mvv-2026-10-16-desktop` |
+| CA-9 a detached setup process outlives its server on Windows | verified with conditions: only by a double launch, with `CREATE_BREAKAWAY_FROM_JOB` where the job asks for it; one host | spike, `228-research-32`, `-33`, `-35` |
 
 Not verified before implementation, each named in Phase 0's "still open"
 list: a reconnect replacing the stand-in with the real server; the stand-in
@@ -1369,8 +1439,12 @@ Test Plan covers the "local" path without a network.
   the clear to the address the user typed. Rotation and override are the
   existing `nx config` verbs.
 - **Memory management**: the launcher replaces itself with the real program
-  on POSIX and stays as one idle parent process on Windows. On every platform
-  `uv` stays as an idle parent of each server it started.
+  on POSIX and stays as an idle parent on Windows. On every platform `uv`
+  stays as an idle parent of each server it started. On Windows each Nexus
+  server runs six processes deep under the application: `uv`, the two Python
+  processes of `uv`'s interpreter running the launcher, and the CLI's
+  `nx-mcp.exe` with the two Python processes behind it
+  (`nexus_rdr/228-research-25`).
 
 ### Proportionality
 
@@ -1535,3 +1609,17 @@ is flagged for trimming before then.
   embedder notice that says to run `nx init` (Sam, 2026-10-16). The
   start-at-login supervisor reads every setting from the config directory it
   was installed for.
+- 2026-10-17: Close critique folded in, on Sam's approval
+  (T2 `nexus_rdr/228-close-critique-2026-10-17`, Issues 1 to 4 and Gap 4).
+  The Windows launcher cost is stated as measured, 0.2 to 1.1 s per
+  session-start entry with servers six processes deep, and accepted by Sam,
+  with the preflight timeout raise and conexus 7.82.0's 30 s cold-start
+  allowance (Consequences, Performance Expectations, Memory management). After
+  setup, Claude Desktop needs the app quit and opened again, not a reconnect
+  (`nexus-93xx0`); the self-replacing stand-in is recorded as not taken
+  ("What is served", Consequences, Failure Modes, Minimum Viable Validation row
+  1). The terminal-free claim holds once `uv` and `git` are present (Problem
+  Statement, Approach). CA-8 and CA-9 are verified with their conditions, the
+  Windows double launch is stated under "Where the setup process lives", and
+  "Consent" and Risks take the CA-8 result. Gap 4 records that no local agent
+  session was found in the cases tried (`nexus_rdr/228-research-39`).
