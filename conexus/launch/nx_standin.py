@@ -109,9 +109,9 @@ NOT_INSTALLED: str = (
 QUESTION_TABLE: str = (
     "| Choice | What happens | Download |\n"
     "|---|---|---|\n"
-    "| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 GB on disk |\n"
-    "| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 1.6 GB on disk |\n"
-    "| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 1.6 GB on disk |\n"
+    "| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |\n"
+    "| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |\n"
+    "| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |\n"
     "| Not now | Nothing is installed | none |"
 )
 
@@ -250,8 +250,8 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download, 2.4 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address, token and tenant for, up to about 0.7 GB to download, 1.6 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 1.6 GB on disk; a service can be added later), "
+    "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
+    "address, token and tenant for, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk; a service can be added later), "
     "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
     "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "

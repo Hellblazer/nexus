@@ -182,11 +182,12 @@ def test_the_download_sizes_are_ceilings_not_promises() -> None:
 
 def test_the_descriptions_give_the_disk_sizes_beside_the_download_sizes() -> None:
     """The Desktop question (Sam, 2026-10-14): the choice shows what it takes on disk as
-    well as what it downloads, from the record's table (2.4 GB for local, 1.6 GB for the
-    CLI alone), so the user is not surprised after answering."""
+    well as what it downloads, as measured from nothing on macOS, Linux and Windows with conexus
+    7.81.0 (2.4 to 3.1 GB for local, 2.1 to 2.3 GB for the CLI alone; nexus-gxzfq), so the user
+    is not surprised after answering."""
     text = _tools()["setup"].description
-    assert "up to about 1.3 GB to download, 2.4 GB on disk" in text, text
-    assert "up to about 0.7 GB to download, 1.6 GB on disk" in text, text
+    assert "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk" in text, text
+    assert "up to about 0.7 GB to download, 2.1 to 2.3 GB on disk" in text, text
 
 
 # -- the instructions notice --------------------------------------------------------
@@ -262,7 +263,7 @@ def test_the_notice_gives_the_sizes_a_choice_takes(monkeypatch: pytest.MonkeyPat
     service: the sizes of the two ways to fix it, download and disk, in the table's words."""
     _service(monkeypatch, False)
     text = setup_tools.no_service_notice() or ""
-    assert "1.3 GB" in text and "2.4 GB on disk" in text and "0.7 GB" in text and "1.6 GB on disk" in text, text
+    assert "1.3 GB" in text and "2.4 to 3.1 GB on disk" in text and "0.7 GB" in text and "2.1 to 2.3 GB on disk" in text, text
 
 
 def _provision(config: Path, *, files: int = 3) -> None:
