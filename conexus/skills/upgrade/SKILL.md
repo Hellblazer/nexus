@@ -119,9 +119,10 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
   managed`, or a ChromaDB Cloud key with no mode record), which `NX_LOCAL=1`
   overrides. Read from the 6.18.1 source, not run at the pin. Never run
   the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
-  endpoint: that path is unsupported (the engine retired the `/v1/staging`
-  routes it lands through; what it did against a current engine before that is
-  unmeasured, nexus-6g218). Do not set `service_url` first "to save a step".
+  endpoint: that path is unsupported and never works against a current engine
+  (it stops before writing anything, and on engines from before the
+  `/v1/staging` routes were retired it reported success while dropping every
+  Chroma-era pointer; measured, nexus-6g218). Do not set `service_url` first "to save a step".
 - **Stop any current-engine local service** a 7.x install left running
   (`nx daemon service stop`) so the pin provisions its own engine.
 - **Voyage-embedded data needs a Voyage-keyed local engine**
