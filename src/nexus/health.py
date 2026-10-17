@@ -1204,16 +1204,50 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
 
 
 def _boot_failure_advisory() -> str | None:
-    """Soft wrapper: resolve the local service log path and tail-parse it.
+    """Soft wrapper: read the engine's own log and say why it refused to start.
 
-    Guards cloud-mode / no-local-service installs (no log path exists) and
-    any resolution failure — degrades to ``None`` silently, never raises.
+    The engine writes ``storage_service_native.log`` (production artifact) or
+    ``storage_service_jar.log`` (a jar launch, dev and test). With the engine
+    down there is no lease naming the launch kind, so the newer of the two
+    files is the one the last launch wrote. A Liquibase changeset failure keeps
+    its dedicated advisory; any other startup error (for instance
+    ``event=pg_session_env_invalid``) is the engine's own last error line, read
+    by :func:`nexus.daemon.storage_service_daemon.last_engine_error_line`.
+
+    Guards cloud-mode / no-local-service installs (no log exists) and any
+    resolution failure — degrades to ``None`` silently, never raises.
     """
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — failure path only
+            _ENGINE_ERROR_LINE,
+            _ENGINE_LOGBACK_LINE,
+            ENGINE_LOG_STEMS,
+            last_engine_error_line,
+        )
 
-        log_path = nexus_config_dir() / "logs" / "storage_service_native.log"
+        logs_dir = nexus_config_dir() / "logs"
+        candidates: list[tuple[float, Path]] = []
+        for stem in ENGINE_LOG_STEMS:
+            path = logs_dir / f"{stem}.log"
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        if not candidates:
+            return None
+        log_path = max(candidates, key=lambda c: c[0])[1]
+
         detail = _last_boot_failure_detail(log_path)
+        if detail is None:
+            reason = last_engine_error_line(log_path, 0)
+            # The reader falls back to the last output line when the engine
+            # logged no ERROR; a routine INFO/WARN tail (a clean stop) is not
+            # a reason for being unreachable.
+            if reason is not None and not (
+                _ENGINE_LOGBACK_LINE.match(reason) and not _ENGINE_ERROR_LINE.match(reason)
+            ):
+                detail = reason
     except Exception:  # noqa: BLE001 — best-effort: must never crash the reachability probe
         return None
     if detail is None:
@@ -1288,8 +1322,7 @@ def _check_vector_service() -> HealthResult:
         # nexus-4m6i0.7: the service can crash-loop before answering any
         # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
         # the root cause from the local service log when one is available,
-        # instead of leaving the operator to spelunk storage_service_native.log
-        # by hand. Strictly best-effort/soft: any failure here degrades
+        # instead of leaving the operator to spelunk the engine log by hand. Strictly best-effort/soft: any failure here degrades
         # silently back to the bare "not reachable" message. Only reached for
         # transport failures now, so a boot advisory can never be scraped from
         # a stale log while the service is actually up and answering.

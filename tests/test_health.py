@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
+
 import pytest
 
 from nexus.health import (
@@ -1085,3 +1087,101 @@ def test_embedding_profile_missing_voyage_key_is_red_with_its_own_text(monkeypat
     )
     r = _by_label(health._check_embedding_profile(), "Embedding profile vs client intent")
     assert _is_red(r) and "requires a Voyage API key" in r.detail
+
+
+# ── nexus-pbway: any engine startup error, from the log of the launch kind ───
+
+_ENGINE_ERR = (
+    "2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - "
+    'event=pg_session_env_invalid error="X must be in 60..3600, got: 10"'
+)
+
+
+def _down(*a, **kw):
+    raise RuntimeError("connection refused")
+
+
+def _write_engine_log(config_dir, stem: str, content: str, mtime: float | None = None):
+    logs_dir = config_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / f"{stem}.log"
+    path.write_text(content)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_unreachable_engine_surfaces_a_non_liquibase_startup_error(
+    monkeypatch, tmp_path
+) -> None:
+    """An engine that exited on an out-of-range env value shows its own error
+    line in the doctor detail, not a bare 'not reachable'."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(tmp_path, "storage_service_native", _ENGINE_ERR + "\n")
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    assert "not reachable" in line.detail
+    assert "pg_session_env_invalid" in line.detail
+    assert "must be in 60..3600" in line.detail
+
+
+def test_unreachable_jar_launch_reads_the_jar_log(monkeypatch, tmp_path) -> None:
+    """A jar launch writes storage_service_jar.log only; the native log is absent."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(tmp_path, "storage_service_jar", _ENGINE_ERR + "\n")
+
+    line = _check_vector_service()
+    assert "pg_session_env_invalid" in line.detail
+
+
+def test_the_newer_engine_log_wins_over_a_stale_one(monkeypatch, tmp_path) -> None:
+    """An older native log left by an earlier install must not mask the jar
+    launch that just failed (and the reverse)."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(
+        tmp_path, "storage_service_native",
+        _ENGINE_ERR.replace("pg_session_env_invalid", "stale_native_error") + "\n",
+        mtime=1_000_000,
+    )
+    _write_engine_log(tmp_path, "storage_service_jar", _ENGINE_ERR + "\n", mtime=2_000_000)
+
+    line = _check_vector_service()
+    assert "pg_session_env_invalid" in line.detail
+    assert "stale_native_error" not in line.detail
+
+
+def test_the_liquibase_advisory_is_kept_for_the_jar_log(monkeypatch, tmp_path) -> None:
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(tmp_path, "storage_service_jar", _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert "catalog-013-2" in line.detail
+    assert 'constraint "chunks_384_chash_len_check"' in line.detail
+
+
+def test_a_log_with_no_error_stays_a_bare_not_reachable(monkeypatch, tmp_path) -> None:
+    """A routine INFO tail (a clean stop) is not an error and is not reported as one."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _write_engine_log(
+        tmp_path, "storage_service_jar",
+        "2026-10-11 02:10:03,114 INFO  [main] d.n.service.Main - shutdown complete\n",
+    )
+
+    assert _check_vector_service().detail == "not reachable"
