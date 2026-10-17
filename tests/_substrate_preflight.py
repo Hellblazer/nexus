@@ -16,8 +16,8 @@ progress.
 
 The bundle is provisioned HERE when it is not cached: once, on the controller,
 before any xdist worker spawns, so each worker finds it in the per-tag cache
-(``substrate_cache_root()``, which the HOME fence mirrors) instead of racing a
-download.
+(``substrate_cache_root()``, which the HOME fence pins to the real cache through
+``NX_TEST_SUBSTRATE_CACHE``) instead of racing a download.
 
 Every input is injectable so the unit tests never touch the network or the
 real ``service/`` tree; the defaults are the real functions, resolved at call

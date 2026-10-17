@@ -249,8 +249,16 @@ def last_provision_failure() -> str | None:
 
 
 def substrate_cache_root() -> Path:
-    """Root of the per-tag test-substrate caches: ``$XDG_CACHE_HOME`` when set
-    and non-blank, else ``~/.cache``, then ``nexus-test-substrate``.
+    """Root of the per-tag test-substrate caches: ``$NX_TEST_SUBSTRATE_CACHE``
+    when set and non-blank, else ``$XDG_CACHE_HOME``/``~/.cache`` plus
+    ``nexus-test-substrate``.
+
+    ``NX_TEST_SUBSTRATE_CACHE`` (nexus-ld3aa review) is how the suite's HOME
+    fence shares the real cache: the fenced home is empty, so the HOME rung would
+    resolve to a cold directory and re-fetch and sigstore-verify the PG bundle
+    every session. ``XDG_CACHE_HOME`` would also work but re-exposes all of
+    ``.cache``, so the fence pins this one key (tests/_fence_home.py
+    ``fence_cache_env``).
 
     nexus-wvyvn: this was ``~/.cache`` unconditionally, so a host that moves
     its caches with ``XDG_CACHE_HOME`` still grew a second cache under HOME.
@@ -263,6 +271,9 @@ def substrate_cache_root() -> Path:
     so a test that redirects HOME would otherwise still land in the real
     profile's cache.
     """
+    pinned = os.environ.get("NX_TEST_SUBSTRATE_CACHE", "").strip()
+    if pinned:
+        return Path(pinned)
     xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
     if xdg:
         return Path(xdg) / "nexus-test-substrate"

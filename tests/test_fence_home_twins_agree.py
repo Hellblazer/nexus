@@ -10,11 +10,12 @@ should not, so this pins the contract rather than trusting the comments.
 
 The rule (nexus-ld3aa): the fenced home starts EMPTY and only the entries of one
 declared allowlist (``MIRRORED_ENTRIES`` / ``FENCE_MIRRORED_ENTRIES``) that the
-real home has are linked through. Credential stores are never on it.
+real home has are linked through. No credential store is on it by name.
 """
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -140,13 +141,30 @@ def _shell_mirrored() -> list[str]:
     return [line for line in r.stdout.splitlines() if line]
 
 
+#: The allowlist as a LITERAL. Equality between the twins is not enough: an entry
+#: added to both stays green there. Widening the mirror means editing this set,
+#: in a diff a reviewer reads (nexus-ld3aa review). .gradle .cargo .rustup were
+#: dropped: no consumer in this repo.
+_EXPECTED_MIRROR = {".m2", ".docker", ".testcontainers.properties"}
+
+
 def test_the_two_allowlists_are_equal() -> None:
     shell = _shell_mirrored()
     assert len(shell) == len(set(shell)), f"duplicate in the shell allowlist: {shell}"
     assert sorted(shell) == sorted(MIRRORED_ENTRIES)
-    # non-vacuity: the measured toolchain caches, not an empty pair
-    for name in (".m2", ".gradle", ".docker", ".cargo", ".rustup", ".testcontainers.properties"):
-        assert name in shell
+
+
+def test_the_allowlist_is_exactly_the_three_measured_entries() -> None:
+    assert set(MIRRORED_ENTRIES) == _EXPECTED_MIRROR and len(MIRRORED_ENTRIES) == 3
+    assert set(_shell_mirrored()) == _EXPECTED_MIRROR
+
+
+def test_a_toolchain_cache_with_no_repo_consumer_is_not_mirrored(tmp_path: Path) -> None:
+    real = tmp_path / "real"; real.mkdir(); _seed(real)
+    for home in (fence_home(real, tmp_path / "py"), (_shell_fence(real, tmp_path / "sh"), tmp_path / "sh")[1]):
+        for dropped in (".gradle", ".cargo", ".rustup"):
+            assert (real / dropped).is_dir(), "the seed must hold it, or this proves nothing"
+            assert not (home / dropped).exists() and not (home / dropped).is_symlink(), dropped
 
 
 def test_no_credential_store_is_on_either_allowlist() -> None:
@@ -186,38 +204,90 @@ def test_a_seeded_credential_store_is_never_visible_in_either_fence(tmp_path: Pa
         assert not any(home.rglob("secret")), f"{home}: a credential file is reachable"
 
 
-_CACHE_KEYS = ("NX_ONNX_MODEL_DIR", "NX_MINILM_CACHE_DIR", "NX_ORT_NATIVE_DIR")
+_CACHE_KEYS = (
+    "NX_ONNX_MODEL_DIR", "NX_MINILM_CACHE_DIR", "NX_ORT_NATIVE_DIR",
+    "HF_HUB_CACHE", "NX_TEST_SUBSTRATE_CACHE",
+)
+#: Inputs the pins read; cleared on both sides so the host env cannot leak in.
+_CACHE_INPUTS = ("XDG_CACHE_HOME", "HF_HOME")
 
 
-@pytest.mark.parametrize("outer", [{}, {"NX_ONNX_MODEL_DIR": "/m"},
-                                   {"NX_ONNX_MODEL_DIR": "", "NX_MINILM_CACHE_DIR": "", "NX_ORT_NATIVE_DIR": ""}])
-def test_the_model_cache_pin_agrees_between_the_twins(outer: dict[str, str], tmp_path: Path) -> None:
+@pytest.mark.parametrize("outer", [
+    {},
+    {"NX_ONNX_MODEL_DIR": "/m"},
+    {"HF_HUB_CACHE": "/hub", "NX_TEST_SUBSTRATE_CACHE": "/sub"},
+    {k: "" for k in _CACHE_KEYS},
+    {"XDG_CACHE_HOME": "/xdg"},
+    {"HF_HOME": "/hf"},
+])
+def test_the_cache_pins_agree_between_the_twins(outer: dict[str, str], tmp_path: Path) -> None:
     from tests._fence_home import fence_cache_env
 
     real = tmp_path / "real"
+    cleared = (*_CACHE_KEYS, *_CACHE_INPUTS)
     with patch.dict(os.environ):
-        for k in _CACHE_KEYS:
+        for k in cleared:
             os.environ.pop(k, None)
         os.environ.update(outer)
         fence_cache_env(real)
         py = {k: os.environ.get(k) for k in _CACHE_KEYS}
 
-    env = {k: v for k, v in os.environ.items() if k not in _CACHE_KEYS}
+    env = {k: v for k, v in os.environ.items() if k not in cleared}
     env.update(outer)
     script = (
         f'source "{_SHELL_FENCE}"; fence_cache_env "{real}"; '
-        'printf "NX_ONNX_MODEL_DIR=%s\\nNX_MINILM_CACHE_DIR=%s\\nNX_ORT_NATIVE_DIR=%s\\n" '
-        '"$NX_ONNX_MODEL_DIR" "$NX_MINILM_CACHE_DIR" "$NX_ORT_NATIVE_DIR"'
+        + "".join(f'printf "{k}=%s\\n" "${k}"; ' for k in _CACHE_KEYS)
     )
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=30)
     assert r.returncode == 0, r.stderr
     sh = dict(line.split("=", 1) for line in r.stdout.splitlines())
     assert py == sh
     assert all(py.values()), py
-    if not outer:
+    cache = Path(outer.get("XDG_CACHE_HOME") or real / ".cache")
+    if not outer.get("NX_ONNX_MODEL_DIR") and not any(outer.values()):
         assert py["NX_ONNX_MODEL_DIR"] == str(real / ".cache" / "nexus" / "onnx_models")
         assert py["NX_MINILM_CACHE_DIR"] == str(real / ".cache" / "chroma" / "onnx_models")
         assert py["NX_ORT_NATIVE_DIR"] == str(real / ".cache" / "nexus" / "ort_native")
+        assert py["HF_HUB_CACHE"] == str(real / ".cache" / "huggingface" / "hub")
+        assert py["NX_TEST_SUBSTRATE_CACHE"] == str(real / ".cache" / "nexus-test-substrate")
+    if outer.get("XDG_CACHE_HOME"):
+        assert py["HF_HUB_CACHE"] == str(cache / "huggingface" / "hub")
+        assert py["NX_TEST_SUBSTRATE_CACHE"] == str(cache / "nexus-test-substrate")
+    if outer.get("HF_HOME"):
+        assert py["HF_HUB_CACHE"] == "/hf/hub"
+    if outer.get("HF_HUB_CACHE"):
+        assert py["HF_HUB_CACHE"] == "/hub" and py["NX_TEST_SUBSTRATE_CACHE"] == "/sub"
+
+
+def test_the_hf_pin_is_the_hub_dir_never_hf_home(tmp_path: Path) -> None:
+    """HF_HOME is the parent of ``token`` and ``stored_tokens``; pinning it would
+    hand the operator's HuggingFace credential to every test."""
+    from tests._fence_home import fence_cache_env
+
+    with patch.dict(os.environ):
+        for k in (*_CACHE_KEYS, *_CACHE_INPUTS):
+            os.environ.pop(k, None)
+        fence_cache_env(tmp_path / "real")
+        assert "HF_HOME" not in os.environ
+        assert "XDG_CACHE_HOME" not in os.environ
+        assert Path(os.environ["HF_HUB_CACHE"]).name == "hub"
+    assert 'export HF_HOME' not in _SHELL_FENCE.read_text()
+
+
+def test_the_fence_pin_reaches_the_substrate_cache_with_the_home_empty(tmp_path: Path) -> None:
+    """The point of NX_TEST_SUBSTRATE_CACHE: under an empty fenced HOME the
+    substrate cache still resolves to the REAL cache, not a cold dir in the fence."""
+    from tests._fence_home import fence_cache_env
+    from tests.db._service_fixture import substrate_cache_root
+
+    real, fenced = tmp_path / "real", tmp_path / "fenced"
+    with patch.dict(os.environ):
+        for k in (*_CACHE_KEYS, *_CACHE_INPUTS):
+            os.environ.pop(k, None)
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(fenced)
+        fence_cache_env(real)
+        assert substrate_cache_root() == real / ".cache" / "nexus-test-substrate"
+        assert not str(substrate_cache_root()).startswith(str(fenced))
 
 
 def _python_manager_env(tmp_path: Path, real_runtime: Path, platform: str, docker_host: str | None):
@@ -328,3 +398,159 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
     setattr_in(monkeypatch, fh, "sys.platform", "linux")
     with pytest.raises(OSError):
         fh.fence_home(real, tmp_path / "gate2")
+
+
+# ── nexus-7df8e: the fenced home is removed when the session ends ───────────
+
+def test_remove_fenced_home_deletes_the_home_and_never_the_real_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests._fence_home import FENCED_HOME_ENV, remove_fenced_home
+
+    real = tmp_path / "real"; real.mkdir(); _seed(real)
+    (real / ".m2" / "repository" / "artifact.jar").write_text("x")
+    home = fence_home(real, tmp_path / "nx-suite-home-abc")
+    (home / "stray").mkdir(); (home / "stray" / "f").write_text("x")  # something the session wrote
+    monkeypatch.setenv(FENCED_HOME_ENV, str(home))
+    assert remove_fenced_home(0) is True
+    assert not home.exists()
+    assert (real / ".m2" / "repository" / "artifact.jar").read_text() == "x", "rmtree followed a mirror link"
+    assert (real / ".docker" / "run").is_dir()
+
+
+def test_remove_fenced_home_refuses_a_directory_it_did_not_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests._fence_home import FENCED_HOME_ENV, remove_fenced_home
+
+    other = tmp_path / "somebodys-home"; other.mkdir(); (other / "keep").write_text("x")
+    monkeypatch.setenv(FENCED_HOME_ENV, str(other))
+    assert remove_fenced_home(0) is False
+    assert (other / "keep").exists()
+    monkeypatch.delenv(FENCED_HOME_ENV)
+    assert remove_fenced_home(0) is False
+
+
+def test_remove_fenced_home_keeps_a_failed_session_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests._fence_home import FENCED_HOME_ENV, KEEP_FENCED_HOME_ENV, remove_fenced_home
+
+    real = tmp_path / "real"; real.mkdir()
+    home = fence_home(real, tmp_path / "nx-suite-home-keep")
+    monkeypatch.setenv(FENCED_HOME_ENV, str(home))
+    monkeypatch.setenv(KEEP_FENCED_HOME_ENV, "1")
+    assert remove_fenced_home(0) is True and not home.exists(), "a PASSING session is never kept"
+    home = fence_home(real, tmp_path / "nx-suite-home-keep2")
+    monkeypatch.setenv(FENCED_HOME_ENV, str(home))
+    assert remove_fenced_home(1) is False and home.is_dir(), "kept on failure with the opt-in"
+    monkeypatch.delenv(KEEP_FENCED_HOME_ENV)
+    assert remove_fenced_home(1) is True and not home.exists(), "failure without the opt-in still removes"
+
+
+def _shell_remove(gate: Path, status: int, *, fenced: str | None, keep: bool) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k not in ("NX_FENCED_HOME", "NX_KEEP_FENCED_HOME")}
+    if fenced is not None:
+        env["NX_FENCED_HOME"] = fenced
+    if keep:
+        env["NX_KEEP_FENCED_HOME"] = "1"
+    return subprocess.run(
+        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_remove_home "{gate}" {status}'],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+
+
+def test_the_shell_twin_removes_the_home_with_the_same_keep_rule(tmp_path: Path) -> None:
+    real = tmp_path / "real"; real.mkdir(); _seed(real)
+    (real / ".m2" / "repository" / "artifact.jar").write_text("x")
+
+    gate = tmp_path / "gate1"
+    assert _shell_fence(real, gate).returncode == 0
+    assert _shell_remove(gate, 0, fenced=str(gate), keep=True).returncode == 0
+    assert not gate.exists()
+    assert (real / ".m2" / "repository" / "artifact.jar").read_text() == "x", "removal followed a mirror link"
+
+    gate = tmp_path / "gate2"
+    assert _shell_fence(real, gate).returncode == 0
+    assert _shell_remove(gate, 1, fenced=str(gate), keep=True).returncode == 1 and gate.is_dir()
+    assert _shell_remove(gate, 1, fenced=str(gate), keep=False).returncode == 0 and not gate.exists()
+
+    other = tmp_path / "not-the-fence"; other.mkdir()
+    assert _shell_remove(other, 0, fenced=str(tmp_path / "elsewhere"), keep=False).returncode == 1
+    assert _shell_remove(other, 0, fenced=None, keep=False).returncode == 1
+    assert other.is_dir()
+
+
+def _suite_session(tmp_path: Path, *, fail: bool, keep: bool) -> tuple[subprocess.CompletedProcess, list[Path]]:
+    """Run one real pytest session under THIS repo's conftest with TMPDIR pointed at
+    *tmp_path*, so the fence it installs lands there. Returns the process and the
+    fenced homes left behind."""
+    seam_dir = tmp_path / "seam"
+    seam_dir.mkdir(parents=True)
+    (seam_dir / "_fail_seam.py").write_text(
+        "import pytest\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_runtest_call(item):\n"
+        "    raise AssertionError('forced failure')\n"
+    )
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir(parents=True)
+    drop = {"NX_REAL_HOME", "NX_FENCED_HOME", "NX_NO_HOME_FENCE", "NX_KEEP_FENCED_HOME", "NX_SUITE_LEASE_HELD_BY",
+            "NX_SUITE_LEASE_WAIT", "NX_SUITE_LEASE_UNGUARDED", "NEXUS_PG_BIN", "PYTEST_ADDOPTS"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    # the real home, as the fence recorded it, so the child fences the OPERATOR's home like a fresh run
+    env["HOME"] = os.environ.get("NX_REAL_HOME") or os.environ["HOME"]
+    env.update(
+        TMPDIR=str(tmpdir), PYTHONPATH=str(seam_dir), PYTEST_ADDOPTS="",
+        NX_TEST_T2_SUBSTRATE="none",
+        NX_BUILD_LEASE_ROOT=str(tmp_path / "leases"),
+    )
+    if keep:
+        env["NX_KEEP_FENCED_HOME"] = "1"
+    args = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist"]
+    if fail:
+        args += ["-p", "_fail_seam"]
+    args += [f"{Path(__file__)}::test_an_allowlist_entry_the_real_home_lacks_is_skipped"]
+    proc = subprocess.run(args, cwd=_REPO, env=env, capture_output=True, text=True, timeout=300)
+    return proc, sorted(tmpdir.glob("nx-suite-home-*"))
+
+
+_REPO = Path(__file__).parent.parent
+
+
+def test_a_real_session_leaves_no_fenced_home_behind(tmp_path: Path) -> None:
+    """End to end: the fence is installed at session start under the repo's own
+    conftest and is gone after the session, pass or fail; kept only on a failed
+    session with NX_KEEP_FENCED_HOME."""
+    ok, left = _suite_session(tmp_path / "ok", fail=False, keep=True)
+    assert "1 passed" in ok.stdout, ok.stdout + ok.stderr
+    assert left == [], f"a passing session left {left}"
+
+    bad, left = _suite_session(tmp_path / "bad", fail=True, keep=False)
+    assert bad.returncode == 1 and "1 failed" in bad.stdout, bad.stdout + bad.stderr
+    assert left == [], f"a failed session without the opt-in left {left}"
+
+    kept, left = _suite_session(tmp_path / "kept", fail=True, keep=True)
+    assert kept.returncode == 1 and "1 failed" in kept.stdout, kept.stdout + kept.stderr
+    assert len(left) == 1, f"a failed session with NX_KEEP_FENCED_HOME must keep its home: {left}"
+
+
+def test_both_twins_pass_the_container_runtime_env_through(tmp_path: Path) -> None:
+    """The laptop runs containers on colima: DOCKER_HOST and
+    TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE arrive from ~/.zshenv, not from the
+    mirrored ``.docker``. Neither twin may clear or rewrite them."""
+    from tests._fence_home import fence_manager_env
+
+    pins = {"DOCKER_HOST": "unix:///colima/docker.sock",
+            "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE": "/colima/docker.sock"}
+    with patch.dict(os.environ, pins):
+        fence_manager_env(tmp_path / "py-gate")
+        assert {k: os.environ.get(k) for k in pins} == pins
+    env = {**os.environ, **pins}
+    out = subprocess.run(
+        ["bash", "-c", f'source "{_SHELL_FENCE}"; fence_home_env "{tmp_path / "sh-gate"}"; '
+                       'printf "%s\\n%s\\n" "$DOCKER_HOST" "$TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE"'],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines() == list(pins.values())

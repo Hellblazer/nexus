@@ -576,10 +576,10 @@ def pytest_sessionstart(session):
         # nexus-8ool4: every engine JVM a test starts unpacks ONNX Runtime's ~16 MB native
         # libraries into onnxruntime-java<random> under /tmp unless the engine has a native
         # cache, and a killed one never deletes it. The engine extracts once into
-        # NX_ORT_NATIVE_DIR (default HOME/.cache/nexus/ort_native). The fence symlinks
-        # ~/.cache through today, so the default already lands in the real cache; the pin
-        # matters for a test that moves HOME and for the day the fence stops mirroring
-        # .cache (nexus-ld3aa). An empty value counts as unset; an explicit outer value wins.
+        # NX_ORT_NATIVE_DIR (default HOME/.cache/nexus/ort_native). The fence no longer
+        # mirrors ~/.cache (nexus-ld3aa), so install_fence pins it from the real home
+        # (fence_cache_env); this setdefault covers NX_NO_HOME_FENCE runs and a test that
+        # moves HOME. An empty value counts as unset; an explicit outer value wins.
         if not os.environ.get("NX_ORT_NATIVE_DIR", "").strip():
             os.environ["NX_ORT_NATIVE_DIR"] = str(Path(_real_home) / ".cache" / "nexus" / "ort_native")
 
@@ -667,6 +667,13 @@ def pytest_sessionfinish(session, exitstatus):
     _check_mandatory_pin_non_vacuity(session)
     _check_real_config_dir_mutations(session)
     _check_real_autostart_unit_mutations(session)
+    # LAST: the guards above read NX_REAL_HOME, not the fenced home, but nothing
+    # should find the home gone mid-finish. Controller/serial only: the fence was
+    # installed there and workers only inherit it (nexus-7df8e).
+    if _is_controller_or_serial:
+        from tests._fence_home import remove_fenced_home  # noqa: PLC0415 — test-only helper
+
+        remove_fenced_home(int(session.exitstatus))
 
 
 # ── real-config-dir mutation guard (nexus-pfuns, 2026-08-20) ────────────────
@@ -3163,15 +3170,19 @@ def _fence_beads_prime_user_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     """Fence ``nexus.beads_prime``'s user-level PRIME.md path to a per-test
     tmp dir for EVERY test (nexus-cnzei.8 CRE fix round, ship-blocker).
 
-    This module's own ``install_fence`` (``tests/_fence_home.py``, wired at
-    ``pytest_sessionstart`` above) shadows only ``.config/nexus`` -- every
-    OTHER top-level HOME entry (``Library`` on macOS, every other
-    ``.config/<x>`` on Linux) is symlinked straight through to the REAL
-    filesystem. ``nexus.beads_prime.user_prime_path()`` resolves to exactly
-    one of those un-shadowed locations by construction
+    HISTORY (nexus-ld3aa): this fixture was written when ``install_fence``
+    (``tests/_fence_home.py``, wired at ``pytest_sessionstart`` above) shadowed
+    only ``.config/nexus`` and symlinked every OTHER top-level HOME entry
+    (``Library`` on macOS, every other ``.config/<x>`` on Linux) straight
+    through to the REAL filesystem. The fence is now inverted: the test home
+    starts empty and links through only ``.m2 .docker
+    .testcontainers.properties``, so the locations below are absent under it
+    and this fixture is the second layer, kept because it also covers a run
+    under ``NX_NO_HOME_FENCE``.
+    ``nexus.beads_prime.user_prime_path()`` resolves to one of the locations the
+    old fence left reachable by construction
     (``~/Library/Application Support/beads/PRIME.md`` on macOS,
-    ``~/.config/beads/PRIME.md`` on Linux) -- the fence's one shadow never
-    covers it. A test that invokes ``nx init``/``nx upgrade`` (directly or
+    ``~/.config/beads/PRIME.md`` on Linux). A test that invokes ``nx init``/``nx upgrade`` (directly or
     via ``CliRunner``) with no per-test stub, on a box with ``bd`` on
     ``PATH``, writes for real into the operator's machine-wide beads
     PRIME.md. Confirmed: ``tests/test_init_service_binary.py`` did exactly

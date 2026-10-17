@@ -204,6 +204,9 @@ def _child(tmp_path: Path, mode: str, **extra: str) -> subprocess.CompletedProce
     drop = {
         "NX_TEST_T2_SUBSTRATE", "NX_BUILD_LEASE_WAIT", "NX_SUITE_LEASE_HELD_BY",
         "NX_SUITE_LEASE_WAIT", "NEXUS_PG_BIN", "NX_SUITE_LEASE_UNGUARDED",
+        # The HOME fence pins this to the REAL cache; the child's XDG_CACHE_HOME
+        # below is what keeps it off the operator's cache.
+        "NX_TEST_SUBSTRATE_CACHE",
     }
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env.update(

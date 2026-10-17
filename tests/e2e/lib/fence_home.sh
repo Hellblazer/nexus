@@ -18,15 +18,19 @@
 # default. So the home starts EMPTY and only FENCE_MIRRORED_ENTRIES are linked
 # through, each a read-mostly toolchain cache measured as needed. Anything else
 # a leg needs it is given explicitly (an env pin: fence_uv_env, fence_cache_env;
-# or a fixture file), never by widening the mirror. Credential stores
-# (.ssh .aws .gnupg .kube .netrc .npmrc .gitconfig .claude .config/gh .config/op
-# ...) are never in the list.
+# or a fixture file), never by widening the mirror. No credential store is
+# mirrored BY NAME (.ssh .aws .gnupg .kube .netrc .npmrc .gitconfig .claude
+# .config/gh .config/op ... are never in the list). That is a claim about
+# top-level names, not content: .docker can hold config.json (registry auths) and
+# .m2 can hold settings.xml (server passwords), and both are linked whole. A JVM
+# reads them regardless, since the JDK's user.home ignores $HOME. Narrowing them
+# is Sam's call (nexus-u73rf).
 
 # The only top-level entries of the real home linked into a fenced home. Twin of
 # MIRRORED_ENTRIES in tests/_fence_home.py, kept in step by
 # tests/test_fence_home_twins_agree.py. An entry the real home lacks is skipped.
 FENCE_MIRRORED_ENTRIES=(
-    ".m2" ".gradle" ".docker" ".cargo" ".rustup" ".testcontainers.properties"
+    ".m2" ".docker" ".testcontainers.properties"
 )
 
 # fence_home <real_home> <gate_home>
@@ -90,22 +94,58 @@ fence_uv_env() {
 
 # fence_cache_env <real_home>
 #
-# Pin the ONNX model roots to the real home's read-mostly caches. The engine
-# resolves model files from NX_ONNX_MODEL_DIR or $HOME/.cache/nexus/onnx_models
-# (nexus.db.onnx_model_root); under the empty fenced home the default has no
-# model in it and the gate's vector leg would find nothing (or download ~500 MB).
-# Shared by env, not by mirroring .cache, which holds far more than models. Twin
-# of fence_cache_env in tests/_fence_home.py; an explicit outer value wins and an
-# EMPTY one counts as unset.
+# Pin the HOME-derived caches the empty fenced home would leave cold. The old
+# whole-.cache mirror shared all of these; the inverted fence shares exactly the
+# ones named here, by env, never by mirroring .cache (which holds far more than
+# caches). An explicit outer value wins and an EMPTY one counts as unset. The
+# pins are EXPORTED, so a nested fence (the Python twin inside this gate, whose
+# "real home" is the empty gate home) keeps the outer value. Twin of
+# fence_cache_env in tests/_fence_home.py; read that docstring for each key.
+#
+#   NX_ONNX_MODEL_DIR, NX_MINILM_CACHE_DIR, NX_ORT_NATIVE_DIR: model and native roots.
+#   HF_HUB_CACHE: the HuggingFace hub cache. NOT HF_HOME, the parent of token.
+#     <HF_HOME>/hub when the operator set HF_HOME, else
+#     <XDG_CACHE_HOME>/huggingface/hub, else <real>/.cache/huggingface/hub.
+#   NX_TEST_SUBSTRATE_CACHE: the engine-substrate cache root, read first by
+#     tests/db/_service_fixture.py substrate_cache_root(). NOT XDG_CACHE_HOME,
+#     which would re-expose all of .cache.
 fence_cache_env() {
-    local real_home="$1"
+    local real_home="$1" cache_home hf_home
     export NX_ONNX_MODEL_DIR="${NX_ONNX_MODEL_DIR:-$real_home/.cache/nexus/onnx_models}"
-    # The MiniLM direct-path cache (nexus.db.minilm_direct.CACHE_DIR_ENV), the
-    # Chroma-compatible root. tests/conftest.py also pins it, but from
-    # NX_REAL_HOME, which is the EMPTY gate home when the suite runs in the gate.
     export NX_MINILM_CACHE_DIR="${NX_MINILM_CACHE_DIR:-$real_home/.cache/chroma/onnx_models}"
-    # The ONNX Runtime native-library extraction root (nexus-8ool4): write-once per
-    # <version>-<os-arch>, reused across engine starts, so the gate shares the real
-    # cache instead of extracting ~16 MB again into the empty home.
     export NX_ORT_NATIVE_DIR="${NX_ORT_NATIVE_DIR:-$real_home/.cache/nexus/ort_native}"
+    cache_home="${XDG_CACHE_HOME:-$real_home/.cache}"
+    hf_home="${HF_HOME:-$cache_home/huggingface}"
+    export HF_HUB_CACHE="${HF_HUB_CACHE:-$hf_home/hub}"
+    export NX_TEST_SUBSTRATE_CACHE="${NX_TEST_SUBSTRATE_CACHE:-$cache_home/nexus-test-substrate}"
+}
+
+# fence_keep_home <exitstatus>
+#
+# True (0) when a fenced home must be KEPT: only after a FAILED run, and only
+# when NX_KEEP_FENCED_HOME is set (nexus-7df8e). Twin of the keep rule in
+# remove_fenced_home in tests/_fence_home.py.
+fence_keep_home() {
+    [ -n "${NX_KEEP_FENCED_HOME:-}" ] && [ "${1:-0}" != "0" ]
+}
+
+# fence_remove_home <gate_home> <exitstatus>
+#
+# Remove the fenced home at the end of a run (nexus-7df8e). Returns 0 when it is
+# gone, 1 when it was kept or refused. Refuses unless <gate_home> is the
+# NX_FENCED_HOME this tree exported, so a wrong argument can never delete a
+# directory the fence did not make. The mirror links are removed as links first,
+# so nothing can follow one into the operator's real .m2 or .docker.
+fence_remove_home() {
+    local gate_home="$1" status="${2:-0}" name
+    [ -n "$gate_home" ] && [ -d "$gate_home" ] && [ ! -L "$gate_home" ] || return 1
+    [ "$gate_home" = "${NX_FENCED_HOME:-}" ] || return 1
+    fence_keep_home "$status" && return 1
+    for name in "${FENCE_MIRRORED_ENTRIES[@]}"; do
+        if [ -L "$gate_home/$name" ]; then
+            rm -f "$gate_home/$name" || return 1
+        fi
+    done
+    rm -rf "$gate_home"
+    [ ! -e "$gate_home" ]
 }

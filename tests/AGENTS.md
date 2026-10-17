@@ -238,8 +238,8 @@ parses blank as log-only), so `tests/_engine_substrate.py` goes through `_pin_ow
 
 The suite provisions its own PostgreSQL bundle and the engine's ONNX models
 on first use, each once per box under a cross-process lock: the PG bundle
-under `$XDG_CACHE_HOME/nexus-test-substrate/<tag>/` (`~/.cache/...` when
-`XDG_CACHE_HOME` is unset), the models under the engine's onnx_models root
+under `$NX_TEST_SUBSTRATE_CACHE/<tag>/` (the HOME fence pins it to the real
+cache; else `$XDG_CACHE_HOME/nexus-test-substrate`, else `~/.cache/...`), the models under the engine's onnx_models root
 (`$NX_ONNX_MODEL_DIR`, else `~/.cache/nexus/onnx_models`). A box that is
 offline on its first run gets one exit-75 line at session start naming the
 pinned engine tag, not a wall of setup errors (see the substrate preflight

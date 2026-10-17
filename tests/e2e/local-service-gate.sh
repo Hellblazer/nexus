@@ -286,8 +286,9 @@ echo "[gate] scratch config: $SCRATCH"
 # 2026-09-30 a live nexus-service unit replaced) while a missing one fails
 # loudly on the first run. So the fence is inverted: the home starts empty and
 # only the measured read-mostly toolchain caches in FENCE_MIRRORED_ENTRIES
-# (lib/fence_home.sh) are linked through. uv's roots and the ONNX model root
-# are pinned by env (fence_uv_env, fence_cache_env), not mirrored. A leg that
+# (lib/fence_home.sh) are linked through. uv's roots, the ONNX model root, the
+# HuggingFace hub cache and the substrate cache are pinned by env (fence_uv_env,
+# fence_cache_env), not mirrored. A leg that
 # needs anything else is given it explicitly; the mirror is never widened.
 #
 # NOT A LAYER: sandbox-exec. An earlier revision created a Seatbelt profile
@@ -391,6 +392,7 @@ RELEASE_PROPS_SNAPSHOT=""
 
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
+  local rc=$?
   set +e
   # --with-pg: a plain stop leaves the supervisor's PostgreSQL running by
   # design, and the pg_ctl fallback below needs a pg_ctl on PATH, which
@@ -403,6 +405,14 @@ cleanup() {
     # shellcheck disable=SC1090,SC1091
     source "$SCRATCH/pg_credentials" >/dev/null 2>&1
     pg_ctl -D "$SCRATCH/postgres" stop -m fast >/dev/null 2>&1
+  fi
+  # nexus-7df8e: the fenced home goes with the run. After a FAILED run with
+  # NX_KEEP_FENCED_HOME set it is moved out of $SCRATCH and kept for debugging.
+  if ! fence_remove_home "$GATE_HOME" "$rc" && fence_keep_home "$rc" && [ -d "$GATE_HOME" ]; then
+    KEPT_HOME="${TMPDIR:-/tmp}/nx-kept-gate-home.$$"
+    if mv "$GATE_HOME" "$KEPT_HOME" 2>/dev/null; then
+      echo "[gate] kept the fenced home (NX_KEEP_FENCED_HOME): $KEPT_HOME"
+    fi
   fi
   rm -rf "$SCRATCH"
   # Backstop for a signal mid-jar-build: never leave a stamped

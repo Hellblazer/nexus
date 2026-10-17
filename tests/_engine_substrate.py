@@ -227,7 +227,7 @@ def _worker_shard_width() -> int:
 #: import-time resolution note).
 _PG_AMBIENT_ENV_KEYS = (
     "NEXUS_PG_BIN", "NEXUS_PG_BUNDLE", "NEXUS_CONFIG_DIR", "HOME", "PATH",
-    "XDG_CACHE_HOME", "NX_ONNX_MODEL_DIR", "NX_SERVICE_BGE_DIR",
+    "XDG_CACHE_HOME", "NX_TEST_SUBSTRATE_CACHE", "NX_ONNX_MODEL_DIR", "NX_SERVICE_BGE_DIR",
     "NX_SERVICE_CROSSENCODER_DIR",
 )
 _PG_AMBIENT_ENV: dict[str, str | None] = {

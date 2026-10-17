@@ -24,8 +24,14 @@ only entries linked through, each a read-mostly toolchain cache measured as
 needed. Anything else a test needs it is given explicitly (a fixture-provided
 file, an env pin such as ``UV_CACHE_DIR``), never by widening the mirror.
 
-CREDENTIAL STORES ARE NEVER MIRRORED (:data:`NEVER_MIRRORED`), and the empty
-default means none is. ``tests/test_fence_home_twins_agree.py`` pins that.
+NO CREDENTIAL STORE IS MIRRORED BY NAME (:data:`NEVER_MIRRORED`), and the empty
+default means none is. That is a claim about top-level NAMES, not about content:
+``.docker`` can hold ``config.json`` (registry auths) and ``.m2`` can hold
+``settings.xml`` (server passwords), and both are linked through whole. A JVM
+reads them regardless, since the JDK's ``user.home`` ignores ``$HOME`` (measured
+on macOS JDK 25), so narrowing the mirror hides them from ``$HOME`` readers only.
+Whether to narrow ``.docker`` and ``.m2`` further is Sam's call (nexus-u73rf).
+``tests/test_fence_home_twins_agree.py`` pins the names and the literal list.
 
 TWO IMPLEMENTATIONS, ONE CONTRACT. This module and ``fence_home.sh`` must
 produce the same shape; ``tests/test_fence_home_twins_agree.py`` is what says
@@ -57,17 +63,18 @@ FENCED_HOME_ENV = "NX_FENCED_HOME"
 #: The ONLY entries of the real home a fenced home links through (top-level
 #: names). Each is a read-mostly toolchain cache or daemon-socket directory that
 #: a build or a Testcontainers run needs and that cannot be handed over another
-#: way: ``.m2`` and ``.gradle`` (the dependency caches the jar rebuild resolves
-#: from), ``.docker`` (the daemon socket at ``run/docker.sock``),
-#: ``.testcontainers.properties`` (``testcontainers.ryuk.disabled``), ``.cargo``
-#: and ``.rustup`` (Rust toolchains). uv is NOT here: its cache and managed
-#: Pythons are pinned by env (:func:`fence_uv_env`), as is the ONNX model root
-#: (:func:`fence_cache_env`). Both twins carry this list (``FENCE_MIRRORED_ENTRIES``
-#: in ``fence_home.sh``) and ``test_fence_home_twins_agree`` pins the two
-#: together. An entry the real home does not have is skipped.
-MIRRORED_ENTRIES: tuple[str, ...] = (
-    ".m2", ".gradle", ".docker", ".cargo", ".rustup", ".testcontainers.properties",
-)
+#: way: ``.m2`` (the dependency cache the jar rebuild resolves from, and the
+#: Maven wrapper's dists), ``.docker`` (the daemon socket at ``run/docker.sock``)
+#: and ``.testcontainers.properties`` (``testcontainers.ryuk.disabled``). Gradle
+#: and Rust caches are NOT here: no consumer exists in this repo (nexus-ld3aa
+#: review). uv is NOT here: its cache and managed Pythons are pinned by env
+#: (:func:`fence_uv_env`), as are the ONNX model root, the HuggingFace hub cache
+#: and the engine-substrate cache (:func:`fence_cache_env`). Both twins carry
+#: this list (``FENCE_MIRRORED_ENTRIES`` in ``fence_home.sh``) and
+#: ``test_fence_home_twins_agree`` pins the two together AND pins the literal
+#: set, so a fourth entry added to both twins goes red. An entry the real home
+#: does not have is skipped.
+MIRRORED_ENTRIES: tuple[str, ...] = (".m2", ".docker", ".testcontainers.properties")
 
 #: Never mirrored, whatever else changes: credential stores, the operator's
 #: identity and tool config, and the autostart-unit and state trees whose
@@ -214,29 +221,90 @@ def fence_uv_env(real_home: Path) -> None:
 
 
 def fence_cache_env(real_home: Path) -> None:
-    """Pin the ONNX model roots to the real home's read-mostly caches.
+    """Pin the HOME-derived caches the empty fenced home would leave cold.
 
-    The local engine resolves its model files from ``NX_ONNX_MODEL_DIR`` or
-    ``$HOME/.cache/nexus/onnx_models`` (``nexus.db.onnx_model_root``), and the
-    supervisor hands the resolved path to the engine it spawns. Under the empty
-    fenced home that default is a directory with no model in it, so every
-    substrate-backed vector leg would fail to find (or try to download) the
-    ~500 MB model. The model cache is read-mostly and content-addressed, so it
-    is shared by env rather than by mirroring ``.cache`` (which holds far more
-    than models). An explicit outer value wins; an EMPTY one counts as unset, as in
-    :func:`fence_uv_env`.
+    The old whole-``.cache`` mirror shared all of these; the inverted fence
+    shares exactly the ones named here, by env, never by mirroring ``.cache``
+    (which holds far more than caches). An explicit outer value wins and an
+    EMPTY one counts as unset, as in :func:`fence_uv_env`.
+
+    * ``NX_ONNX_MODEL_DIR``: the local engine resolves its model files from it
+      or ``$HOME/.cache/nexus/onnx_models`` (``nexus.db.onnx_model_root``), and
+      the supervisor hands the resolved path to the engine it spawns.
+    * ``NX_MINILM_CACHE_DIR``: the MiniLM direct-path cache
+      (``nexus.db.minilm_direct.CACHE_DIR_ENV``). tests/conftest.py also pins
+      it, but from NX_REAL_HOME, which is the EMPTY gate home when the suite
+      runs inside the e2e gate.
+    * ``NX_ORT_NATIVE_DIR`` (nexus-8ool4): the ONNX Runtime native-library
+      extraction root, written once per ``<version>-<os-arch>``.
+    * ``HF_HUB_CACHE``: the HuggingFace hub cache (docling and MinerU models,
+      ~500 MB cold). NOT ``HF_HOME``: that is the parent of ``token`` and
+      ``stored_tokens``, which would expose the operator's HuggingFace
+      credential. Defaults to ``<HF_HOME>/hub`` when the operator set
+      ``HF_HOME``, else ``<XDG_CACHE_HOME>/huggingface/hub`` (huggingface_hub's
+      own rule), else ``<real>/.cache/huggingface/hub``.
+    * ``NX_TEST_SUBSTRATE_CACHE``: the engine-substrate cache root, read first
+      by ``tests.db._service_fixture.substrate_cache_root`` (the
+      sigstore-verified PG bundle, fetched once per tag). Not
+      ``XDG_CACHE_HOME``, which would re-expose all of ``.cache``. Defaults to
+      ``<XDG_CACHE_HOME>/nexus-test-substrate`` when the operator set it (the
+      root the fixture used before the pin), else
+      ``<real>/.cache/nexus-test-substrate``.
 
     Twin of ``fence_cache_env`` in ``tests/e2e/lib/fence_home.sh``.
     """
     if not os.environ.get("NX_ONNX_MODEL_DIR"):
         os.environ["NX_ONNX_MODEL_DIR"] = str(real_home / ".cache" / "nexus" / "onnx_models")
-    # The MiniLM direct-path cache (``nexus.db.minilm_direct.CACHE_DIR_ENV``), the
-    # Chroma-compatible root. tests/conftest.py also pins it, but from NX_REAL_HOME,
-    # which is the EMPTY gate home when the suite runs inside the e2e gate.
     if not os.environ.get("NX_MINILM_CACHE_DIR"):
         os.environ["NX_MINILM_CACHE_DIR"] = str(real_home / ".cache" / "chroma" / "onnx_models")
-    # The ONNX Runtime native-library extraction root (nexus-8ool4): written once per
-    # ``<version>-<os-arch>`` and reused across engine starts, so a fenced suite shares
-    # the real cache instead of extracting ~16 MB again into the empty home.
     if not os.environ.get("NX_ORT_NATIVE_DIR"):
         os.environ["NX_ORT_NATIVE_DIR"] = str(real_home / ".cache" / "nexus" / "ort_native")
+    cache_home = os.environ.get("XDG_CACHE_HOME") or str(real_home / ".cache")
+    if not os.environ.get("HF_HUB_CACHE"):
+        hf_home = os.environ.get("HF_HOME") or str(Path(cache_home) / "huggingface")
+        os.environ["HF_HUB_CACHE"] = str(Path(hf_home) / "hub")
+    if not os.environ.get("NX_TEST_SUBSTRATE_CACHE"):
+        os.environ["NX_TEST_SUBSTRATE_CACHE"] = str(Path(cache_home) / "nexus-test-substrate")
+
+
+#: Set to keep a fenced home after a FAILED session, for debugging. A passing
+#: session always removes it (nexus-7df8e).
+KEEP_FENCED_HOME_ENV = "NX_KEEP_FENCED_HOME"
+
+#: ``tempfile.mkdtemp(prefix=...)`` of the unit suite's fenced home; the removal
+#: below refuses any other name.
+FENCED_HOME_PREFIX = "nx-suite-home-"
+
+
+def remove_fenced_home(exitstatus: int) -> bool:
+    """Remove the fenced home this process installed. Returns True when removed.
+
+    nexus-7df8e: ``mkdtemp`` homes were never torn down; with every unpinned
+    cache landing in the fence as real data they grew to ~550 MB each. Called
+    last from the controller's ``pytest_sessionfinish``. Kept only when the
+    session failed AND :data:`KEEP_FENCED_HOME_ENV` is set.
+
+    Safe by construction: it deletes only ``$NX_FENCED_HOME`` and only when its
+    name carries :data:`FENCED_HOME_PREFIX`; the :data:`MIRRORED_ENTRIES` links
+    are removed as links first, so ``rmtree`` can never follow one into the
+    operator's real ``.m2`` or ``.docker``.
+    """
+    raw = os.environ.get(FENCED_HOME_ENV, "")
+    if not raw:
+        return False
+    home = Path(raw)
+    if not home.name.startswith(FENCED_HOME_PREFIX) or not home.is_dir() or home.is_symlink():
+        return False
+    if exitstatus != 0 and os.environ.get(KEEP_FENCED_HOME_ENV):
+        return False
+    for name in MIRRORED_ENTRIES:
+        link = home / name
+        try:
+            if os.path.isjunction(link):  # Windows junction: rmdir, never descend
+                os.rmdir(link)
+            elif link.is_symlink() or link.is_file():
+                link.unlink()
+        except OSError:
+            return False  # cannot prove the link is gone: delete nothing
+    shutil.rmtree(home, ignore_errors=True)
+    return not home.exists()
