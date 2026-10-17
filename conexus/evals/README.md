@@ -171,9 +171,28 @@ against a stale corpus is a wrong answer delivered confidently.
 
 ```bash
 CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
-  --runs 3 --ablation none --scaffold --max-cost-usd 30 \
-  --json report.json <path-to-conexus-plugin>
+  --runs 3 --ablation none --scaffold --trust-plugin --no-publish \
+  --mocks off --allow-tools Bash Write Edit mcp__plugin_conexus_nexus \
+    mcp__plugin_conexus_nexus-catalog mcp__plugin_conexus_sequential-thinking \
+  --max-cost-usd 100 --json report.json <path-to-conexus-plugin>
 ```
+
+- **Tool grants are part of the measurement.** Without `--allow-tools`
+  the runner removes Bash, Write and Edit, so o01 cannot edit its file
+  and o02/o04 cannot read git or run the tests. Without `--mocks off` the
+  plugin's MCP servers do not start, so the n02 `nx_answer` guard passes
+  vacuously. `Agent` needs no grant (a01 dispatched both reviewers with
+  none). `mcp__*` is refused; name each server.
+- **Granting Bash needs a sandbox backend** (bubblewrap and socat on
+  Linux); without one the runner refuses every case. In docker that also
+  needs `--security-opt seccomp=unconfined --security-opt
+  apparmor=unconfined --security-opt systempaths=unconfined`:
+  `tests/e2e/prefix-capture/ab/skillroute/pe_detach.sh` runs it that way
+  on chas.
+- **`--no-publish`** keeps the HTML report local; the default publishes
+  it to claude.ai.
+- **Case filters match the `name:` field**, not the directory
+  (`--case 'review-gate*'`, not `'a01*'`).
 
 - **`--runs 3` is the floor, not a luxury.** At `--runs 1` the positive
   half of this corpus is not a measurement. Measured across the three
@@ -203,8 +222,9 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   skill-trigger cases ($6.12 and $7.80 for 15 case-runs). The outcome and
   agent cases are multi-turn agentic runs (30 to 60 s each on the
   skillroute harness) plus llm judge votes, so that rate does not carry
-  over; the first scaffolded `--runs 3` run (48 case-runs) sets the real
-  figure. Set the ceiling well above the estimate, not at it: a ceiling
+  over. Measured 2026-10-17: one a01 run (two reviewer dispatches) cost
+  $1.45 and took 198 s; the first full scaffolded `--runs 3` run (48
+  case-runs) sets the corpus figure. Set the ceiling well above the estimate, not at it: a ceiling
   hit aborts with a partial report.
 
 - **Do not set `--threshold` yet.** The two structural failures (p07,
