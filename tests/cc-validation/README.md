@@ -443,8 +443,14 @@ python3 tests/e2e/lib/claude_credentials.py run --remote chas-test -- \
 
 The helper sends the automation token over the ssh channel's stdin and the
 script passes it to `docker run` as a bare `-e CLAUDE_CODE_OAUTH_TOKEN`. Do not
-put the script behind `lab-run`: the wrapper does not forward the environment,
-so the token would not arrive. Evidence (hook log, pane, transcripts, per
+put the script behind `lab-run`: the container is a child of dockerd, not of the
+wrapped command, so the wrapper's cgroup grant neither caps nor even sees it
+(`docker run` therefore carries its own `--memory 4g --cpus 2 --pids-limit`),
+and the token reaches chas only over the ssh channel's stdin, which a wrapper in
+between would not hand on. The image pins Claude Code (`ARG
+CLAUDE_CODE_VERSION` in the Dockerfile, updater off); `run.sh` passes the pin to
+the scenario, which refuses a verdict on any other build, and `claude --version`
+is written into each evidence directory. Evidence (hook log, pane, transcripts, per
 session) lands in `$NX_CC_VAL_EVIDENCE` (default `$TMPDIR/cc-val-evidence-<stamp>`).
 
 **Scenario 32 has a positive control** (nexus-ueztp). It runs two sessions: 32a
@@ -464,9 +470,19 @@ triage table), and in `defaultMode: auto` the classifier approves the harmless
 `echo` itself so neither plugin shows a prompt. Sessions run in `defaultMode:
 default`; `--s32-mode auto` restores the old mode, where 32b reports NOT
 INFORMATIVE. 32b also requires Claude Code's own transcript to show the
-v7.64.1 `hooks.json` entries emitting `permissionDecision: allow`, which is the
-direct observation of the real hooks the scenario header says earlier attempts
-could not get.
+v7.64.1 `hooks.json` entries emitting `permissionDecision: allow` (the allow
+shape, not any decision).
+
+**Proof the guards ran.** The transcript records a hook only when its stdout or
+stderr is non-empty, so the current plugin's silent guards leave no record
+there (a first run read that absence as ambiguous; a diagnosis run on 2026-10-17
+showed the hooks do run, `uv` included). Each session therefore runs with
+`claude --debug-file`, which logs every hook, and the scenario requires both
+real guards to show there as finished under the plugin, plus a marker hook
+appended to the same `PreToolUse`/`Bash` matcher group of the installed copy.
+Missing either, a wrong Claude Code build, or an unloaded plugin each fail the
+leg whatever the prompt did. The ladder is `_s32_verdict`; its truth table is
+driven from `tests/test_cc_validation_scenario32_control.py`.
 
 ## Layout
 

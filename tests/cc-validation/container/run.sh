@@ -57,6 +57,11 @@ echo "[stage] control plugin from tag $CONTROL_TAG ($(git -C "$ROOT" rev-parse -
 git -C "$ROOT" archive "$CONTROL_TAG" conexus | tar -x -C "$STAGE/control"
 chmod -R a+rX "$STAGE"
 
+# The Claude Code version the image pins (Dockerfile ARG). The scenario compares
+# `claude --version` to it, so a wrong build fails the verdict.
+CC_VERSION="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$HERE/Dockerfile")"
+[ -n "$CC_VERSION" ] || { echo "no ARG CLAUDE_CODE_VERSION in the Dockerfile" >&2; exit 2; }
+
 IMAGE="nexus-cc-val:local"
 echo "[build] $IMAGE"
 docker build -q -t "$IMAGE" "$HERE" > "$STAGE/docker-build.log" 2>&1 \
@@ -68,12 +73,16 @@ set +e
 # environment. ANTHROPIC_MODEL / CLAUDE_CODE_SUBAGENT_MODEL are the harness's
 # low-cost defaults claude_credentials.py run sets (haiku) and are passed the
 # same way. NX_NO_TELEMETRY: a virgin HOME registers as a new install otherwise.
+# --memory/--cpus/--pids-limit bound the container itself: it is dockerd's
+# child, so no cgroup of the launching shell (lab-run's grant included) applies.
 docker run --rm \
+    --memory 4g --memory-swap 4g --cpus 2 --pids-limit 512 \
     -e CLAUDE_CODE_OAUTH_TOKEN \
     -e ANTHROPIC_MODEL \
     -e CLAUDE_CODE_SUBAGENT_MODEL \
     -e NX_NO_TELEMETRY=1 \
     -e CC_VAL_S32_MODE \
+    -e "CC_VAL_EXPECTED_CLAUDE_VERSION=$CC_VERSION" \
     -v "$STAGE/harness:/stage:ro" \
     -v "$STAGE/control:/control:ro" \
     -v "$EVID:/evidence" \

@@ -179,6 +179,43 @@ def test_cc_validation_harness_exports_the_opt_out(name: str) -> None:
     )
 
 
+def test_every_cc_validation_container_forwards_the_opt_out() -> None:
+    """The same rule as the e2e sweep above, over tests/cc-validation (nexus-ueztp
+    review, 2026-10-17: container/run.sh launched a fresh-HOME Claude Code
+    container and sat outside both sweeps' domain). No exemptions, for the
+    reason the e2e test gives. The Dockerfile's image carries a nexus-capable
+    plugin tree only by bind mount, but the flag is free and the judgement is
+    not."""
+    scripts = sorted(CC_VALIDATION.rglob("*.sh"))
+    runs = 0
+    offenders: list[str] = []
+    for sh in scripts:
+        whole = sh.read_text(errors="replace")
+        for line in _DOCKER_RUN.findall(_spliced(whole)):
+            runs += 1
+            if not _forwards_the_flag(line, whole):
+                offenders.append(f"  {sh.relative_to(CC_VALIDATION)}: {line.strip()[:90]}")
+    assert runs >= 1, (
+        "no `docker run` found under tests/cc-validation (expected container/run.sh): "
+        "the sweep is not examining the launcher it exists for"
+    )
+    assert not offenders, (
+        "docker run invocations under tests/cc-validation that do not forward "
+        "NX_NO_TELEMETRY=1:\n" + "\n".join(offenders)
+        + "\n\nPass `-e NX_NO_TELEMETRY=1`; an exported host var does not cross the container boundary."
+    )
+
+
+def test_cc_validation_container_sweep_sees_the_launcher_and_catches_a_missing_flag() -> None:
+    """Non-vacuity of the sweep above: it finds container/run.sh's docker run,
+    and the same matcher flags a launcher that forgot the flag."""
+    run_sh = CC_VALIDATION / "container" / "run.sh"
+    assert _DOCKER_RUN.findall(_spliced(run_sh.read_text()))
+    bare = _spliced("docker run --rm \\\n    -e CLAUDE_CODE_OAUTH_TOKEN \\\n    img\n")
+    (line,) = _DOCKER_RUN.findall(bare)
+    assert not _forwards_the_flag(line, bare)
+
+
 def test_harness_entry_point_sweep_is_non_vacuous() -> None:
     """nexus-cf3p2's whole point was that the sweep must not stop at the
     first harness found. Each swept ROOT gets its OWN floor (review

@@ -26,7 +26,8 @@ cp -R /stage/. "$REPO"/
 mkdir -p "$REPO/.venv/bin"
 ln -sf "$(command -v python3)" "$REPO/.venv/bin/python"
 
-echo "[container] claude $(claude --version 2>&1 | head -1)"
+claude --version 2>&1 | head -1 > /evidence/claude-version.txt
+echo "[container] claude $(cat /evidence/claude-version.txt) (pinned: ${CC_VAL_EXPECTED_CLAUDE_VERSION:-unset})"
 echo "[container] tmux $(tmux -V)"
 echo "[container] current plugin $(python3 -c 'import json;print(json.load(open("'"$REPO"'/conexus/.claude-plugin/plugin.json"))["version"])')"
 if [[ -d /control ]]; then
@@ -43,5 +44,5 @@ set +e
 "$REPO/tests/cc-validation/runner.sh" --scenario "$scenario"
 rc=$?
 set -e
-chmod -R a+rX /evidence 2>/dev/null || true
+chmod -R a+rwX /evidence 2>/dev/null || true
 exit $rc

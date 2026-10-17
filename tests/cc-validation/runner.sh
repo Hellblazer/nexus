@@ -23,7 +23,7 @@ ONLY_SCENARIO=""
 # tests/e2e/lib/claude_credentials.py) so this file has one call site to
 # change if the helper's path ever moves.
 #
-# NX_CC_VAL_IN_CONTAINER=1 (set only by run_in_container.sh, inside its own
+# NX_CC_VAL_IN_CONTAINER=1 (set only by container/entrypoint_in_container.sh, inside its own
 # container, which has no keychain): the automation token already sits in this
 # process's environment, put there by `claude_credentials.py run -- docker run
 # -e CLAUDE_CODE_OAUTH_TOKEN`, so `run --` degrades to its own fail-loud gate
@@ -33,7 +33,7 @@ ONLY_SCENARIO=""
 _cred_tool() {
     if [[ "${NX_CC_VAL_IN_CONTAINER:-}" == "1" && "${1:-}" == "run" ]]; then
         if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-            echo "[auth] no automation token in this container's environment -- start it with run_in_container.sh under claude_credentials.py run --" >&2
+            echo "[auth] no automation token in this container's environment -- start it with container/run.sh under claude_credentials.py run --" >&2
             return 1
         fi
         shift
