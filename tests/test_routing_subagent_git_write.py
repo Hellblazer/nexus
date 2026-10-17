@@ -437,6 +437,138 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "/usr/local/bin/hub reset --hard",
         "FOO=1 hub checkout x",
         "hub pull-request && hub checkout x",
+        # gh's DEFAULT alias for `pr checkout`, with and without flags
+        "gh co 5",
+        "gh -R Hellblazer/nexus co 5",
+        "gh --repo=Hellblazer/nexus co 5",
+        "gh.exe co 5",
+        "gh pr view 5; gh co 5",
+        "gh co 5 && rm x",
+        # `pr close` deletes the local branch (and leaves it) with -d
+        "gh pr close 5 -d",
+        "gh pr close 5 --delete-branch",
+        "gh pr -R Hellblazer/nexus close 5 --delete-branch",
+        "gh pr close --delete-branch=true 5",
+        # hub in command position, however the command position is reached
+        "(hub checkout x)",
+        "echo a | hub checkout x",
+        "echo a && hub reset --hard",
+        "sh -c 'hub checkout x'",
+        "env hub checkout x",
+        "sudo hub reset --hard",
+        "x=$(hub checkout y)",
+        "echo go\nhub checkout x",
+        "hub sync && ls",
+        "./hub sync",
+        "/usr/local/bin/hub sync",
+    ],
+    # nexus-7mgnd, adversarial review: the shell builds words at RUNTIME, so a
+    # verb glued to a path character in the TEXT can still become the git
+    # subcommand. Each of these was executed by the reviewer in a throwaway repo
+    # against the first cut (a generic lookbehind) and moved HEAD there; the
+    # plain `\b` boundary denies every one.
+    "manufactured_verbs": [
+        "git $(basename /commit) -m x",
+        "git $(basename ./commit) -m x",
+        'git "$(basename /x/commit)" -m x',
+        "git " + BT + "basename /commit" + BT + " -m x",
+        'git -c alias.c="$(basename /commit)" c -m x',
+        "git -c alias.c=$(basename /commit) c -m x",
+        'git config alias.ci "$(basename /commit)" && git ci -m x',
+        "git $(sed s~x~commit~ <<< x) -m x",
+        "git $(tr -d . <<< .commit) -m x",
+        "git $(cut -d/ -f2 <<< /commit) -m x",
+        "git $(printf '%s' ./commit | cut -c3-) -m x",
+        "git -c alias.c=$(basename x-commit | cut -c3-) c -m y",
+        "git status; echo ./commit | cut -c3- | xargs -I{} git {} -m y",
+        "git status; echo x-commit | cut -c3- | xargs git",
+        "git status; echo ./commit | cut -c3- | xargs git -C . -c user.name=t",
+        "git status; cat .git/hooks/post-commit | xargs git",
+        "g=/usr/lib/git-core/git; " + D + "g-commit -m x",
+        "g=/usr/lib/git-core/git; " + D + "{g}-commit -m x",
+        "g=/usr/lib/git-core/git; " + chr(34) + D + "g" + chr(34) + "-commit -m x",
+        "x=git; " + D + "{x}-commit",
+        "git $(basename /x/checkout) -b nb",
+        "git $(basename /usr/lib/git-core/git-checkout | cut -c5-) -b nb",
+        "git ./commit",
+        "git -commit",
+        "git foo/commit",
+        "git {a,/commit}",
+        "git{-commit,} -m x",
+        "git --git-dir=.git " + D + "(basename /x/add) f",
+        # the same for the gh side: an expansion in the subcommand slot
+        "gh pr $(basename /checkout) 5",
+        'gh pr "$(basename /x/checkout)" 5',
+        "gh $(basename /pr) checkout 5",
+        "gh pr -R o/r $(basename /checkout) 5",
+        "gh pr ch${x}ckout 5",
+    ],
+    # nexus-7mgnd: the exemptions are literals, and a shell or an interpreter
+    # can rewrite a literal. Each command carries an exempt literal AND a way to
+    # rebuild a word from it, so the exemption is withheld and the verb denies.
+    "exemptions_withheld_when_text_can_be_rebuilt": [
+        # merge-base -> merge
+        "git $(basename merge-base | cut -c1-5) topic",
+        "git status; echo merge-base | cut -c1-5 | xargs -I{} git {} topic",
+        "git merge-base A B | sh",
+        "git diff " + D + "(git merge-base A B)",
+        "git diff " + BT + "git merge-base A B" + BT,
+        "git merge-base A B > /tmp/out.sh; sh /tmp/out.sh",
+        "git merge-base A B | tee out.sh",
+        "git merge-base A B | python3 -c 'import sys'",
+        "python3 -c 'import os; os.system(\"git \" + \"merge-base\"[:5] + \" t\")'",
+        "sed 's/-base//e' <<< 'git merge-base'",
+        "git merge-base A B; perl -e 'x'",
+        "git merge-base A B >/dev/nullx",
+        "git merge-base A B; ruby -e x",
+        "git merge-base A B; emacs --batch",
+        "git merge-base A B; eval foo",
+        "git merge-base A B; xargs foo < list",
+        "git merge-base A B\n. ./s",
+        # hook path -> `git commit`
+        "git status; echo .git/hooks/post-commit | sed 's/.*post-/git /' | sh",
+        "git status; sed 's/.*post-/git /e' <<< .git/hooks/post-commit",
+        "git status; ls .git/hooks/post-commit | xargs git",
+        "git status; ls .git/hooks/post-commit > /tmp/o; bash /tmp/o",
+        "git status; ls .git/hooks/post-commit; git " + D + "{x#*post-} -m y",
+        # the two flags
+        "git log --abbrev-commit | sh",
+        "git diff-tree --no-commit-id HEAD | xargs -I{} git {}",
+        "git log --no-commit-id " + D + "(basename /x/commit)",
+        # a glued or longer token is not the exempt token
+        "git status; ls x.git/hooks/post-commit",
+        "git status; ls .git/hooks/post-commit-x",
+        "git status; ls .git/hooks/{post-commit,x}",
+        "git status; ls .git/hooks/post-{commit,x}",
+        "git log --abbrev-commit-x",
+        "git log --no-commit-id=1",
+        "git log x--abbrev-commit",
+    ],
+    # nexus-7mgnd accepted false positives: a verb glued to a path or word
+    # character after a git command denies. Over-blocking is the price of not
+    # judging text adjacency (see manufactured_verbs). Pinned so a loosening
+    # is a visible decision.
+    "glued_verbs_accepted_price": [
+        "git log feature/x-add-thing",
+        "git log origin/feature/add-thing",
+        "git log docs/add.md",
+        "git diff docs/add.md",
+        "git show HEAD:src/commit.py",
+        "git branch nexus-96-restore",
+        "git log -- scripts/nexus-96-restore",
+        "git status && ls /Users/x/git/nexus-96-restore",
+        "git status && echo ---clean above---",
+        "git show a461db0b7 --stat; ls scratchpad/commit-a461db0b7",
+        "git status && ls hooks/post-merge",
+        "git log ./checkout",
+        "git log ~/commit",
+        "git merge-file a b c",
+        "git merge-base-foo",
+        "git merge-tree.sh a b",
+        # an exempt literal inside a command that can rebuild text
+        "git diff " + D + "(git merge-base HEAD origin/develop)..HEAD",
+        "for d in a b; do git status; ls " + D + "d/.git/hooks/post-commit; done",
+        "for s in 1; do git diff-tree --no-commit-id -r " + D + "s; done",
     ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
@@ -455,7 +587,6 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "echo 'gh pr checkout' > notes.txt",
         "gh pr view 5 && echo pr checkout",
         "cd ~/bin/gh && echo repo sync",
-        "echo hub checkout",
     ],
 }
 
@@ -517,29 +648,31 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "python git.py add",
         "ls nexus-git-policy.py file${i}.txt",
     ],
-    # nexus-7mgnd: a real git command, then a verb that is only part of a path,
-    # branch name or hook file name. A subcommand is always its own argv word.
-    "verb_glued_to_a_path": [
+    # nexus-7mgnd: the measured, literal exemptions, in a command that cannot
+    # rebuild text. Anything else glued to a path still denies (see
+    # glued_verbs_accepted_price).
+    "exempt_literals": [
         "git config core.hooksPath",
         "git config core.hooksPath; ls .git/hooks/post-commit",
         "git status && ls .git/hooks/post-commit",
         "git rev-parse --git-dir && cat .git/hooks/post-checkout",
-        "git -C x status && cat hooks/post-merge",
-        "git status && ls /Users/x/git/nexus-96-restore",
-        "git log feature/x-add-thing",
-        "git log origin/feature/add-thing",
-        "git log -- scripts/nexus-96-restore",
-        "git diff docs/add.md",
-        "git show HEAD:src/commit.py",
-        "git ls-files '*.add'",
-        "git log ~/commit",
-        "git log ./checkout",
-        "git log a-git-add",
+        "nx hooks status; git status; ls .git/hooks/post-merge",
+        "git status; ls /Users/x/repo/.git/hooks/post-commit.sample",
+        "git status; cat ../.git/hooks/pre-push",
+        "git status; (ls .git/hooks/post-commit)",
+        "git diff-tree --no-commit-id --name-only -r HEAD",
+        "git log --abbrev-commit --oneline -3",
+        "git rev-list HEAD --abbrev-commit --abbrev=7 2>/dev/null | grep -x 76bbfac",
         "git merge-base --is-ancestor HEAD origin/develop",
         "git merge-base HEAD origin/develop",
         "git merge-tree HEAD origin/develop topic",
         "git merge-base HEAD main; echo merge-base",
-        "nx hooks status; git status; ls .git/hooks/post-merge",
+        "git -C /x merge-base --is-ancestor a b && echo yes || echo no",
+        "cd /x || exit 1; git status --short && echo ---BASE--- && git merge-base HEAD develop 2>/dev/null",
+        "git merge-base HEAD develop 2>&1 | head -5",
+        "git merge-base --is-ancestor a b &>/dev/null; git log | tail -3 | wc -l",
+        "git merge-base A B | cut -c1-8",
+        "git merge-base A B | tr a-f A-F | cat",
     ],
     # nexus-0l6zh: gh and hub work that leaves HEAD and the tree alone.
     "gh_and_hub_that_do_not_move_head": [
@@ -565,6 +698,24 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "ls docs/github && echo reset",
         "hub --version",
         "hub pr list",
+        # `co` is a subcommand only right after gh (and its flags)
+        "gh pr view 5 && echo co",
+        "gh pr view co",
+        "gh alias list",
+        "gh pr close 5",
+        "gh pr close 5 --comment bye",
+        "gh pr close 5 -c bye",
+        "gh pr -R Hellblazer/nexus close 5",
+        # hub is a command only in command position (nexus-0l6zh, review)
+        "cd hub && echo file${i}.txt",
+        "cd hub && rm x",
+        "echo hub; cp \"${dir}/a${n}.log\" .",
+        "echo hub; rm -rf /tmp/x",
+        "docker pull hub && mv a b",
+        "ls hub add",
+        "echo hub checkout",
+        "echo hub sync",
+        "ls hub && ls hub/pr",
     ],
     # Ordinary interpolation, nothing git-shaped for it to reconstruct.
     "ordinary_expansions": [
@@ -711,6 +862,11 @@ def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
     # background agents (C4).
     assert "routing-allow" in reason and "not yours to reach for" in reason, reason
     assert "background" in low and "foreground" in low, reason
+    # nexus-7mgnd/0l6zh review: the tool call's cwd decides the worktree
+    # exemption, so a cd or `git -C` inside the command must not be read as one.
+    assert "cwd of the tool call decides" in low, reason
+    assert "`cd <wt>`" in reason and "`git -C <wt>`" in reason, reason
+    assert "isolation: worktree" in reason, reason
 
 
 def test_the_spliced_expansion_deny_names_the_reconstructed_fragment(shared_repo):
@@ -756,27 +912,64 @@ def test_a_hostile_300kb_command_is_scanned_in_linear_time(shared_repo):
     assert elapsed < 10, f"scan of a {len(big)}-byte command took {elapsed:.1f}s"
 
 
-@pytest.mark.parametrize(
-    "hostile",
-    [
-        # many flags in the gh flag gap, ending in a non-subcommand: the gap
-        # pattern must not backtrack exponentially
-        "gh pr" + " -a b" * 50_000 + " view",
-        "gh pr" + " --a" * 50_000 + " view",
-        "gh " + "pr merge " * 30_000,
-        "gh " + "issue develop " * 20_000,
-        # a verb glued to a path, 50k times, then a real git
-        "git " + "a/commit " * 40_000,
-        "git " + "x-add-y " * 40_000,
-    ],
-    ids=["gh_value_flags", "gh_bool_flags", "gh_pr_merge_no_flag", "gh_develop_no_flag", "slash_verbs", "hyphen_verbs"],
-)
-def test_hostile_gh_and_lookbehind_inputs_are_scanned_in_linear_time(hostile, shared_repo):
+def _timed_verdict(cmd: str, repo: pathlib.Path) -> tuple[dict, float]:
     t0 = time.monotonic()
-    out = _verdict(hostile, shared_repo)
-    elapsed = time.monotonic() - t0
-    assert "permissionDecision" not in out, f"a harmless command was denied: {hostile[:60]!r}"
-    assert elapsed < 10, f"scan of a {len(hostile)}-byte command took {elapsed:.1f}s"
+    out = _verdict(cmd, repo)
+    return out, time.monotonic() - t0
+
+
+#: Hostile inputs that stress the gh walk, the command-position walk and the
+#: exemption scans with many repeated starts. The first cut of the gh flag gap
+#: was a regex and measured QUADRATIC on these: 7.8 s at 24 KB, 160 s at 120 KB,
+#: past the 5 s hook timeout (which fails open, so a padded input also hid a
+#: following `gh pr checkout`). Each case is 24 KB or more. A quiet run costs
+#: about 0.1 s to allow and 0.5 s to deny (two `git rev-parse` spawns and the
+#: log write); the ceiling is a multiple of a small run of the SAME outcome
+#: measured just before, so runner contention scales both sides.
+_N = 5_000
+_HOSTILE_GH: list[tuple[str, bool]] = [
+    # (command, must deny)
+    ("gh " + "pr -a " * _N + "x", False),
+    ("gh " + "pr -a " * _N + "x; gh pr checkout 5", True),
+    ("gh " + "pr --x=y " * 3_000, False),
+    ("gh " + "pr --x=y " * 3_000 + "; gh pr checkout 5", True),
+    ("gh " + "repo -a " * 4_000 + "x", False),
+    ("gh " + "repo -a " * 4_000 + "; gh repo sync", True),
+    ("gh " + "issue -a " * 4_000 + "x", False),
+    ("gh " + "issue -a " * 4_000 + "; gh issue develop 5 -c", True),
+    ("gh " + "-R x " * 6_000 + "x", False),
+    ("gh " + "-R x " * 6_000 + "co 5", True),
+    ("gh pr merge 5 -" + "d" * 30_000 + "_", False),
+    ("gh pr" + " -a b" * 50_000 + " view", False),
+    ("gh pr" + " --a" * 50_000 + " view", False),
+    ("gh " + "pr merge " * 30_000, False),
+    ("gh " + "issue develop " * 20_000, False),
+    ("gh " + "(x) " * 6_000 + "pr " + "(y) " * 6_000 + "co", False),
+    ("echo " + "hub " * 8_000 + "checkout", False),
+    ("hub " * 8_000, False),
+    # exemption scans over long runs of exempt tokens and path-like words
+    ("git log " + "--abbrev-commit " * 20_000, False),
+    ("git log " + ".git/hooks/post-commit " * 15_000, False),
+    ("git merge-base " + "a/" * 40_000 + "b", False),
+    ("git merge-base " + "a|" * 20_000 + "b", True),
+]
+
+
+@pytest.mark.parametrize(
+    "hostile,must_deny", _HOSTILE_GH,
+    ids=[f"{i:02d}-{c[:22].replace(' ', '_')}" for i, (c, _) in enumerate(_HOSTILE_GH)],
+)
+def test_hostile_gh_and_exemption_inputs_are_scanned_in_linear_time(hostile, must_deny, shared_repo):
+    assert len(hostile) >= 24_000, f"the case is too small to show a quadratic scan: {len(hostile)}"
+    _, baseline = _timed_verdict(
+        "gh pr checkout 5" if must_deny else "gh pr view 5", shared_repo,
+    )
+    out, elapsed = _timed_verdict(hostile, shared_repo)
+    denied = out.get("permissionDecision") == "deny"
+    assert denied == must_deny, f"{hostile[:60]!r}: denied={denied}, wanted {must_deny}"
+    assert elapsed < max(5 * baseline + 0.5, 1.0) and elapsed < 3.0, (
+        f"scan of a {len(hostile)}-byte command took {elapsed:.2f}s (small run {baseline:.2f}s)"
+    )
 
 
 # --- The chas carve-out (nexus-yc7fs) ---------------------------------------

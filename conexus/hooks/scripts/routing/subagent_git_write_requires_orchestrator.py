@@ -415,36 +415,68 @@ filesystem runs ``/usr/bin/GIT`` as git; the scan was case-sensitive before
 this change too, so that gap is pre-existing, not new). ``gh pr checkout`` and
 ``hub checkout`` were on this list until nexus-0l6zh (below).
 
-nexus-7mgnd: the verb side got the mirror-image narrowing. A git subcommand is
-always its own argv word, so ``_VERB_RE`` now refuses a verb glued to a path
-character in front of it (``[\\w./~-]``): ``git status && ls
-.git/hooks/post-commit``, ``git log feature/x-add-thing``, ``git log
-docs/add.md`` allow. The dispatch spelling keeps its hyphen (``git-add``,
-``/usr/lib/git-core/git-commit``: a verb right after a word-initial ``git-``
-still matches), ``merge-base`` / ``merge-tree`` are exempt (read-only; 24 of the
-82 residual denials measured in the nexus-0r5l8 critique were ``git merge-base
---is-ancestor``), and ``merge-file`` and the rest still deny. Nothing is
-loosened for a verb that is its own word: space, tab, newline, ``( ; & | $( {
-}`` and a stripped quote all leave a non-glue character in front of it, and a
-brace or glob that expands to a bare verb (``git {,x/}commit``) puts ``}`` or
-``,`` there. Not covered, and pre-existing: ``p=add; /usr/lib/git-core/git-${p}
-f`` (the verb only arrives through an expansion glued to the dispatch path).
+nexus-7mgnd: the verb side got a narrow, measured loosening, not a general one.
+The verb is matched with plain ``\\b`` boundaries, as it always was, so a verb
+glued to a path character (``feature/x-add-thing``, ``docs/add.md``,
+``scratchpad/commit-abc``, ``nx-bare-checkout``) still denies after a ``git``
+token. A first cut dropped those with a lookbehind and the adversarial review
+executed the hole: the shell builds words at runtime, so ``git $(basename
+/commit)``, ``git `basename /commit```, ``git -c alias.c="$(basename
+/commit)" c``, ``git $(sed s~x~commit~ <<< x)``, ``... | xargs -I{} git {}``,
+``g=.../git-core/git; $g-commit`` and ``git $(basename /x/checkout) -b nb``
+all moved HEAD (they are pinned as the ``manufactured_verbs`` family in the
+tests). The loosenings that remain are literals only, each measured as a false
+positive in the 402-row replay of logged denials, and ALL of them are withheld
+whenever ``_may_recombine`` finds a way for the command to rebuild a word
+(a ``$``, backtick or process substitution, a redirection to a file, a pipe
+into anything but a read-only filter, or an interpreter/executor word):
+
+- ``merge-base`` / ``merge-tree`` (read-only; 21 of the 23 rows the replay
+  still frees), ``merge-file`` and ``merge-base-x`` still deny;
+- the whole tokens ``--no-commit-id`` and ``--abbrev-commit`` (2 rows);
+- a hook file ``<dir>/.git/hooks/<hookname>`` (``post-commit``, ``post-merge``
+  ...) as a whole token.
+
+Replay result: of 402 logged denials the first cut freed 34, this cut frees 23
+(21 ``merge-base``, 2 ``--abbrev-commit``) and re-denies the 11 glued ones
+(``---clean above---``, ``scratchpad/commit-x``, ``nx-bare-checkout``, a hook
+path built from ``$d``, ``--no-commit-id`` inside ``$(...)``). Running a hook
+file (``.git/hooks/post-commit`` as a command) executes whatever it holds,
+like any script a subagent may already run; the exemption only stops the
+path's TEXT from reading as a verb. ACCEPTED FALSE
+POSITIVES, listed so they are not rediscovered: every verb glued to a path or
+word character after a ``git`` token (``git log feature/x-add-thing``, ``git
+log docs/add.md``, ``git branch nexus-96-restore``, ``echo ---clean---``),
+and every exempt literal inside a command that can recombine text
+(``git diff $(git merge-base A B)``, ``git merge-base A B | sh``). Known gap of
+the recombination gate: an interpreter missing from ``_EXECUTOR_RE`` could
+still rebuild ``merge`` from ``merge-base`` or ``git commit`` from a hook
+path, in a command that also carries one of the exempt literals. One
+PRE-EXISTING hole, found while measuring and not touched here: ``git $(echo
+-commit | cut -c2-) -m x`` allows on origin/develop too, because
+``_resolve_command_sub_literals`` reads ``-commit`` as an echo flag.
 
 nexus-0l6zh: HEAD-moving wrappers. A subagent in the shared checkout is also
-denied ``gh pr checkout`` / ``gh pr co``, ``gh repo sync``, ``gh pr merge`` with
-``-d`` / ``--delete-branch`` (switches to the default branch and deletes the
-local one), ``gh issue develop`` with ``-c`` / ``--checkout``, ``hub sync``, and
-any git verb after ``hub`` (a git wrapper: ``hub checkout <PR-URL>``). The gh
-phrases arm only after a ``gh`` command token (bare, ``.exe``, ``./gh`` or
-``.../bin/gh``) with the same verb-side lookbehind, and like git they pass
-inside a provable linked worktree. Accepted false positives: ``echo gh pr
-checkout``, ``echo hub checkout``, a ``.../bin/gh`` directory. Accepted false
-negatives: a user-defined gh alias (``gh alias set co '!git checkout'``; the
-alias line itself carries ``git checkout`` and denies, but a later ``gh co``
-does not), an expansion spliced into a gh phrase (``gh pr ch${x}ckout``: only
-the zero-expansion pass sees it, and the glue rule keys on ``git`` alone, so a
-populated ``x`` slips through), and ``gh`` subcommands that only change the
-remote (``gh pr create``, ``gh pr update-branch``, ``gh api``).
+denied ``gh pr checkout`` / ``gh pr co`` / ``gh co`` (gh's default alias),
+``gh repo sync``, ``gh pr merge`` and ``gh pr close`` with ``-d`` /
+``--delete-branch`` (they switch to the default branch and delete the local
+one), ``gh issue develop`` with ``-c`` / ``--checkout``, ``hub sync`` and any
+git verb after a ``hub`` COMMAND word (a git wrapper: ``hub checkout
+<PR-URL>``). gh arms after a ``gh`` command token (bare, ``.exe``, ``./gh`` or
+``.../bin/gh``) through one linear token walk (``_gh_match``); hub arms only in
+command position (``_first_hub_command``), so ``cd hub && rm x``, ``echo hub;
+rm -rf x``, ``docker pull hub && mv a b`` and ``ls hub add`` are not denied.
+Both pass inside a provable linked worktree, like git. An expansion in the
+subcommand slot (``gh pr $(basename /checkout) 5``, ``gh $(basename /pr)
+checkout 5``) is a wildcard and denies. Scope: gh arming covers the local-tree
+movers only; user-defined aliases are not followed (``gh alias set co2 'pr
+checkout'`` denies on that line, a later ``gh co2 5`` does not); a whole-word
+variable holding the subcommand (``p=checkout; gh pr $p 5``) is a known limit;
+and ``gh`` subcommands that only change the remote (``gh pr create``,
+``gh pr merge`` without ``-d``, ``gh pr update-branch``, ``gh api``) are not
+guarded, which is inconsistent with the refusal of ``git push`` and is the
+stated price. Accepted false positives: ``echo gh pr checkout`` and a
+``.../bin/gh`` directory. ``gh pr checkout=5`` is no gh command and allows.
 
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
@@ -510,9 +542,9 @@ _WRITE_SUBCOMMANDS = _INDEX_WRITE_SUBCOMMANDS | _TREE_DESTRUCTIVE_SUBCOMMANDS
 #: Every alternative is matched inside one outer ``\b...\b`` so a short
 #: token like ``am``/``rm``/``mv``/``gc`` cannot match as a substring of an
 #: unrelated word (``same``, ``harm``, ``mvfoo``, ``legc`` never match).
-_PRIMARY_VERB_ALT = (
-    r"checkout|restore|switch|reset|clean|stash|add|commit|"
-    r"merge(?!-(?:base|tree)(?![\w./~-]))|rebase|"
+_VERB_ALT_HEAD = r"checkout|restore|switch|reset|clean|stash|add|commit|"
+_VERB_ALT_TAIL = (
+    r"|rebase|"
     r"cherry-pick|am|apply|push|rm|mv|"
     r"worktree\s+(?:add|remove|prune)|"
     r"branch\s+-[dDm]|"
@@ -534,21 +566,104 @@ _PRIMARY_VERB_ALT = (
 #: UNBOUNDED for a verb token anywhere after it), not one combined regex
 #: with a distance cap. There is no longer any distance to pad past.
 #:
-#: nexus-7mgnd: a git subcommand is always its own argv word, so a verb that
-#: is GLUED to a path character before it (``[\w./~-]``) is never the
-#: subcommand: ``.git/hooks/post-commit``, ``feature/x-add-thing``,
-#: ``docs/add.md``, ``nexus-96-restore``. The lookbehind drops those. The one
-#: place a ``-`` legitimately precedes the subcommand is the dispatch spelling
-#: ``git-checkout`` / ``/usr/lib/git-core/git-add``, so a verb directly after a
-#: ``git-`` that itself starts a word (not ``mygit-`` / ``x-git-``) still
-#: matches. Every shell construct that makes a verb its own word (space, tab,
-#: newline, ``( ; & | $( {`` and the like, quotes and escapes already stripped
-#: by the normalizer) leaves a character OUTSIDE ``[\w./~-]`` before it, so
-#: none of the catalogued bypasses loses coverage. ``merge-base`` and
-#: ``merge-tree`` are read-only; ``merge-file`` and the rest still deny.
-_VERB_RE = re.compile(
-    r"(?:(?<![\w./~-])|(?<=(?<![\w.~-])git-))(" + _PRIMARY_VERB_ALT + r")\b"
+#: nexus-7mgnd (second cut): the verb is matched with plain ``\b`` word
+#: boundaries, exactly as on origin/develop. A first cut dropped a verb glued
+#: to a path character (``[\w./~-]``) with a lookbehind, and the adversarial
+#: review executed its hole: the lookbehind judges how the TEXT is adjacent,
+#: but the shell builds words at RUNTIME, so ``git $(basename /commit)``,
+#: backtick ``basename /commit``, ``git -c alias.c="$(basename /commit)" c``,
+#: ``git $(sed s~x~commit~ <<< x)``, ``echo ./commit | cut -c3- | xargs -I{}
+#: git {}``, ``g=.../git-core/git; $g-commit`` and ``git $(basename
+#: /x/checkout) -b nb`` all allowed and moved HEAD. A glued verb is therefore
+#: scanned like any other; the price is a set of accepted false positives
+#: (``git log feature/x-add-thing``, ``git log docs/add.md``, ``git branch
+#: nexus-96-restore``, ``echo ---clean above---``).
+_VERB_RE = re.compile(r"\b(" + _VERB_ALT_HEAD + "merge" + _VERB_ALT_TAIL + r")\b")
+
+#: nexus-7mgnd: the ONLY loosening of the verb scan, and it is used only when
+#: ``_may_recombine`` says the command has no way to turn a literal into a
+#: different word. ``merge-base`` and ``merge-tree`` are read-only, and 25 of
+#: the 402 denials logged 2026-08-20..09-05 were ``git merge-base
+#: --is-ancestor``. ``merge-file``, ``merge-base-x`` and the rest still deny.
+#: Without the gate, ``git $(basename merge-base | cut -c1-5) topic`` would
+#: build ``git merge`` out of the exempt literal.
+_VERB_RE_READ_ONLY = re.compile(
+    r"\b(" + _VERB_ALT_HEAD + r"merge(?!-(?:base|tree)(?![\w./~-]))" + _VERB_ALT_TAIL + r")\b"
 )
+
+#: nexus-7mgnd: three literal token shapes that measured as false positives in
+#: the 402-row replay and that no shell can turn into an executed word UNLESS
+#: the command can recombine text (``_may_recombine``): ``--no-commit-id`` and
+#: ``--abbrev-commit`` (flags of ``git diff-tree`` / ``git log``) and a hook
+#: file path ``<dir>/.git/hooks/<hookname>`` (``post-commit``, ``post-merge``,
+#: ``pre-push`` ...). Each is a WHOLE token: preceded by the start of the text,
+#: whitespace, ``;``, ``&`` or ``(``, and followed by the end, whitespace,
+#: ``;``, ``&`` or ``)``. A neighbour that is anything else (``x.git/hooks/``,
+#: ``--no-commit-id=1``, ``--abbrev-commit-x``) is not the token and still
+#: scans. The path prefix is plain path characters only, so a brace, glob or
+#: expansion in it is never stripped. In the replay these tokens sat inside
+#: ``$(...)``, a ``for`` loop over ``$d`` or a ``| grep`` pipeline in most
+#: rows, so only the pure-literal rows are fixed; the rest keep denying.
+_HOOK_NAMES = (
+    r"applypatch-msg|pre-applypatch|post-applypatch|pre-commit|pre-merge-commit|"
+    r"prepare-commit-msg|commit-msg|post-commit|pre-rebase|post-checkout|"
+    r"post-merge|pre-push|pre-receive|update|post-receive|post-update|"
+    r"post-rewrite|pre-auto-gc|push-to-checkout|reference-transaction|"
+    r"sendemail-validate|fsmonitor-watchman|post-index-change"
+)
+_EXEMPT_TOKEN_RE = re.compile(
+    r"(?<![^\s;&(])(?:--no-commit-id|--abbrev-commit|"
+    r"(?:[\w.~/-]*/)?\.git/hooks/(?:" + _HOOK_NAMES + r")(?:\.sample)?)(?![^\s;&)])"
+)
+
+#: nexus-7mgnd: can this command build a word the text does not spell? The
+#: exemptions above are literals; a shell or an interpreter can rewrite a
+#: literal into another word (``cut -c1-5`` turns ``merge-base`` into
+#: ``merge``, ``sed 's/.*post-/git /'`` turns a hook path into ``git commit``).
+#: This gate answers yes, and every exemption is then withheld, when ANY of
+#: these holds, all read from the normalized text:
+#:
+#: - a capture or expansion: ``$`` (``$(...)``, ``${...}``, ``$name``), a
+#:   backtick, or a process substitution ``<(`` / ``>(``;
+#: - an output redirection other than to ``/dev/null`` or an fd (``2>&1``),
+#:   since a file can be written and then run;
+#: - a pipe whose next stage starts with a word outside ``_SAFE_PIPE_SINKS``
+#:   (read-only filters that cannot execute their input or write a file);
+#: - an executor or interpreter word (``sh``, ``bash``, ``xargs``, ``eval``,
+#:   ``source``, a leading ``.``, ``python``, ``perl``, ``ruby``, ``node``,
+#:   ``awk``, ``sed`` ...), anywhere in the text.
+#:
+#: What it cannot see: an interpreter missing from ``_EXECUTOR_RE``. The list
+#: is open-ended by nature; the miss costs a deny->allow only for a command
+#: that also carries one of the exempt literals.
+_CAPTURE_RE = re.compile(r"[$`]|<\(|>\(")
+_SAFE_REDIRECT_RE = re.compile(
+    r"&>>?\s*/dev/null(?![\w./-])|\d*>>?\s*/dev/null(?![\w./-])|\d*>&\d+"
+)
+_PIPE_STAGE_RE = re.compile(r"(?<!\|)\|(?!\|)&?\s*([^\s;&|()<>]*)")
+_SAFE_PIPE_SINKS = frozenset(
+    {"head", "tail", "grep", "egrep", "fgrep", "wc", "cut", "tr", "cat", "less", "more"}
+)
+_EXECUTOR_RE = re.compile(
+    r"(?<![\w.-])(?:sh|bash|zsh|dash|ksh|csh|tcsh|fish|pwsh|powershell|xargs|eval|"
+    r"source|parallel|python[\d.]*|perl|ruby|node(?:js)?|deno|bun|php|lua|[gmn]?awk|"
+    r"sed|osascript|expect|tclsh|groovy|jshell|irb|swift|emacs|vim|nvim|gdb|lldb)(?![\w.-])"
+)
+_DOT_SOURCE_RE = re.compile(r"(?:^|[;&|(\n])\s*\.\s")
+
+
+def _may_recombine(text: str) -> bool:
+    """True when *text* has any way to build a word it does not spell (see the
+    block comment above). One regex pass per clause, all linear."""
+    if _CAPTURE_RE.search(text):
+        return True
+    if ">" in _SAFE_REDIRECT_RE.sub("", text):
+        return True
+    for m in _PIPE_STAGE_RE.finditer(text):
+        if m.group(1) not in _SAFE_PIPE_SINKS:
+            return True
+    return bool(_EXECUTOR_RE.search(text) or _DOT_SOURCE_RE.search(text))
+
 
 #: nexus-0r5l8 (Sam's option A, 2026-09-29): ``git`` arms the scan only as the
 #: git COMMAND, not as a substring of a path or word. The old ``\bgit\b`` armed
@@ -596,7 +711,9 @@ def _first_git_command(text: str) -> int | None:
     The returned index is the end of the literal ``git``, not of the token,
     so the verb scan still sees ``checkout`` inside ``git-checkout``. One
     linear pass: ``finditer`` over tokens, an ``rfind`` and an anchored
-    ``fullmatch`` per token that contains ``git`` at all.
+    ``fullmatch`` per token that contains ``git`` at all. Git only: ``hub`` and
+    ``gh`` have their own walks, so a bare ``hub`` or ``gh`` word never arms
+    the git-only gates built on this (``_find_spliced_expansion``).
     """
     for m in _PATHISH_TOKEN_RE.finditer(text):
         tok = m.group().rstrip("/")
@@ -604,96 +721,249 @@ def _first_git_command(text: str) -> int | None:
             base_start = tok.rfind("/") + 1
             if _GIT_BASENAME_RE.fullmatch(tok, base_start):
                 return m.start() + base_start + 3
-        if "hub" in tok and _HUB_TOKEN_RE.fullmatch(tok):
-            return m.start() + tok.rfind("hub") + 3
     return None
 
 
 #: nexus-0l6zh: ``hub`` is a git wrapper that forwards every git verb
 #: (``hub checkout <PR-URL>``, ``hub merge``, ``hub sync``), so it arms the same
-#: verb scan as ``git``. Only a bare ``hub`` (or ``hub.exe``), or one under a
-#: ``bin/`` directory, qualifies: a directory or word that merely ends in
-#: ``hub`` (``github``, ``~/hub/notes``) is not the command.
+#: verb scan as ``git``, but ONLY in command position (``_first_hub_command``):
+#: a bare ``hub`` that is an argument or a directory name (``cd hub && rm x``,
+#: ``echo hub; rm -rf x``, ``docker pull hub && mv a b``, ``ls hub add``) must
+#: not arm it. Only a bare ``hub`` (or ``hub.exe``), or one under a ``bin/``
+#: directory, qualifies as the command word.
 _HUB_TOKEN_RE = re.compile(r"(?:\./|.*/bin/)?hub(?:\.exe)?")
 _GH_TOKEN_RE = re.compile(r"(?:\./|.*/bin/)?gh(?:\.exe)?")
+#: Words and delimiters for the command-position walk. ``\n`` is a delimiter
+#: (a new command starts on the next line); other whitespace is skipped.
+_CMD_WALK_RE = re.compile(r"\n|[^\s;&|(){}`]+|[;&|(){}`]")
+_CMD_DELIMS = frozenset(";&|(){}`\n")
+#: A word after which the NEXT word is again a command: wrappers and shell
+#: keywords, any ``NAME=value`` assignment, and a ``-c`` / ``-lc`` flag
+#: (``sh -c 'hub checkout x'``, quotes already stripped).
+_CMD_INTRODUCERS = frozenset(
+    {"env", "command", "exec", "sudo", "doas", "time", "nohup", "xargs", "eval",
+     "builtin", "then", "do", "else", "elif", "if", "while", "until", "!"}
+)
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
+_SHELL_C_FLAG_RE = re.compile(r"-[A-Za-z]*c")
+#: ``hub sync`` is hub's own verb (not a git one): it fast-forwards local
+#: branches, the current one included.
+_HUB_SYNC_RE = re.compile(r"\s+sync(?![\w./~-])")
+
+
+def _first_hub_command(text: str) -> int | None:
+    """Index just past the first ``hub`` COMMAND word in *text*, or ``None``.
+
+    Command position means: the start of the text; right after ``;``, ``&&``,
+    ``||``, ``|``, ``(`` (so ``$(``), a backtick, ``{``, or a newline; or after
+    a word in ``_CMD_INTRODUCERS`` (``env``, ``sudo``, ``exec``, ``command``,
+    ``xargs``, ``then`` ..., an assignment, ``sh -c``). Used only by
+    ``_primary_match``; the git-only helpers never see it. One linear pass.
+    """
+    cmd_pos = True
+    for m in _CMD_WALK_RE.finditer(text):
+        w = m.group()
+        if w in _CMD_DELIMS:
+            cmd_pos = True
+            continue
+        if cmd_pos:
+            tok = w.rstrip("/")
+            if "hub" in tok and _HUB_TOKEN_RE.fullmatch(tok):
+                return m.start() + len(tok)
+        cmd_pos = (
+            w in _CMD_INTRODUCERS
+            or _ASSIGNMENT_RE.match(w) is not None
+            or _SHELL_C_FLAG_RE.fullmatch(w) is not None
+        )
+    return None
+
 
 #: nexus-0l6zh: ``gh`` subcommands that move HEAD or rewrite the working tree
 #: of the checkout they run in, surveyed from ``gh help`` (gh 2.102):
-#: ``pr checkout`` (alias ``pr co``), ``repo sync`` (fast-forwards or hard-resets
-#: the local branch; with an ``owner/repo`` argument it only touches the remote,
-#: which this over-arms on purpose), and ``issue develop`` / ``pr merge`` when
-#: the flag that checks a branch out or deletes the local one is present
-#: (``_GH_HEAD_FLAG_RE``). Same lookbehind as ``_VERB_RE``: a phrase glued to a
-#: path character is not the subcommand. These arm only after a ``gh`` COMMAND
-#: token and, like git, never inside a provable linked worktree.
 #:
-#: Flags may sit between the command word and the subcommand (``gh pr -R
-#: owner/repo checkout 5`` is valid cobra), so the gap ``_GH_FLAGS`` allows any
-#: run of ``-x`` / ``--long`` / ``--long=v`` flags, each with one optional value
-#: word. A non-flag word in the gap ends the phrase: ``gh pr comment 5 -b
-#: 'checkout later'`` is not ``pr checkout``.
-_GH_FLAGS = r"(?:\s+--?[A-Za-z0-9][\w-]*(?:=\S*)?(?:\s+(?!-)\S+)?)*"
-_GH_ALWAYS_RE = re.compile(
-    r"(?<![\w./~-])(pr" + _GH_FLAGS + r"\s+(?:checkout|co)|repo" + _GH_FLAGS + r"\s+sync)\b"
-)
-#: ``hub sync`` is hub's own verb (not a git one): it fast-forwards local
-#: branches, the current one included.
-_HUB_SYNC_RE = re.compile(r"(?<![\w.~-])(hub(?:\.exe)?\s+sync)\b")
-_GH_CONDITIONAL_RE = re.compile(
-    r"(?<![\w./~-])(pr" + _GH_FLAGS + r"\s+merge|issue" + _GH_FLAGS + r"\s+develop)\b"
-)
-#: ``-d`` / ``--delete-branch`` (pr merge), ``-c`` / ``--checkout`` (issue
-#: develop), including inside a short-flag cluster such as ``-sd``.
-_GH_HEAD_FLAG_RE = re.compile(
-    r"(?<![\w-])(?:--delete-branch|--checkout|-[A-Za-z]*[dc][A-Za-z]*)(?![\w-])"
-)
+#: - always: ``pr checkout`` (alias ``pr co``), ``co`` (gh's DEFAULT alias for
+#:   ``pr checkout``; ``gh co 5``, ``gh -R o/r co 5``), ``repo sync``
+#:   (fast-forwards or hard-resets the local branch; with an ``owner/repo``
+#:   argument it only touches the remote, which this over-arms on purpose);
+#: - with ``-d`` / ``--delete-branch``: ``pr merge`` and ``pr close`` (both
+#:   check out the default branch and delete the local one);
+#: - with ``-c`` / ``--checkout``: ``issue develop``.
+#:
+#: Scope: gh arming is limited to the local-tree movers. Commands that only
+#: change the remote (``gh pr create``, ``gh pr merge`` without ``-d``,
+#: ``gh pr update-branch``, ``gh api``) are NOT guarded, which is inconsistent
+#: with this guard's refusal of ``git push`` and is the stated price of not
+#: guarding the whole gh surface. A USER-DEFINED alias (``gh alias set co2 'pr
+#: checkout'`` then ``gh co2 5``) is not seen; the alias line itself carries
+#: ``pr checkout`` and denies, a later ``gh co2`` does not. A whole-word
+#: variable holding the subcommand (``p=checkout; gh pr $p 5``) is a known
+#: limit, the same as ``git $p``.
+#:
+#: One left-to-right walk over the words after the first ``gh`` command token
+#: (``_gh_match``). A phrase is HEAD [flag [value]]* SUBCOMMAND, where HEAD is
+#: ``pr`` / ``repo`` / ``issue`` anywhere after ``gh``, or the ``gh`` command
+#: itself (for ``co``), a flag is ``-x`` / ``--long`` / ``--long=v`` and takes
+#: at most one value word, and ``; & | ( ) < >`` end a phrase. The walk keeps a
+#: SET of live (head, after-flag) states, at most eight, so a hostile run of
+#: repeated heads (``pr -a pr -a pr ...``) costs the same constant per word as
+#: any other input: linear in the text, with no regex backtracking over the
+#: flag gap. (The first cut used a regex flag gap and was measured quadratic:
+#: 7.8 s at 24 KB, past the 5 s hook timeout, which fails open.)
+#:
+#: An expansion in the subcommand slot (``gh pr $(basename /checkout) 5``,
+#: ``gh $(basename /pr) checkout 5``, ``gh pr ch${x}ckout``) is a WILDCARD: it
+#: could spell anything, so a wildcard right after ``pr`` / ``repo`` denies and
+#: a wildcard right after ``gh`` stands for any head.
+_GH_FLAG_RE = re.compile(r"--?[A-Za-z0-9][\w-]*(?:=\S*)?")
+_GH_WALK_RE = re.compile(r"[^\s;&|()<>]+|[;&|()<>]")
+_GH_DELIMS = frozenset(";&|()<>")
+_GH_ALWAYS: dict[str, frozenset[str]] = {
+    "pr": frozenset({"checkout", "co"}),
+    "repo": frozenset({"sync"}),
+    "gh": frozenset({"co"}),
+}
+#: subcommand -> the kind of flag that makes it move the tree.
+_GH_CONDITIONAL: dict[str, dict[str, str]] = {
+    "pr": {"merge": "delete", "close": "delete"},
+    "issue": {"develop": "checkout"},
+}
+_GH_CONDITIONAL_NAMES = {
+    "delete": "gh pr merge/close --delete-branch",
+    "checkout": "gh issue develop --checkout",
+}
+_GH_HEADS = ("pr", "repo", "issue")
+_WILDCARD = "\x00"
 
 
-def _first_gh_command(text: str) -> int | None:
-    """Index just past the first ``gh`` command token in *text* (bare ``gh``,
-    ``gh.exe``, ``./gh`` or ``.../bin/gh``), or ``None``. Same token walk as
+def _gh_command_ends(text: str) -> list[int]:
+    """End index of every ``gh`` command token in *text* (bare ``gh``,
+    ``gh.exe``, ``./gh`` or ``.../bin/gh``). Same token walk as
     ``_first_git_command``; a directory merely named ``gh`` arms it too, the
     accepted cost of the no-position-analysis design."""
+    ends: list[int] = []
     for m in _PATHISH_TOKEN_RE.finditer(text):
         tok = m.group().rstrip("/")
         if "gh" in tok and _GH_TOKEN_RE.fullmatch(tok):
-            idx = tok.rfind("gh")
-            return m.start() + idx + 2
-    return None
+            ends.append(m.end())
+    return ends
 
 
-def _gh_match(normalized_text: str) -> re.Match[str] | None:
-    """First ``hub sync``, else the first HEAD-moving ``gh`` phrase after the
-    first ``gh`` command token, or ``None``. The conditional phrases need their flag somewhere after
-    them; one search from the FIRST candidate decides (a flag after a later
-    candidate is also after the first), which keeps this linear."""
-    m = _HUB_SYNC_RE.search(normalized_text)
-    if m is not None:
-        return m
-    gh_end = _first_gh_command(normalized_text)
-    if gh_end is None:
+def _gh_head_flag(word: str, kind: str) -> bool:
+    """True when *word* is the flag that makes a conditional subcommand move
+    the tree: ``--delete-branch[=v]`` / a short cluster holding ``d`` for
+    ``delete``; ``--checkout[=v]`` / a cluster holding ``c`` for ``checkout``.
+    A word test, not a regex over the whole text, so it cannot backtrack."""
+    long_flag = "--delete-branch" if kind == "delete" else "--checkout"
+    if word == long_flag or word.startswith(long_flag + "="):
+        return True
+    letter = "d" if kind == "delete" else "c"
+    return (
+        len(word) > 1 and word[0] == "-" and word[1:].isascii()
+        and word[1:].isalpha() and letter in word[1:]
+    )
+
+
+def _gh_match(text: str) -> str | None:
+    """The first HEAD-moving ``gh`` phrase after the first ``gh`` command
+    token, as a short name for the deny message, or ``None``. See the block
+    comment above for the phrase grammar and why this is a linear walk.
+
+    Two walks, each linear: over the text as written (so a phrase INSIDE
+    ``$(...)`` or a backtick span is seen), and over a copy whose expansions
+    are replaced by a wildcard word (so a phrase assembled BY an expansion is
+    seen)."""
+    if "gh" not in text:
         return None
-    m = _GH_ALWAYS_RE.search(normalized_text, gh_end)
-    if m is not None:
-        return m
-    m = _GH_CONDITIONAL_RE.search(normalized_text, gh_end)
-    if m is not None and _GH_HEAD_FLAG_RE.search(normalized_text, m.end()):
-        return m
+    hit = _gh_walk(text, wildcards=False)
+    if hit is None and _EXPANSION_CONSTRUCT_RE.search(text) is not None:
+        hit = _gh_walk(_EXPANSION_CONSTRUCT_RE.sub(_WILDCARD, text), wildcards=True,
+                       armed_by_text=text)
+    return hit
+
+
+def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> str | None:
+    """One walk of *t* (see ``_gh_match``). *armed_by_text* is the original
+    text when *t* is its wildcard copy: a ``gh`` that sits only inside an
+    expansion (``$(which gh) pr checkout 5``) still arms the scan, from the
+    start of *t*."""
+    ends = _gh_command_ends(t)
+    if not ends and not (wildcards and _gh_command_ends(armed_by_text or "")):
+        return None
+    start = ends[0] if ends else 0
+    live: set[tuple[str, bool]] = set()  # (head, a flag was just seen)
+    armed_kinds: set[str] = set()
+    pending = 0
+    for m in _GH_WALK_RE.finditer(t, start):
+        w = m.group()
+        while pending < len(ends) and m.start() >= ends[pending]:
+            live.add(("gh", False))  # the gh command itself heads `gh co`
+            pending += 1
+        if w in _GH_DELIMS:
+            live.clear()
+            continue
+        for kind in armed_kinds:
+            if _gh_head_flag(w, kind):
+                return _GH_CONDITIONAL_NAMES[kind]
+        wild = _WILDCARD in w
+        is_flag = not wild and _GH_FLAG_RE.fullmatch(w) is not None
+        nxt: set[tuple[str, bool]] = set()
+        for head, flagged in live:
+            if wild:
+                if not flagged:
+                    if head == "pr" or head == "repo":
+                        return f"gh {head} <expansion>"
+                    if head == "issue":
+                        armed_kinds.add("checkout")
+                    elif head == "gh":
+                        nxt.update((h, False) for h in _GH_HEADS)
+                else:
+                    nxt.add((head, False))  # the value of the flag
+                continue
+            if w in _GH_ALWAYS.get(head, ()):
+                return "gh co" if head == "gh" else f"gh {head} {w}"
+            kind = _GH_CONDITIONAL.get(head, {}).get(w)
+            if kind is not None:
+                armed_kinds.add(kind)
+            if is_flag:
+                nxt.add((head, True))
+            elif flagged and not w.startswith("-"):
+                nxt.add((head, False))  # the flag's one value word
+        if w in _GH_HEADS and not wild:
+            nxt.add((w, False))
+        live = nxt
     return None
 
 
-def _primary_match(normalized_text: str) -> re.Match[str] | None:
-    """First verb-token match anywhere after the first git COMMAND token
-    (``_first_git_command``), else the first HEAD-moving ``gh`` phrase
-    (``_gh_match``), or ``None``. A few linear passes, no
-    catastrophic-backtracking risk: a token walk, then a plain
-    alternation/boundary search with no nested quantifiers."""
-    git_end = _first_git_command(normalized_text)
+def _primary_match(normalized_text: str, *, relaxed: bool = False) -> str | None:
+    """Name of the first write verb after the first git (or hub) COMMAND
+    token, else of the first HEAD-moving ``gh`` phrase (``_gh_match``), or
+    ``None``. A few linear passes, no catastrophic-backtracking risk: token
+    walks, then a plain alternation/boundary search with no nested
+    quantifiers.
+
+    *relaxed* is the caller's ``not _may_recombine(text)``: only then are the
+    read-only exemptions honoured (``merge-base`` / ``merge-tree`` via
+    ``_VERB_RE_READ_ONLY``, and the whole-token literals of
+    ``_EXEMPT_TOKEN_RE`` blanked out before the scan).
+    """
+    text = normalized_text
+    verb_re = _VERB_RE
+    if relaxed:
+        text = _EXEMPT_TOKEN_RE.sub(" ", text)
+        verb_re = _VERB_RE_READ_ONLY
+    git_end = _first_git_command(text)
     if git_end is not None:
-        m = _VERB_RE.search(normalized_text, git_end)
+        m = verb_re.search(text, git_end)
         if m is not None:
-            return m
-    return _gh_match(normalized_text)
+            return m.group(1)
+    hub_end = _first_hub_command(text)
+    if hub_end is not None:
+        m = verb_re.search(text, hub_end)
+        if m is not None:
+            return m.group(1)
+        if _HUB_SYNC_RE.match(text, hub_end) is not None:
+            return "hub sync"
+    return _gh_match(text)
 
 
 #: Shell line-continuation (a trailing, unescaped ``\`` — optionally followed
@@ -1412,7 +1682,9 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"Worktree-isolated agents are exempt automatically when this guard "
         f"can POSITIVELY PROVE a linked worktree (a linked worktree is "
         f"yours to destroy); an undeterminable worktree state does not "
-        f"qualify.\n"
+        f"qualify. The cwd of the tool call decides that, and a `cd <wt>` or "
+        f"`git -C <wt>` inside the command does not count: dispatch with "
+        f"isolation: worktree instead.\n"
         f"An escape (`# routing-allow: <reason>`) exists for this "
         f"guard, but only on the user's explicit instruction to use "
         f"it -- it is not yours to reach for."
@@ -1630,10 +1902,17 @@ def body(payload: dict[str, Any]) -> None:
     # catches any chain length or interleaving pattern without relying on
     # the fragment heuristic's own (now also fixed, see
     # `_expansion_construct_runs`) chain-grouping logic.
+    #
+    # nexus-7mgnd: the read-only exemptions (`merge-base`, three literal
+    # tokens) apply only when `_may_recombine` finds nothing in the command
+    # that could rebuild a word. It is judged on the NORMALIZED text, which
+    # still holds every `$`/backtick; the zero-expansion form below has those
+    # deleted, so it must not decide this for itself.
     primary_match = None
     if not spliced_fragment:
-        primary_match = _primary_match(normalized) or _primary_match(
-            _delete_all_expansions(normalized)
+        relaxed = not _may_recombine(normalized)
+        primary_match = _primary_match(normalized, relaxed=relaxed) or _primary_match(
+            _delete_all_expansions(normalized), relaxed=relaxed
         )
     if not spliced_fragment and primary_match is None:
         _lib.pass_through()
@@ -1689,7 +1968,7 @@ def body(payload: dict[str, Any]) -> None:
     # when it agrees with the primary rule (more precise verb name); when it
     # finds nothing, fall back to the primary regex's own captured text.
     matched = _matched_write_subcommands(command)
-    verb_names = ", ".join(sorted(matched)) if matched else primary_match.group(1)
+    verb_names = ", ".join(sorted(matched)) if matched else primary_match
 
     _lib.log_routing_event(
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
