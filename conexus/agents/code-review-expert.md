@@ -1,7 +1,7 @@
 ---
 name: code-review-expert
 version: "2.0"
-description: Reviews code for quality, security, and best practices. Use proactively after completing features or immediately after writing significant code changes. Brief it with "Ship when BAR" and dispatch substantive-critic alongside it.
+description: Reviews code for quality, security, and best practices. Use proactively after completing features or immediately after writing significant code changes. Brief it with a "Ship when ..." line stating the acceptance bar, and dispatch substantive-critic alongside it.
 model: sonnet
 color: purple
 effort: high

@@ -52,9 +52,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - Description without angle brackets (nexus-0nskc): `conexus/skills/tumbler-footnotes/SKILL.md` writes the tumbler placeholder as TUMBLER in its description, since Claude Desktop's plugin sync rejects angle brackets there.
 
-- Description without angle brackets (nexus-0nskc): `conexus/agents/code-review-expert.md` writes the acceptance-bar placeholder as BAR in its description ("Ship when BAR"), since Claude Desktop's plugin sync rejects angle brackets there.
+- Description without angle brackets (nexus-0nskc): `conexus/agents/code-review-expert.md` asks to be briefed with a "Ship when ..." line stating the acceptance bar, in place of the angle-bracket placeholder Claude Desktop's plugin sync rejects in descriptions.
 
-- Description without angle brackets (nexus-0nskc): `conexus/agents/substantive-critic.md` writes the acceptance-bar placeholder as BAR in its description ("Ship when BAR"), since Claude Desktop's plugin sync rejects angle brackets there.
+- Description without angle brackets (nexus-0nskc): `conexus/agents/substantive-critic.md` asks to be briefed with a "Ship when ..." line stating the acceptance bar, in place of the angle-bracket placeholder Claude Desktop's plugin sync rejects in descriptions.
 
 - Description without angle brackets (nexus-0nskc): `conexus/commands/continuation.md` writes the path placeholder as PATH in its description, since Claude Desktop's plugin sync rejects angle brackets there.
 

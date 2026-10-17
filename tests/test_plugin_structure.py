@@ -433,6 +433,17 @@ def _frontmatter_description(path: Path) -> str | None:
     return m.group(1) if m else None
 
 
+# Per plugin: root directory and the exact number of description-bearing
+# files (skills, agents, commands) the lint must examine. A new skill, agent
+# or command changes the count on purpose: the pin makes the addition visible
+# here, and the undescribed check below stops a file with no description from
+# dropping out of the walk unnoticed. sn ships none today.
+_DESCRIPTION_SURFACES: dict[str, tuple[Path, int]] = {
+    "conexus": (PLUGIN_DIR, 67),
+    "sn": (REPO_ROOT / "sn", 0),
+}
+
+
 class TestDescriptionsCarryNoAngleBrackets:
     """nexus-0nskc: Claude Desktop's plugin sync rejects an XML-tag-like
     description and claude.ai stores it with the angle brackets stripped, so
@@ -440,18 +451,30 @@ class TestDescriptionsCarryNoAngleBrackets:
     `mailbox/address`. Write the placeholder as ADDRESS or in braces.
     """
 
-    def test_no_description_contains_angle_brackets(self) -> None:
-        files = list(skill_skill_mds()) + agent_files() + command_files()
+    @pytest.mark.parametrize("plugin", sorted(_DESCRIPTION_SURFACES))
+    def test_no_description_contains_angle_brackets(self, plugin: str) -> None:
+        root, expected = _DESCRIPTION_SURFACES[plugin]
+        files = (
+            sorted(root.glob("skills/*/SKILL.md"))
+            + sorted(root.glob("agents/*.md"))
+            + sorted(root.glob("commands/*.md"))
+        )
         offenders: list[str] = []
+        undescribed: list[str] = []
         examined = 0
         for path in files:
             desc = _frontmatter_description(path)
             if desc is None:
+                undescribed.append(str(path.relative_to(REPO_ROOT)))
                 continue
             examined += 1
             if re.search(r"[<>]", desc):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}: {desc[:100]!r}")
-        assert examined >= 60, f"only {examined} descriptions examined; the walk found nothing to check"
+        assert not undescribed, f"{plugin}: files with no description: {undescribed}"
+        assert examined == len(files) == expected, (
+            f"{plugin}: examined {examined} of {len(files)} files, expected {expected}; "
+            "update _DESCRIPTION_SURFACES if a skill, agent or command was added or removed"
+        )
         assert not offenders, "\n".join(offenders)
 
 
@@ -691,7 +714,7 @@ class TestRetiredWrapperSkillsLiveInTheOrchestrationSkill:
             text = (PLUGIN_DIR / "agents" / f"{agent}.md").read_text(encoding="utf-8")
             assert "NO ACCEPTANCE BAR" in text, agent
             front = text.split("---", 2)[1]
-            assert "Ship when BAR" in front, f"{agent} description does not ask for the bar"
+            assert 'a "Ship when ..." line' in front, f"{agent} description does not ask for the bar"
 
 
 def _command_bash_block(text: str) -> str | None:
@@ -908,17 +931,29 @@ class TestHooks:
             "check."
         )
 
-    def test_plugin_json_has_only_recognised_keys(self) -> None:
+    @pytest.mark.parametrize("plugin_dir", ["conexus", "sn"])
+    def test_plugin_json_has_only_recognised_keys(self, plugin_dir: str) -> None:
         """Claude Desktop's plugin sync warns on, and the store strips, any
         plugin.json key outside the manifest reference (nexus-0nskc: 'bugs'
-        and 'engines' drew two of five warnings). The Python >=3.12
-        requirement lives in pyproject.toml's requires-python and in each
-        hook script's runtime guard, not in the manifest.
+        and 'engines' drew two of five warnings on conexus, and sn carried
+        'bugs' too). The Python >=3.12 requirement lives in pyproject.toml's
+        requires-python and in each hook script's runtime guard, not in the
+        manifest.
+
+        The allowlist is copied from the Claude Code manifest reference
+        (code.claude.com/docs/en/plugins/manifest-reference) as of
+        2026-10-17. Claude Desktop's accepted set may be narrower: it
+        stripped 'bugs', which the Claude Code validator accepts. Passing
+        this test therefore does not prove the manifest is Desktop-clean.
         """
-        plugin_json = json.loads((PLUGIN_DIR / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        plugin_json = json.loads(
+            (REPO_ROOT / plugin_dir / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
         unknown = sorted(set(plugin_json) - _PLUGIN_JSON_RECOGNISED_KEYS)
-        assert not unknown, f"plugin.json keys outside the manifest reference: {unknown}"
-        assert "name" in plugin_json and "version" in plugin_json, "non-vacuity: manifest lost name/version"
+        assert not unknown, f"{plugin_dir}/plugin.json keys outside the manifest reference: {unknown}"
+        assert "name" in plugin_json and "version" in plugin_json, (
+            f"non-vacuity: {plugin_dir} manifest lost name/version"
+        )
 
     def test_session_end_hook_registered(self) -> None:
         """Regression guard: SessionEnd must run a nexus cleanup entry point.
