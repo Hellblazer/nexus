@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# shellcheck shell=bash
 # Sourced by the A/B batch scripts (nexus-kani0). A container is started by
 # dockerd, outside the lab-run grant's cgroup, so the scheduler cannot see or
 # cap it. Under lab-run (LAB_MEM_MB exported) lab_docker_flags N sets

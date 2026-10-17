@@ -16,11 +16,11 @@ import pytest
 AB = Path(__file__).resolve().parent / "e2e" / "prefix-capture" / "ab"
 HELPER = AB / "lab_grant.sh"
 
-#: Every script that runs a container in the foreground, one at a time. The
-#: detached launcher (skillroute/pe_detach.sh) is excluded: the grant ends when
-#: it exits, long before its container does.
+#: Every script that runs a container, one at a time and in the foreground.
+#: skillroute/pe_detach.sh detaches lab-run around itself, never the container.
 BATCH_SCRIPTS = (
     "ab_batch.sh",
+    "skillroute/pe_detach.sh",
     "tuplespace/ts_batch.sh",
     "seqthink/sq_batch.sh",
     "skillroute/sr_batch.sh",
@@ -74,9 +74,13 @@ def test_every_batch_docker_run_carries_the_grant_flags(rel: str) -> None:
 
 
 def test_the_census_names_every_foreground_launcher() -> None:
-    """A new batch script that starts containers must join BATCH_SCRIPTS."""
+    """A new batch script that starts containers must join BATCH_SCRIPTS, and
+    none may detach the container itself: it would outlive the grant."""
     found = {
         str(p.relative_to(AB)) for p in AB.rglob("*.sh")
-        if re.search(r"^\s*docker run ", p.read_text(encoding="utf-8"), re.M)
+        if re.search(r"docker run ", p.read_text(encoding="utf-8"))
     }
-    assert found - {"skillroute/pe_detach.sh"} == set(BATCH_SCRIPTS), found
+    assert found == set(BATCH_SCRIPTS), found
+    for rel in found:
+        for run in re.findall(r"^.*docker run .*$", (AB / rel).read_text(encoding="utf-8"), re.M):
+            assert not re.search(r"setsid|nohup|\s-d\b|--detach", run), f"{rel}: {run.strip()}"
