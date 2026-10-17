@@ -215,6 +215,21 @@ class OrtNativeDirTest {
                 .isEqualTo(Path.of("/u/.cache/nexus/ort_native"));
     }
 
+    @Test
+    void mainSetsThePathAfterTheGateAndBeforeAnyEmbedderIsBuilt() throws Exception {
+        String main = Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java"));
+        int gate = main.indexOf("OrtInitGate.process().installSignalHandlers();");
+        int apply = main.indexOf("OrtNativeDir.applyAtBoot();");
+        int firstEmbedder = main.indexOf("new Bge768Embedder()");
+        assertThat(gate).isPositive();
+        assertThat(apply).as("Main calls OrtNativeDir.applyAtBoot()").isPositive();
+        assertThat(firstEmbedder).isPositive();
+        assertThat(apply).as("after the signal gate is installed, which Main does first thing")
+                .isGreaterThan(gate);
+        assertThat(apply).as("before ONNX Runtime is first touched, or the property is read too late")
+                .isLessThan(firstEmbedder);
+    }
+
     // ── ORT_VERSION is a property of the pinned jar ─────────────────────────────────────────────
 
     @Test
