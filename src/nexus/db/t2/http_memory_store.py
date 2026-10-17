@@ -76,6 +76,7 @@ _ALL_PAIRS_MAX_ENTRIES = 1000
 from nexus.db.t2._attribution import resolve_attribution
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+from nexus.db.t2_reads import RDR_STATUS_TITLE
 
 
 # ── HttpMemoryStore ────────────────────────────────────────────────────────────
@@ -907,9 +908,10 @@ TITLE_KINDS: tuple[str, ...] = ("rdr_status", "gate_latest")
 
 #: Client-side mirror of the engine's per-kind title test, so an engine that
 #: ignores the parameter yields the same rows. The status pattern is the
-#: engine's regex, ASCII digits only, applied to the whole title.
+#: engine's regex, ASCII digits only, applied to the whole title; the pattern is
+#: :data:`nexus.db.t2_reads.RDR_STATUS_TITLE`, shared with the rdr hook.
 _TITLE_KIND_TESTS: dict[str, Callable[[str], bool]] = {
-    "rdr_status": lambda title: re.fullmatch(r"(?:RDR-)?[0-9]+", title) is not None,
+    "rdr_status": lambda title: RDR_STATUS_TITLE.fullmatch(title) is not None,
     "gate_latest": lambda title: title.endswith("-gate-latest"),
 }
 

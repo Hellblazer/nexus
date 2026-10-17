@@ -21,9 +21,26 @@ place to accumulate query logic — anything that needs more than a single
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-__all__ = ["RDR_ROW_KINDS", "rdr_rows"]
+__all__ = ["RDR_ROW_KINDS", "RDR_STATUS_TITLE", "rdr_rows", "rdr_status_number"]
+
+#: The one Python definition of a status row's title (nexus-pxp44): the bare
+#: number or ``RDR-<n>``, ASCII digits, the WHOLE title. It mirrors the
+#: engine's ``rdr_status`` kind (``^(RDR-)?[0-9]+$``, Postgres, where ``$``
+#: does not match before a trailing newline). The client-side cut in
+#: ``HttpMemoryStore.get_all`` and the hook's status loader both go through
+#: it, so they cannot drift apart: Python's ``\d`` accepts any Unicode digit
+#: and ``$`` accepts a trailing newline, and ``fullmatch`` on ``[0-9]`` does
+#: neither.
+RDR_STATUS_TITLE: re.Pattern[str] = re.compile(r"(?:RDR-)?([0-9]+)")
+
+
+def rdr_status_number(title: str) -> str | None:
+    """The digits of a status-row *title*, or ``None`` if it is not one."""
+    m = RDR_STATUS_TITLE.fullmatch(title)
+    return m.group(1) if m else None
 
 #: The two row kinds the rdr hook reads: status rows and ``*-gate-latest`` rows.
 RDR_ROW_KINDS: tuple[str, ...] = ("rdr_status", "gate_latest")
@@ -50,5 +67,13 @@ def rdr_rows(project: str) -> list[dict[str, Any]]:
     try:
         with T2Database(default_db_path()) as db:
             return list(db.get_all(project=project, title_kinds=RDR_ROW_KINDS))
-    except Exception:  # noqa: BLE001 — the hook must never fail; see the docstring
+    except Exception as exc:  # noqa: BLE001 — the hook must never fail; see the docstring
+        # An empty list reads as "no recorded status", so say why. structlog,
+        # never stdout: the hook's stdout is its decision channel, and the hook
+        # configures a stderr/file sink before it gets here (nexus-pxp44).
+        import structlog  # noqa: PLC0415 — deferred: only the failure path pays for it
+
+        structlog.get_logger(__name__).warning(
+            "rdr_rows_unreadable", project=project, error_class=type(exc).__name__,
+        )
         return []
