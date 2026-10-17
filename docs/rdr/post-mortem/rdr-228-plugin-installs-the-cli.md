@@ -162,4 +162,15 @@ keychain that unlocks at login did.
 
 ## Critique record
 
-CRITIQUE_PLACEHOLDER
+Two close-time critiques, no Critical finding in either. Round 1 (T2
+`nexus_rdr/228-close-critique-2026-10-17`) found five Significant issues: a
+Windows launcher cost the record still gave as 30 ms, the Desktop reconnect
+step, a terminal-free claim never narrowed, CA-8 and CA-9 still marked
+assumed, and a release-gate close reason that claimed cells which had not run.
+The first four were folded into the record; the fifth was answered by running
+the Windows Desktop cells and the remembered-approval check, with Sam ruling the
+remaining two Windows cells covered. Round 2
+(`nexus_rdr/228-close-critique-2026-10-17-r2`) confirmed the first four closed
+and found three residues of the fifth, fixed the same day. The RDR was closed as
+Implemented on Sam's decision with the round-2 verdict at "partial"
+(`nexus_rdr/228-close-override-2026-10-17`).

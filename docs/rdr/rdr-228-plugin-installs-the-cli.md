@@ -2,7 +2,8 @@
 title: "The Plugin Installs the CLI"
 id: RDR-228
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-10-17
 priority: high
 author: Sam
 reviewed-by: self
