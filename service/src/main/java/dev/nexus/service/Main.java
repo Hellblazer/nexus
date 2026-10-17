@@ -8,6 +8,7 @@ import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.LocalTokenizers;
 import dev.nexus.service.vectors.OrtInitGate;
+import dev.nexus.service.vectors.OrtNativeDir;
 import dev.nexus.service.vectors.OrtTempSweep;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
@@ -73,6 +74,11 @@ public final class Main {
         // per start on Windows (its DLLs are locked at exit, so deleteOnExit loses). Remove
         // the dead ones from earlier runs; Windows only, best effort, never throws.
         OrtTempSweep.sweepAtBoot();
+        // nexus-8ool4: load ONNX Runtime's native libraries from one per-version directory
+        // extracted once under the engine's cache tree, instead of unpacking ~16 MB into a fresh
+        // /tmp/onnxruntime-java<random> on every start (a killed engine never deletes it). Sets
+        // onnxruntime.native.path unless the operator already did; best effort, never throws.
+        OrtNativeDir.applyAtBoot();
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
