@@ -159,20 +159,30 @@ def broken_text(reason: str) -> str:
     return f"{BROKEN_PHRASE}. Why it cannot start: {reason}."
 
 
+#: How the user reconnects this server on each surface. Claude Desktop starts a plugin's server
+#: once, when the app starts, and keeps it for every new chat, with no Reconnect command, so only
+#: quitting the app and opening it again replaces this stand-in with the real server (nexus-93xx0,
+#: measured 2026-10-16).
+RECONNECT_HOW: str = (
+    "in Claude Code: /mcp, the server, Reconnect, or a new session; in Claude Desktop: quit the app "
+    "fully and open it again, because a new chat keeps the running server"
+)
+
+
 def instructions(platform: str | None = None, broken: str | None = None) -> str:
     """The server instructions. With *broken* (the reason a found program cannot
     start), the install is installed-but-broken, not missing."""
     if broken is not None:
         return (
             f"{broken_text(broken)} This server has no Nexus tools until it is repaired. {BROKEN_REPAIR} "
-            "The user can also run /conexus:setup. Afterwards the user reconnects this server."
+            f"The user can also run /conexus:setup. Afterwards the user reconnects this server ({RECONNECT_HOW})."
         )
     inline = ", then ".join(f"`{command}`" for command in manual_commands(platform))
     return (
         "Nexus is not installed on this machine, so this server has no Nexus tools yet. "
         f"{question()} Setup runs in the background for several minutes; follow it with setup_status, and "
-        f"afterwards the user reconnects this server. To install by hand instead, the user runs {inline} in a "
-        f"terminal (install guide: {INSTALL_PAGE})."
+        f"afterwards the user reconnects this server ({RECONNECT_HOW}). To install by hand instead, the user "
+        f"runs {inline} in a terminal (install guide: {INSTALL_PAGE})."
     )
 
 
@@ -196,8 +206,7 @@ def setup_text(platform: str | None = None, broken: str | None = None, mode: str
             "It is for the user to run in a terminal; do not run it yourself unless the user asks you to.\n\n"
             f"    {REPAIR_COMMAND}\n\n"
             "It builds the CLI again: up to about 0.7 GB to download and several minutes. Afterwards the user "
-            "reconnects the `nexus` server (in Claude Code: /mcp, the server, Reconnect) or starts a new "
-            "session.\n\n"
+            f"reconnects the `nexus` server ({RECONNECT_HOW}).\n\n"
             f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
         )
     if mode == "cloud":
@@ -219,8 +228,7 @@ def setup_text(platform: str | None = None, broken: str | None = None, mode: str
         + "".join(f"    {command}\n" for command in manual_commands(platform, mode))
         + "\nThe first installs the CLI, the second moves it to its permanent place, and the "
         f"{third}{platform_note(platform)} Afterwards the "
-        "user reconnects the `nexus` server (in Claude Code: /mcp, the server, Reconnect) or "
-        "starts a new session.\n\n"
+        f"user reconnects the `nexus` server ({RECONNECT_HOW}).\n\n"
         f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
     )
 
@@ -258,8 +266,9 @@ SETUP_STATUS_DESCRIPTION: str = (
     "user running /conexus:setup, fixes it. Read-only. The answer gives the stage, the log path and the next "
     "step. A full setup takes 2 to 8 minutes: the CLI build usually 1 to 3 minutes, the local service 2 to 5. "
     "Check again no sooner than the interval the answer names, and not in a loop: each call can ask the user "
-    "for approval. When the answer says setup is done, the user reconnects the nexus server or starts a new "
-    "session before the Nexus tools appear."
+    "for approval. When the answer says setup is done, the user reconnects the nexus server before the Nexus "
+    "tools appear: in Claude Code with /mcp or a new session; in Claude Desktop the user must quit the app and "
+    "open it again, because a new chat keeps the running server."
 )
 
 MODE_DESCRIPTION: str = (
@@ -500,8 +509,7 @@ LAST_RUN_WORDS: dict[str, str] = {
 }
 
 RECONNECT: str = (
-    "The Nexus CLI can start now: the user reconnects the `nexus` server (in Claude Code: /mcp, the server, "
-    "Reconnect) or starts a new session."
+    f"The Nexus CLI can start now: the user reconnects the `nexus` server ({RECONNECT_HOW})."
 )
 
 

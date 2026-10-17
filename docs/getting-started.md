@@ -102,7 +102,7 @@ When the script asks whether the service should start at login, the answer is No
 
 When the install finishes, run `/reload-plugins` or start a new session. In that session Claude tells you that Nexus is not installed and asks the question. If you want to answer later, type `/conexus:setup`. Setup runs in the background. When Claude says it is done, reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session.
 
-In Claude Desktop, add the plugin in Customize → Plugins, then say "Set up Nexus" in a conversation. If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Do not type `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen on Claude Desktop 2.42304.0 on macOS). To update the plugin in Desktop, remove the `Hellblazer/nexus` marketplace and add it again.
+In Claude Desktop, add the plugin in Customize → Plugins, then say "Set up Nexus" in a conversation. When setup is done, quit Desktop fully and open it again; a new conversation keeps the old server. If you added `Hellblazer/nexus` before, remove it and add it again first. An older copy has no setup tool. Do not type `/conexus:setup` in Desktop; it lists the plugin's skills, not its commands (seen on Claude Desktop 2.42304.0 on macOS). To update the plugin in Desktop, remove the `Hellblazer/nexus` marketplace and add it again.
 
 **The question.** Route two asks it with these four choices. The script asks the same question without Not now, because typing the command is your permission to install:
 
@@ -275,7 +275,7 @@ nx doctor
 
 The commands are the same on Windows; [Installing nexus on Windows](windows-install.md) has that platform's prerequisites. Then add the plugin with the two lines from route two.
 
-**The plugin is added but Claude shows no Nexus tools** — The `nx` command is not installed, or setup has not finished. In Claude Code type `/conexus:setup`. In Claude Desktop say "Set up Nexus". After setup is done, reconnect the `nexus` server or start a new session.
+**The plugin is added but Claude shows no Nexus tools** — The `nx` command is not installed, or setup has not finished. In Claude Code type `/conexus:setup`. In Claude Desktop say "Set up Nexus". After setup is done, in Claude Code reconnect the `nexus` server (`/mcp`) or start a new session; in Claude Desktop quit the app fully and open it again, because a new conversation keeps the old server.
 
 ### Other problems
 

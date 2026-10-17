@@ -824,3 +824,26 @@ def test_the_tool_call_hands_the_broken_reason_to_both_tools(monkeypatch: pytest
         assert reply is not None
         text = reply["result"]["content"][0]["text"]
         assert reply["result"]["isError"] is True and mod.BROKEN_PHRASE in text and "not installed" not in text.lower(), name
+
+
+def _names_the_desktop_restart(text: str) -> bool:
+    return "Claude Desktop" in text and "quit the app" in text and "a new chat" in text
+
+
+def test_every_reconnect_instruction_names_the_desktop_restart() -> None:
+    """Claude Desktop starts a plugin's server once, when the app starts, and keeps it for every
+    new chat, with no Reconnect command; only quitting the app and opening it again replaces the
+    stand-in with the real server (nexus-93xx0, measured on hellmini 2026-10-16). So every text
+    that tells the user to reconnect also gives Desktop's step, not only Claude Code's."""
+    mod = _standin()
+    texts = {
+        "RECONNECT": mod.RECONNECT,
+        "instructions": mod.instructions(),
+        "instructions(broken)": mod.instructions(broken="the program exited 1"),
+        "setup_text": mod.setup_text(),
+        "setup_text(broken)": mod.setup_text(broken="the program exited 1"),
+        "setup_text(cloud)": mod.setup_text(mode="cloud"),
+        "SETUP_STATUS_DESCRIPTION": mod.SETUP_STATUS_DESCRIPTION,
+    }
+    missing = [name for name, text in texts.items() if not _names_the_desktop_restart(text)]
+    assert not missing, missing

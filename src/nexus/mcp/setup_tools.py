@@ -75,8 +75,9 @@ SETUP_STATUS_DESCRIPTION: str = (
     "user running /conexus:setup, fixes it. Read-only. The answer gives the stage, the log path and the next "
     "step. A full setup takes 2 to 8 minutes: the CLI build usually 1 to 3 minutes, the local service 2 to 5. "
     "Check again no sooner than the interval the answer names, and not in a loop: each call can ask the user "
-    "for approval. When the answer says setup is done, the user reconnects the nexus server or starts a new "
-    "session before the Nexus tools appear."
+    "for approval. When the answer says setup is done, the user reconnects the nexus server before the Nexus "
+    "tools appear: in Claude Code with /mcp or a new session; in Claude Desktop the user must quit the app and "
+    "open it again, because a new chat keeps the running server."
 )
 
 MODE_DESCRIPTION: str = (
