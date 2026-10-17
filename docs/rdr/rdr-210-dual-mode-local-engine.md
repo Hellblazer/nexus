@@ -597,12 +597,25 @@ use, carrying the document's aspects and highlights with it.
    remedies. A truncated or wrong-size model stays a loud boot failure, not
    "absent". The cloud container has no bge files, so it boots Voyage-only
    exactly as today, with no ONNX session.
-2. **Profile policy.** The supervisor passes `NX_EMBED_PROFILE` (`bge` or
-   `voyage`), derived from `local_embed_model_is_voyage()` when a choice is
-   recorded and left unset when none is. The engine seeds the profile from it and
-   refuses to boot on a choice it cannot serve (`voyage` with no key, `bge` with
-   no bge files), naming the missing piece. Unset keeps today's rule: keyed means
-   Voyage (Sam, 2026-10-17, Q1).
+2. **Profile policy.** One client predicate decides the profile: `voyage` when
+   `local.embed_model` names a Voyage model, or when no choice is recorded and the
+   credential chain has a key; `bge` otherwise. That keeps Sam's Q1 rule (unset
+   keeps keyed means Voyage; 2026-10-17) and closes a split:
+   `local_embed_model_is_voyage()` is False when no choice is recorded
+   (`config.py:725-726`), so today a no-choice client with a key mints bge names
+   while a keyed engine seeds the Voyage profile. The supervisor always passes
+   `NX_EMBED_PROFILE` from that predicate, and the client's write model reads the
+   same predicate (Technical Design 10). An engine started with the variable
+   unset (not by the supervisor) keeps keyed means Voyage. The engine seeds the
+   profile from the variable. On a choice it cannot serve (`voyage` with no key,
+   `bge` with no bge files) it boots degraded, not refused (Sam, 2026-10-17, gate
+   round 1): it serves the family it can, still seeds the chosen profile, prints a
+   loud banner naming the missing piece, and 422s only the unservable family's
+   collections, as a keyless engine does to Voyage collections today. `nx doctor`
+   gets a row for it, read from `/version`'s `embedding_models` against the
+   profile's family. Inferred, not read: that seeding a profile the engine cannot
+   serve needs no change beyond taking the value from the variable rather than
+   the posture. Neither family present stays a boot failure (Technical Design 1).
 3. **Rerank.** One reranker per engine, chosen by the profile (Sam,
    2026-10-17, Q2 and its refinement): an engine whose profile names Voyage
    reranks every search with Voyage, including bge-only results; an engine whose
@@ -611,7 +624,11 @@ use, carrying the document's aspects and highlights with it.
    cross-encoder. Nothing is sent to Voyage for a user who did not choose it.
 4. **Supervisor.** Pass the configured key regardless of `local.embed_model` and
    retire the nexus-r5f3c branch (`storage_service_daemon.py:1544-1572`), whose
-   reason (Gap 1) is gone.
+   reason (Gap 1) is gone only on a dual engine. Against an older engine the key
+   still flips it Voyage-only, so this change lands in the same client release
+   that raises `REQUIRED_ENGINE_VERSION` (`engine_version.py:667`, `(0, 1, 160)`
+   today) to the Phase 2 engine tag, never before; the local supervisor runs "the
+   engine this client was built and gated with" (`storage_service_daemon.py:1483`).
 5. **init and the ladder.** Landed on develop (nexus-ddmfg, Gap 2); not scope here.
 6. **Client reads.** The single-name resolver returns every live sibling of the
    owner's corpus, not one; callers that need one name for a write keep the write
@@ -661,6 +678,11 @@ use, carrying the document's aspects and highlights with it.
     - Remedy and display text names the family the collection needs, not the
       engine's mode (the remedy and display sites in Gap 8).
     - The gate assertion accepts `dual` (`cloud-client-path-gate.sh:705`).
+    - The write model (`corpus.py:420-421`, `:545-546`, `:688-689`,
+      `:1487-1488`, each reading `local_embed_model_is_voyage()`) reads the
+      profile predicate of Technical Design 2 instead, so the names the client
+      mints and the profile the supervisor passes come from one function and
+      agree when no choice is recorded.
     - The dimension-orphan finder compares each collection's declared model with
       the set of models this install can serve: the engine's `embedding_models`
       plus every Voyage model, which a key would
@@ -722,7 +744,15 @@ profile now asks for", and makes the answer yes. A collection is stale when its
 row's `embedding_model` differs from the profile's model for its `content_type`.
 Quarantine, dormant and disputed rows are never candidates; they drain through
 their own lifecycle. The user starts it; a profile change prints a hint and
-`nx doctor` reports the drift (Sam, Q4).
+`nx doctor` reports the drift (Sam, Q4). The hint prints in two places. `nx config
+set` already prints a restart line for the two keys the engine reads at spawn
+(`RESTART_HINT_KEYS = {"local.embed_model", "voyage_api_key"}`,
+`commands/config_cmd.py:27`, printed at `:159-160`); when the set changes the
+profile predicate's answer (Technical Design 2), it prints a second line naming
+`nx collection re-embed --all`. `nx daemon service start`, after its "Storage
+service running on" line (`commands/daemon.py:1010`), prints the same line when
+any live collection is off the profile, by the doctor row's rule. Inferred, not
+read: the cost of that catalog read at start.
 
 **The move is per document, into the model sibling.** The target is the sibling
 named for the profile's model (`code__1-1__voyage-code-3__v1` beside
@@ -773,7 +803,8 @@ before Phase 6.
 **Concurrent writes.** The precondition is that the document's current manifest
 chashes and collection are what the job read. When they are not (a client
 re-indexed or deleted the document since), the job skips it with the typed
-reason and counts the skip; the next pass sees it wherever the client put it. A
+reason and counts the skip; the next pass, a new user-started job (state table,
+`done_with_skips`), sees it wherever the client put it. A
 client write in flight that holds the index-run lock blocks that document's move,
 which then skips it (the spike measured the block at over 5 s). A client
 re-index in the dual world writes to the profile's sibling and moves the document
@@ -847,7 +878,7 @@ what `nx index` already runs after indexing (`commands/index.py:674-690`). The
 cost is a window: from a document's move until discover runs, topic-scoped search
 and topic boosts miss it, which they would do anyway, since its source chunks are
 invisible from the move. The verb runs discover for the target when it waits on a
-job to `done` (`--wait`); otherwise the `done` report names the command
+job to `done` or `done_with_skips` (`--wait`); otherwise the `done` report names the command
 (`taxonomy_cmd.py:694`) and the doctor's drift row says so until a discover has
 run.
 
@@ -861,10 +892,44 @@ run.
   pass, which agrees with Sam's ruling that the job deletes it. The job removes
   it through the existing delete (`CatalogRepository.deleteCollection`, `:8280`)
   once it holds no document row at all, tombstoned ones included, since the
-  delete removes documents by `physical_collection` (`:8465`). By then the
-  satellites are re-homed, so the delete takes only the source's taxonomy (being
-  rebuilt) and rows no document owned. `--keep-source` opts out (Sam,
-  2026-10-17).
+  delete removes documents by `physical_collection` (`:8465`). `--keep-source`
+  opts out (Sam, 2026-10-17).
+- *What that delete removes.* `deleteCollection(tenant, name)` calls the
+  three-argument form with `keepQuarantine` false (`:8281`). On a fully moved
+  source it removes:
+  1. the source's chunks (`:8383`);
+  2. the source's rows in its quarantine siblings, unregistering a sibling it
+     empties (`:8386-8390`). Decision: they die with the source. Passing
+     `keepQuarantine` true would strand them, by the method's own comment
+     ("Without this the sibling was stranded: nothing expires rows whose origin
+     is gone", `:8386`). The plan reports their count; `--keep-source` keeps them
+     restorable;
+  3. topic assignments of OTHER collections that point at the source's topics,
+     through the topic delete's cascade (`:8427-8430`: "a topic_assignments row
+     from ANOTHER collection but pointing at one of THIS collection's topics can
+     still exist here"), and the source topics' `topic_links` through the same
+     cascade (`:8432`). Decision: accepted, since those topics sit in the source
+     model's space; the plan and `--status` report both counts;
+  4. the source's own topic assignments (`:8369`), topics, `taxonomy_meta` and
+     centroids (`:8430`, `:8433`, `:8445`), being rebuilt for the target;
+  5. any `document_aspects`, `document_highlights` or `aspect_extraction_queue`
+     row still naming the source (`:8448-8450`), such as a doc-less aspect row
+     whose `source_path` matched no document. Decision: the plan counts them,
+     and the job refuses the delete while any remain unless the start carried
+     `--force-delete`; the job then ends `done` with disposition
+     `kept_residue` and the count in last error;
+  6. the registry row (`:8467`). Manifest rows and document rows (`:8465`) and
+     the `catalog_links` that cascade off documents (`:8458`) would go too; the
+     parity check below requires that none remain.
+- *Parity before the delete.* The delete is irreversible, so the job checks
+  first, inside cutover: no manifest row names the source; no document row has
+  `physical_collection` naming the source; and every document in this job's move
+  record has `physical_collection` naming the target and manifest rows naming
+  the target, with that count equal to the row's documents moved. If any check
+  fails, the job deletes nothing, keeps the source superseded, and goes to
+  `failed` with reason `parity_mismatch` and the three counts in last error. A
+  document purged since its move makes the counts differ and fails the check,
+  which errs toward keeping the source.
 - *Client caches.* The registration and collection-row caches already treat a
   superseded row as stale (`corpus.py:2090-2095`).
 - *The 30-day reap grace* still protects a job that stops halfway: nothing it
@@ -882,14 +947,63 @@ call fails the batch instead of hanging the runner. Voyage requests are planned 
 the engine's own batching up to 1,000 inputs.
 
 **Managed.** The job is a row in a new engine table, `reembed_jobs` (tenant,
-source, target, state, document cursor, documents moved, documents skipped,
-chunks embedded, chunks reused, tokens billed, started, updated, finished, last
-error), created through Liquibase. States: `planned`, `running`, `paused`,
-`cutover`, `done`, `failed`. A runner on the engine's scheduler, the shape the
-tuple sweep and the reaper already use (`NexusService.java:686, 729`), picks up
+source, target, state, source disposition, document cursor, documents moved,
+documents skipped, chunks embedded, chunks reused, tokens billed, started,
+updated, finished, last error), created through Liquibase, with a per-job move
+record (job, document) written inside each document's move transaction, which
+the cutover's parity check reads (inferred, not read: its exact shape; Phase 6
+Step 2 settles it). A runner on the engine's scheduler, the shape the tuple sweep
+and the reaper already use (`NexusService.java:686, 729`), picks up `planned` and
 `running` rows at boot, so a job survives a restart and a closed lid, and no
-client is needed once it is started. Two jobs never run against one source; the
-row is the lock.
+client is needed once it is started. Two jobs never run against one source: a
+row in `planned`, `running`, `paused` or `cutover` is the lock.
+
+The job is local only (Sam, 2026-10-17, gate round 1). The runner starts and the
+job routes accept requests only when the supervisor marks the engine local at
+spawn, with a variable it sets the way it sets `NX_SERVICE_PARENT_DEATH_EXIT`
+(`storage_service_daemon.py:1479`, read at `Main.java:423`); otherwise the routes
+refuse, naming local mode. The verb refuses unless `is_local_mode()`
+(`config.py:939`). Inferred, not read: that no managed deployment sets that
+variable; Phase 6 Step 2 names it and checks.
+
+| State | Meaning | Leaves to |
+| --- | --- | --- |
+| `planned` | Started; the runner has not picked it up | `running`; `aborted` |
+| `running` | The runner walks the cursor over the source's live documents | `paused`; `failed`; `aborted`; `cutover` when a pass reaches the end |
+| `paused` | Stopped by `--pause`; cursor kept | `running` (`--resume`); `aborted` |
+| `failed` | A batch failed for a reason other than a skip, the profile changed, or the parity check refused the delete; cursor at the last committed document, reason in last error | `running` (`--resume`) |
+| `aborted` | Stopped by `--abort`; moved documents stay moved | none; a later run is a new job |
+| `cutover` | The pass is complete; supersede and delete run (Cutover) | `done`; `done_with_skips`; `failed` |
+| `done` | The source holds no live document and is superseded; disposition `deleted`, `kept_by_flag` (`--keep-source`), `kept_tombstoned` or `kept_residue` (satellite rows the delete would take, Cutover) | none, except that a later `--all` re-enters `cutover` for `kept_tombstoned` |
+| `done_with_skips` | The pass ended with skipped documents still live in the source; the source is neither superseded nor deleted | none; the source is still stale, so the next user-started run is a new job that moves the skips |
+
+`done` guarantees that every document live in the source when the job reached it
+is in the target and that the source serves nothing. `done_with_skips`
+guarantees that only for the documents it moved; the skip count is in the row
+and `--status`. `--wait` returns on `done`, `done_with_skips` or `failed`, and
+runs taxonomy discover for the target on the first two.
+
+- *Tombstoned documents.* A source kept as `kept_tombstoned` stays a candidate:
+  `re-embed --all` lists it and re-enters that job's `cutover` once purge-trash
+  has left the source with no document row. A restore makes a document live in a
+  superseded source, which the routing listing leaves out; inferred, not read,
+  that `--all` then plans it as stale and moves the document first.
+- *Profile change.* Every entry into `running` (boot pickup, `--resume`)
+  re-checks that the target's model is the profile's model for the source's
+  content type. If not, the job goes to `failed` with reason `profile_changed`
+  and moves nothing more; moved documents stay in the target, which the dual
+  engine serves, and the next `--all` plans by the new profile.
+- *A superseded target of the same name.* The target is registered through
+  `upsertCollection`, whose update clears `superseded_by`
+  (`CatalogRepository.java:8076-8077`; the client's comment at
+  `corpus.py:2081-2082`: "The upsert below clears ``superseded_by``"). So the
+  plan checks the name first. Absent, the job registers it; live, it uses it;
+  superseded with `superseded_by` naming this job's source (an earlier re-embed
+  the other way left it under `--keep-source` or `kept_tombstoned`), the job
+  revives it through that upsert, the move reuses its chunks where the text
+  matches, and the earlier job's disposition becomes `revived` so a later
+  `--all` never deletes it; superseded by anything else, the plan refuses,
+  naming the row and its successor.
 
 **The verb.** `nx collection re-embed` is extended rather than joined by a second
 verb:
@@ -904,8 +1018,20 @@ verb:
   `bge-base-en-v15-768` (`:1436`).
 - `--status [JOB]`, `--pause JOB`, `--resume JOB` and `--abort JOB` act on job
   rows. Abort stops the runner; documents already moved stay moved, and a later
-  run continues from what remains in the source. `--wait` blocks until the job
-  is `done` or `failed` and, on `done`, runs taxonomy discover for the target.
+  run continues from what remains in the source. `--wait` blocks as the state
+  table says.
+
+**Routes.** `POST /v1/vectors/reembed/plan` (computes the plan, writes nothing),
+`POST /v1/vectors/reembed/jobs` (start: writes `planned` rows),
+`POST /v1/vectors/reembed/jobs/{id}/pause`, `/resume` and `/abort`, and
+`GET /v1/vectors/reembed/status`. Each is an `[additive]` entry under
+`## Unshipped` in `docs/wire-contract-pending.md`, whose rules say every
+both-halves commit "MUST be listed under `## Unshipped`" and that a non-empty
+section blocks a deploy unless every entry is `[additive]`. RDR-222's request
+identity for mutating routes is a draft and not built; these routes do not need
+it. A resent start finds the lock row and gets 409 naming the existing job, which
+the verb reports as that job; pause, resume and abort set a state, so a resend
+converges.
 
 **Monitored.** `GET /v1/vectors/reembed/status` returns every job row for the
 tenant. `nx doctor` extends the existing off-profile row (`health.py:8436-8458`,
@@ -1071,6 +1197,9 @@ of the throughput for having none of these.
 - **Risk**: an old client sends Voyage-sized requests to a dual engine's bge
   collections. **Mitigation**: measured in Phase 1 Step 1; a minimum client
   version on failure (Technical Design 10).
+- **Risk**: the supervisor passes the key to an engine older than the dual tag,
+  which then 422s every bge collection (Gap 2). **Mitigation**: Phase 3 ships
+  only with the pin raised to the dual tag, held by a test (Phase 3 Step 1).
 - **Risk**: the dual process fails on a platform the spike did not cover.
   **Mitigation**: Phase 1 Step 1 runs macOS arm64 and Windows x64 first; on
   failure the RDR goes back to planning before any engine step.
@@ -1080,7 +1209,8 @@ of the throughput for having none of these.
 A family the engine cannot serve still gets 422 naming the missing piece (the
 key, or the bge model files; `EmbedderRouter.java:547-556`). The boot banner names
 both families, the profile's choice and the reranker. A profile choice the engine
-cannot serve stops the boot with that reason in the service log. A re-embed batch
+cannot serve boots degraded: the banner and an `nx doctor` row name the missing
+piece, and only that family's collections get 422 (Technical Design 2). A re-embed batch
 that fails leaves the job `failed` with the cursor at the last committed document
 and the error in the row; the documents not yet moved are still served from the
 source, so search is whole. A skipped document (reason
@@ -1158,7 +1288,13 @@ sends the RDR back to planning.
 
 Change the 22 site groups of Gap 8 to the rules in Technical Design 10: chunk cap
 and byte budget by collection model, the memo and the gate accept `dual`, remedy
-text by collection family, `embedding_models` as the authority. **Test**: unit
+text by collection family, `embedding_models` as the authority, and the write
+model read from the profile predicate of Technical Design 2. The predicate is
+safe against today's engines: with no choice recorded and a key, today's
+supervisor already passes the key (`storage_service_daemon.py:1565` skips it only
+when a non-Voyage choice is recorded), so the engine is Voyage-only and Voyage
+names are what it serves. **Test**: a unit test of the predicate's four cases
+(Voyage choice, bge choice, no choice with and without a key); unit
 tests with a fake `/version` reporting each of `onnx-local`, `voyage` and `dual`,
 asserting the cap and budget for a bge collection and a Voyage collection under
 each; a test that enumerates the Gap 8 sites by the census patterns
@@ -1222,9 +1358,11 @@ naming both remedies; with a truncated model file it fails naming the size floor
 
 #### Step 3: Profile variable
 
-Seed from `NX_EMBED_PROFILE`; refuse an unservable choice at boot. **Test**:
-engine integration tests for each value with and without the key and the files,
-asserting the seeded rows or the boot refusal.
+Seed from `NX_EMBED_PROFILE`; boot degraded on an unservable choice (Technical
+Design 2). **Test**: engine integration tests for each value with and without the
+key and the files, asserting the seeded rows; for an unservable choice, that the
+engine boots, the banner names the missing piece, the servable family's
+collections serve and the other family's get 422 naming it.
 
 #### Step 4: Rerank, banner and status
 
@@ -1259,17 +1397,29 @@ allowlist entries, files scanned) into the bead before close.
 
 Correct the comments in Technical Design 8. Record the `dual` mode value in
 `docs/wire-contract-pending.md`. Run every `*GateTest`. Ships in an engine tag
-after `engine-service-v0.1.160`; the tag is Sam's.
+after `engine-service-v0.1.160`; the tag is Sam's. That tag is the first dual
+engine, and Phase 3 waits for it.
 
 ### Phase 3: Supervisor
 
 #### Step 1: Key and profile plumbing
 
 Retire the r5f3c branch; pass the key whenever the credential chain has one; pass
-`NX_EMBED_PROFILE`. **Test**: `tests/daemon/test_storage_service_daemon.py` cases
-for a bge choice with a key (key passed, profile `bge`), a Voyage choice without a
-key (no key, profile `voyage`, the engine refuses at boot), and no choice (no
-profile variable).
+`NX_EMBED_PROFILE` from the shared profile predicate (Technical Design 2), which
+the write-model sites already read (Phase 1 Step 2). This step lands in the client release that
+raises `REQUIRED_ENGINE_VERSION` (`engine_version.py:667`) to the Phase 2 Step 7
+tag, never before (Technical Design 4). Add the degraded-boot doctor row
+(Technical Design 2). **Test**: `tests/daemon/test_storage_service_daemon.py`
+cases for a bge choice with a key (key passed, profile `bge`), a Voyage choice
+without a key (no key, profile `voyage`; the engine boots degraded), no choice
+with a key (key passed, profile `voyage`) and no choice without one (profile
+`bge`); a test that the predicate the supervisor passes and the write model the
+client mints agree for all four; a test that fails while
+`REQUIRED_ENGINE_VERSION` is below a named constant for the first dual tag, the
+shape `health.py:6833` already uses for a route floor
+(`REQUIRED_ENGINE_VERSION < _TUPLE_ROUTE_FIRST_ENGINE_VERSION`), so the guard's
+retirement cannot merge ahead of the pin; a doctor test for the degraded-boot row
+against a fake `/version` whose `embedding_models` lacks the profile's family.
 
 #### Step 2: Local-service gate comments
 
@@ -1342,24 +1492,49 @@ fixture table added to the registry without a disposition.
 
 #### Step 2: Job table and runner
 
-`reembed_jobs` changeset, runner on the scheduler, states and cursor. **Test**:
-restart mid-job resumes from the cursor; two starts on one source are refused; a
-failed batch leaves `failed` with the cursor at the last committed document.
+`reembed_jobs` changeset and the per-job move record, runner on the scheduler,
+the states and transitions of the state table, cursor. Name the supervisor's
+local-engine variable and check that no managed deployment sets it. **Test**:
+restart mid-job resumes from the cursor; two starts on one source are refused,
+and a resent start gets 409 naming the existing job; a failed batch leaves
+`failed` with the cursor at the last committed document; without the
+local-engine variable the runner does not start and the routes refuse; a
+profile changed before `--resume` leaves the job `failed` with
+`profile_changed`; a target name superseded by this job's source is revived and
+the earlier job's disposition becomes `revived`, and one superseded by another
+name is refused at plan time; each state's allowed transitions, and a refused
+one, as a table-driven test.
 
 #### Step 3: Status route and verb
 
-`GET /v1/vectors/reembed/status`; `nx collection re-embed --all`, cross-model
-`--to`, and the job controls; token estimate and cap. **Test**: CLI tests for the
-plan, the cap refusal, and each control.
+The routes of the re-embed section, each an `[additive]` entry in
+`docs/wire-contract-pending.md`; `nx collection re-embed --all`, cross-model
+`--to`, and the job controls; token estimate and cap; the plan's counts of
+quarantine rows, cross-collection topic assignments and links, and unmatched
+satellite rows (Cutover); the hint in `nx config set` and
+`nx daemon service start`. **Test**: CLI tests for the plan and its counts, the
+cap refusal, and each control; the verb refuses when `is_local_mode()` is false;
+`nx config set local.embed_model` from a bge to a Voyage model prints the
+re-embed line, and a set that leaves the predicate's answer unchanged does not;
+`nx daemon service start` prints it with an off-profile collection present and
+not without one.
 
 #### Step 4: Cutover and source removal
 
-Supersede at zero live documents; the job deletes the source once it holds no
-document row, unless `--keep-source`; `--wait` runs taxonomy discover for the
-target on `done`. **Test**: after the last move the source is superseded and out
-of the routing listing; it is deleted only when it holds no document row, and
-kept with `--keep-source`; after the delete, no aspect, highlight or queue row of
-a moved document names the source, and the moved documents' aspects are intact;
+Supersede at zero live documents; run the parity check; the job deletes the
+source once it holds no document row and the check passes, unless
+`--keep-source` or unmatched satellite rows without `--force-delete`; `--wait`
+runs taxonomy discover for the target on `done` or `done_with_skips`. **Test**:
+after the last move the source is superseded and out of the routing listing; it
+is deleted only when it holds no document row, and kept with `--keep-source`;
+a fixture that leaves one manifest row naming the source, or a moved document
+homed back in the source, fails the parity check with `parity_mismatch` and
+deletes nothing; an unmatched doc-less aspect row blocks the delete
+(`kept_residue`) and `--force-delete` lets it through; a skipped document ends
+the job `done_with_skips` with the source neither superseded nor deleted; after
+the delete, no aspect, highlight or queue row of a moved document names the
+source, and the moved documents' aspects are intact; the quarantine-sibling and
+cross-collection topic counts in `--status` match what the delete removed;
 after `--wait`, the target has a `taxonomy_meta` row and topic assignments for
 its chunks; without `--wait`, the doctor's drift row names the discover command.
 
@@ -1406,8 +1581,12 @@ None open. Resolved by Sam on 2026-10-17 (T2
   Voyage-only, reports `voyage`, no ONNX session constructed.
 - **Scenario**: bge model file truncated — **Verify**: boot fails naming the size
   floor, not "absent".
-- **Scenario**: `NX_EMBED_PROFILE=voyage` with no key — **Verify**: boot refused
-  naming the key.
+- **Scenario**: `NX_EMBED_PROFILE=voyage` with no key — **Verify**: the engine
+  boots degraded, the banner and the doctor row name the key, bge collections
+  serve, Voyage collections get 422 naming the key.
+- **Scenario**: no `local.embed_model` recorded, a key in the credential chain —
+  **Verify**: the supervisor passes profile `voyage` and the client mints Voyage
+  names; no `EmbeddingProfileMismatchError`.
 - **Scenario**: client against fake engines reporting `onnx-local`, `voyage` and
   `dual` — **Verify**: chunk cap, byte budget and thresholds follow each
   collection's model.
@@ -1452,7 +1631,15 @@ None open. Resolved by Sam on 2026-10-17 (T2
 - **Scenario**: plan above the token cap — **Verify**: refused before any write,
   naming the estimate and the cap.
 - **Scenario**: a tombstoned document in the source — **Verify**: not moved; the
-  source is superseded but not deleted while the document row exists.
+  source is superseded but not deleted while the document row exists
+  (`kept_tombstoned`); after purge-trash removes the row, the next
+  `re-embed --all` deletes it.
+- **Scenario**: the parity check finds a manifest row still naming the source —
+  **Verify**: nothing deleted, job `failed` with `parity_mismatch`.
+- **Scenario**: profile changed in `nx config set` — **Verify**: the re-embed line
+  prints; `nx daemon service start` prints it while a collection is off-profile.
+- **Scenario**: re-embed against an engine the supervisor did not mark local —
+  **Verify**: the verb and the routes refuse; no job row is written.
 
 ## Finalization Gate
 
@@ -1526,7 +1713,8 @@ second half is the Phase 6 Step 5 scenarios added to the same script. The init
 keep-voyage fix is out of scope and already on develop (nexus-ddmfg), the https
 fetcher's removal is out of scope and lands ahead (nexus-3t0jv), and so is any
 change to the managed engine's posture: the cloud boots Voyage-only exactly as
-today.
+today. Re-embed on the managed engine is out of scope (Sam, 2026-10-17, gate
+round 1).
 
 ### Cross-Cutting Concerns
 
@@ -1542,11 +1730,17 @@ today.
   (inferred, not read: CI builds native images today).
 - **Licensing**: N/A; no new dependency.
 - **Deployment model**: local engines only change posture; the managed engine is
-  unchanged, and the re-embed job runs in both (in the managed engine it moves
-  Voyage-to-Voyage only, when a profile changes).
+  unchanged. The re-embed job is local only (Sam, 2026-10-17, gate round 1): the
+  runner and the verb refuse when the engine is not local. Managed re-embed
+  (tenant enumeration, RLS, who pays) is a separate future decision.
 - **IDE compatibility**: N/A.
-- **Incremental adoption**: each phase ships alone. Phase 1 is client-only and
-  safe against today's engines. A dual engine without Phase 4 still serves both
+- **Incremental adoption**: Phases 1, 2, 4 and 5 ship alone. Phase 1 is
+  client-only and safe against today's engines. Phase 3 is not: against an
+  engine older than the dual tag, passing the key recreates the regression
+  nexus-r5f3c fixed, so it ships in the client release that raises
+  `REQUIRED_ENGINE_VERSION` to the Phase 2 tag (Technical Design 4), and a test
+  holds that (Phase 3 Step 1). Phase 6 ships as an engine tag paired with its
+  client half (Phase 6 Step 5). A dual engine without Phase 4 still serves both
   families; only single-name reads stay on one sibling.
 - **Secret/credential lifecycle**: the key keeps its one source (the credential
   chain, then `NX_VOYAGE_API_KEY` at spawn); what changes is that it is passed
