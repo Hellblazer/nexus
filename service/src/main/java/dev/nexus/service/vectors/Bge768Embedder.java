@@ -12,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.LongBuffer;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -280,12 +279,9 @@ public final class Bge768Embedder implements Embedder {
             }
             sess = ortEnv.createSession(modelPath, sessionOpts);
 
-            tok = HuggingFaceTokenizer.builder()
-                    .optTokenizerPath(Path.of(tokenizerPath))
-                    .optMaxLength(MAX_SEQ_LEN)
-                    .optTruncation(true)
-                    .optPadding(false)   // we pad per-sub-batch in runOnnxSubBatch() so each tensor is rectangular
-                    .build();
+            // Built through LocalTokenizers (nexus-17jvq: DJL's own build otherwise probes the AWS metadata
+            // service). Not padded here: we pad per-sub-batch in runOnnxSubBatch() so each tensor is rectangular.
+            tok = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
 
             this.session = sess;
             this.tokenizer = tok;

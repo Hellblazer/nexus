@@ -167,12 +167,8 @@ public final class CrossEncoderReranker implements Reranker {
                 }
                 OrtEnvironment env = OrtEnvironment.getEnvironment();
                 sess = env.createSession(modelPath, sessionOpts);
-                tok = HuggingFaceTokenizer.builder()
-                        .optTokenizerPath(Path.of(tokenizerPath))
-                        .optMaxLength(MAX_SEQ_LEN)
-                        .optTruncation(true)
-                        .optPadding(false)   // padded per batch in scoreBatch()
-                        .build();
+                // nexus-17jvq: through LocalTokenizers, never the DJL builder directly. Padded per batch in scoreBatch().
+                tok = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
                 this.ortEnv = env;
                 this.session = sess;
                 this.tokenizer = tok;
