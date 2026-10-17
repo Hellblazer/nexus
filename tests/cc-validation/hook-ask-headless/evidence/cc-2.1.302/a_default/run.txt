@@ -1,0 +1,1 @@
+a_default perm=- hook=ask style=direct rule=rule

@@ -1,0 +1,1 @@
+a_auto perm=auto hook=ask style=direct rule=rule

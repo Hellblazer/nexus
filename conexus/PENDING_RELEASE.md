@@ -49,6 +49,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-ehg1y): with a missing or stale `cli_lockstep_marker` (a hand install never writes one; a pip or dev-tree install cannot have the action rewrite it) the lockstep hook runs `nx --version` (3 s bound) and treats a CLI not older than the plugin as in lockstep, by the action's own `satisfies` rule, so a matching CLI no longer gets a false nudge and an upgrade dispatch. A marker equal to the plugin's version still decides alone, with no subprocess.
 - `conexus/launch/nx_setup.py` (nexus-ehg1y): a docstring in `_record_lockstep` now names what the lockstep hook does when the marker is missing; no behaviour change.
 
+- A hook ask with no human present is a measured deny (nexus-mcfaj): `conexus/hooks/scripts/routing/_lib.py` documents, in the `ask_envelope` docstring and the module's ask paragraph, what a PreToolUse `ask` does in `claude -p` (default, dontAsk, auto, and a background subagent) at Claude Code 2.1.302: a deny whose reason the model reads, never a hang, never a classifier approval. Docstring only; no behaviour change.
+
 - Description without angle brackets (nexus-0nskc): `conexus/skills/mailbox/SKILL.md` writes the address placeholder as ADDRESS in its description, since Claude Desktop's plugin sync rejects angle brackets there.
 
 - Description without angle brackets (nexus-0nskc): `conexus/skills/tumbler-footnotes/SKILL.md` writes the tumbler placeholder as TUMBLER in its description, since Claude Desktop's plugin sync rejects angle brackets there.

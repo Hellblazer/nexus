@@ -1,0 +1,1 @@
+a_real perm=- hook=real style=direct rule=rule

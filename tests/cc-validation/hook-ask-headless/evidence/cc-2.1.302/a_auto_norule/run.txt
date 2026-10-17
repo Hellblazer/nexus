@@ -1,0 +1,1 @@
+a_auto_norule perm=auto hook=ask style=direct rule=norule

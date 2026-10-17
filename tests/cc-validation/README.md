@@ -406,6 +406,27 @@ desktop backends). Two of its patterns are already ported; two remain.
 - **Capture the pane ID (`%N`) and target it** instead of `-t <session>`, so
   later splits/active-pane shifts can't misdirect keystrokes.
 
+## Headless hook `ask` (nexus-mcfaj), measured on chas
+
+`hook-ask-headless/` is a sibling harness (like `connection-race-ladder/`) for
+what a PreToolUse `permissionDecision: "ask"` does when no human can answer:
+real `claude -p` sessions in the `nexus-cc-val` container on chas, never on
+the laptop. `hook-ask-headless/run.sh` stages the harness, runs the matrix under
+`claude_credentials.py run --remote chas-test -- lab-run -c lab-s -- ...`, and
+`summarize.py` prints one verdict per run (`RAN`, `DENIED`, `HUNG`,
+`NOT-EXERCISED`). Result at Claude Code 2.1.302: an ask is a DENY in default,
+`dontAsk` and `auto` mode and for a background subagent; nothing hung; the
+auto-mode classifier never approved past it. The reason travels back to the
+model in the tool result. Recorded runs: `hook-ask-headless/evidence/`. The
+table and its limits live in `ask_envelope`'s docstring
+(`conexus/hooks/scripts/routing/_lib.py`).
+
+Two traps this harness hit, for the next probe of its kind: an untrusted
+workspace silently ignores the project's `permissions.allow` entries (pre-seed
+`hasTrustDialogAccepted` for the cwd), and a read-only probe command such as
+`echo` is auto-allowed in every mode, so it cannot show that an ask changed
+anything (use `touch` plus an allow rule).
+
 ## Layout
 
 ```

@@ -1,0 +1,1 @@
+a_dontask perm=dontAsk hook=ask style=direct rule=rule
