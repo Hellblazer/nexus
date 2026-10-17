@@ -24,7 +24,9 @@ land the way nexus-dkotg did: found by a human running the corpus by hand.
 That is the control today, and it is a person remembering, not a gate."""
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -175,3 +177,61 @@ def test_not_triggered_graders_assert_absence(path: Path):
         f"(got {data.get('min')!r}). min defaults to 1, which makes "
         f"'max: 0' alone unsatisfiable -- see nexus-dkotg."
     )
+
+
+# ---------------------------------------------------------------------------
+# nexus-dg7i6.7: outcome cases. The o-cases grade what the model produced
+# (regex over the final message or a file, llm criteria) on a project their
+# own scaffold builds, because the model rightly does those tasks without a
+# skill (nexus-dg7i6.5: 0 skill loads in 12 eval runs and 509 real sessions).
+# The pins below keep the scaffolds and the new grader kinds well formed; the
+# corpus score itself is still measured by hand (see the module docstring).
+
+
+def _case_dirs() -> list[Path]:
+    return sorted(p for p in EVALS.iterdir() if p.is_dir() and (p / "prompt.md").exists())
+
+
+def test_every_case_is_named_for_its_grading_shape():
+    """p = a procedural skill must load, o = the outcome is graded, n = an absorption guard."""
+    for case in _case_dirs():
+        assert re.fullmatch(r"[pon]\d\d-[a-z0-9-]+", case.name), case.name
+        kinds = {_frontmatter(g).get("type") for g in (case / "graders").glob("*.md")}
+        if case.name.startswith("o"):
+            assert kinds & {"regex", "llm"}, f"{case.name}: an outcome case needs a regex or llm grader"
+            assert (case / "case.yaml").exists(), f"{case.name}: an outcome case builds its project with a scaffold"
+
+
+@pytest.mark.parametrize("case", [c for c in _case_dirs() if (c / "case.yaml").exists()], ids=lambda p: p.name)
+def test_case_yaml_names_an_executable_scaffold(case: Path):
+    data = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
+    assert data.get("schema_version") == "1.1", case.name
+    assert data.get("name"), case.name
+    script = case / data["context"]["scaffold_script"]
+    assert script.is_file() and script.stat().st_mode & 0o111, f"{case.name}: {script.name} missing or not executable"
+
+
+@pytest.mark.parametrize("path", _grader_files(), ids=lambda p: p.relative_to(EVALS).as_posix())
+def test_regex_and_llm_graders_are_complete(path: Path):
+    data = _frontmatter(path)
+    if data.get("type") == "regex":
+        re.compile(data["pattern"], re.I if "i" in str(data.get("flags", "")) else 0)
+        assert str(data.get("match", "contains")) in ("contains", "not_contains") or str(
+            data["match"]).startswith("count:"), path.name
+    if data.get("type") == "llm":
+        assert len(str(data.get("criteria", ""))) > 40, f"{path.name}: llm criteria too thin to judge by"
+
+
+@pytest.mark.parametrize("case", [c for c in _case_dirs() if (c / "fixture.sh").exists()], ids=lambda p: p.name)
+def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
+    """Outcome graders read the scaffold's files, so two builds must be the same commit."""
+    heads = []
+    for i in (1, 2):
+        d = tmp_path / str(i)
+        d.mkdir()
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(d), "TERM": "dumb"}
+        subprocess.run(["bash", str(case / "fixture.sh")], cwd=d, env=env, check=True,
+                       capture_output=True, timeout=120)
+        heads.append(subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True,
+                                    capture_output=True, text=True).stdout.strip())
+    assert heads[0] == heads[1], f"{case.name}: scaffold is not deterministic {heads}"

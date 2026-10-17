@@ -2,12 +2,15 @@
 
   python3 score_sr.py <out-dir> <conexus/evals dir> [ARM:+name | ARM:-name ...]
 
-For every run under <out-dir>/<ARM>/<case>/r<n>/ the main-session transcript's
-Skill calls are graded with that case's tool_used graders (input_match regex
-over the JSON-encoded tool input; min defaults to 1, max to unbounded), the
-same rule claude plugin eval applies. Per arm it reports positive-grader pass
-rate (loaded-skill recall on the cases that expect a skill), the zero-load
-rate on positive cases, negative-grader pass rate (absorption guards), and the
+For every run under <out-dir>/<ARM>/<case>/r<n>/ the case's graders are applied
+the way claude plugin eval applies them: tool_used to the main-session
+transcript's tool calls (input_match regex over the JSON-encoded tool input;
+min defaults to 1, max to unbounded), regex to the final message or, with
+target { source: file, path: P }, to P in the project the session left
+(r<n>/repo). llm graders need a judge model and are listed, not graded, on a
+line of their own. Per arm it reports skill-load passes (tool_used with
+max > 0), outcome passes (regex), absorption-guard passes (tool_used with
+max 0), the zero-load rate on skill-load cases, and the
 number of entries in the first request's skill listing: an arm whose listing
 did not grow over S0 is vacuous, and the report says so. Arms D and N swap the
 conexus tree instead of adding plugins, so for every arm the report also counts
@@ -27,6 +30,9 @@ from pathlib import Path
 LISTING_HEAD = "The following skills are available for use with the Skill tool"
 
 
+FILE_TARGET = re.compile(r"\{\s*source:\s*file,\s*path:\s*([^\s}]+)\s*\}")
+
+
 def graders(case_dir: Path) -> list[dict]:
     out = []
     for g in sorted((case_dir / "graders").glob("*.md")):
@@ -34,16 +40,50 @@ def graders(case_dir: Path) -> list[dict]:
         front = text.split("---", 2)[1]
         fields = {}
         for line in front.splitlines():
-            if ":" in line:
+            if ":" in line and not line.startswith(" "):
                 k, v = line.split(":", 1)
-                fields[k.strip()] = v.strip().strip("'\"") if k.strip() == "input_match" else v.strip()
-        if fields.get("type") != "tool_used":
-            continue
-        out.append({"name": g.stem, "tool": fields.get("tool", "Skill"),
-                    "match": re.compile(fields["input_match"]) if "input_match" in fields else None,
-                    "min": int(fields.get("min", 1)),
-                    "max": int(fields["max"]) if "max" in fields else None})
+                v = v.strip()
+                fields[k.strip()] = v.strip("'\"") if k.strip() in ("input_match", "pattern") else v
+        kind = fields.get("type")
+        if kind == "tool_used":
+            out.append({"name": g.stem, "kind": "guard" if fields.get("max") == "0" else "skill",
+                        "tool": fields.get("tool", "Skill"),
+                        "match": re.compile(fields["input_match"]) if "input_match" in fields else None,
+                        "min": int(fields.get("min", 1)),
+                        "max": int(fields["max"]) if "max" in fields else None})
+        elif kind == "regex":
+            target = FILE_TARGET.match(fields.get("target", ""))
+            out.append({"name": g.stem, "kind": "outcome",
+                        "pattern": re.compile(fields["pattern"], re.I if "i" in fields.get("flags", "") else 0),
+                        "file": target.group(1) if target else None,
+                        "mode": fields.get("match", "contains")})
+        elif kind == "llm":
+            out.append({"name": g.stem, "kind": "llm"})
     return out
+
+
+def final_message(run: Path) -> str:
+    try:
+        return json.loads((run / "result.S.json").read_text(encoding="utf-8")).get("result") or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def grade_regex(run: Path, g: dict) -> tuple[bool, int]:
+    if g["file"]:
+        try:
+            text = (run / "repo" / g["file"]).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    else:
+        text = final_message(run)
+    n = len(g["pattern"].findall(text))
+    mode = g["mode"]
+    if mode == "not_contains":
+        return n == 0, n
+    if mode.startswith("count:"):
+        return n == int(mode.split(":", 1)[1]), n
+    return n > 0, n
 
 
 def tool_calls(run: Path) -> list[tuple[str, dict]]:
@@ -83,7 +123,7 @@ def listing_names(run: Path) -> list[str] | None:
     return None
 
 
-def grade(calls: list[tuple[str, dict]], g: dict) -> tuple[bool, int]:
+def grade_tool(calls: list[tuple[str, dict]], g: dict) -> tuple[bool, int]:
     n = sum(1 for name, inp in calls
             if name == g["tool"] and (g["match"] is None or g["match"].search(json.dumps(inp))))
     ok = n >= g["min"] and (g["max"] is None or n <= g["max"])
@@ -100,18 +140,22 @@ def main() -> int:
     arms = sorted(p for p in out_dir.iterdir() if p.is_dir())
     summary = {}
     for arm in arms:
-        pos = neg = pos_ok = neg_ok = 0
-        pos_runs = zero = 0
+        tally = {k: [0, 0] for k in ("skill", "outcome", "guard")}
+        llm_listed = 0
+        skill_runs = zero = 0
         listings = []
         conexus = []
         rows = []
         for case in sorted(p for p in arm.iterdir() if p.is_dir()):
+            if not (evals / case.name).is_dir():
+                continue
             gs = graders(evals / case.name)
             for run in sorted(case.glob("r*")):
                 if not (run / "ids.json").exists():
                     continue
                 calls = tool_calls(run)
                 skills = [i.get("skill", "?") for n, i in calls if n == "Skill"]
+                agents = [i.get("subagent_type", "?") for n, i in calls if n in ("Agent", "Task")]
                 if (names := listing_names(run)) is not None:
                     listings.append(len(names))
                     conexus.append(sum(1 for x in names if x.startswith("conexus:")))
@@ -123,26 +167,32 @@ def main() -> int:
                                             f"{name} {'missing' if want else 'present'}")
                 verdicts = []
                 for g in gs:
-                    ok, n_match = grade(calls, g)
-                    negative = g["max"] == 0
-                    if negative:
-                        neg += 1; neg_ok += ok
-                    else:
-                        pos += 1; pos_ok += ok
+                    if g["kind"] == "llm":
+                        llm_listed += 1
+                        verdicts.append(f"{g['name']}=ungraded(llm)")
+                        continue
+                    ok, n_match = grade_regex(run, g) if g["kind"] == "outcome" else grade_tool(calls, g)
+                    tally[g["kind"]][0] += ok
+                    tally[g["kind"]][1] += 1
                     verdicts.append(f"{g['name']}={'pass' if ok else 'FAIL'}({n_match})")
-                if any(g["max"] != 0 for g in gs):
-                    pos_runs += 1
+                if any(g["kind"] == "skill" for g in gs):
+                    skill_runs += 1
                     zero += not skills
-                rows.append(f"  {case.name:46s} {run.name} skills={skills} {' '.join(verdicts)}")
+                rows.append(f"  {case.name:46s} {run.name} skills={skills} agents={agents} {' '.join(verdicts)}")
         summary[arm.name] = {
-            "positive_pass": f"{pos_ok}/{pos}", "negative_pass": f"{neg_ok}/{neg}",
-            "zero_load_on_positive": f"{zero}/{pos_runs}",
+            "skill_pass": "%d/%d" % tuple(tally["skill"]),
+            "outcome_pass": "%d/%d" % tuple(tally["outcome"]),
+            "guard_pass": "%d/%d" % tuple(tally["guard"]),
+            "llm_ungraded": llm_listed,
+            "zero_load_on_skill_cases": f"{zero}/{skill_runs}",
             "listing_entries_median": statistics.median(listings) if listings else None,
             "conexus_entries_median": statistics.median(conexus) if conexus else None}
-        print(f"== {arm.name}: positive {pos_ok}/{pos}  negative {neg_ok}/{neg}  "
-              f"zero-load(positive cases) {zero}/{pos_runs}  "
-              f"listing entries median {summary[arm.name]['listing_entries_median']}  "
-              f"conexus entries median {summary[arm.name]['conexus_entries_median']}")
+        sm = summary[arm.name]
+        print(f"== {arm.name}: skill-load {sm['skill_pass']}  outcome {sm['outcome_pass']}  "
+              f"guards {sm['guard_pass']}  zero-load(skill cases) {sm['zero_load_on_skill_cases']}  "
+              f"listing entries median {sm['listing_entries_median']}  "
+              f"conexus entries median {sm['conexus_entries_median']}")
+        print(f"   llm graders not graded here (claude plugin eval grades them): {llm_listed}")
         print("\n".join(rows))
     for name, s in summary.items():
         if s["listing_entries_median"] is None:

@@ -35,31 +35,60 @@ conexus/evals/
   README.md                    this file
   <case-name>/
     prompt.md                  YAML frontmatter (name:) + the user prompt
+    case.yaml                  outcome cases only: schema_version "1.1", name,
+                               context.scaffold_script: fixture.sh
+    fixture.sh                 outcome cases only: builds the project the
+                               prompt talks about, in an empty directory
     graders/
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-11 cases, each named `p<NN>-...` (positive/disambiguation) or
-`n<NN>-...` (negative/absorption). Numbering is historical and has gaps —
-n03, p03, p07 and p08 were dropped, see below.
+11 cases. The letter says how the case is graded:
 
-| Case | Target skill | Shape | Graders |
-|---|---|---|---|
-| p01-using-nx-skills-generic-turn | using-nx-skills | positive | tool_used |
-| p02-code-review-before-pr | code-review | positive | tool_used |
-| p04-rdr-create-schema-decision | rdr-create | positive | tool_used |
-| p05-query-rdr-synthesis | query | positive (reduce-from-many) | tool_used |
-| p06-orchestration-agent-choice | orchestration | positive | tool_used |
-| p09-debugging-intermittent-npe | debugging | positive + disambig. vs test-validation | tool_used ×2 |
-| p10-test-validation-coverage-check | test-validation | positive + disambig. vs debugging | tool_used ×2 |
-| n01-plan-absorption-dinner | strategic-planning / plan-first / architecture | negative (absorption) | tool_used `0..0` |
-| n02-query-absorption-single-fact | query | negative (absorption) | tool_used `0..0` |
-| n04-test-authoring-absorption-figurative-test | test-validation | negative (absorption) | tool_used `0..0` |
-| n05-debugging-absorption-detective-novels | debugging / debug | negative (absorption) | tool_used `0..0` |
+- `p<NN>`: a procedural skill must load (`tool_used` on `Skill`).
+- `o<NN>`: the outcome is graded (`regex` on the final message or a file,
+  `llm` criteria), on a project the case's scaffold builds.
+- `n<NN>`: absorption guard, a skill or agent must stay silent
+  (`tool_used`, `min: 0, max: 0`).
 
-Every grader is `tool_used`. There are no `llm` graders left — they could
-not see tool calls (their `focus` defaults to `last_message`), which is
-what nexus-7zup9 removed.
+| Case | Graded on | Graders |
+|---|---|---|
+| p04-rdr-create-schema-decision | `rdr-create` loads | tool_used |
+| p06-orchestration-agent-choice | `orchestration` loads | tool_used |
+| o01-voyage-retry-wrapper | `src/embed.py` gains a bounded retry on HTTP errors; only transient failures retried | regex ×2 (file), llm (file) |
+| o02-review-branch-before-pr | the review names the three planted defects: logged API key, `os.system` injection, world-writable cache | regex ×3 |
+| o03-rdr-synthesis-ranking | all five RDRs covered; a ranked top three | regex, llm |
+| o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |
+| o05-intermittent-npe-race | the race in `ConnectionPool` named as the root cause; test-validator agent not dispatched | regex, llm, tool_used `0..0` |
+| n01-plan-absorption-dinner | strategic-planning / plan-first / architecture skills and the strategic-planner agent silent | tool_used `0..0` ×2 |
+| n02-query-absorption-single-fact | `nx_answer` not called for a one-symbol lookup | tool_used `0..0` |
+| n04-test-authoring-absorption-figurative-test | test-validator agent silent | tool_used `0..0` |
+| n05-debugging-absorption-detective-novels | debugger agent silent | tool_used `0..0` |
+
+### The grading rule (nexus-dg7i6.7, 2026-10-17)
+
+A case asserts that a skill loaded only when the skill carries a procedure
+or format the model cannot produce without it (`rdr-create`'s template,
+`orchestration`'s agent table). A task the model rightly does itself is
+graded on the result. This follows nexus-dg7i6.5: the five former
+p-cases for `using-nx-skills`, `code-review`, `query`, `test-validation`
+and `debugging` loaded their skill 0 times in 12 eval runs even with the
+premise true, while the model did the task well, and a 30-day census of
+509 real sessions had 0 model loads of those skills against 602
+`code-review-expert`, 153 `developer` and 27 `debugger` dispatches. Those
+skills were retired (nexus-dg7i6.6); the cases became o01 to o05. An
+absorption guard names a surface that still exists: the agent, or the
+`nx_answer` tool, never a retired skill, since `max: 0` on a name that
+cannot be called passes vacuously.
+
+Outcome cases need `--scaffold` (below): without it the workspace is
+empty and every outcome grader fails. Each `fixture.sh` writes fixed
+content with fixed commit dates and no network, and
+`tests/test_eval_corpus_lint.py` builds each one twice and requires the
+same commit. Before a grader is trusted it must pass on answers where the
+defect or fact is present and fail where it is absent; for o02 to o04 that
+was checked on the skillroute harness runs of 2026-10-17 (15/15 with the
+defects present, 0/15 on the plain project without them).
 
 ### Dropped: n03, p07, p08 (nexus-dkotg, 2026-08-23)
 
@@ -117,7 +146,7 @@ against a stale corpus is a wrong answer delivered confidently.
 
 ```bash
 CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
-  --runs 3 --ablation none --max-cost-usd 30 \
+  --runs 3 --ablation none --scaffold --max-cost-usd 30 \
   --json report.json <path-to-conexus-plugin>
 ```
 

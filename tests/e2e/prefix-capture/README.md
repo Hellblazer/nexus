@@ -116,11 +116,13 @@ markers `ARM:+name` / `ARM:-name` that must hold in every run of that arm, for
 example `D:+conexus:setup S0:-conexus:setup` (`setup` is a command develop has
 and the image's 7.79.0 does not).
 
-Arms `DT` and `NT` are `D` and `N` on true-premise projects
-(nexus-dg7i6.5): after the project's first commit, `fixtures/<case>.sh` adds
-what the case prompt talks about (the outbound Voyage call, a feature branch
-with a diff against `main`, a just-written retry wrapper with a thin test,
-five pgvector RDRs). On the plain project those premises are false, and the
-model checks the repo, finds nothing, and answers without a skill, so a case
-that never loads there measures the premise, not the skill's description.
-Cases without a fixture run on the plain project.
+Any capital letter other than `S` is a tree arm loading
+`plugins/<arm>/conexus` (`export_conexus.sh <arm> <commit>`), and it reads
+the case prompts from that tree's `evals/`. Adding `T` (`DT`, `ET`) runs each
+case's own scaffold, `evals/<case>/fixture.sh`, in an empty project
+directory, the way `claude plugin eval --scaffold` does (nexus-dg7i6.5/.7);
+a case without one runs on the plain project. The session's final project
+is copied to `out/.../repo` so file-target graders can read it.
+`score_sr.py` grades `tool_used` and `regex` graders and lists `llm`
+graders as ungraded, on a separate line, so a pass count never mixes the
+two.

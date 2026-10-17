@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Skill routing under distractor plugins (nexus-dg7i6.1). One container run.
-# Env: ARM (S0|S1|S2|D|N|DT|NT), CASE (a conexus/evals case directory name), ANTHROPIC_MODEL.
+# Env: ARM (S0|S1|S2, or a tree arm X or XT), CASE (a conexus/evals case directory name), ANTHROPIC_MODEL.
 #   S0  the image's installed conexus + sn, nexus tools as shipped (8 eager)
 #   S1  S0 + every plugin under /plugins/S1 (the beads plugin)
 #   S2  S0 + every plugin under /plugins/S2 (the rest of the laptop's enabled set)
@@ -10,9 +10,11 @@
 #   N   the same with /plugins/N/conexus, the narrowed conexus (nexus-dg7i6.2)
 #   Both trees are extracted from commits by export_conexus.sh, so D and N
 #   differ by exactly the narrowing diff.
-#   DT, NT  D and N on the true-premise project: fixtures/<case>.sh runs in it
-#       after the first commit, so the code, branch, tests or RDRs the prompt
-#       talks about exist (nexus-dg7i6.5)
+#   any other letter X: the same with /plugins/X/conexus (export_conexus.sh)
+#   XT  arm X with each case's own scaffold: when the tree's
+#       evals/<case>/fixture.sh exists it builds the project in an empty
+#       directory, as claude plugin eval --scaffold does (nexus-dg7i6.5/.7)
+# Tree arms read the case prompt from their own tree's evals/.
 # D and N change only the plugin tree: its MCP servers hand off to the image's
 # installed nx, so the nexus tools are the ones S0 has.
 # /plugins is ab/skillroute/plugins (not committed; built by snapshot_plugins.sh).
@@ -42,8 +44,9 @@ PLUGIN_ARGS=()
 case "$ARM" in
   S0) : ;;
   S1|S2) for d in /plugins/"$ARM"/*/; do PLUGIN_ARGS+=(--plugin-dir "${d%/}"); done ;;
-  D|N|DT|NT)
-    TREE=/plugins/${ARM%T}/conexus
+  [A-RT-Z]|[A-RT-Z]T)
+    TREE=/plugins/${ARM:0:1}/conexus
+    EVALS=$TREE/evals
     [ -f "$TREE/.claude-plugin/plugin.json" ] || { echo "no conexus tree at $TREE" >&2; exit 2; }
     # Exactly one conexus in the listing: the installed one is switched off.
     python3 - /home/nexus/.claude/settings.json <<'PY'
@@ -59,19 +62,21 @@ esac
 printf '%s\n' "arm=$ARM case=$CASE" "${PLUGIN_ARGS[@]}" > "$OUT/setup.txt"
 
 # The prompt is the case's prompt.md body, frontmatter stripped.
-PROMPT=$(awk 'f>=2{print} /^---$/{f++}' "/src/conexus/evals/$CASE/prompt.md")
+EVALS=${EVALS:-/src/conexus/evals}
+PROMPT=$(awk 'f>=2{print} /^---$/{f++}' "$EVALS/$CASE/prompt.md")
 
 REPO=/home/nexus/repo
 mkdir -p "$REPO"
-cp -R /harness/ab/project/. "$REPO"/
-git -C "$REPO" init -q && git -C "$REPO" config user.email ab@example.invalid \
-  && git -C "$REPO" config user.name ab && git -C "$REPO" add -A \
-  && git -C "$REPO" commit -qm "Add ingest batching with an injected clock"
 cd "$REPO" || exit 1
-FIXTURE=/harness/ab/skillroute/fixtures/$CASE.sh
+FIXTURE=$EVALS/$CASE/fixture.sh
 if [ "${ARM: -1}" = T ] && [ -f "$FIXTURE" ]; then
   bash "$FIXTURE" > "$OUT/fixture.log" 2>&1 || { echo "fixture $CASE failed" >&2; exit 2; }
   echo "fixture=$CASE head=$(git rev-parse --short HEAD) branch=$(git branch --show-current)" >> "$OUT/setup.txt"
+else
+  cp -R /harness/ab/project/. "$REPO"/
+  git -C "$REPO" init -q && git -C "$REPO" config user.email ab@example.invalid \
+    && git -C "$REPO" config user.name ab && git -C "$REPO" add -A \
+    && git -C "$REPO" commit -qm "Add ingest batching with an injected clock"
 fi
 SID=$(python3 -c 'import uuid;print(uuid.uuid4())')
 echo "{\"S\":\"$SID\"}" > "$OUT/ids.json"
@@ -85,6 +90,8 @@ echo "S exit=$? wall=$(( $(date +%s) - t0 ))" >> "$OUT/exit.txt"
 sleep 2
 kill "$PROXY_PID" 2>/dev/null
 cp -R /home/nexus/.claude/projects "$OUT/projects" 2>/dev/null
+# The project as the session left it, for graders that read a file's contents.
+cp -R "$REPO" "$OUT/repo" 2>/dev/null
 gzip -f "$OUT"/debug.*.log 2>/dev/null
 chmod -R a+rwX "$OUT" 2>/dev/null
 exit 0
