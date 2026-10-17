@@ -1,0 +1,158 @@
+#!/bin/bash
+# actions-runner-watchdog: restart system/local.actions-runner when its
+# Runner.Listener is alive but stalled (nexus-ey1me). Run by the LaunchDaemon
+# local.actions-runner-watchdog every 60 s, as root.
+#
+# Why not "Runner log silent for 5 min": an idle healthy listener logs at INFO
+# only on its OAuth token refresh, every ~50 min. So the rule is, with no
+# Runner.Worker running, listener up >= STARTUP_GRACE, cooldown elapsed:
+#   (A) the listener's own open Runner_*.log silent >= HARD_SILENT (65 min:
+#       one missed token refresh), or
+#   (B) no ESTABLISHED TCP :443 from the listener for >= NOSOCK continuous
+#       seconds AND its log silent >= SILENT (an idle listener holds its broker
+#       long-poll connection open; measured 60/60 samples).
+# A running job logs "renew job" every 60 s, so it is never quiet; jobs are
+# excluded anyway.
+#
+# Flags: --dry-run (report, never restart), --verbose (print the evaluation).
+# Test seams (env): WD_SILENT_SECS WD_NOSOCK_SECS WD_HARD_SILENT_SECS
+#   WD_COOLDOWN_SECS WD_STARTUP_GRACE_SECS WD_SOCK_PORT WD_STATE_DIR
+# Disable: sudo launchctl bootout system/local.actions-runner-watchdog
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+RUNNER_DIR=/Volumes/Bulk/ghrunner/actions-runner
+TARGET=system/local.actions-runner
+STATE_DIR=${WD_STATE_DIR:-/Volumes/Bulk/ghrunner/actions-runner-watchdog}
+SILENT_SECS=${WD_SILENT_SECS:-300}
+NOSOCK_SECS=${WD_NOSOCK_SECS:-300}
+HARD_SILENT_SECS=${WD_HARD_SILENT_SECS:-3900}
+COOLDOWN_SECS=${WD_COOLDOWN_SECS:-900}
+STARTUP_GRACE_SECS=${WD_STARTUP_GRACE_SECS:-300}
+SOCK_PORT=${WD_SOCK_PORT:-443}
+LOG_MAX_BYTES=1048576
+
+DRY_RUN=0
+VERBOSE=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY_RUN=1; VERBOSE=1 ;;
+    --verbose) VERBOSE=1 ;;
+    *) echo "usage: $0 [--dry-run] [--verbose]" >&2; exit 2 ;;
+  esac
+done
+
+# The runner lives on /Volumes/Bulk. If it is not mounted, do nothing and touch
+# nothing (never create directories under an unmounted volume path).
+[ -d "$RUNNER_DIR/bin" ] || exit 0
+
+mkdir -p "$STATE_DIR" || exit 1
+LOG="$STATE_DIR/watchdog.log"
+NOSOCK_FILE="$STATE_DIR/nosock_since"
+LAST_FILE="$STATE_DIR/last_restart"
+
+now=$(date +%s)
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+say() { [ "$VERBOSE" = 1 ] && echo "$(ts) $*"; return 0; }
+log() {
+  if [ -f "$LOG" ] && [ "$(stat -f %z "$LOG")" -ge "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG" "$LOG.1"
+  fi
+  echo "$(ts) $*" >> "$LOG"
+  say "$*"
+}
+
+# etime ([[dd-]hh:]mm:ss) to seconds
+etime_secs() {
+  local e=$1 d=0 h=0 m=0 s=0
+  case "$e" in *-*) d=${e%%-*}; e=${e#*-} ;; esac
+  IFS=: read -r x y z <<EOF
+$e
+EOF
+  if [ -n "$z" ]; then h=$x; m=$y; s=$z; else m=$x; s=$y; fi
+  echo $(( 10#$d*86400 + 10#$h*3600 + 10#$m*60 + 10#$s ))
+}
+
+lpid=$(pgrep -f "^$RUNNER_DIR/bin/Runner.Listener run" | head -1)
+if [ -z "$lpid" ]; then
+  rm -f "$NOSOCK_FILE"
+  say "no Runner.Listener running (stopped or updating); nothing to do"
+  exit 0
+fi
+
+if pgrep -f "^$RUNNER_DIR/bin/Runner.Worker" >/dev/null; then
+  rm -f "$NOSOCK_FILE"
+  say "Runner.Worker running (job in progress); nothing to do"
+  exit 0
+fi
+
+uptime=$(etime_secs "$(ps -o etime= -p "$lpid" | tr -d ' ')")
+
+# The log the live listener holds open; a stray Runner_*.log (e.g. from
+# `Runner.Listener --version`) can be newer by name and mtime.
+rlog=$(lsof -nP -p "$lpid" -Fn 2>/dev/null | sed -n 's/^n\(.*\/_diag\/Runner_.*\.log\)$/\1/p' | head -1)
+if [ -z "$rlog" ]; then
+  rlog=$(ls -t "$RUNNER_DIR"/_diag/Runner_*.log 2>/dev/null | head -1)
+fi
+if [ -z "$rlog" ]; then
+  say "no Runner_*.log found; nothing to do"
+  exit 0
+fi
+age=$(( now - $(stat -f %m "$rlog") ))
+
+nsock=$(lsof -nP -a -p "$lpid" -iTCP -sTCP:ESTABLISHED 2>/dev/null | grep -c ":$SOCK_PORT ")
+if [ "$nsock" -gt 0 ]; then
+  if [ -f "$NOSOCK_FILE" ]; then
+    log "INFO listener pid=$lpid established :$SOCK_PORT connection is back after $(( now - $(cat "$NOSOCK_FILE") ))s"
+    rm -f "$NOSOCK_FILE"
+  fi
+  nosock_for=0
+else
+  if [ ! -f "$NOSOCK_FILE" ]; then
+    echo "$now" > "$NOSOCK_FILE"
+    log "INFO listener pid=$lpid has no established :$SOCK_PORT connection (log silent ${age}s)"
+  fi
+  nosock_for=$(( now - $(cat "$NOSOCK_FILE") ))
+fi
+
+say "listener pid=$lpid uptime=${uptime}s log=$(basename "$rlog") silent=${age}s sockets:$SOCK_PORT=$nsock nosock_for=${nosock_for}s thresholds: hard=${HARD_SILENT_SECS}s silent=${SILENT_SECS}s nosock=${NOSOCK_SECS}s grace=${STARTUP_GRACE_SECS}s cooldown=${COOLDOWN_SECS}s"
+
+reason=""
+if [ "$age" -ge "$HARD_SILENT_SECS" ]; then
+  reason="listener log silent ${age}s >= ${HARD_SILENT_SECS}s (a live listener refreshes its token every ~50 min)"
+elif [ "$nosock_for" -ge "$NOSOCK_SECS" ] && [ "$age" -ge "$SILENT_SECS" ]; then
+  reason="no established :$SOCK_PORT connection for ${nosock_for}s and listener log silent ${age}s"
+fi
+
+if [ -z "$reason" ]; then
+  say "healthy; no action"
+  exit 0
+fi
+
+if [ "$uptime" -lt "$STARTUP_GRACE_SECS" ]; then
+  say "would restart ($reason) but listener uptime ${uptime}s < grace ${STARTUP_GRACE_SECS}s; waiting"
+  exit 0
+fi
+
+if [ -f "$LAST_FILE" ]; then
+  since=$(( now - $(cat "$LAST_FILE") ))
+  if [ "$since" -lt "$COOLDOWN_SECS" ]; then
+    say "would restart ($reason) but last restart was ${since}s ago < cooldown ${COOLDOWN_SECS}s"
+    exit 0
+  fi
+fi
+
+if [ "$DRY_RUN" = 1 ]; then
+  say "DRY-RUN would run: launchctl kickstart -k $TARGET; reason: $reason"
+  exit 0
+fi
+
+log "RESTART pid=$lpid log=$(basename "$rlog") reason: $reason"
+if launchctl kickstart -k "$TARGET"; then
+  echo "$now" > "$LAST_FILE"
+  rm -f "$NOSOCK_FILE"
+  log "RESTART kickstart -k $TARGET ok"
+else
+  log "ERROR kickstart -k $TARGET failed rc=$?"
+  exit 1
+fi

@@ -16,9 +16,12 @@ Host facts: T2 `nexus/hellmini-second-test-host-howto`.
 | `hooks/ghrunner/job-completed.sh` | same | Prunes docker, stops the VM, clears tmp and caches. Never fails the job. |
 | `colima/<user>-provision.yaml` | `colima.yaml` of each VM | The `provision:` block only. Record, not installed by `install.sh`. |
 | `install.sh` | | Copies the hooks into place. |
+| `watchdog/actions-runner-watchdog` | `/usr/local/libexec/` (root:wheel 755) | Runner watchdog script, run every 60 s by launchd. |
+| `watchdog/local.actions-runner-watchdog.plist` | `/Library/LaunchDaemons/` (root:wheel 644) | The LaunchDaemon that runs it. |
+| `install-watchdog.sh` | | Installs, and drift-checks, the two watchdog files. |
 
-The hook copies are verbatim from the host (no SPDX header, so a repo copy and a
-live file compare equal).
+The hook and watchdog copies are verbatim from the host (no SPDX header, so a
+repo copy and a live file compare equal).
 
 ## Port ranges
 
@@ -84,3 +87,70 @@ A live file that differs from the repo copy is never overwritten without
 and keeps its mode. All files are checked before any is written. Take care to
 install while no job is running on that runner.
 
+
+## Runner watchdog (nexus-ey1me)
+
+`actions-runner-watchdog` restarts the `hellmini` runner
+(`system/local.actions-runner`) when its `Runner.Listener` is alive but stalled.
+launchd runs it as root every 60 s (`local.actions-runner-watchdog`); it does
+nothing if `/Volumes/Bulk/ghrunner/actions-runner/bin` is absent (volume not
+mounted).
+
+It restarts (`launchctl kickstart -k`) only when a `Runner.Listener` is running,
+no `Runner.Worker` is running (a job is never interrupted), the listener has been
+up at least 300 s, the last restart was at least 900 s ago, and one of these
+holds:
+
+- **A.** the `Runner_*.log` the listener holds open (found with `lsof`; the newest
+  file by name is wrong, since `Runner.Listener --version` writes a fresh one) has
+  been silent for 3900 s, one missed token refresh.
+- **B.** the listener has had no ESTABLISHED TCP `:443` connection for 300 s
+  continuously and its log has been silent for 300 s.
+
+Log silence alone is not a condition below 3900 s because an idle, healthy
+listener writes its log only on its OAuth token refresh, every 50 minutes
+(21 historical logs: the longest gap was exactly 50 minutes). A 5-minute silence
+rule would restart an idle runner every 5 minutes. An idle listener instead holds
+one long-poll connection to the broker open, so a vanished `:443` socket plus
+silence is the signal for B. With no listener running (stopped, updating) it does
+nothing.
+
+Logs: `/Volumes/Bulk/ghrunner/actions-runner-watchdog/watchdog.log` (RESTART lines
+with UTC time, listener pid, log name and reason; INFO lines when the `:443`
+connection disappears or returns; rotates at 1 MiB to `watchdog.log.1`), and
+launchd's own stdout/stderr in `/var/log/actions-runner-watchdog.launchd.log`
+(off the Bulk volume on purpose). State files `last_restart` and `nosock_since`
+sit beside `watchdog.log`.
+
+Look without acting: `sudo /usr/local/libexec/actions-runner-watchdog --dry-run`
+prints the evaluation and the command it would run. Thresholds can be overridden
+through `WD_SILENT_SECS`, `WD_NOSOCK_SECS`, `WD_HARD_SILENT_SECS`,
+`WD_COOLDOWN_SECS`, `WD_STARTUP_GRACE_SECS`, `WD_SOCK_PORT` and `WD_STATE_DIR`
+(test seams; the daemon sets none).
+
+Disable: `sudo launchctl bootout system/local.actions-runner-watchdog`.
+Re-enable: `sudo launchctl bootstrap system /Library/LaunchDaemons/local.actions-runner-watchdog.plist`.
+Remove: bootout, then delete the plist and the script.
+
+### Installing the watchdog
+
+On hellmini, from a checkout (passwordless `sudo`):
+
+```
+infra/hellmini/install-watchdog.sh          # drift check: diffs, exit 1 if live differs, exit 0 if live == repo
+infra/hellmini/install-watchdog.sh --force  # overwrite differing files, backup first
+```
+
+Same rules as `install.sh`: a differing live file is never overwritten without
+`--force`, the live file is first copied to `<file>.bak-<timestamp>`, and every
+file is checked before any is written. A matching file with the wrong mode or
+owner also counts as drift, and `--force` repairs it without a backup. After the
+plist is installed or changed, the script runs `launchctl bootout` (not-loaded is
+ignored) and `launchctl bootstrap system <plist>`; a script-only change needs no
+reload, since launchd starts the script fresh on every run. Exit codes: 0 ok, 1
+drift, 2 usage or missing directory, 3 `launchctl bootstrap` failed.
+
+Off the host, `HELLMINI_WD_ROOT=<tmp>` puts a prefix in front of the two
+destinations (launchctl is then skipped unless `HELLMINI_LAUNCHCTL` names a
+stand-in), `HELLMINI_RUN_AS=<cmd>` replaces `sudo -n`, and `HELLMINI_WD_OWNER`
+replaces `root:wheel`. `tests/test_hellmini_install_watchdog.py` drives it that way.
