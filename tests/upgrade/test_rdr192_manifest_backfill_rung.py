@@ -10,7 +10,8 @@ direct SQL, real ``HttpLadderStore`` completion ledger, real T2 memo) lives in
 ``test_rdr192_manifest_backfill_substrate.py``.
 
 The property under test is the one the reaper depends on: a completion
-record exists ONLY when a fresh census read zero legacy-unmanifested chunks,
+record exists ONLY when a census read zero legacy-unmanifested chunks (each
+reading taken in the session or kept from an earlier one at most 24 hours ago),
 because ``reapable(c)`` treats a manifest-less chunk as garbage and the
 reaper (nexus-2x9xa) refuses to run on a tenant without that record.
 """

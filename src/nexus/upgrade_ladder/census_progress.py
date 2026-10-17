@@ -108,6 +108,32 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def is_quarantine_entry(entry: Mapping[str, Any]) -> bool:
+    """Whether a cached entry records a collection the engine refused as
+    quarantine. The ONE predicate: ``usable()`` and the rung both ask it, so an
+    entry one of them would serve as quarantine the other cannot call usable
+    (``q`` is exactly the integer 1 that :meth:`CensusProgress.entry` writes;
+    ``2``, ``"x"``, ``[1]`` and ``True`` are not it)."""
+    q = entry.get("q")
+    return _is_int(q) and q == 1
+
+
+#: Longest note-derived string the doctor row and ``nx upgrade --dry-run`` print.
+_TEXT_MAX = 80
+#: Longest collection name printed (a real one is well under this).
+_NAME_MAX = 120
+
+
+def _safe_text(value: object, limit: int = _TEXT_MAX) -> str:
+    """A note field made printable: capped at *limit* characters and escaped
+    (``repr`` without the quotes), so a lone surrogate cannot make
+    ``click.echo`` raise ``UnicodeEncodeError`` and a huge or multi-line string
+    cannot flood the row. Note fields are T2 data any tool may have written."""
+    text = str(value)
+    cut = text[:limit]
+    return repr(cut)[1:-1] + ("..." if len(text) > limit else "")
+
+
 def guarded[T](what: str, call: Callable[[], T], default: T) -> T:
     """Run one progress-note operation. Whatever it raises is "no note": a
     structlog warning and *default*, never a failure of the rung (the note only
@@ -191,8 +217,9 @@ class Deferrals:
         head = "STARVED: " if self.starved else ""
         return (
             f"{head}the `nx upgrade --auto` time limit ended {self.count} consecutive session(s) "
-            f"before they read a new collection or backfilled one, since {self.since} "
-            f"(last {self.last}, {self.where}); `nx upgrade` has no time limit and finishes it"
+            f"before they read a new collection or backfilled one, since {_safe_text(self.since)} "
+            f"(last {_safe_text(self.last)}, {_safe_text(self.where, _NAME_MAX)}); "
+            "`nx upgrade` has no time limit and finishes it"
             + ("; or raise NX_UPGRADE_AUTO_DEADLINE_SECONDS" if self.starved else "")
         )
 
@@ -207,10 +234,11 @@ class Stall:
     last: str
 
     def describe(self) -> str:
+        name = _safe_text(self.collection, _NAME_MAX)
         return (
-            f"census stalled at {self.collection} for {self.count} sessions since {self.since} "
-            f"(last {self.last}): the engine's census call for it failed each time; "
-            f"`nx t3 census-manifest-less --collection {self.collection}` shows why"
+            f"census stalled at {name} for {self.count} sessions since {_safe_text(self.since)} "
+            f"(last {_safe_text(self.last)}): the engine's census call for it failed each time; "
+            f"`nx t3 census-manifest-less --collection {name}` shows why"
         )
 
 
@@ -248,20 +276,26 @@ class CensusProgress:
 
     # ── note plumbing ────────────────────────────────────────────────────────
 
-    def _load(self, version: str) -> dict[str, Any]:
-        """The note for *version*, or a fresh empty one. A note written at
-        another package version is not carried over, and a note whose shape is
-        not the documented one is no note (the next write replaces it)."""
+    def _read(self, version: str) -> tuple[dict[str, Any], bool]:
+        """The note for *version* (or a fresh empty one) and whether a stored
+        note of the wrong shape was discarded. A note written at another
+        package version is not carried over, and a note whose shape is not the
+        documented one is no note (the next write replaces it)."""
         note = self._store.load() if self._store is not None else None
+        malformed = False
         if isinstance(note, dict) and note.get("version") == version:
             entries = note.get("entries", {})
             if isinstance(entries, dict) and _cuts_shape_ok(note.get("cuts")) and _stall_shape_ok(note.get("stall")):
                 note["entries"] = entries
                 note.setdefault("cuts", None)
                 note.setdefault("stall", None)
-                return note
+                return note, False
             _log.warning("census_progress_note_malformed", version=version)
-        return {"version": version, "entries": {}, "cuts": None, "stall": None}
+            malformed = True
+        return {"version": version, "entries": {}, "cuts": None, "stall": None}, malformed
+
+    def _load(self, version: str) -> dict[str, Any]:
+        return self._read(version)[0]
 
     def _save(self, note: dict[str, Any]) -> None:
         if self._store is not None:
@@ -299,7 +333,9 @@ class CensusProgress:
             age = self.age(entry)
             if age is None or age > self._max_age or age < timedelta(0):
                 continue
-            if entry.get("q") != 1:
+            if "q" in entry and not is_quarantine_entry(entry):
+                continue  # a quarantine marker that is not exactly the one entry() writes is a forged entry
+            if not is_quarantine_entry(entry):
                 reading = entry.get("r")
                 if (
                     not isinstance(reading, list) or len(reading) != len(READING_FIELDS)
@@ -354,7 +390,7 @@ class CensusProgress:
         count; any session that did not fail there clears it."""
         if self._store is None:
             return
-        note = self._load(version)
+        note, malformed = self._read(version)
         before = (note["cuts"], note["stall"])
         stamp = self._stamp()
 
@@ -376,6 +412,14 @@ class CensusProgress:
 
         if (note["cuts"], note["stall"]) != before:
             self._save(note)
+        elif malformed:
+            # Nothing to count, but the stored note is unreadable: replace it
+            # (or drop it when the replacement would be empty), or every
+            # detect() would log it again.
+            if note["cuts"] is None and note["stall"] is None:
+                self._store.clear()
+            else:
+                self._save(note)
 
     def deferrals(self, version: str) -> Deferrals | None:
         """The no-progress cut count, or ``None`` when no session was cut

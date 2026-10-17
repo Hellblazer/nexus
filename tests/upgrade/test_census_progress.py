@@ -962,3 +962,160 @@ class TestTheProgressDefaultFollowsTheMemo:
         assert rung._progress()._store is not None, "the default memo is the T2 one, so the note is T2 too"
         rung.memo = MemoryNote()
         assert rung._progress()._store is None, "an injected memo disables the note without touching rung.progress"
+
+
+# ── nexus-y67n5 confirmation round ───────────────────────────────────────────
+
+
+class TestQuarantineIsOnePredicate:
+    """``usable()`` and the rung agree on what a quarantine entry is: ``q`` is
+    exactly the integer 1 that ``entry()`` writes."""
+
+    @pytest.mark.parametrize("q", [2, "x", [1], {"a": 1}, True, 10**30, 1.0, 0, None])
+    def test_an_entry_whose_q_is_not_exactly_one_is_unusable(self, q) -> None:
+        note = MemoryNote()
+        note.note = {"version": _V, "entries": {"a": _entry(q=q)}, "cuts": None, "stall": None}
+        progress = CensusProgress(note, now_fn=WallClock())
+        assert progress.usable(_V, {"a": 0}) == {}
+
+    def test_the_quarantine_entry_the_note_writes_is_usable(self) -> None:
+        progress = CensusProgress(MemoryNote(), now_fn=WallClock())
+        progress.commit(_V, {"a": progress.entry(stored=0, reading=None)})
+        assert set(progress.usable(_V, {"a": 0})) == {"a"}
+
+    def test_the_rung_asks_the_engine_about_a_forged_quarantine_marker_rather_than_skipping_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = FakeClock()
+        names = _names(2)
+        engine = SlowEngine(clock, names, cost=1.0)
+        sessions = Sessions(monkeypatch, engine, clock)
+        sessions.note.note = {
+            "version": _V, "cuts": None, "stall": None,
+            "entries": {names[0]: _entry(q=2), names[1]: _entry(q="x")},
+        }
+        registry, _ = sessions.rung()
+
+        report = LadderRunner(registry, sessions.ledger, package_version_fn=lambda: _V).run()
+
+        assert _outcome(report) is RungOutcome.RECORDED
+        assert engine.censused == names, "a collection with a forged marker was censused, not skipped as quarantine"
+
+
+class TestNoteTextIsBoundedAndEscaped:
+    _SURROGATE = "\ud800" + "bad"
+
+    def _hostile_note(self, big: str) -> dict:
+        return {
+            "version": _V, "entries": {},
+            "cuts": {"n": STARVED_AFTER, "since": self._SURROGATE, "last": big, "where": self._SURROGATE + big},
+            "stall": {
+                "collection": self._SURROGATE + big, "n": STALLED_AFTER, "since": big, "last": self._SURROGATE,
+            },
+        }
+
+    @pytest.mark.parametrize("big", ["x" * 100_000, "line\n" * 20_000], ids=["100kb", "multiline"])
+    def test_nx_upgrade_dry_run_prints_a_hostile_note_without_raising(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], big: str
+    ) -> None:
+        from nexus.commands.upgrade import _run_ladder  # noqa: PLC0415
+
+        clock = FakeClock()
+        sessions = Sessions(monkeypatch, SlowEngine(clock, _names(2), cost=1.0), clock)
+        sessions.note.note = self._hostile_note(big)
+        registry, _ = sessions.rung()
+        monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: registry)
+
+        _run_ladder(dry_run=True, auto_mode=False)  # click.echo raised UnicodeEncodeError on the surrogate
+
+        out = capsys.readouterr().out
+        assert "\\ud800bad" in out, "the surrogate is shown escaped"
+        assert "census stalled at" in out and "STARVED" in out
+        assert len(out) < 2_000, f"the printed note text is capped, got {len(out)} characters"
+
+    def test_the_doctor_row_is_bounded_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock = FakeClock()
+        sessions = Sessions(monkeypatch, SlowEngine(clock, _names(2), cost=1.0), clock)
+        sessions.note.note = self._hostile_note("x" * 100_000)
+        registry, _ = sessions.rung()
+        monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: registry)
+
+        (row,) = _check_pending_rungs()
+
+        assert len(row.detail) < 2_000 and "\\ud800" in row.detail
+        row.detail.encode("utf-8")  # a lone surrogate would raise here
+
+    def test_ordinary_text_is_printed_as_it_was(self) -> None:
+        note = MemoryNote()
+        note.note = {
+            "version": _V, "entries": {}, "stall": None,
+            "cuts": {"n": 1, "since": "2026-10-17T09:00:00+00:00", "last": "2026-10-17T10:00:00+00:00", "where": "knowledge__c07"},
+        }
+        text = CensusProgress(note, now_fn=WallClock()).describe(_V)
+        assert "since 2026-10-17T09:00:00+00:00 (last 2026-10-17T10:00:00+00:00, knowledge__c07)" in text
+
+
+class TestAnUnmeasurableListingIsNeitherSavedNorProgress:
+    def test_a_listing_with_no_stored_count_can_still_be_starved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock = FakeClock()
+        names = _names(98)
+        engine = SlowEngine(clock, names, cost=30.0)
+        engine.omit_stored = True
+        sessions = Sessions(monkeypatch, engine, clock)
+        _, rung = sessions.rung()
+
+        for _ in range(STARVED_AFTER):
+            sessions.session(900.0)
+
+        assert sessions.note.note["entries"] == {}, "no reading of an unmeasurable collection was saved"
+        assert "STARVED" in rung.detect().pending_detail
+
+
+class TestAMalformedNoteIsClearedByAnEmptySession:
+    def test_end_session_with_nothing_to_count_clears_the_bad_note_and_the_log_stops(self) -> None:
+        note = MemoryNote()
+        note.note = {"version": _V, "entries": [], "cuts": "x"}
+        progress = CensusProgress(note, now_fn=WallClock())
+
+        with structlog.testing.capture_logs() as logs:
+            progress.end_session(_V, cut_at=None, stalled_at=None, progressed=False)
+            progress.describe(_V)
+            progress.describe(_V)
+
+        malformed = [e for e in logs if e["event"] == "census_progress_note_malformed"]
+        assert len(malformed) == 1, "logged once, by the session that replaced it"
+        assert note.note is None, "the unreadable note is gone"
+
+    def test_a_good_note_with_nothing_to_count_is_not_rewritten(self) -> None:
+        note = MemoryNote()
+        progress = CensusProgress(note, now_fn=WallClock())
+        progress.commit(_V, {"a": progress.entry(stored=5, reading=(0, 0, 1, 2, 3, 5))})
+        saves = note.saves
+        progress.end_session(_V, cut_at=None, stalled_at=None, progressed=True)
+        assert note.saves == saves and set(note.note["entries"]) == {"a"}
+
+
+class TestTheAgeGuardIsReached:
+    def test_a_progress_object_whose_age_raises_costs_the_age_and_nothing_else(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class AgeBlowsUp(CensusProgress):
+            def usable(self, version, stored):
+                return {n: {"s": 0, "t": _STAMP, "r": [0, 0, 0, 0, 0, 1]} for n in stored}
+
+            def age(self, entry):
+                raise RuntimeError("age blew up")
+
+        clock = FakeClock()
+        names = _names(3)
+        engine = SlowEngine(clock, names, cost=1.0)
+        sessions = Sessions(monkeypatch, engine, clock)
+        registry, rung = sessions.rung()
+        rung.progress = AgeBlowsUp(sessions.note, now_fn=sessions.wall)
+
+        with structlog.testing.capture_logs() as logs:
+            report = LadderRunner(registry, sessions.ledger, package_version_fn=lambda: _V).run()
+
+        assert _outcome(report) is RungOutcome.RECORDED
+        assert engine.censused == [], "every reading came from the note; only the age was lost"
+        assert "age" in {e["operation"] for e in logs if e["event"] == "census_progress_failed"}

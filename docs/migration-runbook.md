@@ -44,8 +44,9 @@ and get, and the RDR-192 reaper moves it to quarantine once it has had no owner 
 censuses every non-quarantine collection (`nx t3 census-manifest-less`'s
 route), backfills each collection that holds a `legacy-unmanifested` chunk
 (`nx t3 backfill-manifest --no-dry-run --only-gapped`'s call), and records
-completion in the engine's `nexus.ladder_completions` only after a fresh census
-reads zero legacy-unmanifested and zero unclassified chunks. It never deletes a
+completion in the engine's `nexus.ladder_completions` only after a census
+reads zero legacy-unmanifested and zero unclassified chunks (each collection's
+reading taken in that session or kept from an earlier one at most 24 hours old). It never deletes a
 chunk and leaves the `superseded`, `dead-owner` and `no-owner` buckets to the
 reaper.
 

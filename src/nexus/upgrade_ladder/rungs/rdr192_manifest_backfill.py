@@ -135,6 +135,7 @@ from nexus.upgrade_ladder.census_progress import (
     CensusProgress,
     T2NoteStore,
     guarded,
+    is_quarantine_entry,
 )
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_deadline, active_expired
@@ -516,6 +517,12 @@ def _default_census(
 
     def keep(name: str, stored: int, fields: tuple[int, ...] | None) -> None:
         """Remember one new reading, and write the note every few of them."""
+        if stored < 0:
+            # The listing could not measure this collection's stored count, so a
+            # reading of it can never be served from the note (usable() refuses
+            # it). Saving it, or counting it as progress, would make every
+            # session on such a listing "progress" and hide STARVED.
+            return
         if tally is not None:
             tally.fresh_readings += 1
         if progress is None:
@@ -539,8 +546,9 @@ def _default_census(
             if hit is not None:
                 # `usable` already vetted the entry; a reading that still cannot
                 # be rebuilt is not served, the engine is asked instead.
-                kept = None if hit.get("q") else guarded("reading", lambda: _reading_from_entry(name, hit), None)
-                if hit.get("q") or kept is not None:
+                is_q = is_quarantine_entry(hit)
+                kept = None if is_q else guarded("reading", lambda: _reading_from_entry(name, hit), None)
+                if is_q or kept is not None:
                     from_note += 1
                     age = guarded("age", lambda: progress.age(hit), None)
                     if age is not None:
