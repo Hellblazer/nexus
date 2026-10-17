@@ -661,16 +661,6 @@ _V4_ADDR = re.compile(r'sin_addr=inet_addr\("([^"]*)"\)')
 _V6_ADDR = re.compile(r'inet_pton\(AF_INET6, "([^"]*)"')
 
 
-#: The one non-local address the trace tolerates, and how often: the engine (``nexus-service``, which carries the
-#: AWS instance-metadata URL ``http://169.254.169.254/latest/api/token``) dials it on port 80 four times at start,
-#: on a host that is no cloud instance. A link-local address is not routed off the host, so nothing leaves the
-#: machine, and nothing is fetched or needed from it. Found by this witness on chas (2026-10-15); a bead owns the
-#: engine's side of it. A fifth connect, another port or another link-local address is foreign.
-LINK_LOCAL_PROBE = ("169.254.169.254", 80)
-LINK_LOCAL_PROBE_LIMIT = 4
-_PORT = re.compile(r"sin_port=htons\((\d+)\)")
-
-
 def _is_local(address: str) -> bool:
     try:
         ip = ipaddress.ip_address(address)
@@ -681,13 +671,13 @@ def _is_local(address: str) -> bool:
     return ip.is_loopback or ip.is_unspecified
 
 
-def trace_summary(trace: str) -> tuple[int, list[str], int]:
-    """``(connects, foreign, tolerated)`` of an ``strace -f -e trace=connect`` trace: how many ``connect`` calls it
-    holds, the lines among them that do not stay on the machine, and how many were the engine's link-local probe
-    (:data:`LINK_LOCAL_PROBE`, up to its limit; the rest are foreign). A connect whose address cannot be read is
-    foreign (the check fails closed); a family that is not local, IPv4 or IPv6 is foreign."""
+def trace_summary(trace: str) -> tuple[int, list[str]]:
+    """``(connects, foreign)`` of an ``strace -f -e trace=connect`` trace: how many ``connect`` calls it holds and
+    the lines among them that do not stay on the machine. No address is tolerated: the engine's old probe of the
+    link-local metadata address 169.254.169.254:80 (nexus-17jvq, DJL's telemetry call) is gone, so it is foreign
+    like any other. A connect whose address cannot be read is foreign (the check fails closed); a family that is
+    not local, IPv4 or IPv6 is foreign."""
     connects = 0
-    tolerated = 0
     foreign: list[str] = []
     for line in trace.splitlines():
         match = _CONNECT_LINE.search(line)
@@ -705,25 +695,20 @@ def trace_summary(trace: str) -> tuple[int, list[str], int]:
         address = _V4_ADDR.search(rest) if name == "AF_INET" else _V6_ADDR.search(rest) if name == "AF_INET6" else None
         if address is not None and _is_local(address.group(1)):
             continue
-        port = _PORT.search(rest)
-        if (name == "AF_INET" and address is not None and port is not None
-                and (address.group(1), int(port.group(1))) == LINK_LOCAL_PROBE and tolerated < LINK_LOCAL_PROBE_LIMIT):
-            tolerated += 1
-            continue
         foreign.append(line.strip()[:240])
-    return connects, foreign, tolerated
+    return connects, foreign
 
 
 def check_trace_command(path: Path) -> int:
     """``--check-trace FILE``: exit 1 on any foreign connect, and on a trace with no connect at all (a witness
-    that saw nothing proves nothing). Prints ``connects=N foreign=M tolerated=T`` then the foreign lines."""
+    that saw nothing proves nothing). Prints ``connects=N foreign=M`` then the foreign lines."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        print(f"connects=0 foreign=0 tolerated=0\ncannot read the trace {path}: {exc}")  # noqa: T201 -- the harness's own output
+        print(f"connects=0 foreign=0\ncannot read the trace {path}: {exc}")  # noqa: T201 -- the harness's own output
         return 1
-    connects, foreign, tolerated = trace_summary(text)
-    print(f"connects={connects} foreign={len(foreign)} tolerated={tolerated}")  # noqa: T201 -- the harness's own output
+    connects, foreign = trace_summary(text)
+    print(f"connects={connects} foreign={len(foreign)}")  # noqa: T201 -- the harness's own output
     for line in foreign:
         print(line)  # noqa: T201 -- the harness's own output
     if connects == 0:

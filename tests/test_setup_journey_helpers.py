@@ -298,8 +298,8 @@ class TestNetworkWitness:
     ])
 
     def test_loopback_unix_and_netlink_stay_on_the_machine(self) -> None:
-        connects, foreign, tolerated = sj.trace_summary(self.TRACE)
-        assert foreign == [] and tolerated == 0
+        connects, foreign = sj.trace_summary(self.TRACE)
+        assert foreign == []
         assert connects == 7  # the "resumed" line is the same call as its unfinished half
 
     @pytest.mark.parametrize("line", [
@@ -312,25 +312,22 @@ class TestNetworkWitness:
         '201 connect(3, {sa_family=AF_INET, sin_port=htons(80)}, 16) = 0',
     ])
     def test_anything_else_is_foreign_and_what_cannot_be_read_fails_closed(self, line: str) -> None:
-        connects, foreign, _ = sj.trace_summary(self.TRACE + "\n" + line)
+        connects, foreign = sj.trace_summary(self.TRACE + "\n" + line)
         assert connects == 8 and len(foreign) == 1 and "201 connect" in foreign[0]
 
-    def test_the_engines_link_local_probe_is_tolerated_four_times_and_no_more(self) -> None:
+    def test_the_metadata_address_is_foreign_like_any_other(self) -> None:
+        """nexus-17jvq: the engine no longer probes 169.254.169.254:80, so the witness tolerates nothing; a probe
+        that came back (one connect, not just a fifth) fails the journey."""
         probe = '300 connect(17, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("169.254.169.254")}, 16) = -1 EINPROGRESS'
-        four = "\n".join([probe] * 4)
-        connects, foreign, tolerated = sj.trace_summary(self.TRACE + "\n" + four)
-        assert (connects, foreign, tolerated) == (11, [], 4)
-        connects, foreign, tolerated = sj.trace_summary(self.TRACE + "\n" + four + "\n" + probe)
-        assert connects == 12 and tolerated == 4 and len(foreign) == 1, "a fifth probe is foreign"
-        other_port = probe.replace("htons(80)", "htons(8080)")
-        other_ip = probe.replace("169.254.169.254", "169.254.169.253")
-        assert len(sj.trace_summary(other_port)[1]) == 1 and len(sj.trace_summary(other_ip)[1]) == 1
+        connects, foreign = sj.trace_summary(self.TRACE + "\n" + probe)
+        assert connects == 8 and len(foreign) == 1 and "169.254.169.254" in foreign[0]
+        assert not hasattr(sj, "LINK_LOCAL_PROBE"), "the tolerance is deleted, not parked"
 
     def test_the_command_fails_on_a_foreign_connect_and_on_an_empty_trace(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         good = tmp_path / "good.trace"
         good.write_text(self.TRACE, encoding="utf-8")
         assert sj.check_trace_command(good) == 0
-        assert "connects=7 foreign=0 tolerated=0" in capsys.readouterr().out
+        assert "connects=7 foreign=0\n" in capsys.readouterr().out
         bad = tmp_path / "bad.trace"
         bad.write_text(self.TRACE + '\n9 connect(3, {sa_family=AF_INET, sin_port=htons(9), sin_addr=inet_addr("192.0.2.1")}, 16) = -1 EINPROGRESS\n', encoding="utf-8")
         assert sj.check_trace_command(bad) == 1
