@@ -1,7 +1,7 @@
 ---
 type: regex
 target: trace
-pattern: '"name":"(?:Write|Edit|MultiEdit)","input":\{(?=(?:(?!"name":")[^\n])*?"file_path":"(?![^"]*(?:/tests?/|/testing/|/test_[^"/]*"|_test\.py"|/conftest\.py"|/tests\.py"))[^"]*")(?:(?!"name":")[^\n])*?"(?:content|new_string)":"(?:[^"\\]|\\.)*?(?:HTTPError|\.code\b|status|\b5\d\d\b)'
+pattern: '"name":"(?:Write|Edit|MultiEdit)","input":\{(?=(?:(?!"name":")[^\n])*?"file_path":"(?![^"]*(?:/tests?/|/testing/|/test_[^"/]*"|_test\.py"|/conftest\.py"|/tests\.py"))[^"]*\.py")(?:(?!"name":")[^\n])*?"(?:content|new_string)":"(?:[^"\\]|\\.)*?(?:HTTPError|\.code\b|status|\b5\d\d\b)'
 match: contains
 ---
 

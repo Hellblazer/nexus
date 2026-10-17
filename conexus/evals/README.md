@@ -90,6 +90,10 @@ model writes it to (nexus-pztjj). Its judge reads only the final `src/embed.py`:
 `focus: trace` gives the judge the first and last messages of a run, and the live
 run's middle, retry edit included, was elided. A retry body in a helper module
 is therefore token-checked, never judged for the transient-only rule (nexus-ejdlu).
+The regexes grade what the model attempted, not the file it ended with: a
+Write or Edit that failed, or a retry a later edit removed, still counts, and
+a write made through Bash is not seen. `files` targets carry paths only, so
+the trace is the only grader source that spans several files.
 
 ### The grading rule (nexus-dg7i6.7, 2026-10-17)
 

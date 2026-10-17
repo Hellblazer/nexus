@@ -250,8 +250,17 @@ def test_scaffold_is_deterministic(case: Path, tmp_path: Path):
 
 
 def _trace_line(content: list[dict]) -> str:
-    """One assistant message as `claude plugin eval` writes it to trace.jsonl: compact JSON."""
-    return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": content}},
+    """One assistant message as `claude plugin eval` writes it to trace.jsonl: compact JSON, each
+    tool call followed by its caller, the content followed by usage and ids, as the live o01 run
+    and tests/fixtures/claude_dispatch_stream_json_sample.ndjson lay them out."""
+    blocks = [dict(b, caller={"type": "direct"}) if b.get("type") == "tool_use" else b for b in content]
+    return json.dumps({"type": "assistant",
+                       "message": {"id": "msg_x", "role": "assistant", "content": blocks,
+                                   "stop_reason": "tool_use",
+                                   "usage": {"input_tokens": 3, "output_tokens": 523,
+                                             "cache_read_input_tokens": 512}},
+                       "session_id": "c4beaba5-a8dc-4fb2-8d5d-81c25798d0f8",
+                       "uuid": "5995691c-0d2c-4f2a-a0d8-85bc8c129867"},
                       separators=(",", ":"))
 
 
@@ -281,14 +290,12 @@ def _content_first_write(path: str, content: str) -> str:
 
 def _then_text(call: str, text: str) -> str:
     """A tool call with a text block after it in the same message line."""
-    return _trace_line([json.loads(call)["message"]["content"][0], {"type": "text", "text": text}])
+    return _trace_line([_call(call), {"type": "text", "text": text}])
 
 
-def _with_usage(call: str) -> str:
-    """A tool call followed on the same line by the message's usage counts."""
-    d = json.loads(call)
-    d["message"]["usage"] = {"input_tokens": 3, "cache_read_input_tokens": 512}
-    return json.dumps(d, separators=(",", ":"))
+def _sandbox_path(call: str) -> str:
+    """A tool call under the macOS per-uid sandbox path, whose -501- looks like a 5xx status."""
+    return call.replace("/tmp/claude-eval-x/", "/private/tmp/claude-501/claude-eval-x/")
 
 
 def _scaffold_embed() -> str:
@@ -299,10 +306,15 @@ def _scaffold_embed() -> str:
     return m.group(1)
 
 
+def _call(line: str) -> dict:
+    block = dict(json.loads(line)["message"]["content"][0])
+    block.pop("caller", None)
+    return block
+
+
 def _two_calls(first: str, second: str) -> str:
     """One assistant message carrying two tool calls, as a model may batch them."""
-    a, b = (json.loads(x)["message"]["content"][0] for x in (first, second))
-    return _trace_line([a, b])
+    return _trace_line([_call(first), _call(second)])
 
 
 def _text(text: str) -> str:
@@ -370,6 +382,8 @@ _REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
          _write("src/util.py", "entries = []"),
          _write("conftest.py", "retries = 3"),
          _write("src/testing/fake.py", "retries = 3"),
+         _write("docs/retry.md", "retries = 3"),
+         _edit("src/embed.py", "for attempt in range(5):\n" + _O01_EMBED_CALL, _O01_EMBED_CALL),
          _text("I would wrap it: for attempt in range(5): try the request, then back off."),
          _edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
          _hook('{"type":"tool_use","name":"Write","input":{"content":"retries = 3"}}'),
@@ -386,7 +400,9 @@ _REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
         [_text("Catch HTTPError and retry on a 503."),
          _edit("src/embed.py", _scaffold_embed(), _scaffold_embed() + "\n# TODO retry"),
          _then_text(_write("src/util.py", "x = 1"), "retry on a 503"),
-         _with_usage(_write("src/util.py", "x = 1")),
+         _write("src/util.py", "x = 1"),
+         _sandbox_path(_write("src/util.py", "x = 1")),
+         _write("README.md", "Retries on status 503."),
          _write("conftest.py", "raise HTTPError(url, 503, 'busy', {}, None)"),
          _write("src/tests.py", "fake.fail(503)"),
          _edit("src/embed.py", _O01_EMBED_CALL, "# TODO retry\n" + _O01_EMBED_CALL),
