@@ -859,11 +859,11 @@ class TestServiceLocalEmbedder:
         voyage-* posture; reverting it strands their voyage collections."""
         calls = self._patch_common(monkeypatch)
         (cfg_dir / "config.yml").write_text(
-            "local:\n  embed_model: voyage-context-3\n", encoding="utf-8"
+            "local:\n  embed_model: voyage-3\n", encoding="utf-8"
         )
         result = CliRunner().invoke(init_cmd, ["--service"])
         assert result.exit_code == 0, result.output
-        assert _read_config(cfg_dir)["local"]["embed_model"] == "voyage-context-3"
+        assert _read_config(cfg_dir)["local"]["embed_model"] == "voyage-3"
         assert "Kept" in result.output
         assert f"nx config set local.embed_model {_TIER1_MODEL}" in result.output
         assert f"Saved: local.embed_model = {_TIER1_MODEL}" not in result.output
@@ -887,7 +887,7 @@ class TestServiceLocalEmbedder:
             monkeypatch.delenv(var, raising=False)
         self._patch_common(monkeypatch)
         cfg = cfg_dir / "config.yml"
-        cfg.write_text("local:\n  embed_model: voyage-context-3\n", encoding="utf-8")
+        cfg.write_text("local:\n  embed_model: voyage-3\n", encoding="utf-8")
 
         keyless = CliRunner().invoke(init_cmd, ["--service"])
         assert keyless.exit_code == 0, keyless.output
@@ -897,7 +897,7 @@ class TestServiceLocalEmbedder:
 
         secret = "pa-test-secret-value-1234"
         cfg.write_text(
-            "local:\n  embed_model: voyage-context-3\n"
+            "local:\n  embed_model: voyage-3\n"
             f"credentials:\n  voyage_api_key: {secret}\n",
             encoding="utf-8",
         )
