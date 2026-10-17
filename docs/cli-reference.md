@@ -471,6 +471,7 @@ Exit codes:
 
 - `0`: indexed (or dry-ran) successfully, including the no-records case.
 - `1`: DT not running, malformed selectors, or non-darwin platform.
+- `1`, after the whole batch has run: one or more records failed with an unexpected error or with `RuntimeError` or `ImportError` (nexus-gjxkb). Each is listed under `Failures:`, the other records are indexed, and the next run retries the failed ones; the `dt_index_unexpected_error` log event carries the traceback.
 - `2`: Click usage error (missing or mutually-exclusive flags).
 
 ### nx dt capture
@@ -4747,7 +4748,9 @@ the group yourself.
 nx mineru status
 ```
 
-Show server status: running/stopped, PID, port, active tasks, and completed tasks. Removes stale PID file if the server process is no longer running.
+Show server status: running/stopped, PID, port, and the processing, queued and completed task counts. Removes stale PID file if the server process is no longer running.
+
+A 200 from `/health` is not taken as health (nexus-x3m8e). The command prints `UNHEALTHY` with each fault and exits 1 when the server's working directory is gone, when its interpreter, executable or output directory no longer exists, when no POSIX semaphore can be created (the remedy names `/dev/shm` on Linux and `kern.posix.sem.max` on macOS), or when at least 3 recent tasks failed and at least 90% of the finished ones did. A server that does not answer, or answers with another status, also exits 1.
 
 ## nx tenant
 

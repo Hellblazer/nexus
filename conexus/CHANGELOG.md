@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.82.0] - 2026-10-17
+
+Plugin version aligned with conexus 7.82.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied):
+
+- **Six wrapper skills retired** (nexus-dg7i6.6). `code-review`, `debugging`, `development`, `test-validation`, `query` and `using-nx-skills` are gone; their procedure lives in the agents and rules, and the skills, agents and commands that named them now name the agent or tool.
+- **Agents carry the skill procedure** (nexus-dg7i6.3). `code-review-expert`, `substantive-critic`, `developer` and `strategic-planner` carry the round rules, confirmation pass, first-live-run hand-back and continuation `ttl` their skills held, since the model dispatches the agents and never loaded the skills.
+- **Ten commands hidden from the model** (nexus-dg7i6.2). `debug`, `review-code`, `test-validate`, `create-plan`, `implement`, `research`, `analyze-code`, `plan-audit`, `rdr-list` and `nx-preflight` carry `disable-model-invocation: true`; the `/slash` forms stay, and model-facing text names the skill or tool instead.
+- **`bd` commands replace `/beads:` pointers** (nexus-dg7i6.4). Agents, skills and shared resources name `bd <verb>`; the session-start hook prints `bd prime` when the beads plugin is off.
+- **SessionStart hook timeouts** (nexus-3ya9d). Every entry in `hooks/hooks.json` gets a 30 s cold-start allowance for `uv tool run`, so a first session on Windows no longer has its hooks cancelled.
+- **Desktop restart step** (nexus-93xx0). The stand-in and setup say that Claude Desktop needs the app quit and opened again after setup; a new chat keeps the running stand-in.
+- **Measured sizes** (nexus-gxzfq). The four-choice question, `/conexus:setup` and the stand-in give the measured sizes on disk: Local about 2.4 to 3.1 GB, Cloud and CLI only about 2.1 to 2.3 GB.
+- **Outcome-graded evals** (nexus-dg7i6.7). `evals/` gains outcome-graded cases on scaffolded projects and the run command's tool grants.
+
+Claude Desktop picks these up only after the marketplace is removed and added again (RDR-228 Discovery 6).
+
 ## [7.81.0] - 2026-10-16
 
 Plugin version aligned with conexus 7.81.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied), all from RDR-228 Phase 2 unless named:
