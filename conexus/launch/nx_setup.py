@@ -148,8 +148,9 @@ file's own history alone:
    daemon service start``. Else ``nx init --yes`` with ``--no-autostart`` unless
    ``autostart``, and always ``--no-beads-prime`` (``nx init`` otherwise installs
    a user-level beads PRIME.md).
-3. verify: ``nx doctor``. Exit 0 is ``done``; anything else is ``doctor-failed``
-   with the ``[✗]`` rows, read from the tail of the log.
+3. verify: ``nx doctor``. Exit 0 is ``done``. The one exception is a missing git: exit 1 or 2 with the fatal
+   summary footer printed after the rows and the ``git`` row the only failing one is also ``done``. Anything else is
+   ``doctor-failed`` with the ``[✗]`` rows, read from the tail of the log.
 
 **Child programs** print straight into ``setup.log`` (an append-mode handle, no
 pipe), so the log shows a long step's output while it runs and a killed step's
@@ -347,8 +348,12 @@ _DOCTOR_ROW_CHARS = 300
 _GIT_ROW = re.compile(r"\[?✗\]?\s+git(?::|$)")
 
 #: The exit code of ``nx doctor`` when a check marked fatal fails (``nexus.health.EXIT_FATAL``). The git row of a CLI
-#: from before nexus-36qyh is fatal, so it ends the sweep with this code and no other.
+#: from before nexus-36qyh is fatal, so it ends the sweep with this code. CLIs up to v7.20.0 exit 1 after the same
+#: footer (code 2 begins at v7.21.0, commit 02e0379c5): :data:`_DOCTOR_EXIT_FATAL_CODES`.
 _DOCTOR_EXIT_FATAL = 2
+
+#: The exit codes a finished sweep with a fatal failed row can carry: 1 up to v7.20.0, 2 from v7.21.0.
+_DOCTOR_EXIT_FATAL_CODES = (1, _DOCTOR_EXIT_FATAL)
 
 #: The summary ``nx doctor`` prints after its main sweep when a fatal check failed: the first is the local-mode
 #: footer, the second the one a service-mode (cloud) sweep prints (``format_health_for_cli`` in ``nexus.health``;
@@ -363,7 +368,7 @@ _DOCTOR_FATAL_FOOTERS = (
 #: The row added to a record when ``nx doctor`` named only ``git`` but did not finish as a git-only sweep does, so
 #: that neither this script's view nor ``nx doctor``'s setup row (which read the rows alone) reads it as ``done``.
 _DOCTOR_UNFINISHED_ROW = (
-    "nx doctor did not finish a sweep that failed only on git (exit code {code}); its output may be cut short"
+    "nx doctor did not finish a sweep that failed only on git ({how}); its output may be cut short"
 )
 
 #: ``nx --version`` of the Nexus CLI (click's ``version_option(prog_name="nx")``).
@@ -2031,11 +2036,11 @@ def only_git_failed(rows: object) -> bool:
 
 
 def git_only_sweep(code: int | None, text: str, rows: object) -> bool:
-    """Whether ``nx doctor`` finished a sweep whose only failing row is ``git``: exit code 2 (fatal), the fatal
-    footer printed after the rows, and *rows* naming ``git`` alone. Rows without the exit code and the footer are an
-    old CLI that failed the row and then died (nexus-0ky29): a real failure."""
+    """Whether ``nx doctor`` finished a sweep whose only failing row is ``git``: a fatal exit code (2, or 1 for a CLI
+    up to v7.20.0), the fatal footer printed after the rows, and *rows* naming ``git`` alone. Rows without the footer
+    are a CLI that failed the row and then died (nexus-0ky29): a real failure, whatever the exit code."""
     return (
-        code == _DOCTOR_EXIT_FATAL
+        code in _DOCTOR_EXIT_FATAL_CODES
         and any(footer in text for footer in _DOCTOR_FATAL_FOOTERS)
         and only_git_failed(rows)
     )
@@ -2219,7 +2224,7 @@ def _execute(run: _Run) -> int:
             RECONNECT_NEXT, doctor="pass", doctor_failing=[],
         )
     if only_git_failed(rows):
-        rows = [*rows, _DOCTOR_UNFINISHED_ROW.format(code="none, it timed out" if code is None else code)]
+        rows = [*rows, _DOCTOR_UNFINISHED_ROW.format(how="timed out" if code is None else f"exit code {code}")]
     return run.end(
         DOCTOR_FAILED, "nx doctor reported problems." if code is not None else "nx doctor timed out.",
         f"Run `nx doctor` in a terminal to see the failing rows.{_CLOUD_DOCTOR_NOTE if run.mode == MODE_CLOUD else ''} "

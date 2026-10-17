@@ -165,6 +165,23 @@
       "view": {"state": "done", "live": false},
       "row": {"outcome": "ok", "contains": ["finished", "mode local", "2026-10-14T10:09:00Z"]}
     },
+    "doctor-failed-git-unfinished": {
+      "comment": "A sweep that printed the git row and then died or timed out (nexus-0ky29): the script adds a row saying the sweep did not finish, so the rows are not git-only and both readers keep it as doctor-failed.",
+      "setup_dir": true,
+      "status": {
+        "state": "doctor-failed", "stage": "verify", "mode": "local", "autostart": false, "log": "{LOG}",
+        "started_at": "2026-10-14T10:00:00Z", "updated_at": "2026-10-14T10:09:00Z",
+        "message": "nx doctor reported problems.", "doctor": "fail",
+        "doctor_failing": ["✗ git: not found on PATH", "nx doctor did not finish a sweep that failed only on git (timed out); its output may be cut short"],
+        "steps_done": ["build", "init"],
+        "next": "Show the user the failing rows and run nx doctor in a terminal. Log: {LOG}"
+      },
+      "error": null,
+      "heartbeat_age_seconds": null,
+      "not_now": false,
+      "view": {"state": "doctor-failed", "live": false},
+      "row": {"outcome": "warn", "contains": ["nx doctor reported problems.", "did not finish a sweep", "{LOG}"]}
+    },
     "doctor-failed-git-hooks": {
       "comment": "The git hooks rows are other checks and real failures: only a row labelled exactly git is the missing tool.",
       "setup_dir": true,

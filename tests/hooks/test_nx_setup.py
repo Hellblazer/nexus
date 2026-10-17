@@ -731,9 +731,10 @@ _CLOUD_FOOTER = (
 
 def test_a_missing_vcs_tool_does_not_fail_the_verify_step(box: Box) -> None:
     """nexus-36qyh. A Claude Desktop-only Windows user has no git. A doctor that exits 0 with git
-    a warning ends ``done`` with ``doctor`` pass; a doctor from before that change exits 2 (git is a
-    fatal row there) with git as its only failing row and its summary footer, and the plugin must
-    still call the run done, because the plugin updates independently of the CLI it finds."""
+    a warning ends ``done`` with ``doctor`` pass; a doctor from before that change exits 1 (up to
+    v7.20.0) or 2 (from v7.21.0; git is a fatal row there) with git as its only failing row and its
+    summary footer, and the plugin must still call the run done, because the plugin updates
+    independently of the CLI it finds."""
     box.layout()
     box.provision()
     for out, code in (
@@ -741,6 +742,8 @@ def test_a_missing_vcs_tool_does_not_fail_the_verify_step(box: Box) -> None:
         (_GIT_FAILED_OUT + _LOCAL_FOOTER, 2),
         (_GIT_FAILED_OUT + _CLOUD_FOOTER, 2),
         (_GIT_FAILED_OUT + _LOCAL_FOOTER + "[✓] supplementary: fine\r\n", 2),
+        (_GIT_FAILED_OUT + _LOCAL_FOOTER, 1),  # a CLI up to v7.20.0 exits 1 after the same footer
+        (_GIT_FAILED_OUT + _CLOUD_FOOTER, 1),
     ):
         box.behave([{"prog": "nx", "match": ["doctor"], "exit": code, "out": out}])
         box.start("local")
@@ -754,20 +757,20 @@ def test_a_missing_vcs_tool_does_not_fail_the_verify_step(box: Box) -> None:
     [
         (_GIT_FAILED_OUT, 1),
         (_GIT_FAILED_OUT, 2),
-        (_GIT_FAILED_OUT + _LOCAL_FOOTER, 1),
         (_GIT_FAILED_OUT + _LOCAL_FOOTER, 3),
         (_GIT_FAILED_OUT + "Traceback (most recent call last):\n  File \"x\", line 1\nRuntimeError: boom\n", 1),
         (_GIT_FAILED_OUT + "Some checks failed", 2),
     ],
     ids=[
-        "died-after-the-row-exit-1", "exit-2-without-the-footer", "footer-with-exit-1", "footer-with-exit-3",
+        "died-after-the-row-exit-1", "exit-2-without-the-footer", "footer-with-exit-3",
         "traceback", "footer-cut-short",
     ],
 )
 def test_a_doctor_that_failed_git_and_did_not_finish_the_sweep_fails_the_verify_step(
     box: Box, out: str, code: int
 ) -> None:
-    """nexus-0ky29. The git-only path needs the fatal exit code AND the footer printed after the rows. An old CLI
+    """nexus-0ky29. The git-only path needs a fatal exit code (1 or 2) AND the footer printed after the rows (exit 1
+    with the footer is a finished git-only sweep, covered above; exit 1 without it is here). An old CLI
     that prints the git row and then dies without another row is not a missing git alone. The record names an
     added row, so neither this script's status view nor ``nx doctor``'s setup row reads it as ``done`` later."""
     box.layout()
@@ -781,13 +784,42 @@ def test_a_doctor_that_failed_git_and_did_not_finish_the_sweep_fails_the_verify_
     assert "did not finish" in done["doctor_failing"][-1] and f"exit code {code}" in done["doctor_failing"][-1]
 
 
-def test_the_record_of_an_unfinished_git_only_sweep_is_not_git_only(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
-    """nexus-0ky29. A timeout (no exit code) with only the git row printed is a failure, and the rows its record
-    carries are not git-only, so the status view keeps ``doctor-failed``."""
+def test_a_doctor_that_times_out_after_the_git_row_is_recorded_as_unfinished(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-0ky29. Drives ``_execute`` itself: ``nx doctor`` times out (``cmd`` returns ``None``) after printing only
+    the git row (and, being cut short, no footer). The run ends ``doctor-failed`` and its record carries the added
+    row, so ``status_view`` reads the record back as ``doctor-failed`` rather than the git-only ``done``."""
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    token = mod.acquire_lock(box.setup)
+    assert token
+    run = mod._Run(box.setup, "local", False, mod._Heartbeat(box.setup / "lock", token))
+    nx = str(box.root / "nx")
+
+    def cmd(argv: list[str], **kw: Any) -> tuple[int | None, str]:
+        assert argv == [nx, "doctor"], argv  # nothing else runs: the build and the service step are stubbed out
+        return None, _GIT_FAILED_OUT
+
+    monkeypatch.setattr(mod, "_locate_nexus_cli", lambda r: (nx, False))
+    monkeypatch.setattr(mod, "_service", lambda r, n, c: None)
+    monkeypatch.setattr(run, "cmd", cmd)
+    assert mod._execute(run) == 1
+    record = json.loads((box.setup / "status.json").read_text(encoding="utf-8"))
+    assert record["state"] == "doctor-failed" and record["doctor"] == "fail"
+    assert record["message"] == "nx doctor timed out."
+    assert record["doctor_failing"][0] == "✗ git: not found on PATH"
+    extra = record["doctor_failing"][-1]
+    assert "did not finish a sweep that failed only on git (timed out)" in extra, extra
+    assert len(record["doctor_failing"]) == 2
+    assert mod.only_git_failed(record["doctor_failing"]) is False
+    view = mod.status_view(box.setup)
+    assert view["state"] == "doctor-failed", view
+
+
+def test_a_sweep_that_timed_out_is_never_a_git_only_sweep(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-0ky29. No exit code is not a fatal one, whatever was printed."""
     mod = _in_process(box, monkeypatch)
     rows = ["✗ git: not found on PATH"]
     assert mod.git_only_sweep(None, _GIT_FAILED_OUT + _LOCAL_FOOTER, rows) is False
-    assert mod.only_git_failed([*rows, mod._DOCTOR_UNFINISHED_ROW.format(code="none, it timed out")]) is False
 
 
 def test_the_git_only_sweep_matches_the_real_doctor_footer_and_exit_code(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -807,7 +839,9 @@ def test_the_git_only_sweep_matches_the_real_doctor_footer_and_exit_code(box: Bo
         assert any(footer in output for footer in mod._DOCTOR_FATAL_FOOTERS), (local_mode, output)
         rows = mod._doctor_rows(output)
         assert rows and mod.git_only_sweep(2, output, rows), (local_mode, output, rows)
-        assert not mod.git_only_sweep(1, output, rows)
+        assert mod.git_only_sweep(1, output, rows)  # a CLI up to v7.20.0 exits 1 after the same footer
+        assert not mod.git_only_sweep(3, output, rows)
+        assert not mod.git_only_sweep(None, output, rows)
         assert not mod.git_only_sweep(2, output.split("\n\n")[0], rows)  # the same output, cut before its footer
     # every footer the script accepts is printed by one of the two modes (none is stale)
     assert all(footer in printed for footer in mod._DOCTOR_FATAL_FOOTERS)
