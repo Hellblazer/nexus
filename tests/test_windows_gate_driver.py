@@ -612,12 +612,28 @@ class Harness:
     def start(
         self, *args: str, verdict: bytes | str | None = None, fail_step: str = "", env: dict[str, str] | None = None
     ) -> subprocess.Popen[str]:
-        """The script in a session of its own, so a signal to its process group is a terminal Ctrl-C or hangup."""
-        return popen_in_group(
-            [_bash(), str(self.script), *args], env=self._env(verdict, fail_step, env),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=self.root,
-        )
+        """The script in a session of its own, so a signal to its process group is a terminal Ctrl-C or hangup.
+
+        SIGINT is reset to the default for the spawn: a suite started with '&' from a
+        non-interactive shell (nohup, a pool launcher) inherits SIGINT=SIG_IGN, the child
+        inherits it across exec, and bash cannot trap a signal ignored on entry. The INT
+        cases then waited out the 60 s fake sleep (nexus-frfeh), which a real terminal's
+        Ctrl-C never meets.
+        """
+        before = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+        except ValueError:  # not the main thread: the disposition cannot be changed here
+            before = None
+        try:
+            return popen_in_group(
+                [_bash(), str(self.script), *args], env=self._env(verdict, fail_step, env),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=self.root,
+            )
+        finally:
+            if before is not None:
+                signal.signal(signal.SIGINT, before)
 
     def end_calls(self) -> list[str]:
         path = self.root / "end.log"
