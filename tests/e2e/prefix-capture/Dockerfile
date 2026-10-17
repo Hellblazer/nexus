@@ -6,7 +6,9 @@
 FROM debian:trixie-slim
 ARG CC_VERSION=2.1.300
 ARG CONEXUS_VERSION=7.79.0
-ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PYTHONUNBUFFERED=1
+# NX_NO_TELEMETRY: every container is a fresh install, and a hand-typed docker run
+# names no -e flag; the image opts out whoever starts it (nexus-ca5rw).
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PYTHONUNBUFFERED=1 NX_NO_TELEMETRY=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git jq procps python3 python3-venv python3-pip libgomp1 \
     && rm -rf /var/lib/apt/lists/*

@@ -285,3 +285,10 @@ def test_every_plugin_eval_run_names_the_opt_out_for_every_server(tmp_path: path
     servers = json.loads(mcp.read_text())
     assert len(servers) >= 3, "the shipped .mcp.json lost its servers; the check would pass on nothing"
     assert {n: s.get("env", {}).get("NX_NO_TELEMETRY") for n, s in servers.items()} == dict.fromkeys(servers, "1")
+
+
+def test_the_prefix_capture_image_opts_out_whoever_starts_it() -> None:
+    """A hand-typed docker run of the A/B image (nxab-seed on 10-15) names no -e flag; the image
+    itself carries the opt-out (nexus-ca5rw)."""
+    dockerfile = (E2E / "prefix-capture" / "Dockerfile").read_text()
+    assert re.search(r"^ENV\b.*\bNX_NO_TELEMETRY=1\b", dockerfile, re.M), "the image must set ENV NX_NO_TELEMETRY=1"
