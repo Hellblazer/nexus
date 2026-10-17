@@ -121,7 +121,9 @@ leasedir4="$repo4/service/.build-lease/trapped"
 ready4="$WORKDIR/repo4.ready"
 bash -c "source '$repo4/scripts/lib/build-lease.sh'; build_lease_acquire trapped || exit 9; trap 'build_lease_release trapped' EXIT; : > '$ready4'; sleep 30" &
 holder4=$!
-for _ in $(seq 1 50); do
+# Polled up to 15 s: a holder that has to start, source and acquire under a loaded host
+# (nexus-ys8a4) can take well over the 5 s this used to allow.
+for _ in $(seq 1 150); do
     [[ -f "$ready4" ]] && break
     sleep 0.1
 done
@@ -132,7 +134,7 @@ else
     # process actually terminates -- this is what should release the lease
     # WITHOUT needing stale-pid reclaim.
     kill -TERM "$holder4" 2>/dev/null
-    for _ in $(seq 1 50); do
+    for _ in $(seq 1 150); do
         [[ ! -d "$leasedir4" ]] && break
         sleep 0.1
     done

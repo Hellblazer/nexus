@@ -370,10 +370,19 @@ else
     for attempt in 1 2; do
         _sleep_with_default_sigint
         probe_pid=$!
+        # Poll until the job has exec'd its sleep: until then SIGINT is still ignored (the
+        # interpreter has not reset it), so a signal sent during a slow interpreter start on a
+        # loaded host is dropped and the probe reads as "did not terminate" (nexus-ys8a4). Bounded
+        # at 10 s; on timeout we signal anyway and the existing retry/verdict logic decides.
+        for _ in $(seq 1 100); do
+            probe_comm="$(ps -o comm= -p "$probe_pid" 2>/dev/null)"
+            [[ "${probe_comm##*/}" == "sleep" ]] && break
+            sleep 0.1
+        done
         sleep 0.2   # let the new job's process group settle before signaling it
         died=0
         if kill -s INT -- "-$probe_pid" 2>/dev/null; then
-            for _ in $(seq 1 20); do
+            for _ in $(seq 1 100); do
                 kill -0 -- "-$probe_pid" 2>/dev/null || { died=1; break; }
                 sleep 0.1
             done
