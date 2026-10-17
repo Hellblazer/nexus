@@ -77,7 +77,6 @@ package aurora;
 /** Fixed-size pool of connections shared by the nightly job's worker threads. */
 public final class ConnectionPool {
     private final Connection[] slots;
-    private int next = 0;
 
     public ConnectionPool(int size) {
         slots = new Connection[size];
@@ -86,15 +85,16 @@ public final class ConnectionPool {
         }
     }
 
-    /** Takes the next free connection. */
+    /** Takes the first free connection. */
     public Connection borrow() {
-        if (next >= slots.length) {
-            next = 0;
+        for (int i = 0; i < slots.length; i++) {
+            if (slots[i] != null) {
+                Connection c = slots[i];
+                slots[i] = null;
+                return c;
+            }
         }
-        Connection c = slots[next];
-        slots[next] = null;
-        next++;
-        return c;
+        throw new IllegalStateException("pool exhausted");
     }
 
     /** Puts a connection back in the first empty slot. */
