@@ -118,6 +118,9 @@ def test_the_watcher_ignores_console_ctrl_only_on_windows() -> None:
     reports it. On POSIX it must not ignore SIGINT: the child would inherit that."""
     before = signal.getsignal(signal.SIGINT)
     try:
+        # A run started with '&' from a non-interactive shell inherits SIGINT=SIG_IGN;
+        # start from the default so the assertion checks the function, not the inheritance.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         wp._ignore_console_ctrl()
         ignored = signal.getsignal(signal.SIGINT) is signal.SIG_IGN
         assert ignored is (sys.platform == "win32")
