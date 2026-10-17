@@ -222,8 +222,10 @@ class TestHandInstallNoMarker:
     ``cli_lockstep_marker``, so a marker-only check read the matching CLI as
     skew, told the model so and dispatched an upgrade. With no marker the hook
     now compares the plugin version with the CLI's own ``nx --version``; a
-    real mismatch still nudges and dispatches, and a marker, when present,
-    still decides alone."""
+    real mismatch still nudges and dispatches. A marker equal to the plugin's
+    version is lockstep without a subprocess; a stale marker is consulted
+    against the CLI by the action's rule (CLI >= plugin), because on a pip or
+    dev-tree install the action cannot rewrite the marker."""
 
     def _arm(self, mod, plugin_root, tmp_path, monkeypatch, cli_version, *, marker_text=None):
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
@@ -269,18 +271,66 @@ class TestHandInstallNoMarker:
         assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
         assert dispatched == ["9.9.9"]
 
-    def test_stale_marker_decides_alone_and_the_cli_is_not_asked(
+    def test_stale_marker_with_satisfying_cli_is_silent_and_dispatches_nothing(
         self, mod, plugin_root, tmp_path, monkeypatch, capsys
     ) -> None:
-        """A marker that disagrees is skew even when the CLI reports the plugin's
-        version (the action rewrites the marker); no subprocess is paid."""
+        """Where the action cannot rewrite the marker (pip into another env, a
+        dev tree) a stale marker beside a matching CLI must not nudge every
+        session."""
         dispatched, calls, _marker = self._arm(
             mod, plugin_root, tmp_path, monkeypatch, "9.9.9", marker_text="1.0.0"
         )
         mod.main()
+        assert capsys.readouterr().out.strip() == ""
+        assert dispatched == []
+        assert calls == [1]
+
+    def test_stale_marker_with_older_cli_still_nudges_and_dispatches(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """The control for the test above."""
+        dispatched, _calls, _marker = self._arm(
+            mod, plugin_root, tmp_path, monkeypatch, "9.9.8", marker_text="1.0.0"
+        )
+        mod.main()
         assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
         assert dispatched == ["9.9.9"]
-        assert calls == []
+
+    def test_stale_marker_with_unreadable_cli_still_nudges_and_dispatches(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys
+    ) -> None:
+        dispatched, _calls, _marker = self._arm(
+            mod, plugin_root, tmp_path, monkeypatch, None, marker_text="1.0.0"
+        )
+        mod.main()
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert dispatched == ["9.9.9"]
+
+    @pytest.mark.parametrize("marker_text", [None, "1.0.0"])
+    @pytest.mark.parametrize("cli_version", ["9.9.10", "9.10.0", "10.0.0", "9.9.9rc1", "9.9.9-rc1", "9.9.9.dev1"])
+    def test_cli_not_older_than_the_plugin_is_lockstep(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys, marker_text, cli_version
+    ) -> None:
+        """The action's rule is CLI >= plugin on the numeric core (a dev or rc
+        suffix is ignored), so a CLI ahead of the plugin is settled."""
+        dispatched, _calls, _marker = self._arm(
+            mod, plugin_root, tmp_path, monkeypatch, cli_version, marker_text=marker_text
+        )
+        mod.main()
+        assert capsys.readouterr().out.strip() == ""
+        assert dispatched == []
+
+    @pytest.mark.parametrize("marker_text", [None, "1.0.0"])
+    @pytest.mark.parametrize("cli_version", ["9.9.8", "9.8.99", "8.99.99", "9.9.8-rc1"])
+    def test_cli_older_than_the_plugin_is_skew(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys, marker_text, cli_version
+    ) -> None:
+        dispatched, _calls, _marker = self._arm(
+            mod, plugin_root, tmp_path, monkeypatch, cli_version, marker_text=marker_text
+        )
+        mod.main()
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert dispatched == ["9.9.9"]
 
     def test_matching_marker_does_not_ask_the_cli(
         self, mod, plugin_root, tmp_path, monkeypatch, capsys
@@ -323,6 +373,25 @@ class TestReadCliVersion:
         assert seen["cmd"] == ["/fake/nx", "--version"]
         assert 0 < seen["kw"]["timeout"] <= 10, "the hook runs every session start: bounded"
 
+    def test_child_never_reads_the_hooks_stdin(self, mod, monkeypatch) -> None:
+        seen = self._run_with(mod, monkeypatch, self._Done(0, "nx, version 9.9.9\n"))
+        mod.read_cli_version()
+        assert seen["kw"]["stdin"] is subprocess.DEVNULL
+
+    @pytest.mark.parametrize("os_name, flags", [("nt", 0x08000000), ("posix", 0)])
+    def test_no_console_window_on_windows_only(self, mod, monkeypatch, os_name, flags) -> None:
+        seen = self._run_with(mod, monkeypatch, self._Done(0, "nx, version 9.9.9\n"))
+        monkeypatch.setattr(mod.os, "name", os_name)
+        mod.read_cli_version()
+        assert seen["kw"]["creationflags"] == flags
+
+    def test_worst_case_with_the_git_budget_fits_the_hooks_work_budget(self, mod) -> None:
+        """tests/test_session_start_cold_start_allowance.py gives this hook 5 s of
+        its own work; nx --version and the ref-drift git calls both draw on it."""
+        from tests.test_session_start_cold_start_allowance import WORK_BUDGET_S
+
+        assert mod._CLI_VERSION_TIMEOUT_S + mod._GIT_TIMEOUT_S <= WORK_BUDGET_S["version_lockstep_hook.py"]
+
     def test_nonzero_exit_is_none(self, mod, monkeypatch) -> None:
         self._run_with(mod, monkeypatch, self._Done(1, "nx, version 9.9.9\n"))
         assert mod.read_cli_version() is None
@@ -339,6 +408,64 @@ class TestReadCliVersion:
     def test_no_cli_is_none(self, mod, monkeypatch) -> None:
         monkeypatch.setattr(mod._cli_lookup, "resolve", lambda name: None)
         assert mod.read_cli_version() is None
+
+
+def _load_action():
+    spec = importlib.util.spec_from_file_location(
+        "version_lockstep_action", SCRIPT.parent / "version_lockstep_action.py"
+    )
+    assert spec and spec.loader
+    action_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(action_mod)
+    return action_mod
+
+
+class TestVersionRuleCopiesMatchTheAction:
+    """The hook judges skew by the action's rule, but the two bare stdlib
+    scripts cannot import each other, so the regex and the comparison are
+    copies. These pin them together (the same trade as the ref-drift sentinel)."""
+
+    def test_version_regex_is_the_actions(self, mod) -> None:
+        action = _load_action()
+        assert mod._VERSION_RE.pattern == action._VERSION_RE.pattern
+        assert mod._VERSION_RE.flags == action._VERSION_RE.flags
+
+    @pytest.mark.parametrize(
+        "installed, target",
+        [
+            ("5.7.0", "5.7.0"), ("5.8.0", "5.7.0"), ("5.6.2", "5.7.0"), (None, "5.7.0"),
+            ("garbage", "garbage"), ("garbage", "5.7.0"), ("5.7.0", "garbage"),
+            ("5.7.0-rc1", "5.7.0"), ("5.7.0.dev1", "5.7.0"), ("5.7.0+local", "5.7.0"),
+            ("5.7.1-rc1", "5.7.0"), ("5.6.9-rc1", "5.7.0"), ("10.0.0", "9.9.9"), ("9.9.9", "10.0.0"),
+            ("5.7", "5.7.0"), ("5.7.0", "5.7"), (" 5.7.0 ", "5.7.0"),
+        ],
+    )
+    def test_satisfies_agrees_with_the_action(self, mod, installed, target) -> None:
+        action = _load_action()
+        assert mod.satisfies(installed, target) is action.satisfies(installed, target)
+
+    @pytest.mark.parametrize("version", ["5.7.0", "5.7.0-rc1", "10.20.30", "garbage", "", " 5.7 "])
+    def test_version_core_agrees_with_the_action(self, mod, version) -> None:
+        assert mod._version_core(version) == _load_action()._version_core(version)
+
+
+class TestParserReadsTheRealCliOutput:
+    """The hook may not import nexus; this test may. It runs click's own
+    ``--version`` on the real group and asserts the hook's regex extracts the
+    installed version, so a change to the output shape fails here, not as a
+    silent permanent skew in the field."""
+
+    def test_regex_extracts_the_version_the_cli_prints(self, mod) -> None:
+        from click.testing import CliRunner
+        from importlib.metadata import version
+
+        from nexus.cli import main as nx_main
+
+        result = CliRunner().invoke(nx_main, ["--version"])
+        assert result.exit_code == 0, result.output
+        m = mod._VERSION_RE.search(result.output)
+        assert m is not None, result.output
+        assert m.group(1) == version("conexus")
 
 
 class TestNoCli:

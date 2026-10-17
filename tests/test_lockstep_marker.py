@@ -5,8 +5,7 @@ The marker is the CLI version last confirmed to match the plugin. The plugin's s
 after a build it has checked (``conexus/launch/nx_setup.py``, which runs before any CLI exists
 and so cannot import this module); ``nx self install --bootstrap`` writes it for the installer
 scripts, which build the CLI without the plugin's setup. The SessionStart hook compares it with
-the plugin's version, and a missing marker makes the first session announce an upgrade and
-dispatch one.
+the plugin's version; a missing or stale marker falls back to the CLI's own version (nexus-ehg1y).
 """
 from __future__ import annotations
 

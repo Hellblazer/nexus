@@ -11,7 +11,9 @@
 
 The blocking, stdlib-only SessionStart entry point. It detects skew
 between the installed plugin version (the marketplace surface) and the
-last-confirmed CLI version (a per-user marker), and when they diverge it
+last-confirmed CLI version (a per-user marker; a missing or stale marker
+falls back to the CLI's own ``nx --version``, nexus-ehg1y), and when they
+diverge it
 (a) emits an additionalContext nudge so the in-session model knows an
 upgrade is in flight, and (b) dispatches a DETACHED action that performs
 the extras-preserving two-command upgrade. The hook returns immediately
@@ -321,20 +323,52 @@ def read_marker() -> str | None:
 
 
 #: Seconds ``nx --version`` may take before the hook gives up on it. The hook
-#: runs at every session start, so this is a bound, not an expectation.
-_CLI_VERSION_TIMEOUT_S = 5.0
+#: runs at every session start whenever the marker is absent or stale, so this
+#: is a bound, not an expectation (measured 0.2 s). It shares the hook's 5 s
+#: work budget (tests/test_session_start_cold_start_allowance.py) with
+#: ``_GIT_TIMEOUT_S`` (2 s), so the two worst cases sum to the budget: 3 + 2.
+_CLI_VERSION_TIMEOUT_S = 3.0
 
-_CLI_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?)")
+#: ``CREATE_NO_WINDOW`` (Windows): the child gets no console window.
+_CREATE_NO_WINDOW = 0x08000000
+
+#: A COPY of ``version_lockstep_action._VERSION_RE`` (the two bare stdlib
+#: scripts cannot import each other); tests/hooks/test_version_lockstep_hook.py
+#: pins the copies together.
+_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?)")
+
+
+def _version_core(version: str) -> tuple[int, ...] | None:
+    """COPY of ``version_lockstep_action._version_core`` (pinned by test): the
+    leading dotted-numeric core as a comparable tuple, or None."""
+    m = re.match(r"(\d+(?:\.\d+)*)", version.strip())
+    if not m:
+        return None
+    return tuple(int(p) for p in m.group(1).split("."))
+
+
+def satisfies(installed: str | None, target: str) -> bool:
+    """COPY of ``version_lockstep_action.satisfies`` (pinned by test): True
+    when the installed CLI is at least the target plugin version, comparing
+    the numeric core only. The hook must judge skew by the rule the action
+    uses, or it nudges for a state the action would call settled."""
+    if installed is None:
+        return False
+    inst, tgt = _version_core(installed), _version_core(target)
+    if inst is None or tgt is None:
+        return installed == target  # conservative fallback
+    return inst >= tgt
 
 
 def read_cli_version() -> str | None:
     """The CLI's own version from ``nx --version`` (``nx, version 5.7.0``), or
     None when nx does not resolve, fails, times out or prints no version.
 
-    Only asked when there is no marker (nexus-ehg1y): a hand install
-    (``uv tool install conexus`` then ``nx init``) never writes one, and the
-    marker alone read that matching CLI as skew. Any failure is quiet and
-    means "unknown", which keeps the old behaviour (skew)."""
+    Asked whenever the marker does not already match the plugin (nexus-ehg1y):
+    a hand install (``uv tool install conexus`` then ``nx init``) never writes
+    one, and on an install where the action cannot rewrite it the marker stays
+    stale; the marker alone read that matching CLI as skew. Any failure is
+    quiet and means "unknown", which keeps the old behaviour (skew)."""
     exe = _cli_lookup.resolve("nx")
     if exe is None:
         return None
@@ -344,13 +378,16 @@ def read_cli_version() -> str | None:
             # nx writes UTF-8 to its pipes on Windows (nexus.cli reconfigures at import).
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_CLI_VERSION_TIMEOUT_S,
+            # A hook inherits Claude Code's stdin: never let the child read it.
+            stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"`nx --version` failed: {exc}")
         return None
     if proc.returncode != 0:
         return None
-    m = _CLI_VERSION_RE.search(proc.stdout)
+    m = _VERSION_RE.search(proc.stdout)
     return m.group(1) if m else None
 
 
@@ -725,6 +762,11 @@ def main() -> None:
     """Detect skew (version mismatch, and separately, nexus-konsk ref
     drift), nudge + dispatch on either. Always fail-safe.
 
+    A marker equal to the plugin's version means lockstep. A missing or stale
+    marker falls back to the CLI's own ``nx --version``: lockstep when the CLI
+    is not older than the plugin (the action's ``satisfies`` rule), skew when
+    older or unreadable (nexus-ehg1y).
+
     With no CLI there is nothing to keep in lockstep, so the hook does nothing
     at all: no message, no action, no marker (RDR-228 Gap 2). Before, it told
     the model an upgrade had been dispatched, and the action it started found
@@ -744,12 +786,13 @@ def main() -> None:
             debug("no Nexus CLI resolves, or it cannot start; nothing to keep in lockstep")
             return
         plugin_version = read_plugin_version()
-        marker = read_marker()
-        # A marker decides alone. With none (a hand install never writes one,
-        # nexus-ehg1y), the CLI's own version stands in: equal to the plugin's
-        # is lockstep, anything else, or unknown, is skew as before.
-        version_mismatch = bool(plugin_version) and (
-            marker != plugin_version if marker is not None else read_cli_version() != plugin_version
+        # A marker equal to the plugin's version is lockstep at no cost. With
+        # none (a hand install never writes one) or a stale one (the action
+        # cannot rewrite it on a pip or dev-tree install), the CLI's own
+        # version stands in, judged by the action's rule (CLI >= plugin);
+        # a CLI that is older, or unknown, is skew (nexus-ehg1y).
+        version_mismatch = bool(plugin_version) and read_marker() != plugin_version and not satisfies(
+            read_cli_version(), plugin_version  # type: ignore[arg-type]
         )
         if version_mismatch:
             dispatch_action(plugin_version)  # type: ignore[arg-type]

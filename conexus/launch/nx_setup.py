@@ -2078,7 +2078,8 @@ def _record_lockstep(run: _Run, nx: str, version: str) -> None:
     returned) reports exactly that version: RDR-143's rule is a marker on confirmed lockstep, not on the intent to
     build it. A ``PATH`` ``nx`` or a leftover generation that is not the one just built reports another version and
     gets no marker, so the hook judges it. Without the marker for a build that did match, the next session's
-    lockstep hook dispatches an upgrade that races nothing useful (found by the setup journey, 2026-10-15). A failed
+    lockstep hook pays an `nx --version` call to learn what the marker would have said (nexus-ehg1y; before that
+    it dispatched an upgrade that raced nothing useful, found by the setup journey, 2026-10-15). A failed
     check or write is logged and changes nothing else."""
     seen = _cli_version(run, nx)
     if seen != version:

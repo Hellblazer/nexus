@@ -45,7 +45,8 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-ehg1y): with no `cli_lockstep_marker` (a hand install never writes one) the lockstep hook compares the plugin version with `nx --version` before it reports skew, so a CLI that matches the plugin no longer gets a false nudge and an upgrade dispatch. A marker, when present, still decides alone.
+- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-ehg1y): with a missing or stale `cli_lockstep_marker` (a hand install never writes one; a pip or dev-tree install cannot have the action rewrite it) the lockstep hook runs `nx --version` (3 s bound) and treats a CLI not older than the plugin as in lockstep, by the action's own `satisfies` rule, so a matching CLI no longer gets a false nudge and an upgrade dispatch. A marker equal to the plugin's version still decides alone, with no subprocess.
+- `conexus/launch/nx_setup.py` (nexus-ehg1y): a docstring in `_record_lockstep` now names what the lockstep hook does when the marker is missing; no behaviour change.
 
 
 

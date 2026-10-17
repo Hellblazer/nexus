@@ -4283,9 +4283,9 @@ run the plain command:
   path), the file the plugin's SessionStart hook compares with the plugin's
   version. The installer scripts (`web/install.sh`, `web/install.ps1`) build the
   CLI with this command and without the plugin's setup, which writes the same
-  marker after its own checked build; without it the first Claude session would
-  announce an upgrade and dispatch one (nexus-sv2wx.28). A dry run, a refusal and
-  a failed build write nothing, and a marker that cannot be written is a warning,
+  marker after its own checked build; without it the hook falls back to
+  the CLI's own `nx --version` on every session (nexus-sv2wx.28). A dry run, a
+  refusal and a failed build write nothing, and a marker that cannot be written is a warning,
   not a failure.
 
 Two bootstraps running at once are not guarded here; the setup process's lock

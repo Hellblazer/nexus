@@ -54,6 +54,8 @@ WORK_BUDGET_S: dict[str, int] = {
     "session-start": 10,
     "session-context": 10,
     "rdr": 10,
+    # nx --version (3 s bound) plus the ref-drift git calls (2 s shared bound): the
+    # hook pins their sum to this figure (tests/hooks/test_version_lockstep_hook.py).
     "version_lockstep_hook.py": 5,
     "mcp-connect-wait": 20,
 }

@@ -326,8 +326,8 @@ class TestTheBootstrapBuild:
 
     def test_it_records_the_version_lockstep_marker(self, bootstrapped: Bootstrapped) -> None:
         """The installer scripts build the CLI without the plugin's setup, which is what writes
-        this marker after a build (nexus-sv2wx.28). Without it the first Claude session
-        announces an upgrade and dispatches one. The subprocess ran with the sandbox home."""
+        this marker after a build (nexus-sv2wx.28). Without it the session hook asks the
+        CLI for its own version on every session start. The subprocess ran with the sandbox home."""
         assert bootstrapped.result.returncode == 0
         marker = bootstrapped.world.root / "home" / ".config" / "nexus" / "cli_lockstep_marker"
         assert marker.read_text(encoding="utf-8") == bootstrapped.running_version
