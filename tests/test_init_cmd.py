@@ -851,6 +851,47 @@ class TestServiceLocalEmbedder:
         assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
         assert calls == ["fetch"]
 
+    def test_service_local_keeps_an_existing_voyage_embed_model(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-ddmfg: a local-Voyage user re-running `nx init --service` (or the
+        ladder's provision leg, which goes through the same step) keeps their
+        voyage-* posture; reverting it strands their voyage collections."""
+        calls = self._patch_common(monkeypatch)
+        (cfg_dir / "config.yml").write_text(
+            "local:\n  embed_model: voyage-context-3\n", encoding="utf-8"
+        )
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert _read_config(cfg_dir)["local"]["embed_model"] == "voyage-context-3"
+        assert "Kept" in result.output
+        assert f"nx config set local.embed_model {_TIER1_MODEL}" in result.output
+        assert f"Saved: local.embed_model = {_TIER1_MODEL}" not in result.output
+        # the bge ONNX is still fetched: the service boot reads it regardless
+        assert calls == ["fetch"]
+
+    @pytest.mark.parametrize(
+        "seed",
+        [
+            "",  # no config file at all
+            "local:\n  embed_model: bge-768\n",
+            "local:\n  embed_model: minilm-384\n",
+        ],
+        ids=["absent", "bge", "minilm"],
+    )
+    def test_service_local_stamps_bge_unless_voyage(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, seed: str
+    ) -> None:
+        calls = self._patch_common(monkeypatch)
+        if seed:
+            (cfg_dir / "config.yml").write_text(seed, encoding="utf-8")
+        result = CliRunner().invoke(init_cmd, ["--service"])
+        assert result.exit_code == 0, result.output
+        assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
+        assert f"Saved: local.embed_model = {_TIER1_MODEL}" in result.output
+        assert "Kept" not in result.output
+        assert calls == ["fetch"]
+
     def test_service_local_fetch_offline_is_loud_and_fatal(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1456,8 +1456,7 @@ def t3_collection_name(
             # regardless of what local.embed_model CURRENTLY says.
             # Bounded (LOCAL_EMBEDDING_MODELS is a 2-entry frozenset) and
             # scoped tightly to the voyage-switch scenario (never fires
-            # for a plain bge<->minilm install, which keeps its own
-            # deliberate `nx init` migration UX unchanged).
+            # for a plain bge<->minilm install).
             #
             # TRUTH TABLE (mode: local + local.embed_model voyage-shaped;
             # all other modes/configs never reach this line — full table

@@ -10,11 +10,12 @@ probe. It is distinct from the credentials-only wizard ``nx config init``.
 Local mode's embedding posture is one model per boot, not a fixed bge-768
 ceiling: with ``NX_VOYAGE_API_KEY`` reaching the service, the Java service
 embeds and reranks with Voyage instead (nexus-umm29 carve-out; the outbound
-call is the only one the local service makes). This module always stamps
-``local.embed_model`` to bge-768 regardless of that opt-in — re-running
-``nx init`` or the upgrade ladder's provision leg reverts a Voyage posture at
-the next restart. RDR-210 tracks the dual-mode engine and the fix to stop
-clobbering the setting.
+call is the only one the local service makes). This module stamps
+``local.embed_model`` to bge-768 on a fresh or bge/minilm install, but KEEPS
+a value that is already voyage-* (nexus-ddmfg): re-running ``nx init`` or the
+upgrade ladder's provision leg must not revert a Voyage posture, which would
+strand its collections at the next restart. Switching on purpose goes through
+``nx config set local.embed_model``, which lists what the switch strands.
 
 This module DOES perform network and install work on the LOCAL path (PG
 provisioning, native-binary acquisition, bge-768 ONNX download) — the RDR-144
@@ -39,12 +40,11 @@ _log = structlog.get_logger(__name__)
 #: ``config.local_embed_model_choice()`` reads it and feeds the doctor advisory
 #: (health.py), the MCP first-run advisory, and ``local_ef`` model selection.
 #: ``_provision_service_embedder_step`` stamps it at provisioning time so those
-#: consumers agree with what the service actually runs — bge-768 is what this
-#: init/provision path always writes (RDR-160); the RDR-144 multi-choice picker
-#: that once varied it was removed in RDR-174 P1.3. A separate opt-in
-#: (``NX_VOYAGE_API_KEY``, nexus-umm29) switches the running service to Voyage
-#: without going through this key, which is why re-running init or the upgrade
-#: ladder's provision leg silently reverts that opt-in (RDR-210).
+#: consumers agree with what the service actually runs — bge-768 unless the
+#: key already holds a voyage-* value, which is kept (nexus-ddmfg; RDR-160 set
+#: the bge-768 default, and the RDR-144 multi-choice picker that once varied it
+#: was removed in RDR-174 P1.3). A Voyage posture is set by
+#: ``nx config set local.embed_model voyage-*`` plus a key (nexus-umm29).
 _EMBED_MODEL_KEY = "local.embed_model"
 
 
@@ -67,11 +67,12 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
       Java-read path; the service only reads the file. Offline failure is loud
       (no silent fallback).
 
-    This step always stamps ``local.embed_model`` to bge-768, even on a
-    machine with a Voyage opt-in already configured (``NX_VOYAGE_API_KEY``,
-    nexus-umm29) — that opt-in is a separate switch the supervisor reads at
-    service spawn, and running this step reverts it at the next restart.
-    RDR-210 tracks making the two agree.
+    This step stamps ``local.embed_model`` to bge-768 unless it already holds
+    a voyage-* value (nexus-ddmfg): a local-Voyage install that reruns
+    ``nx init`` or whose upgrade ladder runs this step keeps its posture, and
+    the step says so. Reverting would strand its voyage collections at the
+    next restart. The bge ONNX is still fetched either way; the service boot
+    reads it regardless.
     """
     from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         SERVICE_BGE_DOWNLOAD_HINT,
@@ -89,12 +90,20 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
 
     # Record bge-768 as the active local model so the rest of nx (catalog model
     # segment, doctor advisory) agrees with what the service actually runs.
-    # This is the default posture only — switching this key to a voyage model
-    # AND configuring voyage_api_key, then restarting, is a separate opt-in
-    # (docs/cli-reference.md "Local mode with Voyage"); a later `nx init`/
-    # upgrade-ladder provision run reverts that switch (RDR-210).
-    set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
-    click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service default; Voyage is a separate opt-in)")
+    # Default posture only: a value that is already voyage-* (set by `nx config
+    # set local.embed_model`, docs/cli-reference.md "Local mode with Voyage") is
+    # kept, so a rerun of `nx init` or the upgrade ladder's provision leg does
+    # not strand the voyage collections at the next restart (nexus-ddmfg).
+    if _config.local_embed_model_is_voyage():
+        click.echo(
+            f"\nKept: {_EMBED_MODEL_KEY} = {_config.local_embed_model_choice()} "
+            f"(not reset to the bge-768 default). To switch on purpose, run "
+            f"`nx config set {_EMBED_MODEL_KEY} {_TIER1_MODEL}`; it lists the "
+            f"collections the switch strands first."
+        )
+    else:
+        set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
+        click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service default; Voyage is a separate opt-in)")
 
     click.echo(
         f"\nProvisioning the standard bge-768 ONNX the service reads "
@@ -1048,7 +1057,8 @@ def init_cmd(
     A separate opt-in (nexus-umm29) switches the running service to Voyage
     instead — see docs/cli-reference.md "Local mode with Voyage" for the
     ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later
-    ``nx init`` reverts it (RDR-210). ``--service`` is still accepted (it
+    ``nx init`` keeps a voyage-* ``local.embed_model`` and says so
+    (nexus-ddmfg). ``--service`` is still accepted (it
     forces local provisioning) and is slated for a deprecation notice in P3.1.
     """
     # nexus-gynt2: stranded-install refusal, FIRST — before any provisioning.

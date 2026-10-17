@@ -206,7 +206,7 @@ limit):
 
 A collection embedded under the posture NOT running at the moment is refused
 with a 422 (RDR-204's "reads never refused" is the design intent, not today's
-behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and re-running `nx init` or the upgrade ladder's provision leg reverts a Voyage opt-in back to bge-768 (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
+behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and `nx config set local.embed_model` lists the collections a switch strands before it changes anything. Re-running `nx init` or the upgrade ladder's provision leg keeps a Voyage opt-in (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
 
 Both modes rerank server-side in the Java engine on `rerank=true`; there is no client-side rerank path (the old `nexus.cross_encoder` rerank caller was deleted at RDR-188 P2.6; that module's ONNX cross-encoder has no live production consumer since its salience caller was also retired at nexus-0hqez, 2026-09-23). A missing local cross-encoder model degrades loud (`rerank_degraded=true`) rather than silently skipping the stage; `nx doctor` flags it.
 

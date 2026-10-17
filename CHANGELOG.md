@@ -9,6 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Every push to develop gets a CI run that finishes** (Sam, 2026-10-17). With several sessions pushing, the next push cancelled the last one's run in `ci.yml`, the Windows rehearsal and the plugin drift ledger, so many develop commits never got a finished run. Those three workflows now take one concurrency group per commit on develop and one per ref elsewhere, so a PR push still cancels the run it supersedes. Sessions batch their commits and push less often. Test: `tests/test_ci_develop_runs_finish.py`.
+- `nx init` (and the upgrade ladder's provision leg, which runs the same step) no longer resets a `voyage-*` `local.embed_model` to bge-768. It keeps the value and prints one line saying so and how to switch on purpose; a fresh, bge or minilm value is still stamped bge-768. Before, a local-Voyage user rerunning `nx init` had their voyage collections stranded at the next restart. The cli-reference `nx init` section no longer describes the 384-to-768 migration offer that RDR-174 P1.3 removed. Tests: `tests/test_init_cmd.py` (`TestServiceLocalEmbedder`).
 
 ### Fixed
 
