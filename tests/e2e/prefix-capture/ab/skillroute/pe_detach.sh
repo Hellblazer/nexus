@@ -15,7 +15,7 @@ setsid -f docker run --rm --name "nxpe-$LABEL" \
   --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --security-opt systempaths=unconfined \
   -e CLAUDE_CODE_OAUTH_TOKEN -e NX_NO_TELEMETRY=1 -e TREE=/plugins/"$ARM"/conexus \
-  -e RUNS="$RUNS" -e CASE_GLOB="$GLOB" -e MAX_COST="${MAX_COST:-60}" -e CONC="${CONC:-2}" \
+  -e RUNS="$RUNS" -e CASE_GLOB="$GLOB" -e MAX_COST="${MAX_COST:-100}" -e CONC="${CONC:-2}" \
   -e ANTHROPIC_MODEL="${AB_MODEL:-claude-opus-5-5}" \
   -v "$HARNESS:/harness:ro" -v "$HERE/plugins:/plugins:ro" -v "$OUT:/out" \
   --entrypoint /bin/bash ${PE_IMAGE:-nexus-ab-seeded-sbx:2.1.300} /harness/ab/skillroute/pe_in_container.sh \

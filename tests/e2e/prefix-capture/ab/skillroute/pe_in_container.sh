@@ -14,7 +14,7 @@ mkdir -p /home/nexus/pe && cp -R "${TREE:?TREE}" "$PLUGIN"
 ARGS=(--runs "${RUNS:-3}" --ablation none --scaffold --trust-plugin --no-publish
       --mocks off --allow-tools Bash Write Edit mcp__plugin_conexus_nexus mcp__plugin_conexus_nexus-catalog mcp__plugin_conexus_sequential-thinking
       --model "${ANTHROPIC_MODEL:-claude-opus-5-5}" -j "${CONC:-2}"
-      --max-cost-usd "${MAX_COST:-60}" --json "$OUT/report.json"
+      --max-cost-usd "${MAX_COST:-100}" --json "$OUT/report.json"
       --output-dir "$OUT/results" --report "$OUT/report.html")
 [ -n "${CASE_GLOB:-}" ] && ARGS+=(--case "$CASE_GLOB")
 t0=$(date +%s)
