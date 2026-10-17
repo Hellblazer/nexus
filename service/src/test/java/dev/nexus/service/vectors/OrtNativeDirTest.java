@@ -202,8 +202,12 @@ class OrtNativeDirTest {
         ExecutorService pool = Executors.newFixedThreadPool(n);
         try {
             for (int t = 0; t < trials; t++) {
-                Path root = Files.createDirectory(base.resolve("trial-" + t));
+                // ensure() creates the root rwxr-xr-x, as it does in production. A root made here with
+                // Files.createDirectory inherits the host umask, and a 0002 umask (Ubuntu, lab-run on
+                // chas) makes it group-writable, which the owner check rightly refuses.
+                Path root = base.resolve("trial-" + t);
                 Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+                assertThat(dir).as("trial %d: the first starter extracts", t).isNotNull();
                 Files.delete(lib(dir, "onnxruntime4j_jni"));
                 CountDownLatch go = new CountDownLatch(1);
                 List<Future<OrtNativeDir.Result>> futures = new ArrayList<>();
