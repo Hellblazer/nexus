@@ -127,6 +127,7 @@ $psi.UseShellExecute = $false
 $psi.WorkingDirectory = $HOME
 $psi.EnvironmentVariables['CLAUDE_CODE_OAUTH_TOKEN'] = $t
 $psi.EnvironmentVariables['NX_HARNESS_CLAUDE_OAUTH_TOKEN'] = $t
+$psi.EnvironmentVariables['NX_NO_TELEMETRY'] = '1'  # a restored guest is a fresh install (nexus-ca5rw)
 $p = [System.Diagnostics.Process]::Start($psi)
 $t = $null; $psi = $null
 $p.WaitForExit()

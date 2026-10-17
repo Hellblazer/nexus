@@ -11,6 +11,20 @@ rm -f /home/nexus/.config/nexus/postgres/postmaster.pid
 nx daemon service start > "$OUT/service.log" 2>&1
 PLUGIN=/home/nexus/pe/conexus
 mkdir -p /home/nexus/pe && cp -R "${TREE:?TREE}" "$PLUGIN"
+# claude plugin eval hands a plugin MCP server only the env its .mcp.json names: NX_NO_TELEMETRY=1
+# on the container never reached nx-mcp, and each run, with its own fresh HOME, pinged as a new
+# install (nexus-ca5rw; probed on chas 2026-10-17). The copy names it for every server,
+# whichever script produced the mounted tree.
+python3 - "$PLUGIN/.mcp.json" <<'PY' || { echo "eval not run: could not add NX_NO_TELEMETRY to .mcp.json" > "$OUT/exit.txt"; exit 1; }
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    config = json.load(f)
+for server in config.get("mcpServers", config).values():
+    server.setdefault("env", {})["NX_NO_TELEMETRY"] = "1"
+with open(path, "w") as f:
+    json.dump(config, f, indent=2)
+PY
 ARGS=(--runs "${RUNS:-3}" --ablation none --scaffold --trust-plugin --no-publish
       --mocks off --allow-tools Bash Write Edit mcp__plugin_conexus_nexus mcp__plugin_conexus_nexus-catalog mcp__plugin_conexus_sequential-thinking
       --model "${ANTHROPIC_MODEL:-claude-opus-5-5}" -j "${CONC:-2}"

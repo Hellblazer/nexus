@@ -33,8 +33,9 @@ $cred = New-Object PSCredential($GuestUser, $sec)
 # A failed open is retried every 10 s for 2 minutes while the guest is Running; a guest that is not Running
 # stops the script at once. After a failure, the guest's failed sign-ins (events 4625 and 4776) from a minute
 # before the first one are printed.
-# It then sets NX_NO_TELEMETRY=1 in the guest, Machine-wide so the as-user scheduled task's new logon gets it
-# too: a restored guest is a fresh install, and every run used to send conexus an install ping (nexus-ca5rw).
+# It then sets NX_NO_TELEMETRY=1 in the guest, in the session and Machine-wide: a restored guest is a fresh
+# install, and every run used to send conexus an install ping (nexus-ca5rw). The scheduled-task payloads
+# set it too, since an Interactive task joins a signed-in session whose environment predates this.
 # Everything it prints goes through Write-Host: its pipeline output is its return value, the session.
 function Open-GuestSession($Name) {
     $since = $null

@@ -237,7 +237,8 @@ def test_split_floor_catches_an_emptied_cc_validation_sweep(monkeypatch) -> None
 # MCP server the container's NX_NO_TELEMETRY=1, `claude plugin eval` does not
 # (the server saw None) unless the plugin's .mcp.json names it in `env`.
 
-WINDOWS_DRIVER = E2E / "windows-guest" / "driver"
+WINDOWS_GUEST = E2E / "windows-guest"
+WINDOWS_DRIVER = WINDOWS_GUEST / "driver"
 SESSION_SCRIPTS = ("restore.ps1", "stduser.ps1", "cache.ps1", "guest-run.ps1")
 _GUEST_OPT_OUT = "[Environment]::SetEnvironmentVariable('NX_NO_TELEMETRY', '1', 'Machine'); $env:NX_NO_TELEMETRY = '1'"
 
@@ -247,8 +248,6 @@ def test_every_windows_guest_session_opts_the_guest_out(name: str) -> None:
     text = (WINDOWS_DRIVER / name).read_text()
     start = text.index("function Open-GuestSession")
     body = text[start : text.index("\n}\n", start)]
-    # Machine scope: the as-user step runs nx through a scheduled task, a new logon that never
-    # sees a variable set only in the PowerShell Direct session.
     assert _GUEST_OPT_OUT in body, f"{name}: Open-GuestSession must set NX_NO_TELEMETRY=1 Machine-wide"
 
 
@@ -257,10 +256,27 @@ def test_every_script_that_opens_a_guest_session_is_listed() -> None:
     assert openers == sorted(SESSION_SCRIPTS)
 
 
-def test_the_plugin_eval_tree_export_names_the_opt_out_for_every_server(tmp_path: pathlib.Path) -> None:
-    script = (E2E / "prefix-capture" / "ab" / "skillroute" / "export_conexus.sh").read_text()
-    m = re.search(r"python3 - \"\$DEST/conexus/\.mcp\.json\" <<'PY'\n(.*?)\nPY\n", script, re.S)
-    assert m, "export_conexus.sh no longer rewrites the extract's .mcp.json"
+def test_every_guest_task_that_runs_powershell_opts_out() -> None:
+    """An Interactive scheduled task joins the signed-in session, whose environment predates the
+    Machine-wide value, so each PowerShell payload a task starts sets the opt-out itself. host-recv's
+    task starts claude through a ProcessStartInfo, whose environment it names the same way."""
+    payloads = {
+        "driver/as-user.ps1": "\n$env:NX_NO_TELEMETRY = '1'\n",
+        "driver/setup-run.ps1": "\n$env:NX_NO_TELEMETRY = '1'\n",
+        "host-recv.ps1": "$psi.EnvironmentVariables['NX_NO_TELEMETRY'] = '1'",
+    }
+    tasks = sorted(p.relative_to(WINDOWS_GUEST).as_posix() for p in WINDOWS_GUEST.rglob("*.ps1")
+                   if re.search(r"New-ScheduledTaskAction -Execute 'powershell\.exe'", p.read_text()))
+    assert tasks == sorted(payloads), "a new scheduled task runs PowerShell in the guest: add its opt-out here"
+    for rel, needle in payloads.items():
+        assert needle in (WINDOWS_GUEST / rel).read_text(), f"{rel} must set NX_NO_TELEMETRY=1 for its task"
+
+
+def test_every_plugin_eval_run_names_the_opt_out_for_every_server(tmp_path: pathlib.Path) -> None:
+    script = (E2E / "prefix-capture" / "ab" / "skillroute" / "pe_in_container.sh").read_text()
+    m = re.search(r"python3 - \"\$PLUGIN/\.mcp\.json\" <<'PY' \|\| \{[^\n]*exit 1; \}\n(.*?)\nPY\n", script, re.S)
+    assert m, "pe_in_container.sh no longer rewrites the copied tree's .mcp.json, or no longer stops when it fails"
+    assert script.index(m.group(0)) < script.index('claude plugin eval "${ARGS[@]}"'), "the rewrite must come before the eval"
     mcp = tmp_path / ".mcp.json"
     mcp.write_text((REPO / "conexus" / ".mcp.json").read_text())
     subprocess.run([sys.executable, "-c", m.group(1), str(mcp)], check=True)

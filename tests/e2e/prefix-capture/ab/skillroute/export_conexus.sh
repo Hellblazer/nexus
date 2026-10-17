@@ -15,18 +15,5 @@ git -C "$WT" cat-file -e "$SHA^{tree}"
 rm -rf "$DEST/conexus"
 mkdir -p "$DEST"
 git -C "$WT" archive "$SHA" conexus | tar -x -C "$DEST"
-# claude plugin eval hands a plugin MCP server only the env its .mcp.json names: NX_NO_TELEMETRY=1
-# on the container never reached nx-mcp, and each run, with its own fresh HOME, pinged as a new
-# install (nexus-ca5rw; probed on chas 2026-10-17). The extract names it for every server.
-python3 - "$DEST/conexus/.mcp.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-with open(path) as f:
-    config = json.load(f)
-for server in config.get("mcpServers", config).values():
-    server.setdefault("env", {})["NX_NO_TELEMETRY"] = "1"
-with open(path, "w") as f:
-    json.dump(config, f, indent=2)
-PY
 git -C "$WT" rev-parse "$SHA" > "$DEST/commit"
 echo "plugins/$ARM/conexus from $(cat "$DEST/commit")"

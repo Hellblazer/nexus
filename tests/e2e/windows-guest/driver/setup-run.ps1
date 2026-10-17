@@ -17,6 +17,7 @@ $b = "$env:USERPROFILE\nx-gate"
 $who = if ($env:NXG_RUN_AS) { $env:NXG_RUN_AS } else { $env:USERNAME }
 (@'
 $host.UI.RawUI.WindowTitle = 'Phase 5 gate: setup'
+$env:NX_NO_TELEMETRY = '1'
 $env:PATH = "$env:USERPROFILE\.local\bin;C:\Program Files\Git\cmd;$env:LOCALAPPDATA\Programs\Git\cmd;" + $env:PATH
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\nx-gate\windows-phase5-gate.ps1" -Phase setup -ExpectedVersion @VERSION@ -ExpectedEngine @ENGINE@ *>&1 | Tee-Object -FilePath "$env:USERPROFILE\nx-gate\setup.log"
 "setup exit=$LASTEXITCODE" | Tee-Object -Append -FilePath "$env:USERPROFILE\nx-gate\setup.log"
