@@ -59,6 +59,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
+- Desktop restart step (nexus-93xx0): `conexus/launch/nx_standin.py` tells the user, wherever it says to reconnect the `nexus` server, that Claude Desktop needs the app quit and opened again because a new chat keeps the running stand-in. Deferred because the same bead changes `src/nexus/mcp/setup_tools.py`, whose `setup_status` description is kept equal to the stand-in's.
+- Desktop restart step (nexus-93xx0): `conexus/launch/nx_setup.py` gives a finished run the next step `RECONNECT_NEXT`, which names Claude Desktop's quit-and-reopen. Deferred because the same bead changes `src/nexus/mcp/setup_tools.py`.
 - bd commands replace /beads: pointers (nexus-dg7i6.4): `conexus/agents/architect-planner.md` names `bd <verb>` where it named the beads plugin's `/beads:<verb>` commands, which nexus no longer installs; agents already run `bd` through Bash. Deferred because the same bead re-hosts `bd prime` in `src/nexus/hooks/session_context.py`.
 - bd commands replace /beads: pointers (nexus-dg7i6.4): `conexus/agents/code-review-expert.md` names `bd <verb>` where it named the beads plugin's `/beads:<verb>` commands, which nexus no longer installs; agents already run `bd` through Bash. Deferred because the same bead re-hosts `bd prime` in `src/nexus/hooks/session_context.py`.
 - bd commands replace /beads: pointers (nexus-dg7i6.4): `conexus/agents/codebase-deep-analyzer.md` names `bd <verb>` where it named the beads plugin's `/beads:<verb>` commands, which nexus no longer installs; agents already run `bd` through Bash. Deferred because the same bead re-hosts `bd prime` in `src/nexus/hooks/session_context.py`.
