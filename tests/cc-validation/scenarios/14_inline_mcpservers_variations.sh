@@ -108,20 +108,12 @@ Save your tool inventory to ${TEST_HOME}/14b_tools.txt using Write.
 Then call mcp__stub__record with payload='14b-PROOF'. Reply 14B_DONE.
 EOF
 
-NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<EOF
-{ "version": 2, "plugins": {
-  "test-plugin@local-marketplace": [
-    { "scope": "user", "installPath": "$TEST_HOME/.claude/test-plugin", "version": "dev",
-      "installedAt": "$NOW", "lastUpdated": "$NOW" }
-  ]
-}}
-EOF
-
+# nexus-spwp2: installed through cc_plugin_require (runner.sh), not a
+# hand-written installed_plugins.json, which Claude Code 2.1.302 does not load.
+# Settings first: the install merges enabledPlugins into them.
 cat > "$TEST_HOME/.claude/settings.json" <<EOF
 {
   "skipDangerousModePermissionPrompt": true,
-  "enabledPlugins": { "test-plugin@local-marketplace": true },
   "permissions": { "allow": ["Task", "mcp__stub__*", "Write"], "defaultMode": "acceptEdits" }
 }
 EOF
@@ -129,6 +121,7 @@ EOF
 : > "$STUB_LOG"
 rm -f "$TEST_HOME/14b_tools.txt"
 
+if cc_plugin_require "$TEST_HOME/.claude/test-plugin" test-plugin local-marketplace; then
 claude_start
 claude_prompt "Use Task to dispatch agent14b. Description='14b'. Prompt: 'Run your instructions exactly.'"
 claude_wait 90
@@ -139,30 +132,27 @@ mcp_in_inv=0; [[ -f "$TEST_HOME/14b_tools.txt" ]] && grep -qE "mcp__stub__" "$TE
 agent_ran=0; [[ -f "$TEST_HOME/14b_tools.txt" ]] && agent_ran=1
 echo "    14b verdict: agent_ran=$agent_ran  mcp_in_inv=$mcp_in_inv  stub_called=$log_called"
 
-# VALIDITY NOTE (root-caused 2026-05-31): this tests a config CC explicitly
-# DISALLOWS — the docs state hooks/mcpServers/permissionMode are not supported on
-# plugin-shipped agents (security). On top of that, agent14b never even runs
-# because the plugin AGENT is not registered. The sandbox installs the fake plugin
-# via installed_plugins.json + enabledPlugins, which loads plugin HOOKS (proven
-# by scenario 13b) but NOT plugin AGENTS — the dispatch errors with "Agent type
-# 'agent14b' not found. Available agents: agent14a, ...". So this scenario cannot
-# exercise its intended behavior in this harness: that is a SKIP (untestable),
-# not a pass (we verified nothing) and not a fail (no CC defect under test). If
-# agent14b ever DOES run, report the real result. Registering plugin agents would
-# need a marketplace-style install, out of scope for the manual-install harness.
+# VALIDITY NOTE (root-caused 2026-05-31, restated by nexus-spwp2): this tests a
+# config CC explicitly DISALLOWS -- the docs state hooks/mcpServers/permissionMode
+# are not supported on plugin-shipped agents (security). Until nexus-spwp2 the
+# plugin was never loaded at all (a hand-written installed_plugins.json is not
+# read by Claude Code 2.1.302), which is why agent14b was "not registered" and
+# this part could only skip. With the plugin loaded (cc_plugin_require above, a
+# FAIL otherwise) a missing agent is a real result about plugin agents, still
+# reported as a SKIP only when agent14b did not run.
 if [[ $mcp_in_inv -eq 1 && $log_called -eq 1 ]]; then
     pass "14b: plugin-shipped agent inline mcpServers WORK (server loaded, tool used)"
 elif [[ $agent_ran -eq 1 && $mcp_in_inv -eq 0 ]]; then
     pass "14b: plugin-shipped agent inline mcpServers do NOT load (agent ran, stub absent from inventory) — vs 14a project-level which loads"
+elif [[ $agent_ran -eq 1 ]]; then
+    skip "14b: agent14b (registered by the marketplace-installed plugin) ran and listed the stub tool but did not call it (deferred MCP tool schema not loaded, see the README); not a verdict on inline mcpServers"
 else
-    skip "14b: plugin-shipped agent 'agent14b' is not registered by the manual plugin install (hooks load, agents do not — 'Agent type not found'). Untestable in this harness; needs a marketplace-style install to register plugin agents."
+    skip "14b: plugin-shipped agent 'agent14b' did not run although the plugin loaded (see the pane); not a verdict on inline mcpServers"
+fi
+claude_exit
 fi
 
-# Reset plugins
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<'EOF'
-{"version": 2, "plugins": {}}
-EOF
-claude_exit
+cc_plugin_uninstall_all
 scenario_end
 
 # ── 14c: project-level .mcp.json + agent string-reference (no inline)

@@ -42,7 +42,7 @@
 # that route loads nothing ("Marketplace nexus-plugins not found", found
 # 2026-10-17 with `claude plugin list`), so no hook of those plugins could have
 # run there. The plugin is now installed through a local-directory marketplace
-# and verified loaded (see _s32_install_plugin). What is observable of the REAL
+# and verified loaded (see cc_plugin_install in runner.sh). What is observable of the REAL
 # hooks.json entries, and how:
 #   - the session transcript records a hook's stdout and stderr only when one
 #     of them is non-empty (the current plugin's guards print nothing on a
@@ -185,38 +185,29 @@ with open(path, "w") as f:
 PY
 }
 
-# Install <plugin_root> as the user-scope conexus plugin through a
-# local-directory marketplace named nexus-plugins -- its own hooks.json is what
-# actually governs the Bash call below. The plugin tree is copied byte for byte;
-# the synthesized marketplace.json names it, and the marker hook is appended to
-# the copy's PreToolUse/Bash group (_s32_add_marker_hook).
+# Install <plugin_root> as the user-scope conexus plugin through the shared
+# cc_plugin_install (runner.sh): a local-directory marketplace named
+# nexus-plugins whose own hooks.json is what actually governs the Bash call
+# below, verified loaded at the expected version. The plugin tree is copied byte
+# for byte; the marker hook is appended to the copy's PreToolUse/Bash group
+# (_s32_add_marker_hook, through the prepare callback).
 #
-# WHY NOT A HAND-WRITTEN installed_plugins.json (scenario 12's shape, and this
-# scenario's own until nexus-ueztp): Claude Code 2.1.302 reads such an entry as
-# "conexus@nexus-plugins ... Status: failed to load, Error: Marketplace
-# nexus-plugins not found" and loads NOTHING from it -- no hooks, no agents. A
-# plugin that never loaded emits no decision, so 32a's "the prompt was seen"
-# held for the wrong reason, and it would hold just the same with the vulnerable
-# plugin. Found by running `claude plugin list` in the cc-val container.
+# WHY NOT A HAND-WRITTEN installed_plugins.json: see runner.sh's plugin helpers
+# and tests/cc-validation/README.md. This scenario's own did exactly that until
+# nexus-ueztp, and its "the prompt was seen" held for the wrong reason.
 #
 # Sets S32_INSTALLED_ROOT (where Claude Code put the plugin) and returns non-zero
 # unless `claude plugin list` reports the plugin enabled at the expected version.
 S32_INSTALLED_ROOT=""
+S32_MARKER_PATH=""
+_s32_prepare_copy() {
+    _s32_add_marker_hook "$1/hooks/hooks.json" "$S32_MARKER_PATH"
+}
 _s32_install_plugin() {
-    local root="$1" label="$2" marker="$3" version mkt="$TEST_HOME/marketplace-$2"
-    version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$root/.claude-plugin/plugin.json")"
-    rm -rf "$mkt" "$TEST_HOME/.claude/plugins"
-    mkdir -p "$mkt/.claude-plugin" "$TEST_HOME/.claude/plugins"
-    cp -R "$root" "$mkt/conexus"
-    _s32_add_marker_hook "$mkt/conexus/hooks/hooks.json" "$marker" || return 1
-    cat > "$mkt/.claude-plugin/marketplace.json" <<EOF
-{"name":"nexus-plugins","owner":{"name":"cc-validation"},"plugins":[{"name":"conexus","source":"./conexus","version":"$version"}]}
-EOF
-    HOME="$TEST_HOME" claude plugin marketplace add "$mkt" > "$TEST_HOME/plugin-install.log" 2>&1 || return 1
-    HOME="$TEST_HOME" claude plugin install conexus@nexus-plugins --scope user >> "$TEST_HOME/plugin-install.log" 2>&1 || return 1
-    HOME="$TEST_HOME" claude plugin list > "$TEST_HOME/plugin-list.txt" 2>&1 || return 1
-    grep -q "Version: $version" "$TEST_HOME/plugin-list.txt" && grep -q "Status: ✔ enabled" "$TEST_HOME/plugin-list.txt" || return 1
-    S32_INSTALLED_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plugins"]["conexus@nexus-plugins"][0]["installPath"])' "$TEST_HOME/.claude/plugins/installed_plugins.json")"
+    local root="$1" marker="$3"
+    S32_MARKER_PATH="$marker"
+    cc_plugin_install "$root" conexus nexus-plugins _s32_prepare_copy || return 1
+    S32_INSTALLED_ROOT="$CC_PLUGIN_INSTALLED_ROOT"
     [[ -f "$S32_INSTALLED_ROOT/hooks/hooks.json" ]]
 }
 
@@ -449,7 +440,7 @@ EOF
         S32_PLUGIN_LOADED=1
     else
         echo "    32/$label: the plugin did not load -- 'claude plugin list' said:" >&2
-        sed 's/^/    | /' "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" 2>/dev/null >&2 || true
+        sed 's/^/    | /' "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" >&2 2>/dev/null || true
         _s32_keep_evidence "$label" ""
         return 0
     fi
@@ -556,10 +547,7 @@ else
     fail "32b control: the ${S32_CONTROL_TAG} plugin tree could not be staged from the git tag -- the positive control is declared, so its absence is a failure, never a skip"
 fi
 
-# Restore empty plugins (mirrors scenario 12's teardown).
-rm -rf "$TEST_HOME/.claude/plugins"; mkdir -p "$TEST_HOME/.claude/plugins"
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<'EOF'
-{"version": 2, "plugins": {}}
-EOF
+# Back to the empty plugin registry.
+cc_plugin_uninstall_all
 
 scenario_end

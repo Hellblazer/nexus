@@ -156,6 +156,13 @@ eval "$(declare -f claude_start | sed '1s/claude_start/_lib_claude_start/')"
 claude_start() {
     _preseed_trust
     CLAUDE_EXTRA_ARGS="$(_prepare_mcp_args)"
+    # nexus-spwp2: a scenario that installed a plugin through cc_plugin_install
+    # has CC_DEBUG_FILE set; Claude Code's debug log is the only record of a
+    # hook that ran SILENTLY (the transcript omits a hook whose stdout and
+    # stderr are empty), so those sessions always write one.
+    if [[ -n "${CC_DEBUG_FILE:-}" ]]; then
+        CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS} --debug-file ${CC_DEBUG_FILE}"
+    fi
     export CLAUDE_EXTRA_ARGS
     _lib_claude_start "$@"
 }
@@ -228,10 +235,8 @@ mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.c
 # from tests/e2e/.claude-auth/claude.json is not needed.
 echo '{"hasCompletedOnboarding":true}' > "$TEST_HOME/.claude.json"
 
-# Empty plugin registry — no plugins loaded by default.
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<'EOF'
-{"version": 2, "plugins": {}}
-EOF
+# Empty plugin registry — no plugins loaded by default (_cc_plugins_baseline,
+# defined with the plugin helpers below, writes it).
 
 # Default settings: bypass dangerous-mode dialog. Each scenario overwrites this.
 cat > "$TEST_HOME/.claude/settings.json" <<'EOF'
@@ -282,8 +287,143 @@ reset_scenario_state() {
     mkdir -p "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
     # Restore the dangerous-mode bypass — every scenario needs it.
     echo '{"skipDangerousModePermissionPrompt": true}' > "$TEST_HOME/.claude/settings.json"
+    # A plugin installed by an earlier scenario must not leak into this one.
+    _cc_plugins_baseline
 }
 export -f reset_scenario_state
+
+# ─── Plugin install (nexus-spwp2) ─────────────────────────────────────────────
+#
+# THE way a scenario gets a plugin loaded. Claude Code 2.1.302 does NOT load a
+# plugin from a hand-written installed_plugins.json entry: `claude plugin list`
+# says "failed to load: Marketplace <name> not found", and no hook, agent or
+# server of it exists in the session. A scenario that wrote one passed on
+# whatever the plugin-less session did (found by nexus-ueztp; census and fix in
+# nexus-spwp2). So a plugin is installed through a local-directory marketplace
+# with `claude plugin marketplace add` + `claude plugin install`, and the
+# scenario does not start a session unless `claude plugin list` reports it
+# enabled at the version its plugin.json declares.
+#
+# The install replaces ALL plugin state: one plugin per scenario part. It also
+# merges enabledPlugins/extraKnownMarketplaces into
+# $TEST_HOME/.claude/settings.json, so a scenario writes its settings.json FIRST
+# and installs after.
+
+CC_PLUGIN_ID=""
+CC_PLUGIN_VERSION=""
+CC_PLUGIN_INSTALLED_ROOT=""
+CC_DEBUG_FILE=""
+
+# The empty registry: the state before any install and after every teardown.
+# The one place an installed_plugins.json is written, and it names no plugin.
+_cc_plugins_baseline() {
+    rm -rf "$TEST_HOME/.claude/plugins"
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    printf '%s\n' '{"version": 2, "plugins": {}}' > "$TEST_HOME/.claude/plugins/installed_plugins.json"
+    CC_PLUGIN_ID="" CC_PLUGIN_VERSION="" CC_PLUGIN_INSTALLED_ROOT="" CC_DEBUG_FILE=""
+}
+
+# cc_plugin_install <plugin_root> <plugin_name> <marketplace_name> [prepare_fn]
+#
+# Copies <plugin_root> into a synthesized marketplace named <marketplace_name>,
+# installs it at user scope, and succeeds only when `claude plugin list` shows
+# <plugin_name>@<marketplace_name> enabled at the version <plugin_root>'s
+# plugin.json declares. <prepare_fn>, when given, runs on the COPY before the
+# install (scenario 32 appends its marker hook there). Sets CC_PLUGIN_ID,
+# CC_PLUGIN_VERSION, CC_PLUGIN_INSTALLED_ROOT and CC_DEBUG_FILE (the file
+# claude_start hands to --debug-file); the evidence files plugin-install.log and
+# plugin-list.txt land in $TEST_HOME. Never skips: a caller that gets non-zero
+# back must fail its scenario (cc_plugin_require does).
+cc_plugin_install() {
+    local root="$1" plugin="$2" mkt_name="$3" prepare="${4:-}"
+    local mkt="$TEST_HOME/marketplace-$plugin" list="$TEST_HOME/plugin-list.txt"
+    CC_PLUGIN_ID="" CC_PLUGIN_VERSION="" CC_PLUGIN_INSTALLED_ROOT="" CC_DEBUG_FILE=""
+    CC_PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$root/.claude-plugin/plugin.json" 2>/dev/null)" || return 1
+    [[ -n "$CC_PLUGIN_VERSION" ]] || return 1
+    rm -rf "$mkt" "$TEST_HOME/.claude/plugins"
+    mkdir -p "$mkt/.claude-plugin" "$TEST_HOME/.claude/plugins"
+    cp -R "$root" "$mkt/$plugin" || return 1
+    if [[ -n "$prepare" ]]; then "$prepare" "$mkt/$plugin" || return 1; fi
+    cat > "$mkt/.claude-plugin/marketplace.json" <<EOF
+{"name":"$mkt_name","owner":{"name":"cc-validation"},"plugins":[{"name":"$plugin","source":"./$plugin","version":"$CC_PLUGIN_VERSION"}]}
+EOF
+    : > "$TEST_HOME/plugin-install.log"
+    HOME="$TEST_HOME" claude plugin marketplace add "$mkt" >> "$TEST_HOME/plugin-install.log" 2>&1 || return 1
+    HOME="$TEST_HOME" claude plugin install "$plugin@$mkt_name" --scope user >> "$TEST_HOME/plugin-install.log" 2>&1 || return 1
+    HOME="$TEST_HOME" claude plugin list > "$list" 2>&1 || return 1
+    grep -qF "$plugin@$mkt_name" "$list" || return 1
+    grep -qF "Version: $CC_PLUGIN_VERSION" "$list" || return 1
+    grep -qF "Status: ✔ enabled" "$list" || return 1
+    ! grep -qiE "failed to load" "$list" || return 1
+    CC_PLUGIN_INSTALLED_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plugins"][sys.argv[2]][0]["installPath"])' "$TEST_HOME/.claude/plugins/installed_plugins.json" "$plugin@$mkt_name" 2>/dev/null)" || return 1
+    [[ -f "$CC_PLUGIN_INSTALLED_ROOT/.claude-plugin/plugin.json" ]] || return 1
+    CC_PLUGIN_ID="$plugin@$mkt_name"
+    CC_DEBUG_FILE="$TEST_HOME/cc-debug-$plugin.log"
+    rm -f "$CC_DEBUG_FILE"
+    return 0
+}
+
+# cc_plugin_require <same arguments>: the precondition every plugin-dependent
+# scenario part runs before it starts a session. Fails the scenario (never skips)
+# and returns non-zero when the plugin is not loaded at the expected version, so
+# a part that would have measured a plugin-less session says so instead. Use it
+# as `if cc_plugin_require ...; then <the part>; fi`.
+cc_plugin_require() {
+    if cc_plugin_install "$@"; then
+        return 0
+    fi
+    fail "${_SCENARIO:-scenario}: plugin ${2:-?}@${3:-?} is NOT loaded at version ${CC_PLUGIN_VERSION:-?} -- nothing of it can run in this session, so the measurement would be of a plugin-less session"
+    echo "    'claude plugin list' said:" >&2
+    sed 's/^/    | /' "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" >&2 2>/dev/null || true
+    return 1
+}
+
+# Copy a plugin session's evidence (plugin list/install output, debug log,
+# settings, registry, transcripts) to $CC_VAL_EVIDENCE_DIR/<label> when the
+# container run.sh mounted one. $TEST_HOME is deleted at exit.
+cc_keep_evidence() {
+    [[ -n "${CC_VAL_EVIDENCE_DIR:-}" ]] || return 0
+    local d="$CC_VAL_EVIDENCE_DIR/${1:-plugin}" f
+    mkdir -p "$d"
+    for f in "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" "$TEST_HOME/.claude/settings.json" \
+             "$TEST_HOME/.claude/plugins/installed_plugins.json" "${CC_DEBUG_FILE:-}"; do
+        [[ -n "$f" && -f "$f" ]] && cp "$f" "$d/" 2>/dev/null
+    done
+    find "$TEST_HOME/.claude/projects" -name '*.jsonl' -exec cp {} "$d/" \; 2>/dev/null
+    return 0
+}
+
+# Teardown: keep the evidence, then back to the empty registry.
+cc_plugin_uninstall_all() {
+    cc_keep_evidence "$(printf '%s' "${_SCENARIO:-scenario}" | awk '{print $1}')"
+    _cc_plugins_baseline
+}
+
+# cc_hook_ran <event-ere> <plugin_id> [script-ere]: 0 when Claude Code's debug
+# log ($CC_DEBUG_FILE) shows a hook of <event-ere> from plugin <plugin_id>
+# finished with status 0 (and, when given, whose command names <script-ere>).
+# The debug log records every hook, silent ones too; the session transcript
+# records a hook only when its stdout or stderr is non-empty, so a hook's
+# absence there is not evidence it did not run (nexus-ueztp).
+cc_hook_ran() {
+    local event="$1" id="$2" script="${3:-}"
+    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
+    grep -Eq "Hooks: ${event}[^[]*\[[^]]*${script}[^]]*\] \(plugin ${id}\) finished with status 0" "$CC_DEBUG_FILE"
+}
+
+# cc_mcp_hook_ran <tool>: the same for a `type: mcp_tool` hook, which the debug
+# log records differently (`Hooks: mcp_tool calling plugin:<p>:<server>/<tool>`,
+# and `Hooks: mcp_tool hook error: ...` on failure). 0 only when the call was
+# made and the log holds no mcp_tool hook error: a plugin whose CLI is absent
+# loads fine and then fails every such hook with "Nexus is not installed".
+cc_mcp_hook_ran() {
+    local tool="$1"
+    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
+    grep -Eq "Hooks: mcp_tool calling plugin:[^ ]*/${tool}( |$)" "$CC_DEBUG_FILE" || return 1
+    ! grep -q "Hooks: mcp_tool hook error" "$CC_DEBUG_FILE"
+}
+
+_cc_plugins_baseline
 
 # write_settings <path-to-fixture-json>: install settings.json for the next claude_start
 write_settings() {

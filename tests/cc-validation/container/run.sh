@@ -12,7 +12,7 @@
 # Nothing here prints it.
 #
 # What it does: stages the tracked harness files (tests/cc-validation, the
-# e2e helpers, and the conexus plugin of THIS checkout), extracts the control
+# e2e helpers, and the conexus and sn plugins of THIS checkout), extracts the control
 # plugin from the git tag v7.64.1 with `git archive` (fetching the tag when the
 # clone lacks it), builds the toolchain image, and runs the scenario inside it
 # with the stage mounted read-only and an evidence directory mounted
@@ -47,7 +47,7 @@ mkdir -p "$EVID"; chmod 777 "$EVID"
 
 echo "[stage] harness + current plugin from $(git -C "$ROOT" rev-parse --short HEAD) (tracked and new files, working-tree content)"
 mkdir -p "$STAGE/harness" "$STAGE/control"
-( cd "$ROOT" && git ls-files -z -co --exclude-standard -- tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus ) \
+( cd "$ROOT" && git ls-files -z -co --exclude-standard -- tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn ) \
     | tar -C "$ROOT" --null -T - -cf - | tar -x -C "$STAGE/harness"
 
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$CONTROL_TAG" > /dev/null 2>&1; then
@@ -62,9 +62,14 @@ chmod -R a+rX "$STAGE"
 CC_VERSION="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$HERE/Dockerfile")"
 [ -n "$CC_VERSION" ] || { echo "no ARG CLAUDE_CODE_VERSION in the Dockerfile" >&2; exit 2; }
 
+# The Nexus CLI baked into the image is the version of the plugin staged here,
+# so the plugin's servers and mcp_tool hooks have the program they name.
+NEXUS_CLI_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$STAGE/harness/conexus/.claude-plugin/plugin.json")"
+[ -n "$NEXUS_CLI_VERSION" ] || { echo "no version in the staged conexus plugin.json" >&2; exit 2; }
+
 IMAGE="nexus-cc-val:local"
-echo "[build] $IMAGE"
-docker build -q -t "$IMAGE" "$HERE" > "$STAGE/docker-build.log" 2>&1 \
+echo "[build] $IMAGE (nexus CLI $NEXUS_CLI_VERSION)"
+docker build -q -t "$IMAGE" --build-arg "NEXUS_CLI_VERSION=$NEXUS_CLI_VERSION" "$HERE" > "$STAGE/docker-build.log" 2>&1 \
     || { tail -40 "$STAGE/docker-build.log" >&2; exit 1; }
 
 echo "[run] scenario $SCENARIO; evidence -> $EVID"

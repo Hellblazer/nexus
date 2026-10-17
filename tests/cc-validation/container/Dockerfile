@@ -20,7 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git jq procps tmux \
         python3 python3-venv python3-pip \
     && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --no-cache-dir --break-system-packages uv
+# mcp: the MCP stub scenarios launch tests/cc-validation/fixtures/stub_server.py with
+# .venv/bin/python, which the entrypoint links to this python3. Without the
+# package every stub scenario (11, 14, ...) reads "server never spawned" and
+# nexus-spwp2's 14b could not tell a plugin agent's mcpServers from a stub that
+# cannot start. Version = uv.lock's.
+RUN pip3 install --no-cache-dir --break-system-packages uv mcp==1.27.1
 RUN useradd -m -s /bin/bash nexus
 USER nexus
 WORKDIR /home/nexus
@@ -28,6 +33,19 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}" \
     && /home/nexus/.local/bin/claude --version \
     && /home/nexus/.local/bin/claude --version | grep -q "^${CLAUDE_CODE_VERSION} "
 USER root
+# The Nexus CLI the conexus plugin's servers and mcp_tool hooks run (nx-mcp,
+# nx-hook). Without it the plugin loads but its SubagentStart hook fails with
+# "Unknown tool: 'hook_subagent_start'. Nexus is not installed." and scenario 12
+# measures nothing (nexus-spwp2). run.sh passes the version of the plugin it
+# stages, so the CLI and the plugin match; the default is only for a bare
+# `docker build`. Installed system-wide (the harness points HOME at its sandbox)
+# and found by the plugin's launcher through PATH.
+ARG NEXUS_CLI_VERSION=7.82.0
+RUN mkdir -p /opt/uv-tools /opt/uv-python \
+    && UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+       uv tool install "conexus==${NEXUS_CLI_VERSION}" \
+    && chmod -R a+rX /opt/uv-tools /opt/uv-python \
+    && test -x /usr/local/bin/nx-mcp
 # The harness points HOME at its sandbox, so ~/.local/bin/claude would no longer
 # resolve inside a scenario; put claude on the system PATH.
 RUN ln -s /home/nexus/.local/bin/claude /usr/local/bin/claude \

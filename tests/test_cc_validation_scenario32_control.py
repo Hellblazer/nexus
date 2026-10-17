@@ -80,12 +80,18 @@ def test_scenario_runs_both_sessions_and_reports_each() -> None:
 def test_the_plugin_is_installed_through_a_marketplace_and_verified_loaded() -> None:
     """A hand-written installed_plugins.json leaves the plugin unloaded in
     Claude Code 2.1.302 ('Marketplace nexus-plugins not found'), which made the
-    first container run's control vacuous. The only installed_plugins.json the
-    scenario may write is the empty teardown one."""
+    first container run's control vacuous. The install is the shared
+    cc_plugin_install (runner.sh, nexus-spwp2); tests/test_cc_validation_plugin_install.py
+    pins the helper and that no scenario writes installed_plugins.json."""
     code = _code(SCENARIO)
-    assert "claude plugin marketplace add" in code
-    assert "claude plugin install conexus@nexus-plugins" in code
-    assert 'grep -q "Status: ✔ enabled"' in code
+    assert "cc_plugin_install" in code and "nexus-plugins" in code
+    assert "claude plugin marketplace" not in code and "claude plugin install" not in code, (
+        "scenario 32 must use the shared helper, not its own install"
+    )
+    helper = _bash_function(RUNNER, "cc_plugin_install")
+    assert 'claude plugin marketplace add "$mkt"' in helper
+    assert 'claude plugin install "$plugin@$mkt_name" --scope user' in helper
+    assert 'grep -qF "Status: ✔ enabled"' in helper
     assert '"installPath":' not in code, "scenario 32 must not hand-write a plugin install entry"
 
 

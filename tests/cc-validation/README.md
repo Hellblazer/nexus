@@ -26,7 +26,9 @@ silently nullified scenarios for an hour-plus at least once.
 | `can't find pane: cc-val`, suite aborts mid-run | bare `tmux` instead of `_tmux` (wrong socket) | [tmux isolation](#tmux-isolation) |
 | Hook "runs" but writes nothing | PreToolUse hooks don't inherit harness env | [Hooks](#hooks) |
 | New `nx` subcommand: `No such command` | cc-val uses on-PATH `nx`, not repo source | [on-PATH nx](#on-path-nx) |
-| A scenario that installs the real plugin by writing `installed_plugins.json` sees no plugin hooks, agents or servers | Claude Code 2.1.302: `claude plugin list` reports `failed to load: Marketplace nexus-plugins not found`; install through a local-directory marketplace instead (scenario 32's `_s32_install_plugin`) and check `claude plugin list` before the session | [Container](#running-in-a-container-and-scenario-32s-positive-control) |
+| A scenario that installs the real plugin by writing `installed_plugins.json` sees no plugin hooks, agents or servers | Claude Code 2.1.302: `claude plugin list` reports `failed to load: Marketplace nexus-plugins not found`; never write one: call `cc_plugin_require` (runner.sh), which installs through a local-directory marketplace and fails the scenario unless `claude plugin list` shows the plugin enabled at its declared version | [Installing a plugin](#installing-a-plugin-in-a-scenario) |
+| A scenario asserts a plugin hook ran and the transcript shows nothing | the transcript records a hook only when its stdout or stderr is non-empty; read the debug log with `cc_hook_ran` / `cc_mcp_hook_ran` | [Installing a plugin](#installing-a-plugin-in-a-scenario) |
+| A probe passes the moment the prompt is sent | the pane shows the prompt, so a marker or reply token written whole in the prompt matches the grep; spell it in two pieces to be joined | [Installing a plugin](#installing-a-plugin-in-a-scenario) |
 
 ## Auth
 
@@ -427,6 +429,47 @@ workspace silently ignores the project's `permissions.allow` entries (pre-seed
 `hasTrustDialogAccepted` for the cwd), and a read-only probe command such as
 `echo` is auto-allowed in every mode, so it cannot show that an ask changed
 anything (use `touch` plus an allow rule).
+
+## Installing a plugin in a scenario
+
+(nexus-spwp2.) A scenario that needs a plugin loaded calls the shared helpers in
+`runner.sh`; it never writes `installed_plugins.json` or `enabledPlugins` itself
+(`tests/test_cc_validation_plugin_install.py` fails the build on either).
+
+```bash
+cat > "$TEST_HOME/.claude/settings.json" <<EOF ... EOF       # settings FIRST: the install merges enabledPlugins into them
+if cc_plugin_require "$REPO_ROOT/conexus" conexus nexus-plugins; then
+    claude_start                                              # adds --debug-file when a plugin is installed
+    ...probe...
+    cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID"               # command hook: debug log says it finished with status 0
+    cc_mcp_hook_ran "hook_subagent_start"                     # mcp_tool hook: a call, and no mcp_tool hook error
+    claude_exit
+fi
+cc_plugin_uninstall_all                                       # keeps evidence, restores the empty registry
+```
+
+`cc_plugin_require` copies the plugin tree into a synthesized local-directory
+marketplace, runs `claude plugin marketplace add` and `claude plugin install
+--scope user`, and passes only when `claude plugin list` shows
+`<plugin>@<marketplace>` enabled at the version its `plugin.json` declares. When
+it does not, the scenario FAILS (never skips) and the list and install output are
+printed. `cc_plugin_install` is the same without the `fail`, for scenario 32,
+which routes a not-loaded plugin into its own verdict ladder. One plugin per
+scenario part: an install replaces all plugin state.
+
+Evidence (plugin list/install output, debug log, settings, registry, transcripts)
+goes to `$CC_VAL_EVIDENCE_DIR/<scenario>` when the container mounted one.
+
+Census (2026-10-17, 30 scenarios): plugin-dependent were 12, 13b, 14b, 18 and 32;
+the other 25 install nothing. The container carries what a loaded plugin needs:
+the Nexus CLI at the staged plugin's version (`nx-mcp`, `nx-hook`; without it the
+plugin loads and then its `mcp_tool` hooks fail with "Nexus is not installed"),
+the `sn` plugin tree, and the `mcp` package for the stub server.
+
+**Probes must not match their own prompt.** The pane shows the prompt, and the
+subagent sees it too, so a marker or reply token written whole in the prompt
+satisfies the grep at once. Scenarios 12, 13 and 18 spell tokens as two pieces
+("the word FOUND immediately followed by -13B") and grep the joined form.
 
 ## Running in a container (and scenario 32's positive control)
 

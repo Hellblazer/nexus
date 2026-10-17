@@ -28,71 +28,73 @@
 
 scenario "18 real_sn_subagent: does sn's subagent_start.py deliver Serena+Context7 to a real subagent?"
 
-# Install sn plugin into TEST_HOME, pointing at the working-tree source so
-# we exercise the in-tree fix (not the cached published version).
-NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<EOF
-{
-  "version": 2,
-  "plugins": {
-    "sn@nexus-plugins": [
-      { "scope": "user", "installPath": "$REPO_ROOT/sn", "version": "dev",
-        "installedAt": "$NOW", "lastUpdated": "$NOW" }
-    ]
-  }
-}
-EOF
+# Install the sn plugin of THIS checkout (the in-tree fix, not a cached
+# published version) the way Claude Code loads one: a local-directory marketplace
+# (nexus-spwp2: a hand-written installed_plugins.json loads nothing on Claude
+# Code 2.1.302, so this scenario ran with NO plugin). Settings are written first
+# because the install merges enabledPlugins into them; cc_plugin_require FAILS
+# the scenario unless `claude plugin list` shows sn enabled at the version its
+# plugin.json declares.
 cat > "$TEST_HOME/.claude/settings.json" <<EOF
 {
   "skipDangerousModePermissionPrompt": true,
-  "enabledPlugins": { "sn@nexus-plugins": true },
   "permissions": { "allow": ["Task"], "defaultMode": "acceptEdits" }
 }
 EOF
 
-claude_start
-# Probe: ask the subagent for two anchor phrases that exist ONLY inside the
-# hook-injected sections. If hooks fire and the JSON envelope reaches the
-# subagent's context, both phrases will be in scope.
-#
-# We use a SENTINEL token (PROBE-DONE) for the subagent to emit at the very
-# end of its reply. This is more reliable than polling on spinner words
-# (the harness's lib.sh spinner regex doesn't include the current "Sautéed"
-# state), and it lets us know when the subagent has actually returned.
-# Probe wording deliberately avoids every subagent_start.py SKIP keyword so the task
-# lands in the inject-both default (see VALIDITY NOTE above). We ask for fixed
-# CONFIRMATION TOKENS rather than verbatim quotes: a binary "emit TOKEN if the
-# text is present" is far more robust than asking the model to reproduce a
-# sentence (which it paraphrases or omits, the prior false-fail). subagent_start.py
-# is independently verified to emit both sections for a neutral task via a direct
-# pipe test, so this scenario isolates the remaining question: does CC deliver
-# the SubagentStart JSON envelope into the subagent's context end-to-end.
-claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='sn hook check'. Prompt for the subagent: 'Look at the guidance injected into your context. On separate lines output SERENA-OK if your context contains the text project-from-cwd, and DOCS-OK if your context contains the text fetch current docs. If neither phrase is present, output NONE-OK. Then on a line by itself write the literal token PROBE-DONE-9F2K.'"
+if cc_plugin_require "$REPO_ROOT/sn" sn nexus-plugins; then
+    claude_start
+    # Probe: ask the subagent for two anchor phrases that exist ONLY inside the
+    # hook-injected sections. If hooks fire and the JSON envelope reaches the
+    # subagent's context, both phrases will be in scope.
+    #
+    # We use a SENTINEL token (PROBE-DONE) for the subagent to emit at the very
+    # end of its reply. This is more reliable than polling on spinner words
+    # (the harness's lib.sh spinner regex doesn't include the current "Sautéed"
+    # state), and it lets us know when the subagent has actually returned.
+    # Probe wording deliberately avoids every subagent_start.py SKIP keyword so the task
+    # lands in the inject-both default (see VALIDITY NOTE above). We ask for fixed
+    # CONFIRMATION TOKENS rather than verbatim quotes: a binary "emit TOKEN if the
+    # text is present" is far more robust than asking the model to reproduce a
+    # sentence (which it paraphrases or omits, the prior false-fail). subagent_start.py
+    # is independently verified to emit both sections for a neutral task via a direct
+    # pipe test, so this scenario isolates the remaining question: does CC deliver
+    # the SubagentStart JSON envelope into the subagent's context end-to-end.
+    #
+    # nexus-spwp2: every token below is spelled in the prompt as two pieces to be
+    # joined ("SERENA" then "-OK-9F2K"), never whole. The pane shows the prompt
+    # itself, so a whole token written into it matches immediately and this
+    # scenario would pass (and its sentinel poll return) before the subagent
+    # answered; only the reply contains the joined spelling.
+    claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='sn hook check'. Prompt for the subagent: 'Look at the guidance injected into your context. On separate lines output: the word SERENA immediately followed by -OK-9F2K (no space) if your context contains the text project-from-cwd; the word DOCS immediately followed by -OK-9F2K (no space) if your context contains the text fetch current docs. If neither phrase is present, output the word NONE immediately followed by -OK-9F2K (no space). Then on a line by itself write the word PROBE immediately followed by -DONE-9F2K (no space).'"
 
-# Poll for the sentinel — up to 300s. Subagent dispatch can take ~60s alone.
-poll_for "PROBE-DONE-9F2K" 300 "subagent reply sentinel" || true
-OUT=$(capture -500)
-HAS_A=0
-HAS_B=0
-echo "$OUT" | grep -qE "SERENA-OK" && HAS_A=1
-echo "$OUT" | grep -qE "DOCS-OK" && HAS_B=1
+    # Poll for the sentinel — up to 300s. Subagent dispatch can take ~60s alone.
+    poll_for "PROBE-DONE-9F2K" 300 "subagent reply sentinel" || true
+    OUT=$(capture -500)
+    HAS_A=0
+    HAS_B=0
+    echo "$OUT" | grep -qE "SERENA-OK-9F2K" && HAS_A=1
+    echo "$OUT" | grep -qE "DOCS-OK-9F2K" && HAS_B=1
 
-if [[ $HAS_A -eq 1 && $HAS_B -eq 1 ]]; then
-    pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent — JSON envelope works"
-elif [[ $HAS_A -eq 1 && $HAS_B -eq 0 ]]; then
-    fail "Serena section injected but Context7 missing — partial delivery"
-elif [[ $HAS_A -eq 0 && $HAS_B -eq 1 ]]; then
-    fail "Context7 section injected but Serena missing — partial delivery"
-elif echo "$OUT" | grep -qE "NONE-OK"; then
-    fail "Subagent confirms NEITHER section in context — SubagentStart envelope not delivered end-to-end"
-else
-    fail "indeterminate — no confirmation token (SERENA-OK/DOCS-OK/NONE-OK) seen in capture"
-    echo "$OUT" | tail -40 | sed 's/^/    | /'
+    if [[ $HAS_A -eq 1 && $HAS_B -eq 1 ]]; then
+        if cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID"; then
+            pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent and the debug log shows the plugin's SubagentStart hook finished — JSON envelope works"
+        else
+            fail "Both phrases reached the subagent but the debug log ($CC_DEBUG_FILE) shows no SubagentStart hook of $CC_PLUGIN_ID finishing — the content did not come from the plugin's hook"
+        fi
+    elif [[ $HAS_A -eq 1 && $HAS_B -eq 0 ]]; then
+        fail "Serena section injected but Context7 missing — partial delivery"
+    elif [[ $HAS_A -eq 0 && $HAS_B -eq 1 ]]; then
+        fail "Context7 section injected but Serena missing — partial delivery"
+    elif echo "$OUT" | grep -qE "NONE-OK-9F2K"; then
+        fail "Subagent confirms NEITHER section in context — SubagentStart envelope not delivered end-to-end"
+    else
+        fail "indeterminate — no confirmation token (SERENA-OK/DOCS-OK/NONE-OK) seen in capture"
+        echo "$OUT" | tail -40 | sed 's/^/    | /'
+    fi
+
+    claude_exit
 fi
 
-# Restore empty plugins
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<'EOF'
-{"version": 2, "plugins": {}}
-EOF
-claude_exit
+cc_plugin_uninstall_all
 scenario_end
