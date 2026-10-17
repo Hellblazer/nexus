@@ -818,6 +818,13 @@ class TestIsRetryableEndpointErrorClassifier:
 
         assert _is_retryable_endpoint_error(httpx.ReadError("reset mid-read"))
 
+    def test_bare_broken_pipe_is_retryable(self) -> None:
+        # nexus-40fjk: the write-side form of a connection reset. httpx wraps it as WriteError
+        # (already retryable); a bare one from a lower transport layer is the defensive case.
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(BrokenPipeError(32, "Broken pipe"))
+
     def test_connect_error_is_retryable(self) -> None:
         import httpx
 

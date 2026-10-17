@@ -379,9 +379,12 @@ def _invalidate_endpoint() -> None:
 
 #: A refused connection, or one dropped mid-request. Windows reports a drop as
 #: ``ConnectionAbortedError`` (WinError 10053), a sibling of
-#: ``ConnectionResetError``, not a subclass (RDR-224).
+#: ``ConnectionResetError``, not a subclass (RDR-224). ``BrokenPipeError`` is
+#: the same drop seen on the write side: a client that writes its request after
+#: the restarting service's RST gets EPIPE, not ECONNRESET (always on macOS; on
+#: Linux once the first write after the RST has been told ECONNRESET), nexus-40fjk.
 _RESTART_SIGNATURES: tuple[type[OSError], ...] = (
-    ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError,
+    ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
 )
 
 

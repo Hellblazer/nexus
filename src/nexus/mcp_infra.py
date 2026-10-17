@@ -1103,7 +1103,7 @@ def list_collections_or_not_ready(t3: Any, *, routing: bool) -> list[dict]:
         reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
         if isinstance(reason, ConnectionRefusedError):
             return "connection refused"
-        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError)):
+        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
             return "connection reset"
         return type(reason).__name__
 

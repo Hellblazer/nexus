@@ -4168,3 +4168,45 @@ class TestUpdateChunksMissing:
             client.update_chunks("col", ["b"], [{"y": 2}])
         unreported = [e for e in logs if e["event"] == "update_chunks_missing_unreported"]
         assert [e["log_level"] for e in unreported] == ["warning", "debug"], unreported
+
+
+# ── nexus-40fjk: EPIPE is a restart signature ────────────────────────────────
+
+class TestBrokenPipeIsARestartSignature:
+    """A request written after the restarting service's RST fails with EPIPE, not ECONNRESET
+    (tests/_epipe_server.py says how the EPIPE is pinned on macOS and Linux). It takes the same
+    single idempotent retry as a reset."""
+
+    def test_broken_pipe_is_classified_retryable(self) -> None:
+        import urllib.error
+
+        from nexus.db.http_vector_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(BrokenPipeError(32, "Broken pipe"))
+        assert _is_retryable_endpoint_error(urllib.error.URLError(BrokenPipeError(32, "Broken pipe")))
+
+    def test_a_write_after_the_rst_is_retried_once_and_the_second_attempt_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.db.http_vector_client as hvc
+        from tests._epipe_server import (
+            order_rst_before_the_first_write,
+            record_transport_reasons,
+            resetting_server,
+        )
+
+        rows = [{"name": "knowledge__x__minilm__v1", "count": 3}]
+        with resetting_server(reset_first=1, payload=rows) as server:
+            order_rst_before_the_first_write(monkeypatch, connections=1)
+            reasons = record_transport_reasons(monkeypatch)
+            monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (server.base_url, "tok"))
+            monkeypatch.setattr(hvc, "_wait_for_lease_republication", lambda: None)
+            hvc.reset_http_vector_client_for_tests()
+            try:
+                assert hvc._get("/v1/vectors/stats") == rows
+            finally:
+                hvc.reset_http_vector_client_for_tests()
+            # Non-vacuity: the first attempt failed with EPIPE (not ECONNRESET), and was the only
+            # one retried; the retry reached the server and was answered.
+            assert reasons == [BrokenPipeError]
+            assert (server.accepted, server.answered) == (2, 1)
