@@ -25,18 +25,23 @@ import java.util.stream.Stream;
  * hosts live in them), then every outbound construct in {@link #CONSTRUCTS} must sit in a file on
  * {@link #ALLOWLIST}, with that construct named on the entry and a reason beside it.
  *
- * <p>What it cannot see: library code (DJL's tokenizer probes, paths 6 and 7: the runtime witness in
- * {@code EgressRuntimeWitnessTest} covers those), an outbound call spelled through reflection, a static
- * import of a construct, or {@code java.net.http} reached by a type this list does not name. Non-vacuity:
- * {@link #scan} reports the sites it found, and the caller asserts the count is at least the number the
- * allowlist names; an allowlist entry with no site in its file is stale and fails.
+ * <p>This is a text scan of {@code service/src/main/java} for ten named constructs, and nothing more. It
+ * does not see any dependency's code: {@code java.net.http} used inside a library, raw sockets, DNS or JNI
+ * inside a library (DJL's Rust tokenizers library does network I/O that no Java-level check can see), or
+ * the behavior of the GraalVM native image the engine ships as. It also misses an outbound call spelled
+ * through reflection, a static import of a construct, or {@code java.net.http} reached by a type this list
+ * does not name. No test in this repository covers those gaps; {@code EgressRuntimeWitnessTest} is a
+ * separate, narrower check and does not close them. Each allowlist entry pins an exact site count for its
+ * file, so a second site in an allowlisted file fails; a file whose count falls short is stale and fails.
+ * Non-vacuity: {@link #scan} reports the sites it found, and the caller asserts the count is at least the
+ * number the allowlist names.
  *
  * <p>The scan takes its roots as arguments so a test can run it against a planted tree.
  */
 final class EgressGuardCensus {
 
-    /** One allowlist entry: the constructs the file may use, the fewest sites it must show, and why. */
-    record Allow(Set<String> constructs, int minSites, String reason) {
+    /** One allowlist entry: the constructs the file may use, the exact number of sites it shows, and why. */
+    record Allow(Set<String> constructs, int sites, String reason) {
     }
 
     /** The outbound constructs, by name, with the pattern that finds each one in comment-stripped source. */
@@ -194,14 +199,17 @@ final class EgressGuardCensus {
 
         int allowlistSites = 0;
         for (Map.Entry<String, Allow> e : allowlist.entrySet()) {
-            allowlistSites += e.getValue().minSites();
+            allowlistSites += e.getValue().sites();
             if (e.getValue().reason() == null || e.getValue().reason().isBlank()) {
                 problems.add(e.getKey() + " is on the allowlist without a reason");
             }
             int seen = sitesByFile.getOrDefault(e.getKey(), 0);
-            if (seen < e.getValue().minSites()) {
-                problems.add(e.getKey() + " is allowlisted for " + e.getValue().minSites() + " site(s) but "
+            if (seen < e.getValue().sites()) {
+                problems.add(e.getKey() + " is allowlisted for " + e.getValue().sites() + " site(s) but "
                     + "shows " + seen + ": the entry is stale, or the scan stopped seeing the construct");
+            } else if (seen > e.getValue().sites()) {
+                problems.add(e.getKey() + " is allowlisted for exactly " + e.getValue().sites() + " site(s) but "
+                    + "shows " + seen + ": a new outbound site in an allowlisted file needs a reviewed entry");
             }
         }
         if (sites < allowlistSites) {
@@ -287,7 +295,7 @@ final class EgressGuardCensus {
      * @param configText the pom and the main sources (java and resources) joined, where the switch may live
      */
     static List<String> liquibaseProblems(String pomText, String configText) {
-        Matcher m = LIQUIBASE_VERSION.matcher(pomText);
+        Matcher m = LIQUIBASE_VERSION.matcher(stripConfigComments("pom.xml", pomText));
         if (!m.find()) {
             return List.of("pom.xml has no <liquibase.version> property: the analytics check has nothing to read");
         }
@@ -301,15 +309,33 @@ final class EgressGuardCensus {
         return List.of();
     }
 
-    /** The pom plus every main source and resource, as one string, for {@link #liquibaseProblems}. */
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
+    private static final Pattern HASH_COMMENT = Pattern.compile("(?m)^[ \\t]*#.*$");
+
+    /** Comment removal by file kind; see {@link #configText}. */
+    static String stripConfigComments(String fileName, String text) {
+        if (fileName.endsWith(".java")) {
+            return stripComments(text);
+        }
+        if (fileName.endsWith(".xml")) {
+            return XML_COMMENT.matcher(text).replaceAll(" ");
+        }
+        return HASH_COMMENT.matcher(text).replaceAll("");
+    }
+
+    /**
+     * The pom plus every main source and resource, as one string, for {@link #liquibaseProblems}. Comments
+     * are removed first (Java and XML comments, and whole-line {@code #} comments in properties and YAML),
+     * so a comment that mentions the switch does not satisfy the check.
+     */
     static String configText(Path pom, Path mainRoot) throws IOException {
-        StringBuilder sb = new StringBuilder(Files.readString(pom));
+        StringBuilder sb = new StringBuilder(stripConfigComments("pom.xml", Files.readString(pom)));
         try (Stream<Path> walk = Files.walk(mainRoot)) {
             for (Path f : (Iterable<Path>) walk.filter(Files::isRegularFile)::iterator) {
                 String name = f.getFileName().toString();
                 if (name.endsWith(".java") || name.endsWith(".properties") || name.endsWith(".xml")
                     || name.endsWith(".yaml") || name.endsWith(".yml")) {
-                    sb.append('\n').append(Files.readString(f));
+                    sb.append('\n').append(stripConfigComments(name, Files.readString(f)));
                 }
             }
         }

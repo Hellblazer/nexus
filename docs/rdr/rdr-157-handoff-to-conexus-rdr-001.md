@@ -80,14 +80,26 @@ the consumer.**
   `pg_provision.discover_pg_binaries` (env override, then extracted bundle,
   then fixed candidates, then PATH), so every caller (init, the daemon's
   PG-restart path) finds the bundle on a bundle-only machine.
-- **Contract:** the local Java service connects ONLY to a local Postgres
-  (never a remote PG). The pgvector >= 0.8 (`iterative_scan`) floor is validated
+- **Contract:** the local Java service's database is a LOCAL Postgres at
+  `NX_DB_URL` (never a remote PG). The pgvector >= 0.8 (`iterative_scan`) floor is validated
   locally by `pg_provision.check_pgvector_available`.
 
   *(Amended 2026-09-15, nexus-umm29.)* This invariant has one sanctioned
   exception: the third-party embedding and rerank API (Voyage). The carve-out
   was decided 2026-06-15 (Sam) and is bounded to that API, stated as an
-  allowlist (nexus-qfy01): The local engine connects only to the Voyage API (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and `VoyageReranker`, and only when keyed, optionally through the operator's proxy (`EgressProxy`); and to its database at `NX_DB_URL` over JDBC. Nothing else. A source census and a runtime witness (`service/src/test/java/dev/nexus/service/EgressGuardCensus.java`, `EgressRuntimeWitnessTest.java`; nexus-qfy01, RDR-210) hold that list. Local mode must
+  allowlist (nexus-qfy01): the local engine connects only to the Voyage API
+  (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and `VoyageReranker`,
+  and only when keyed, optionally through the operator's proxy (`EgressProxy`);
+  and to its database, a LOCAL Postgres at `NX_DB_URL`, over JDBC. Nothing else is
+  intended. Two tests in `service/src/test/java/dev/nexus/service/` check the list
+  and neither proves it. `EgressGuardCensus` scans `service/src/main/java` for ten
+  named outbound constructs against an allowlist with an exact site count per
+  file. `EgressRuntimeWitnessTest` builds the tokenizer, the bge embedder and the
+  cross-encoder in a JVM whose URL-stream factory refuses every non-`file`,
+  non-`jar` stream. Not covered: `java.net.http` use inside a dependency; raw
+  sockets, DNS or JNI inside a dependency (DJL's Rust tokenizers library does
+  network I/O a URL factory cannot see); and the GraalVM native image the engine
+  ships as (the witness runs on a JVM). Local mode must
   support both bge-768 and Voyage at once (Sam, 2026-09-15); today it serves
   one per boot, picked by whether `NX_VOYAGE_API_KEY` reaches the service —
   RDR-210 tracks the dual-mode engine that closes the gap.

@@ -7,7 +7,10 @@ import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.CrossEncoderReranker;
 import dev.nexus.service.vectors.LocalTokenizers;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.BufferedReader;
@@ -29,11 +32,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
 /**
- * RDR-210 Technical Design 7 (nexus-qfy01): the runtime half of the egress guard. The source census cannot
- * see library code, and DJL's tokenizer build was the one place the engine's own libraries opened an
- * outbound stream (nexus-17jvq). This witness is a child JVM that installs a {@code URLStreamHandlerFactory}
- * refusing every stream that is not {@code file} or {@code jar}, records each attempt, then builds the
- * engine's local models the way the engine does and runs one embed and one rerank.
+ * RDR-210 Technical Design 7 (nexus-qfy01): a runtime check beside the source census. DJL's tokenizer build
+ * was the one place the engine's own libraries opened an outbound stream through {@code java.net.URL}
+ * (nexus-17jvq). This witness is a child JVM that installs a {@code URLStreamHandlerFactory} refusing every
+ * stream that is not {@code file} or {@code jar}, records each attempt, then builds the engine's local
+ * models the way the engine does and runs one embed and one rerank.
  *
  * <p>Two legs. The tokenizer leg always runs: it builds a tiny tokenizer through {@link LocalTokenizers}, the
  * helper that Bge768Embedder, CrossEncoderReranker and OnnxEmbedder share, so the witness has a target on a
@@ -43,9 +46,13 @@ import static org.assertj.core.api.Assertions.fail;
  * pass. The tokenizer leg and the negative fixtures below are what keep a skipped model leg from leaving the
  * witness empty.
  *
- * <p>It does not see {@code java.net.http}, which bypasses {@code URL}; the source census covers that. A
- * child, because the factory can be set once per JVM.
+ * <p>What it does not cover, and no test in this repository does: {@code java.net.http} use inside a
+ * dependency (it bypasses {@code URL}), raw sockets, DNS or JNI inside a dependency (DJL's Rust tokenizers
+ * library does network I/O that a URL factory cannot see), and the GraalVM native image the engine ships as
+ * (this runs on a JVM). {@code EgressGuardCensus} scans only the engine's own sources and does not close
+ * these gaps. A child, because the factory can be set once per JVM.
  */
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class EgressRuntimeWitnessTest {
 
     static final String REQUIRE_ENV = "NX_REQUIRE_ORT_MODEL";
@@ -158,7 +165,11 @@ class EgressRuntimeWitnessTest {
         assertNoOutboundOpen(lines);
     }
 
+    /** Set by the model leg when it skips; read by the max-skip guard below, which runs last. */
+    private static volatile boolean modelLegSkipped;
+
     @Test
+    @Order(1)
     void theBgeEmbedderAndTheCrossEncoderOpenNothingOutboundThroughAnEmbedAndARerank() throws Exception {
         String[] paths = requireModelsOrSkip();
         List<String> lines = run("models", paths);
@@ -185,28 +196,88 @@ class EgressRuntimeWitnessTest {
 
     // ---- the model files ---------------------------------------------------------------------------
 
+    private static String[] defaultModelPaths() {
+        return new String[] {Bge768Embedder.DEFAULT_MODEL_PATH, Bge768Embedder.DEFAULT_TOKENIZER_PATH,
+                             CrossEncoderReranker.DEFAULT_MODEL_PATH, CrossEncoderReranker.DEFAULT_TOKENIZER_PATH};
+    }
+
+    /** What the model leg does for a given set of model files. */
+    enum LegVerdict { RUN, SKIP, FAIL_REQUIRED, FAIL_PARTIAL }
+
+    /**
+     * The model leg's decision. {@code RUN} whenever the files are all present, whatever else is set; a skip
+     * is possible only when nothing is provisioned and the leg is not required.
+     */
+    static LegVerdict legVerdict(String[] paths, long minBgeBytes, boolean required) {
+        boolean complete = size(paths[0]) >= minBgeBytes && size(paths[1]) > 0
+            && size(paths[2]) > 0 && size(paths[3]) > 0;
+        if (complete) {
+            return LegVerdict.RUN;
+        }
+        if (required) {
+            return LegVerdict.FAIL_REQUIRED;
+        }
+        boolean partial = Files.isDirectory(Path.of(paths[0]).getParent())
+            || Files.isDirectory(Path.of(paths[2]).getParent());
+        return partial ? LegVerdict.FAIL_PARTIAL : LegVerdict.SKIP;
+    }
+
     /**
      * The four model paths, or a skip. A skip means nothing is provisioned; a partial provision fails, and so
      * does {@value #REQUIRE_ENV}=1 with the files absent.
      */
     private static String[] requireModelsOrSkip() {
-        String[] paths = {Bge768Embedder.DEFAULT_MODEL_PATH, Bge768Embedder.DEFAULT_TOKENIZER_PATH,
-                          CrossEncoderReranker.DEFAULT_MODEL_PATH, CrossEncoderReranker.DEFAULT_TOKENIZER_PATH};
-        boolean complete = size(paths[0]) >= MIN_BGE_BYTES && size(paths[1]) > 0
-            && size(paths[2]) > 0 && size(paths[3]) > 0;
-        if (complete) {
-            return paths;
-        }
+        String[] paths = defaultModelPaths();
+        LegVerdict verdict = legVerdict(paths, MIN_BGE_BYTES, "1".equals(System.getenv(REQUIRE_ENV)));
         String why = "bge or cross-encoder model files not complete under " + Path.of(paths[0]).getParent().getParent();
-        if ("1".equals(System.getenv(REQUIRE_ENV))) {
-            fail("%s=1 but %s; provision them with `nx init --service`", REQUIRE_ENV, why);
+        switch (verdict) {
+            case RUN -> {
+                return paths;
+            }
+            case FAIL_REQUIRED -> fail("%s=1 but %s; provision them with `nx init --service`", REQUIRE_ENV, why);
+            case FAIL_PARTIAL -> fail("a model directory exists but is incomplete (%s): "
+                + "a half provision must not skip this witness", why);
+            case SKIP -> {
+                modelLegSkipped = true;
+                Assumptions.assumeTrue(false, "SKIPPED (not passed): " + why
+                    + ". The tokenizer leg and the fixtures still ran.");
+            }
         }
-        boolean partial = Files.isDirectory(Path.of(paths[0]).getParent()) || Files.isDirectory(Path.of(paths[2]).getParent());
-        if (partial) {
-            fail("a model directory exists but is incomplete (%s): a half provision must not skip this witness", why);
-        }
-        Assumptions.assumeTrue(false, "SKIPPED (not passed): " + why + ". The tokenizer leg and the fixtures still ran.");
         return paths;
+    }
+
+    // ---- max-skip: a skipped model leg is never a silent pass on a host that has the files ---------
+
+    @Test
+    @Order(Integer.MAX_VALUE)
+    void maxSkip_theModelLegDidNotSkipOnAHostWhereTheFilesArePresent() {
+        LegVerdict verdict = legVerdict(defaultModelPaths(), MIN_BGE_BYTES, false);
+        System.out.println("EGRESS_WITNESS modelLegVerdict=" + verdict + " skipped=" + modelLegSkipped);
+        if (verdict == LegVerdict.RUN) {
+            assertThat(modelLegSkipped).as("the model files are present, so the model leg must have run").isFalse();
+        }
+    }
+
+    @Test
+    void fixture_theLegVerdictRunsWhenFilesArePresent_andSkipsOnlyWhenNothingIsProvisioned() throws IOException {
+        Path root = dir.resolve("models");
+        String[] paths = {root.resolve("bge/model.onnx").toString(), root.resolve("bge/tokenizer.json").toString(),
+                          root.resolve("ce/model.onnx").toString(), root.resolve("ce/tokenizer.json").toString()};
+        assertThat(legVerdict(paths, 10, false)).as("nothing provisioned").isEqualTo(LegVerdict.SKIP);
+        assertThat(legVerdict(paths, 10, true)).as("nothing provisioned, required").isEqualTo(LegVerdict.FAIL_REQUIRED);
+
+        Files.createDirectories(root.resolve("bge"));
+        Files.writeString(root.resolve("bge/model.onnx"), "x".repeat(10));
+        assertThat(legVerdict(paths, 10, false)).as("half provisioned").isEqualTo(LegVerdict.FAIL_PARTIAL);
+
+        Files.writeString(root.resolve("bge/tokenizer.json"), "{}");
+        Files.createDirectories(root.resolve("ce"));
+        Files.writeString(root.resolve("ce/model.onnx"), "x");
+        Files.writeString(root.resolve("ce/tokenizer.json"), "{}");
+        assertThat(legVerdict(paths, 10, false)).as("all present").isEqualTo(LegVerdict.RUN);
+        assertThat(legVerdict(paths, 10, true)).as("all present, required").isEqualTo(LegVerdict.RUN);
+        assertThat(legVerdict(paths, 11, false)).as("bge model under the size floor")
+            .isEqualTo(LegVerdict.FAIL_PARTIAL);
     }
 
     private static long size(String path) {

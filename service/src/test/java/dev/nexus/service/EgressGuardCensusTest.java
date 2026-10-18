@@ -160,6 +160,33 @@ class EgressGuardCensusTest {
     }
 
     @Test
+    void fixture_aSecondSiteInAnAllowlistedFileFails() throws IOException {
+        plant(VOYAGE, GOOD_VOYAGE_CLASS.replace("HttpClient c()",
+            "HttpClient d() { return HttpClient.newBuilder().build(); }\n    HttpClient c()"));
+        EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, ONE_VOYAGE, List.of(VOYAGE));
+        assertThat(r.sitesFound()).isEqualTo(2);
+        assertThat(r.problems()).anyMatch(p -> p.contains("exactly 1") && p.contains("shows 2"));
+
+        String reaper = "dev/nexus/service/db/BackendReaper.java";
+        Map<String, EgressGuardCensus.Allow> one = Map.of(
+            reaper, new EgressGuardCensus.Allow(Set.of("DriverManager.getConnection"), 1, "fixture"));
+        Path sub = dir.resolve("reaperTree");
+        Path f = sub.resolve(reaper);
+        Files.createDirectories(f.getParent());
+        Files.writeString(f, """
+            package dev.nexus.service.db;
+            final class BackendReaper {
+                Object a() throws Exception { return java.sql.DriverManager.getConnection("jdbc:x"); }
+                Object b() throws Exception { return java.sql.DriverManager.getConnection("jdbc:y"); }
+            }
+            """);
+        EgressGuardCensus.Report rr = EgressGuardCensus.scan(sub, one, List.of());
+        assertThat(rr.sitesFound()).isEqualTo(2);
+        assertThat(rr.problems())
+            .anyMatch(p -> p.contains("BackendReaper.java") && p.contains("exactly 1") && p.contains("shows 2"));
+    }
+
+    @Test
     void fixture_anAllowlistEntryWithoutAReasonFails() throws IOException {
         plant(VOYAGE, GOOD_VOYAGE_CLASS);
         Map<String, EgressGuardCensus.Allow> noReason = Map.of(
@@ -220,6 +247,36 @@ class EgressGuardCensusTest {
             pom + "\nliquibase.analytics.enabled=false")).isEmpty();
         assertThat(EgressGuardCensus.liquibaseProblems(pom,
             pom + "\nliquibase.analytics.enabled=true")).as("true is not off").hasSize(1);
+    }
+
+    @Test
+    void fixture_aCommentNamingTheAnalyticsSwitchDoesNotSatisfyTheCheck() throws IOException {
+        String pomText = "<project><properties><liquibase.version>4.30.0</liquibase.version></properties></project>";
+        Path pom = dir.resolve("pom.xml");
+        Files.writeString(pom, pomText);
+        Path main = dir.resolve("main");
+        Files.createDirectories(main);
+        Files.writeString(main.resolve("A.java"), """
+            class A {
+                // liquibase.analytics.enabled=false
+                /* System.setProperty("liquibase.analytics.enabled", "false"); */
+            }
+            """);
+        Files.writeString(main.resolve("app.properties"), "# liquibase.analytics.enabled=false\n");
+        assertThat(EgressGuardCensus.liquibaseProblems(pomText, EgressGuardCensus.configText(pom, main)))
+            .as("comments naming the switch").hasSize(1);
+
+        Files.writeString(pom, pomText.replace("</project>", "<!-- liquibase.analytics.enabled=false --></project>"));
+        assertThat(EgressGuardCensus.liquibaseProblems(pomText, EgressGuardCensus.configText(pom, main)))
+            .as("a pom comment naming the switch").hasSize(1);
+
+        Files.writeString(main.resolve("A.java"), """
+            class A {
+                static { System.setProperty("liquibase.analytics.enabled", "false"); }
+            }
+            """);
+        assertThat(EgressGuardCensus.liquibaseProblems(pomText, EgressGuardCensus.configText(pom, main)))
+            .as("a real setting still satisfies it").isEmpty();
     }
 
     @Test
