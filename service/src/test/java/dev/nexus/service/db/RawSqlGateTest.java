@@ -944,12 +944,11 @@ class RawSqlGateTest {
         // fk_catalog_chunks_chunk) and deleteChunk's chunks DELETE.
         Map.entry("dev/nexus/service/CombinedWriteRacedEmbedCounterTest.java", 2),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
-        // nexus-v4pj4 (round-2 review decision): 4 raw-JDBC fixture sites, the
+        // nexus-v4pj4 (round-2 review decision): raw-JDBC fixture sites, the
         // same idiom TaxonomyAssignFromChashesRepositoryTest uses above --
-        // seedChunk's chunks INSERT, seedCentroid's taxonomy_centroids INSERT,
-        // and startAll's two su.createStatement().execute(...) GRANT EXECUTE
-        // call sites (one per function family, each looped over the three
-        // dims) -- no jOOQ codegen for GRANT EXECUTE.
+        // seedChunk's chunks INSERT and seedCentroid's taxonomy_centroids
+        // INSERT. startAll's two GRANT EXECUTE sites moved onto
+        // PgContainerHelper#grantExecuteOnFunction (nexus-cbo4a, 2026-10-18): 4 -> 2.
         Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 5),
         // nexus-brxnp: new file at 3 -- metadataField's raw executeQuery
@@ -989,7 +988,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PgVectorCombinedQueryContractTest.java", 6),
         Map.entry("dev/nexus/service/PgVectorEmbedSkipGcRaceTest.java", 3),
         Map.entry("dev/nexus/service/PgVectorRepositoryContractTest.java", 9),
-        Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 10), // nexus-cbo4a: signature qualification only, no new sites
+        Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 10), // nexus-cbo4a 2026-10-18: 13 -> 10, three GRANT EXECUTE sites onto grantExecuteOnFunction
         Map.entry("dev/nexus/service/PgVectorServingContractTest.java", 4),
         Map.entry("dev/nexus/service/PgVectorTombstoneFilterTest.java", 3),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 20),
@@ -1598,10 +1597,12 @@ class RawSqlGateTest {
      * {@code PgContainerHelper#grantExecuteOnFunction} -- jOOQ's typed GRANT
      * DSL targets tables, not a function's parenthesized argument-type
      * signature, which Postgres's {@code GRANT ... ON FUNCTION} syntax
-     * requires. This same {@code GRANT EXECUTE ON FUNCTION} shape recurs raw
-     * across roughly 15 OTHER test files today -- out of this batch's scope,
-     * but the new function is available for a future batch to rewire them
-     * onto.
+     * requires. The 2026-10-18 rewire moved 20 raw {@code GRANT EXECUTE ON
+     * FUNCTION} statements in 12 files onto it. What stays raw is 22
+     * statements in 11 fresh-walk bootstrap tests granting the
+     * {@code ensure_vector_extensions_(un)relocated()} stubs to a migrating
+     * role: they run before any changelog, so this function does not exist
+     * yet there.
      */
     // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): 1129 -> 1134 (+5, the new
     // TupleSweepIndexPlanShapeTest.java entry above).
