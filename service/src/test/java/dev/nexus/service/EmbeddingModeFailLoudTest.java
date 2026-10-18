@@ -241,7 +241,9 @@ class EmbeddingModeFailLoudTest {
         assertThat(local.availableModels()).containsExactly("minilm-l6-v2-384");
 
         EmbedderRouter cloud = new EmbedderRouter(onnx, "dummy-key", "document");
-        assertThat(cloud.modeName()).isEqualTo("voyage");
+        // RDR-210: a router holding a local embedder AND a key is "dual" (the voyage-only
+        // shape, "voyage", is covered by EmbedderRouterVoyageOnlyTest).
+        assertThat(cloud.modeName()).isEqualTo("dual");
         assertThat(cloud.availableModels()).containsExactly(
                 "minilm-l6-v2-384", "voyage-3", "voyage-code-3", "voyage-context-3");
     }

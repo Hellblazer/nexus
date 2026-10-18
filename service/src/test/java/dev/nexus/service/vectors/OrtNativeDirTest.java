@@ -1268,26 +1268,37 @@ class OrtNativeDirTest {
     }
 
     @Test
-    void mainSetsThePathOnlyInTheLocalBranchBeforeTheFirstEmbedderIsBuilt() throws Exception {
+    void mainSetsThePathOnlyWhenBgeIsPresentBeforeTheFirstEmbedderIsBuilt() throws Exception {
         String main = withoutComments(Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java")));
         int gate = main.indexOf("OrtInitGate.process().installSignalHandlers();");
         int apply = main.indexOf("OrtNativeDir.applyAtBoot();");
-        int cloud = main.indexOf("new EmbedderRouter(voyageKey");
+        // RDR-210 P2.1: the presence probe decides; the Voyage-only (cloud) shape never
+        // enters the guarded block, so it extracts nothing and creates no ONNX session.
+        int probe = main.indexOf("LocalModelProbe.probe(");
+        int guard = main.lastIndexOf("if (presence.bgePresent()) {", apply);
         int local = main.indexOf("OnnxModelPaths.resolved()");
         int firstEmbedder = main.indexOf("new Bge768Embedder()");
+        int firstRouter = main.indexOf("new EmbedderRouter(");
         assertThat(gate).isPositive();
         assertThat(apply).as("Main calls OrtNativeDir.applyAtBoot() (not in a comment)").isPositive();
         assertThat(main.indexOf("OrtNativeDir.applyAtBoot();", apply + 1)).as("exactly one call").isEqualTo(-1);
-        assertThat(cloud).isPositive();
+        assertThat(probe).as("Main probes presence").isPositive();
+        assertThat(guard).as("applyAtBoot sits inside the bge-present guard").isPositive();
         assertThat(local).isPositive();
         assertThat(firstEmbedder).isPositive();
+        assertThat(firstRouter).isPositive();
         assertThat(apply).as("after the signal gate is installed, which Main does first thing")
                 .isGreaterThan(gate);
-        assertThat(apply).as("not in the cloud/Voyage branch, which never touches ONNX Runtime")
-                .isGreaterThan(cloud);
-        assertThat(apply).as("in the local branch, with the model-root resolution").isGreaterThan(local);
+        assertThat(guard).as("the guard follows the probe").isGreaterThan(probe);
+        assertThat(main.substring(guard, apply))
+                .as("nothing between the guard and the call opens another block or builds a router")
+                .doesNotContain("new EmbedderRouter(")
+                .doesNotContain("} else {");
+        assertThat(apply).as("with the model-root resolution").isGreaterThan(local);
         assertThat(apply).as("before ONNX Runtime is first touched, or the property is read too late")
                 .isLessThan(firstEmbedder);
+        assertThat(apply).as("before any router is built from an ONNX member")
+                .isLessThan(firstRouter);
     }
 
     // ── ORT_VERSION is a property of the pinned jar ─────────────────────────────────────────────

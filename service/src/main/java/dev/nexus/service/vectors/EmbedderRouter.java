@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
@@ -30,22 +31,26 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
  *   <li>local mode → the local ONNX-runtime embedder (RDR-160: bge-base-en-v1.5, 768d)</li>
  * </ul>
  *
- * <p>The Java service runs in one of three modes (by constructor):
+ * <p>The Java service holds whatever PRESENT SET of embedder families its boot could
+ * build (RDR-210 Phase 2 Step 1, bead nexus-uaovy), reported by {@link #modeName()}:
  * <ul>
- *   <li><strong>Local mode</strong> ({@link #EmbedderRouter(Embedder, String)}): all
- *       collections → the injected local embedder (RDR-160 wires bge-768); voyage
- *       collections REFUSED (422).</li>
- *   <li><strong>Pure-voyage cloud mode</strong> ({@link #EmbedderRouter(String, String)} —
- *       PRODUCTION cloud, nexus-0n7uc): {@code localEmbedder == null}, NO local ONNX;
- *       prefix/segment routing to Voyage embedders; a non-conformant or
- *       {@code minilm-l6-v2-384} collection is REFUSED (422), symmetric with local
- *       mode refusing voyage. This is what Main boots when {@code NX_VOYAGE_API_KEY}
- *       is set.</li>
- *   <li><strong>Onnx-cloud mode</strong> ({@link #EmbedderRouter(OnnxEmbedder, String,
- *       String)} — TESTS / parity-gate only, NOT production): voyage routing plus a
- *       local ONNX fallback for non-conformant names. Retained because those callers
- *       run where the MiniLM model exists on disk.</li>
+ *   <li><strong>{@code onnx-local}</strong> — a local embedder only
+ *       ({@link #EmbedderRouter(Embedder, String)}; production: bge-768, RDR-160). Voyage
+ *       collections are REFUSED (422).</li>
+ *   <li><strong>{@code voyage}</strong> — Voyage only
+ *       ({@link #EmbedderRouter(String, String)}; the production CLOUD shape,
+ *       nexus-0n7uc): {@code localEmbedder == null}, NO local ONNX; a bge or
+ *       {@code minilm-l6-v2-384} collection is REFUSED (422), symmetric with local mode
+ *       refusing Voyage.</li>
+ *   <li><strong>{@code dual}</strong> — both
+ *       ({@link #EmbedderRouter(Embedder, String, String)} with a local embedder AND a
+ *       key): a row routes to whichever family serves its model. Tests and the parity
+ *       gate also use this form with the MiniLM {@link OnnxEmbedder} as the local
+ *       member.</li>
  * </ul>
+ *
+ * <p>Neither present is not a router: construction refuses, and {@code Main} reports the
+ * boot failure with both remedies before it gets here.
  *
  * <p>Thread-safe: all embedder instances are stateless per-call.
  */
@@ -54,15 +59,15 @@ public final class EmbedderRouter implements Embedder {
     private static final Logger log = LoggerFactory.getLogger(EmbedderRouter.class);
 
     /**
-     * Local-mode embedder (RDR-160: a {@link Bge768Embedder}); also the
-     * cloud-mode fallback for non-conformant prefixes. Typed to the
-     * {@link Embedder} interface so the local model can change (MiniLM → bge-768)
-     * without a signature churn — the MiniLM {@link OnnxEmbedder} stays a valid
-     * argument, it is simply no longer what production local mode passes.
+     * The local embedder when one is present (RDR-160: a {@link Bge768Embedder});
+     * {@code null} on the Voyage-only shape. Typed to the {@link Embedder} interface
+     * so the local model can change (MiniLM → bge-768) without a signature churn —
+     * the MiniLM {@link OnnxEmbedder} stays a valid argument, it is simply no longer
+     * what production passes.
      */
     private final Embedder       localEmbedder;
-    private final VoyageEmbedder voyageCodeEmbedder;    // voyage-code-3, null in local mode
-    private final CceEmbedder    cceEmbedder;           // voyage-context-3, null in local mode
+    private final VoyageEmbedder voyageCodeEmbedder;    // voyage-code-3, null when no key
+    private final CceEmbedder    cceEmbedder;           // voyage-context-3, null when no key
     private final String         inputType;             // "document" or "query"
 
     /**
@@ -93,80 +98,86 @@ public final class EmbedderRouter implements Embedder {
         // doc and query routers so the bound is process-wide, not per-router
         // — wrapping here, once per router, produced a per-router bound
         // instead and was the exact defect this comment replaces).
-        this.localEmbedder       = localEmbedder;
-        this.voyageCodeEmbedder  = null;
-        this.cceEmbedder         = null;
-        this.inputType           = inputType;
-        this.modelEmbedders      = Map.of(localEmbedder.modelToken(), localEmbedder);
+        this(Objects.requireNonNull(localEmbedder, "localEmbedder"), null, inputType);
     }
 
     /**
-     * Cloud-mode constructor: routes by collection model segment (prefix for
-     * non-conformant names).
+     * Voyage-only constructor (the production CLOUD shape, nexus-0n7uc): NO local
+     * ONNX embedder.
      *
-     * @param onnxEmbedder  ONNX fallback (used when collection prefix is unrecognised)
-     * @param voyageApiKey  Voyage AI API key
-     * @param inputType     {@code "document"} or {@code "query"}
-     */
-    public EmbedderRouter(OnnxEmbedder onnxEmbedder, String voyageApiKey, String inputType) {
-        this.localEmbedder      = onnxEmbedder;
-        this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
-        this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
-        this.inputType          = inputType;
-        // voyage-3 gets its own standard-embed instance: prefix routing sent it
-        // to CCE (voyage-context-3) — the same-dim wrong-model contamination
-        // hole this dispatch table closes. Every entry is self-keyed by the
-        // embedder's own modelToken() so a key can never drift from the
-        // identity actually dispatched.
-        VoyageEmbedder voyage3 = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
-        this.modelEmbedders     = Map.of(
-                onnxEmbedder.modelToken(),       onnxEmbedder,
-                voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
-                cceEmbedder.modelToken(),        cceEmbedder,
-                voyage3.modelToken(),            voyage3);
-    }
-
-    /**
-     * Cloud-mode, VOYAGE-ONLY constructor (nexus-0n7uc): NO local ONNX embedder.
-     *
-     * <p>The production cloud service embeds exclusively via Voyage; it must not
-     * construct any local ONNX embedder. The cloud container has no MiniLM model
-     * on disk, and {@code OnnxEmbedder} loads it via {@code OrtEnvironment.
-     * createSession(path)} — which onnxruntime SEGFAULTS (does not throw) on a
-     * missing file, crashing the engine at boot (conexus STEP-5, conexus-qcn).
-     * A voyage-1024 cloud corpus has no legitimate use for a local 384-dim
-     * fallback anyway. A non-conformant or {@code minilm-l6-v2-384}-segment
-     * collection is REFUSED ({@link EmbeddingModelUnavailableException} → 422),
-     * symmetric with how local mode refuses voyage collections.
-     *
-     * <p>The {@link #EmbedderRouter(OnnxEmbedder, String, String) onnx cloud
-     * constructor} is retained for tests / the parity-gate, which run where the
-     * MiniLM model exists; production boot (Main) uses THIS constructor.
+     * <p>The cloud container has no model on disk, and a local embedder loads via
+     * {@code OrtEnvironment.createSession(path)} — which onnxruntime SEGFAULTS (does
+     * not throw) on a missing file, crashing the engine at boot (conexus STEP-5,
+     * conexus-qcn). A bge or {@code minilm-l6-v2-384} row is REFUSED ({@link
+     * EmbeddingModelUnavailableException} → 422), symmetric with how local mode
+     * refuses Voyage rows.
      *
      * @param voyageApiKey Voyage AI API key
      * @param inputType    {@code "document"} or {@code "query"}
      */
     public EmbedderRouter(String voyageApiKey, String inputType) {
-        this.localEmbedder      = null;   // pure-voyage cloud: no local fallback
-        this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
-        this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
-        this.inputType          = inputType;
-        VoyageEmbedder voyage3 = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
-        this.modelEmbedders     = Map.of(
-                voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
-                cceEmbedder.modelToken(),        cceEmbedder,
-                voyage3.modelToken(),            voyage3);
+        this(null, voyageApiKey, inputType);
     }
 
     /**
-     * Embedding mode for banners and refusal messages. {@code "onnx-local"} is a
-     * cross-language SENTINEL parsed by {@code doctor.py} and
-     * {@code storage_service_daemon.py} — do not change the literal. It names the
-     * RUNTIME (local ONNX), not the model; the model token is in
+     * Any present set of embedder families (RDR-210 Phase 2 Step 1, bead
+     * nexus-uaovy): a local embedder, the Voyage embedders, or both. This replaces
+     * the MiniLM-typed "onnx cloud" form — the local member is any {@link Embedder}
+     * (production: the admission-wrapped bge-768; tests still pass the MiniLM {@link
+     * OnnxEmbedder}).
+     *
+     * <p>Every dispatch-table entry is self-keyed by the embedder's own {@link
+     * Embedder#modelToken()}, so a key can never drift from the identity actually
+     * dispatched. {@code voyage-3} gets its own standard-embed instance: prefix
+     * routing once sent it to CCE ({@code voyage-context-3}) — the same-dim
+     * wrong-model contamination hole this dispatch table closes.
+     *
+     * @param localEmbedder the local embedder, or {@code null} when no local model is present
+     * @param voyageApiKey  the Voyage key, or {@code null}/blank when none is present
+     * @param inputType     {@code "document"} or {@code "query"}
+     * @throws IllegalArgumentException when neither family is present
+     */
+    public EmbedderRouter(Embedder localEmbedder, String voyageApiKey, String inputType) {
+        boolean voyage = voyageApiKey != null && !voyageApiKey.isBlank();
+        if (localEmbedder == null && !voyage) {
+            throw new IllegalArgumentException(
+                "EmbedderRouter needs at least one embedder family: a local embedder "
+                + "and/or a Voyage API key");
+        }
+        this.localEmbedder = localEmbedder;
+        this.inputType     = inputType;
+        Map<String, Embedder> table = new LinkedHashMap<>();
+        if (localEmbedder != null) {
+            table.put(localEmbedder.modelToken(), localEmbedder);
+        }
+        if (voyage) {
+            this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
+            this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
+            VoyageEmbedder voyage3  = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
+            table.put(voyageCodeEmbedder.modelToken(), voyageCodeEmbedder);
+            table.put(cceEmbedder.modelToken(),        cceEmbedder);
+            table.put(voyage3.modelToken(),            voyage3);
+        } else {
+            this.voyageCodeEmbedder = null;
+            this.cceEmbedder        = null;
+        }
+        this.modelEmbedders = Map.copyOf(table);
+    }
+
+    /**
+     * Embedding mode for banners and refusal messages: {@code "onnx-local"} (a local
+     * embedder only), {@code "voyage"} (Voyage only) or {@code "dual"} (both,
+     * RDR-210). {@code "onnx-local"} and {@code "voyage"} are cross-language
+     * SENTINELS parsed by {@code doctor.py} and {@code storage_service_daemon.py} —
+     * do not change those literals; they keep their single-family meaning. The mode
+     * names the RUNTIME family present, not the model; the model tokens are in
      * {@link #availableModels()} (RDR-160 swapped MiniLM-384 → bge-768 there).
      */
     public String modeName() {
-        return voyageCodeEmbedder == null ? "onnx-local" : "voyage";
+        if (voyageCodeEmbedder == null) {
+            return "onnx-local";
+        }
+        return localEmbedder == null ? "voyage" : "dual";
     }
 
     /** Model tokens this router can embed for (sorted, for stable banner output). */
@@ -548,14 +559,28 @@ public final class EmbedderRouter implements Embedder {
                 "this install's profile names a model this mode cannot serve — collection '"
                 + collection + "' resolves to model '" + row.embeddingModel() + "', which "
                 + "embedding mode " + modeName() + " has no embedder for. Available models: "
-                + availableModels()
-                + ("onnx-local".equals(modeName())
-                   ? ". Voyage collections need NX_VOYAGE_API_KEY in the service "
-                     + "environment (supervisor plumbs it from the nexus credential "
-                     + "chain when set)."
-                   : "."));
+                + availableModels() + missingFamilyHint("Voyage collections", row.embeddingModel()));
         }
         return embedder;
+    }
+
+    /**
+     * The remedy sentence for a refusal, naming whichever family this router does not
+     * hold: the key for a Voyage model on a keyless router, the bge model files for a
+     * non-Voyage model on a Voyage-only router. Empty remedy (just a period) otherwise.
+     */
+    private String missingFamilyHint(String subject, String modelToken) {
+        boolean voyageModel = modelToken != null && modelToken.startsWith("voyage-");
+        if (voyageModel && voyageCodeEmbedder == null) {
+            return ". " + subject + " need NX_VOYAGE_API_KEY in the service "
+                 + "environment (supervisor plumbs it from the nexus credential "
+                 + "chain when set).";
+        }
+        if (!voyageModel && localEmbedder == null) {
+            return ". Local-model collections need the bge model files on disk; "
+                 + "provision them with `nx init --service`.";
+        }
+        return ".";
     }
 
     /**
@@ -585,11 +610,7 @@ public final class EmbedderRouter implements Embedder {
                 "this install's profile names a model this mode cannot serve — model '"
                 + modelToken + "', which embedding mode " + modeName() + " has no embedder for. "
                 + "Available models: " + availableModels()
-                + ("onnx-local".equals(modeName())
-                   ? ". Voyage models need NX_VOYAGE_API_KEY in the service "
-                     + "environment (supervisor plumbs it from the nexus credential "
-                     + "chain when set)."
-                   : "."));
+                + missingFamilyHint("Voyage models", modelToken));
         }
         return embedder;
     }

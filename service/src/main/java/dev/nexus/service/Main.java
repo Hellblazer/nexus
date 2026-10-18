@@ -243,43 +243,45 @@ public final class Main {
         String voyageKey = System.getenv("NX_VOYAGE_API_KEY");
         EmbedderRouter docEmbedRouter;
         EmbedderRouter qryEmbedRouter;
-        // Bead nexus-s71lr, deliverable 2: non-null ONLY in the local-mode branch
-        // below (bge is that branch's own Bge768Embedder) — null in cloud/voyage
-        // mode, where GET /v1/status reports local_embed_activity: null rather
-        // than fabricating a value for an embedder that does not exist here.
+        // Bead nexus-s71lr, deliverable 2: non-null ONLY when bge is built (in
+        // either the bge-only or the dual shape) — null on the Voyage-only shape,
+        // where GET /v1/status reports local_embed_activity: null rather than
+        // fabricating a value for an embedder that does not exist here.
         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier = null;
         // nexus-pebfx.2: LOUD one-line embedding-mode banner. The 2026-06-10
         // migration ran for hours against silent ONNX-384 fallback because the
         // mode was invisible; onnx-local now logs at WARN and names the refusal
         // behaviour so a missing key is unmissable in the service log.
         dev.nexus.service.vectors.Reranker reranker = null;
-        if (voyageKey != null && !voyageKey.isBlank()) {
-            // Cloud mode: PURE Voyage routing — NO local ONNX embedder (nexus-0n7uc).
-            // The cloud container has no MiniLM model on disk; constructing
-            // OnnxEmbedder would call onnxruntime createSession() on a missing file,
-            // which SEGFAULTS (not throws) and crashed the engine at boot (conexus
-            // STEP-5, conexus-qcn). A voyage-1024 cloud corpus has no use for a local
-            // 384-dim fallback; non-conformant collections are REFUSED (422).
-            docEmbedRouter = new EmbedderRouter(voyageKey, "document");
-            qryEmbedRouter = new EmbedderRouter(voyageKey, "query");
-            // RDR-188: the same key grants the fused rerank stage — the engine owns
-            // ALL Voyage traffic (embed + rerank); no new credential surface.
-            // NX_RERANK_MODEL (RDR-157 config-via-env) is the SERVER-side successor
-            // of the client's embeddings.rerankerModel knob (e.g. rerank-2.5-lite
-            // for cost/latency): model choice moved server-side with the traffic —
-            // there is deliberately NO per-request model field (the server owns
-            // rerank cost; the client knob retires loudly in P2, nexus bead filed).
-            String rerankModelEnv = System.getenv("NX_RERANK_MODEL");
-            String rerankModel = (rerankModelEnv == null || rerankModelEnv.isBlank())
-                    ? dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL
-                    : rerankModelEnv.trim();
-            reranker = new dev.nexus.service.vectors.VoyageReranker(voyageKey, rerankModel);
-            log.info("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector",
-                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(), rerankModel);
-        } else {
-            // Local mode (RDR-160): bge-768 serves EVERY collection. MiniLM is
-            // NOT loaded on the local path (Decision 5) — a non-bge collection
-            // is REFUSED (422), never silently embedded at the wrong dim.
+
+        // RDR-210 Phase 2 Step 1 (nexus-uaovy): build whatever embedder family is
+        // PRESENT — bge only, Voyage only, or both. The probe only stats files (it
+        // never touches ONNX Runtime; building a session on a missing model file
+        // segfaults), so it is safe on the cloud shape (key, no model files).
+        boolean voyagePresent = voyageKey != null && !voyageKey.isBlank();
+        var presence = dev.nexus.service.vectors.LocalModelProbe.probe(voyageKey);
+        log.info("event=embedder_presence bge_present={} voyage_key_present={} bge=\"{}\"",
+                presence.bgePresent(), presence.voyageKeyPresent(), presence.bgeDetail());
+        if (!presence.any()) {
+            // Neither family can be built: a boot failure that names BOTH remedies.
+            ds.close();
+            log.error("event=no_embedder_available error=\"no embedder family is present: "
+                    + "the Voyage key is not set and the bge model files are not on disk. "
+                    + "Either set NX_VOYAGE_API_KEY (or persist the key with `nx config set "
+                    + "voyage_api_key --stdin` so the supervisor passes it), or provision the "
+                    + "local bge model with `nx init --service`.\" bge=\"{}\"",
+                    presence.bgeDetail());
+            System.exit(1);
+        }
+
+        // The local (bge) member, present only when its files are. ONNX Runtime is
+        // touched ONLY inside this block: the cloud shape (key, no model files) never
+        // enters it, so it extracts nothing and creates no ONNX session.
+        Bge768Embedder bge = null;
+        dev.nexus.service.vectors.LocalOnnxAdmission localOnnxAdmission = null;
+        if (presence.bgePresent()) {
+            // Local model (RDR-160): bge-768. MiniLM is NOT loaded (Decision 5) — a
+            // non-bge row is REFUSED (422), never silently embedded at the wrong dim.
             // nexus-ogccs: log the resolved onnx_models root BEFORE constructing
             // the embedder — its fail-loud missing-model path should follow a
             // line saying where the engine looked and why.
@@ -288,11 +290,12 @@ public final class Main {
                     onnxRoot.root(), onnxRoot.source());
             // nexus-8ool4: load ONNX Runtime's native libraries from one per-version directory
             // extracted once under the engine's cache tree, instead of unpacking ~16 MB into a fresh
-            // /tmp/onnxruntime-java<random> on every start (a killed engine never deletes it). Local
-            // mode only: cloud/Voyage mode never touches ONNX Runtime. Sets onnxruntime.native.path
-            // unless the operator already did; best effort, never throws; must precede any ORT use.
+            // /tmp/onnxruntime-java<random> on every start (a killed engine never deletes it). Runs
+            // once, only in a boot that builds a local ONNX member (the Phase 2 Step 4 cross-encoder
+            // placement extends this condition); the cloud shape never reaches it. Sets
+            // onnxruntime.native.path unless the operator already did; best effort, never throws;
+            // must precede any ORT use.
             OrtNativeDir.applyAtBoot();
-            Bge768Embedder bge;
             try {
                 bge = new Bge768Embedder();
             } catch (OrtInitGate.ShutdownInProgressException e) {
@@ -311,19 +314,44 @@ public final class Main {
             // Document embeds block (bulk indexing is not latency-sensitive);
             // query embeds and reranks use the bounded-timeout acquire so a
             // bulk-indexing burst cannot stall interactive search unboundedly.
-            var localOnnxAdmission = dev.nexus.service.vectors.LocalOnnxAdmission.fromEnv();
+            // It wraps only the ONNX members, never the Voyage embedders.
+            localOnnxAdmission = dev.nexus.service.vectors.LocalOnnxAdmission.fromEnv();
             // Bead nexus-s71lr: composition-root wiring so the progress log line and
             // GET /v1/status can report REAL queue-depth/thread-width (read from this
             // same admission gate) instead of omitting them. bge itself never looks
             // the gate up — it is handed the reference exactly once, here.
             bge.setAdmissionGate(localOnnxAdmission);
-            localEmbedActivitySupplier = bge::activitySnapshot;
-            docEmbedRouter = new EmbedderRouter(
-                    new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, false),
-                    "document");
-            qryEmbedRouter = new EmbedderRouter(
-                    new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, true),
-                    "query");
+            final Bge768Embedder builtBge = bge;
+            localEmbedActivitySupplier = builtBge::activitySnapshot;
+        }
+        var docLocal = bge == null ? null
+                : new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, false);
+        var qryLocal = bge == null ? null
+                : new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, true);
+        String routerKey = voyagePresent ? voyageKey : null;
+        docEmbedRouter = new EmbedderRouter(docLocal, routerKey, "document");
+        qryEmbedRouter = new EmbedderRouter(qryLocal, routerKey, "query");
+
+        if (voyagePresent) {
+            // Voyage present (Voyage-only on the cloud shape, nexus-0n7uc: no local ONNX
+            // embedder; or dual when bge is also present). The reranker follows the key
+            // until Phase 2 Step 4 makes it follow the profile.
+            // RDR-188: the same key grants the fused rerank stage — the engine owns
+            // ALL Voyage traffic (embed + rerank); no new credential surface.
+            // NX_RERANK_MODEL (RDR-157 config-via-env) is the SERVER-side successor
+            // of the client's embeddings.rerankerModel knob (e.g. rerank-2.5-lite
+            // for cost/latency): model choice moved server-side with the traffic —
+            // there is deliberately NO per-request model field (the server owns
+            // rerank cost; the client knob retires loudly in P2, nexus bead filed).
+            String rerankModelEnv = System.getenv("NX_RERANK_MODEL");
+            String rerankModel = (rerankModelEnv == null || rerankModelEnv.isBlank())
+                    ? dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL
+                    : rerankModelEnv.trim();
+            reranker = new dev.nexus.service.vectors.VoyageReranker(voyageKey, rerankModel);
+            log.info("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector",
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(), rerankModel);
+        } else {
+            // Local only (no key; bge is present or the boot failed above).
             // RDR-188 P1.3: local no-Voyage posture reranks with the ms-marco
             // cross-encoder. Lazy init (ctor touches no I/O): a not-yet-provisioned
             // model degrades the fused stage LOUD per request instead of failing
