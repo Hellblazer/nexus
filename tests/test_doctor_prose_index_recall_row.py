@@ -2,7 +2,7 @@
 """nx doctor's "Prose collections at the index threshold" row (nexus-qqoak, RDR-227 residual).
 
 A collection above ``NX_SEARCH_EXACT_MAX_ROWS`` rows (default 20,000; at or below it the router runs exact) is routed
-to its own HNSW index once one is built. For prose on ``voyage-context-3`` that index's recall was measured under the
+to its own HNSW index once one is built. For prose on the measured model (``health._PROSE_MEASURED_MODEL``) that index's recall was measured under the
 0.99 target at 10,308 and 14,300 rows and not at all above 20,000 (T2 ``nexus_rdr/227-research-12``); no other model
 was measured. Nothing checked that no prose collection had crossed. The ``GET /v1/status`` object carries counts only,
 so the row reads the collection listing.
@@ -83,13 +83,13 @@ def test_a_virgin_box_listing_nothing_is_not_applicable_and_green() -> None:
 # ── the three acceptance cases ───────────────────────────────────────────────
 
 
-_VCTX = "voyage-context-3"
+_VCTX = health._PROSE_MEASURED_MODEL
 
 
 def test_a_prose_collection_above_the_threshold_warns_naming_it_its_count_and_how_to_measure() -> None:
-    r = _row([_col("rdr__1-79__voyage-context-3__v1", 20_001, model=_VCTX)])
+    r = _row([_col("rdr__1-79__model-ctx__v1", 20_001, model=_VCTX)])
     assert r.ok is False and r.warn is True
-    assert "rdr__1-79__voyage-context-3__v1" in r.detail and "20,001 rows" in r.detail
+    assert "rdr__1-79__model-ctx__v1" in r.detail and "20,001 rows" in r.detail
     fix = " ".join(r.fix_suggestions)
     # The remedy is the procedure, inline: no T2 or repo-path pointer an installed operator cannot open, and no
     # "raise NX_SEARCH_EXACT_MAX_ROWS" (the doctor reads its own shell, so that hint cannot clear the warning).
@@ -101,8 +101,8 @@ def test_a_prose_collection_above_the_threshold_warns_naming_it_its_count_and_ho
 
 
 def test_the_threshold_itself_does_not_warn_the_router_runs_it_exact() -> None:
-    assert not _row([_col("rdr__a__voyage-context-3__v1", 20_000, model=_VCTX)]).warn
-    assert _row([_col("rdr__a__voyage-context-3__v1", 20_001, model=_VCTX)]).warn is True
+    assert not _row([_col("rdr__a__model-ctx__v1", 20_000, model=_VCTX)]).warn
+    assert _row([_col("rdr__a__model-ctx__v1", 20_001, model=_VCTX)]).warn is True
 
 
 def test_the_route_is_worded_as_conditional_and_the_thresholds_source_is_named() -> None:
@@ -120,7 +120,7 @@ def test_voyage_context_3_gets_the_measurement_and_nothing_else_is_claimed() -> 
     r = _row([_col("docs__a__m__v1", 25_000, model=_VCTX)])
     assert "0.9833 minimum tail recall (mean 0.9992, no top-1 miss) at 10,308 and 14,300 rows" in r.detail
     assert "under the 0.99 target" in r.detail and "unmeasured" not in r.detail
-    assert "voyage-context-3" in r.detail
+    assert _VCTX in r.detail
 
 
 def test_any_other_model_is_unmeasured_and_the_measurement_is_not_quoted_for_it() -> None:
@@ -134,7 +134,7 @@ def test_any_other_model_is_unmeasured_and_the_measurement_is_not_quoted_for_it(
 def test_mixed_models_each_get_their_own_sentence() -> None:
     r = _row([_col("docs__a__m__v1", 25_000, model=_VCTX), _col("docs__b__m__v1", 24_000, model="bge-768")])
     assert "0.9833 minimum tail recall" in r.detail and "recall on bge-768 is unmeasured" in r.detail
-    assert "docs__a__m__v1 (25,000 rows, voyage-context-3)" in r.detail
+    assert f"docs__a__m__v1 (25,000 rows, {_VCTX})" in r.detail
     assert "docs__b__m__v1 (24,000 rows, bge-768)" in r.detail
 
 
@@ -164,12 +164,12 @@ def test_a_collection_that_is_not_live_is_ignored() -> None:
 
 def test_a_code_collection_at_or_above_the_threshold_does_not_warn() -> None:
     for rows in (20_000, 29_355, 59_257):
-        r = _row([_col("code__1-20__voyage-code-3__v1", rows)])
+        r = _row([_col("code__1-20__model-code__v1", rows)])
         assert r.ok is True and not r.warn, rows
 
 
 def test_a_prose_collection_below_the_threshold_does_not_warn() -> None:
-    r = _row([_col("docs__1-2__voyage-context-3__v1", 19_999), _col("rdr__1-79__voyage-context-3__v1", 14_300)])
+    r = _row([_col("docs__1-2__model-ctx__v1", 19_999), _col("rdr__1-79__model-ctx__v1", 14_300)])
     assert r.ok is True and not r.warn
 
 
@@ -177,8 +177,8 @@ def test_a_prose_collection_below_the_threshold_does_not_warn() -> None:
 
 
 def test_docs_rdr_and_knowledge_are_prose_and_are_all_named_largest_first() -> None:
-    r = _row([_col("docs__a__voyage-context-3__v1", 21_000), _col("knowledge__b__voyage-context-3__v1", 40_000),
-              _col("rdr__c__voyage-context-3__v1", 30_000), _col("code__d__voyage-code-3__v1", 90_000)])
+    r = _row([_col("docs__a__model-ctx__v1", 21_000), _col("knowledge__b__model-ctx__v1", 40_000),
+              _col("rdr__c__model-ctx__v1", 30_000), _col("code__d__model-code__v1", 90_000)])
     assert r.warn is True
     assert "code__d" not in r.detail
     assert r.detail.index("knowledge__b") < r.detail.index("rdr__c") < r.detail.index("docs__a")
@@ -271,12 +271,12 @@ def test_the_default_listing_comes_from_the_t3_client() -> None:
 def test_nx_doctor_prints_the_row(monkeypatch) -> None:
     class _T3:
         def list_collections(self):
-            return [_col("rdr__1-79__voyage-context-3__v1", 23_456)]
+            return [_col("rdr__1-79__model-ctx__v1", 23_456)]
 
     monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: _T3())
     result = CliRunner().invoke(main, ["doctor"])
     assert "Prose collections at the index threshold" in result.output, result.output
-    assert "rdr__1-79__voyage-context-3__v1" in result.output and "23,456" in result.output
+    assert "rdr__1-79__model-ctx__v1" in result.output and "23,456" in result.output
 
 
 def test_one_doctor_run_lists_the_collections_once_for_the_t3_count_and_this_row(monkeypatch) -> None:
@@ -289,7 +289,7 @@ def test_one_doctor_run_lists_the_collections_once_for_the_t3_count_and_this_row
         class _T3:
             def list_collections(self, *a, **k):
                 calls.append(1)
-                return [_col("rdr__1-79__voyage-context-3__v1", 23_456, model=_VCTX)]
+                return [_col("rdr__1-79__model-ctx__v1", 23_456, model=_VCTX)]
 
         seen: list = []
         real_prose = health._check_prose_index_recall
