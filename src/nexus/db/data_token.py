@@ -311,8 +311,11 @@ _MINT_LOCK_REAP_MAX_PER_MINT: int = 8
 #: Times :meth:`DataTokenManager._mint_guarded` reopens its lock file when,
 #: once locked, the descriptor no longer names the file at the path (a reaper
 #: unlinked it between our open and our lock). Past the bound the mint goes
-#: ahead under the lock it holds, which is the pre-lock behaviour: one extra
-#: mint, absorbed by the rate limiter's burst.
+#: ahead under the lock it holds, on a dead inode, so it can run concurrently
+#: with a minter holding the new file. Reaching the bound takes five unlinks
+#: of a file just created or touched, which the reaper's mtime-under-lock
+#: check forbids; only an external delete or a filesystem mtime skewed by more
+#: than a day gets there (measured: T2 nexus/confirm-ndfc1-74c739621-2026-10-17).
 _MINT_LOCK_REOPEN_MAX: int = 5
 
 #: The Windows reap skip is logged once per process, not once per mint.
