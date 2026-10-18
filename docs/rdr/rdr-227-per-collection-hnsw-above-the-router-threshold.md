@@ -550,8 +550,9 @@ walk at `ef_search = 1000`.
   still running holds `ShareUpdateExclusiveLock` on the leaf, the drop times out
   against it, and the next pass judges again. Because the snapshot can be a pass
   old, the drop re-reads `pg_index.indisvalid` for that name on its own session
-  immediately before the `DROP` and skips it, logging `pci_drop_skipped_stale` and
-  not `pci_index_dropped`, when the index is valid now or gone. A leftover is still not one of the
+  immediately before the `DROP` and skips it, logging `pci_drop_skipped_stale` (the
+  session) and `pci_index_drop_stale` (the reconciler) and not `pci_index_dropped`,
+  when the index is valid now or gone. A leftover is still not one of the
   builder's own for routing: never routed to, never counted against
   `NX_SEARCH_PCI_MAX_PER_LEAF`, never taken as "this collection has an index", and
   counted by the status object in `reindex_leftover` instead of `unparsed`. A valid

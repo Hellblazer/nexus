@@ -483,8 +483,9 @@ public final class PciBuilderSession {
          * {@code pg_index.indisvalid} for that name on this session immediately before the DROP. An index that is valid
          * now (an operator's {@code CREATE INDEX CONCURRENTLY} finished since the snapshot) or gone is
          * {@link DdlOutcome#STALE}: no DROP is sent. The read and the DROP are two statements, so the residual window is
-         * the read-to-DROP gap of one session round trip; a build still running holds the heap lock the DROP waits on,
-         * and the wait ends at the 5 s lock timeout.
+         * the read-to-DROP round trip plus the DROP's own wait for the heap lock, up to the 5 s lock timeout: a build
+         * still running holds that lock, and one that finishes inside the wait is dropped. A REINDEX that renames the
+         * name away inside the wait makes the {@code IF EXISTS} DROP a no-op that still reports DONE.
          */
         public DdlOutcome drop(PciCatalog.Leaf leaf, PciCatalog.Index index) {
             if (ended != null) {

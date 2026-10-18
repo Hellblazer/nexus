@@ -959,6 +959,13 @@ class PciReconcilerIntegrationTest {
             // validation snapshot was taken. A reader opened now is newer than that snapshot, so the step does not
             // wait for it, but its AccessShareLock is what step 5 waits on.
             await(() -> "waiting for old snapshots".equals(createIndexPhase()), "the reindex in step 3");
+            // Step 3 waits for every backend whose xmin is at or below its limit, so the late reader must see a
+            // newer xmin than the validation snapshot. On an idle database nothing advances it: commit one
+            // transaction that takes an xid first.
+            try (Connection bump = pg.createConnection("")) {
+                bump.setAutoCommit(true);
+                DSL.using(bump, SQLDialect.POSTGRES).select(DSL.function("pg_current_xact_id", Object.class)).fetch();
+            }
             late = new HeldRead(leaf);
             early.close();
             // Step 4 committed (the new index took the base name and is valid; the old one is _ccold and invalid);
