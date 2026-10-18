@@ -157,10 +157,11 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
        Claude Code" is the ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT``
        environment (:func:`started_by_claude_code`); the gate applies only
        to a process that called :func:`mark_mcp_server_process`, so a bare
-       ``nx`` in a terminal and the hooks keep the file. The gate is this
-       resolver's only: ``read_claude_session_id`` callers outside it (T2
-       attribution, operator dispatch) still read the file for a label
-       (nexus-d8yul).
+       ``nx`` in a terminal and the hooks keep the file. T2 attribution
+       resolves through this function and so inherits the gate (nexus-d8yul).
+       Operator dispatch still reads the raw file as its last tier, because
+       without an injected id a ``claude -p`` child's SessionStart hook would
+       overwrite it; that read is a label for a child, never a T1 scope.
     5. ``None``.
 
     Returns ``None`` when nothing in the chain resolves. Callers choose

@@ -116,11 +116,23 @@ class TestDefaultSession:
         # Ensure no session resolvable.
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         import nexus.commands.tier_status as ts_mod
-        monkeypatch.setattr(ts_mod, "read_claude_session_id", lambda: None)
+        monkeypatch.setattr(ts_mod, "resolve_active_session_id", lambda: None)
 
         result = CliRunner().invoke(tier_status_cmd, [])
         assert result.exit_code == 1
         assert "No current session resolvable" in result.output
+
+    def test_default_session_prefers_claude_code_session_id_over_the_file(
+        self, monkeypatch, tmp_path,
+    ):
+        """nexus-d8yul: the default session follows resolve_active_session_id."""
+        from nexus.commands.tier_status import _resolve_session
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "current_session").write_text("last-claude-session")
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "this-claude-session")
+        assert _resolve_session(None) == "this-claude-session"
 
 
 class TestExplicitFlags:
