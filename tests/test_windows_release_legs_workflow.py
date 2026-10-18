@@ -321,8 +321,9 @@ def test_the_rehearsal_has_the_decided_shape() -> None:
     assert triggers["push"]["paths"], "an unfiltered push trigger would build on every commit"
     assert "workflow_dispatch" in triggers
     assert doc["permissions"] == {"contents": "read"}
-    assert doc["concurrency"]["cancel-in-progress"] is True
-    assert doc["concurrency"]["group"]
+    # one run at a time on develop, the newest push waiting (nexus-1wf1s)
+    assert doc["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/develop' }}"
+    assert doc["concurrency"]["group"].endswith("${{ github.ref }}")
     for job_id, job in _win_jobs(REHEARSAL).items():
         assert "github.actor == 'Hellblazer'" in str(job["if"]), job_id
 
@@ -859,7 +860,7 @@ def test_the_windows_job_keeps_the_switch_the_actor_guard_and_never_runs_on_pull
     assert "github.actor == 'Hellblazer'" in str(job["if"])
     assert SWITCH in str(job["if"])
     assert "pull_request" not in _triggers(doc)
-    assert doc["concurrency"]["cancel-in-progress"] is True
+    assert doc["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/develop' }}"
 
 
 def test_the_python_resolver_runs_native_commands_with_both_streams_redirected() -> None:
