@@ -64,6 +64,7 @@ def test_service_mode_uses_single_endpoint_and_maps_counts(
         "topics": 2, "assignments": 3, "links": 0, "meta": 1, "centroids": 2,
     }
     assert counts.failures == []
+    assert counts.service_delete_failed is False
 
 
 def test_service_mode_maps_the_quarantine_rows_taken_with_the_origin(
@@ -179,3 +180,4 @@ def test_service_mode_endpoint_failure_recorded(
 
     assert any("service deleteCollection failed" in f for f in counts.failures)
     assert "service unreachable" in " ".join(counts.failures)
+    assert counts.service_delete_failed is True  # nexus-oq5gd: delete is unconfirmed

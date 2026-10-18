@@ -50,7 +50,9 @@ Routes deliberately left OUT of this sweep, and why:
 """
 from __future__ import annotations
 
+import contextlib
 import threading
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -105,10 +107,17 @@ class TestCatalogClientSweeps:
             client.merge_documents("1.1.1", "1.1.2")
         _assert_idempotent_false(m)
 
-    def test_ghost_sweep(self, client: HttpCatalogClient) -> None:
+    def test_ghost_sweep_live(self, client: HttpCatalogClient) -> None:
         with patch.object(client, "_post", return_value={}) as m:
             client.ghost_sweep(dry_run=False)
         _assert_idempotent_false(m)
+
+    def test_ghost_sweep_dry_run_keeps_the_retry(self, client: HttpCatalogClient) -> None:
+        """A dry run is a pure read on the engine, so it stays retryable."""
+        with patch.object(client, "_post", return_value={}) as m:
+            client.ghost_sweep(dry_run=True)
+        m.assert_called_once()
+        assert m.call_args.kwargs.get("idempotent") is True
 
 
 class _StallingPostServer:
@@ -158,7 +167,10 @@ class TestCatalogClientReadTimeoutOverRealTransport:
     }
 
     @staticmethod
-    def _client(srv: _StallingPostServer, monkeypatch: pytest.MonkeyPatch) -> HttpCatalogClient:
+    @contextlib.contextmanager
+    def _client(
+        srv: _StallingPostServer, monkeypatch: pytest.MonkeyPatch,
+    ) -> Iterator[HttpCatalogClient]:
         # Endpoint and token come from the environment, NOT constructor
         # pins: a fully pinned client raises "cannot self-heal" instead of
         # resending, which would hide a blind retry behind a count of 1.
@@ -166,17 +178,27 @@ class TestCatalogClientReadTimeoutOverRealTransport:
         monkeypatch.setenv("NX_SERVICE_PORT", str(srv.port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", _TOKEN)
         monkeypatch.delenv("NX_SERVICE_URL", raising=False)
-        return HttpCatalogClient(client=httpx.Client(timeout=0.3))
+        http = httpx.Client(timeout=0.3)
+        try:
+            yield HttpCatalogClient(client=http)
+        finally:
+            http.close()
 
     @pytest.mark.parametrize("name", sorted(_CALLS))
     def test_read_timeout_is_not_retried(
         self, name: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        with _StallingPostServer() as srv:
-            client = self._client(srv, monkeypatch)
+        with _StallingPostServer() as srv, self._client(srv, monkeypatch) as client:
             with pytest.raises(httpx.ReadTimeout):
                 self._CALLS[name](client)
             assert len(srv.posts) == 1, srv.posts
+
+    def test_ghost_sweep_dry_run_does_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A dry run is a pure read: two POSTs on a stalled first attempt."""
+        with _StallingPostServer() as srv, self._client(srv, monkeypatch) as client:
+            with pytest.raises(httpx.ReadTimeout):
+                client.ghost_sweep(dry_run=True)
+            assert len(srv.posts) == 2, srv.posts
 
     def test_control_idempotent_post_does_retry(
         self, monkeypatch: pytest.MonkeyPatch
@@ -184,8 +206,7 @@ class TestCatalogClientReadTimeoutOverRealTransport:
         """Non-vacuity: the same server and client DO see two POSTs for a
         default (idempotent) call, so a count of 1 above means the flag
         worked, not that retries cannot be observed here."""
-        with _StallingPostServer() as srv:
-            client = self._client(srv, monkeypatch)
+        with _StallingPostServer() as srv, self._client(srv, monkeypatch) as client:
             with pytest.raises(httpx.ReadTimeout):
                 client._post("/update", {"tumbler": "1.1.1"})
             assert len(srv.posts) == 2, srv.posts

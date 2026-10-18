@@ -912,6 +912,8 @@ def merge_cmd(duplicate: str, canonical: str) -> None:
         # surfaces here as a 409 whose body IS the clean message — same
         # convention as the source_uri/alias_of ValueError catches above.
         raise click.ClickException(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise _service_timeout_error("merge", exc) from exc
     finally:
         writer.close()
     click.echo(
@@ -920,6 +922,17 @@ def merge_cmd(duplicate: str, canonical: str) -> None:
         f" links_remapped={result.get('links_remapped', 0)},"
         f" links_collapsed={result.get('links_collapsed', 0)},"
         f" links_dropped={result.get('links_dropped', 0)})"
+    )
+
+
+def _service_timeout_error(verb: str, exc: httpx.TimeoutException) -> click.ClickException:
+    """nexus-oq5gd: a mutating verb makes ONE attempt, so a read timeout
+    reaches the user. Say what is known: the service did not answer, the
+    operation may have completed, and re-running is safe."""
+    return click.ClickException(
+        f"the nexus service did not answer `nx catalog {verb}` within the timeout "
+        f"({type(exc).__name__}). The operation may have completed server-side; "
+        f"re-running it is safe."
     )
 
 

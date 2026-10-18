@@ -2004,11 +2004,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         it propagates the raw ``httpx.HTTPStatusError`` so the CLI verb can
         tell "engine too old" apart from "engine answered".
         """
-        # idempotent=False (nexus-oq5gd, nexus-ll31n sibling): a
-        # population-discovery sweep; a blind resend after a read timeout
-        # reports the post-sweep population (``ghosts_deleted`` ~ 0), not
-        # what the first attempt did.
-        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=False) or {}
+        # idempotent=dry_run (nexus-oq5gd, nexus-ll31n sibling): a dry run is
+        # a pure read on the engine and keeps the retry. A LIVE sweep makes
+        # one attempt: a blind resend after a read timeout reports the
+        # post-sweep population (``ghosts_deleted`` ~ 0), not what the first
+        # attempt did.
+        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=dry_run) or {}
 
     def gc_audit_list(
         self,

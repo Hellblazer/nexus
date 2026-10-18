@@ -92,6 +92,8 @@ def sweep_ghosts_cmd(apply: bool, json_out: bool) -> None:
         if status == 404:
             _raise_engine_floor(exc)
         raise
+    except httpx.TimeoutException as exc:
+        raise _cat_cmd._service_timeout_error("sweep-ghosts", exc) from exc
     finally:
         writer.close()
 

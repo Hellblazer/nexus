@@ -50,6 +50,10 @@ class CascadeCounts:
     quarantine_chunks_deleted: int = 0
     #: T3 chunk rows the engine deleted from the collection itself (its ``chunks`` count).
     chunks_deleted: int = 0
+    #: True when the engine's single-transaction deleteCollection raised (or
+    #: timed out): the delete is UNCONFIRMED, not merely missing derived rows.
+    #: Callers must not report the collection as deleted (nexus-oq5gd).
+    service_delete_failed: bool = False
     failures: list[str] = field(default_factory=list)
 
 
@@ -135,4 +139,5 @@ def purge_collection_cascade(
     except Exception as exc:  # noqa: BLE001 — best-effort, atomic on the service side
         _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
         counts.failures.append(f"service deleteCollection failed: {exc}")
+        counts.service_delete_failed = True
     return _purge_pipeline_db(name, counts)

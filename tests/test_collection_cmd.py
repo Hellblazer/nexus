@@ -374,6 +374,27 @@ def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert "catalog cascade failed: boom" in result.output
 
 
+def test_delete_with_failed_service_cascade_is_unconfirmed_and_exits_nonzero(
+    runner, env_creds, mock_db,
+) -> None:
+    """nexus-oq5gd: a failed (or timed-out) service deleteCollection must not
+    print "Deleted:"; it says the delete is unconfirmed and how to retry."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    fake = CascadeCounts(
+        failures=["service deleteCollection failed: ReadTimeout"],
+        service_delete_failed=True,
+    )
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code != 0
+    assert "Deleted:" not in result.output
+    assert "unconfirmed" in result.output
+    assert "nx collection delete old" in result.output
+    assert "service deleteCollection failed" in result.output
+
+
 def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runner, env_creds, mock_db) -> None:
     """nexus-wbfpw.68/.71: deleting an origin takes its quarantine rows in the same engine
     transaction, one gc_audit row per sibling. The user must see that they went."""
@@ -589,6 +610,31 @@ def test_prune_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert result.exit_code == 0, result.output
     assert "warn:" in result.output
     assert "catalog cascade failed: boom" in result.output
+
+
+def test_prune_with_failed_service_cascade_counts_only_confirmed_deletes(
+    runner, env_creds, mock_db,
+) -> None:
+    """nexus-oq5gd: same rule as delete: an unconfirmed delete is not counted
+    as deleted, the loop still visits every collection, and the exit is non-zero."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    mock_db.embedding_mode.return_value = "voyage"
+    mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
+    fake = CascadeCounts(
+        failures=["service deleteCollection failed: ReadTimeout"],
+        service_delete_failed=True,
+    )
+
+    with patch(
+        "nexus.db.collection_purge.purge_collection_cascade", return_value=fake,
+    ):
+        result = _invoke(runner, mock_db, ["prune", "--yes"])
+
+    assert result.exit_code != 0
+    assert "Deleted 0 collection(s)." in result.output
+    assert "unconfirmed" in result.output
+    assert _ORPHAN in result.output
 
 
 def test_prune_local_mode_active_dim_from_local_model_token(

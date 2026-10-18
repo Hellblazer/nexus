@@ -530,6 +530,14 @@ def delete_cmd(name: str, yes: bool) -> None:
     # Surface any cascade-step failure to the user (orphan rows may remain).
     for failure in cascade.failures:
         click.echo(f"warn: {failure}", err=True)
+    if cascade.service_delete_failed:
+        # nexus-oq5gd: the service never confirmed the delete (a read timeout
+        # makes ONE attempt, so it may or may not have committed). Do not
+        # claim "Deleted:".
+        raise click.ClickException(
+            f"delete of '{name}' is unconfirmed: the service cascade failed. "
+            f"Re-run `nx collection delete {name}`."
+        )
 
     taxonomy_counts = cascade.taxonomy
     chash_deleted = cascade.chash_deleted
@@ -788,11 +796,21 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
 
     from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
+    unconfirmed: list[str] = []
     for m in mismatches:
         cascade = purge_collection_cascade(t3, m["name"])
         for failure in cascade.failures:
             click.echo(f"warn: {failure}", err=True)
-    click.echo(f"\nDeleted {len(mismatches)} collection(s).")
+        if cascade.service_delete_failed:
+            unconfirmed.append(m["name"])
+    deleted_count = len(mismatches) - len(unconfirmed)
+    click.echo(f"\nDeleted {deleted_count} collection(s).")
+    if unconfirmed:
+        # nexus-oq5gd: see delete_cmd — a failed service cascade is unconfirmed.
+        raise click.ClickException(
+            f"{len(unconfirmed)} delete(s) unconfirmed (service cascade failed): "
+            f"{', '.join(unconfirmed)}. Re-run `nx collection prune --yes`."
+        )
 
 
 # nexus-8g79.10 (V5): rename_collection_data_plane extracted to

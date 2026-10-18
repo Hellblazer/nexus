@@ -918,6 +918,36 @@ class TestMergeCommand:
         assert "Traceback" not in result.output
         assert "already aliased" in result.output.lower()
 
+    def test_merge_read_timeout_is_a_clean_error(self, monkeypatch):
+        """nexus-oq5gd: merge makes one attempt, so a timeout reaches the user.
+        Fully faked (no engine): this pins the CLI's error handling only."""
+        import httpx
+
+        class _TimingOutWriter:
+            closed = False
+
+            def merge_documents(self, duplicate, canonical):
+                raise httpx.ReadTimeout("slow")
+
+            def close(self):
+                self.closed = True
+
+        writer = _TimingOutWriter()
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", lambda: writer)
+        monkeypatch.setattr("nexus.commands.catalog._resolve_tumbler", lambda cat, t: t)
+
+        result = CliRunner().invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        text = result.output.lower()
+        assert "did not answer" in text
+        assert "may have completed" in text
+        assert "re-running it is safe" in text
+        assert writer.closed
+
     def test_merge_remaps_a_link_and_reports_the_count(
         self, initialized_catalog, catalog_env,
     ):
