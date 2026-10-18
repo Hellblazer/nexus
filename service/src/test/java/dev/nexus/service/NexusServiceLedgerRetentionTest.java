@@ -113,6 +113,9 @@ class NexusServiceLedgerRetentionTest {
         UUID tokenLive = UUID.randomUUID();
         seed("default", "committed", NOW.minusDays(7).minusHours(1), null, defaultOld);
         seed("default", "committed", NOW.minusDays(7).plusHours(1), null, defaultFresh);
+        // A tenant with ledger rows and no service_tokens row is not visited: the documented liveness gap.
+        UUID noTokenOld = UUID.randomUUID();
+        seed("ledger-retention-no-token", "committed", NOW.minusDays(30), null, noTokenOld);
         seed(tokenTenant, "failed", NOW.minusDays(8), null, tokenOld);
         seed(tokenTenant, "in_flight", null, NOW.plusHours(1), tokenLive);
 
@@ -129,6 +132,9 @@ class NexusServiceLedgerRetentionTest {
             assertThat(exists("default", defaultFresh)).isTrue();
             assertThat(exists(tokenTenant, tokenOld)).isFalse();
             assertThat(exists(tokenTenant, tokenLive)).as("a live lease is never deleted").isTrue();
+            assertThat(passes).extracting(RequestLedger.RetentionPass::tenant)
+                .as("a tenant with no service_tokens row is not visited").doesNotContain("ledger-retention-no-token");
+            assertThat(exists("ledger-retention-no-token", noTokenOld)).isTrue();
         } finally {
             stopQuietly(service);
         }
@@ -145,10 +151,45 @@ class NexusServiceLedgerRetentionTest {
             assertThat(recording.fixedRate).as("the retention task is registered on the sweep scheduler")
                 .anySatisfy(r -> {
                     assertThat(r.task()).as("the VERY SAME Runnable, not a copy of its body").isSameAs(task);
-                    assertThat(r.unit()).isEqualTo(TimeUnit.HOURS);
-                    assertThat(r.initialDelay()).isEqualTo(NexusService.SWEEP_INTERVAL_HOURS);
-                    assertThat(r.period()).isEqualTo(NexusService.SWEEP_INTERVAL_HOURS);
+                    assertThat(r.unit()).isEqualTo(TimeUnit.SECONDS);
+                    assertThat(r.initialDelay()).as("the first pass shortly after boot, like the reaper")
+                        .isEqualTo(ChunkReaper.INITIAL_DELAY.toSeconds());
+                    assertThat(r.period()).isEqualTo(TimeUnit.HOURS.toSeconds(NexusService.SWEEP_INTERVAL_HOURS));
                 });
+        } finally {
+            stopQuietly(service);
+        }
+    }
+
+    @Test
+    void theRegisteredTaskItselfPrunesByTheRealClock_sevenDaysBack() throws Exception {
+        String tenant = "ledger-retention-task-tenant";
+        new TokenStore(ds, Clock.systemUTC()).issueToken(tenant, "retention-task", null);
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        UUID committedOld = UUID.randomUUID();
+        UUID failedOld = UUID.randomUUID();
+        UUID expiredOld = UUID.randomUUID();
+        UUID fresh = UUID.randomUUID();
+        UUID liveLease = UUID.randomUUID();
+        seed(tenant, "committed", now.minusDays(8), null, committedOld);
+        seed(tenant, "failed", now.minusDays(9), null, failedOld);
+        seed(tenant, "in_flight", null, now.minusDays(8), expiredOld);
+        seed(tenant, "committed", now.minusDays(6), null, fresh);
+        seed(tenant, "in_flight", null, now.plusHours(1), liveLease);
+
+        var recording = new RecordingScheduler();
+        NexusService service = new NexusService(0, "ledger-retention-token", ds, null, null, null, null, null,
+            recording);
+        try {
+            // The VERY SAME Runnable the scheduler is handed, run as the scheduler would run it.
+            recording.fixedRate.stream().filter(r -> r.task() == service.requestLedgerRetentionTask())
+                .findFirst().orElseThrow().task().run();
+
+            assertThat(exists(tenant, committedOld)).isFalse();
+            assertThat(exists(tenant, failedOld)).isFalse();
+            assertThat(exists(tenant, expiredOld)).isFalse();
+            assertThat(exists(tenant, fresh)).as("six days old is inside the seven-day window").isTrue();
+            assertThat(exists(tenant, liveLease)).isTrue();
         } finally {
             stopQuietly(service);
         }

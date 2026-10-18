@@ -692,13 +692,16 @@ public final class NexusService {
             );
         }
 
-        // RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm, on the SAME sweepScheduler at the
-        // SAME cadence. It is not gated on the vector backend or the tuple registry: the ledger is a plain table.
+        // RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm, on the SAME sweepScheduler, every
+        // SWEEP_INTERVAL_HOURS. The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval, as the
+        // reaper's does: an engine that restarts more often than every six hours must still prune. It is not gated
+        // on the vector backend or the tuple registry: the ledger is a plain table.
         this.requestLedgerRetentionDays = dev.nexus.service.db.RequestLedger.resolveRetentionDays(System::getenv);
         this.requestLedgerRetentionTask = surviving("request_ledger_retention_failed",
             () -> runScheduledLedgerRetention(OffsetDateTime.now(ZoneOffset.UTC)));
         this.sweepScheduler.scheduleAtFixedRate(
-            this.requestLedgerRetentionTask, SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+            this.requestLedgerRetentionTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
+            TimeUnit.HOURS.toSeconds(SWEEP_INTERVAL_HOURS), TimeUnit.SECONDS
         );
 
         // RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, a THIRD scheduled task on the SAME

@@ -14,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.sql.Connection;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HashMap;
@@ -24,6 +26,7 @@ import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm on real Postgres.
@@ -208,6 +211,39 @@ class RequestLedgerRetentionTest {
         assertThat(logged(Level.INFO, "event=request_ledger_retention tenant=" + good + " deleted=1")).hasSize(1);
     }
 
+    // ── the statement bound ──────────────────────────────────────────────────
+
+    @Test
+    void aDeleteBlockedByAnotherTransactionFailsWithinTheBound_andTheNextTenantStillRuns() throws Exception {
+        String blocked = "retain-blocked";
+        String next = "retain-after-block";
+        UUID held = terminal(blocked, "committed", CUTOFF.minusHours(1));
+        UUID nextOld = terminal(next, "committed", CUTOFF.minusHours(1));
+
+        // A second connection holds a row lock on the very row the DELETE targets.
+        try (Connection locker = pg.createConnection("")) {
+            locker.setAutoCommit(false);
+            org.jooq.impl.DSL.using(locker, org.jooq.SQLDialect.POSTGRES)
+                .select(REQUEST_LEDGER.REQUEST_ID).from(REQUEST_LEDGER)
+                .where(REQUEST_LEDGER.TENANT_ID.eq(blocked).and(REQUEST_LEDGER.REQUEST_ID.eq(held)))
+                .forUpdate().fetch();
+
+            List<RequestLedger.RetentionPass> passes = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                () -> ledger.retainAll(List.of(blocked, next), CUTOFF, Duration.ofSeconds(1)));
+
+            assertThat(passes).hasSize(2);
+            assertThat(passes.get(0).failed()).as("the blocked tenant's pass fails at the bound").isTrue();
+            assertThat(passes.get(1).failed()).isFalse();
+            assertThat(passes.get(1).deleted()).isEqualTo(1);
+            assertThat(logged(Level.WARN, "event=request_ledger_retention_tenant_failed tenant=" + blocked))
+                .hasSize(1);
+            locker.rollback();
+        }
+        assertThat(exists(blocked, held)).as("the blocked row is untouched").isTrue();
+        assertThat(exists(next, nextOld)).isFalse();
+        assertThat(ledger.retain(blocked, CUTOFF)).as("with the lock gone the same pass deletes it").isEqualTo(1);
+    }
+
     // ── the retention setting ────────────────────────────────────────────────
 
     @Test
@@ -222,12 +258,14 @@ class RequestLedgerRetentionTest {
     void aPositiveIntegerIsTheRetention() {
         assertThat(RequestLedger.resolveRetentionDays(env("30"))).isEqualTo(30);
         assertThat(RequestLedger.resolveRetentionDays(env(" 3 "))).isEqualTo(3);
+        assertThat(RequestLedger.resolveRetentionDays(env("3650"))).as("ten years is the cap, inclusive")
+            .isEqualTo(3650);
         assertThat(logged(Level.WARN, RequestLedger.RETENTION_ENV)).isEmpty();
     }
 
     @Test
     void anUnparseableOrNonPositiveRetentionUsesSevenWithExactlyOneWarn() {
-        for (String bad : new String[] {"abc", "7.5", "0", "-3", "99999999999999999999", "1d"}) {
+        for (String bad : new String[] {"abc", "7.5", "0", "-3", "99999999999999999999", "1d", "3651", "100000"}) {
             logs.list.clear();
             assertThat(RequestLedger.resolveRetentionDays(env(bad))).as("value %s", bad).isEqualTo(7);
             assertThat(logged(Level.WARN, RequestLedger.RETENTION_ENV)).as("one WARN for %s", bad).hasSize(1);

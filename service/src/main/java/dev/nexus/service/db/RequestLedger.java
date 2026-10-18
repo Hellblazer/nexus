@@ -64,6 +64,9 @@ public final class RequestLedger {
     /** Retention when {@link #RETENTION_ENV} is unset or invalid (Sam, 2026-10-17). */
     public static final int DEFAULT_RETENTION_DAYS = 7;
 
+    /** The most days {@link #RETENTION_ENV} may ask for (ten years); a larger value is a typo, not a policy. */
+    public static final int MAX_RETENTION_DAYS = 3650;
+
     private static final int SHA256_BYTES = 32;
     private static final int MAX_CLAIM_ROUNDS = 3;
 
@@ -319,8 +322,8 @@ public final class RequestLedger {
 
     /**
      * Retention in days from {@link #RETENTION_ENV}, read through {@code env}. Unset or blank is
-     * {@link #DEFAULT_RETENTION_DAYS}. A value that is not a positive integer also falls back to
-     * the default, with exactly one WARN line.
+     * {@link #DEFAULT_RETENTION_DAYS}. A value that is not a positive integer, or exceeds
+     * {@link #MAX_RETENTION_DAYS}, also falls back to the default, with exactly one WARN line.
      */
     public static int resolveRetentionDays(Function<String, String> env) {
         String raw = env.apply(RETENTION_ENV);
@@ -329,7 +332,7 @@ public final class RequestLedger {
         }
         try {
             int days = Integer.parseInt(raw.strip());
-            if (days > 0) {
+            if (days > 0 && days <= MAX_RETENTION_DAYS) {
                 return days;
             }
         } catch (NumberFormatException e) {
@@ -350,11 +353,24 @@ public final class RequestLedger {
      * <p>The tenant filter is explicit as well as enforced by RLS, as in {@link #key}.
      */
     public int retain(String tenant, OffsetDateTime cutoff) {
-        return scope.withTenant(tenant, ctx -> ctx.deleteFrom(REQUEST_LEDGER)
-            .where(REQUEST_LEDGER.TENANT_ID.eq(tenant))
-            .and(REQUEST_LEDGER.STATE.in(COMMITTED, FAILED).and(REQUEST_LEDGER.FINISHED_AT.lt(cutoff))
-                .or(REQUEST_LEDGER.STATE.eq(IN_FLIGHT).and(REQUEST_LEDGER.LEASE_UNTIL.lt(cutoff))))
-            .execute());
+        return retain(tenant, cutoff, SweepBounds.STATEMENT_TIMEOUT);
+    }
+
+    /**
+     * As {@link #retain(String, OffsetDateTime)}, with the DELETE bounded by {@code statementBound}
+     * ({@code SET LOCAL statement_timeout}, plus the matching network bound): the retention arm shares
+     * the engine's single sweep thread, so a DELETE stuck behind a lock would otherwise stall every
+     * other scheduled task for as long as the lock lasts.
+     */
+    public int retain(String tenant, OffsetDateTime cutoff, Duration statementBound) {
+        return scope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, statementBound);
+            return ctx.deleteFrom(REQUEST_LEDGER)
+                .where(REQUEST_LEDGER.TENANT_ID.eq(tenant))
+                .and(REQUEST_LEDGER.STATE.in(COMMITTED, FAILED).and(REQUEST_LEDGER.FINISHED_AT.lt(cutoff))
+                    .or(REQUEST_LEDGER.STATE.eq(IN_FLIGHT).and(REQUEST_LEDGER.LEASE_UNTIL.lt(cutoff))))
+                .execute();
+        });
     }
 
     /**
@@ -363,10 +379,15 @@ public final class RequestLedger {
      * FORCE RLS: a tenant cannot be enumerated from the table itself.
      */
     public List<RetentionPass> retainAll(List<String> tenants, OffsetDateTime cutoff) {
+        return retainAll(tenants, cutoff, SweepBounds.STATEMENT_TIMEOUT);
+    }
+
+    /** As {@link #retainAll(List, OffsetDateTime)}, with each tenant's DELETE bounded by {@code statementBound}. */
+    public List<RetentionPass> retainAll(List<String> tenants, OffsetDateTime cutoff, Duration statementBound) {
         List<RetentionPass> passes = new ArrayList<>(tenants.size());
         for (String tenant : tenants) {
             try {
-                int deleted = retain(tenant, cutoff);
+                int deleted = retain(tenant, cutoff, statementBound);
                 log.info("event=request_ledger_retention tenant={} deleted={}", tenant, deleted);
                 passes.add(new RetentionPass(tenant, deleted, false));
             } catch (RuntimeException e) {
