@@ -613,7 +613,10 @@ use, carrying the document's aspects and highlights with it.
    file and size checks the constructor makes) finds the files, and the Voyage
    embedders when the key is set. Neither present is a boot failure naming both
    remedies. A truncated or wrong-size model stays a loud boot failure, not
-   "absent". The cloud container has no bge files, so it boots Voyage-only
+   "absent". A partial bge install (exactly one of the model and the tokenizer) on a
+   keyed box degrades to Voyage-only with a loud WARN naming the missing file and
+   `nx init`, never building the embedder; on a keyless box it fails the boot (Sam,
+   2026-10-18, nexus-ngvxb). The cloud container has no bge files, so it boots Voyage-only
    exactly as today, with no ONNX session.
 2. **Profile policy.** One NEW client function, `local_embed_profile()` in
    `config.py`, decides the profile: `voyage` when `local.embed_model` names a

@@ -53,15 +53,50 @@ class LocalModelProbeTest {
         assertThat(LocalModelProbe.probe(model.toString(), tok.toString(), "k").bgePresent()).isTrue();
     }
 
+    /** nexus-ngvxb (Sam, 2026-10-18): exactly one of the two files is PARTIAL, a state of its own. */
     @Test
-    void aHalfProvisionedInstall_isPresent_notQuietlyAbsent() throws Exception {
+    void aHalfProvisionedInstall_isPartial_notPresentAndNotQuietlyAbsent() throws Exception {
         Path model = touch("model.onnx", 8);
-        var modelOnly = LocalModelProbe.probe(model.toString(), dir.resolve("none.json").toString(), "k");
-        assertThat(modelOnly.bgePresent()).isTrue();
+        Path noTok = dir.resolve("none.json");
+        var modelOnly = LocalModelProbe.probe(model.toString(), noTok.toString(), "k");
+        assertThat(modelOnly.bgePresent()).as("a partial install is not servable").isFalse();
+        assertThat(modelOnly.bgePartial()).isTrue();
+        assertThat(modelOnly.bgeMissing()).containsExactly(noTok.toString());
         assertThat(modelOnly.bgeDetail()).contains("model=present").contains("tokenizer=absent");
+        assertThat(modelOnly.any()).as("a keyed partial box can still serve Voyage").isTrue();
+
         Path tok = touch("tokenizer.json", 8);
-        var tokOnly = LocalModelProbe.probe(dir.resolve("none.onnx").toString(), tok.toString(), "k");
-        assertThat(tokOnly.bgePresent()).isTrue();
+        Path noModel = dir.resolve("none.onnx");
+        var tokOnly = LocalModelProbe.probe(noModel.toString(), tok.toString(), null);
+        assertThat(tokOnly.bgePresent()).isFalse();
+        assertThat(tokOnly.bgePartial()).isTrue();
+        assertThat(tokOnly.bgeMissing()).containsExactly(noModel.toString());
+        assertThat(tokOnly.any()).as("keyless partial: nothing can be served").isFalse();
+    }
+
+    @Test
+    void bothPresent_isNeitherPartialNorMissingAnything() throws Exception {
+        var p = LocalModelProbe.probe(touch("model.onnx", 8).toString(), touch("tokenizer.json", 8).toString(), "k");
+        assertThat(p.bgePresent()).isTrue();
+        assertThat(p.bgePartial()).isFalse();
+        assertThat(p.bgeMissing()).isEmpty();
+    }
+
+    @Test
+    void neitherPresent_isNeitherPresentNorPartial_andNamesBothMissing() {
+        String m = dir.resolve("a.onnx").toString();
+        String t = dir.resolve("a.json").toString();
+        var p = LocalModelProbe.probe(m, t, "k");
+        assertThat(p.bgePresent()).isFalse();
+        assertThat(p.bgePartial()).isFalse();
+        assertThat(p.bgeMissing()).containsExactly(m, t);
+    }
+
+    @Test
+    void aProbeError_isNeitherPresentNorPartial() {
+        var p = LocalModelProbe.probe("a\0b", "c\0d", "k");
+        assertThat(p.bgePresent()).isFalse();
+        assertThat(p.bgePartial()).isFalse();
     }
 
     @Test

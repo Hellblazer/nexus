@@ -4,6 +4,8 @@ package dev.nexus.service.vectors;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * RDR-210 Phase 2 Step 1 (bead nexus-uaovy) — NON-THROWING presence probe: which
@@ -22,12 +24,13 @@ import java.nio.file.Path;
  * by {@code LocalModelProbeTest}).
  *
  * <p><b>Presence is not validity.</b> The probe answers "is it there", not "is it
- * good". A truncated or wrong-size model is reported PRESENT, so {@link
- * Bge768Embedder}'s own constructor then fails the boot loudly naming the size floor
- * — it is never quietly dropped as "absent". A half-provisioned install (the model
- * without its tokenizer, or the reverse) is likewise PRESENT, so the constructor's
- * missing-file error names the remedy rather than the engine silently serving Voyage
- * alone.
+ * good". A truncated or wrong-size model with both files on disk is reported PRESENT,
+ * so {@link Bge768Embedder}'s own constructor then fails the boot loudly naming the
+ * size floor — it is never quietly dropped as "absent". A half-provisioned install
+ * (exactly one of the model and its tokenizer) is its own state, PARTIAL (nexus-ngvxb,
+ * Sam 2026-10-18): it is not servable, so {@code bgePresent} is false, and {@code Main}
+ * decides — degrade to Voyage-only with a loud WARN on a keyed box, fail the boot on a
+ * keyless one. The probe never builds the embedder for either answer.
  *
  * <p>The Phase 2 cross-encoder placement (Step 4) adds its own files to this probe
  * when it needs them; Step 1 builds no cross-encoder on a path without bge.
@@ -37,12 +40,17 @@ public final class LocalModelProbe {
     /**
      * What this boot can build.
      *
-     * @param bgePresent       at least one of the bge model / tokenizer files exists
+     * @param bgePresent       BOTH the bge model and tokenizer files exist (what {@code
+     *                         Bge768Embedder} needs; validity is its constructor's job)
+     * @param bgePartial       exactly ONE of the two exists: a half-provisioned install
      * @param voyageKeyPresent the Voyage key is non-null and non-blank
      * @param bgeDetail        human-readable file state (or the probe error), for the boot log
+     * @param bgeMissing       the absent bge file paths ({@code bgePartial}: the one missing;
+     *                         neither present: both; both present or a probe error: empty)
      */
-    public record Presence(boolean bgePresent, boolean voyageKeyPresent, String bgeDetail) {
-        /** True when at least one embedder family can be built. */
+    public record Presence(boolean bgePresent, boolean bgePartial, boolean voyageKeyPresent,
+                           String bgeDetail, List<String> bgeMissing) {
+        /** True when at least one embedder family can be built (a partial bge install is not one). */
         public boolean any() {
             return bgePresent || voyageKeyPresent;
         }
@@ -64,8 +72,8 @@ public final class LocalModelProbe {
         try {
             root = OnnxModelPaths.root();
         } catch (RuntimeException e) {
-            return new Presence(false, voyageKey != null && !voyageKey.isBlank(),
-                    "probe_error=" + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return new Presence(false, false, voyageKey != null && !voyageKey.isBlank(),
+                    "probe_error=" + e.getClass().getSimpleName() + ": " + e.getMessage(), List.of());
         }
         return probe(root + BGE_MODEL_SUFFIX, root + BGE_TOKENIZER_SUFFIX, voyageKey);
     }
@@ -81,10 +89,13 @@ public final class LocalModelProbe {
             boolean tokenizer = Files.isRegularFile(Path.of(bgeTokenizerPath));
             String detail = "model=" + (model ? "present" : "absent") + " path=" + bgeModelPath
                     + " tokenizer=" + (tokenizer ? "present" : "absent") + " path=" + bgeTokenizerPath;
-            return new Presence(model || tokenizer, key, detail);
+            List<String> missing = new ArrayList<>(2);
+            if (!model) missing.add(bgeModelPath);
+            if (!tokenizer) missing.add(bgeTokenizerPath);
+            return new Presence(model && tokenizer, model != tokenizer, key, detail, List.copyOf(missing));
         } catch (RuntimeException e) {
-            return new Presence(false, key, "probe_error=" + e.getClass().getSimpleName()
-                    + ": " + e.getMessage());
+            return new Presence(false, false, key, "probe_error=" + e.getClass().getSimpleName()
+                    + ": " + e.getMessage(), List.of());
         }
     }
 

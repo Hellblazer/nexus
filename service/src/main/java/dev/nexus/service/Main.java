@@ -262,6 +262,25 @@ public final class Main {
         var presence = dev.nexus.service.vectors.LocalModelProbe.probe(voyageKey);
         log.info("event=embedder_presence bge_present={} voyage_key_present={} bge=\"{}\"",
                 presence.bgePresent(), presence.voyageKeyPresent(), presence.bgeDetail());
+        if (presence.bgePartial()) {
+            // nexus-ngvxb (RDR-210 TD1, Sam 2026-10-18): exactly one of the bge model and its
+            // tokenizer is on disk. Never construct Bge768Embedder or touch ORT for it.
+            if (!voyagePresent) {
+                // Keyless: nothing is servable. Fail loud, naming the missing file(s).
+                ds.close();
+                log.error("event=bge_partial_install_no_voyage_key error=\"the bge install is partial "
+                        + "(exactly one of the model and the tokenizer is on disk) and no Voyage key is "
+                        + "set, so no embedder can be built. Repair the install with `nx init`, or set "
+                        + "NX_VOYAGE_API_KEY.\" missing={} bge=\"{}\"",
+                        presence.bgeMissing(), presence.bgeDetail());
+                System.exit(1);
+            }
+            // Keyed: boot with the family that can be served (Voyage only), loudly.
+            log.warn("event=bge_partial_install_degraded missing={} bge=\"{}\" serving=voyage_only "
+                    + "local_collections=REFUSED_422 hint=\"the local bge install is incomplete; "
+                    + "run `nx init` to repair it, then restart the service\"",
+                    presence.bgeMissing(), presence.bgeDetail());
+        }
         if (!presence.any()) {
             // Neither family can be built: a boot failure that names BOTH remedies.
             ds.close();
