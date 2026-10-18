@@ -2,12 +2,12 @@
 title: "One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side"
 id: RDR-210
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-09-15
-accepted_date:
+accepted_date: 2026-10-18
 related_issues: [nexus-ddmfg, nexus-umm29, nexus-r5f3c, nexus-35ok4]
 related_rdrs: [RDR-160, RDR-204, RDR-157, RDR-188, RDR-109, RDR-223, RDR-225, RDR-192, RDR-227, RDR-224, RDR-228]
 ---
@@ -2123,3 +2123,4 @@ and the per-table dispositions.
 - 2026-10-18: Sam's ruling on RDR-229 Q6 (recorded on nexus-j4gl6): the row rule is adopted now. Sibling, Gap 4, Technical Design 6, the re-embed target and Phase 4 Step 1 find siblings by the row tuple through the catalog routes, never by rendering or matching a name; the sibling test registers a non-conformant name. The list route has no `owner_id` filter today, noted in Gap 4.
 - 2026-10-18: Fix check on 7d26a0a93 failed (3 of 3, one BLOCKS-PLANNING: the superseded-target branch and its test still found the target by name, and `for_tuple` cannot see a superseded row). The target lookup now reads the list route without `lifecycle_state`, and the revive branch and its Phase 6 Step 2 test key on the row tuple. The three DISCOVER-AT-IMPLEMENTATION items every critic raised are for Phase 4 Step 1 and Phase 6 Step 2: the client `list_collections` gains a `content_type` parameter, the Phase 4 fixture registers a non-conformant row past the strict guard, and the `--to` source model is read from the row, not the name.
 - 2026-10-18: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `ecd51d2c3`; critique `nexus_rdr/210-gate-critique-2026-10-18-r3`.
+- 2026-10-18: Accept dispositions (residuals by bead): S-R3-1 nexus-b4w2n and nexus-a0814; S-R3-2 nexus-lard5; S-R3-3 nexus-noayy; S-R3-4 nexus-zyu6n; S-R2-2 nexus-6grho; S-R2-3 nexus-hx3c8; S-R2-4 nexus-q6t89; S-R2-5 nexus-n6mh0; target row selection nexus-5ki2n; client parameter and fixture nexus-dxifx; admission-gate order nexus-e81g7; native-load errors nexus-lt84r.
