@@ -127,6 +127,13 @@ class CceEmbedderParallelTest {
 
             int current = inFlight.incrementAndGet();
             maxInFlight.updateAndGet(prev -> Math.max(prev, current));
+            // The call leaves the in-flight count BEFORE its response is written: once the
+            // client reads the response it releases its permit and starts the next call, so
+            // a decrement after the write lets a preempted handler thread count a call the
+            // client has already finished (5 observed against a bound of 4 under full-suite
+            // load on chas, 2026-10-18).
+            int status;
+            String reply;
             try {
                 Long delay = latencyMs.get(text);
                 if (delay != null && delay > 0) {
@@ -134,32 +141,34 @@ class CceEmbedderParallelTest {
                 }
 
                 int cap = maxInputsPerRequest.get();
-                if ((cap > 0 && texts.size() > cap) || texts.stream().anyMatch(badRequestTexts::contains)) {
-                    sendStatus(exchange, 400, "{\"detail\": \"too many tokens in request\"}");
-                    return;
-                }
                 AtomicInteger rl = rateLimitsRemaining.get(text);
-                if (rl != null && rl.get() > 0) {
+                AtomicInteger fail = failuresRemaining.get(text);
+                if ((cap > 0 && texts.size() > cap) || texts.stream().anyMatch(badRequestTexts::contains)) {
+                    status = 400;
+                    reply = "{\"detail\": \"too many tokens in request\"}";
+                } else if (rl != null && rl.get() > 0) {
                     rl.decrementAndGet();
                     String retryAfter = rateLimitRetryAfter.get(text);
                     if (retryAfter != null) {
                         exchange.getResponseHeaders().set("Retry-After", retryAfter);
                     }
-                    sendStatus(exchange, 429, "{\"detail\": \"rate limited\"}");
-                    return;
-                }
-                AtomicInteger fail = failuresRemaining.get(text);
-                if (fail != null && fail.get() > 0) {
+                    status = 429;
+                    reply = "{\"detail\": \"rate limited\"}";
+                } else if (fail != null && fail.get() > 0) {
                     fail.decrementAndGet();
-                    sendStatus(exchange, 500, "{\"detail\": \"upstream sad\"}");
-                    return;
+                    status = 500;
+                    reply = "{\"detail\": \"upstream sad\"}";
+                } else {
+                    status = 200;
+                    reply = cceResponseBody(texts);
                 }
-                sendStatus(exchange, 200, cceResponseBody(texts));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                return;
             } finally {
                 inFlight.decrementAndGet();
             }
+            sendStatus(exchange, status, reply);
         });
         server.start();
         url = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1/contextualizedembeddings";
