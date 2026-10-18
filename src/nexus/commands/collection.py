@@ -1145,7 +1145,16 @@ def reindex_cmd(name: str, force: bool) -> None:
     # keep_quarantine: this verb re-registers the SAME name below, so the origin's rows in its
     # quarantine- siblings stay restorable instead of being deleted with the old registration
     # (nexus-wbfpw.71; `nx collection delete` takes them, this does not).
-    purge_collection_cascade(db, name, keep_quarantine=True)
+    cascade = purge_collection_cascade(db, name, keep_quarantine=True)
+    for failure in cascade.failures:
+        click.echo(f"warn: {failure}", err=True)
+    if cascade.service_delete_failed:
+        # nexus-69n4q: the service never confirmed the delete (a read timeout makes ONE attempt since
+        # nexus-oq5gd), so the old collection may still be there; re-indexing now would write into it.
+        raise click.ClickException(
+            f"reindex of '{name}' stopped: the delete is unconfirmed (the service cascade failed). "
+            f"Re-run `nx collection reindex {name}`."
+        )
 
     # 3b. Re-register the catalog_collections registry row the cascade just
     # deleted (nexus-ync6s): no re-index path calls register_collection, so

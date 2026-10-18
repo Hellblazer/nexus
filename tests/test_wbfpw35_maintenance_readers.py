@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from nexus.db.collection_purge import CascadeCounts
+
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from tests.test_catalog_backfill import catalog_env, git_identity  # noqa: F401 — fixtures
@@ -317,7 +319,7 @@ def _run_reindex(monkeypatch: pytest.MonkeyPatch, name: str, col, cat, *, force:
     with patch("nexus.commands.collection._t3", return_value=db), \
          patch("nexus.catalog.factory.make_catalog_reader", side_effect=factory), \
          patch("nexus.db.collection_purge.purge_collection_cascade",
-               side_effect=lambda _db, n, **_kw: purged.append(n)), \
+               side_effect=lambda _db, n, **_kw: (purged.append(n), CascadeCounts())[1]), \
          patch("nexus.doc_indexer.index_markdown", side_effect=_record):
         result = CliRunner().invoke(main, argv)
     return result, indexed, purged

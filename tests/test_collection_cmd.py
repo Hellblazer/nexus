@@ -9,6 +9,7 @@ from tests._catalog_fixture_ops import active_reader
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.collection_purge import CascadeCounts
 from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import make_vector_test_client
 
@@ -753,13 +754,43 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
         [{"source_path": str(doc_file)}],
     )
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
     assert result.exit_code == 0, result.output
     mock_purge.assert_called_once_with(mock_db, "knowledge__test", keep_quarantine=True)
     mock_db.delete_collection.assert_not_called()
+
+
+def test_reindex_stops_when_the_service_did_not_confirm_the_delete(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-69n4q: a failed (or timed-out) service deleteCollection leaves the old collection in place;
+    reindex must stop before re-registering or re-indexing into it, and say how to retry."""
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+    vr = _setup_reindex_mock(
+        mock_db,
+        [{"source_path": str(doc_file)}],
+        [{"source_path": str(doc_file)}],
+    )
+    fake = CascadeCounts(
+        failures=["service deleteCollection failed: ReadTimeout"],
+        service_delete_failed=True,
+    )
+    with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake), \
+         patch("nexus.corpus.ensure_collection_registered") as register, \
+         patch("nexus.doc_indexer.index_markdown", return_value=1) as index_md, \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
+    assert result.exit_code != 0
+    assert "unconfirmed" in result.output
+    assert "nx collection reindex knowledge__test" in result.output
+    assert "service deleteCollection failed" in result.output
+    index_md.assert_not_called()
+    register.assert_not_called()
 
 
 def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
@@ -786,7 +817,7 @@ def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
     writer = MagicMock()
     name = "docs__myrepo__stub-code-1024__v5"
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade"), \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()), \
          patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
@@ -925,7 +956,7 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
         return_value=str(doc_file),
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(
@@ -983,7 +1014,7 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(
@@ -1038,7 +1069,7 @@ def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
         before_count=2, after_count=1,
     )
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test", "--force"])
@@ -1710,7 +1741,7 @@ def test_reindex_refuses_code_collections_before_deleting(runner, env_creds, moc
         "ids": ["a"], "metadatas": [{"source_path": "/repo/x.py"}],
     }
     mock_db.get_or_create_collection.return_value = mock_col
-    with patch("nexus.db.collection_purge.purge_collection_cascade") as cascade:
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as cascade:
         result = _invoke(runner, mock_db, ["reindex", "code__myrepo"])
     assert result.exit_code != 0
     assert "nx index repo" in result.output
