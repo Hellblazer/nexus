@@ -100,10 +100,9 @@ class PlainSearchTextGatedSearchExplainTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // EXECUTE ON FUNCTION is not part of bootstrapServiceRole's fixed grant
             // set -- kept as an explicit grant (nexus-cbo4a batch 1b).
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, "
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.plain_search_1024, "
                 + "nexus.text_gate_probe_1024, nexus.text_gated_search_hnsw_first_1024, "
-                + "nexus.text_gated_search_by_chash_1024 TO " + SVC_ROLE);
+                + "nexus.text_gated_search_by_chash_1024", SVC_ROLE);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());

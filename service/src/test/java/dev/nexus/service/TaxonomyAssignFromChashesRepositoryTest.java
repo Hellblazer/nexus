@@ -112,9 +112,8 @@ class TaxonomyAssignFromChashesRepositoryTest {
             // bootstrapServiceRole's fixed grant set -- kept as explicit grants
             // (nexus-cbo4a batch 1b).
             for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
-                    + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
+                PgContainerHelper.grantExecuteOnFunction(su, "nexus.assign_from_chashes_" + dim
+                    + "(text, text[], boolean, text, text)", SVC_ROLE);
             }
         }
 

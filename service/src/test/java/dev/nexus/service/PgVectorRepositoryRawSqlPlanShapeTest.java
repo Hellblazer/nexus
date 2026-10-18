@@ -152,15 +152,12 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // (nexus-cbo4a batch 1b); the extra tables those functions join
             // (catalog_links, topics, topic_assignments) already have SELECT via the
             // helper's ALL TABLES IN SCHEMA nexus grant.
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024"
-                + "(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768"
-                + "(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384"
-                + "(nexus.vector, text, text, int, text, text) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_metadata_scoped_1024"
+                + "(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_graph_hop_768"
+                + "(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_topic_scoped_384"
+                + "(nexus.vector, text, text, int, text, text)", SVC_ROLE);
         }
 
         // Second role + pool, DEDICATED to the real-call companion test (found during

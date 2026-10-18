@@ -79,9 +79,8 @@ class CatalogGcAuditProducersTest {
             // purge_trash / gc_quarantine_orphans EXECUTE are not part of
             // bootstrapServiceRole's fixed grant set (nexus-cbo4a batch 1b) --
             // kept as explicit grants.
-            su.createStatement().execute("GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.purge_trash(interval)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_quarantine_orphans(int, text, text, text, text, int)", SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();

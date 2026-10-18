@@ -75,12 +75,10 @@ class CrossPreviewRepositoryTest {
             // AND assign_from_chashes are exercised in this suite (the "matches
             // what got persisted" test calls both), so both need explicit grants.
             for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT EXECUTE ON FUNCTION nexus.cross_preview_" + dim
-                    + "(text, text[], text, text) TO " + SVC_ROLE);
-                su.createStatement().execute(
-                    "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
-                    + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
+                PgContainerHelper.grantExecuteOnFunction(su, "nexus.cross_preview_" + dim
+                    + "(text, text[], text, text)", SVC_ROLE);
+                PgContainerHelper.grantExecuteOnFunction(su, "nexus.assign_from_chashes_" + dim
+                    + "(text, text[], boolean, text, text)", SVC_ROLE);
             }
         }
 

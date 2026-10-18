@@ -110,12 +110,11 @@ class CatalogPurgeTrashVacuumTest {
         // control; purge_trash(interval) EXECUTE is kept as an explicit grant per role.
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
-            su.createStatement().execute("GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.purge_trash(interval)", SVC_ROLE);
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE_NO_MAINTAIN, SVC_PASS);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE_NO_MAINTAIN);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.purge_trash(interval)", SVC_ROLE_NO_MAINTAIN);
         }
 
         // nexus_svc gets NO manual grants here — grants-nexus-svc-1 (base DML,

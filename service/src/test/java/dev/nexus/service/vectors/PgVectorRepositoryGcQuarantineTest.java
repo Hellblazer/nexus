@@ -118,12 +118,9 @@ class PgVectorRepositoryGcQuarantineTest {
             // carry (catalog_links_id_seq, gc_audit_id_seq) are now redundant with
             // bootstrapServiceRole's broader "USAGE, SELECT ON ALL SEQUENCES" and
             // are dropped.
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_restore_rereferenced(int, text, text, text) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_quarantine_orphans(int, text, text, text, text, int)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_restore_rereferenced(int, text, text, text)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su, "nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean)", SVC_ROLE);
         }
 
         var cfg = new HikariConfig();
