@@ -68,8 +68,12 @@ def _code(p: Path) -> str:
 
 _FAKE_SSH = r"""#!/bin/bash
 # stand-in for ssh: a host target runs the command locally; admin@<ip> is the guest.
-# umask 022 is hellmini's; fd 8 is launch.sh's hold pipe, which a real ssh never passes on.
+# umask 022 is hellmini's. A real ssh passes no descriptor but 0-2 to the remote side: launch.sh's hold
+# pipe is fd 8, and bash keeps a saved copy of it (fd 10 was seen), so a remote-side process that outlives
+# the call (the deadman of a VM whose delete failed) held the pipe open and the hold never saw EOF; the
+# test then waited out end_hold's 90 s cap (nexus-w6oif). Close them all, as the real hop does.
 umask 022
+for fd in $(seq 3 63); do [[ -e /dev/fd/$fd ]] && eval "exec $fd>&-"; done
 dest=''; opts=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -83,8 +87,8 @@ echo "$dest :: $cmd" >> "$FAKE_ROOT/ssh.log"
 case "$dest" in
   admin@*)
     echo "${opts[*]}" >> "$FAKE_ROOT/guest-ssh-opts.log"
-    exec "$FAKE_ROOT/guest" "$cmd" 8>&- ;;
-  *) exec bash -c "$cmd" 8>&- ;;
+    exec "$FAKE_ROOT/guest" "$cmd" ;;
+  *) exec bash -c "$cmd" ;;
 esac
 """
 
