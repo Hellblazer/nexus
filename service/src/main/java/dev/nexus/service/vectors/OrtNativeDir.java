@@ -13,6 +13,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -129,7 +130,17 @@ public final class OrtNativeDir {
 
     /** Records each extracted library's size, so a truncated file is told from a whole one. */
     static final String SIZES_FILE = ".sizes";
-    private static final String LOCK_FILE = ".lock";
+    static final String LOCK_FILE = ".lock";
+
+    /**
+     * How long broken-directory recovery waits for the cross-process file lock before going on without
+     * it (as when the filesystem refuses the lock). A lock daemon that is down (NFS) blocks a plain
+     * {@code lock()} forever; this keeps boot bounded. The wait is only on the recovery path.
+     */
+    static final Duration LOCK_TIMEOUT = Duration.ofSeconds(10);
+
+    /** Pause between {@code tryLock} attempts while waiting for the file lock. */
+    private static final Duration LOCK_POLL = Duration.ofMillis(50);
 
     /** Serialises broken-directory recovery within this JVM (a {@link FileLock} is per-JVM). */
     private static final Object RECOVERY = new Object();
@@ -139,6 +150,96 @@ public final class OrtNativeDir {
 
     /** Extracted when the jar carries it (1.20.0 does not); ORT looks for it beside the main library. */
     private static final List<String> OPTIONAL = List.of("onnxruntime_providers_shared");
+
+    /**
+     * Who the root and version directory must be owned by. {@code uid} is the process's unix uid where
+     * the platform has one: ownership is then the directory's {@code unix:uid}, so a container with no
+     * passwd entry (where the owner name is a bare number and {@code user.name} is not that name) and a
+     * same-name-different-uid account are judged correctly. With no uid (non-unix platform, or the
+     * directory's uid unreadable) it falls back to comparing {@code name} with the owner's name.
+     * Both null: unknown, ownership is unproven.
+     */
+    record Identity(String name, Integer uid) {
+        /** Name only: the owner is compared by name. */
+        static Identity named(String name) {
+            return new Identity(name, null);
+        }
+
+        /** This process: {@code user.name} and, where there is a unix view, the uid it runs as. */
+        static Identity current() {
+            return new Identity(System.getProperty("user.name"), processUid());
+        }
+
+        boolean known() {
+            return name != null || uid != null;
+        }
+
+        /** True when {@code dir}, whose owner's name is {@code ownerName}, belongs to this identity. */
+        boolean owns(Path dir, String ownerName) {
+            if (uid != null) {
+                Integer dirUid = uidOf(dir);
+                if (dirUid != null) {
+                    return dirUid.intValue() == uid.intValue();
+                }
+                return name != null && name.equals(ownerName);
+            }
+            return name == null || name.equals(ownerName);
+        }
+
+        /** The identity as the warnings print it; null when unknown. */
+        String describe() {
+            if (uid == null) {
+                return name;
+            }
+            return name == null ? "uid=" + uid : name + " uid=" + uid;
+        }
+
+        /** Extra warning text naming the two uids when the verdict came from them; empty otherwise. */
+        String ownerNote(Path dir) {
+            Integer dirUid = uid == null ? null : uidOf(dir);
+            return dirUid == null ? "" : " owner_uid=" + dirUid + " expected_uid=" + uid;
+        }
+    }
+
+    /**
+     * The {@code unix:uid} of {@code dir}, following links exactly as the owner-name read does (a
+     * different rule here would let a link owned by us vouch for a foreign directory), or null when the
+     * platform has no such attribute.
+     */
+    static Integer uidOf(Path dir) {
+        try {
+            return Files.getAttribute(dir, "unix:uid") instanceof Integer i ? i : null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The uid this process runs as, read from a file it creates in {@code java.io.tmpdir} and deletes
+     * at once (a new file is owned by the process's effective uid, on any unix and in a container with
+     * no passwd entry; no native call, nothing for native-image to register). Null when there is no
+     * unix view or no file can be created.
+     */
+    static Integer processUid() {
+        try {
+            if (!FileSystems.getDefault().supportedFileAttributeViews().contains("unix")) {
+                return null;
+            }
+            Path probe = Files.createTempFile("nx-ort-uid", null);
+            try {
+                return uidOf(probe);
+            } finally {
+                try {
+                    Files.deleteIfExists(probe);
+                } catch (IOException ignored) {
+                    // a leftover empty file in tmp is harmless
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            log.debug("event=ort_native_dir_uid_unavailable error=\"{}\"", e.toString());
+            return null;
+        }
+    }
 
     /** What {@link #ensure} did. {@code dir} is null when nothing usable could be prepared. */
     public record Result(Path dir, Outcome outcome) {}
@@ -232,7 +333,7 @@ public final class OrtNativeDir {
 
     /** {@link #ensure(Path, String, String, Resources, String)} for the current user. */
     public static Result ensure(Path root, String osName, String osArchName, Resources resources) {
-        return ensure(root, osName, osArchName, resources, System.getProperty("user.name"));
+        return ensure(root, osName, osArchName, resources, Identity.current(), d -> { }, LOCK_TIMEOUT);
     }
 
     /**
@@ -245,13 +346,19 @@ public final class OrtNativeDir {
         return ensure(root, osName, osArchName, resources, user, d -> { });
     }
 
+    /** {@link #ensure(Path, String, String, Resources, String)} with a test seam; the owner is judged by name only. */
+    static Result ensure(Path root, String osName, String osArchName, Resources resources, String user,
+                         Consumer<Path> afterSeen) {
+        return ensure(root, osName, osArchName, resources, Identity.named(user), afterSeen, LOCK_TIMEOUT);
+    }
+
     /**
      * {@link #ensure(Path, String, String, Resources, String)} with a test seam: {@code afterSeen} runs
      * with the version directory right after each existence check that found it (in {@code ensure}
      * and again in {@code recover}), so a test can make a sibling's rename-aside land exactly there.
      */
-    static Result ensure(Path root, String osName, String osArchName, Resources resources, String user,
-                         Consumer<Path> afterSeen) {
+    static Result ensure(Path root, String osName, String osArchName, Resources resources, Identity user,
+                         Consumer<Path> afterSeen, Duration lockTimeout) {
         String platform = osArch(osName, osArchName);
         if (platform == null) {
             return new Result(null, Outcome.UNAVAILABLE);
@@ -259,7 +366,7 @@ public final class OrtNativeDir {
         Path finalDir = root.resolve(ORT_VERSION + "-" + platform);
         try {
             createRoot(root);
-            if (!trusted(root, user)) {
+            if (!trustedBy(root, user, OrtNativeDir::chmodNoGroupOtherWrite)) {
                 return new Result(null, Outcome.UNAVAILABLE);
             }
             // Before the reuse return: a stage left by a killed starter is removed by ANY later start.
@@ -291,7 +398,7 @@ public final class OrtNativeDir {
                 if (reusable(finalDir, user)) {
                     return new Result(finalDir, Outcome.REUSED);
                 }
-                return recover(root, stage, finalDir, user, failure, afterSeen);
+                return recover(root, stage, finalDir, user, failure, afterSeen, lockTimeout);
             } finally {
                 deleteTree(stage);
             }
@@ -307,12 +414,12 @@ public final class OrtNativeDir {
      * a file lock; the check is repeated inside the lock, and a broken directory is renamed aside, not
      * deleted in place.
      */
-    private static Result recover(Path root, Path stage, Path finalDir, String user, IOException lastFailure,
-                                  Consumer<Path> afterSeen) throws IOException {
+    private static Result recover(Path root, Path stage, Path finalDir, Identity user, IOException lastFailure,
+                                  Consumer<Path> afterSeen, Duration lockTimeout) throws IOException {
         synchronized (RECOVERY) {
             try (FileChannel ch = FileChannel.open(root.resolve(LOCK_FILE),
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                 FileLock ignored = lockOrNull(ch)) {
+                 FileLock ignored = lockOrNull(ch, lockTimeout)) {
                 for (int attempt = 0; attempt < 3; attempt++) {
                     // Immediately before acting: a sibling may have published a whole directory.
                     if (reusable(finalDir, user)) {
@@ -351,13 +458,37 @@ public final class OrtNativeDir {
         return new Result(null, Outcome.UNAVAILABLE);
     }
 
-    /** A file lock for cross-process exclusion, or null when the filesystem will not give one. */
-    private static FileLock lockOrNull(FileChannel ch) {
-        try {
-            return ch.lock();
-        } catch (IOException | RuntimeException e) {
-            log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
-            return null;
+    /**
+     * A file lock for cross-process exclusion, or null when the filesystem will not give one or another
+     * process still holds it after {@code timeout} (the caller then goes on unlocked, as when the lock is
+     * refused). A bounded {@code tryLock} loop, never {@code lock()}: that blocks without end when the
+     * lock daemon is gone.
+     */
+    private static FileLock lockOrNull(FileChannel ch, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            try {
+                FileLock lock = ch.tryLock();
+                if (lock != null) {
+                    return lock;
+                }
+            } catch (IOException | RuntimeException e) {
+                log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
+                return null;
+            }
+            if (System.nanoTime() - deadline >= 0) {
+                log.warn("event=ort_native_dir_lock_timeout timeout_ms={} note=\"another process held the "
+                        + "recovery lock for the whole wait; continuing without it\"", timeout.toMillis());
+                return null;
+            }
+            try {
+                Thread.sleep(LOCK_POLL.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("event=ort_native_dir_lock_timeout timeout_ms={} note=\"interrupted while waiting for the "
+                        + "recovery lock; continuing without it\"", timeout.toMillis());
+                return null;
+            }
         }
     }
 
@@ -414,6 +545,11 @@ public final class OrtNativeDir {
         return trusted(dir, user, OrtNativeDir::chmodNoGroupOtherWrite);
     }
 
+    /** {@link #trustedBy} judging the owner by name only. */
+    static boolean trusted(Path dir, String user, Tightener tightener) {
+        return trustedBy(dir, Identity.named(user), tightener);
+    }
+
     /**
      * Trust for the ROOT. POSIX: {@code dir} must be owned by {@code user} and not writable by group
      * or others, or a planted library could be loaded into the engine. A directory the current user
@@ -426,7 +562,7 @@ public final class OrtNativeDir {
      * failed ({@code tighten_failed}) and one that did not take effect ({@code tighten_ineffective}).
      * Other platforms: true. A false return warns.
      */
-    static boolean trusted(Path dir, String user, Tightener tightener) {
+    static boolean trustedBy(Path dir, Identity who, Tightener tightener) {
         PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
         if (view == null) {
             return true;
@@ -435,15 +571,16 @@ public final class OrtNativeDir {
             PosixFileAttributes a = view.readAttributes();
             String owner = a.owner().getName();
             Set<PosixFilePermission> perms = a.permissions();
-            boolean ownerOk = user == null || user.equals(owner);
+            boolean ownerOk = !who.known() || who.owns(dir, owner);
             if (ownerOk && !writableByGroupOrOthers(perms)) {
                 return true;
             }
             String mode = PosixFilePermissions.toString(perms);
-            if (user != null && !user.equals(owner)) {
-                return refuse(dir, "foreign_owner", owner, user, mode, "");
+            String user = who.describe();
+            if (who.known() && !ownerOk) {
+                return refuse(dir, "foreign_owner", owner, user, mode, who.ownerNote(dir));
             }
-            if (user == null) {
+            if (!who.known()) {
                 return refuse(dir, "unknown_user", owner, user, mode, "");
             }
             if (Files.isSymbolicLink(dir)) {
@@ -462,7 +599,7 @@ public final class OrtNativeDir {
                 tightener.tighten(dir, perms);
                 PosixFileAttributes after = (noFollow != null ? noFollow : view).readAttributes();
                 Set<PosixFilePermission> now = after.permissions();
-                if (user.equals(after.owner().getName()) && !writableByGroupOrOthers(now)) {
+                if (who.owns(dir, after.owner().getName()) && !writableByGroupOrOthers(now)) {
                     log.warn("event=ort_native_dir_tightened dir=\"{}\" old_mode={} new_mode={} "
                                     + "note=\"group and other write were removed; to keep a shared directory, "
                                     + "point {} elsewhere or make it owner-writable only\"",
@@ -495,7 +632,7 @@ public final class OrtNativeDir {
     }
 
     /** What the version directory is, for {@link #versionDirTrust}. */
-    private enum Trust { TRUSTED, WRITABLE_OWNED, UNTRUSTED, ABSENT }
+    enum Trust { TRUSTED, WRITABLE_OWNED, UNTRUSTED, ABSENT }
 
     /**
      * Trust for the VERSION directory, which is never tightened: another user may already have written
@@ -505,7 +642,7 @@ public final class OrtNativeDir {
      * {@code UNTRUSTED} (foreign owner, unknown user, symbolic link: refused, warns); {@code ABSENT} (gone
      * by the time its attributes were read, which a concurrent starter's rename-aside causes: not a refusal).
      */
-    private static Trust versionDirTrust(Path dir, String user, boolean announce) {
+    static Trust versionDirTrust(Path dir, Identity who, boolean announce) {
         PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
         if (view == null) {
             return Trust.TRUSTED;
@@ -515,14 +652,15 @@ public final class OrtNativeDir {
             String owner = a.owner().getName();
             String mode = PosixFilePermissions.toString(a.permissions());
             boolean writable = writableByGroupOrOthers(a.permissions());
-            if (user != null && !user.equals(owner)) {
-                refuse(announce, dir, "foreign_owner", owner, user, mode, "");
+            String user = who.describe();
+            if (who.known() && !who.owns(dir, owner)) {
+                refuse(announce, dir, "foreign_owner", owner, user, mode, who.ownerNote(dir));
                 return Trust.UNTRUSTED;
             }
             if (!writable) {
                 return Trust.TRUSTED;
             }
-            if (user == null) {
+            if (!who.known()) {
                 refuse(announce, dir, "unknown_user", owner, user, mode, "");
                 return Trust.UNTRUSTED;
             }
@@ -550,7 +688,7 @@ public final class OrtNativeDir {
     }
 
     /** A complete version directory that is also trusted as it stands (never a writable one). */
-    private static boolean reusable(Path finalDir, String user) {
+    private static boolean reusable(Path finalDir, Identity user) {
         return isComplete(finalDir) && versionDirTrust(finalDir, user, false) == Trust.TRUSTED;
     }
 

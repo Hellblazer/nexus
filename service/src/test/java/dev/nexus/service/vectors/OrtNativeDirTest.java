@@ -537,6 +537,155 @@ class OrtNativeDirTest {
                 .anySatisfy(w -> assertThat(w).contains("reason=tighten_ineffective"));
     }
 
+    // ---- nexus-1g32a: bounded recovery lock ------------------------------------------------------
+
+    /** Starts a JVM that holds {@code root/.lock} and waits until it prints LOCKED. */
+    private static Process holdLockInAnotherProcess(Path root) throws Exception {
+        Path java = Path.of(System.getProperty("java.home"), "bin", "java");
+        Process p = new ProcessBuilder(java.toString(), "-cp", System.getProperty("java.class.path"),
+                OrtLockHolderProbe.class.getName(), root.resolve(OrtNativeDir.LOCK_FILE).toString())
+                .redirectErrorStream(true).start();
+        var in = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
+        String line = in.readLine();
+        if (!"LOCKED".equals(line)) {
+            p.destroyForcibly();
+            throw new AssertionError("lock holder did not start: " + line);
+        }
+        return p;
+    }
+
+    /** A root whose version directory is broken, so ensure() goes through the locked recovery. */
+    private static Path rootWithBrokenVersionDir(Path root) throws Exception {
+        Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+        Files.delete(lib(dir, "onnxruntime4j_jni"));
+        return dir;
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void aRecoveryLockAnotherProcessHoldsIsWaitedForThenGivenUpOnWithAWarn(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        Path dir = rootWithBrokenVersionDir(root);
+        Process holder = holdLockInAnotherProcess(root);
+        try {
+            Duration bound = Duration.ofMillis(600);
+            long t0 = System.nanoTime();
+            var result = new java.util.concurrent.atomic.AtomicReference<OrtNativeDir.Result>();
+            List<String> warnings = warnings(() -> result.set(OrtNativeDir.ensure(root, OS, ARCH, small(),
+                    OrtNativeDir.Identity.current(), d -> { }, bound)));
+            long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+
+            assertThat(waitedMs).as("it waited the whole bound before giving up").isGreaterThanOrEqualTo(600);
+            assertThat(result.get().outcome()).as("it carried on unlocked, as when the lock is refused")
+                    .isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+            assertThat(lib(dir, "onnxruntime4j_jni")).isRegularFile();
+            assertThat(warnings).anySatisfy(w -> assertThat(w).contains("event=ort_native_dir_lock_timeout")
+                    .contains("timeout_ms=600"));
+        } finally {
+            holder.destroyForcibly();
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void aRecoveryLockReleasedWithinTheBoundIsTakenWithoutAWarn(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        rootWithBrokenVersionDir(root);
+        Process holder = holdLockInAnotherProcess(root);
+        Thread releaser = new Thread(() -> {
+            try {
+                Thread.sleep(400);
+                holder.getOutputStream().close();
+            } catch (Exception ignored) {
+                holder.destroyForcibly();
+            }
+        });
+        releaser.start();
+        try {
+            var result = new java.util.concurrent.atomic.AtomicReference<OrtNativeDir.Result>();
+            List<String> warnings = warnings(() -> result.set(OrtNativeDir.ensure(root, OS, ARCH, small(),
+                    OrtNativeDir.Identity.current(), d -> { }, Duration.ofSeconds(30))));
+
+            assertThat(result.get().outcome()).isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+            assertThat(warnings).noneSatisfy(w -> assertThat(w).contains("lock_timeout"));
+        } finally {
+            releaser.join();
+            holder.destroyForcibly();
+        }
+    }
+
+    @Test
+    void theProductionLockBoundIsFiniteAndShort() {
+        assertThat(OrtNativeDir.LOCK_TIMEOUT).isPositive().isLessThanOrEqualTo(Duration.ofSeconds(30));
+    }
+
+    // ---- nexus-1g32a: ownership by uid -----------------------------------------------------------
+
+    private static int uidOfOrSkip(Path p) {
+        Integer uid = OrtNativeDir.uidOf(p);
+        Assumptions.assumeTrue(uid != null, "unix:uid attribute not available on this platform");
+        return uid;
+    }
+
+    @Test
+    void theProcessUidIsTheUidOfAFileThisProcessCreates(@TempDir Path dir) throws Exception {
+        int uid = uidOfOrSkip(dir);
+        assertThat(OrtNativeDir.processUid()).isEqualTo(uid);
+        assertThat(OrtNativeDir.Identity.current().uid()).isEqualTo(uid);
+    }
+
+    @Test
+    void theUidDecidesOwnershipNotTheNameSoAContainerWithNoPasswdEntryIsTrusted(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        int uid = uidOfOrSkip(dir);
+        // user.name says something the owner's name never matches (a container: "?" vs the bare uid).
+        assertThat(OrtNativeDir.trustedBy(dir, new OrtNativeDir.Identity("?", uid),
+                (d, perms) -> { })).isTrue();
+        // ...and ensure() agrees all the way through extraction and reuse.
+        var who = new OrtNativeDir.Identity("?", uid);
+        assertThat(OrtNativeDir.ensure(dir, OS, ARCH, small(), who, d -> { }, OrtNativeDir.LOCK_TIMEOUT).outcome())
+                .isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+        assertThat(OrtNativeDir.ensure(dir, OS, ARCH, small(), who, d -> { }, OrtNativeDir.LOCK_TIMEOUT).outcome())
+                .isEqualTo(OrtNativeDir.Outcome.REUSED);
+    }
+
+    @Test
+    void theSameNameWithADifferentUidIsAForeignOwnerAndSaysBothUids(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        int uid = uidOfOrSkip(dir);
+        String me = System.getProperty("user.name");
+        var other = new OrtNativeDir.Identity(me, uid + 1);
+
+        List<String> warnings = warnings(() ->
+                assertThat(OrtNativeDir.trustedBy(dir, other, (d, perms) -> { })).isFalse());
+
+        assertThat(warnings).anySatisfy(w -> assertThat(w).contains("reason=foreign_owner")
+                .contains("owner_uid=" + uid).contains("expected_uid=" + (uid + 1)));
+        assertThat(OrtNativeDir.ensure(dir, OS, ARCH, small(), other, d -> { }, OrtNativeDir.LOCK_TIMEOUT).outcome())
+                .isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+        assertThat(names(dir)).as("nothing extracted into a root another uid owns").isEmpty();
+    }
+
+    @Test
+    void aVersionDirectoryIsJudgedByUidToo(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        int uid = uidOfOrSkip(dir);
+        String me = System.getProperty("user.name");
+        assertThat(OrtNativeDir.versionDirTrust(dir, new OrtNativeDir.Identity("?", uid), false))
+                .as("uid matches, the name does not").isEqualTo(OrtNativeDir.Trust.TRUSTED);
+        assertThat(OrtNativeDir.versionDirTrust(dir, new OrtNativeDir.Identity(me, uid + 1), false))
+                .as("the name matches, the uid does not").isEqualTo(OrtNativeDir.Trust.UNTRUSTED);
+    }
+
+    @Test
+    void withNoUidTheOwnerNameIsComparedAsBefore(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        String me = System.getProperty("user.name");
+        assertThat(OrtNativeDir.trustedBy(dir, OrtNativeDir.Identity.named(me), (d, perms) -> { })).isTrue();
+        assertThat(OrtNativeDir.trustedBy(dir, OrtNativeDir.Identity.named("not-the-owner"), (d, perms) -> { }))
+                .isFalse();
+    }
+
     /** The WARN messages {@link OrtNativeDir} logs while {@code body} runs. */
     private static List<String> warnings(ThrowingRunnable body) throws Exception {
         var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OrtNativeDir.class);

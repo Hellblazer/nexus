@@ -660,12 +660,35 @@ if [[ "$ORT_LINES" =~ event=ort_native_dir\ source=(extracted|reused)\ dir= ]]; 
 else
   echo "  FAIL no event=ort_native_dir source=extracted|reused in the service log; saw: ${ORT_LINES:-nothing}"; fail=1
 fi
-ORT_TMP_BIG=$(find "$SMOKE_TMP/jtmp" -type f -size +1000k 2>/dev/null || true)
-if [ -z "$ORT_TMP_BIG" ]; then
-  echo "  ok   no ORT library was unpacked into the temp directory"
-else
-  echo "  FAIL ONNX Runtime still unpacked large file(s) into the temp directory: $ORT_TMP_BIG"; fail=1
-fi
+# nexus-1g32a: the "no large file in the scratch tmpdir" check passes just as well when the native
+# binary ignores -Djava.io.tmpdir and writes elsewhere, so it needs a positive control: once ONNX
+# Runtime has initialised (the bge embed leg ran), onnxruntime-java has made its empty
+# onnxruntime-java<random> directory, and it must be HERE. Absent after an embed that worked means the
+# property was not honoured and the size check saw nothing to look at. Without the bge model ORT
+# never initialises, so the control cannot run; that is said out loud, like the other model-gated legs.
+# Function form: tests/test_native_smoke_scratch_dir_lint.py runs this exact text against fixtures.
+check_ort_tmpdir() {
+  local tmp="$1" have_model="$2" big dirs
+  big=$(find "$tmp" -type f -size +1000k 2>/dev/null || true)
+  if [ -z "$big" ]; then
+    echo "  ok   no ORT library was unpacked into the temp directory"
+  else
+    echo "  FAIL ONNX Runtime still unpacked large file(s) into the temp directory: $big"; fail=1
+  fi
+  if [ "$have_model" = "1" ]; then
+    dirs=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'onnxruntime-java*' 2>/dev/null || true)
+    if [ -n "$dirs" ]; then
+      echo "  ok   the binary honoured the scratch java.io.tmpdir (onnxruntime-java directory present)"
+    else
+      echo "  FAIL no onnxruntime-java* directory in the scratch java.io.tmpdir $tmp although ORT initialised: the native binary ignored -Djava.io.tmpdir, so the size check above proved nothing"; fail=1
+    fi
+  else
+    echo "  WARN tmpdir positive control NOT covered — ORT never initialised (bge model absent)"
+  fi
+}
+HAVE_BGE=0
+[ -f "$BGE_MODEL" ] && HAVE_BGE=1
+check_ort_tmpdir "$SMOKE_TMP/jtmp" "$HAVE_BGE"
 
 # ── SIGTERM during in-flight local inference (nexus-o5xyx.3) ─────────────────
 # onnxruntime-java's shutdown hook frees ORT's env under a running session.run()

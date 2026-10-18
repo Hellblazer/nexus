@@ -100,3 +100,64 @@ def test_trap_removes_dir_on_success_and_keeps_it_on_failure(tmp_path):
         assert d.parent == scratch and d.name.startswith("native-smoke.")
         outcomes[label] = d.exists()
     assert outcomes == {"ok": False, "fail": True}
+
+
+# ---- nexus-1g32a: positive control that the binary honoured the scratch tmpdir ----------------
+
+
+def _run_ort_tmpdir_check(tmp_path, *, have_model, files=(), dirs=()):
+    """Run the script's own check_ort_tmpdir text against a fixture tmpdir; return (fail, output)."""
+    m = re.search(r"^check_ort_tmpdir\(\) \{.*?^\}\n", SMOKE.read_text(), re.S | re.M)
+    assert m, "check_ort_tmpdir() is gone from native-smoke.sh"
+    jtmp = tmp_path / "jtmp"
+    jtmp.mkdir()
+    for d in dirs:
+        (jtmp / d).mkdir()
+    for name, size in files:
+        (jtmp / name).write_bytes(b"x" * size)
+    bash = shutil.which("bash")
+    assert bash
+    prog = (
+        "set -uo pipefail\nfail=0\n"
+        + m.group(0)
+        + f'check_ort_tmpdir "{jtmp}" "{1 if have_model else 0}"\n'
+        + 'echo "fail=$fail"\n'
+    )
+    r = subprocess.run([bash, "-c", prog], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+    assert r.returncode == 0, r.stderr
+    last = r.stdout.strip().splitlines()[-1]
+    return int(last.removeprefix("fail=")), r.stdout
+
+
+def test_tmpdir_control_passes_when_the_binary_made_its_directory_in_scratch(tmp_path):
+    fail, out = _run_ort_tmpdir_check(tmp_path, have_model=True, dirs=["onnxruntime-java123"])
+    assert fail == 0, out
+    assert "honoured the scratch java.io.tmpdir" in out
+
+
+def test_tmpdir_control_fails_when_scratch_is_empty_after_a_working_embed(tmp_path):
+    """The vacuous shape: the binary ignored -Djava.io.tmpdir, so scratch holds nothing at all."""
+    fail, out = _run_ort_tmpdir_check(tmp_path, have_model=True)
+    assert fail == 1, out
+    assert "ignored -Djava.io.tmpdir" in out
+
+
+def test_tmpdir_control_still_fails_on_a_large_file_even_with_the_directory_present(tmp_path):
+    fail, out = _run_ort_tmpdir_check(
+        tmp_path, have_model=True, dirs=["onnxruntime-java9"], files=[("libonnxruntime.so", 1_100_000)]
+    )
+    assert fail == 1, out
+    assert "still unpacked large file" in out
+
+
+def test_tmpdir_control_says_so_when_ort_never_initialised(tmp_path):
+    """No bge model: no failure, and the not-covered line is printed (never a silent skip)."""
+    fail, out = _run_ort_tmpdir_check(tmp_path, have_model=False)
+    assert fail == 0, out
+    assert "tmpdir positive control NOT covered" in out
+
+
+def test_the_script_calls_the_control_with_the_scratch_dir_and_the_model_flag():
+    text = SMOKE.read_text()
+    assert 'check_ort_tmpdir "$SMOKE_TMP/jtmp" "$HAVE_BGE"' in text
+    assert '[ -f "$BGE_MODEL" ] && HAVE_BGE=1' in text
