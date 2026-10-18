@@ -5,12 +5,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -65,26 +59,10 @@ class TenantPoolingIsolationTest {
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
-        // grants-nexus-svc.xml fail-fasts if the role is absent; create it first.
+        // role-001-nexus-svc.xml (first include of the master changelog) creates
+        // nexus_svc before grants-nexus-svc.xml needs it (nexus-cbo4a batch 9).
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // KEPT RAW: conditional CREATE ROLE via a DO $$ block -- no typed jOOQ
-            // DDL form for "create this role only if it does not already exist",
-            // and no nexus_test bootstrap function covers it this round (candidate
-            // for one, per the task brief's ladder-file exclusion list).
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='"
-                + PgContainerHelper.SVC_USERNAME + "') THEN CREATE ROLE "
-                + PgContainerHelper.SVC_USERNAME + " LOGIN PASSWORD '"
-                + PgContainerHelper.SVC_PASSWORD + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            try (var lq = new Liquibase("db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db)) {
-                lq.update(new Contexts());
-            }
+            PgContainerHelper.applyProductSchema(su);
         }
 
         var cfg = new HikariConfig();

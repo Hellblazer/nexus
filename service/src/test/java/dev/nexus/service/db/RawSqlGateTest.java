@@ -912,7 +912,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/AspectOperatorQueryTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/BridgeAddressFieldsTest.java", 6),
-        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 18),
+        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 17),
         Map.entry("dev/nexus/service/CatalogDeleteCollectionCascadeTest.java", 14),
         Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 11),
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 5),
@@ -985,7 +985,7 @@ class RawSqlGateTest {
         // GRANT in the finally block. No jOOQ codegen exists for GRANT/REVOKE.
         Map.entry("dev/nexus/service/NexusServiceTupleSweepIsolationTest.java", 3),
         Map.entry("dev/nexus/service/OnjvyReadRoutesHandlerTest.java", 1),
-        Map.entry("dev/nexus/service/PgBouncerTenantIsolationTest.java", 4),
+        Map.entry("dev/nexus/service/PgBouncerTenantIsolationTest.java", 3),
         Map.entry("dev/nexus/service/PgVectorCombinedQueryContractTest.java", 6),
         Map.entry("dev/nexus/service/PgVectorEmbedSkipGcRaceTest.java", 3),
         Map.entry("dev/nexus/service/PgVectorRepositoryContractTest.java", 9),
@@ -995,7 +995,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PlainSearchTextGatedSearchExplainTest.java", 1),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 20),
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 4),
-        Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 1),
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
         // (net DOWN, not up -- stale comment fix, batch-9 gate pass,
         // worktree-agent-ae864db44cc9fe82c). An earlier design pinned this
@@ -1171,7 +1170,6 @@ class RawSqlGateTest {
         // topic_assignments) -- same raw-JDBC-fixture idiom as
         // TaxonomyAssignFromChashesRepositoryTest; 5 -> 10.
         Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 10),
-        Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 1),
         Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 2),
@@ -1677,7 +1675,11 @@ class RawSqlGateTest {
     // nexus-z0o2p.27 fix round 3: 967 -> 979 (+12, StagingSchemaDropLiquibaseTest.java 2 -> 14, see its entry).
     // nexus-3wh8d.10: 978 -> 976 (-2, PgVectorRepositoryDimGuardTest.java 2 -> 0: its foreign-dimension seed
     // is gone, RDR-225 makes that shape unrepresentable).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 976;
+    // nexus-cbo4a batch 9 (role-bootstrap fold): 976 -> 972 (-4: PgBouncerTenantIsolationTest.java 4 -> 3
+    // and Catalog013RlsReplayTest.java 18 -> 17, each its nexus_svc DO $$ CREATE ROLE block deleted
+    // (role-001 creates the role); TenantPoolingIsolationTest.java 1 -> 0 and
+    // SchemaMigratorDateExecutedUtcTest.java 1 -> 0, entries removed outright).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 972;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

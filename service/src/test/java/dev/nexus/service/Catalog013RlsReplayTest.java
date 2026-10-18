@@ -94,13 +94,10 @@ class Catalog013RlsReplayTest {
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
-            // DBA bootstrap: the grants changeset (runAlways) requires nexus_svc.
-            exec(su,
-                "DO $$ BEGIN "
-                + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; "
-                + "  END IF; "
-                + "END $$");
+            // nexus_svc needs no hand-created bootstrap: role-001-nexus-svc.xml (first
+            // include of the master changelog, run as superuser in step 1) creates it
+            // before the runAlways grants changeset needs it (nexus-cbo4a batch 9).
+            // The replay role below stays hand-built: it is the point of this test.
             exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '"
                 + ADMIN_PASS + "' NOSUPERUSER NOBYPASSRLS");
             // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-

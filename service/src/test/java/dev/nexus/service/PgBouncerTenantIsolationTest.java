@@ -10,12 +10,6 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -93,23 +87,10 @@ class PgBouncerTenantIsolationTest {
             .withNetworkAliases(PG_ALIAS);
         pg.start();
 
-        // Create the production service role + apply the schema (grants-nexus-svc.xml
-        // grants nexus_svc DML), exactly as the other PG tests do.
+        // Apply the product schema; role-001-nexus-svc.xml (first include) creates
+        // nexus_svc and grants-nexus-svc.xml grants it DML (nexus-cbo4a batch 9).
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='"
-                + PgContainerHelper.SVC_USERNAME + "') THEN CREATE ROLE "
-                + PgContainerHelper.SVC_USERNAME + " LOGIN PASSWORD '"
-                + PgContainerHelper.SVC_PASSWORD + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            try (var lq = new Liquibase("db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db)) {
-                lq.update(new Contexts());
-            }
+            PgContainerHelper.applyProductSchema(su);
         }
 
         pgbouncer = new GenericContainer<>(PGBOUNCER_IMAGE)

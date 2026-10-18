@@ -15,12 +15,6 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -101,11 +95,7 @@ class IndexRunFenceTest {
         // grants-nexus-svc (runAlways, last) grants nexus_svc DML on every table
         // it owns, including catalog-020-5's EXECUTE on the two SQL functions.
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         svcDs = buildSvcDataSource();

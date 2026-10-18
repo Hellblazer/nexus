@@ -2,12 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -101,10 +95,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
         // javadoc names exactly this class of test as required to opt out).
         pg = PgContainerHelper.startDedicated();
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 

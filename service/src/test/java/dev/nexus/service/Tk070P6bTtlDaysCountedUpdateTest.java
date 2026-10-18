@@ -2,12 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
@@ -88,15 +82,9 @@ class Tk070P6bTtlDaysCountedUpdateTest {
         // not leak into any other test class's shared-cluster assumptions.
         pg = PgContainerHelper.startDedicated();
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
-            // nexus_test.* (dropConstraint below) isn't installed by this file's own
-            // migration path (unlike applyProductSchema) -- install it via the SAME
-            // connection/role that just ran the product changelog, so whichever role
-            // owns databasechangelog stays consistent (nexus-cbo4a batch 12 finding).
-            PgContainerHelper.installTestObjects(su);
+            // applyProductSchema also installs nexus_test.* (dropConstraint below)
+            // through the same superuser connection that runs the product changelog.
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 

@@ -7,12 +7,6 @@ import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
-import liquibase.Contexts;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.Liquibase;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -108,11 +102,7 @@ class ManifestVerifyTest {
         // changeset fails to apply cleanly, @BeforeAll fails and every test below
         // reports it — the migration-conformance check for this bead.
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         svcDs = buildSvcDataSource();
