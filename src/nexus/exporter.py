@@ -344,8 +344,9 @@ def _resolve_export_owners(
             # row count, so the import can tell a whole document from one whose shared chunks
             # were written under another owner (the import uses the key only when it holds every row
             # and one of the document's chunks witnesses the key, _note_source_evidence). The entry is
-            # read after the manifests; a re-index landing between the two pairs a new key with old
-            # rows, whose chunks then carry the old key, so the witness check refuses it.
+            # read after the manifests, and the three reads are not one snapshot: the source is
+            # assumed quiescent during export. A re-index landing between them usually pairs a new
+            # key with old rows whose chunks carry the old key, which the witness check refuses.
             "index_content_hash": entry.index_content_hash if entry.index_state == "complete" else "",
             "manifest_rows": len(manifests.get(chosen, [])),
         }
@@ -793,7 +794,8 @@ def _prepass_groups(
     target_collection: str,
 ) -> dict[str, dict]:
     """Read the file once and return its owner groups with their record counts (``seen``) and
-    highest position (``maxpos``), never the records: memory is one small dict per group. The
+    highest position (``maxpos``), never the records: memory is one small dict per group, plus the
+    set of positions of a group whose source key could be used (nexus-mjikf, :func:`_note_source_evidence`). The
     import needs both before it writes anything. A document's LAST PAGE is the one that brings its
     received rows up to its count, which is when it is swept and stamped; and a row that claims a
     position already taken goes past the document's highest one, which only a whole-file scan can
@@ -827,7 +829,10 @@ def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
     key, matches no chunk. Two records at one position mean the group is not one whole manifest
     (a live export can read a record twice and miss another), so the key is dropped."""
     source = group.get("source")
-    if not source:
+    # Track only a group whose key could ever be used, so an old bundle or an incomplete source
+    # costs nothing beyond the group's small dict.
+    if (not source or not isinstance(source[0], str) or not _CONTENT_KEY.fullmatch(source[0])
+            or not isinstance(source[1], int) or isinstance(source[1], bool)):
         group.pop("positions", None)
         return
     if meta.get("content_hash") == source[0]:
@@ -850,7 +855,12 @@ def _whole_source(group: dict) -> tuple[str, Any] | None:
     rows = source[1]
     if not isinstance(rows, int) or isinstance(rows, bool):
         return None
-    return source if group.get("positions") == set(range(rows)) else None
+    # Distinct positions, so "exactly 0..rows-1" is a count plus bounds; never build range(rows) from
+    # a number the bundle supplies.
+    positions = group.get("positions") or set()
+    if len(positions) != rows or not all(0 <= p < rows for p in positions):
+        return None
+    return source
 
 
 #: The shape of a content key an import accepts from a bundle (a sha256 hex digest, the form every

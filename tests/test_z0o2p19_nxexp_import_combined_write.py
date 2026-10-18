@@ -1293,6 +1293,10 @@ def test_a_source_key_counts_only_when_a_chunk_witnesses_it_and_every_position_i
     assert _whole_source(_group_of([(0, _KA), (0, _KA)])) is None                # a record read twice
     assert _whole_source(_group_of([(0, _KA), (2, _KA)])) is None                # a position missing
     assert _whole_source(_group_of([(0, _KA)])) is None                          # a row short
+    huge = _group_of([(0, _KA)], rows=10**12)                                      # never built as a range
+    assert _whole_source(huge) is None
+    unusable = _group_of([(0, None), (1, None)], key="")                           # an incomplete source
+    assert "positions" not in unusable
 
 
 class _StubOwnerReader:
