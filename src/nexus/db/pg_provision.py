@@ -112,6 +112,7 @@ from typing import Callable, NamedTuple
 
 import structlog
 
+from nexus._smart_app_control import BLOCKED_WINERROR as _SAC_BLOCKED_WINERROR
 from nexus._smart_app_control import ON as _SAC_ON
 from nexus._smart_app_control import execution_blocked as _sac_execution_blocked
 from nexus._smart_app_control import state as smart_app_control_state
@@ -797,6 +798,14 @@ def _run(
         raise subprocess.CalledProcessError(
             exc.returncode, _redacted(cmd), output=exc.output, stderr=exc.stderr
         ) from None
+    except OSError as exc:
+        # nexus-cntvz: the up-front probe can say "ran" while Windows blocks
+        # the real bundle (a signed interpreter makes its stand-in pass). The
+        # first bundle binary then fails here; name the cause, not the raw code.
+        if getattr(exc, "winerror", None) == _SAC_BLOCKED_WINERROR:
+            _log.error("pg_provision_blocked_by_application_control", cmd=_redacted(cmd)[:1])
+            raise PgSmartAppControlError(smart_app_control_remedy()) from None
+        raise
 
 
 def _superuser_password(port: int) -> str | None:

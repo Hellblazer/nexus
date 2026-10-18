@@ -29,7 +29,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN",
-    "execution_blocked", "state",
+    "BLOCKED_WINERROR", "execution_blocked", "state",
 ]
 
 OFF = "off"
@@ -77,7 +77,7 @@ def state(
 
 #: ERROR_ACCESS_DISABLED_BY_POLICY: "An Application Control policy has blocked
 #: this file", the code CreateProcess returns for a blocked unsigned binary.
-_BLOCKED_WINERROR = 4551
+BLOCKED_WINERROR = 4551
 
 
 def _launch_unsigned_copy() -> None:
@@ -113,7 +113,7 @@ def execution_blocked(
         (launch or _launch_unsigned_copy)()
     except OSError as exc:
         winerror = getattr(exc, "winerror", None)
-        if winerror == _BLOCKED_WINERROR:
+        if winerror == BLOCKED_WINERROR:
             return True
         _log.warning("sac_probe_inconclusive", error=type(exc).__name__, winerror=winerror)
         return None

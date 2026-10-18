@@ -230,3 +230,35 @@ def test_probe_is_inconclusive_on_a_crash_or_timeout(exc: Exception) -> None:
         raise exc
 
     assert sac.execution_blocked(platform="win32", launch=_launch) is None
+
+
+# ── The backstop: a blocked spawn carries the remedy (nexus-cntvz) ────────────
+
+
+def test_a_blocked_pg_spawn_raises_the_remedy_not_a_raw_winerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The probe can say "ran" while Windows blocks the real bundle (signed
+    # interpreter, unobserved True branch). The first bundle binary then fails
+    # with WinError 4551 after the download; that must name the cause.
+    def _blocked(*_a: object, **_k: object) -> None:
+        raise _os_error_with_winerror(4551)
+
+    monkeypatch.setattr(pg_provision, "run_bounded", _blocked)
+    monkeypatch.setattr(pg_provision, "refuse_root", lambda: None)
+    with pytest.raises(PgSmartAppControlError) as exc:
+        pg_provision._run(["initdb.exe", "--version"], timeout=5)
+    assert "Smart App Control" in str(exc.value)
+
+
+def test_another_spawn_failure_is_not_taken_for_smart_app_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing(*_a: object, **_k: object) -> None:
+        raise _os_error_with_winerror(2)
+
+    monkeypatch.setattr(pg_provision, "run_bounded", _missing)
+    monkeypatch.setattr(pg_provision, "refuse_root", lambda: None)
+    with pytest.raises(OSError) as exc:
+        pg_provision._run(["initdb.exe", "--version"], timeout=5)
+    assert not isinstance(exc.value, PgSmartAppControlError)
