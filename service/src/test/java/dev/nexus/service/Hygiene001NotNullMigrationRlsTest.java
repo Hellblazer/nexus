@@ -58,50 +58,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class Hygiene001NotNullMigrationRlsTest {
 
-    /** Package-visible (nexus-ft04v.4/.5): {@link Hygiene002CollectionAttributesWalkTest}
-     *  reuses this exact bootstrap for its own real NOBYPASSRLS migrating-role walk
-     *  rather than duplicating it — RawSqlGateTest's TEST_TREE_RAW_SQL_CEILING ratchet
-     *  is reduce-only, so a second copy of this raw-SQL bootstrap is not an option. */
-    static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute(
-            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
-        su.createStatement().execute(
-            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
-            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
-            + "BEGIN "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
-            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
-            + "  END IF; "
-            + "END; "
-            + "$relofunc$");
-        su.createStatement().execute(
-            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
-        su.createStatement().execute(
-            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
-            su.createStatement().execute(
-                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
-                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
-                + "BEGIN "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
-                + "  END IF; "
-                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
-                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
-                + "  END IF; "
-                + "END; "
-                + "$unrelofunc$");
-            su.createStatement().execute(
-                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
-    }
-
-
     private static final String TARGET_CHANGESET_ID = "hygiene-001-1";
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT_1 = "hygiene001-rls-tenant-1";
@@ -446,30 +402,14 @@ class Hygiene001NotNullMigrationRlsTest {
         }
     }
 
-    /** Minimal DBA-equivalent bootstrap, mirroring AspectDocIdBackfillTest's identical helper.
-     *  Package-visible (nexus-ft04v.4/.5): see {@link #bootstrapVectorExtensionsForFreshWalk}. */
+    /** Minimal DBA-equivalent bootstrap: the migrating role, nexus_svc, the CREATE grants, the extensions
+     *  and the relocation helpers, all through {@link PgContainerHelper#bootstrapNonSuperuserOwner}'s test
+     *  changelog (no SQL text here). Package-visible (nexus-ft04v.4/.5): reused by the other walk tests
+     *  that need a real NOSUPERUSER migrating role. */
     static void bootstrapAdminRole(PostgreSQLContainer<?> pg, String role, String pass)
             throws Exception {
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-            su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-            su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-            su.createStatement().execute(
-                "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
-                + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
-            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
-            // javadoc for the full derivation -- creates the extensions directly as
-            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
-            // 001's guard to call mid-walk, since this walk resumes through both
-            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
-            // as a NOSUPERUSER role.
-            bootstrapVectorExtensionsForFreshWalk(su, role);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, role, pass);
         }
     }
 

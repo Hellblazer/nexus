@@ -551,19 +551,12 @@ class StagingSchemaDropLiquibaseTest {
      * Provision the cluster the way production's DBA does: a NOSUPERUSER role that will run
      * the walk (and so create and own schema staging), the service role, the CREATE grants a
      * schema creator needs, and the extension-relocation helper the mid-walk
-     * search-path-001 changeset calls. Mirrors SchemaMigratorIntegrationTest's bootstrap.
+     * search-path-001 changeset calls. All of it is the db.changelog-test-nonsuper-owner.xml
+     * test changelog (PgContainerHelper#bootstrapNonSuperuserOwner).
      */
     private static void provisionOwnerRole(PostgreSQLContainer<?> pg) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            su.setAutoCommit(true);
-            st.execute("CREATE ROLE " + OWNER_ROLE + " LOGIN PASSWORD '" + OWNER_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            st.execute("CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'"
-                + " NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            st.execute("GRANT CREATE ON DATABASE " + pg.getDatabaseName() + " TO " + OWNER_ROLE);
-            st.execute("GRANT CREATE ON SCHEMA public TO " + OWNER_ROLE);
-            st.execute("GRANT pg_monitor TO " + OWNER_ROLE + " WITH ADMIN OPTION");
-            SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk(su, OWNER_ROLE);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, OWNER_ROLE, OWNER_PASS);
         }
     }
 }

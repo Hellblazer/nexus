@@ -408,9 +408,24 @@ public final class PgContainerHelper {
      * @param adminPass its password
      */
     public static void bootstrapNonSuperuserOwner(Connection su, String adminRole, String adminPass) throws Exception {
+        bootstrapNonSuperuserOwner(su, adminRole, adminPass, true, true);
+    }
+
+    /**
+     * {@link #bootstrapNonSuperuserOwner(Connection, String, String)} for the fixture that deliberately differs
+     * from production's provisioning (nexus-cbo4a, pre-walk bootstrap fold): {@code monitorAdminOption=false}
+     * omits {@code GRANT pg_monitor TO adminRole WITH ADMIN OPTION} (the falsification case of
+     * {@code GrantsPgMonitorTest}); {@code svcInherits=false} creates {@code nexus_svc} NOINHERIT, as
+     * production does. Safe to call again on the same container (every statement is idempotent), e.g. to
+     * reinstall the relocation helpers after a rollback dropped the {@code nexus} schema.
+     */
+    public static void bootstrapNonSuperuserOwner(Connection su, String adminRole, String adminPass,
+                                                  boolean monitorAdminOption, boolean svcInherits) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nonsuper-owner.xml",
             "databasechangelog_test_nonsuper_owner", Map.of(
-                "adminRole", adminRole, "adminPass", adminPass, "svcPass", SVC_PASSWORD));
+                "adminRole", adminRole, "adminPass", adminPass, "svcPass", SVC_PASSWORD,
+                "monitorAdminOption", Boolean.toString(monitorAdminOption),
+                "svcInherit", svcInherits ? "INHERIT" : "NOINHERIT"));
     }
 
     /**

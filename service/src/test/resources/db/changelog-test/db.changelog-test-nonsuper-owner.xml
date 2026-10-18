@@ -24,6 +24,16 @@
     product walk must not find a superuser-owned one in public.
 
     runAlways so a repeat call is harmless; every statement is idempotent.
+
+    TWO PARAMETERS keep the default shape unchanged and cover the fixtures that deliberately differ
+    (nexus-cbo4a, pre-walk bootstrap fold; every other fixture passes the defaults):
+      ${monitorAdminOption}  'true' grants pg_monitor WITH ADMIN OPTION to ${adminRole}; 'false' omits it
+                             (GrantsPgMonitorTest's falsification case: grants-004 must fail loud without it).
+      ${svcInherit}          INHERIT (the PostgreSQL default) or NOINHERIT for nexus_svc
+                             (GrantsPgMonitorTest mirrors production's NOINHERIT nexus_svc).
+
+    Re-running it after a rollback has dropped the nexus schema reinstalls the relocation helpers
+    (SchemaRollbackRoundTripIntegrationTest does exactly that, as nexus.db.pg_provision does on a daemon start).
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -42,7 +52,7 @@ END $$;
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        CREATE ROLE nexus_svc LOGIN PASSWORD '${svcPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+        CREATE ROLE nexus_svc LOGIN PASSWORD '${svcPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS ${svcInherit};
     END IF;
 END $$;
 
@@ -51,7 +61,11 @@ DO $$ BEGIN
 END $$;
 
 GRANT CREATE ON SCHEMA public TO ${adminRole};
-GRANT pg_monitor TO ${adminRole} WITH ADMIN OPTION;
+DO $$ BEGIN
+    IF '${monitorAdminOption}' = 'true' THEN
+        GRANT pg_monitor TO ${adminRole} WITH ADMIN OPTION;
+    END IF;
+END $$;
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;

@@ -906,9 +906,6 @@ class RawSqlGateTest {
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
-        // nexus-cbo4a batch 9 item 0: 12 -> 17 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 17 -> 19 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/AspectDocIdBackfillTest.java", 14),
         Map.entry("dev/nexus/service/AspectOperatorQueryTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/BridgeAddressFieldsTest.java", 6),
@@ -958,21 +955,21 @@ class RawSqlGateTest {
         // PgVectorRepositoryGcQuarantineTest.seedManifestBypassingFk already
         // carries raw-SQL entries for below.
         Map.entry("dev/nexus/service/GcRestoreRereferencedBoundedTest.java", 3),
-        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        // nexus-f1pbh: 20 -> 21 (nexusDiagCanSelectTupleTables's count(diag, "SELECT count(*) FROM " + table) call).
-        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 16),
-        // nexus-cbo4a batch 9 item 0: 11 -> 16 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 16 -> 18 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 18),
-        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 15),
+        // nexus-cbo4a pre-walk bootstrap fold: 16 -> 2. The admin/svc role, grant, extension and
+        // relocation-helper bootstrap is PgContainerHelper.bootstrapNonSuperuserOwner now. What stays raw:
+        // the exec() wrapper's own execute(sql) and the one CREATE ROLE nexus_diag ... BYPASSRLS call
+        // (cluster-level DDL with no typed form, and not part of the shared bootstrap).
+        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 2),
+        // nexus-cbo4a pre-walk bootstrap fold: 18 -> 5. Provisioning is bootstrapNonSuperuserOwner(...,
+        // monitorAdminOption=false, svcInherits=false) now. What stays raw: the exec() wrapper's execute(sql),
+        // the GRANT pg_monitor ... WITH ADMIN OPTION the second test replays because that exact statement is
+        // the test's subject, and the three pg_ls_waldir()/SET ROLE probes (table-valued function in FROM).
+        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 5),
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 16),
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
-        // nexus-cbo4a batch 9 item 0: 29 -> 34 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 34 -> 36 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 36),
+        // nexus-cbo4a pre-walk bootstrap fold: 36 -> 22 (its bootstrapVectorExtensionsForFreshWalk and the
+        // 5-statement bootstrapAdminRole are PgContainerHelper.bootstrapNonSuperuserOwner now).
+        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 22),
         Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 10),
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 8),
         Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 14),
@@ -1035,6 +1032,8 @@ class RawSqlGateTest {
         // CHUNKS/CATALOG_COLLECTIONS). changesetExecType onto the same
         // databasechangelog schema-agnostic form.
         //
+        // [Superseded by the nexus-cbo4a pre-walk bootstrap fold: the two bootstrap shapes named
+        // next are gone, see this file's entry below. The chunks seed INSERT is still kept raw.]
         // Kept raw with reasons, all documented inline at their site:
         // bootstrapVectorExtensionsForFreshWalk's 9-site DBA bootstrap (same class as
         // SchemaRollbackRoundTripIntegrationTest's own kept-raw copy of this exact
@@ -1088,7 +1087,11 @@ class RawSqlGateTest {
         // nexus-q81g7: 55 -> 52. The new role-named-for-a-schema tests share ONE
         // multi-statement bootstrapRole helper (1 site), and the jl08t aged-box
         // test's own 5-statement role bootstrap now calls it too (-5 +1 +1 ALTER).
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 52),
+        // nexus-cbo4a pre-walk bootstrap fold: 52 -> 2. All eight admin/svc role bootstraps and the
+        // bootstrapVectorExtensionsForFreshWalk block (bootstrap() plus the seven aged-box tests and
+        // bootstrapRole) are PgContainerHelper.bootstrapNonSuperuserOwner now. What stays raw is the
+        // test 13 chunks seed INSERT (the bare ::vector cast, see above) and the jl08t ALTER.
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 2),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1104,7 +1107,9 @@ class RawSqlGateTest {
         // the column's ACTUAL Postgres type varies by rollback depth, so a fixed
         // generated-table Field would be WRONG at half this file's call sites; this is
         // the ladder-file mid-walk CAUTION the task brief names, applied to reads
-        // rather than DDL). Kept raw with reasons, all documented inline at their site:
+        // rather than DDL). [Superseded by the nexus-cbo4a pre-walk bootstrap fold: the
+        // bootstrapVectorExtensionsForFreshWalk and dbaBootstrap sites named next are gone.]
+        // Kept raw with reasons, all documented inline at their site:
         // bootstrapVectorExtensionsForFreshWalk's 9-site CREATE EXTENSION/CREATE SCHEMA
         // AUTHORIZATION/CREATE OR REPLACE FUNCTION block (DBA/superuser provisioning
         // DDL mirroring nexus.db.pg_provision.py, no jOOQ typed form for any of the
@@ -1115,13 +1120,19 @@ class RawSqlGateTest {
         // longer be the SAME statement Liquibase executes), and dbaBootstrap's 5-site
         // admin/svc role bootstrap against a dedicated container (same exclusion class,
         // already named in this file's own javadoc history above).
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 16),
+        // nexus-cbo4a pre-walk bootstrap fold: 16 -> 2. bootstrapVectorExtensionsForFreshWalk, dbaBootstrap's
+        // role block and the post-rollback helper reinstall are PgContainerHelper.bootstrapNonSuperuserOwner
+        // now (the reinstall is the same idempotent call). Of the two sites left, one is the CREATE ROLE
+        // nexus_diag bootstrap (cluster-level DDL, no typed form) and one the grants-nexus-diag-1 body replay.
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 2),
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-8zoyp seed-coverage follow-up: 104 -> 111 (seedTupleConsumedBodyCleanupRows'
         // two prepareStatement/executeUpdate pairs seeding tuples-004-1's consumed/unconsumed
         // rows, mirroring nexus-r7xao's own seedTupleBodySizeLimitRows already counted here).
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 111),
+        // nexus-cbo4a pre-walk bootstrap fold: 111 -> 97 (bootstrapVectorExtensionsForFreshWalk and
+        // dbaBootstrap's role block are PgContainerHelper.bootstrapNonSuperuserOwner now).
+        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 97),
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 3),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 1),
@@ -1138,7 +1149,9 @@ class RawSqlGateTest {
         // RESET ROLE (4), and the NOSUPERUSER owner provisioning, CREATE ROLE / GRANT, the
         // SchemaMigratorIntegrationTest idiom (5). The st.execute(body) and st.execute(rollback) calls take a
         // variable, not a literal, so they are not counted.
-        Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 14),
+        // nexus-cbo4a pre-walk bootstrap fold: 14 -> 9 (the 5-statement owner provisioning is
+        // PgContainerHelper.bootstrapNonSuperuserOwner now; the 5 in the list above are gone).
+        Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 9),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
@@ -1193,15 +1206,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 7),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 3),
-        // nexus-cbo4a batch 9 item 0: 63 -> 68 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 68 -> 70 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 66),
-        // nexus-cbo4a batch 9 item 0: 14 -> 19 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 19 -> 21 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 15),
-        // nexus-cbo4a batch 9 item 0: 23 -> 28 (extension-ownership-transfer dance);
-        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 28 -> 30 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 27),
+        // nexus-cbo4a pre-walk bootstrap fold: 66 -> 52, 15 -> 1, 27 -> 13 for the three Vectors*
+        // entries below (each file's bootstrapVectorExtensionsForFreshWalk and newRig role block are
+        // PgContainerHelper.bootstrapNonSuperuserOwner now).
+        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 52),
+        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 1),
+        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 13),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
         // nexus-v4pj4 (round-2 review decision): 1 raw-JDBC site -- prosrc(...)'s
         // su.prepareStatement(...) fetching pg_proc.prosrc (no jOOQ codegen for
@@ -1602,7 +1612,9 @@ class RawSqlGateTest {
      * statements in 11 fresh-walk bootstrap tests granting the
      * {@code ensure_vector_extensions_(un)relocated()} stubs to a migrating
      * role: they run before any changelog, so this function does not exist
-     * yet there.
+     * yet there. (Superseded 2026-10-18: those 22 statements are gone, the fresh-walk
+     * bootstrap is db.changelog-test-nonsuper-owner.xml through
+     * PgContainerHelper#bootstrapNonSuperuserOwner.)
      */
     // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): 1129 -> 1134 (+5, the new
     // TupleSweepIndexPlanShapeTest.java entry above).
@@ -1684,7 +1696,11 @@ class RawSqlGateTest {
     // nexus-cbo4a batch 10 (GRANT EXECUTE ON FUNCTION rewire): 972 -> 952 (-20: 20 raw grant statements in
     // 12 files onto PgContainerHelper.grantExecuteOnFunction; PlainSearchTextGatedSearchExplainTest.java
     // 1 -> 0, entry removed outright).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 952;
+    // nexus-cbo4a pre-walk bootstrap fold: 952 -> 757 (-195: the copy-pasted fresh-walk bootstrap in 12 files
+    // (the 11 named in the GRANT EXECUTE rewire note plus StagingSchemaDropLiquibaseTest) moved onto
+    // PgContainerHelper.bootstrapNonSuperuserOwner / db.changelog-test-nonsuper-owner.xml; AspectDocIdBackfillTest.java
+    // and GrantsSvcForeignOwnedRelationTest.java reach 0, entries removed outright; 105 -> 103 files).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 757;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
