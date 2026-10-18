@@ -169,6 +169,7 @@ finish() {
         scp "${SSH_OPTS[@]}" -q "$HOST:$BASE/logs/$RUN.run.log" "$out/tart-run.log" </dev/null 2>/dev/null || true
         if [[ $keep -eq 1 ]]; then
             say "--keep-guest: $RUN left running on $HOST, lease held until it is deleted or 90 min (delete with: ssh $HOST $BASE/host.sh destroy $RUN)"
+            # for the manual destroy named above; the hold itself destroys through its own private copy (nexus-2fn57)
             ssh "${SSH_OPTS[@]}" "$HOST" "cp $RD/host.sh $BASE/host.sh" </dev/null || true
             hold_made=0    # the hold outlives this script: it saw `keep`, and EOF on its stdin only starts its wait for the VM to go
             rm -rf "$fifo_dir"
