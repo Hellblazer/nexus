@@ -1644,3 +1644,10 @@ def test_the_network_probe_asks_for_headers_only() -> None:
     restore = _read("restore.ps1")
     probes = [ln for ln in _code_lines(restore) if "Invoke-WebRequest" in ln]
     assert probes and all("-Method Head" in ln for ln in probes), probes
+
+
+def test_step_keeps_the_miss_lines_by_not_streaming_its_output() -> None:
+    # Out-String without -Stream joins the output into one string, so `Select -Last 12` trims
+    # nothing; with -Stream every cache-miss line past the twelfth would vanish from the log.
+    step = next(ln for ln in _code_lines(_read("inst.ps1")) if "Out-String" in ln)
+    assert "-Stream" not in step, step
