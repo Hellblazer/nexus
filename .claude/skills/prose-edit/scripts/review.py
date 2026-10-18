@@ -518,8 +518,9 @@ def change_note(old: str, new: str) -> str:
 
 
 def _anchor(kind: str, n: object) -> str:
-    """An explicit HTML anchor for the index links. `id` is what a browser follows, `name` is what Typora's
-    own docs name for its anchors; both are harmless where only one is read, and both render as nothing."""
+    """An explicit HTML anchor for the index links: `id` for a browser, `name` for older HTML readers. Both
+    render as nothing. Typora's bundled Markdown Reference documents only heading targets for internal links,
+    so a jump to this anchor in Typora's rendered view is unverified (nexus-ger02.29)."""
     key = f"{kind.lower()}{n}"
     return f'<a id="{key}" name="{key}"></a>'
 
@@ -534,20 +535,28 @@ def _anchored(body: str, kind: str, n: object) -> str:
 INDEX_GIST = 90
 
 
-def _gist(text: object) -> str:
-    """One line: whitespace collapsed, cut at INDEX_GIST characters."""
-    one = " ".join(str(text).split())
-    return one if len(one) <= INDEX_GIST else one[:INDEX_GIST - 1].rstrip() + "…"
+def _gist(text: object, fallback: str) -> str:
+    """One line: whitespace collapsed, cut at INDEX_GIST characters; `fallback` when nothing is left. Markdown
+    and HTML specials are escaped after the cut, so a reason with `<del>`, a backtick or a bracket is shown as
+    text and cannot open a construct the cut leaves unclosed."""
+    one = " ".join(str(text).split()) or fallback
+    if len(one) > INDEX_GIST:
+        one = one[:INDEX_GIST - 1].rstrip() + "…"
+    return "".join(_GIST_ESCAPES.get(c, c) for c in one)
+
+
+_GIST_ESCAPES: dict[str, str] = {"<": "&lt;", "&": "&amp;", "`": "\\`", "[": "\\[", "]": "\\]", "*": "\\*", "_": "\\_"}
 
 
 def _index(edits: list[Obj], paragraphs: list[Obj], queries: list[Obj]) -> list[str]:
     """The copy's index: one link per proposal in the copy (a dropped one is not a proposal here) with a
     one-line gist. A Typora reader has no line numbers, so the links are the way around a long copy."""
-    rows = [f"- [E{e['n']}](#e{e['n']}) {_gist(e.get('reason') or 'edit')}"
+    rows = [f"- [E{e['n']}](#e{e['n']}) {_gist(e.get('reason') or '', 'edit')}"
             for e in sorted(edits, key=lambda x: int(x["n"]))]
-    rows += [f"- [P{p['n']}](#p{p['n']}) {_gist(str(p.get('action', '')) + ': ' + str(p.get('advice', '')))}"
+    rows += [f"- [P{p['n']}](#p{p['n']}) "
+             f"{_gist(': '.join(x for x in (str(p.get('action', '')).strip(), str(p.get('advice', '')).strip()) if x), 'paragraph')}"
              for p in sorted(paragraphs, key=lambda x: int(x["n"]))]
-    rows += [f"- [Q{q['n']}](#q{q['n']}) {_gist(q.get('text', ''))}"
+    rows += [f"- [Q{q['n']}](#q{q['n']}) {_gist(q.get('text') or '', 'query')}"
              for q in sorted(queries, key=lambda x: int(x["n"]))]
     return ["## Index", "", *rows] if rows else []
 

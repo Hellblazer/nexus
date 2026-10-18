@@ -121,3 +121,48 @@ def test_the_html_copy_has_the_same_index_and_anchors_in_its_excerpts() -> None:
     anchors = re.findall(r'<a id="([a-z]\d+)"[^>]*></a>', copy)
     assert sorted(targets) == sorted(anchors) == ["e1", "e2", "p1", "q1"]
     assert 'href' not in copy  # the page's own links are still flattened away; only id anchors remain
+
+
+def _one_anchor_each(copy: str, ids: list[str]) -> None:
+    for i in ids:
+        assert f"(#{i})" in "\n".join(_index(copy)), i
+        assert len(re.findall(rf'<a id="{i}"[^>]*></a>', copy)) == 1, i
+
+
+def test_an_unplaced_paragraph_note_and_query_keep_their_links_and_anchors() -> None:
+    """A paragraph proposal whose quoted phrase is not in the text, and a query whose anchor is not, are
+    listed rather than placed; each listing carries the anchor its index link points to."""
+    copy = _copy(proposal(
+        [E1],
+        paragraphs=[{"n": 1, "action": "cut", "paragraphs": 'the paragraph opening "No such opening"',
+                     "advice": "Gone."}],
+        queries=[{"n": 1, "anchor": "no such anchor text", "text": "Where?"}]))
+    _one_anchor_each(copy, ["e1", "p1", "q1"])
+    for tag in ("[P1]", "[Q1]"):
+        listing = next(ln for ln in copy.splitlines() if tag in ln and ln.startswith("> "))
+        assert listing.startswith("> ") and f'<a id="{tag[1:3].lower()}"' in listing
+
+
+def test_an_html_note_outside_every_section_keeps_its_link_and_anchor() -> None:
+    """A query anchored in text no section of the page holds (here, a script body) goes to the
+    'Not in any section' listing, which still carries its anchor."""
+    prop = proposal([edit(1, "It really is quite simple.", "It is simple.", "filler")],
+                    queries=[{"n": 1, "anchor": "goatcounter", "text": "Why here?"}])
+    copy = _copy(prop, HTML, label="web/page.html", genre="how-to", html=True)
+    lost = next(ln for ln in copy.splitlines() if "Not in any section" in ln)
+    assert "[Q1]" in lost and '<a id="q1"' in lost
+    _one_anchor_each(copy, ["e1", "q1"])
+
+
+def test_an_empty_gist_falls_back_to_the_proposal_kind() -> None:
+    copy = _copy(proposal(
+        [edit(1, "It really is quite simple.", "It is simple.", "   ")],
+        paragraphs=[{"n": 1, "action": "cut", "paragraphs": 'the paragraph opening "Third paragraph"', "advice": ""}],
+        queries=[{"n": 1, "anchor": "queue drains in order", "text": ""}]))
+    assert _index(copy) == ["- [E1](#e1) edit", "- [P1](#p1) cut", "- [Q1](#q1) query"]
+
+
+def test_a_gist_shows_markup_in_the_reason_as_text() -> None:
+    raw = edit(1, "It really is quite simple.", "It is simple.", "a [bracketed] `tick` <del>raw</del> *star*")
+    row = _index(_copy(proposal([raw])))[0]
+    assert row == r"- [E1](#e1) a \[bracketed\] \`tick\` &lt;del>raw&lt;/del> \*star\*"
