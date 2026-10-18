@@ -469,8 +469,10 @@ public final class PciBuilderSession {
         }
 
         /**
-         * Drop {@code index} from {@code leaf}. Only a parsed index with the builder's name shape is touched; an
-         * operator's or leftover {@code pci_} index is {@link DdlOutcome#REJECTED}.
+         * Drop {@code index} from {@code leaf}. Only two kinds are touched: a parsed index with the builder's name
+         * shape, and a REINDEX CONCURRENTLY leftover ({@link PciCatalog.Index#leftover()}) whose name is a builder
+         * name plus {@code _ccnew}/{@code _ccold} and a counter (nexus-rn1yd). An operator's {@code pci_} index and a
+         * valid {@code _ccnew} are {@link DdlOutcome#REJECTED}.
          */
         public DdlOutcome drop(PciCatalog.Leaf leaf, PciCatalog.Index index) {
             if (ended != null) {
@@ -478,9 +480,11 @@ public final class PciBuilderSession {
             }
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
-            if (!index.parsed() || !PciCatalog.isBuilderName(index.name())) {
-                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={}",
-                    index.name(), index.parsed());
+            boolean ours = index.parsed() ? PciCatalog.isBuilderName(index.name())
+                : index.leftover() && PciCatalog.isLeftoverName(index.name());
+            if (!ours) {
+                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={} leftover={}",
+                    index.name(), index.parsed(), index.leftover());
                 return DdlOutcome.REJECTED;
             }
             return run("drop", DROP_LOCK_TIMEOUT, index.name(), leaf, () -> {

@@ -102,6 +102,7 @@ class PciIndexSweepTest {
         assertThat(s.valid()).isZero();
         assertThat(s.invalid()).isZero();
         assertThat(s.unparsed()).isZero();
+        assertThat(s.reindexLeftover()).isZero();
     }
 
     @Test
@@ -139,7 +140,8 @@ class PciIndexSweepTest {
         assertThat(s.invalid()).isEqualTo(1);
         assertThat(s.unparsed()).isEqualTo(1);
         assertThat(s.lastReadAt()).isEqualTo(now);
-        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=1 unparsed=1");
+        assertThat(s.reindexLeftover()).isZero();
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=1 unparsed=1 reindex_leftover=0");
     }
 
     @Test
@@ -156,6 +158,22 @@ class PciIndexSweepTest {
         sweep.refresh();
         assertThat(sweep.hasValidIndex(M, T, "c1")).isFalse();
         assertThat(sweep.status().unparsed()).isEqualTo(1);
+    }
+
+    @Test
+    void aReindexLeftover_isCountedOnItsOwn_notAsUnparsedOrInvalid_andIsNotInTheSet() {
+        sweep = new PciIndexSweep(() -> snapshot(index(HASH_A, true, "c1"),
+            new PciCatalog.Index(HASH_A + "_ccnew", false, null, "c1"), index("pci_foo", true, null)), SETTINGS);
+
+        assertThat(sweep.refresh()).isTrue();
+
+        PciIndexSweep.Status s = sweep.status();
+        assertThat(s.valid()).isEqualTo(1);
+        assertThat(s.invalid()).isZero();
+        assertThat(s.unparsed()).as("unparsed excludes leftovers: no double count").isEqualTo(1);
+        assertThat(s.reindexLeftover()).isEqualTo(1);
+        assertThat(sweep.hasValidIndex(M, T, "c1")).isTrue();
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=0 unparsed=1 reindex_leftover=1");
     }
 
     @Test

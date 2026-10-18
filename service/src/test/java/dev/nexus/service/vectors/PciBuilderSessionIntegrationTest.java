@@ -313,6 +313,45 @@ class PciBuilderSessionIntegrationTest {
     }
 
     @Test
+    void aReindexLeftover_isDropped_aValidCcnewAndAMisShapedLeftoverAreRejected() throws Exception {
+        String collection = collectionName("leftover");
+        String base = PciCatalog.indexName(M1024, T1, collection);
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.build(leaf, 1024, collection)).isEqualTo(DdlOutcome.DONE);
+        }
+        String ccnew = base + "_ccnew";
+        String validCcnew = base + "_ccnew7";
+        try (Connection su = pg.createConnection("")) {
+            for (String n : new String[] {ccnew, validCcnew}) {
+                PgContainerHelper.runSuperuserDdl(su, "CREATE INDEX " + n + " ON " + leaf.schema() + "." + leaf.name()
+                    + " USING hnsw (embedding_1024 nexus.vector_cosine_ops) WHERE collection = '" + collection + "'");
+            }
+            PgContainerHelper.runSuperuserDdl(su, "UPDATE pg_catalog.pg_index SET indisvalid = false "
+                + "WHERE indexrelid = '" + leaf.schema() + "." + ccnew + "'::regclass");
+        }
+        PciCatalog.Index leftover = indexOn(M1024, T1, ccnew).orElseThrow();
+        PciCatalog.Index valid = indexOn(M1024, T1, validCcnew).orElseThrow();
+        assertThat(leftover.leftover()).isTrue();
+        assertThat(valid.leftover()).isFalse();
+        assertThat(valid.parsed()).isFalse();
+        // A leftover claim on a name that is not builder-name plus cc(new|old)N, and one with no claim at all.
+        PciCatalog.Index misShaped = new PciCatalog.Index(base + "_ccnewX", false, null, collection);
+        PciCatalog.Index operatorMade = new PciCatalog.Index("pci_foo", false, null, collection);
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.drop(leaf, valid)).as("a valid _ccnew is never touched").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.drop(leaf, misShaped)).isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.drop(leaf, operatorMade)).isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.drop(leaf, leftover)).isEqualTo(DdlOutcome.DONE);
+            assertThat(pass.currentSetting("lock_timeout")).as("the existing drop's timeout").isEqualTo("5s");
+        }
+        assertThat(indexOn(M1024, T1, ccnew)).as("the leftover is gone").isEmpty();
+        assertThat(indexOn(M1024, T1, validCcnew)).isPresent();
+        assertThat(indexOn(M1024, T1, base)).hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+    }
+
+    @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aDropBlockedByAnOpenTransaction_givesUpAfterFiveSeconds_andLeavesTheIndex() throws Exception {
         String collection = collectionName("droptimeout");

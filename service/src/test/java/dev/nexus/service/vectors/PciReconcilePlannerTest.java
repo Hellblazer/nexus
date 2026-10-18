@@ -287,6 +287,73 @@ class PciReconcilePlannerTest {
         assertThat(plan(leaf(unparsed, unparsedInvalid), Map.of(), List.of())).isEmpty();
     }
 
+    // ---- REINDEX CONCURRENTLY leftovers (nexus-rn1yd, T2 nexus_rdr/227-decision-4-amendment-reindex-leftovers) ----
+
+    private static Index leftover(String collection, String suffix) {
+        return new Index(name(collection) + suffix, false, null, collection);
+    }
+
+    private static Drop dropLeftover(String collection, String suffix) {
+        return new Drop(name(collection) + suffix, collection, DropReason.REINDEX_LEFTOVER);
+    }
+
+    @Test
+    void aReindexLeftover_isDroppedByName_whateverTheRegistryAndTheCountSay() {
+        // Gone from the registry, zero rows, live and counting well above B: none of it matters to a leftover.
+        assertThat(plan(leaf(leftover("c", "_ccnew")), Map.of(), List.of()))
+            .containsExactly(dropLeftover("c", "_ccnew"));
+        assertThat(plan(leaf(leftover("c", "_ccold")), Map.of("c", 0), List.of(superseded("c", "d"))))
+            .containsExactly(dropLeftover("c", "_ccold"));
+        assertThat(plan(leaf(valid("c"), leftover("c", "_ccnew")), Map.of("c", B + 1), List.of(live("c"))))
+            .as("the valid base index stays").containsExactly(dropLeftover("c", "_ccnew"));
+    }
+
+    @Test
+    void reindexLeftovers_runWithTheOtherDrops_inNameOrder_aheadOfSuspectsAndBuilds() {
+        var l = leaf(valid("gone"), leftover("z", "_ccnew2"), valid("zero"), leftover("a", "_ccold"));
+        var actions = plan(l, Map.of("zero", 0, "n", B), List.of(live("zero"), live("n"), live("a"), live("z")));
+
+        var drops = actions.subList(0, 3);
+        assertThat(drops).containsExactlyInAnyOrder(drop("gone", DropReason.NOT_IN_REGISTRY),
+            dropLeftover("a", "_ccold"), dropLeftover("z", "_ccnew2"));
+        assertThat(drops).extracting(a -> ((Drop) a).name()).isSorted();
+        assertThat(actions.subList(3, actions.size())).containsExactly(new SkipCountSuspect("zero"), build("n"));
+    }
+
+    @Test
+    void aReindexLeftover_isNeverChargedAgainstTheCap_andNeverBlocksABuild() {
+        // Cap 1: the leftover is dropped and does not use the slot, so "n" still builds.
+        assertThat(plan(leaf(leftover("x", "_ccnew")), Map.of("n", B), List.of(live("n")), settings(1)))
+            .containsExactly(dropLeftover("x", "_ccnew"), build("n"));
+        // A leftover for the very collection that wants an index is not "a parsed pci_ index": the build goes ahead.
+        assertThat(plan(leaf(leftover("c", "_ccnew")), Map.of("c", B), List.of(live("c")), settings(1)))
+            .containsExactly(dropLeftover("c", "_ccnew"), build("c"));
+    }
+
+    @Test
+    void aReindexLeftover_withTheSwitchOff_isAnEmptyPlan() {
+        var off = new PciSettings(false, B, 600, 16);
+
+        assertThat(plan(leaf(leftover("c", "_ccnew")), Map.of(), List.of(), off)).isEmpty();
+    }
+
+    @Test
+    void aLeftoverOnALeafWhoseBoundsDidNotParse_isAnEmptyPlan() {
+        var noTenant = new Leaf("nexus", "x", MODEL, null, List.of(leftover("c", "_ccnew")));
+
+        assertThat(plan(noTenant, Map.of(), List.of())).isEmpty();
+    }
+
+    @Test
+    void aValidCcnewAndOperatorIndexes_areStillNeverTouched() {
+        // Built directly, the way PciCatalog hands them over: unparsed, no leftover attribution.
+        var validCcnew = new Index(name("c") + "_ccnew", true, null);
+        var invalidUnattributed = new Index(name("c") + "_ccold", false, null);
+        var operator = new Index("pci_foo", false, null);
+
+        assertThat(plan(leaf(validCcnew, invalidUnattributed, operator), Map.of(), List.of())).isEmpty();
+    }
+
     // ---- cap ----
 
     @Test

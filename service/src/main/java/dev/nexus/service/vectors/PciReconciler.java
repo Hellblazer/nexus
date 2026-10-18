@@ -590,7 +590,10 @@ public final class PciReconciler {
         PciSettings uncapped = new PciSettings(settings.enabled(), b, settings.sweepSeconds(), Integer.MAX_VALUE);
         List<Action> preliminary = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, uncapped);
         long parsed = leaf.indexes().stream().filter(Index::parsed).count();
-        long drops = preliminary.stream().filter(a -> a instanceof Drop).count();
+        // A leftover is not a parsed index (it is not in `parsed`), so its drop frees no cap slot either.
+        long drops = preliminary.stream()
+            .filter(a -> a instanceof Drop d && d.reason() != PciReconcilePlanner.DropReason.REINDEX_LEFTOVER)
+            .count();
         long slots = settings.maxPerLeaf() - (parsed - drops);
         List<String> candidates = preliminary.stream().filter(a -> a instanceof Build)
             .map(a -> ((Build) a).collection()).toList();

@@ -1373,6 +1373,7 @@ nexus-6996z
 nexus-699ot
 nexus-69c94
 nexus-69goc
+nexus-69n4q
 nexus-6a19f
 nexus-6acm
 nexus-6az5
@@ -1870,6 +1871,7 @@ nexus-8oxsb
 nexus-8pwos
 nexus-8pwos.1
 nexus-8py1k
+nexus-8q2ay
 nexus-8q4v
 nexus-8qat
 nexus-8rgaj
@@ -5133,6 +5135,7 @@ nexus-ncte4
 nexus-nd6r1
 nexus-ndfc1
 nexus-ndoke
+nexus-ndsei
 nexus-ndve9
 nexus-ndve9.1
 nexus-ndwzk
@@ -6049,6 +6052,7 @@ nexus-rlp0v
 nexus-rml7o
 nexus-rmver
 nexus-rmx3
+nexus-rn1yd
 nexus-rn3wo
 nexus-rn3wo.1
 nexus-rn3wo.2

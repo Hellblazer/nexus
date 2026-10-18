@@ -274,6 +274,61 @@ class PciCatalogIntegrationTest {
     }
 
     @Test
+    void anInvalidReindexLeftover_isALeftoverOfItsCollection_neverParsed_neverRouted_andCountedApart() throws Exception {
+        PciCatalog.Snapshot before = catalog.read();
+        String collection = "code__pcicat-leftover__voyage-code-3__v1";
+        String base = PciCatalog.indexName(M1024, T1, collection);
+        String ccnew = base + "_ccnew";
+        String ccold = base + "_ccold1";
+        String validCcnew = PciCatalog.indexName(M1024, T1, collection + "-b") + "_ccnew";
+        buildIndex(M1024, T1, collection);
+        ddl(createIndexDdl("", ccnew, M1024, T1, "collection = " + lit(collection)));
+        ddl(createIndexDdl("", ccold, M1024, T1, "collection = " + lit(collection)));
+        ddl(createIndexDdl("", validCcnew, M1024, T1, "collection = " + lit(collection + "-b")));
+        // What an interrupted REINDEX INDEX CONCURRENTLY leaves behind: a pending index with indisvalid false.
+        for (String leftover : List.of(ccnew, ccold)) {
+            ddl("UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = 'nexus." + leftover
+                + "'::regclass");
+        }
+
+        PciCatalog.Snapshot snap = catalog.read();
+
+        for (String leftover : List.of(ccnew, ccold)) {
+            assertThat(index(leaf(snap, M1024, T1), leftover)).as(leftover).hasValueSatisfying(i -> {
+                assertThat(i.valid()).isFalse();
+                assertThat(i.leftover()).isTrue();
+                assertThat(i.leftoverOf()).isEqualTo(collection);
+                assertThat(i.parsed()).as("not parsed in the routing sense").isFalse();
+                assertThat(i.collection()).isNull();
+            });
+        }
+        assertThat(index(leaf(snap, M1024, T1), validCcnew)).as("a VALID _ccnew is untouched").hasValueSatisfying(i -> {
+            assertThat(i.leftover()).isFalse();
+            assertThat(i.parsed()).isFalse();
+        });
+        assertThat(snap.reindexLeftoverCount()).isEqualTo(before.reindexLeftoverCount() + 2);
+        assertThat(snap.unparsedCount()).as("a valid _ccnew is unparsed; a leftover is not counted twice")
+            .isEqualTo(before.unparsedCount() + 1);
+        assertThat(snap.invalidCount()).isEqualTo(before.invalidCount());
+        assertThat(snap.validCount()).isEqualTo(before.validCount() + 1);
+        assertThat(snap.hasValidIndex(M1024, T1, collection)).as("the base index still routes").isTrue();
+
+        // With standard_conforming_strings off nothing can be attributed, leftovers included.
+        try (Connection c = svcDs.getConnection()) {
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            setStandardConformingStrings(ctx, "off");
+            PciCatalog.Snapshot off;
+            try {
+                off = catalog.read(ctx);
+            } finally {
+                setStandardConformingStrings(ctx, "on");
+            }
+            assertThat(off.reindexLeftoverCount()).isZero();
+            assertThat(index(leaf(off, M1024, T1), ccnew)).hasValueSatisfying(i -> assertThat(i.leftover()).isFalse());
+        }
+    }
+
+    @Test
     void aCorrectlyNamedIndexThatIsNotHnsw_isUnparsedEvenWithAParseablePredicate() throws Exception {
         PciCatalog.Snapshot before = catalog.read();
         String collection = "code__pcicat-btree__voyage-code-3__v1";
@@ -322,7 +377,8 @@ class PciCatalogIntegrationTest {
             assertThat(off.validCount()).isZero();
             assertThat(off.invalidCount()).isZero();
             assertThat(off.unparsedCount()).as("the same indexes, all unparsed")
-                .isEqualTo(on.validCount() + on.invalidCount() + on.unparsedCount());
+                .isEqualTo(on.validCount() + on.invalidCount() + on.unparsedCount() + on.reindexLeftoverCount());
+            assertThat(off.reindexLeftoverCount()).as("scs off: a leftover cannot be attributed either").isZero();
             assertThat(off.hasValidIndex(M384, T2, "knowledge__scs-off__minilm-l6-v2-384__v1")).isFalse();
         }
     }

@@ -254,7 +254,8 @@ public final class StatusHandler implements HttpHandler {
      *
      * <ul>
      *   <li>the READ half's last catalog read, global (the same on every engine, up to when each last read):
-     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code last_read_at}, and {@code expired}, true when
+     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code reindex_leftover} (nexus-rn1yd), {@code last_read_at},
+     *       and {@code expired}, true when
      *       the set is older than three sweep periods plus the read bound and so is answering as empty;</li>
      *   <li>{@code this_engine}, the DDL half of THIS process only.</li>
      * </ul>
@@ -263,15 +264,19 @@ public final class StatusHandler implements HttpHandler {
      *
      * @param valid      parsed {@code pci_} indexes with {@code indisvalid} true at the last read
      * @param invalid    parsed indexes with {@code indisvalid} false (a failed or in-flight build)
-     * @param unparsed   {@code pci_} indexes that failed any part of the name-and-definition rule
+     * @param unparsed   {@code pci_} indexes that failed any part of the name-and-definition rule, EXCLUDING the
+     *                   {@code reindexLeftover} ones
+     * @param reindexLeftover invalid REINDEX CONCURRENTLY leftovers ({@code _ccnew}/{@code _ccold}) of a builder
+     *                   index, which the reconciler drops; counted apart from {@code unparsed}, never in both
      * @param lastReadAt when the last successful read finished; null before the first
      * @param expired    the set is older than {@code 3 * period + readBound} and the router ignores it
      * @param thisEngine this process's DDL half
      * @param sweepSeconds the period of the DDL passes ({@code NX_SEARCH_PCI_SWEEP_SECONDS}); a client reads it to
      *                   judge how old {@code last_ddl_pass_at} may be before it is a stall
      */
-    public record PerCollectionIndexes(int valid, int invalid, int unparsed, java.time.Instant lastReadAt,
-                                       boolean expired, ThisEngine thisEngine, long sweepSeconds) {
+    public record PerCollectionIndexes(int valid, int invalid, int unparsed, int reindexLeftover,
+                                       java.time.Instant lastReadAt, boolean expired, ThisEngine thisEngine,
+                                       long sweepSeconds) {
 
         /**
          * @param builderState  {@code ok}, {@code auth_failed}, {@code no_privilege}, {@code off} or {@code standby}
@@ -297,8 +302,8 @@ public final class StatusHandler implements HttpHandler {
         /** The object as the sweep's last read and the reconciler's status say it. */
         public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
                                               dev.nexus.service.vectors.PciReconciler.DdlStatus ddl) {
-            return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(), sweep.lastReadAt(),
-                sweep.expired(),
+            return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(),
+                sweep.reindexLeftover(), sweep.lastReadAt(), sweep.expired(),
                 new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
                     ddl.passStartedAt(), ddl.passInProgress()),
                 ddl.sweepSeconds());
@@ -455,6 +460,7 @@ public final class StatusHandler implements HttpHandler {
         body.append(",\"per_collection_indexes\":{\"valid\":").append(p.valid())
             .append(",\"invalid\":").append(p.invalid())
             .append(",\"unparsed\":").append(p.unparsed())
+            .append(",\"reindex_leftover\":").append(p.reindexLeftover())
             .append(",\"last_read_at\":");
         appendSeconds(body, p.lastReadAt());
         body.append(",\"expired\":").append(p.expired())

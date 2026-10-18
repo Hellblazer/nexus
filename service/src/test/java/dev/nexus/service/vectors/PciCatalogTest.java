@@ -104,6 +104,106 @@ class PciCatalogTest {
         assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, null)).isEmpty();
     }
 
+    // ---- REINDEX CONCURRENTLY leftovers (nexus-rn1yd, T2 nexus_rdr/227-decision-4-amendment-reindex-leftovers) ----
+
+    @Test
+    void leftoverCollection_isAttributedOnlyToAnInvalidBuilderNamePlusCcnewOrCcold() {
+        for (String suffix : new String[] {"_ccnew", "_ccold", "_ccnew1", "_ccold12", "_ccnew0"}) {
+            assertThat(PciCatalog.leftoverCollection(GOOD_NAME + suffix, "hnsw", GOOD_PREDICATE, true, "on", false))
+                .as(suffix).contains("c");
+        }
+        // A VALID _ccnew/_ccold is never a leftover: it is unparsed and nothing touches it.
+        assertThat(PciCatalog.leftoverCollection(GOOD_NAME + "_ccnew", "hnsw", GOOD_PREDICATE, true, "on", true))
+            .isEmpty();
+        assertThat(PciCatalog.leftoverCollection(GOOD_NAME + "_ccold", "hnsw", GOOD_PREDICATE, true, "on", true))
+            .isEmpty();
+        // The builder's own name is not a leftover whatever its validity (a failed build is FAILED_BUILD).
+        assertThat(PciCatalog.leftoverCollection(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, "on", false)).isEmpty();
+    }
+
+    @Test
+    void leftoverCollection_everyOtherConditionStillBreaksIt() {
+        String ok = GOOD_NAME + "_ccnew";
+        assertThat(PciCatalog.leftoverCollection(ok, "hnsw", GOOD_PREDICATE, true, "on", false)).contains("c");
+        assertThat(PciCatalog.leftoverCollection(ok, "btree", GOOD_PREDICATE, true, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollection(ok, null, GOOD_PREDICATE, true, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollection(ok, "hnsw", "(tenant_id = 'c'::text)", true, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollection(ok, "hnsw", null, true, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollection(ok, "hnsw", GOOD_PREDICATE, false, "on", false))
+            .as("a leaf whose model or tenant did not parse").isEmpty();
+        assertThat(PciCatalog.leftoverCollection(ok, "hnsw", GOOD_PREDICATE, true, "off", false))
+            .as("scs off").isEmpty();
+        assertThat(PciCatalog.leftoverCollection(ok, "hnsw", GOOD_PREDICATE, true, null, false)).isEmpty();
+    }
+
+    @Test
+    void leftoverCollection_refusesEveryNameThatIsNotABuilderNameWithTheLeftoverSuffix() {
+        for (String name : new String[] {
+            "pci_foo", "pci_foo_ccnew", null, "",
+            "pci_0123456789ABCDEF01234567_ccnew",     // upper case hex
+            "pci_0123456789abcdef0123456_ccnew",      // 23 digits
+            "pci_0123456789abcdef012345678_ccnew",    // 25 digits
+            GOOD_NAME + "_ccnewx",                    // not digits
+            GOOD_NAME + "_ccnew_1",
+            GOOD_NAME + "_ccnew1x",
+            GOOD_NAME + "_cc",
+            GOOD_NAME + "_ccnewold",
+            GOOD_NAME + "ccnew",
+            "x" + GOOD_NAME + "_ccnew"}) {
+            assertThat(PciCatalog.leftoverCollection(name, "hnsw", GOOD_PREDICATE, true, "on", false))
+                .as(String.valueOf(name)).isEmpty();
+        }
+    }
+
+    @Test
+    void anIndexIsEitherParsedOrALeftoverOrNeither_neverTwo() {
+        var parsed = new PciCatalog.Index(GOOD_NAME, true, "c");
+        var leftover = new PciCatalog.Index(GOOD_NAME + "_ccnew", false, null, "c");
+        var unparsed = new PciCatalog.Index("pci_foo", true, null);
+
+        assertThat(parsed.parsed()).isTrue();
+        assertThat(parsed.leftover()).isFalse();
+        assertThat(leftover.parsed()).as("a leftover is not parsed in the routing sense").isFalse();
+        assertThat(leftover.leftover()).isTrue();
+        assertThat(leftover.leftoverOf()).isEqualTo("c");
+        assertThat(unparsed.parsed()).isFalse();
+        assertThat(unparsed.leftover()).isFalse();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new PciCatalog.Index(GOOD_NAME, false, "a", "b"))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void snapshot_countsALeftoverOnItsOwn_notAsUnparsed_notAsInvalid_andNeverRoutesToIt() {
+        var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
+            new PciCatalog.Index(GOOD_NAME, true, "c"),
+            new PciCatalog.Index(GOOD_NAME + "_ccnew", false, null, "c"),
+            new PciCatalog.Index(GOOD_NAME + "_ccold1", false, null, "c"),
+            new PciCatalog.Index("pci_foo", true, null),
+            new PciCatalog.Index("pci_" + "a".repeat(24) + "_ccnew", true, null)));
+
+        PciCatalog.Snapshot snap = new PciCatalog.Snapshot(java.util.List.of(leaf));
+
+        assertThat(snap.validCount()).isEqualTo(1);
+        assertThat(snap.invalidCount()).as("leftovers are not parsed invalid builds").isZero();
+        assertThat(snap.unparsedCount()).as("leftovers are counted once, apart from unparsed").isEqualTo(2);
+        assertThat(snap.reindexLeftoverCount()).isEqualTo(2);
+        assertThat(snap.hasValidIndex("m", "t", "c")).isTrue();
+        assertThat(snap.validEntries()).containsExactly("l:c:" + GOOD_NAME);
+    }
+
+    @Test
+    void aLeafWithOnlyALeftover_hasNoValidIndex() {
+        var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
+            new PciCatalog.Index(GOOD_NAME + "_ccnew", false, null, "c")));
+
+        PciCatalog.Snapshot snap = new PciCatalog.Snapshot(java.util.List.of(leaf));
+
+        assertThat(snap.hasValidIndex("m", "t", "c")).isFalse();
+        assertThat(snap.validIndex("m", "t", "c")).isEmpty();
+        assertThat(snap.reindexLeftoverCount()).isEqualTo(1);
+        assertThat(snap.validCount() + snap.invalidCount() + snap.unparsedCount()).isZero();
+    }
+
     @Test
     void snapshot_ofNoLeaves_isEmptyAndCountsNothing() {
         PciCatalog.Snapshot snap = new PciCatalog.Snapshot(java.util.List.of());

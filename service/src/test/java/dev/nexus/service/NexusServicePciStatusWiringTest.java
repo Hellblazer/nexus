@@ -81,7 +81,7 @@ class NexusServicePciStatusWiringTest {
     void theKeyIsOmittedUntilMainBindsASource_thenServedFromTheBoundSupplierOnEveryRequest() throws Exception {
         assertThat(status().has("per_collection_indexes")).as("unbound: cannot tell, not zero indexes").isFalse();
 
-        var sweep = new PciIndexSweep.Status(true, 2, 0, 1, Instant.parse("2026-10-10T08:00:00Z"), null, 0, false);
+        var sweep = new PciIndexSweep.Status(true, 2, 0, 1, 4, Instant.parse("2026-10-10T08:00:00Z"), null, 0, false);
         var state = new java.util.concurrent.atomic.AtomicReference<>(
             new DdlStatus(BuilderState.STANDBY, null, null, null));
         service.perCollectionIndexes(() -> StatusHandler.PerCollectionIndexes.of(sweep, state.get()));
@@ -89,6 +89,7 @@ class NexusServicePciStatusWiringTest {
         JsonNode standby = status().get("per_collection_indexes");
         assertThat(standby.get("valid").asInt()).isEqualTo(2);
         assertThat(standby.get("unparsed").asInt()).isEqualTo(1);
+        assertThat(standby.get("reindex_leftover").asInt()).isEqualTo(4);
         assertThat(standby.at("/this_engine/builder_state").asText()).isEqualTo("standby");
         assertThat(standby.at("/this_engine/building").isNull()).isTrue();
 

@@ -766,6 +766,167 @@ class PciReconcilerIntegrationTest {
         assertThat(sweep.hasValidIndex(M384, tenant, name("victim"))).isTrue();
     }
 
+    // -- REINDEX CONCURRENTLY leftovers (nexus-rn1yd, T2 nexus_rdr/227-decision-4-amendment-reindex-leftovers) ----------
+
+    /**
+     * Run {@code REINDEX INDEX CONCURRENTLY} on the base index as an operator would, with a writer holding the leaf
+     * open so the reindex stalls after it has committed its invalid {@code _ccnew} and is ended by its statement
+     * timeout: the genuine leftover. Returns the leftover's name.
+     */
+    /** Session-level {@code set_config} on {@code conn}: the typed form of {@code SET name = value}. */
+    static void setSession(Connection conn, String name, String value) {
+        DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("set_config", SQLDataType.VARCHAR,
+            DSL.val(name), DSL.val(value), DSL.inline(false))).fetch();
+    }
+
+    static boolean causedBy(Throwable t, String needle) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c.getMessage() != null && c.getMessage().contains(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static final String REINDEX_APP = "pcirec-reindex";
+
+    String reindexAndFailLeftBehind(String tenant, String baseIndex) throws Exception {
+        PciCatalog.Leaf leaf = leaf(tenant);
+        try (HeldWrite held = new HeldWrite(tenant);
+             Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            setSession(su, "statement_timeout", "2s");
+            Throwable failure = null;
+            try {
+                PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
+                    "REINDEX INDEX CONCURRENTLY " + leaf.schema() + "." + baseIndex);
+            } catch (Exception e) {
+                failure = e;
+            }
+            assertThat(failure).as("the reindex must end by its timeout").isNotNull();
+            assertThat(causedBy(failure, "canceling statement due to statement timeout")).as(String.valueOf(failure))
+                .isTrue();
+        }
+        return baseIndex + "_ccnew";
+    }
+
+    @Test
+    void aRealFailedReindexConcurrently_leavesAnInvalidCcnew_thePassDropsItAsReindexLeftover_andKeepsTheBaseIndex()
+            throws Exception {
+        String tenant = newTenant("rileft");
+        String collection = name("victim");
+        collection(tenant, collection, 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        PciReconciler r = reconciler(s, sweep);
+        assertThat(r.reconcileOnce().builds()).isEqualTo(1);
+        String base = PciCatalog.indexName(M384, tenant, collection);
+
+        String ccnew = reindexAndFailLeftBehind(tenant, base);
+
+        // The genuine article: invalid, attributed to the collection, not parsed, and the base still serves.
+        assertThat(leaf(tenant).indexes()).filteredOn(i -> i.name().equals(ccnew)).singleElement().satisfies(i -> {
+            assertThat(i.valid()).isFalse();
+            assertThat(i.leftover()).isTrue();
+            assertThat(i.leftoverOf()).isEqualTo(collection);
+            assertThat(i.parsed()).isFalse();
+        });
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.hasValidIndex(M384, tenant, collection)).as("the leftover does not hide the base").isTrue();
+        assertThat(sweep.status().reindexLeftover()).isGreaterThanOrEqualTo(1);
+        assertThat(sweep.status().invalid()).as("a leftover is not a failed build").isZero();
+        JsonNode before = statusJson(r, sweep).get("per_collection_indexes");
+        assertThat(before.get("reindex_leftover").asInt()).isEqualTo(1);
+
+        PassReport pass = r.reconcileOnce();
+
+        assertThat(pass.drops()).isEqualTo(1);
+        assertThat(pass.builds()).as("the base index is valid; nothing to build").isZero();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_dropped") && l.contains("index=" + ccnew)
+            && l.contains("reason=reindex_leftover"));
+        assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).containsExactly(base);
+        assertThat(leaf(tenant).indexes().get(0).valid()).isTrue();
+        assertThat(sweep.hasValidIndex(M384, tenant, collection)).isTrue();
+        assertThat(statusJson(r, sweep).get("per_collection_indexes").get("reindex_leftover").asInt()).isZero();
+        assertThat(r.reconcileOnce().drops()).as("a second pass has nothing left to drop").isZero();
+    }
+
+    @Test
+    void aLeftoverFreesNoCapSlot_soTheLargestCandidateStillWinsTheOneSlot() throws Exception {
+        String tenant = newTenant("rislot");
+        // "a-small" sorts before "z-big": a tie on the B+1 count would build a-small, so only the recount at the
+        // higher cap builds z-big. The recount happens only when candidates (2) exceed the free slots: cap 1.
+        collection(tenant, name("a-small"), B + 50);
+        collection(tenant, name("z-big"), 2 * B + 50);
+        String ghost = name("ghost");
+        PciCatalog.Leaf leaf = leaf(tenant);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, "CREATE INDEX " + PciCatalog.indexName(M384, tenant, ghost)
+                + "_ccnew ON " + leaf.schema() + "." + leaf.name() + " USING hnsw (embedding_384 "
+                + "nexus.vector_cosine_ops) WHERE collection = '" + ghost + "'");
+            PgContainerHelper.runSuperuserDdl(su, "UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = '"
+                + leaf.schema() + "." + PciCatalog.indexName(M384, tenant, ghost) + "_ccnew'::regclass");
+        }
+        PciSettings s = settings(1);
+
+        PassReport report = reconciler(s, sweep(s)).reconcileOnce();
+
+        assertThat(report.drops()).as("the leftover").isEqualTo(1);
+        assertThat(report.builds()).isEqualTo(1);
+        assertThat(validIndexed(tenant)).containsExactly(name("z-big"));
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_count_done") && l.contains("recounted=2"));
+    }
+
+    @Test
+    @Timeout(value = 120, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aReindexConcurrentlyStillRunning_holdsTheLeafLock_soTheLeftoverDropTimesOut_andThePassCarriesOn()
+            throws Exception {
+        String tenant = newTenant("riflight");
+        String collection = name("flying");
+        collection(tenant, collection, 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        PciReconciler r = reconciler(s, sweep);
+        assertThat(r.reconcileOnce().builds()).isEqualTo(1);
+        String base = PciCatalog.indexName(M384, tenant, collection);
+        String ccnew = base + "_ccnew";
+        PciCatalog.Leaf leaf = leaf(tenant);
+
+        try (HeldWrite held = new HeldWrite(tenant); Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            setSession(su, "application_name", REINDEX_APP);
+            setSession(su, "statement_timeout", "60s");
+            CompletableFuture<Void> reindex = CompletableFuture.runAsync(() -> {
+                try {
+                    PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
+                        "REINDEX INDEX CONCURRENTLY " + leaf.schema() + "." + base);
+                } catch (Exception e) {
+                    // The test ends it by cancelling below.
+                }
+            }, async);
+            await(() -> leaf(tenant).indexes().stream().anyMatch(i -> i.name().equals(ccnew) && i.leftover()),
+                "the in-progress reindex's invalid _ccnew");
+
+            PassReport during = r.reconcileOnce();
+
+            // No pg_stat_progress_create_index guard: the leaf lock the reindex holds is the guard.
+            assertThat(during.drops()).as("the drop did not complete").isZero();
+            assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_drop_not_done") && l.contains(ccnew));
+            assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).contains(base, ccnew);
+
+            asSuperuser(sctx -> sctx.select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN,
+                    DSL.field(DSL.name("pid"), Integer.class)))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.field(DSL.name("application_name"), String.class).eq(REINDEX_APP))
+                .fetch());
+            reindex.get(60, TimeUnit.SECONDS);
+        }
+
+        // The next pass re-judges: the reindex has ended, the leftover stays invalid, and now it drops.
+        assertThat(r.reconcileOnce().drops()).isEqualTo(1);
+        assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).containsExactly(base);
+    }
+
     @Test
     void aFailedBuildBacksOff_ten_twenty_fortyMinutes_andThreeInARowCountAsFailing() throws Exception {
         String tenant = newTenant("backoff");
