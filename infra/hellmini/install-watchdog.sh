@@ -24,7 +24,9 @@
 # With no --force this is also the drift check: exit 0 means live == repo.
 #
 # The state directory is checked like a file: absent is created, and a wrong
-# mode or owner counts as drift (--force repairs it).
+# mode or owner counts as drift (--force repairs it). A symlink directly inside
+# it also counts as drift (the watchdog never makes one; --force removes it, and
+# never follows it).
 #
 # After the plist is installed or changed, the daemon is reloaded:
 # `launchctl bootout system/local.actions-runner-watchdog` (not-loaded is
@@ -150,6 +152,15 @@ elif [ "$(live_meta "$STATE_DEST")" != "$STATE_MODE $OWNER" ]; then
 else
   state_action=same
 fi
+state_links=""
+if as_root test -d "$STATE_DEST"; then
+  state_links="$(as_root find "$STATE_DEST" -maxdepth 1 -type l)"
+  if [ -n "$state_links" ]; then
+    differ=$((differ + 1))
+    echo "--- state dir: contains symlink(s), which the watchdog never creates:"
+    echo "$state_links"
+  fi
+fi
 
 if [ "$differ" -gt 0 ] && [ "$force" -ne 1 ]; then
   echo "install-watchdog.sh: $differ live item(s) differ from the repo copy; nothing written. Re-run with --force to overwrite (a backup is made first)." >&2
@@ -177,6 +188,12 @@ case "$state_action" in
     changed=1
     ;;
 esac
+if [ -n "$state_links" ]; then
+  # -type l matches the link itself; rm removes it without following it.
+  as_root find "$STATE_DEST" -maxdepth 1 -type l -exec rm -f {} +
+  echo "removed symlink(s) from the state dir"
+  changed=1
+fi
 for i in "${!names[@]}"; do
   n="${names[$i]}"; src="$SRC_DIR/$n"; dest="${dests[$i]}"; mode="${modes[$i]}"
   [ "${actions[$i]}" = same ] || changed=1

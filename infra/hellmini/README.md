@@ -20,8 +20,9 @@ Host facts: T2 `nexus/hellmini-second-test-host-howto`.
 | `watchdog/local.actions-runner-watchdog.plist` | `/Library/LaunchDaemons/` (root:wheel 644) | The LaunchDaemon that runs it. |
 | `install-watchdog.sh` | `/var/db/actions-runner-watchdog` (root:wheel 700, state and log) | Installs, and drift-checks, the two watchdog files and the state directory. |
 
-The hook and watchdog copies are verbatim from the host (no SPDX header, so a
-repo copy and a live file compare equal).
+The hook and watchdog files in the repo are the source: the installers copy them
+repo to host, byte for byte (no SPDX header, so a repo copy and a live file compare
+equal, and the drift check relies on it).
 
 ## Port ranges
 
@@ -106,22 +107,52 @@ a listener that is alive but has stopped talking to the broker: worst case it
 restarts the runner 3900 s of log silence after the stall began, plus up to 60 s
 for the next tick (about 65 minutes).
 
-It restarts (`launchctl kickstart -k`) only when a `Runner.Listener` is running,
-no `Runner.Worker` is running (a job is never interrupted), the listener has been
-up at least 300 s, the last restart was at least 900 s ago, and one of these
-holds:
+It restarts (`launchctl kickstart -k`) only when exactly one `Runner.Listener` is
+running, no `Runner.Worker` is running, the listener has been up at least 300 s,
+the last restart was at least 900 s ago, and one of these holds. A running job is
+not interrupted by design, but the guarantee is not absolute: the last re-check
+(below) and the kickstart are separated by a window of tens of milliseconds
+(36-130 ms measured before the re-check was added). It is reachable only after
+5-65 minutes of listener quiet, when no job should be starting, and a job that
+did start in it would lose its runner.
 
-- **A.** the `Runner_*.log` the listener holds open (found with `lsof`; the newest
-  file by name is wrong, since `Runner.Listener --version` writes a fresh one) has
-  been silent for 3900 s, one missed token refresh.
+- **A.** the `Runner_*.log` the listener holds open has been silent for 3900 s,
+  one missed token refresh. The log is found with `lsof` (the newest file by name
+  is wrong, since `Runner.Listener --version` writes a fresh one). If `lsof` fails
+  or the listener holds no `_diag/Runner_*.log` open, it falls back to the newest
+  `Runner_*.log` by modification time, which a stray `--version` run can make look
+  fresher than the real one; the verbose line and `last_tick` say which was used
+  (`logsrc=lsof` or `logsrc=newest`).
 - **B.** the listener has had no ESTABLISHED TCP `:443` connection for 300 s
   continuously and its log has been silent for 300 s. B is skipped on any tick
-  where `lsof` fails or times out (an ERROR line in the log): an unknown is not
-  "no connection".
+  where `lsof` fails, times out, or exits 0 without listing the listener's own
+  `p<pid>` record (an ERROR line in the log): an unknown is not "no connection".
+
+The listener and the Worker are found with `pgrep -u ghrunner -f '^<runner
+dir>/bin/Runner.…'`: the process must belong to the CI user and its command line
+must start with this runner's directory, so another runner (for example the
+`ghconexus-cred` one) or another user's forged argv neither hides this listener
+nor fakes a job. (Reading the pid from `launchctl print system/local.actions-runner`
+was rejected: its `pid =` is the wrapper script, not the listener, so it would
+need a process-tree walk and one more command that can fail.) If `pgrep` itself
+fails (exit 2 or more) the listener check does nothing that tick and logs ERROR,
+and the Worker check assumes a job is running and logs ERROR. Two matching
+listeners are ambiguous: ERROR, no action.
 
 Immediately before the kickstart it looks again for a `Runner.Worker`, the same
-listener pid, and an unchanged listener log mtime, and abandons the restart
+single listener pid, and an unchanged listener log mtime, and abandons the restart
 (`ABORT` line in the log) if any changed.
+
+**Repeat guard.** If the listener the watchdog started (no older than the time
+since `last_restart`) is again eligible for a restart within 1800 s of that
+restart and past its 300 s startup grace, the restart did not cure it. The script
+logs one `ERROR ... did not cure the listener`, creates `halted` in the state
+directory, deletes `last_restart`, and restarts nothing more until a human removes
+`halted` (`sudo rm /var/db/actions-runner-watchdog/halted`). Ticks while halted
+stay quiet; `last_tick` shows `halted=1`. This replaces the earlier behaviour of
+restarting every 15 minutes through a sustained outage. The cost: after a
+GitHub-side outage that outlasts the first restart, auto-restart stays off until
+someone removes the file. `--dry-run` reports the halt and writes nothing.
 
 Log silence alone is not a condition below 3900 s because an idle, healthy
 listener writes its log only on its OAuth token refresh, about every 50 minutes:
@@ -144,8 +175,25 @@ also refuses a symlinked, non-root-owned or group/other-writable state directory
 
 Files there: `watchdog.log` (RESTART, ABORT, ERROR and WARN lines with UTC time,
 listener pid, log name and reason; INFO lines when the `:443` connection
-disappears or returns; rotates at 1 MiB to `watchdog.log.1`), `last_restart`
-and `nosock_since`. launchd's own stdout/stderr go to
+disappears or returns; rotates at 1 MiB to `watchdog.log.1`), `last_restart`,
+`nosock_since`, `halted` (present only after the repeat guard fired) and
+`last_tick`.
+
+**Is it alive?** A healthy idle watchdog writes nothing to `watchdog.log`, which
+looks the same as one that is not running. `last_tick` tells them apart: every tick
+that gets as far as the decision (a listener is up, no job is running, a log is
+found) overwrites it atomically with one line, for example
+
+```
+epoch=1792272000 pid=19158 uptime=2081 silent=1500 sockets=1 lsof_ok=1 logsrc=lsof halted=0
+```
+
+`sudo cat /var/db/actions-runner-watchdog/last_tick` twice, a minute or more
+apart: `epoch` must advance by about 60 and `pid` must be the listener's
+(`pgrep -u ghrunner -f Runner.Listener`). While a job runs, or the listener is
+stopped, no tick reaches the decision and the file stands still; that is not a
+fault. A `last_tick` that stays still with an idle listener up means launchd is not
+running the daemon (`sudo launchctl print system/local.actions-runner-watchdog`). launchd's own stdout/stderr go to
 `/var/log/actions-runner-watchdog.launchd.log` (off the Bulk volume on purpose).
 `lsof` and `launchctl` calls are killed after 20 s and 30 s.
 
@@ -182,7 +230,8 @@ is never overwritten without `--force`, the live file is first copied to
 `<file>.bak-<timestamp>`, and every item is checked before any is written. A
 matching file with the wrong mode or owner counts as drift, and `--force` repairs
 it without a backup. The state directory is created `root:wheel 700` and counts in
-the drift check the same way. After the plist is installed or changed, the script
+the drift check the same way; a symlink directly inside it (the watchdog never
+makes one) is drift too, and `--force` removes the link without following it. After the plist is installed or changed, the script
 runs `launchctl bootout` (not-loaded is ignored), `launchctl enable` (so a daemon
 left disabled by `launchctl disable` comes back) and `launchctl bootstrap system
 <plist>`. If the plist is unchanged but something else was written (or `--force`
@@ -199,11 +248,21 @@ replaces `root:wheel`, and `HELLMINI_WD_HOSTMARK` replaces the
 `/Volumes/Bulk/ghrunner` check. `tests/test_hellmini_install_watchdog.py` drives
 the installer that way.
 
-The watchdog's own logic is tested in `tests/test_hellmini_watchdog.py` (macOS
-only): the script runs for real against a fake runner directory, a tmp state
-directory and stand-ins for `pgrep`, `ps`, `lsof`, `launchctl` and `date`, through
-the env seams `WD_RUNNER_DIR`, `WD_STATE_DIR`, `WD_PATH` (directories searched for
-the commands), `WD_TARGET`, `WD_LSOF_TIMEOUT`, `WD_LAUNCHCTL_TIMEOUT` and the
-threshold overrides `WD_SILENT_SECS`, `WD_NOSOCK_SECS`, `WD_HARD_SILENT_SECS`,
-`WD_COOLDOWN_SECS`, `WD_STARTUP_GRACE_SECS`, `WD_SOCK_PORT` (the daemon sets
-none).
+The watchdog's own logic is tested in `tests/test_hellmini_watchdog.py`: the
+script runs for real against a fake runner directory, a tmp state directory and
+stand-ins for `ps`, `lsof`, `launchctl`, `date` and (mostly) `pgrep`, through
+the env seams `WD_RUNNER_DIR`, `WD_RUNNER_USER`, `WD_STATE_DIR`, `WD_PATH`
+(directories searched for the commands), `WD_TARGET`, `WD_LSOF_TIMEOUT`,
+`WD_LAUNCHCTL_TIMEOUT` and the threshold overrides `WD_SILENT_SECS`,
+`WD_NOSOCK_SECS`, `WD_HARD_SILENT_SECS`, `WD_COOLDOWN_SECS`,
+`WD_STARTUP_GRACE_SECS`, `WD_REPEAT_WINDOW_SECS`, `WD_SOCK_PORT` (the daemon sets
+none). A few tests run the real `pgrep` against processes with forged argv
+(`bash -c 'exec -a "<dir>/bin/Runner.Listener run" sleep'`), because a stub that
+ignores its flags cannot notice `-f` or `-u` being removed.
+
+**These tests are macOS-only on purpose.** The script reads BSD `stat`, `ps`,
+`lsof` and `pgrep` output and runs only on hellmini, and CI is Linux, so the
+module skips itself off darwin (`pytest -rs` shows the reason) and no CI lane
+runs it. Run it on a Mac before changing the script:
+`NX_TEST_T2_SUBSTRATE=none uv run pytest tests/test_hellmini_watchdog.py -o addopts=""`.
+`tests/test_hellmini_install_watchdog.py` runs everywhere.

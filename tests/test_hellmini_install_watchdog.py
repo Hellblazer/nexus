@@ -269,6 +269,26 @@ def test_state_dir_that_is_a_symlink_is_refused(host: dict) -> None:
     assert not host["script"].exists()
 
 
+def test_a_symlink_inside_the_state_dir_is_drift_and_force_removes_it_unfollowed(host: dict) -> None:
+    assert _run(host).returncode == 0
+    victim = host["root"].parent / "victim"
+    victim.write_text("keep\n")
+    link = host["state"] / "last_restart"
+    link.symlink_to(victim)
+    (host["state"] / "last_tick").write_text("epoch=1\n")  # a regular file stays
+    r = _run(host)
+    assert r.returncode == 1
+    assert "state dir: contains symlink(s)" in r.stdout and str(link) in r.stdout
+    assert link.is_symlink(), "a refusal changes nothing"
+    r = _run(host, "--force")
+    assert r.returncode == 0, r.stderr
+    assert not link.is_symlink() and not link.exists()
+    assert victim.read_text() == "keep\n", "the target is never touched"
+    assert (host["state"] / "last_tick").read_text() == "epoch=1\n"
+    again = _run(host)
+    assert again.returncode == 0 and "contains symlink" not in again.stdout
+
+
 def test_state_dir_matches_the_script_default() -> None:
     """The installer's directory and the script's default STATE_DIR are the same literal."""
     assert 'STATE_DEST="$PREFIX/var/db/actions-runner-watchdog"' in INSTALL.read_text()

@@ -8,27 +8,35 @@ a tmp state directory, and stand-in executables for pgrep, ps, lsof, launchctl
 and date found first on WD_PATH. The clock is fixed through the date stand-in, so
 every threshold is exercised exactly at, and one second either side of, its
 boundary. Log mtimes are real (os.utime). One test drives the real lsof against
-a real socket to pin the output parsing.
+a real socket to pin the output parsing; the real-pgrep tests spawn processes
+with forged argv (bash exec -a) and run the REAL pgrep, since a stub that ignores
+its flags would let `-f` or `-u` be deleted unnoticed.
 
 Set WD_TEST_SCRIPT to point the suite at a mutated copy of the script.
 
-macOS only: the script uses BSD stat, ps and lsof output.
+macOS only, by design: the script uses BSD stat, ps, lsof and pgrep and runs only
+on hellmini. The module skips everywhere else (CI is Linux), so these tests run
+on a Mac dev box or on hellmini itself, not in a CI lane. A skip is therefore the
+normal result off-Mac; `pytest -rs` names it.
 """
 
 from __future__ import annotations
 
+import getpass
 import os
 import shutil
 import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "darwin", reason="the watchdog uses BSD stat/ps/lsof; hellmini is macOS"
+    sys.platform != "darwin",
+    reason="macOS-only by design: the watchdog uses BSD stat/ps/lsof/pgrep and runs only on hellmini; no CI lane runs it",
 )
 
 REPO_SCRIPT = Path(__file__).resolve().parent.parent / "infra" / "hellmini" / "watchdog" / "actions-runner-watchdog"
@@ -41,15 +49,18 @@ TARGET = "system/test.runner"
 STUBS = {
     "pgrep": r"""#!/bin/sh
 for a; do pat="$a"; done
+echo "$*" >> "$CTL/pgrep.calls"
 case "$pat" in
   *Runner.Listener*)
     echo "$pat" >> "$CTL/pgrep.patterns"
+    [ -f "$CTL/listener_rc" ] && exit "$(cat "$CTL/listener_rc")"
     n=$(cat "$CTL/listener_calls" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$CTL/listener_calls"
     if [ "$n" -ge 2 ] && [ -f "$CTL/listener_pid_after_first" ]; then cat "$CTL/listener_pid_after_first"; exit 0; fi
     [ -f "$CTL/listener_pid" ] || exit 1
-    cat "$CTL/listener_pid" ;;
+    cat "$CTL/listener_pid"; exit 0 ;;
   *Runner.Worker*)
     echo "$pat" >> "$CTL/pgrep.patterns"
+    [ -f "$CTL/worker_rc" ] && exit "$(cat "$CTL/worker_rc")"
     n=$(cat "$CTL/worker_calls" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$CTL/worker_calls"
     if [ -f "$CTL/touch_log_on_call" ] && [ "$n" -eq "$(cat "$CTL/touch_log_on_call")" ]; then
       touch "$(cat "$CTL/log_path")"
@@ -59,12 +70,13 @@ case "$pat" in
 esac
 exit 1
 """,
-    "ps": '#!/bin/sh\necho "  $(cat "$CTL/etime")"\n',
+    "ps": '#!/bin/sh\necho "$*" >> "$CTL/ps.calls"\necho "  $(cat "$CTL/etime")"\n',
     "date": '#!/bin/sh\nif [ "$1" = "+%s" ]; then cat "$CTL/now"; else exec /bin/date "$@"; fi\n',
     "lsof": r"""#!/bin/sh
 echo "$@" >> "$CTL/lsof.calls"
 case "$(cat "$CTL/lsof_mode")" in
   fail) echo "lsof: WARNING: cannot do the thing" >&2; exit 1 ;;
+  empty) exit 0 ;;
   hang) exec sleep 30 ;;
 esac
 cat "$CTL/lsof.out"
@@ -78,7 +90,7 @@ exit "$(cat "$CTL/kickstart_rc" 2>/dev/null || echo 0)"
 
 
 class Wd:
-    def __init__(self, tmp: Path, real_lsof: bool = False) -> None:
+    def __init__(self, tmp: Path, real_lsof: bool = False, real_pgrep: bool = False) -> None:
         self.tmp = tmp
         self.runner = tmp / "runner"
         (self.runner / "bin").mkdir(parents=True)
@@ -91,11 +103,12 @@ class Wd:
         self.state.mkdir()
         self.state.chmod(0o700)
         for name, body in STUBS.items():
-            if name == "lsof" and real_lsof:
+            if (name == "lsof" and real_lsof) or (name == "pgrep" and real_pgrep):
                 continue
             p = self.stubs / name
             p.write_text(body)
             p.chmod(0o755)
+        self.lpid = LISTENER_PID
         self.log = self.runner / "_diag" / "Runner_20261017-010101-utc.log"
         self.log.write_text("log\n")
         (self.ctl / "log_path").write_text(str(self.log))
@@ -119,7 +132,7 @@ class Wd:
     def lsof(self, socket_up: bool = True, mode: str = "ok", port: int = 443) -> None:
         self.set("lsof_mode", mode)
         out = [
-            f"p{LISTENER_PID}",
+            f"p{self.lpid}",
             "fcwd", "tDIR", f"n{self.runner}",
             "f4", "tREG", f"n{self.log}",
         ]
@@ -133,6 +146,12 @@ class Wd:
                     "f10", "tIPv4", f"n10.0.0.2:51002->20.1.1.1:{port}", "TST=CLOSE_WAIT"]
         (self.ctl / "lsof.out").write_text("\n".join(out) + "\n")
 
+    def use_pid(self, pid: int) -> None:
+        """Make the lsof stand-in report `pid` (for the real-pgrep tests)."""
+        self.lpid = pid
+        self.set("listener_pid", str(pid))
+        self.lsof()
+
     def run(self, *args: str, timeout: int = 25, **env: str) -> subprocess.CompletedProcess:
         e = {
             "PATH": "/usr/bin:/bin",
@@ -142,6 +161,7 @@ class Wd:
             "WD_RUNNER_DIR": str(self.runner),
             "WD_STATE_DIR": str(self.state),
             "WD_TARGET": TARGET,
+            "WD_RUNNER_USER": "ghrunner",
             **self.extra_env,
             **env,
         }
@@ -185,6 +205,11 @@ def test_healthy_idle_with_a_socket_takes_no_action(wd: Wd) -> None:
     pats = (wd.ctl / "pgrep.patterns").read_text().splitlines()
     assert f"^{wd.runner}/bin/Runner.Listener run" in pats
     assert f"^{wd.runner}/bin/Runner.Worker" in pats
+    # ...and on the CI user's own processes only (the real-pgrep tests below pin the flags' effect).
+    calls = (wd.ctl / "pgrep.calls").read_text().splitlines()
+    assert calls and all(c.startswith("-u ghrunner -f ^") for c in calls), calls
+    # etime is read for the listener's own pid.
+    assert (wd.ctl / "ps.calls").read_text().splitlines() == [f"-o etime= -p {LISTENER_PID}"]
     assert not [p for p in os.listdir(wd.state) if p.startswith(".tmp.")]
 
 
@@ -499,3 +524,299 @@ def test_real_lsof_output_is_parsed(tmp_path: Path) -> None:
         child.kill()
         child.wait()
         srv.close()
+
+
+# --- state, symlinks, owner ---------------------------------------------------
+
+
+def test_a_state_dir_not_owned_by_the_running_uid_is_refused(wd: Wd) -> None:
+    # `id -u` says 0 (the root the daemon runs as); the tmp dir belongs to this user.
+    stub = wd.stubs / "id"
+    stub.write_text("#!/bin/sh\necho 0\n")
+    stub.chmod(0o755)
+    wd.set_log_age(5000)
+    r = wd.run()
+    assert r.returncode == 1 and "must be owned by uid 0" in r.stderr
+    assert wd.kicks() == []
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_a_symlinked_state_file_is_treated_as_absent_not_followed(wd: Wd, dangling: bool) -> None:
+    target = wd.tmp / "target"
+    if not dangling:
+        target.write_text(f"{NOW - 100}\n")  # followed, this would put the restart in cooldown
+    (wd.state / "last_restart").symlink_to(target)
+    wd.set_log_age(5000)
+    r = wd.run()
+    assert r.returncode == 0, r.stderr
+    assert wd.kicks() == [f"kickstart -k {TARGET}"]
+    assert "WARN ignored and removed invalid state file last_restart" in wd.wlog()
+    if not dangling:
+        assert target.read_text() == f"{NOW - 100}\n", "the link's target is never written"
+    assert not (wd.state / "last_restart").is_symlink()
+    assert wd.state_file("last_restart") == str(NOW)
+
+
+# --- last_tick ------------------------------------------------------------------
+
+
+def _fields(text: str | None) -> dict[str, str]:
+    assert text is not None
+    return dict(kv.split("=", 1) for kv in text.split())
+
+
+def test_last_tick_is_rewritten_by_every_tick_that_reaches_the_decision(wd: Wd) -> None:
+    assert wd.run().returncode == 0
+    assert _fields(wd.state_file("last_tick")) == {
+        "epoch": str(NOW), "pid": str(LISTENER_PID), "uptime": "7200", "silent": "3000",
+        "sockets": "1", "lsof_ok": "1", "logsrc": "lsof", "halted": "0",
+    }
+    assert wd.tick(NOW + 60).returncode == 0
+    assert _fields(wd.state_file("last_tick"))["epoch"] == str(NOW + 60), "overwritten, not appended"
+    assert len((wd.state / "last_tick").read_text().splitlines()) == 1
+    assert oct((wd.state / "last_tick").stat().st_mode & 0o777) == "0o600"
+    assert not [p for p in os.listdir(wd.state) if p.startswith(".tmp.")]
+
+
+def test_last_tick_reports_a_failed_lsof_and_the_fallback_log(wd: Wd) -> None:
+    wd.lsof(mode="fail")
+    r = wd.run("--verbose")
+    assert "logsrc=newest" in r.stdout
+    f = _fields(wd.state_file("last_tick"))
+    assert (f["lsof_ok"], f["logsrc"], f["sockets"]) == ("0", "newest", "0")
+    wd.lsof()
+    assert "logsrc=lsof" in wd.run("--verbose").stdout
+
+
+def test_last_tick_is_not_written_when_no_decision_is_reached(wd: Wd) -> None:
+    wd.set("worker_from_call", "1")
+    assert wd.run().returncode == 0
+    assert wd.state_file("last_tick") is None
+    wd.run()  # still a job
+    (wd.ctl / "worker_from_call").unlink()
+    (wd.ctl / "listener_pid").unlink()
+    assert wd.run().returncode == 0
+    assert wd.state_file("last_tick") is None
+
+
+# --- fail-closed edges ----------------------------------------------------------
+
+
+def test_a_failing_worker_pgrep_means_a_job_is_assumed(wd: Wd) -> None:
+    wd.set_log_age(5000)
+    wd.set("worker_rc", "3")
+    r = wd.run()
+    assert r.returncode == 0
+    assert wd.kicks() == []
+    assert "ERROR pgrep for Runner.Worker failed rc=3" in wd.wlog()
+
+
+def test_a_failing_listener_pgrep_is_an_error_not_no_listener(wd: Wd) -> None:
+    wd.set_log_age(5000)
+    (wd.state / "nosock_since").write_text(f"{NOW - 50}\n")
+    wd.set("listener_rc", "3")
+    r = wd.run()
+    assert r.returncode == 0
+    assert wd.kicks() == []
+    assert "ERROR pgrep for Runner.Listener failed rc=3" in wd.wlog()
+    assert wd.state_file("nosock_since") == str(NOW - 50), "an unknown tick leaves the socket clock alone"
+
+
+def test_lsof_that_exits_zero_with_no_record_is_unknown_not_zero_sockets(wd: Wd) -> None:
+    wd.set_log_age(400)
+    wd.lsof(mode="empty")
+    (wd.state / "nosock_since").write_text(f"{NOW - 5000}\n")  # B would fire on "no socket"
+    r = wd.run("--verbose")
+    assert r.returncode == 0
+    assert wd.kicks() == []
+    assert "ERROR lsof -p 4141 exited 0 but listed no p4141 record" in wd.wlog()
+    assert "lsof_ok=0" in r.stdout and "logsrc=newest" in r.stdout
+    assert wd.state_file("nosock_since") == str(NOW - 5000)
+
+
+# --- repeat guard ---------------------------------------------------------------
+
+
+def _halt_errors(wd: Wd) -> int:
+    return wd.wlog().count("did not cure the listener")
+
+
+def test_a_repeat_after_our_own_restart_halts_once_and_removing_the_flag_resumes(wd: Wd) -> None:
+    wd.set_log_age(5000)
+    wd.set("etime", "10:00")  # the listener our restart started 600 s ago
+    (wd.state / "last_restart").write_text(f"{NOW - 600}\n")
+    r = wd.run("--verbose")
+    assert r.returncode == 0
+    assert wd.kicks() == []
+    assert (wd.state / "halted").exists()
+    assert wd.state_file("last_restart") is None, "the restart record goes with the halt"
+    assert _halt_errors(wd) == 1
+    assert "ERROR restart 600s ago did not cure the listener (pid=4141;" in wd.wlog()
+    # Later ticks stay quiet and do nothing.
+    r2 = wd.tick(NOW + 60, "--verbose")
+    assert wd.kicks() == [] and _halt_errors(wd) == 1
+    assert "auto-restart is halted" in r2.stdout
+    assert _fields(wd.state_file("last_tick"))["halted"] == "1"
+    # A human removes the flag: the next eligible tick restarts.
+    (wd.state / "halted").unlink()
+    assert wd.tick(NOW + 120).returncode == 0
+    assert wd.kicks() == [f"kickstart -k {TARGET}"]
+    assert wd.state_file("last_restart") == str(NOW + 120)
+
+
+@pytest.mark.parametrize(
+    "since,etime,halts",
+    [
+        (600, "10:05", True),    # uptime 605 == since + 5: ours
+        (600, "10:06", False),   # uptime 606: not the listener we started
+        (1800, "30:00", True),   # the window's last second
+        (1801, "30:01", False),  # outside the window; a plain restart
+    ],
+)
+def test_the_repeat_guard_boundaries(wd: Wd, since: int, etime: str, halts: bool) -> None:
+    wd.set_log_age(5000)
+    wd.set("etime", etime)
+    (wd.state / "last_restart").write_text(f"{NOW - since}\n")
+    assert wd.run().returncode == 0
+    assert (wd.state / "halted").exists() is halts
+    assert _halt_errors(wd) == (1 if halts else 0)
+    if halts:
+        assert wd.kicks() == []
+    elif since >= 900:
+        assert wd.kicks() == [f"kickstart -k {TARGET}"]
+    else:
+        assert wd.kicks() == [], "inside the cooldown, and not halted"
+
+
+def test_a_halted_watchdog_does_not_restart_even_when_eligible(wd: Wd) -> None:
+    wd.set_log_age(5000)
+    (wd.state / "halted").write_text("1\n")
+    r = wd.run("--verbose")
+    assert r.returncode == 0 and wd.kicks() == []
+    assert "auto-restart is halted; remove" in r.stdout
+
+
+def test_dry_run_reports_the_halt_and_writes_nothing(wd: Wd) -> None:
+    wd.set_log_age(5000)
+    wd.set("etime", "10:00")
+    (wd.state / "last_restart").write_text(f"{NOW - 600}\n")
+    r = wd.run("--dry-run")
+    assert r.returncode == 0 and "DRY-RUN would halt auto-restart" in r.stdout
+    assert not (wd.state / "halted").exists()
+    assert wd.state_file("last_restart") == str(NOW - 600)
+    assert wd.kicks() == []
+
+
+# --- the REAL pgrep -------------------------------------------------------------
+
+REAL_PGREP = pytest.mark.skipif(not Path("/usr/bin/pgrep").exists(), reason="no /usr/bin/pgrep")
+USER = getpass.getuser()
+
+
+@pytest.fixture
+def forge() -> Iterator[Callable[[Path, str], int]]:
+    """Spawn `sleep` whose argv[0] reads "<exe> <args>" (bash exec -a); killed at teardown."""
+    procs: list[subprocess.Popen] = []
+
+    def spawn(exe: Path, args: str = "") -> int:
+        argv0 = f"{exe} {args}".rstrip()
+        p = subprocess.Popen(
+            ["/bin/bash", "-c", 'exec -a "$0" sleep 120', argv0],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        procs.append(p)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            seen = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(p.pid)], capture_output=True, text=True)
+            if seen.stdout.startswith(argv0):
+                return p.pid
+            time.sleep(0.05)
+        raise AssertionError(f"forged process {argv0!r} never showed its argv")
+
+    yield spawn
+    for p in procs:
+        p.kill()
+        p.wait()
+
+
+@REAL_PGREP
+def test_real_pgrep_finds_the_listener_of_the_right_dir_only(tmp_path: Path, forge: Callable[[Path, str], int]) -> None:
+    wd = Wd(tmp_path, real_pgrep=True)
+    wd.set_log_age(5000)
+    # Stand-ins for a second runner (/Users/ghconexus-cred/actions-runner) and a
+    # non-"run" invocation: neither is the listener of wd.runner.
+    forge(tmp_path / "other" / "bin" / "Runner.Listener", "run")
+    forge(wd.runner / "bin" / "Runner.Listener", "--version")
+    r = wd.run("--verbose", WD_RUNNER_USER=USER)
+    assert r.returncode == 0, r.stderr
+    assert "no Runner.Listener running" in r.stdout and wd.kicks() == []
+    pid = forge(wd.runner / "bin" / "Runner.Listener", "run --startuptype service")
+    wd.use_pid(pid)
+    r = wd.run("--verbose", WD_RUNNER_USER=USER)
+    assert r.returncode == 0, r.stderr
+    assert f"listener pid={pid} " in r.stdout
+    assert wd.kicks() == [f"kickstart -k {TARGET}"], "found, and the pre-kickstart recheck found it again"
+
+
+@REAL_PGREP
+def test_real_pgrep_is_restricted_to_the_runner_user(tmp_path: Path, forge: Callable[[Path, str], int]) -> None:
+    wd = Wd(tmp_path, real_pgrep=True)
+    wd.set_log_age(5000)
+    pid = forge(wd.runner / "bin" / "Runner.Listener", "run")
+    wd.use_pid(pid)
+    r = wd.run("--verbose", WD_RUNNER_USER="nobody")
+    assert "no Runner.Listener running" in r.stdout and wd.kicks() == []
+    assert f"listener pid={pid} " in wd.run("--verbose", WD_RUNNER_USER=USER).stdout
+
+
+@REAL_PGREP
+def test_real_pgrep_worker_of_this_runner_blocks_a_restart_and_a_sibling_runners_does_not(
+    tmp_path: Path, forge: Callable[[Path, str], int]
+) -> None:
+    wd = Wd(tmp_path, real_pgrep=True)
+    wd.set_log_age(5000)
+    wd.use_pid(forge(wd.runner / "bin" / "Runner.Listener", "run"))
+    forge(tmp_path / "other" / "bin" / "Runner.Worker", "")
+    assert wd.run(WD_RUNNER_USER=USER).returncode == 0
+    assert wd.kicks() == [f"kickstart -k {TARGET}"], "another runner's job must not block this one"
+    (wd.ctl / "launchctl.calls").unlink()
+    (wd.state / "last_restart").unlink()
+    forge(wd.runner / "bin" / "Runner.Worker", "")
+    r = wd.run("--verbose", WD_RUNNER_USER=USER)
+    assert r.returncode == 0
+    assert "Runner.Worker running" in r.stdout and wd.kicks() == []
+
+
+@REAL_PGREP
+def test_real_pgrep_two_listeners_are_ambiguous_and_nothing_is_restarted(
+    tmp_path: Path, forge: Callable[[Path, str], int]
+) -> None:
+    wd = Wd(tmp_path, real_pgrep=True)
+    wd.set_log_age(5000)
+    a = forge(wd.runner / "bin" / "Runner.Listener", "run")
+    b = forge(wd.runner / "bin" / "Runner.Listener", "run")
+    wd.use_pid(a)
+    r = wd.run(WD_RUNNER_USER=USER)
+    assert r.returncode == 0
+    assert wd.kicks() == []
+    assert f"ERROR more than one Runner.Listener under {wd.runner} ({min(a, b)} {max(a, b)})" in wd.wlog()
+
+
+@REAL_PGREP
+def test_real_pgrep_worker_search_is_restricted_to_the_runner_user_too(
+    tmp_path: Path, forge: Callable[[Path, str], int]
+) -> None:
+    wd = Wd(tmp_path)
+    # The listener is stubbed (so the user can differ); the Worker search is the real pgrep.
+    stub = wd.stubs / "pgrep"
+    stub.write_text(
+        '#!/bin/sh\nfor a; do pat="$a"; done\n'
+        'case "$pat" in *Runner.Listener*) cat "$CTL/listener_pid"; exit 0 ;; esac\n'
+        'exec /usr/bin/pgrep "$@"\n'
+    )
+    wd.set_log_age(5000)
+    forge(wd.runner / "bin" / "Runner.Worker", "")  # ours, and this user is not "nobody"
+    r = wd.run("--verbose", WD_RUNNER_USER=USER)
+    assert "Runner.Worker running" in r.stdout and wd.kicks() == []
+    assert wd.run(WD_RUNNER_USER="nobody").returncode == 0
+    assert wd.kicks() == [f"kickstart -k {TARGET}"], "a process of another user is not this runner's job"
