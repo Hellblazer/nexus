@@ -5,6 +5,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -22,6 +24,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -272,14 +275,12 @@ class PgBouncerTenantIsolationTest {
     private void registerFixtureDoc(String tenant, String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                    + "VALUES (?, ?, 'hygiene-001 test fixture') "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
-                ps.setString(1, tenant);
-                ps.setString(2, tumbler);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "hygiene-001 test fixture")
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                .execute();
         }
     }
 

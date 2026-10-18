@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
+import java.util.HexFormat;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -21,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
@@ -392,19 +395,18 @@ class TaxonomyAssignFromChashesRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-194 P3c: doc_id is bytea now -- decode('hex') the bind parameter.
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
-                    + " embedding_model)"
-                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?, ?)")) {
-                ps.setString(1, tenant);
-                ps.setString(2, c1);
-                ps.setLong(3, tStrong);
-                ps.setString(4, col);
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(TOPIC_ASSIGNMENTS)
+                .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+                .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(c1))
+                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, tStrong)
+                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
+                .set(TOPIC_ASSIGNMENTS.SIMILARITY, 0.999)
+                .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, DSL.currentOffsetDateTime())
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, col)
                 // RDR-225: the assignment carries the model of the chunk it references.
-                ps.setString(5, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, col));
-                ps.executeUpdate();
-            }
+                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenant, col))
+                .execute();
         }
 
         // Re-run the cross pass: tWeak's row must NOT regress below what it already

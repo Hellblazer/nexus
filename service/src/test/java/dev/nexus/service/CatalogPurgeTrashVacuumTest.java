@@ -18,13 +18,15 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -199,10 +201,14 @@ class CatalogPurgeTrashVacuumTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             for (String docId : docIds) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES ('"
-                    + tenant + "', '" + docId + "', '" + docId + "', '" + collection + "')");
+                seed.insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, docId)
+                    .set(CATALOG_DOCUMENTS.TITLE, docId)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                    .execute();
             }
         }
 
@@ -218,20 +224,17 @@ class CatalogPurgeTrashVacuumTest {
             // carries a real physical_collection above, so stamp the
             // manifest row with the SAME collection rather than relying on
             // the no-longer-existent NULL default.
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            String model = PgContainerHelper.collectionModel(seed, tenant, collection);
             for (int i = 0; i < count; i++) {
-                try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.catalog_document_chunks"
-                        + " (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                        + "VALUES (?, ?, 0, decode(?, 'hex'), ?, (SELECT embedding_model FROM nexus.catalog_collections"
-                        + " WHERE tenant_id = ? AND name = ?))")) {
-                    ps.setString(1, tenant);
-                    ps.setString(2, docIds.get(i));
-                    ps.setString(3, chashes.get(i));
-                    ps.setString(4, collection);
-                    ps.setString(5, tenant);
-                    ps.setString(6, collection);
-                    ps.execute();
-                }
+                seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                    .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docIds.get(i))
+                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashes.get(i)))
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                    .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+                    .execute();
             }
         }
 

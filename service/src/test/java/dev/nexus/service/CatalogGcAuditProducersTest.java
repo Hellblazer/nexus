@@ -6,6 +6,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -18,12 +19,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -108,18 +111,15 @@ class CatalogGcAuditProducersTest {
 
     private void insertManifestRow(Connection su, String tenant, String docId, String chashHex, String collection)
             throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'), ?, (SELECT embedding_model FROM nexus.catalog_collections "
-                + "WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setString(3, chashHex);
-            ps.setString(4, collection);
-            ps.setString(5, tenant);
-            ps.setString(6, collection);
-            ps.execute();
-        }
+        DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenant, collection))
+            .execute();
     }
 
     // ── purge_trash: SQL-side producer (catalog-033-1) ─────────────────────────
@@ -133,10 +133,14 @@ class CatalogGcAuditProducersTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES ('"
-                + TENANT + "', '" + docId + "', 'GC Audit Purge Doc', '" + collection + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(seed, TENANT, collection);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, docId)
+                .set(CATALOG_DOCUMENTS.TITLE, "GC Audit Purge Doc")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .execute();
         }
         vecRepo.upsertChunks(TENANT, collection, List.of(chash), List.of("gc audit purge text"), List.of(Map.of()));
         try (Connection su = pg.createConnection("")) {

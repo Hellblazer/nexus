@@ -21,6 +21,7 @@ import java.util.Optional;
 import java.util.concurrent.*;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -108,10 +109,12 @@ class AspectRepositoryTest {
                     "coalesce-doc-1", "coalesce-doc-2",
                     // nexus-nj4ch enqueueMany batch tests
                     "many-doc-a")) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-                    "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
-                    "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                    .set(CATALOG_DOCUMENTS.TITLE, "Test fixture: " + tumbler)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                    .execute();
             }
 
             // RDR-204 Phase 1 (bead nexus-ft04v.7): document_aspects_collection_fk /
@@ -1409,14 +1412,12 @@ class AspectRepositoryTest {
     private void registerFixtureDoc(String tenant, String tumbler) throws SQLException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                    + "VALUES (?, ?, 'hygiene-001 test fixture') "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
-                ps.setString(1, tenant);
-                ps.setString(2, tumbler);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "hygiene-001 test fixture")
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                .execute();
         }
     }
 

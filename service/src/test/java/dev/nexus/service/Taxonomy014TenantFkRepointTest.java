@@ -11,6 +11,7 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
@@ -21,14 +22,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Types;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -407,21 +408,14 @@ class Taxonomy014TenantFkRepointTest {
         // requires (the bare two-column raw INSERT this used to run 23502s on
         // lifecycle_state NOT NULL).
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, "coll");
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO nexus.topics (tenant_id, label, parent_id, collection, created_at) "
-                + "VALUES (?, ?, ?, 'coll', now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tenant + "-topic");
-            if (parentId == null) {
-                ps.setNull(3, Types.BIGINT);
-            } else {
-                ps.setLong(3, parentId);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
+        return DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, tenant + "-topic")
+            .set(TOPICS.PARENT_ID, parentId)
+            .set(TOPICS.COLLECTION, "coll")
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     private static int count(Connection c, String sql) throws Exception {
@@ -456,18 +450,14 @@ class Taxonomy014TenantFkRepointTest {
             Connection c, String tenant, String collection, int docCount) throws Exception {
         // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at) "
-                + "VALUES (?, ?, ?, ?, now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tenant + "-doc-count-topic");
-            ps.setString(3, collection);
-            ps.setInt(4, docCount);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
+        return DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, tenant + "-doc-count-topic")
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.DOC_COUNT, docCount)
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     /**
@@ -499,18 +489,15 @@ class Taxonomy014TenantFkRepointTest {
      *  P3c), {@code source_collection} is NOT NULL (RDR-194 P3b). */
     private static void insertTopicAssignment(
             Connection c, String tenant, String docIdHex, long topicId, String sourceCollection) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
-                + "VALUES (?, decode(?, 'hex'), ?, 'manual', ?, "
-                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docIdHex);
-            ps.setLong(3, topicId);
-            ps.setString(4, sourceCollection);
-            ps.setString(5, tenant);
-            ps.setString(6, sourceCollection);
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        ctx.insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TOPIC_ASSIGNMENTS.DOC_ID, java.util.HexFormat.of().parseHex(docIdHex))
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                PgContainerHelper.collectionModel(ctx, tenant, sourceCollection))
+            .execute();
     }
 }

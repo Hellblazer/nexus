@@ -17,7 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.postgresql.util.PSQLException;
+import org.jooq.exception.DataAccessException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.file.Files;
@@ -26,6 +26,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.HexFormat;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -34,6 +35,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -237,31 +240,38 @@ class Rdr71gw2CollectionNotNullTest {
     }
 
     private static void insertDoc(Connection su, String tenantId, String tumbler) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-            + "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') "
-            + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     private static void insertManifestRowNull(Connection su, String tenantId, String docId,
                                                int position, String chashHex) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks "
-            + "  (tenant_id, doc_id, position, chash) "
-            + "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", "
-            + "decode('" + chashHex + "', 'hex')) "
-            + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void insertManifestRowStamped(Connection su, String tenantId, String docId,
                                                   int position, String chashHex, String collection)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks "
-            + "  (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", "
-            + "decode('" + chashHex + "', 'hex'), '" + collection + "') "
-            + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     /** Step G correction (RDR-191 repoint batch cluster A): seeds the
@@ -527,13 +537,15 @@ class Rdr71gw2CollectionNotNullTest {
                 .isTrue();
             insertDoc(su, tenant, doc);
 
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + tenant + "', '" + doc + "', 0, "
-                    + "decode('" + chash("71gw2-throws") + "', 'hex'), NULL)"));
-            assertThat(ex.getSQLState())
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                    .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash("71gw2-throws")))
+                    .setNull(CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .execute());
+            assertThat(ex.sqlState())
                 .as("the state is unrepresentable -- assert the not-null-violation SQLSTATE "
                     + "directly, not merely a row count of 0")
                 .isEqualTo("23502");
@@ -581,11 +593,12 @@ class Rdr71gw2CollectionNotNullTest {
 
             Future<?> writer = executor.submit(() -> {
                 try (Connection su2 = pg.createConnection("")) {
-                    su2.createStatement().execute(
-                        "INSERT INTO nexus.catalog_document_chunks "
-                        + "(tenant_id, doc_id, position, chash) "
-                        + "VALUES ('" + tenant + "', '" + doc + "', 0, "
-                        + "decode('" + ch + "', 'hex'))");
+                    DSL.using(su2, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                        .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                        .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                        .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                        .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(ch))
+                        .execute();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }

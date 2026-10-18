@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.impl.SQLDataType;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 import java.sql.Connection;
@@ -182,16 +185,27 @@ class GraphHopParityTest {
     private void seedExplainFixture(Connection su) throws Exception {
         insertCollection(su, TENANT_A, COLL_EXPLAIN);
         // seed doc
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "VALUES ('" + TENANT_A + "', 'exseed', 'Seed', 'exauthor', 2024, 'paper', 'research', '" +
-            COLL_EXPLAIN + "')");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 'Doc '||g, 'exauthor', 2024, 'paper', 'research', '" +
-            COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        var series = DSL.generateSeries(1, EXPLAIN_ROWS).as("s", "g");
+        Field<Integer> g = series.field("g", Integer.class);
+        ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+            .set(CATALOG_DOCUMENTS.TUMBLER, "exseed")
+            .set(CATALOG_DOCUMENTS.TITLE, "Seed")
+            .set(CATALOG_DOCUMENTS.AUTHOR, "exauthor")
+            .set(CATALOG_DOCUMENTS.YEAR, 2024)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+            .set(CATALOG_DOCUMENTS.CORPUS, "research")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL_EXPLAIN)
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .select(ctx.select(DSL.inline(TENANT_A), DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)), DSL.inline("exauthor"),
+                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"), DSL.inline(COLL_EXPLAIN))
+                .from(series))
+            .execute();
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
         // hex (digits 0-9 only), padded to the full 64-hex canonical width and
         // decoded at the seam.
@@ -204,17 +218,26 @@ class GraphHopParityTest {
             "' AND name = '" + COLL_EXPLAIN + "'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "', " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT_A +
-            "' AND name = '" + COLL_EXPLAIN + "') " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .select(ctx.select(DSL.inline(TENANT_A), DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline(0),
+                    DSL.function("decode", SQLDataType.BLOB,
+                        DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
+                        DSL.inline("hex")),
+                    DSL.inline(COLL_EXPLAIN),
+                    DSL.inline(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN)))
+                .from(series))
+            .execute();
         // edges exseed --cites--> ex1..exN
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) " +
-            "SELECT '" + TENANT_A + "', 'exseed', 'ex'||g, 'cites', 'test' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+            .select(ctx.select(DSL.inline(TENANT_A), DSL.inline("exseed"),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline("cites"), DSL.inline("test"))
+                .from(series))
+            .execute();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -689,11 +712,18 @@ class GraphHopParityTest {
                          double x, double y) throws Exception {
         String tenant = tenantFor(collection);
         String chash = validChash(tumbler);
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc " + tumbler + "', 'a', 2024, " +
-            "'paper', 'research', '" + collection + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Doc " + tumbler)
+            .set(CATALOG_DOCUMENTS.AUTHOR, "a")
+            .set(CATALOG_DOCUMENTS.YEAR, 2024)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+            .set(CATALOG_DOCUMENTS.CORPUS, "research")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk row to land BEFORE the manifest row (previously order-independent).
         su.createStatement().execute(
@@ -703,20 +733,29 @@ class GraphHopParityTest {
             "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
             "' AND name = '" + collection + "'), '" + tumbler + "', " +
             vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "', " +
-            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
-            "' AND name = '" + collection + "')) " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void link(Connection su, String tenant, String from, String to, String type)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) " +
-            "VALUES ('" + tenant + "', '" + from + "', '" + to + "', '" + type + "', 'test') " +
-            "ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_LINKS)
+            .set(CATALOG_LINKS.TENANT_ID, tenant)
+            .set(CATALOG_LINKS.FROM_TUMBLER, from)
+            .set(CATALOG_LINKS.TO_TUMBLER, to)
+            .set(CATALOG_LINKS.LINK_TYPE, type)
+            .set(CATALOG_LINKS.CREATED_BY, "test")
+            .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                CATALOG_LINKS.LINK_TYPE).doNothing()
+            .execute();
     }
 
     private static String tenantFor(String collection) {

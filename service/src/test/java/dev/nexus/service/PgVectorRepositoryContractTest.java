@@ -4,9 +4,14 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -1920,34 +1925,31 @@ class PgVectorRepositoryContractTest {
 
     /** Superuser insert of a catalog document (bypasses catalog RLS; tenant explicit). */
     private void seedCatalogDocument(String tenant, String tumbler, String title) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tumbler);
-            ps.setString(3, title);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, title)
+                .execute();
         }
     }
 
     /** Superuser insert of a manifest row with the RDR-155 {@code collection} column set. */
     private void seedManifestRow(String tenant, String docId, int position,
                                  String chash, String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.catalog_document_chunks "
-                 + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, ?, ?, ?, "
-                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setInt(3, position);
-            // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
-            ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
-            ps.setString(5, collection);
-            // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
-            ps.setString(6, tenant);
-            ps.setString(7, collection);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+                // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    PgContainerHelper.collectionModel(seed, tenant, collection))
+                .execute();
         }
     }
 

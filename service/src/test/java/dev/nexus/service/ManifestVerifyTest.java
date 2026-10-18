@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
@@ -16,7 +17,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.util.HexFormat;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -571,10 +575,12 @@ class ManifestVerifyTest {
     }
 
     private static void insertDoc(Connection su, String tenantId, String tumbler) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     private static void insertManifestRow(Connection su, String tenantId, String docId,
@@ -594,10 +600,10 @@ class ManifestVerifyTest {
                                            int position, String chashHex, String collection,
                                            String embeddingModel)
             throws Exception {
-        final String modelExpr = embeddingModel != null
-            ? "'" + embeddingModel + "'"
-            : "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId
-                + "' AND name = '" + collection + "')";
+        final DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        final String model = embeddingModel != null
+            ? embeddingModel
+            : PgContainerHelper.collectionModel(seed, tenantId, collection);
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every catalog_document_chunks insert. This
         // file's whole purpose is manifest_verify's detection of a chash with NO
@@ -611,12 +617,16 @@ class ManifestVerifyTest {
         // container, including any other test's real inserts.
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
-            "decode('" + chashHex + "', 'hex'), '" + collection + "', " + modelExpr + ") " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks " +
             "ADD CONSTRAINT fk_catalog_chunks_chunk " +
@@ -628,12 +638,15 @@ class ManifestVerifyTest {
     private static void insertManifestRowNullCollection(Connection su, String tenantId,
                                                          String docId, int position, String chashHex)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
-            "decode('" + chashHex + "', 'hex'), 'voyage-context-3') " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "voyage-context-3")
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,

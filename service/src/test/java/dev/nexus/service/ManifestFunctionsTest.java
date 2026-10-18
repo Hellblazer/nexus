@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
@@ -11,11 +12,14 @@ import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -438,11 +442,13 @@ class ManifestFunctionsTest {
      */
     private static void insertCatalogDocument(Connection su, String tenantId, String tumbler,
                                                String physicalCollection) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, physical_collection) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "', '" + physicalCollection + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     /**
@@ -475,12 +481,19 @@ class ManifestFunctionsTest {
         // (unvalidated) for every subsequent statement in this container.
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" + collection + "', '"
-            + PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenantId, collection) + "') " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        // The 32-character chash is the bytea's ASCII bytes, exactly as the raw chunk seed's text
+        // literal is read into the bytea column (catalog-002-hygiene CHECK).
+        DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenantId, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
         // RDR-225: the foreign key is four columns (the chunk's model is part of its identity).
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks " +

@@ -8,6 +8,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -29,6 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -316,30 +319,27 @@ class PgVectorEmbedSkipGcRaceTest {
     }
 
     private void seedCatalogDocument(String tumbler, String title) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, tumbler);
-            ps.setString(3, title);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, title)
+                .execute();
         }
     }
 
     private void seedManifestRow(String tumbler, int position, String chash) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.catalog_document_chunks "
-                 + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, ?, ?, ?, "
-                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, tumbler);
-            ps.setInt(3, position);
-            ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
-            ps.setString(5, COLLECTION);
-            ps.setString(6, TENANT);
-            ps.setString(7, COLLECTION);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    PgContainerHelper.collectionModel(seed, TENANT, COLLECTION))
+                .execute();
         }
     }
 

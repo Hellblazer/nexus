@@ -9,6 +9,9 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -17,6 +20,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -241,26 +245,36 @@ class Hygiene001NotNullMigrationRlsTest {
 
                     // NOT NULL genuinely took effect -- not merely "no NULL rows remain
                     // right now". A raw INSERT with doc_id IS NULL must be rejected.
-                    assertThatThrownBy(() -> su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                        + "   extractor_name, source_uri, doc_id) "
-                        + "VALUES ('" + TENANT_1 + "', 'post-migration-coll', 'post-migration.md', "
-                        + "now(), 'v1', 'ex', 'file:///post.md', NULL)"))
+                    assertThatThrownBy(() -> DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                        .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT_1)
+                        .set(DOCUMENT_ASPECTS.COLLECTION, "post-migration-coll")
+                        .set(DOCUMENT_ASPECTS.SOURCE_PATH, "post-migration.md")
+                        .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
+                        .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+                        .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "ex")
+                        .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///post.md")
+                        .setNull(DOCUMENT_ASPECTS.DOC_ID)
+                        .execute())
                         .as("SET NOT NULL on doc_id must genuinely reject a fresh NULL insert "
                             + "post-migration")
-                        .isInstanceOf(PSQLException.class)
+                        .isInstanceOf(DataAccessException.class)
+                        .hasRootCauseInstanceOf(PSQLException.class)
                         .hasMessageContaining("null value in column \"doc_id\"");
 
-                    assertThatThrownBy(() -> su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                        + "   extractor_name, source_uri, doc_id) "
-                        + "VALUES ('" + TENANT_1 + "', 'post-migration-coll', 'post-migration-2.md', "
-                        + "now(), 'v1', 'ex', NULL, '" + TENANT_1 + "-doc-1')"))
+                    assertThatThrownBy(() -> DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                        .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT_1)
+                        .set(DOCUMENT_ASPECTS.COLLECTION, "post-migration-coll")
+                        .set(DOCUMENT_ASPECTS.SOURCE_PATH, "post-migration-2.md")
+                        .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
+                        .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+                        .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "ex")
+                        .setNull(DOCUMENT_ASPECTS.SOURCE_URI)
+                        .set(DOCUMENT_ASPECTS.DOC_ID, TENANT_1 + "-doc-1")
+                        .execute())
                         .as("SET NOT NULL on source_uri must genuinely reject a fresh NULL insert "
                             + "post-migration")
-                        .isInstanceOf(PSQLException.class)
+                        .isInstanceOf(DataAccessException.class)
+                        .hasRootCauseInstanceOf(PSQLException.class)
                         .hasMessageContaining("null value in column \"source_uri\"");
                 }
             }

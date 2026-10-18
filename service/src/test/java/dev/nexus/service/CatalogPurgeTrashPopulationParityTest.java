@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -16,9 +17,11 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -147,27 +150,31 @@ class CatalogPurgeTrashPopulationParityTest {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
 
             // A live document — must never be touched by any of this.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', 'parity-live', 'Live', '" + COLLECTION + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertDocument(seed, "parity-live", "Live", null);
 
             // A tombstone NEWER than the threshold — must never be purged.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, deleted_at) "
-                + "VALUES ('" + TENANT + "', 'parity-tomb-fresh', 'Fresh', '" + COLLECTION + "', "
-                + "NOW() - interval '10 days')");
+            insertDocument(seed, "parity-tomb-fresh", "Fresh", OffsetDateTime.now().minusDays(10));
 
             // The age-eligible tombstones. No manifest rows and no chunks_<dim> rows for any
             // of them: this is the DOMINANT production shape (yesterday's vanished/orphaned
             // tombstones own zero chunks) and it also proves the doc purge is not gated on
             // owning stranded chunks.
             for (int ageDays : TOMB_AGES_DAYS) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, deleted_at) "
-                    + "VALUES ('" + TENANT + "', 'parity-tomb-" + ageDays + "', 'Tomb " + ageDays + "', '"
-                    + COLLECTION + "', NOW() - interval '" + ageDays + " days')");
+                insertDocument(seed, "parity-tomb-" + ageDays, "Tomb " + ageDays,
+                    OffsetDateTime.now().minusDays(ageDays));
             }
         }
+    }
+
+    private static void insertDocument(DSLContext seed, String tumbler, String title, OffsetDateTime deletedAt) {
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, deletedAt)
+            .execute();
     }
 
     private long liveTombstoneRowsRemaining() throws Exception {

@@ -3,7 +3,9 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
+import java.util.HexFormat;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -17,6 +19,7 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -609,12 +612,16 @@ class ManifestCollectionStampTest {
             st.execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
             try {
                 var ex = org.junit.jupiter.api.Assertions.assertThrows(
-                    java.sql.SQLException.class, () ->
-                        st.execute("INSERT INTO nexus.catalog_document_chunks "
-                            + "(tenant_id, doc_id, position, chash, collection, embedding_model) "
-                            + "VALUES ('" + TENANT + "', '" + docTumbler + "', 99, decode('"
-                            + chNull + "', 'hex'), NULL, 'voyage-context-3')"));
-                assertThat(ex.getSQLState())
+                    DataAccessException.class, () ->
+                        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+                            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docTumbler)
+                            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 99)
+                            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chNull))
+                            .setNull(CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "voyage-context-3")
+                            .execute());
+                assertThat(ex.sqlState())
                     .as("NOT NULL is a column constraint -- FORCE RLS being off must not exempt it")
                     .isEqualTo("23502");
             } finally {

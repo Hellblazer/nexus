@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1266,24 +1268,24 @@ class CatalogEngineDefects70Test {
                                   String metadataJson) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, physical_collection, "
-                + " chunk_count, metadata, file_path, corpus, head_hash, indexed_at, source_uri) "
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "damaged-" + tumbler)
+                .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, chunkCount)
+                .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf(metadataJson))
+                .set(CATALOG_DOCUMENTS.FILE_PATH, "")
+                .set(CATALOG_DOCUMENTS.CORPUS, "")
+                .set(CATALOG_DOCUMENTS.HEAD_HASH, "")
                 // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
-                // — '' is invalid input for that type (PSQLException); NULL is the correct
-                // "unset" representation. file_path/corpus/head_hash stay TEXT NOT NULL
-                // DEFAULT '' (untouched by this migration), so '' remains correct for those.
-                + "VALUES (?, ?, ?, 'code', ?, ?, CAST(? AS jsonb), '', '', '', NULL, ?)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, tumbler);
-                ps.setString(3, "damaged-" + tumbler);
-                ps.setString(4, collection);
-                ps.setInt(5, chunkCount);
-                ps.setString(6, metadataJson);
-                ps.setString(7, "file:///defects70/damaged/" + tumbler + ".md");
-                ps.executeUpdate();
-            }
+                // — '' is invalid input for that type; NULL is the correct "unset" representation.
+                // file_path/corpus/head_hash stay TEXT NOT NULL DEFAULT '' (untouched by that
+                // migration), so '' remains correct for those.
+                .setNull(CATALOG_DOCUMENTS.INDEXED_AT)
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///defects70/damaged/" + tumbler + ".md")
+                .execute();
         }
     }
 

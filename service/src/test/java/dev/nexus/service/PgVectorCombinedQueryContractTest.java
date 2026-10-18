@@ -8,6 +8,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -17,9 +18,15 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.OffsetDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -288,10 +295,7 @@ class PgVectorCombinedQueryContractTest {
     private void seedMetaDoc(Connection su, String tenant, int dim, String collection,
                              String tumbler, String contentType, double x, double y) throws Exception {
         String chash = chashOf(tumbler);
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, content_type, physical_collection) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', '" + contentType + "', '" + collection + "') "
-            + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        insertDoc(su, tenant, tumbler, contentType, collection);
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, tenant, dim, collection, chash, tumbler, x, y);
@@ -301,20 +305,39 @@ class PgVectorCombinedQueryContractTest {
     private void seedTopicChunk(Connection su, String tenant, int dim, String collection,
                                 String tumbler, long topicId, double x, double y) throws Exception {
         String chash = chashOf(tumbler);
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, content_type, physical_collection) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', 'paper', '" + collection + "') "
-            + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        insertDoc(su, tenant, tumbler, "paper", collection);
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, tenant, dim, collection, chash, tumbler, x, y);
         insertManifest(su, tenant, tumbler, chash, collection);
         // chunk-level topic membership: topic_assignments.doc_id = chash (nexus-sa14p).
         // RDR-194 P3c: doc_id is bytea now — decode('hex').
-        su.createStatement().execute(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at, embedding_model) "
-            + "VALUES ('" + tenant + "', decode('" + chash + "', 'hex'), " + topicId + ", '" + collection + "', "
-            + "'2026-01-01T00:00:00+00'::timestamptz, " + modelOf(tenant, collection) + ") ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(chash))
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS)
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+            .doNothing()
+            .execute();
+    }
+
+    /** The timestamp every seeded row in this class carries ({@code 2026-01-01T00:00:00+00}). */
+    private static final OffsetDateTime SEED_TS = OffsetDateTime.parse("2026-01-01T00:00:00+00:00");
+
+    private static void insertDoc(Connection su, String tenant, String tumbler, String contentType,
+                                  String collection) {
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     private static void insertCollection(Connection su, String tenant, String name) throws Exception {
@@ -327,11 +350,17 @@ class PgVectorCombinedQueryContractTest {
 
     private static void insertManifest(Connection su, String tenant, String docId, String chash,
                                        String collection) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-            + "VALUES ('" + tenant + "', '" + docId + "', 0, decode('" + chash + "', 'hex'), '" + collection + "', "
-            + modelOf(tenant, collection) + ") "
-            + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     private static void insertChunk(Connection su, String tenant, int dim, String collection,
@@ -352,14 +381,13 @@ class PgVectorCombinedQueryContractTest {
 
     private static long insertTopic(Connection su, String tenant, String label, String collection)
             throws Exception {
-        try (var st = su.createStatement();
-             var rs = st.executeQuery(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) VALUES ('"
-                + tenant + "', '" + label + "', '" + collection + "', '2026-01-01T00:00:00+00'::timestamptz) "
-                + "RETURNING id")) {
-            rs.next();
-            return rs.getLong(1);
-        }
+        return DSL.using(su, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, label)
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.CREATED_AT, SEED_TS)
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     private static String vec2(int dim, double x, double y) {

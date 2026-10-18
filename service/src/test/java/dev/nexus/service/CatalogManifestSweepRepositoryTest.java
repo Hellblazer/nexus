@@ -5,6 +5,7 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -18,6 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -26,6 +28,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -574,16 +577,7 @@ class CatalogManifestSweepRepositoryTest {
             connA.rollback();
 
             // B now completes its manifest insert normally and commits.
-            try (var psB = connB.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model) "
-                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, 'minilm-l6-v2-384')")) {
-                psB.setString(1, TENANT_A);
-                psB.setString(2, "swp.8a-b");
-                psB.setString(3, shared1);
-                psB.setString(4, col1);
-                psB.executeUpdate();
-            }
+            insertManifestRowOn(connB, "swp.8a-b", shared1, col1);
             connB.commit();
         }
 
@@ -614,16 +608,7 @@ class CatalogManifestSweepRepositoryTest {
 
             PgContainerHelper.setTenant(connB, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateShared(connB, TENANT_A, col2);
-            try (var psB = connB.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model) "
-                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, 'minilm-l6-v2-384')")) {
-                psB.setString(1, TENANT_A);
-                psB.setString(2, "swp.8b-b");
-                psB.setString(3, shared2);
-                psB.setString(4, col2);
-                psB.executeUpdate();
-            }
+            insertManifestRowOn(connB, "swp.8b-b", shared2, col2);
             connB.commit();   // B fully committed before A even starts.
 
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
@@ -662,6 +647,19 @@ class CatalogManifestSweepRepositoryTest {
         + "  WHERE d2.tenant_id = ? AND d2.physical_collection = ? AND d2.deleted_at IS NULL "
         + "  AND (d2.file_path IS NULL OR d2.file_path = '') "
         + "  AND (d2.metadata ->> 'doc_id') = ?)";
+
+    /** Writer B's manifest insert, on its own (already tenant-scoped) transaction connection. */
+    private static void insertManifestRowOn(Connection conn, String docId, String chashHex, String collection) {
+        DSL.using(conn, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT_A)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
+            .execute();
+    }
 
     /** Hand-drives {@code acquireSweepGateShared}'s exact SQL shape on a raw
      *  connection, for tests that need manual transaction control around it. */

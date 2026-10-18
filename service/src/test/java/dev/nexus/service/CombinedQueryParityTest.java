@@ -6,15 +6,19 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -299,11 +303,10 @@ class CombinedQueryParityTest {
     private void seedExplainFixture(Connection su) throws Exception {
         insertCollection(su, TENANT_A, COLL_EXPLAIN);
         long topicId = insertTopic(su, TENANT_A, TOPIC_VEC, COLL_EXPLAIN);
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 'Doc '||g, 'exauthor', 2024, 'paper', 'research', '" +
-            COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        var series = DSL.generateSeries(1, EXPLAIN_ROWS).as("s", "g");
+        Field<Integer> g = series.field("g", Integer.class);
+        insertBulkDocs(ctx, series, g, TENANT_A, "ex", "exauthor", COLL_EXPLAIN);
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
         // hex (digits 0-9 only), padded to the full 64-hex canonical width and
         // decoded at the seam. topic_assignments.doc_id stays TEXT but is a chunk
@@ -319,16 +322,15 @@ class CombinedQueryParityTest {
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), '" + modelOf(su, TENANT_A, COLL_EXPLAIN) + "', 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "', '" + modelOf(su, TENANT_A, COLL_EXPLAIN) + "' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        insertBulkManifest(ctx, series, g, g, TENANT_A, "ex", COLL_EXPLAIN, modelOf(su, TENANT_A, COLL_EXPLAIN));
         // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode(lpad(...), 'hex').
-        su.createStatement().execute(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at, embedding_model) " +
-            "SELECT '" + TENANT_A + "', decode(lpad(g::text, 64, '0'), 'hex'), " + topicId + ", '"
-            + COLL_EXPLAIN + "', " +
-            "'2026-01-01T00:00:00+00'::timestamptz, '" + modelOf(su, TENANT_A, COLL_EXPLAIN) + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+            .select(ctx.select(DSL.inline(TENANT_A), paddedChash(g), DSL.inline(topicId),
+                    DSL.inline(COLL_EXPLAIN), DSL.val(SEED_TS), DSL.inline(modelOf(su, TENANT_A, COLL_EXPLAIN)))
+                .from(series))
+            .execute();
     }
 
     /**
@@ -394,18 +396,23 @@ class CombinedQueryParityTest {
         // nexus-tk070.p6a follow-on). No assertion in this class reads the
         // column, so a synthetic per-row value satisfies the constraint
         // without changing any assertion surface.
-        su.createStatement().execute(
-            "INSERT INTO nexus.document_aspects " +
-            "  (tenant_id, collection, source_path, proposed_method, confidence, " +
-            "   extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + sourcePath + "', " +
-            sqlText(proposedMethod) + ", " + confidence + ", " +
-            "'2026-01-01T00:00:00+00'::timestamptz, 'cqp-test-model', 'cqp-test-extractor', " +
-            (docId == null ? "NULL" : sqlText(docId)) + ", " +
-            sqlText("cqp://" + collection + "/" + sourcePath) + ") " +
-            "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET " +
-            "  proposed_method = EXCLUDED.proposed_method, " +
-            "  confidence = EXCLUDED.confidence, doc_id = EXCLUDED.doc_id");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+            .set(DOCUMENT_ASPECTS.TENANT_ID, tenantId)
+            .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+            .set(DOCUMENT_ASPECTS.SOURCE_PATH, sourcePath)
+            .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, proposedMethod)
+            .set(DOCUMENT_ASPECTS.CONFIDENCE, confidence)
+            .set(DOCUMENT_ASPECTS.EXTRACTED_AT, SEED_TS)
+            .set(DOCUMENT_ASPECTS.MODEL_VERSION, "cqp-test-model")
+            .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "cqp-test-extractor")
+            .set(DOCUMENT_ASPECTS.DOC_ID, docId)
+            .set(DOCUMENT_ASPECTS.SOURCE_URI, "cqp://" + collection + "/" + sourcePath)
+            .onConflict(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH)
+            .doUpdate()
+            .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, DSL.excluded(DOCUMENT_ASPECTS.PROPOSED_METHOD))
+            .set(DOCUMENT_ASPECTS.CONFIDENCE, DSL.excluded(DOCUMENT_ASPECTS.CONFIDENCE))
+            .set(DOCUMENT_ASPECTS.DOC_ID, DSL.excluded(DOCUMENT_ASPECTS.DOC_ID))
+            .execute();
     }
 
     /**
@@ -417,30 +424,31 @@ class CombinedQueryParityTest {
      */
     private void seedAspectExplainFixture(Connection su) throws Exception {
         insertCollection(su, TENANT_A, COLL_ASPECT_EXPLAIN);
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "SELECT '" + TENANT_A + "', 'asx'||g, 'Doc '||g, 'asxauthor', 2024, 'paper', 'research', '" +
-            COLL_ASPECT_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        var series = DSL.generateSeries(1, EXPLAIN_ROWS).as("s", "g");
+        Field<Integer> g = series.field("g", Integer.class);
+        insertBulkDocs(ctx, series, g, TENANT_A, "asx", "asxauthor", COLL_ASPECT_EXPLAIN);
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', decode(lpad((g+1000000)::text, 64, '0'), 'hex'), '" + modelOf(su, TENANT_A, COLL_ASPECT_EXPLAIN) + "', 'asx'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "SELECT '" + TENANT_A + "', 'asx'||g, 0, decode(lpad((g+1000000)::text, 64, '0'), 'hex'), '" + COLL_ASPECT_EXPLAIN + "', '" + modelOf(su, TENANT_A, COLL_ASPECT_EXPLAIN) + "' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
-        su.createStatement().execute(
-            // source_uri: document_aspects.source_uri is NOT NULL
-            // (hygiene-001-1) -- synthetic per-row value, no assertion reads it.
-            "INSERT INTO nexus.document_aspects " +
-            "  (tenant_id, collection, source_path, proposed_method, confidence, " +
-            "   extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-            "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', 'asx'||g, " +
-            "'Uses gradient descent', 0.9, '2026-01-01T00:00:00+00'::timestamptz, " +
-            "'cqp-test-model', 'cqp-test-extractor', 'asx'||g, 'cqp://' || '" + COLL_ASPECT_EXPLAIN + "' || '/asx'||g " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        insertBulkManifest(ctx, series, g, g.add(1000000), TENANT_A, "asx", COLL_ASPECT_EXPLAIN,
+            modelOf(su, TENANT_A, COLL_ASPECT_EXPLAIN));
+        // source_uri: document_aspects.source_uri is NOT NULL
+        // (hygiene-001-1) -- synthetic per-row value, no assertion reads it.
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.PROPOSED_METHOD, DOCUMENT_ASPECTS.CONFIDENCE,
+                DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+            .select(ctx.select(DSL.inline(TENANT_A), DSL.inline(COLL_ASPECT_EXPLAIN),
+                    DSL.concat(DSL.inline("asx"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline("Uses gradient descent"), DSL.inline(0.9), DSL.val(SEED_TS),
+                    DSL.inline("cqp-test-model"), DSL.inline("cqp-test-extractor"),
+                    DSL.concat(DSL.inline("asx"), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.concat(DSL.inline("cqp://" + COLL_ASPECT_EXPLAIN + "/asx"), DSL.cast(g, SQLDataType.VARCHAR)))
+                .from(series))
+            .execute();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1439,47 +1447,94 @@ class CombinedQueryParityTest {
                                                   String collection, String contentType,
                                                   String author, int year, String corpus)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Doc " + tumbler + "', " +
-            sqlText(author) + ", " + year + ", " + sqlText(contentType) + ", " +
-            sqlText(corpus) + ", '" + collection + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "Doc " + tumbler)
+            .set(CATALOG_DOCUMENTS.AUTHOR, author)
+            .set(CATALOG_DOCUMENTS.YEAR, year)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
+            .set(CATALOG_DOCUMENTS.CORPUS, corpus)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+            .execute();
     }
 
     private static void insertManifestRow(Connection su, String tenantId, String docId,
                                           int position, String chash, String collection)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex'), '" +
-            collection + "', '" + modelOf(su, tenantId, collection) + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, modelOf(su, tenantId, collection))
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
+            .execute();
     }
 
     /** Insert a topic; returns its generated id. */
     private static long insertTopic(Connection su, String tenantId, String label,
                                     String collection) throws Exception {
-        try (var st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) " +
-                "VALUES ('" + tenantId + "', " + sqlText(label) + ", '" + collection + "', " +
-                "'2026-01-01T00:00:00+00'::timestamptz) RETURNING id")) {
-            rs.next();
-            return rs.getLong(1);
-        }
+        return DSL.using(su, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenantId)
+            .set(TOPICS.LABEL, label)
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.CREATED_AT, SEED_TS)
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     private static void insertTopicAssignment(Connection su, String tenantId, String docId,
                                               long topicId, String collection) throws Exception {
         // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode('hex').
-        su.createStatement().execute(
-            "INSERT INTO nexus.topic_assignments " +
-            "  (tenant_id, doc_id, topic_id, source_collection, assigned_at, embedding_model) " +
-            "VALUES ('" + tenantId + "', decode('" + docId + "', 'hex'), " + topicId + ", '" + collection + "', " +
-            "'2026-01-01T00:00:00+00'::timestamptz, '" + modelOf(su, tenantId, collection) + "') " +
-            "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenantId)
+            .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(docId))
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS)
+            .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(su, tenantId, collection))
+            .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+            .doNothing()
+            .execute();
+    }
+
+    /** The timestamp every seeded row in this class carries ({@code 2026-01-01T00:00:00+00}). */
+    private static final OffsetDateTime SEED_TS = OffsetDateTime.parse("2026-01-01T00:00:00+00:00");
+
+    /** {@code decode(lpad(n::text, 64, '0'), 'hex')}: the lpad'd decimal string is valid hex, full 64-hex width. */
+    private static Field<byte[]> paddedChash(Field<Integer> n) {
+        return DSL.function("decode", SQLDataType.BLOB,
+            DSL.lpad(DSL.cast(n, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")), DSL.inline("hex"));
+    }
+
+    /** One {@code <prefix>N} paper document per generate_series row, in {@code collection}. */
+    private static void insertBulkDocs(DSLContext ctx, org.jooq.Table<?> series, Field<Integer> g,
+                                       String tenantId, String prefix, String author, String collection) {
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
+                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .select(ctx.select(DSL.inline(tenantId), DSL.concat(DSL.inline(prefix), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)), DSL.inline(author),
+                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"), DSL.inline(collection))
+                .from(series))
+            .execute();
+    }
+
+    /** One position-0 manifest row per generate_series row, keyed {@code <prefix>N} to chash {@code chashN}. */
+    private static void insertBulkManifest(DSLContext ctx, org.jooq.Table<?> series, Field<Integer> g,
+                                           Field<Integer> chashN, String tenantId, String prefix,
+                                           String collection, String model) {
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .select(ctx.select(DSL.inline(tenantId), DSL.concat(DSL.inline(prefix), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline(0), paddedChash(chashN), DSL.inline(collection), DSL.inline(model))
+                .from(series))
+            .execute();
     }
 
     /** Insert a nexus.chunks row (RDR-191 unified; formerly chunks_&lt;dim&gt;) with a 2-D unit direction embedding. */

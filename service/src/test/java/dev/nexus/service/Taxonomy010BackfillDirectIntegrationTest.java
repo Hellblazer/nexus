@@ -22,6 +22,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -347,17 +348,13 @@ class Taxonomy010BackfillDirectIntegrationTest {
 
     private static long seedTopic(Connection c, String tenant, String collection, String label)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-            + "VALUES (?, ?, ?, now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, label);
-            ps.setString(3, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
+        return DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, label)
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)

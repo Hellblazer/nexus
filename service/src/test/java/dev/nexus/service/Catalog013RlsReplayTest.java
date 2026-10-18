@@ -5,6 +5,7 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,8 @@ import java.util.HexFormat;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -212,16 +215,18 @@ class Catalog013RlsReplayTest {
         // Manifest vehicle (RDR-187: the chash_index original was dropped):
         // parent doc first, then the chunk-pointer row carrying the legacy
         // 16-byte chash.
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_documents "
-            + "(tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) "
-            + "VALUES (?, ?, 'replay doc', 'a', 2026, 'paper', 'research', ?) "
-            + "ON CONFLICT DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, "replay-" + tenant);
-            ps.setString(3, collection);
-            ps.executeUpdate();
-        }
+        DSLContext seed = DSL.using(c, SQLDialect.POSTGRES);
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, "replay-" + tenant)
+            .set(CATALOG_DOCUMENTS.TITLE, "replay doc")
+            .set(CATALOG_DOCUMENTS.AUTHOR, "a")
+            .set(CATALOG_DOCUMENTS.YEAR, 2026)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+            .set(CATALOG_DOCUMENTS.CORPUS, "research")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .onConflictDoNothing()
+            .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every catalog_document_chunks insert. This
         // test's whole point is replaying a LEGACY 16-byte (pre-octet-CHECK) chash
@@ -233,18 +238,15 @@ class Catalog013RlsReplayTest {
         // subsequent statement on this connection/container.
         c.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-            + "VALUES (?, ?, 0, ?, ?, (SELECT embedding_model FROM nexus.catalog_collections "
-            + "WHERE tenant_id = ? AND name = ?))")) {
-            ps.setString(1, tenant);
-            ps.setString(2, "replay-" + tenant);
-            ps.setBytes(3, chash);
-            ps.setString(4, collection);
-            ps.setString(5, tenant);
-            ps.setString(6, collection);
-            ps.executeUpdate();
-        }
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "replay-" + tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                PgContainerHelper.collectionModel(seed, tenant, collection))
+            .execute();
         c.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks "
             + "ADD CONSTRAINT fk_catalog_chunks_chunk "

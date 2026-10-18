@@ -9,9 +9,11 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -32,6 +34,7 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -316,19 +319,34 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // (which tolerates manifest-less chunks via its own live-chunks anti-join;
             // these two functions INNER JOIN and so need real rows to return anything
             // at all).
-            st.execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', 'planshape-graphhop-doc', 'planshape graph-hop seed doc', '"
-                + COL_768 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-            st.execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                + "SELECT tenant_id, 'planshape-graphhop-doc', row_number() OVER (ORDER BY chash), chash, collection, embedding_model "
-                + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_768 + "'");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "planshape-graphhop-doc")
+                .set(CATALOG_DOCUMENTS.TITLE, "planshape graph-hop seed doc")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_768)
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                .execute();
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .select(seed.select(CHUNKS.TENANT_ID, DSL.inline("planshape-graphhop-doc"),
+                        DSL.rowNumber().over(DSL.orderBy(CHUNKS.CHASH)), CHUNKS.CHASH, CHUNKS.COLLECTION,
+                        CHUNKS.EMBEDDING_MODEL)
+                    .from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COL_768))))
+                .execute();
 
-            st.execute(
-                "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
-                + "VALUES (900001, '" + TENANT + "', 'planshape-topic', '" + COL_384
-                + "', 0, NOW(), 'pending') ON CONFLICT (id) DO NOTHING");
+            seed.insertInto(TOPICS)
+                .set(TOPICS.ID, 900001L)
+                .set(TOPICS.TENANT_ID, TENANT)
+                .set(TOPICS.LABEL, "planshape-topic")
+                .set(TOPICS.COLLECTION, COL_384)
+                .set(TOPICS.DOC_COUNT, 0)
+                .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+                .set(TOPICS.REVIEW_STATUS, "pending")
+                .onConflict(TOPICS.ID).doNothing()
+                .execute();
             // Deliberately SELECTIVE (~10% of the 384-dim filler, via a
             // deterministic byte-modulo sample), NOT the full collection: with
             // every chunk tagged, the join is non-selective and the planner
@@ -343,12 +361,16 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // explain() below) actually cheaper than a full scan+sort.
             // RDR-194 P3c: topic_assignments.doc_id is bytea now — select chash
             // directly, no encode('hex').
-            st.execute(
-                "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at, embedding_model) "
-                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW(), embedding_model "
-                + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
-                + "AND get_byte(chash, 0) < 26");
+            seed.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .select(seed.select(CHUNKS.TENANT_ID, CHUNKS.CHASH, DSL.inline(900001L),
+                        DSL.inline("planshape-seed"), CHUNKS.COLLECTION, DSL.currentOffsetDateTime(),
+                        CHUNKS.EMBEDDING_MODEL)
+                    .from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COL_384))
+                        .and(DSL.function("get_byte", SQLDataType.INTEGER, CHUNKS.CHASH, DSL.inline(0)).lt(26))))
+                .execute();
 
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);

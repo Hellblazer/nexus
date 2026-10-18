@@ -7,13 +7,14 @@ import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
+import org.jooq.exception.DataAccessException;
 
 import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.*;
@@ -152,10 +153,12 @@ class TaxonomyRepositoryTest {
                     "disc-doc-1", "disc-doc-2",
                     // nexus-71988 assignMany fixtures
                     "am-doc-1", "am-doc-2", "am-doc-dup", "am-doc-proj")) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-                    "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
-                    "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                    .set(CATALOG_DOCUMENTS.TITLE, "Test fixture: " + tumbler)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                    .execute();
             }
             // RDR-156 P0.2: topic_assignments.source_collection now enforces a FK to
             // catalog_collections(tenant_id, name).  Seed stub rows for all test collections.
@@ -1075,10 +1078,15 @@ class TaxonomyRepositoryTest {
                 // Stamp GUC as 'injector-tenant'
                 PgContainerHelper.setTenant(c, TenantScope.DEFAULT_TENANT_GUC, "injector-tenant", true);
                 // Attempt INSERT with a different tenant_id → WITH CHECK rejects
-                var e = assertThrows(PSQLException.class,
-                    () -> c.createStatement().execute(
-                        "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) " +
-                        "VALUES ('other-tenant', 'evil', 'col-x', 0, NOW(), 'pending')"));
+                var e = assertThrows(DataAccessException.class,
+                    () -> DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPICS)
+                        .set(TOPICS.TENANT_ID, "other-tenant")
+                        .set(TOPICS.LABEL, "evil")
+                        .set(TOPICS.COLLECTION, "col-x")
+                        .set(TOPICS.DOC_COUNT, 0)
+                        .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+                        .set(TOPICS.REVIEW_STATUS, "pending")
+                        .execute());
                 // RLS WITH CHECK violation → new row violates row-level security policy
                 assertThat(e.getMessage()).containsIgnoringCase("row-level security");
                 c.rollback();

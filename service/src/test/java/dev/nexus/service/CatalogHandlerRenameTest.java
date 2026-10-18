@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -175,9 +176,13 @@ class CatalogHandlerRenameTest {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-src");
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-tgt");
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', 'xm-doc-1', 'XM', 'hren__xm-src') ON CONFLICT DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "xm-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "XM")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "hren__xm-src")
+                .onConflictDoNothing()
+                .execute();
         }
         var resp = post("/v1/catalog/collections/rename",
             "{\"old_name\":\"hren__xm-src\",\"new_name\":\"hren__xm-tgt\",\"cross_model\":true}");
@@ -213,10 +218,13 @@ class CatalogHandlerRenameTest {
     private void seedDocumentIn(String collection, String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', '" + tumbler + "', 'seeded', '" + collection + "') "
-                + "ON CONFLICT DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                .set(CATALOG_DOCUMENTS.TITLE, "seeded")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .onConflictDoNothing()
+                .execute();
         }
     }
 

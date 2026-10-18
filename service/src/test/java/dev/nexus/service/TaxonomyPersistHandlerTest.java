@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -71,10 +72,12 @@ class TaxonomyPersistHandlerTest {
             // seed every doc_id this test uses as a tumbler under the default tenant.
             for (String tumbler : List.of(
                     "hd-disc-1", "hd-disc-2", "hd-rb-1", "hd-rb-2", "hd-rb-manual", "hd-os-manual")) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
-                    + TENANT + "', '" + tumbler + "', 'fixture: " + tumbler + "') "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+                    .set(CATALOG_DOCUMENTS.TITLE, "fixture: " + tumbler)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
+                    .execute();
             }
         }
 

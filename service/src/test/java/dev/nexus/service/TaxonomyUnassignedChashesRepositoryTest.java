@@ -5,9 +5,11 @@ package dev.nexus.service;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -19,10 +21,14 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_UNASSIGNED_CHASHES_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -177,17 +183,16 @@ class TaxonomyUnassignedChashesRepositoryTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
-                    + " embedding_model)"
-                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 1.0, now(), ?, '" + MODEL + "')")) {
-                ps.setString(1, TENANT_A);
-                ps.setString(2, c1);
-                ps.setLong(3, tForeign);
-                ps.setString(4, col);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
+                .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT_A)
+                .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(c1))
+                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, tForeign)
+                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
+                .set(TOPIC_ASSIGNMENTS.SIMILARITY, 1.0)
+                .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, DSL.currentOffsetDateTime())
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, col)
+                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, MODEL)
+                .execute();
         }
 
         Map<String, Object> out = repo.unassignedChashes(TENANT_A, col, 100, null);
@@ -337,42 +342,32 @@ class TaxonomyUnassignedChashesRepositoryTest {
 
             // One manifest document, 50,000 catalog_document_chunks positions --
             // the real production shape (one document, many chunk positions).
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title)"
-                    + " VALUES (?, ?, ?) ON CONFLICT DO NOTHING")) {
-                ps.setString(1, TENANT_A);
-                ps.setString(2, "unassigned-scale-doc");
-                ps.setString(3, "unassigned-scale-doc");
-                ps.executeUpdate();
-            }
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks"
-                    + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
-                    + " SELECT ?, ?, i, decode(lpad(to_hex(i), 64, '0'), 'hex'), i, ?, '" + MODEL + "'"
-                    + "   FROM generate_series(1, ?) i")) {
-                ps.setString(1, TENANT_A);
-                ps.setString(2, "unassigned-scale-doc");
-                ps.setString(3, col);
-                ps.setInt(4, total);
-                ps.executeUpdate();
-            }
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "unassigned-scale-doc")
+                .set(CATALOG_DOCUMENTS.TITLE, "unassigned-scale-doc")
+                .onConflictDoNothing()
+                .execute();
+            var series = DSL.generateSeries(1, total).as("s", "i");
+            Field<Integer> i = series.field("i", Integer.class);
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                    CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .select(seed.select(DSL.inline(TENANT_A), DSL.inline("unassigned-scale-doc"), i, indexChash(i), i,
+                        DSL.inline(col), DSL.inline(MODEL)).from(series))
+                .execute();
 
             // Own-collection assignments for every row EXCEPT the 5 scattered gaps.
-            java.sql.Array excluded = su.createArrayOf("integer",
-                java.util.Arrays.stream(unassignedIdx).boxed().toArray());
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection,"
-                    + " embedding_model)"
-                    + " SELECT ?, decode(lpad(to_hex(i), 64, '0'), 'hex'), ?, 'centroid', ?, '" + MODEL + "'"
-                    + "   FROM generate_series(1, ?) i"
-                    + "  WHERE i <> ALL (?)")) {
-                ps.setString(1, TENANT_A);
-                ps.setLong(2, topicId);
-                ps.setString(3, col);
-                ps.setInt(4, total);
-                ps.setArray(5, excluded);
-                ps.executeUpdate();
-            }
+            seed.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .select(seed.select(DSL.inline(TENANT_A), indexChash(i), DSL.inline(topicId),
+                        DSL.inline("centroid"), DSL.inline(col), DSL.inline(MODEL))
+                    .from(series)
+                    .where(i.notIn(java.util.Arrays.stream(unassignedIdx).boxed().toList())))
+                .execute();
         }
 
         long started = System.nanoTime();
@@ -440,6 +435,13 @@ class TaxonomyUnassignedChashesRepositoryTest {
         return String.format("%064x", i);
     }
 
+    /** {@code decode(lpad(to_hex(i), 64, '0'), 'hex')}: the deterministic 64-hex chash for index {@code i}. */
+    private static Field<byte[]> indexChash(Field<Integer> i) {
+        return DSL.function("decode", SQLDataType.BLOB,
+            DSL.lpad(DSL.function("to_hex", SQLDataType.VARCHAR, i), DSL.inline(64), DSL.inline("0")),
+            DSL.inline("hex"));
+    }
+
     /** Seeds a chunk AND a real {@code catalog_document_chunks} manifest row
      *  referencing it (one dedicated {@code catalog_documents} row per chash,
      *  position 0) -- the manifest-liveness fact the rework round's filter
@@ -451,16 +453,15 @@ class TaxonomyUnassignedChashesRepositoryTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             String doc = "doc-" + hexChashValue;
             PgContainerHelper.insertCatalogDocument(ctx, tenant, doc);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks"
-                    + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
-                    + " VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, '" + MODEL + "')")) {
-                ps.setString(1, tenant);
-                ps.setString(2, doc);
-                ps.setString(3, hexChashValue);
-                ps.setString(4, collection);
-                ps.executeUpdate();
-            }
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hexChashValue))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                .execute();
         }
     }
 

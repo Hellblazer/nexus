@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -19,11 +20,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -159,12 +161,6 @@ class ChashConformanceReportIntegrationTest {
         }
     }
 
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
-    }
-
     private static Map<String, Object> tableRow(List<Map<String, Object>> report, String tableName) {
         return report.stream()
             .filter(r -> tableName.equals(r.get("table_name")))
@@ -190,22 +186,26 @@ class ChashConformanceReportIntegrationTest {
             // requires (the bare two-column raw INSERT this used to run 23502s on
             // lifecycle_state NOT NULL).
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COLLECTION);
-            exec(su, "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
-                + TENANT_A + "', '1.1', 'doc') ON CONFLICT DO NOTHING");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "1.1")
+                .set(CATALOG_DOCUMENTS.TITLE, "doc")
+                .onConflictDoNothing()
+                .execute();
             withChecksDropped(su, () -> {
                 // a conformant sibling row too, so total > non_conformant is
                 // asserted meaningfully (not just "1 row total, 1 poisoned").
                 insertChunk768(su, TENANT_A, sha256("chashconf clean sibling"), "clean sibling");
                 insertChunk768(su, TENANT_A, legacyChash, "poisoned legacy row");
-                try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES ('"
-                    + TENANT_A + "', '1.1', 0, ?, '" + COLLECTION + "', '" + MODEL + "')")) {
-                    ps.setBytes(1, legacyChash);
-                    ps.executeUpdate();
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
+                seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT_A)
+                    .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "1.1")
+                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, legacyChash)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
+                    .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .execute();
             });
         }
 

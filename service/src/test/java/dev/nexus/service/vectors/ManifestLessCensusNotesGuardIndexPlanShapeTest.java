@@ -7,10 +7,13 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -18,7 +21,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -165,28 +167,20 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
     private void seedNoiseAndTargets() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Statement st = su.createStatement();
-            st.execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
-                + "SELECT '" + TENANT + "', 'wbfpw4-idx-planshape-noise-' || i, "
-                + "       'noise note ' || i, 'prose', 'knowledge', '" + COLLECTION + "', "
-                + "       jsonb_build_object('doc_id', md5('noise-a-' || i) || md5('noise-b-' || i)) "
-                + "FROM generate_series(1, " + NOISE_NOTE_ROWS + ") i");
-            st.execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
-                + "SELECT '" + TENANT + "', 'wbfpw4-idx-planshape-other-' || i, "
-                + "       'other collection doc ' || i, 'prose', 'knowledge', '" + OTHER_COLLECTION + "', "
-                + "       jsonb_build_object('doc_id', md5('other-a-' || i) || md5('other-b-' || i)) "
-                + "FROM generate_series(1, " + OTHER_COLLECTION_ROWS + ") i");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertBulkNotes(seed, NOISE_NOTE_ROWS, "wbfpw4-idx-planshape-noise-", "noise note ", COLLECTION, "noise");
+            insertBulkNotes(seed, OTHER_COLLECTION_ROWS, "wbfpw4-idx-planshape-other-", "other collection doc ",
+                OTHER_COLLECTION, "other");
             for (int i = 0; i < NUM_TARGETS; i++) {
-                st.execute(
-                    "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
-                    + "VALUES ('" + TENANT + "', '" + TARGET_NOTE_DOCS.get(i) + "', 'target note', 'prose', "
-                    + "        'knowledge', '" + COLLECTION + "', "
-                    + "        jsonb_build_object('doc_id', '" + TARGET_CHASHES.get(i) + "'))");
+                seed.insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, TARGET_NOTE_DOCS.get(i))
+                    .set(CATALOG_DOCUMENTS.TITLE, "target note")
+                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
+                    .set(CATALOG_DOCUMENTS.CORPUS, "knowledge")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                    .set(CATALOG_DOCUMENTS.METADATA, DSL.jsonbObject(DSL.key("doc_id").value(TARGET_CHASHES.get(i))))
+                    .execute();
             }
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
         }
@@ -194,6 +188,27 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
         vecRepo.upsertChunks(TENANT, COLLECTION, TARGET_CHASHES,
             TARGET_CHASHES.stream().map(c -> "reverse-lookup plan-shape text " + c).toList(),
             IntStream.range(0, NUM_TARGETS).mapToObj(i -> Map.<String, Object>of()).toList());
+    }
+
+    /**
+     * {@code rows} note-shaped documents {@code <tumblerPrefix>N} in {@code collection}, each with a
+     * distinct {@code metadata.doc_id} = {@code md5(<tag>-a-N) || md5(<tag>-b-N)}.
+     */
+    private static void insertBulkNotes(DSLContext seed, int rows, String tumblerPrefix, String titlePrefix,
+                                        String collection, String tag) {
+        var series = DSL.generateSeries(1, rows).as("s", "i");
+        Field<String> i = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
+        seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS,
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.METADATA)
+            .select(seed.select(DSL.inline(TENANT), DSL.concat(DSL.inline(tumblerPrefix), i),
+                    DSL.concat(DSL.inline(titlePrefix), i), DSL.inline("prose"), DSL.inline("knowledge"),
+                    DSL.inline(collection),
+                    DSL.jsonbObject(DSL.key("doc_id").value(DSL.concat(
+                        DSL.md5(DSL.concat(DSL.inline(tag + "-a-"), i)),
+                        DSL.md5(DSL.concat(DSL.inline(tag + "-b-"), i))))))
+                .from(series))
+            .execute();
     }
 
     // Matches each CTE's own MATERIALIZATION node -- "CTE <name>" followed by its

@@ -3,6 +3,7 @@ package dev.nexus.service;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -23,6 +24,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -150,16 +153,26 @@ class ChashRepositoryTest {
             // can no longer hold).
             chunk(su, TENANT_A, 384, "ren-src", ch("ren-1"), "2026-07-01 00:00:06+00");
             chunk(su, TENANT_A, 384, "ren-src", ch("ren-2"), "2026-07-01 00:00:07+00");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents " +
-                "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
-                "VALUES ('" + TENANT_A + "', 'ren-doc-1', 'Ren Doc', 'a', 2026, " +
-                "'paper', 'research', 'ren-src')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
-                "VALUES ('" + TENANT_A + "', 'ren-doc-1', 0, decode('" + ch("ren-1").toHex() + "', 'hex'), 'ren-src', " +
-                "(SELECT embedding_model FROM nexus.catalog_collections " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND name = 'ren-src'))");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "ren-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Ren Doc")
+                .set(CATALOG_DOCUMENTS.AUTHOR, "a")
+                .set(CATALOG_DOCUMENTS.YEAR, 2026)
+                .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                .set(CATALOG_DOCUMENTS.CORPUS, "research")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "ren-src")
+                .execute();
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT_A)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "ren-doc-1")
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, ch("ren-1").toBytes())
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "ren-src")
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    PgContainerHelper.collectionModel(seed, TENANT_A, "ren-src"))
+                .execute();
             // Rename collision fixture: same chash on both sides.
             chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide"),   "2026-07-01 00:00:08+00");
             chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide-2"), "2026-07-01 00:00:09+00");

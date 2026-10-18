@@ -9,6 +9,7 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -21,12 +22,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.time.OffsetDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -154,21 +157,26 @@ class CatalogPurgeTrashTest {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', 'Live', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_FRESH_TOMB + "', 'Fresh Tomb', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_AGED_TOMB + "', 'Aged Tomb', '" + COLLECTION + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertDocument(seed, DOC_LIVE, "Live");
+            insertDocument(seed, DOC_FRESH_TOMB, "Fresh Tomb");
+            insertDocument(seed, DOC_AGED_TOMB, "Aged Tomb");
             // nexus-tk070.p1 (RDR-194 § D2): one catalog_links row per tombstone
             // class, DOC_LIVE as the FROM side, so purge_trash's Step 4 physical
             // delete of DOC_AGED_TOMB exercises fk_catalog_links_to_document's
             // cascade (execute_... below), while DOC_FRESH_TOMB's link — still
             // inside the grace window, never physically deleted by this fixture —
             // stays a live pin that the link never disappears out from under.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) VALUES "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', '" + DOC_AGED_TOMB + "', 'relates', 'test', NOW()), "
-                + "('" + TENANT + "', '" + DOC_LIVE + "', '" + DOC_FRESH_TOMB + "', 'relates', 'test', NOW())");
+            for (String to : List.of(DOC_AGED_TOMB, DOC_FRESH_TOMB)) {
+                seed.insertInto(CATALOG_LINKS)
+                    .set(CATALOG_LINKS.TENANT_ID, TENANT)
+                    .set(CATALOG_LINKS.FROM_TUMBLER, DOC_LIVE)
+                    .set(CATALOG_LINKS.TO_TUMBLER, to)
+                    .set(CATALOG_LINKS.LINK_TYPE, "relates")
+                    .set(CATALOG_LINKS.CREATED_BY, "test")
+                    .set(CATALOG_LINKS.CREATED_AT, DSL.currentOffsetDateTime())
+                    .execute();
+            }
         }
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
@@ -219,17 +227,24 @@ class CatalogPurgeTrashTest {
      * fixture below needs a manifest row stamped with a collection OTHER than the
      * shared {@link #COLLECTION} constant. */
     private static void insertManifestRow(Connection su, String docId, String chashHex, String collection) throws Exception {
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'), ?, ?)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, docId);
-            ps.setString(3, chashHex);
-            ps.setString(4, collection);
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
             // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
-            ps.setString(5, MODEL);
-            ps.execute();
-        }
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+            .execute();
+    }
+
+    private static void insertDocument(DSLContext seed, String tumbler, String title) {
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+            .execute();
     }
 
     /** RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks --
@@ -465,11 +480,10 @@ class CatalogPurgeTrashTest {
         // Fresh, self-contained fixture: three docs, own chashes.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_BOUNDARY_AT + "', 'Boundary At', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_BOUNDARY_INSIDE + "', 'Boundary Inside', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_BOUNDARY_OUTSIDE + "', 'Boundary Outside', '" + COLLECTION + "')");
+            DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            insertDocument(seed, DOC_BOUNDARY_AT, "Boundary At");
+            insertDocument(seed, DOC_BOUNDARY_INSIDE, "Boundary Inside");
+            insertDocument(seed, DOC_BOUNDARY_OUTSIDE, "Boundary Outside");
         }
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // chunk vectors to land BEFORE the manifest rows below.
