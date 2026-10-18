@@ -1161,7 +1161,7 @@ def _row1_env(h: Harness, model: str, **extra: str) -> dict[str, str]:
 
 @_POSIX_ONLY
 def test_row1_refuses_to_run_on_a_machine_that_is_not_a_tart_guest(h: Harness) -> None:
-    env = _row1_env(h, "Mac17,16", CLAUDE_CODE_OAUTH_TOKEN="x")
+    env = _row1_env(h, "Mac17,16", **{"CLAUDE_CODE_OAUTH_TOKEN": "x"})
     res = subprocess.run([str(h.row1), "pre"], env=env, capture_output=True, text=True, timeout=60)
     assert res.returncode == 2
     assert "refusing to run outside a tart guest" in res.stderr and "Mac17,16" in res.stderr
@@ -1178,7 +1178,7 @@ def test_row1_goes_on_in_a_virtualmac_guest(h: Harness) -> None:
 
 @_POSIX_ONLY
 def test_the_automation_token_reaches_only_the_claude_calls(h: Harness) -> None:
-    env = _row1_env(h, "VirtualMac2,1", CLAUDE_CODE_OAUTH_TOKEN="fake-token-for-the-test")
+    env = _row1_env(h, "VirtualMac2,1", **{"CLAUDE_CODE_OAUTH_TOKEN": "fake-token-for-the-test"})
     home = Path(env["HOME"])
     stub = home / ".local" / "bin"  # row1.sh resets PATH to this directory and the system's
     stub.mkdir(parents=True)

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Run RDR-228 MVV row 1 (local, start at login, then a real reboot) in a fresh
-# macOS guest on hellmini, from the laptop, with no human step (nexus-ppuwc).
+# macOS guest on hellmini, from the laptop, with no human step per run (nexus-ppuwc);
+# the one standing dependency is a signed-in nxmvv GUI session (exit 3 without it).
 #
 #   tests/e2e/macos-guest/launch.sh [--out DIR] [--wheel PATH] [--permission-mode MODE] [--keep-guest]
 #
@@ -18,8 +19,9 @@
 #   3 hold      host.sh hold acquires the hellmini `suite` lease and keeps it, over
 #               an ssh session whose stdin this script owns, for the whole run: a
 #               suite started mid-run finds it held and fails closed, and the
-#               runner overlap guard waits. The lease is released only after the
-#               per-run VM is destroyed. A run that dies, or a laptop that goes
+#               runner overlap guard waits. The hold destroys the per-run VM
+#               before it releases the lease; if the destroy fails the lease is still
+#               released and the host-side deadman deletes the VM at its cap. A run that dies, or a laptop that goes
 #               away, ends the hold (stdin closes) and with it the VM; a host-side
 #               deadman deletes the VM at 90 minutes whatever else happens.
 #   4 restore   clone the clean image (nexus-mac-clean) to nx-mac-run-<run id>,
@@ -202,7 +204,7 @@ start_hold() {
     HOLD_PID=$!
     hold_made=1
     exec 8>"$fifo_dir/in"
-    for i in $(seq 1 90); do
+    for _ in $(seq 1 90); do
         if grep '^HOLD: acquired the suite lease' "$out/hold.log" >/dev/null 2>&1; then return 0; fi
         kill -0 "$HOLD_PID" 2>/dev/null || break
         sleep 1

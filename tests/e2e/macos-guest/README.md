@@ -58,8 +58,9 @@ overlap. The run enforces that for its whole duration, not only at the start:
   `tests/_suite_lease.py` and `scripts/lib/build-lease.sh` use, in the git
   common dir of `/Volumes/Bulk/src/nexus`) over an ssh session whose stdin
   `launch.sh` owns. A suite started mid-run finds it held and fails closed
-  (exit 75); the runner overlap guard waits. The lease is released only after
-  the VM is destroyed (the hold destroys it itself on the way out).
+  (exit 75); the runner overlap guard waits. The hold destroys the VM
+  before it releases the lease; if the destroy fails the lease is still released
+  and the deadman deletes the VM at its cap.
 - `host.sh guard` reads those leases (`suite`, `service`) before the hold. An
   unreadable lease directory or pid file counts as busy, as in
   `tests/_suite_lease.py`; a pid-less lease younger than a minute counts as
