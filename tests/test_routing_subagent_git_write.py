@@ -891,6 +891,72 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git status; ssh localhost <<'EOF'\ngit config user.name x\nEOF\ngit log",
         "git log -1 --format='%s config' && ssh localhost 'git config user.name x'",
     ],
+    # nexus-gvg6t review B1: a fully quoted global option before `config` is one
+    # opaque word to the tokenizer. The cursor used to take it for the
+    # subcommand, so the `config` after it read as an argument and passed.
+    "config_quoted_global_option_before_config": [
+        "git '--git-dir=.git' config user.name pwned",
+        'git "--git-dir=.git" config user.name pwned',
+        "git '--git-dir=.git' config core.hooksPath /tmp/evil",
+        "git '--work-tree=.' config user.name pwned",
+        "git '--namespace=a' config user.name pwned",
+        "git '--exec-path=/x' config user.name pwned",
+        "git -c user.x=1 '--git-dir=.git' config user.name pwned",
+        "git -C . '--git-dir=.git' config user.name pwned",
+        # glued to a quote: still one opaque option word
+        'git --git-dir"=.git" config user.name pwned',
+        "git '--git-dir=.git' config --add alias.x '!id'",
+        # these write elsewhere or die first, so the real-git test lists them apart
+        'git "--config-env=core.x=FOO" config user.name pwned',
+        "git '--git-dir=.git' config --global user.name pwned",
+    ],
+    # nexus-gvg6t review B1: a quoted word in the subcommand slot may be anything
+    # (git itself rejects these three, so no real-git run); `config` after it is
+    # not provably an argument.
+    "config_quoted_word_in_subcommand_slot": [
+        "git ' ' config user.name pwned",
+        "git '' config user.name pwned",
+        "git 'x y' config user.name pwned",
+    ],
+    # nexus-gvg6t review B2: `''` or `""` glued to a neighbour is part of a word, so
+    # a `#` after it is not a comment (in the shell `''#` is the word `#`).
+    "config_glued_empty_string_is_not_a_comment_start": [
+        "echo ''#;git config user.name pwned",
+        'echo ""#;git config user.name pwned',
+        "echo ''# ; git config user.name pwned",
+        "echo a ''#b;git config user.name pwned",
+    ],
+    # nexus-gvg6t review B4: a consumer runs its quoted argument as a command, and
+    # the quotes can split the spelling of `git` or the command itself across
+    # strings; the consumer joins its arguments, so no string holds the whole write.
+    "config_split_spelling_in_data_a_consumer_runs": [
+        "git rebase -x 'g''it config user.name x' HEAD~1",
+        "git filter-branch --tree-filter 'gi\"\"t config user.name x' HEAD~1..HEAD",
+        "git submodule foreach 'g''it config user.name x'",
+        "git submodule foreach 'gi\"\"t config user.name x'",
+        "git submodule foreach \"gi''t config user.name x\"",
+        "ssh localhost 'gi\"\"t config user.name x'",
+        "ssh localhost <<'EOF'\ngi\"\"t config user.name x\nEOF",
+        "ssh localhost \"" + D + "(cat <<'EOF'\ngi''t config user.name x\nEOF\n)\"",
+        "tmux send-keys 'git config' ' user.name x' Enter",
+        "tmux send-keys 'git' ' ' 'config' ' user.name x'",
+        "ssh localhost 'git config' user.name x",
+        "ssh localhost 'git config user.name' x",
+        "ssh localhost 'cd r && git config' user.name x",
+        "ssh localhost 'git' config user.name x",
+        "git rebase '--exec=g''it config user.name x' main",
+    ],
+    # nexus-gvg6t review B5: `git-config` is a program only in command position;
+    # still a write there, whatever wraps it.
+    "config_dashed_program_in_command_position": [
+        "git-config user.name x",
+        "sudo git-config user.name x",
+        "env A=1 git-config user.name x",
+        "echo hi; git-config user.name " + D + "x",
+        "true && git-config user.name '" + D + "x'",
+        "if true; then git-config user.name x; fi",
+        "FOO=1 /usr/bin/git-config user.name " + D + "x docs/*.md",
+    ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
@@ -1093,6 +1159,15 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
     # expansion is possible in them, so the word `config` there is a search term,
     # a message or a file name, not a verb. The cursor reads each as ONE word.
     "config_quoted_text_is_data": [
+        # nexus-gvg6t review B5: a dashed name is an argument here, not a program
+        'grep -n "git-config" docs/*.md',
+        "rg 'git-config' docs/*.md",
+        "grep -rn git-config docs/*.md src",
+        "man git-config docs/*.md",
+        # nexus-gvg6t review B1: a quoted word AFTER the subcommand stays data
+        "git log --grep='x y' --oneline",
+        'git grep "config" -- "a b"',
+        "git log -n 3 --grep=\"config\" -- 'a b'",
         'git grep "config"',
         "git grep 'config' src",
         'git log --grep="config" --oneline',
@@ -1512,7 +1587,29 @@ _SHARED_CONFIG_WRITES = [
     'GIT_DIR="{primary}/.git" git config --worktree user.name x',
     "env 'GIT_DIR={primary}/.git' git config --worktree user.name x",
     "git config --worktree user.name x; GIT_COMMON_DIR='{primary}/.git' git status",
+    # nexus-gvg6t review B1: a quoted global option before `config`, and one that
+    # points git at the primary.
+    "git '--git-dir=.git' config user.name x",
+    'git "--git-dir=.git" config --global user.name x',
+    "git '--git-dir=.git' config core.hooksPath /tmp/evil",
+    "git '--work-tree=.' config user.name x",
+    "git '--namespace=a' config user.name x",
+    'git "--config-env=core.x=FOO" config user.name x',
+    "git '--exec-path=/x' config user.name x",
+    "git -c user.x=1 '--git-dir=.git' config user.name x",
+    "git '--git-dir={primary}/.git' config --worktree user.name x",
+    "git '--work-tree={primary}' config --worktree user.name x",
+    'git --git-dir"={primary}/.git" config --worktree user.name x',
+    # nexus-gvg6t review B3: a quote that hides the `=` of a repository variable
+    # still points git at the primary.
+    'env GIT_DIR"={primary}/.git" git config --worktree user.name x',
+    "env GIT_WORK_TREE'='{primary} git config --worktree user.name x",
+    "env GIT_COMMON_DIR'='{primary}/.git git config --worktree user.name x",
+    "env G'IT_DIR'={primary}/.git git config --worktree user.name x",
+    # nexus-gvg6t review B2 in a worktree
+    "echo ''#;git config user.name x",
     # A data string a consumer runs is held to the same rule.
+    "git rebase -x 'g''it config user.name x' HEAD~1",
     "ssh localhost 'git config user.name x'",
     "git submodule foreach 'git config --worktree core.hooksPath /tmp/x'",
 ]
@@ -1674,10 +1771,16 @@ _NOT_REAL_WRITES = {
     "git --config-env alias.c=CFG c user.name x": "CFG unset",
     "git --config-env=ALIAS.c=CFG c user.name x": "CFG unset",
     "git -c alias.c=" + D + "CFG c user.name x": "CFG unset",
+    # nexus-gvg6t review B1: the first dies on the unset FOO, the second writes the
+    # sandbox's global file, which the watch does not cover.
+    'git "--config-env=core.x=FOO" config user.name pwned': "FOO unset",
+    "git '--git-dir=.git' config --global user.name pwned": "global file",
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=" + D + "CFG git c user.name x": "CFG unset",
 }
 _REAL_WRITE_FAMILIES = (
     "config_global_option_values", "config_substitution_payload", "config_alias_injection",
+    "config_quoted_global_option_before_config",
+    "config_glued_empty_string_is_not_a_comment_start",
 )
 
 
@@ -1765,6 +1868,9 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     for cmd in (
         "git submodule foreach 'git config user.name via-foreach'",
         'git submodule foreach "git config core.hooksPath /tmp/hk"',
+        "git submodule foreach 'g''it config user.name via-split'",
+        "git submodule foreach 'gi\"\"t config user.name via-split2'",
+        "git submodule foreach \"gi''t config user.name via-split3\"",
     ):
         before = _config_snapshot(watched)
         subprocess.run(["bash", "-c", cmd], cwd=main, env=env, check=True, capture_output=True)

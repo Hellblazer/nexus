@@ -992,7 +992,20 @@ def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> st
 #: ``data``): a ``git config`` write spelled out in it denies, with the same
 #: cursor. Prose such as ``fix git config handling in hooks`` reads as a write
 #: there (a key and a value) and denies; ``git config`` with one word after it,
-#: or none, is a read and passes.
+#: or none, is a read and passes. A consumer joins its arguments and the quotes
+#: can split a spelling across strings, so in a command that names a consumer
+#: (``_CONSUMER_RE``) the words of each simple command are also read joined, quotes
+#: removed (``_JoinTrack``, ``_config_joined_hit``): ``ssh host 'g''it config' k v``,
+#: ``tmux send-keys 'git config' ' user.name x'``. A command of more than 64 words
+#: keeps two copies of a repeated word and, if still too long, denies when it names
+#: git and ``config`` (a repeat cannot change a verdict past two copies; a count
+#: the reader cannot prove is refused). Limit, taken on purpose: tmux key names
+#: (``Space``) and an argument built by the consumer's own shell are not modelled.
+#:
+#: A quoted word that is not a plain word is ``Q`` in the cursor's text (``-Q`` when
+#: it starts with a dash). A ``Q`` where the subcommand may be (``git
+#: '--git-dir=.git' config``, ``git 'x y' config``) counts as a possible ``config``
+#: and as another repository, and a ``-Q`` after the key is a possible scope flag.
 #:
 #: - CURSOR (plain apart from data): ``_config_relaxed_match`` splits the text
 #:   into simple commands (the split is exact once data is one word) and finds a
@@ -1089,11 +1102,19 @@ _CONFIG_NONPLAIN_RE = re.compile(r"""['"\\\r{}*?\[]""")
 _CONFIG_SEGMENT_SPLIT_RE = re.compile(r"[;&|()\n]")
 _CONFIG_REDIRECT_RE = re.compile(r"(?<!\d)\d*<{1,3}\s*[^\s;&|()<>]*")
 _DASHED_CONFIG_RE = re.compile(r"git-config(?:\.(?:exe|cmd|bat|com|sh))?")
-#: The same program as a token anywhere in text (the strict path has no cursor).
+#: The same program, in text the cursor cannot read (the strict path has no cursor).
 #: ``config`` in ``git-config`` is glued to ``-``, which ``_CONFIG_STRICT_RE``
 #: excludes, so the quoted forms ``git-config user.name "$x"`` need their own.
-_DASHED_CONFIG_SCAN_RE = re.compile(
-    r"(?<![\w.\-])git-config(?:\.(?:exe|cmd|bat|com|sh))?(?![\w.\-])"
+#: Only in COMMAND position: at the start, after a command break, behind
+#: assignments and the words that hand a command on (``sudo``, ``env``,
+#: ``command``, ``exec``, ``if``/``then``). An argument is not a program:
+#: ``grep -n "git-config" docs/*.md`` searches for the name. The run of prefix
+#: words cannot cross a break, so an attempt ends at the next break: linear.
+_DASHED_CONFIG_CMD_RE = re.compile(
+    r"(?:^|[;&|(){}`\n])[ \t]*"
+    r"(?:(?:[A-Za-z_]\w*=[^\s;&|(){}`]*|sudo|doas|env|command|exec|nice|nohup|time|"
+    r"xargs|builtin|if|then|else|elif|do|while|until|!)[ \t]+)*"
+    r"(?:[^\s;&|(){}`]*/)?git-config(?:\.(?:exe|cmd|bat|com|sh))?(?![\w.\-])"
 )
 _WORD_RE = re.compile(r"\S+")
 #: Words and breaks for the argument walk of the get-read exemption: a break
@@ -1112,6 +1133,17 @@ _CONFIG_ALIAS_INJECT_RE = re.compile(
 )
 #: Variables that point git at another repository.
 _GIT_REPO_ENV_RE = re.compile(r"(?<!\w)GIT_(?:DIR|COMMON_DIR|WORK_TREE)=")
+
+
+def _repo_env_named(text: str) -> bool:
+    """True when *text* assigns a repository-pointing variable, as written or
+    once its quotes are gone (``env GIT_DIR"=/x" git ...``, ``GIT_WORK_TREE'='/x``,
+    ``G'IT_DIR'=/x``: the shell joins those into the assignment)."""
+    if _GIT_REPO_ENV_RE.search(text) is not None:
+        return True
+    if "'" not in text and '"' not in text:
+        return False
+    return _GIT_REPO_ENV_RE.search(text.replace("'", "").replace('"', "")) is not None
 #: A segment with more ``config`` verbs than this denies without being read: each
 #: one re-reads the arguments after it, and a cap keeps the walk linear.
 _CONFIG_MAX_WORDS_PER_SEGMENT = 8
@@ -1200,6 +1232,16 @@ _MASK_WORD_RE = re.compile(r"[\w.\-/]+")
 _MASK_DQUOTE_RE = re.compile(r'"([^"\\$`]*(?:\\.[^"\\$`]*)*)"', re.DOTALL)
 #: Heredocs opened on one line before the first newline; more gives up.
 _MASK_MAX_PENDING = 16
+#: The joined-words reader (``_JoinTrack``): word and break boundaries, and the
+#: words one command may hold before repeats are collapsed and the rest refused.
+_MASK_PLAIN_SPLIT_RE = re.compile(r"(\s+|[;&|()]+)")
+_JOIN_MAX_WORDS = 64
+_JOIN_OVERFLOW = "\x00"
+#: What a data string stands for in the cursor's text: a word that is not a plain
+#: word is ``Q``, and ``-Q`` when it starts with a dash, so the cursor sees an
+#: option it cannot read rather than a positional.
+_MASK_OPAQUE = "Q"
+_MASK_OPAQUE_OPTION = "-Q"
 
 
 class _Masked(NamedTuple):
@@ -1209,6 +1251,71 @@ class _Masked(NamedTuple):
 
     text: str
     data: tuple[str, ...]
+    joined: tuple[str, ...] = ()
+
+
+class _JoinTrack:
+    """The shell words of each simple command that holds a quoted string, for
+    ``_config_joined_hit``. A word is the glued run of its unquoted text and its
+    quoted bodies, with the quotes gone (``g''it`` is ``git``); a command ends at
+    a break character or a newline. A command with no quoted word is dropped
+    when it ends, so a plain command costs one split and no string."""
+
+    __slots__ = ("words", "cur", "quoted", "out")
+
+    def __init__(self) -> None:
+        self.words: list[str] = []
+        self.cur: list[str] = []
+        self.quoted = False
+        self.out: list[list[str]] = []
+
+    def feed(self, text: str) -> None:
+        parts = _MASK_PLAIN_SPLIT_RE.split(text)
+        for k, part in enumerate(parts):
+            if k % 2 == 0:
+                if part:
+                    self.cur.append(part)
+                continue
+            self.word_end()
+            if "\n" in part or not part.isspace():
+                self.command_end()
+
+    def quote(self, body: str) -> None:
+        self.cur.append(body)
+        self.quoted = True
+
+    def word_end(self) -> None:
+        if self.cur:
+            self.words.append("".join(self.cur))
+            self.cur = []
+
+    def command_end(self) -> None:
+        self.word_end()
+        if self.quoted and self.words:
+            self.out.append(self.words)
+        self.words = []
+        self.quoted = False
+
+    def joined(self) -> tuple[str, ...]:
+        self.command_end()
+        res: list[str] = []
+        for words in self.out:
+            if len(words) > _JOIN_MAX_WORDS:
+                # Runs of one word repeated: two copies decide every verdict a
+                # repeat can change (the positional count saturates at two), so
+                # a run keeps two. What is still too long is refused unread.
+                kept: list[str] = []
+                run = 0
+                for w in words:
+                    run = run + 1 if kept and kept[-1] == w else 1
+                    if run <= 2:
+                        kept.append(w)
+                if len(kept) > _JOIN_MAX_WORDS:
+                    res.append(_JOIN_OVERFLOW + " ".join(kept))
+                    continue
+                words = kept
+            res.append(" ".join(words))
+        return tuple(res)
 
 
 def _heredoc_end(text: str, p: int, delim: str, dash: bool) -> tuple[int, int] | None:
@@ -1240,6 +1347,12 @@ def _heredoc_end(text: str, p: int, delim: str, dash: bool) -> tuple[int, int] |
     return None
 
 
+def _data_squash(body: str) -> str:
+    """*body* with the characters a consumer's shell would drop from inside a word
+    removed (quotes, backslashes), so ``gi""t`` and ``g\\it`` name ``git``."""
+    return body.replace("'", "").replace('"', "").replace("\\", "")
+
+
 def _config_mask(command: str) -> _Masked | None:
     """Read *command* once, left to right, and return it with every data string
     replaced by one word and every comment dropped (see the block comment above
@@ -1250,6 +1363,7 @@ def _config_mask(command: str) -> _Masked | None:
     out: list[str] = []
     data: list[str] = []
     pending: list[tuple[str, bool]] = []
+    track = _JoinTrack()
     prev = ""  # the last character of the text so far; "" at the start
     i = 0
     while True:
@@ -1257,6 +1371,7 @@ def _config_mask(command: str) -> _Masked | None:
         j = n if m is None else m.start()
         if j > i:
             out.append(command[i:j])
+            track.feed(command[i:j])
             prev = command[j - 1]
         if m is None:
             break
@@ -1264,14 +1379,16 @@ def _config_mask(command: str) -> _Masked | None:
         c = m.group()
         if c == "\n":
             out.append("\n")
+            track.feed("\n")
             prev = "\n"
             i += 1
             for delim, dash in pending:
                 end = _heredoc_end(command, i, delim, dash)
                 if end is None:
                     return None
-                if "git" in command[i:end[0]]:
-                    data.append(command[i:end[0]])
+                body = command[i:end[0]]
+                if "git" in body or "git" in _data_squash(body):
+                    data.append(body)
                 i = end[1]
             pending = []
         elif c == "\\" and command.startswith("\\\n", i):
@@ -1282,6 +1399,7 @@ def _config_mask(command: str) -> _Masked | None:
                 i = n if e < 0 else e
             else:
                 out.append("#")
+                track.feed("#")
                 prev = "#"
                 i += 1
         elif c == "<<":
@@ -1289,10 +1407,12 @@ def _config_mask(command: str) -> _Masked | None:
             if hm is not None and len(pending) < _MASK_MAX_PENDING:
                 pending.append((hm.group(2) or hm.group(3) or hm.group(4), hm.group(1) == "-"))
                 out.append("<<Q")
+                track.feed("<<Q")
                 prev = "Q"
                 i = hm.end()
             elif command.startswith("<<<", i):
                 out.append("<<<")
+                track.feed("<<<")
                 prev = "<"
                 i += 3
             else:
@@ -1334,14 +1454,19 @@ def _config_mask(command: str) -> _Masked | None:
                 alone = (not before or before.isspace() or before in _MASK_BOUNDARY) and (
                     not after or after.isspace() or after in _MASK_BOUNDARY
                 )
-                word = "Q" if alone else ""
+                word = _MASK_OPAQUE if alone else ""
+            elif _MASK_WORD_RE.fullmatch(content):
+                word = content
             else:
-                word = content if _MASK_WORD_RE.fullmatch(content) else "Q"
+                word = _MASK_OPAQUE_OPTION if content.startswith("-") else _MASK_OPAQUE
             out.append(word)
-            if word:
-                prev = word[-1]
+            # A glued empty string emits no character but is still part of a word
+            # (`''#` is the word `#`, not a comment), so what follows is not at a
+            # word start.
+            prev = word[-1] if word else "'"
+            track.quote(content)
             i = end_at
-            if "git" in body:
+            if "git" in body or "git" in _data_squash(body):
                 data.append(body)
         else:
             return None
@@ -1350,7 +1475,7 @@ def _config_mask(command: str) -> _Masked | None:
     text = "".join(out)
     if _CONFIG_NONPLAIN_RE.search(text) is not None:
         return None
-    return _Masked(text, tuple(data))
+    return _Masked(text, tuple(data), track.joined())
 
 
 class _ConfigView(NamedTuple):
@@ -1370,6 +1495,7 @@ class _ConfigView(NamedTuple):
     text: str = ""
     data: tuple[str, ...] = ()
     memo: dict[bool, bool] | None = None
+    joined: tuple[str, ...] = ()
 
 
 def _config_view(command: str, relaxed: bool) -> _ConfigView:
@@ -1378,7 +1504,9 @@ def _config_view(command: str, relaxed: bool) -> _ConfigView:
     reads = relaxed and _CAPTURE_RE.search(command) is None
     masked = _config_mask(command)
     if masked is not None and not _may_recombine(masked.text):
-        return _ConfigView(command, True, reads, masked.text, masked.data, {})
+        return _ConfigView(
+            command, True, reads, masked.text, masked.data, {}, masked.joined,
+        )
     return _ConfigView(command, False, reads)
 
 
@@ -1392,6 +1520,8 @@ def _config_known_read_flag(a: str) -> bool:
 def _config_scope_flag(a: str) -> bool:
     """True for ``--global``/``--system``/``--local``/``--file``/``--blob``, any
     unique-prefix spelling of them, ``--file=x`` and ``-f``, ``-fx``."""
+    if _MASK_OPAQUE in a and a.startswith("-"):
+        return True  # a quoted option word: it may be any of them
     if a.startswith("--"):
         head = a.split("=", 1)[0]
         return len(head) >= 3 and any(f.startswith(head) for f in _CONFIG_SCOPE_LONG_FLAGS)
@@ -1516,13 +1646,16 @@ class _GitGlobals:
     ``-C`` is a directory). The cursor only moves forward, so a segment costs
     one pass however many ``config`` words it holds. Exact only on PLAIN text."""
 
-    __slots__ = ("pos", "skip", "sub", "other_repo")
+    __slots__ = ("pos", "skip", "sub", "other_repo", "quoted")
 
     def __init__(self, pos: int) -> None:
         self.pos = pos
         self.skip = False  # the next word is the value of a global option
         self.sub = False  # a subcommand word was seen
         self.other_repo = False  # -C / --git-dir / --work-tree named a repository
+        # A quoted word stood where the subcommand may be (nexus-gvg6t review B1):
+        # `git '--git-dir=.git' config` hides an option, `git 'x y' config` any word.
+        self.quoted = False
 
     def at_subcommand(self, seg: str, end: int) -> bool:
         if not self.sub:
@@ -1533,6 +1666,15 @@ class _GitGlobals:
                 elif w in _GIT_VALUED_GLOBALS:
                     self.skip = True
                     self.other_repo = self.other_repo or w in _GIT_OTHER_REPO_GLOBALS
+                elif _MASK_OPAQUE in w:
+                    # An opaque word in a global-option slot: an option that may
+                    # name another repository, or the subcommand itself. Either
+                    # way the `config` after it may be the verb.
+                    self.other_repo = True
+                    if not w.startswith("-"):
+                        self.sub = True
+                        self.quoted = True
+                        break
                 elif w.startswith("-"):
                     if w.startswith(("--git-dir=", "--work-tree=", "-C")):
                         self.other_repo = True
@@ -1540,7 +1682,7 @@ class _GitGlobals:
                     self.sub = True
                     break
         self.pos = end
-        return not self.sub and not self.skip
+        return self.quoted or (not self.sub and not self.skip)
 
 
 def _config_relaxed_match(text: str, *, worktree: bool = False) -> bool:
@@ -1612,7 +1754,7 @@ def _config_strict_match(text: str, view: _ConfigView, git_end: int) -> bool:
     first git (or hub) command at *git_end* that is not an excused get read, a
     ``git-config`` program token, or the raw command holds ``config`` inside a
     substitution span."""
-    if _DASHED_CONFIG_SCAN_RE.search(text) is not None:
+    if _DASHED_CONFIG_CMD_RE.search(text) is not None:
         return True
     for m in _CONFIG_STRICT_RE.finditer(text, git_end):
         if not (view.reads and _config_get_read(text, m.end())):
@@ -1651,9 +1793,51 @@ def _config_data_hit(data: tuple[str, ...], worktree: bool) -> bool:
         if not ends or "config" not in n:
             continue
         if _CONFIG_DATA_META_RE.search(d) is None:
-            if _config_relaxed_match(n, worktree=worktree):
+            if _config_relaxed_match(n, worktree=worktree and not _repo_env_named(d)):
                 return True
         elif _config_strict_match(n, _ConfigView(d, False, False), min(ends)):
+            return True
+    return False
+
+
+#: Programs and git verbs that run an argument as a command (nexus-gvg6t review
+#: B4). A shell word of such a command is read joined to its neighbours, because
+#: the consumer joins its arguments: no single string need hold the whole write.
+_CONSUMER_RE = re.compile(
+    r"(?<![\w.\-])(?:ssh|mosh|tmux|screen|foreach|filter-branch|rebase|bisect|xargs|"
+    r"parallel|watch|xterm|difftool|mergetool|nohup|timeout|nice|setsid|flock|stdbuf|"
+    r"sudo|doas|runuser)(?![\w.\-])"
+)
+
+
+def _config_joined_hit(joined: tuple[str, ...], worktree: bool) -> bool:
+    """True when a command that has quoted words and names a consumer holds a
+    ``git config`` write once its words are joined with their quotes removed
+    (``ssh host 'git config' user.name x``, ``git rebase -x 'g''it config ...'``,
+    ``tmux send-keys 'git config' ' user.name x'``). *joined* is
+    ``_Masked.joined``: one string per simple command that has a quoted word,
+    each word's pieces glued and the words separated by one space. A string the
+    mask marked as too long to read (``_JOIN_OVERFLOW``) denies when it names git
+    and ``config`` after normalization: a count it cannot prove is a count it
+    refuses. Text with a character the cursor cannot count takes the strict rule."""
+    for j in joined:
+        over = j.startswith(_JOIN_OVERFLOW)
+        if over:
+            j = j[len(_JOIN_OVERFLOW):]
+        if _CONSUMER_RE.search(j) is None:
+            continue
+        n = _normalize_for_primary_scan(j)
+        ends = [
+            e for e in (_first_git_command(n), _first_hub_command(n)) if e is not None
+        ]
+        if not ends or "config" not in n:
+            continue
+        if over:
+            return True
+        if _CONFIG_DATA_META_RE.search(j) is None:
+            if _config_relaxed_match(n, worktree=worktree and not _repo_env_named(j)):
+                return True
+        elif _config_strict_match(n, _ConfigView(j, False, False), min(ends)):
             return True
     return False
 
@@ -1668,8 +1852,12 @@ def _config_cursor_hit(view: _ConfigView, worktree: bool) -> bool:
     memo = view.memo if view.memo is not None else {}
     hit = memo.get(worktree)
     if hit is None:
-        wt = worktree and _GIT_REPO_ENV_RE.search(view.raw) is None
-        hit = _config_relaxed_match(view.text, worktree=wt) or _config_data_hit(view.data, wt)
+        wt = worktree and not _repo_env_named(view.raw)
+        hit = (
+            _config_relaxed_match(view.text, worktree=wt)
+            or _config_data_hit(view.data, wt)
+            or _config_joined_hit(view.joined, wt)
+        )
         memo[worktree] = hit
     return hit
 
