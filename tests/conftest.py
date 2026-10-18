@@ -755,6 +755,11 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     # session on the box, the real one for a session without NEXUS_CONFIG_DIR
     # (see the cli_lockstep_marker allowlist entry).
     "lockstep.log",
+    # hooks/rdr_verb._log_resolution_error: one line per RDR-hook resolution
+    # failure, opened "a" by the live hook of any session on the box without
+    # NEXUS_CONFIG_DIR. A peer session in a repo whose rdr collection is
+    # unregistered appended one every prompt (nexus-ys8a4, 2026-10-17).
+    "rdr_hook.log",
 })
 
 #: Directories under the real config dir that hold AMBIENT DAEMON OUTPUT --

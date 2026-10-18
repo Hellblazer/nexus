@@ -253,6 +253,14 @@ class TestAllowlist:
         assert "lockstep.log" in _APPEND_ONLY_REAL_CONFIG_LOGS
         assert _is_allowlisted_config_dir_path("lockstep.log") is False
 
+    def test_rdr_hook_log_is_append_only_not_allowlisted(self) -> None:
+        """``rdr_hook.log`` is the live RDR hook's append-only failure record, written by any session on
+        the box (nexus-ys8a4). Growth is benign; a truncation or rewrite still fails."""
+        from tests.conftest import _APPEND_ONLY_REAL_CONFIG_LOGS
+
+        assert "rdr_hook.log" in _APPEND_ONLY_REAL_CONFIG_LOGS
+        assert _is_allowlisted_config_dir_path("rdr_hook.log") is False
+
     def test_service_registry_election_flocks_are_allowlisted(self) -> None:
         """ServiceRegistry per-scope election flocks churn independently of
         pytest and must not trip the guard.
