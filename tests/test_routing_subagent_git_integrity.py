@@ -266,7 +266,9 @@ def test_real_scalar_register_is_detected(box: Box, which: str) -> None:
     (box.root / "global.gitconfig").write_text("")
     box.env["GIT_CONFIG_GLOBAL"] = str(box.root / "global.gitconfig")
     report = _call(box, f"scalar register --no-maintenance {_q(box.primary)}", box.cwd(which))
-    for key in ("core.fsmonitor", "core.untrackedCache", "feature.manyFiles", "gc.auto"):
+    # core.fsmonitor is set only where scalar finds an fsmonitor daemon (macOS and
+    # Windows, not the Linux CI runners), so assert keys scalar writes everywhere.
+    for key in ("core.untrackedCache", "feature.manyFiles", "gc.auto"):
         assert key in report, f"{key} missing from:\n{report or '(silent)'}"
 
 
