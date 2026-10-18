@@ -1350,7 +1350,9 @@ class RawSqlGateTest {
      * LabelExpression}), not a single master-changelog apply. {@code
      * SchemaMigratorDateExecutedUtcTest} exercises {@code
      * SchemaMigrator#migrate} directly (the production entrypoint under
-     * test), never a hand-rolled {@code Liquibase} call to fold.
+     * test), never a hand-rolled {@code Liquibase} call to fold. (Its
+     * redundant {@code nexus_svc} DO block was deleted in the 2026-10-18
+     * role-bootstrap fold, so it no longer carries a ceiling entry.)
      *
      * <p><b>nexus-cbo4a batch 9 item 1 (2026-09-07):</b> 1661 -&gt; 1602, -59
      * sites across 36 files. Two shapes, one edit: (a) every remaining
