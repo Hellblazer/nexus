@@ -534,7 +534,9 @@ token in a transcript that made no such call (the leaf agent's, never the fork's
 CANNOT needs a `ToolSearch` call and no Task/Agent call in the fork's transcript. The token
 must sit in the transcript of the agent the dispatch STARTED, by id: the Agent result names it
 (`agentId: <id>`) and the leaf's transcript is `agent-<id>.jsonl`; a token in any other
-transcript, or a result that names no agent, fails (nexus-ijate). Scenarios
+transcript, or a result that names no agent, fails (nexus-ijate). Every result observed
+on chas so far is the async shape that names the id; a sync or a fork-type result (a fork's
+"Fork started" names none) would read as a false red until a live run shows its shape. Scenarios
 01 and 15 (plain stdout) read the subagent's answer AND the debug log, which must agree
 (`cc_injection_reading`, `lib/debug_log.py`): NONE passes only with the hook's
 finished-with-status-0 line and no accepted `additionalContext`, VISIBLE only with both; 15
