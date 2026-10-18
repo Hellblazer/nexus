@@ -214,3 +214,34 @@ def test_hybrid_default_config_reaches_the_scorer(cli_env, mock_t3, hybrid_defau
     assert seen and all(v == hybrid_default for v in seen), seen
 
 
+
+
+@pytest.mark.parametrize("n", [10, 15])
+def test_cli_page_and_scores_do_not_depend_on_pool_depth(cli_env, mock_t3, n):
+    """nexus-cbg2s: ``nx search`` ranks through the same windowed boosts as the MCP
+    search tool, so the same query fetched at depth 40..300 prints the same page, with
+    the same scores (``--json`` carries ``hybrid_score``)."""
+    from nexus.search_engine import boost_window_size
+    from tests._boost_window_pool import DEPTHS, pool
+
+    pages: dict[int, list] = {}
+    for depth in (d for d in DEPTHS if d >= boost_window_size(n)):
+        with (
+            patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+            patched_mcp_infra_t3(mock_t3),
+            patch("nexus.commands.search_cmd.search_cross_corpus",
+                  side_effect=lambda *_a, _d=depth, **_k: pool(_d, "code__repo-abcd1234")),
+            patch("nexus.commands.search_cmd.load_config",
+                  return_value={"embeddings": {"rerankerModel": "rerank-2.5"}, "search": {}}),
+        ):
+            result = CliRunner().invoke(
+                _cli_main(),
+                ["search", "query", "--corpus", "code", "--no-rerank", "--hybrid", "--json",
+                 "--n", str(n)],
+            )
+        assert result.exit_code == 0, result.output
+        rows = json.loads(result.output)
+        assert len(rows) == n
+        pages[depth] = [(r["id"], r["hybrid_score"]) for r in rows]
+    assert len(pages) >= 3
+    assert len({repr(p) for p in pages.values()}) == 1, pages

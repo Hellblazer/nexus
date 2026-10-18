@@ -613,6 +613,81 @@ def test_search_and_cli_helper_rank_identically():
     assert mcp_out["ids"] == cli_order
 
 
+def _strip_pool_count(text: str) -> str:
+    """The page text minus its footer: ``of N`` counts the rows the pool held, which
+    legitimately grows with the fetch depth (nexus-cbg2s keeps it that way)."""
+    return "\n".join(ln for ln in text.splitlines() if not ln.startswith("--- showing"))
+
+
+@pytest.mark.parametrize("limit", [10, 15])
+def test_search_page_and_scores_do_not_depend_on_pool_depth(limit):
+    """nexus-cbg2s: the same query fetched at depth 40, 60, 80, 120 and 300 renders the
+    SAME page, ``s=`` included. The boosts used to be normalised over the whole pool, so
+    a deeper fetch swapped near ties on a page whose nearest rows had not changed
+    (nexus-ann50's k sweep: top-30 identical at every k, the boosted page not)."""
+    from nexus.mcp import core as mcp_core
+    from nexus.search_engine import boost_window_size
+    from tests._boost_window_pool import DEPTHS, pool
+
+    _mock_t3([{"name": "code__test", "count": 300}])
+    pages: dict[int, str] = {}
+    structured: dict[int, tuple] = {}
+    # The guarantee holds for pools at least as deep as the window (30 at limit 10,
+    # 45 at limit 15); a shallower pool IS the whole window and ranks as one.
+    for depth in (d for d in DEPTHS if d >= boost_window_size(limit)):
+        mcp_core._reset_page_cache_for_tests()
+        with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
+             patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+            pages[depth] = _strip_pool_count(_search_render(
+                query="boost window pin", corpus="code__test", cluster_by="", limit=limit))
+            mcp_core._reset_page_cache_for_tests()
+            out = _search_render(
+                query="boost window pin", corpus="code__test", cluster_by="",
+                limit=limit, structured=True)
+        structured[depth] = (out["ids"], out["hybrid_scores"])
+    assert len(pages) >= 3
+    assert all(" s=" in p for p in pages.values()), "the page must show s= or the pin proves nothing"
+    assert len({p for p in pages.values()}) == 1, {d: p[:300] for d, p in pages.items()}
+    assert len({repr(v) for v in structured.values()}) == 1
+
+
+def test_search_pool_count_still_follows_the_fetch_depth():
+    """nexus-cbg2s leaves ``of N`` alone: it is the number of rows the pool held, so it
+    differs with the fetch depth while the page above it does not."""
+    from nexus.mcp import core as mcp_core
+    from tests._boost_window_pool import pool
+
+    _mock_t3([{"name": "code__test", "count": 300}])
+    footers = []
+    for depth in (40, 120):
+        mcp_core._reset_page_cache_for_tests()
+        with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
+             patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+            text = _search_render(query="boost window count", corpus="code__test", cluster_by="")
+        footers.append([ln for ln in text.splitlines() if ln.startswith("--- showing")][0])
+    assert footers[0].endswith("of 40. next: offset=10"), footers
+    assert footers[1].endswith("of 120. next: offset=10"), footers
+
+
+def test_search_page_turns_past_the_window_continue_the_same_ordering():
+    """Pages 1-3 are cut from the boost window, page 4 from the tail behind it: no row is
+    repeated or skipped at the seam, at either fetch depth."""
+    from nexus.mcp import core as mcp_core
+    from tests._boost_window_pool import pool
+
+    _mock_t3([{"name": "code__test", "count": 300}])
+    for depth in (120, 300):
+        seen: list[str] = []
+        for offset in (0, 10, 20, 30, 40):
+            mcp_core._reset_page_cache_for_tests()
+            with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
+                 patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+                out = _search_render(query="boost window seam", corpus="code__test",
+                                     cluster_by="", limit=10, offset=offset, structured=True)
+            seen.extend(out["ids"])
+        assert len(seen) == 50 and len(set(seen)) == 50, depth
+
+
 def test_cluster_by_semantic_discards_the_boosted_order():
     """critique 2026-08-19 (both reviewers): ``cluster_by="semantic"``
     computes the hybrid/bib boost (real cost: catalog lookup, tuning

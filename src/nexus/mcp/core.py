@@ -2983,6 +2983,7 @@ def _search_render(
         from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             apply_file_diversity_cap,
             apply_ranking_boosts,
+            boost_window_size,
             flag_displayed_contradictions,
             search_cross_corpus,
         )
@@ -3026,6 +3027,11 @@ def _search_render(
         # the uncached path would render.
         need = offset + limit
         fetch_n = need + limit * _PAGE_LOOKAHEAD_PAGES
+        # nexus-cbg2s: the boosts normalise over this many nearest rows, not
+        # over however deep the pool happens to be, so the page does not move
+        # with the fetch depth. Fixed by the page size alone (never by offset),
+        # so every page of one query is cut from the same ordering.
+        boost_window = boost_window_size(limit)
         # ``lexical`` MUST be in this tuple. It changes WHICH rows are
         # retrieved, so a lexical call that reused a vector-only page would be
         # served silently-wrong results inside the 120s TTL — and the wrapper
@@ -3033,7 +3039,7 @@ def _search_render(
         # Found by the RDR-217 enrichment pass before the parameter existed.
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical,
+            topic or "", threshold, lexical, boost_window,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3094,6 +3100,7 @@ def _search_render(
                 hybrid=cfg.get("search", {}).get("hybrid_default", False),
                 tuning=get_tuning_config(),
                 catalog=_get_catalog(),
+                window=boost_window,
             )
             if lexical_rerank:
                 # Same consumption as the CLI's: scored rows lead in server
@@ -3160,10 +3167,14 @@ def _search_render(
         # appear contiguously; interleaving a file cap into that order
         # would break the grouping the renderer relies on.
         display_results = (
-            results if (structured or clustered) else apply_file_diversity_cap(results)
+            results if (structured or clustered)
+            else apply_file_diversity_cap(results, window=boost_window)
         )
 
-        # Apply pagination
+        # Apply pagination. ``total`` is the number of rows the pool holds after
+        # the threshold, which depends on how many rows were fetched (per-collection
+        # k, and the page lookahead), so "of N" still varies with k even though the
+        # page above it does not (nexus-cbg2s). It was never a corpus-wide count.
         total = len(display_results)
         page = display_results[offset:offset + limit]
         if not page:
@@ -3277,7 +3288,8 @@ def _search_render(
             # Both numbers, because the order comes from the second one.
             # `d=` is the raw vector distance (absolute, lower is better);
             # `s=` is the hybrid score this page was sorted by (relative to
-            # this window, higher is better). Printing only `d=` while
+            # the boost window, the nearest max(30, 3*limit) rows of the pool,
+            # higher is better; nexus-cbg2s). Printing only `d=` while
             # sorting by `s=` is what nexus-la5pr was filed about.
             dist = f"d={r.distance:.4f} s={r.hybrid_score:.3f}"
             label = title or source or r.id

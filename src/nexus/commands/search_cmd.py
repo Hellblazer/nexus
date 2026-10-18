@@ -25,6 +25,7 @@ from nexus.search_engine import (
     SearchDiagnostics,
     apply_file_diversity_cap,
     apply_ranking_boosts,
+    boost_window_size,
     search_cross_corpus,
 )
 from nexus.types import SearchResult
@@ -623,8 +624,12 @@ def search_cmd(
     # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
     # search()/query() paths via apply_ranking_boosts (search_engine.py) so
     # both surfaces rank identically for identical inputs.
+    # nexus-cbg2s: normalised over the nearest boost_window_size(n) rows, the same
+    # window the MCP search tool uses, so the page does not move with pool depth.
+    _boost_window = boost_window_size(n)
     results = apply_ranking_boosts(
         results, hybrid=hybrid, tuning=tuning, catalog=_scoring_cat,
+        window=_boost_window,
     )
     # nexus-zdzm5 (surface A A8): scoring logs this at debug; a CLI user who
     # typed --hybrid gets a plain note instead of a raw structlog line.
@@ -686,8 +691,12 @@ def search_cmd(
         # does not stop one file's chunks from dominating a single-collection
         # page — the diversity cap below is what does that, again as the
         # last ordering step before truncation (nexus-0bmhd).
+        #
+        # Only the boost window feeds the page (nexus-cbg2s): a collection with no
+        # row inside the window must not enter the interleave through a row far
+        # down the pool, or the page would depend on how deep the pool went.
         groups: dict[str, list[SearchResult]] = {}
-        for r in results:
+        for r in results[:_boost_window]:
             groups.setdefault(r.collection, []).append(r)
         results = apply_file_diversity_cap(round_robin_interleave(list(groups.values())))[:n]
 

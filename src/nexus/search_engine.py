@@ -35,6 +35,7 @@ __all__ = [
     "_overfetch_multiplier",
     "SearchDiagnostics",
     "apply_ranking_boosts",
+    "boost_window_size",
     "apply_file_diversity_cap",
     "LexicalLegUnavailableError",
 ]
@@ -2210,12 +2211,28 @@ def search_cross_corpus(
     return all_results
 
 
+#: Floor of the boost window (nexus-cbg2s): rows normalised and ranked together.
+_BOOST_WINDOW_FLOOR = 30
+
+
+def boost_window_size(page_size: int) -> int:
+    """Rows the client boosts are normalised over for a page of *page_size*:
+    ``max(30, 3 * page_size)`` (nexus-cbg2s).
+
+    The one definition both surfaces use (``nx search`` passes ``-n``, the
+    MCP ``search`` tool passes ``limit``), so a page ranks the same whichever
+    asks, and the one the file-diversity cap's ``window`` argument takes.
+    """
+    return max(_BOOST_WINDOW_FLOOR, 3 * max(1, page_size))
+
+
 def apply_ranking_boosts(
     results: list[SearchResult],
     *,
     hybrid: bool = False,
     tuning: TuningConfig | None = None,
     catalog: Any | None = None,
+    window: int | None = None,
 ) -> list[SearchResult]:
     """Apply the CLI's post-retrieval ranking boosts — hybrid scoring
     (RDR-frecency) then bibliographic quality boost (RDR-055 E2) — and
@@ -2247,6 +2264,22 @@ def apply_ranking_boosts(
     ``apply_hybrid_scoring``'s docstring). Domination control now lives at
     the render layer: see :func:`apply_file_diversity_cap` below.
 
+    *window* (nexus-cbg2s; pass :func:`boost_window_size`) makes the result
+    independent of how deep the pool is. The hybrid score min-max normalises
+    distance and frecency over the pool, so with ``window=None`` (the
+    historical behaviour, kept for callers that consume the whole pool) a
+    deeper fetch moved every score and could swap near ties on a page whose
+    nearest rows had not changed. With a window, the *window* nearest rows (by
+    raw distance on the calibrated scale, ties broken by collection then id:
+    :func:`nexus.scoring.order_by_calibrated_distance`) are normalised, scored
+    and sorted among themselves, exactly as a pool of that size would be; the
+    remaining rows follow in that same distance order, scored on the WINDOW's
+    scale (clamped into [0, 1]) so their ``hybrid_score`` is comparable but
+    never moves a window row. Any pool that holds each collection's nearest
+    *window* rows therefore yields the same first *window* rows and scores,
+    and a deeper pool only extends the tail. A pool of *window* rows or fewer
+    is the whole window: the same scores as ``window=None``.
+
     Does NOT apply, by design, to result rows that never carry the
     metadata these boosts read:
 
@@ -2264,18 +2297,37 @@ def apply_ranking_boosts(
     """
     if not results:
         return results
-    from nexus.scoring import apply_hybrid_scoring, apply_quality_boost  # noqa: PLC0415 — deferred to avoid a module-load-time scoring<->search_engine cycle
+    from nexus.scoring import (  # noqa: PLC0415 — deferred to avoid a module-load-time scoring<->search_engine cycle
+        apply_hybrid_scoring,
+        apply_quality_boost,
+        order_by_calibrated_distance,
+    )
 
     _tuning = tuning or TuningConfig()
-    results = apply_hybrid_scoring(
-        results,
-        hybrid=hybrid,
-        vector_weight=_tuning.vector_weight,
-        frecency_weight=_tuning.frecency_weight,
-        file_size_threshold=_tuning.file_size_threshold,
-        catalog=catalog,
-    )
-    return apply_quality_boost(results)
+    scoring_kwargs: dict[str, Any] = {
+        "hybrid": hybrid,
+        "vector_weight": _tuning.vector_weight,
+        "frecency_weight": _tuning.frecency_weight,
+        "file_size_threshold": _tuning.file_size_threshold,
+        "catalog": catalog,
+    }
+    if window is None:
+        return apply_quality_boost(apply_hybrid_scoring(results, **scoring_kwargs))
+
+    # Calibrated raw distance, deliberately (see order_by_calibrated_distance):
+    # the one key a deeper fetch cannot change for a row it shares with a
+    # shallower one, and the order today's page is cut in when the boosts do
+    # not reorder it. The collection/id tiebreak makes the cut, and every score
+    # tie below, a function of the rows and not of the order they arrived in.
+    by_distance = order_by_calibrated_distance(results)
+    head, tail = by_distance[:window], by_distance[window:]
+    head = apply_quality_boost(apply_hybrid_scoring(head, **scoring_kwargs))
+    if tail:
+        # Scored in place on the window's scale; the list order stays raw
+        # distance (apply_hybrid_scoring's own sort is not wanted here: a
+        # deeper pool would let a later row's frecency reorder the tail).
+        apply_quality_boost(apply_hybrid_scoring(tail, window=head, **scoring_kwargs))
+    return head + tail
 
 
 # ── File diversity cap (render layer) — nexus-0bmhd, 2026-09-01 ────────────
@@ -2311,6 +2363,7 @@ def apply_file_diversity_cap(
     results: list[SearchResult],
     *,
     max_per_file: int = _DEFAULT_MAX_CHUNKS_PER_FILE,
+    window: int | None = None,
 ) -> list[SearchResult]:
     """Reorder *results* so at most *max_per_file* chunks from the same
     file appear before chunks from other files — a non-destructive stable
@@ -2335,12 +2388,24 @@ def apply_file_diversity_cap(
     after the slice is too late (the domination already consumed the
     slots).
 
+    *window* (nexus-cbg2s) caps ``results[:window]`` and ``results[window:]``
+    separately and joins them. Pass the boost window
+    (:func:`boost_window_size`) when *results* came from
+    :func:`apply_ranking_boosts` with that window: the cap then never pulls
+    a row from beyond the window ahead of an overflow row inside it, which
+    is what keeps a page independent of pool depth.
+
     A no-op (returns *results* unchanged, not a copy) for an empty list
     or ``max_per_file <= 0``. Otherwise always returns a NEW list; the
     input list and its elements are never mutated.
     """
     if not results or max_per_file <= 0:
         return results
+    if window is not None and 0 < window < len(results):
+        return (
+            apply_file_diversity_cap(results[:window], max_per_file=max_per_file)
+            + apply_file_diversity_cap(results[window:], max_per_file=max_per_file)
+        )
     kept: list[SearchResult] = []
     overflow: list[SearchResult] = []
     counts: dict[str, int] = {}
