@@ -6,6 +6,8 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Table;
+import org.jooq.types.DayToSecond;
+import org.jooq.types.YearToMonth;
 import org.jooq.types.YearToSecond;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
@@ -27,7 +29,6 @@ import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Arrays;
 
 import static dev.nexus.service.jooq.nexus.Tables.ASSIGN_FROM_CHASHES_1024;
@@ -635,7 +636,8 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // purge_trash: no tombstoned documents -> 0 rows purged, and the
                 // manifest-referenced seeded chunk must SURVIVE the sweep.
-                assertThat(Routines.purgeTrash(ctx.configuration(), YearToSecond.valueOf(Duration.ZERO)))
+                assertThat(Routines.purgeTrash(ctx.configuration(),
+                        new YearToSecond(new YearToMonth(0, 0), new DayToSecond(0))))
                     .isEqualTo(0L);
                 assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT)))
                     .as("purge_trash must not sweep a chunk still protected by a live manifest row")

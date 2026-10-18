@@ -777,8 +777,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // perturb THEIR per-collection count assertions. No stub
                     // registration needed (taxonomy_centroids_<dim> carries no FK to
                     // catalog_collections or nexus.topics, per taxonomy-007-1's own
-                    // coverage note above). label=null binds SQL NULL via
-                    // PreparedStatement#setString.
+                    // coverage note above). label=null binds SQL NULL through the
+                    // typed jOOQ insert.
                     seedTaxonomyCentroidLegacyContent(
                         su, 384, "t1", "code__hyg9b", 999L, null);
 
@@ -1772,16 +1772,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                     // RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea at HEAD now (this
                     // leg runs the FULL hop, which includes taxonomy-011-1's ALTER) --
-                    // these three comparisons use encode(doc_id,'hex') rather than a
-                    // bare string literal. A raw `doc_id = '<64-char-string>'` against a
-                    // bytea column is NOT a type error (Postgres accepts it as legacy
-                    // "escape format" input, silently reinterpreting the hex-looking
-                    // characters as their own raw ASCII bytes) -- it would compile and
-                    // ALWAYS evaluate false regardless of the row's real content, making
-                    // an isEqualTo(0) assertion vacuously true even if the targeted
-                    // DELETE had a bug and left the row behind. encode(doc_id,'hex')
-                    // keeps the comparison on the TEXT side, so it fails loud if a row
-                    // this arm was supposed to delete unexpectedly survives.
+                    // these comparisons bind the decoded bytes (HexFormat#parseHex) as a
+                    // typed bytea value. A raw `doc_id = '<64-char-string>'` against a
+                    // bytea column would NOT be a type error (Postgres reads it as legacy
+                    // "escape format" input, the hex-looking characters becoming their
+                    // own ASCII bytes) and would ALWAYS be false, making an isEqualTo(0)
+                    // assertion vacuously true even if the targeted DELETE left the row
+                    // behind. The decoded-bytes bind compares the real value, so it fails
+                    // loud if a row this arm was supposed to delete survives.
                     assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
                             TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")
                                 .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex("b".repeat(32))))))
@@ -2779,6 +2777,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
             .onConflict(tenantId, coll, chashCol)
             .doNothing()
             .execute();
+        // Positive control: the "deleted by HEAD" isEqualTo(0) assertions downstream are vacuous
+        // unless the legacy row actually landed (ON CONFLICT DO NOTHING would hide a non-insert).
+        assertThat(dsl(c).fetchCount(DSL.table(DSL.name("nexus", "chunks_" + dim)),
+                tenantId.eq(tenant).and(coll.eq(collection)).and(chashCol.eq(chash))))
+            .as("legacy chunks_%d seed %s/%s/%s must be present", dim, tenant, collection, chash)
+            .isEqualTo(1);
     }
 
     /**
@@ -2802,6 +2806,11 @@ class SchemaUpgradeRehearsalIntegrationTest {
             .set(DSL.field(DSL.name("label"), String.class), label)
             .set(DSL.field(DSL.name("doc_count"), Integer.class), 3)
             .execute();
+        assertThat(dsl(c).fetchCount(DSL.table(DSL.name("nexus", "taxonomy_centroids_" + dim)),
+                DSL.field(DSL.name("tenant_id"), String.class).eq(tenant)
+                    .and(DSL.field(DSL.name("topic_id"), Long.class).eq(topicId))))
+            .as("legacy taxonomy_centroids_%d seed %s/%d must be present", dim, tenant, topicId)
+            .isEqualTo(1);
     }
 
     /**
@@ -3115,7 +3124,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
     /** nexus.chash_index: present on the old leg, dropped at HEAD (rdr187-2), so no generated table. */
     private static final org.jooq.Table<?> CHASH_INDEX_RETIRED = DSL.table(DSL.name("nexus", "chash_index"));
 
-    /** nexus.taxonomy_centroids_retired_225 is excluded from codegen (pom.xml), so it is a plain-SQL handle. */
+    /** nexus.taxonomy_centroids_retired_225 is excluded from codegen (pom.xml), so it is addressed by quoted name. */
     private static final org.jooq.Table<?> CENTROIDS_RETIRED_225 =
         DSL.table(DSL.name("nexus", "taxonomy_centroids_retired_225"));
     private static final org.jooq.Field<String> RETIRED_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
