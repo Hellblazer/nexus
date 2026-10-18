@@ -18,6 +18,9 @@ EXEMPT = {
     LIB,
     REPO_ROOT / "scripts" / "lib" / "build-lease_test.sh",
     REPO_ROOT / "scripts" / "mvnw-leased_test.sh",
+    # The macOS guest hold fails closed on a held lease (exit 75) rather than
+    # queueing: a waiting hold would sit with a VM provisioned and idle.
+    REPO_ROOT / "tests" / "e2e" / "macos-guest" / "host.sh",
 }
 #: A call anywhere on a non-comment line: start of line, or after `&&`, `||`, `;`, `(`, `{`, `then`, `do`.
 _BARE = re.compile(r"(?:^|&&|\|\||;|\(|\{|\bthen\b|\bdo\b)\s*build_lease_acquire\s")

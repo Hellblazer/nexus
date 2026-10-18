@@ -96,9 +96,9 @@ memory_snapshot() {  # display only; it gates nothing
 if [[ "$phase" == pre ]]; then
     { sw_vers; echo "claude $(claude --version 2>&1)"; echo "uv $(uv --version 2>&1)"; uname -m; } >"$OUT/guest.txt" 2>&1
     if command -v nx >/dev/null 2>&1 || [[ -e "$HOME/.config/nexus" ]]; then
-        check clean_start 0 "nx or ~/.config/nexus is present before setup: $(command -v nx || echo no-nx)"
+        check clean_start 0 "the nexus CLI or ~/.config/nexus is present before setup: $(command -v nx || echo no-nx)"
     else
-        check clean_start 1 "no nx and no ~/.config/nexus before setup"
+        check clean_start 1 "neither the nexus CLI nor ~/.config/nexus before setup"
     fi
     memory_snapshot "before setup"
     turn 10-setup.txt "$PROMPT_SETUP"

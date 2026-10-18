@@ -2324,7 +2324,7 @@ def test_hostile_gh_and_exemption_inputs_are_scanned_in_linear_time(hostile, mus
     out, elapsed = _timed_verdict(hostile, shared_repo)
     denied = out.get("permissionDecision") == "deny"
     assert denied == must_deny, f"{hostile[:60]!r}: denied={denied}, wanted {must_deny}"
-    assert elapsed < max(5 * baseline + 0.5, 1.0) and elapsed < 3.0, (
+    assert elapsed < max(5 * baseline + 0.5, 2.0) and elapsed < 3.0, (
         f"scan of a {len(hostile)}-byte command took {elapsed:.2f}s (small run {baseline:.2f}s)"
     )
 

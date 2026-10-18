@@ -40,6 +40,6 @@ grep -qix 'passwordauthentication no' <<<"$eff" || { echo "provision: sshd still
 grep -qix 'kbdinteractiveauthentication no' <<<"$eff" || { echo "provision: sshd still allows keyboard-interactive authentication" >&2; exit 1; }
 echo "provision: new host keys, sshd key-only (password and keyboard-interactive off)"
 if command -v nx >/dev/null 2>&1 || [[ -e "$HOME/.config/nexus" ]] || [[ -e "$HOME/Library/LaunchAgents/com.nexus.service.plist" ]]; then
-    echo "provision: nx or its state is present; the clean image must have none" >&2; exit 1
+    echo "provision: the nexus CLI or its state is present; the clean image must have none" >&2; exit 1
 fi
 echo "provision: FileVault off, automatic login $al, passwordless sudo, no nx"

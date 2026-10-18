@@ -337,8 +337,8 @@ A second pass settled the questions the first left open:
 | 210-research-18 | Spike, 17 of 17 | Copy versus per-document move | The move holds under the guard; the copy has a race; satellite tables move with neither |
 | 210-research-19 | Spike, linux-amd64 | CA-1 in JVM and native image | One process holds both families; memory within noise of bge-only |
 
-The spikes ran on local branches (`spike/nexus_911-rdr210-copy-cutover`
-0d3ebc1b8, `spike/nexus_911-rdr210-dual-native` a86b4d0d1), not on develop.
+The spikes ran on local branches (`spike/nexus_911-rdr210-copy-cutover` and
+`spike/nexus_911-rdr210-dual-native`), not on develop.
 Every cited line was re-read against the code of 42382fa3d (Provenance names the
 three passes); where a record and the code disagree,
 the code is cited and the disagreement is noted.
@@ -1402,8 +1402,8 @@ plus the Phase 6 scenarios.
 #### Step 1: CA-1 residual checks
 
 linux-amd64 passed in JVM and native image (210-research-19). This step runs what
-that spike did not, from its branch (`spike/nexus_911-rdr210-dual-native`
-a86b4d0d1) or its successor. Each check records VmHWM (or the platform's peak
+that spike did not, from its branch (`spike/nexus_911-rdr210-dual-native`)
+or its successor. Each check records VmHWM (or the platform's peak
 working set) and is a research finding. Any fail stops the engine phases and
 sends the RDR back to planning.
 
