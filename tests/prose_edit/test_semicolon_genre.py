@@ -7,6 +7,7 @@ semicolons, so the editor must not be told to remove them.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -75,3 +76,38 @@ def test_a_treatment_naming_the_semicolon_bullet_is_not_stale_for_an_essay(prose
     assert "semicolon" not in _sheet(proc.stdout).lower()
     sheet = _sheet(brief_ok(prose, "build", _page(repo), "--genre", "how-to"))
     assert "QUERY ONLY" in sheet and "No semicolons" in sheet[sheet.index("QUERY ONLY"):]
+
+
+def _site_page_without_semicolon_bullet(tmp_path: Path) -> Path:
+    text = SITE_PAGE.read_text(encoding="utf-8")
+    kept = [ln for ln in text.splitlines(keepends=True) if not ln.startswith("- No semicolons")]
+    assert len(kept) == len(text.splitlines(keepends=True)) - 1  # exactly the one bullet removed
+    copy = tmp_path / "SKILL.md"
+    copy.write_text("".join(kept), encoding="utf-8")
+    return copy
+
+
+def test_a_missing_dropped_bullet_stops_an_essay_build_and_names_genre_drops(
+    prose: Prose, repo: Path, tmp_path: Path,
+) -> None:
+    """GENRE_DROPS is keyed on a bullet's opening words; when the skill renames the bullet the essay build
+    fails loud rather than silently carrying a rule it should drop. A how-to build is not affected."""
+    page = str(_site_page_without_semicolon_bullet(tmp_path))
+    proc = run_brief(prose, "build", ESSAY, "--genre", "exploration-essay", "--site-page", page)
+    assert proc.returncode == 1, proc.stderr
+    assert "update GENRE_DROPS" in proc.stderr
+    brief_ok(prose, "build", _page(repo), "--genre", "how-to", "--site-page", page)
+
+
+def test_site_layer_drops_the_semicolon_rule_for_an_essay_and_keeps_it_by_default(prose: Prose) -> None:
+    essay = "\n".join(json.loads(brief_ok(prose, "site-layer", "--genre", "exploration-essay"))["lists"]["site_page_rules"])
+    plain = "\n".join(json.loads(brief_ok(prose, "site-layer"))["lists"]["site_page_rules"])
+    assert "No semicolons" not in essay and "Plain technical English" in essay
+    assert "No semicolons" in plain
+
+
+def test_a_path_run_classifies_an_exploration_essay_without_a_genre_flag(prose: Prose) -> None:
+    """No --genre: memory.py maps docs/exploration/*.md to exploration-essay, and the drop follows."""
+    brief = brief_ok(prose, "build", ESSAY)
+    assert "exploration-essay" in brief
+    assert "semicolon" not in _sheet(brief).lower()
