@@ -843,9 +843,13 @@ not read: the cost of that catalog read at start, and where in
 
 **The move is per document, into the model sibling.** The target is the sibling
 whose row carries the profile's model for the source's `(content_type, owner_id)`,
-looked up by that tuple (`GET /v1/catalog/collections/for_tuple`,
-`CatalogHandler.java:234`), never by rendering a name; it is registered live if
-absent, through the registration path that mints the name (an opaque generated
+looked up by that tuple through the list route
+(`GET /v1/catalog/collections/list?content_type=<ct>` with no `lifecycle_state`,
+which returns superseded rows; `CatalogRepository.java:8213-8218`), keeping the
+rows whose `owner_id` and `embedding_model` equal the source's owner and the
+profile's model, never by rendering a name. `for_tuple` is not used here: it
+returns no superseded row (`CatalogRepository.java`, `collectionForTuple`). The
+target is registered live if absent, through the registration path that mints the name (an opaque generated
 id once RDR-229 lands, the conformant name before); the profile is
 what lets that registration through (`CatalogRepository.java:7944-7960`), so the
 target model is always the profile's. The job walks the source's live documents
@@ -1150,11 +1154,12 @@ the target on the first two (author's decision).
   `--all` plans by the new profile. A failed job keeps its source's lock until
   it is resumed or aborted, so `--all` names that job instead of planning its
   source.
-- *A superseded target of the same name.* The target is registered through
+- *A superseded target of the same tuple.* The target is registered through
   `upsertCollection`, whose update clears `superseded_by`
   (`CatalogRepository.java:8076-8077`; the client's comment at
   `corpus.py:2081-2082`: "The upsert below clears ``superseded_by``"). So the
-  plan checks the name first. Absent, the job registers it; live, it uses it;
+  plan finds the target's row by the tuple first (above) and branches on that
+  row. Absent, the job registers it; live, it uses it;
   superseded with `superseded_by` naming this job's source (an earlier re-embed
   the other way left it under `--keep-source` or `kept_tombstoned`), the job
   revives it through that upsert, the move reuses its chunks where the text
@@ -1718,7 +1723,7 @@ change nothing; the cap and flags survive a restart (a job started with
 `failed` with the cursor at the last committed document; without the
 local-engine variable the runner does not start and the routes refuse; a
 profile changed before `--resume` leaves the job `failed` with
-`profile_changed`; a target name superseded by this job's source is revived and
+`profile_changed`; a superseded target row of the same tuple, whatever its name, whose `superseded_by` names this job's source is revived and
 the earlier job's disposition becomes `revived`, and one superseded by another
 name is refused at plan time; each state's allowed transitions, and a refused
 one, as a table-driven test.
@@ -2116,3 +2121,4 @@ and the per-table dispositions.
 - 2026-10-17: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `c62709e9e`; critique `nexus_rdr/210-gate-critique-2026-10-17-r1`.
 - 2026-10-18: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `90a51e69d`; critique `nexus_rdr/210-gate-critique-2026-10-18-r2`.
 - 2026-10-18: Sam's ruling on RDR-229 Q6 (recorded on nexus-j4gl6): the row rule is adopted now. Sibling, Gap 4, Technical Design 6, the re-embed target and Phase 4 Step 1 find siblings by the row tuple through the catalog routes, never by rendering or matching a name; the sibling test registers a non-conformant name. The list route has no `owner_id` filter today, noted in Gap 4.
+- 2026-10-18: Fix check on 7d26a0a93 failed (3 of 3, one BLOCKS-PLANNING: the superseded-target branch and its test still found the target by name, and `for_tuple` cannot see a superseded row). The target lookup now reads the list route without `lifecycle_state`, and the revive branch and its Phase 6 Step 2 test key on the row tuple. The three DISCOVER-AT-IMPLEMENTATION items every critic raised are for Phase 4 Step 1 and Phase 6 Step 2: the client `list_collections` gains a `content_type` parameter, the Phase 4 fixture registers a non-conformant row past the strict guard, and the `--to` source model is read from the row, not the name.
