@@ -1350,8 +1350,12 @@ with no lease (nexus-f7xyq), and falls through to a shared CLI identity
 only on a bare invocation. `~/.config/nexus/current_session` is a
 machine-wide last-writer-wins file, never a per-conversation value, and an
 MCP server that Claude Code did not start (Cursor, Codex, Gemini) never
-takes its T1 scope from it (nexus-xs7fp; T2 attribution still reads it for a
-label, nexus-d8yul). Consequences: durable
+takes its T1 scope from it (nexus-xs7fp). T2 attribution resolves through
+`resolve_active_session_id` and inherits that gate, so a gated server's rows
+carry a NULL session label; only operator dispatch keeps a raw file read, as
+its last tier, because without it a `claude -p` child's SessionStart hook
+overwrites the file. A bare CLI in a terminal still labels with the file's
+last writer (nexus-d8yul). Consequences: durable
 write-back goes to T2, and an agent's write-back is declared lost only
 after the agent has terminated.
 

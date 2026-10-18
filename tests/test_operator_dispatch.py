@@ -472,6 +472,32 @@ class TestSubprocessContract:
         assert captured[0]["env"].get("NX_SESSION_ID") == "parent-real-session"
 
     @pytest.mark.asyncio
+    async def test_nx_session_id_beats_claude_code_session_id_and_the_file(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-d8yul: NX_SESSION_ID is tier 2 and is never shadowed. With
+        all three sources present the child gets NX_SESSION_ID; swapping it
+        with CLAUDE_CODE_SESSION_ID (or the file) turns this red."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_SESSION_ID", "forced-by-nx")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-real-session")
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="other-window-in-file"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured[0]["env"].get("NX_SESSION_ID") == "forced-by-nx"
+
+    @pytest.mark.asyncio
     async def test_file_is_still_injected_when_no_session_env(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

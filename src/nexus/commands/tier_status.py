@@ -13,7 +13,6 @@ modes select by id, last-N, or time window.
 from __future__ import annotations
 
 import json as _json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -69,7 +68,8 @@ def _resolve_target_session_or_exit(
         else:
             click.echo(
                 "No current session resolvable "
-                "(NX_SESSION_ID env unset, no claude session file). "
+                "(NX_SESSION_ID and CLAUDE_CODE_SESSION_ID env unset, "
+                "no claude session file). "
                 "Use --session, --last, or --since.",
                 err=True,
             )
@@ -92,7 +92,10 @@ def _summarize(rows: list[tuple]) -> dict[str, int]:
 @click.command("tier-status")
 @click.option(
     "--session", "session_arg", default=None,
-    help="Specific session_id (default: current session via NX_SESSION_ID).",
+    help=(
+        "Specific session_id (default: current session via NX_SESSION_ID, "
+        "then CLAUDE_CODE_SESSION_ID, then the claude session file)."
+    ),
 )
 @click.option(
     "--last", "last_n", type=int, default=None,

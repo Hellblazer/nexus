@@ -1599,14 +1599,11 @@ def _run_check_tier_discipline() -> None:
     Heuristic only — does NOT exit non-zero. Visibility, not
     enforcement.
     """
-    import os as _os  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    from nexus.session import read_claude_session_id as _read_claude_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    session_id = (
-        _os.environ.get("NX_SESSION_ID", "").strip()
-        or _read_claude_session_id()
-    )
+    # The order tier_writes rows are keyed by: NX_SESSION_ID, then
+    # CLAUDE_CODE_SESSION_ID, then the machine-wide file (nexus-d8yul).
+    session_id = resolve_active_session_id()
     if not session_id:
         click.echo("Tier-discipline check:")
         click.echo("  No current session resolvable (skip).")

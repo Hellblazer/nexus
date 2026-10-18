@@ -167,15 +167,18 @@ unavailable this process"); `NX_SESSION_ID` in the host's server entry
 names a scope. The CLI in a terminal, the hooks and `claude -p` children
 are not MCP server processes and keep the file.
 
-The gate sits in `resolve_active_session_id` tier 4 only. Raw readers of
-the file inside the server process are untouched: T2 attribution
-(`resolve_attribution`, reached by `memory_put` and plan writes) and
-operator dispatch (the `NX_SESSION_ID` injected into `claude -p` children)
-still stamp the last Claude session's id as a `session` label on rows. That
-is a label on shared rows, not a read or write into another conversation's
-scratch scope; it is its own bead, nexus-d8yul. Operator dispatch's read
-stays load-bearing meanwhile: a child `claude -p` with no `NX_SESSION_ID`
-makes its SessionStart hook overwrite the file.
+The gate sits in `resolve_active_session_id` tier 4 only. T2 attribution
+(`resolve_attribution`, reached by `memory_put`) resolves through
+`resolve_active_session_id` and so inherits the gate: a gated server's rows
+carry a NULL `session` label (nexus-d8yul). Only operator dispatch (the
+`NX_SESSION_ID` injected into `claude -p` children) keeps a raw file read,
+as its last tier after `NX_SESSION_ID` and `CLAUDE_CODE_SESSION_ID`: a child
+`claude -p` with no injected `NX_SESSION_ID` makes its SessionStart hook
+overwrite the file. That read is mostly a label for the child; on a
+dispatch-level T1 mint failure the forwarded `NX_SESSION_ID` lets the child
+borrow that session's lease (nexus-ylof9). A bare CLI in a terminal still
+labels its T2 writes with the file's last writer; the CLI relies on the file
+here.
 
 Rejected: gating the resolver for every process (a bare `nx scratch` beside
 a Claude session relies on the file); a liveness check (a live session is
@@ -241,3 +244,8 @@ gets T1 unavailable instead of borrowing one (Cowork was not measured).
   longer borrows the last Claude session's scope through
   `current_session`. T2 attribution still reads the file for a label
   (nexus-d8yul). See "Scope 3 is a T1 source for Claude Code hosts only".
+- 2026-10-17 (later): nexus-d8yul closed the T2 attribution clause of the
+  line above. T2 attribution now resolves through
+  `resolve_active_session_id` and inherits the gate (a gated server's rows
+  carry NULL); only operator dispatch keeps a raw file read, as its last
+  tier. A bare CLI in a terminal still labels with the file's last writer.

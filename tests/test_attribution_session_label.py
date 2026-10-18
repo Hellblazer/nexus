@@ -73,14 +73,38 @@ def test_explicit_session_is_never_overridden(
     assert resolve_attribution("a", "explicit") == ("a", "explicit")
 
 
-def test_a_resolver_that_declines_the_file_is_not_borrowed_around(
+def _non_claude_mcp_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make this process a Cursor/Codex/Gemini-hosted ``nx-mcp``: marked as
+    an MCP server, no Claude Code marker, no session env."""
+    for name in (
+        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID", "NX_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    session_mod.mark_mcp_server_process()  # reset by the autouse conftest flag fixture
+
+
+def test_a_gated_mcp_server_labels_nothing_instead_of_borrowing_the_file(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Composes with a gated resolver (nexus-xs7fp): when
-    ``resolve_active_session_id`` answers ``None`` (a non-Claude MCP host
-    with no claim on the file), the label is ``None``, not the file's id.
-    The gate itself is not on this branch, so the resolver is stubbed."""
+    """Composes with the REAL xs7fp gate: an MCP server Claude Code did not
+    start, with no session env, has no claim on the file, so the label is
+    ``None`` (stored NULL), not the last Claude session's id. Fails if the
+    gate is removed from ``resolve_active_session_id`` or if
+    ``resolve_attribution`` goes back to reading the file directly."""
     _write_file(config_dir, "last-writer-from-file")
-    monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda arg=None: None)
+    _non_claude_mcp_server(monkeypatch)
 
     assert resolve_attribution(None, None) == (None, None)
+
+
+def test_the_same_server_started_by_claude_code_keeps_the_file_label(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control for the test above: the only change is the Claude
+    Code marker, and the file is read again, so the gate is what declined."""
+    _write_file(config_dir, "last-writer-from-file")
+    _non_claude_mcp_server(monkeypatch)
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+    assert resolve_attribution(None, None) == (None, "last-writer-from-file")

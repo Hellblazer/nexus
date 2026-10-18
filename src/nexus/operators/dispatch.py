@@ -1340,7 +1340,12 @@ async def claude_dispatch(
     # other's id), then the file. The raw file read stays as the last tier on
     # purpose and is NOT the gated ``resolve_active_session_id``: a non-Claude
     # host that got ``None`` here would inject nothing, and the child's
-    # SessionStart hook would then overwrite ``current_session``.
+    # SessionStart hook would then overwrite ``current_session``. A
+    # long-lived Claude-spawned MCP server keeps its spawn-time
+    # CLAUDE_CODE_SESSION_ID across /clear and /resume (nexus-ggvi0), so after
+    # one the injected id is the pre-clear session, where the file was current;
+    # the child only labels with it, and _record_tier_write is stale the same
+    # way.
     from nexus.session import read_claude_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
     parent_session_id = (
         os.environ.get("NX_SESSION_ID", "").strip()

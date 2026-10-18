@@ -158,9 +158,12 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         The ``agent`` / ``session`` fallback chain is applied HERE, not left
         to the engine: it resolves from the CLIENT's process env
-        (``NX_AGENT``) and the client's claude-session file, neither of which
-        the service can see. Omitting it silently returned both columns to
-        NULL in service mode, undoing nexus-9clx — see
+        (``NX_AGENT``) and the client's session resolver, neither of which
+        the service can see. The session resolves through
+        ``resolve_active_session_id`` and so inherits the nexus-xs7fp gate:
+        an MCP server Claude Code did not start, with no session env, labels
+        its rows NULL (nexus-d8yul). Omitting the chain silently returned
+        both columns to NULL in service mode, undoing nexus-9clx — see
         :mod:`nexus.db.t2._attribution`.
         """
         agent, session = resolve_attribution(agent, session)

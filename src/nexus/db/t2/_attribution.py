@@ -6,9 +6,10 @@
 falling back when the caller leaves them unset — ``agent``: "When empty,
 falls back to ``NX_AGENT`` env, then NULL"; ``session``: "falls back to the
 parent's session_id resolution chain (``NX_SESSION_ID`` env →
-``CLAUDE_CODE_SESSION_ID`` env → claude session file → NULL)". That is the whole point of RDR Phase 1B (nexus-9clx): before
-it, 1012 of 1012 production rows had both columns NULL, so ``nx tier-status``
-could not slice T2 writes by which agent did the persisting.
+``CLAUDE_CODE_SESSION_ID`` env → claude session file → NULL)". That is the
+whole point of RDR Phase 1B (nexus-9clx): before it, 1012 of 1012 production
+rows had both columns NULL, so ``nx tier-status`` could not slice T2 writes
+by which agent did the persisting.
 
 :class:`~nexus.db.t2.memory_store.MemoryStore` resolved the chain inline.
 :class:`~nexus.db.t2.http_memory_store.HttpMemoryStore` did not — it only

@@ -114,10 +114,12 @@ scratch scope. A bare `nx` in a terminal and the hooks still use the file.
 No host-local id is minted in its place: nexus-4lkmz decision 2 is "never a
 shared identity, never a silent private store".
 
-The file is still read in that server for a label: T2 attribution
-(`memory_put`, plan writes) and operator dispatch stamp the last Claude
-session's id as a `session` label, which touches no scratch scope
-(nexus-d8yul tracks it). One case the gate cannot close: a host launched
+T2 attribution (the `session` label on `memory_put` rows) resolves through
+`resolve_active_session_id` and so inherits this gate: a gated server's rows
+carry NULL (nexus-d8yul). Only operator dispatch keeps a raw file read, as
+its last tier, because without it a `claude -p` child's SessionStart hook
+overwrites `current_session`. A bare CLI in a terminal still labels with
+the file's last writer. One case the gate cannot close: a host launched
 from inside a Claude Code shell inherits that shell's
 `CLAUDE_CODE_SESSION_ID`, which the resolver answers (tier 3) before the
 gate is consulted, so that host keeps the launching session's scope.

@@ -446,6 +446,43 @@ class TestServiceModeReadParity:
         assert "WARNING: zero tier writes" in result.output
         assert "nx tier-status --session sess-A" in result.output
 
+    def test_doctor_tier_discipline_resolves_claude_code_session_id_before_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-d8yul: tier_writes rows are keyed by resolve_active_session_id,
+        so the check must ask for the same session. Under concurrent Claude
+        windows the file holds another window's id; the old
+        NX_SESSION_ID-then-file chain queried that one."""
+        import click as _click
+        from click.testing import CliRunner as _CR
+
+        import nexus.commands.doctor as doc
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "current_session").write_text("other-window-in-file")
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "this-windows-session")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        asked: list[str | None] = []
+
+        class _RecordingStore:
+            def query_tier_writes(self, *, session_id=None, **_kw):
+                asked.append(session_id)
+                return [("memory_put", "T2", "developer", "nexus", 1)]
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _RecordingStore(),
+        )
+
+        @_click.command()
+        def _wrap() -> None:
+            doc._run_check_tier_discipline()
+
+        result = _CR().invoke(_wrap, [])
+        assert result.exit_code == 0, result.output
+        assert asked == ["this-windows-session"]
+
     def test_tier_status_service_read_404_names_engine_skew(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

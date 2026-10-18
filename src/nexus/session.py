@@ -161,7 +161,9 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
        resolves through this function and so inherits the gate (nexus-d8yul).
        Operator dispatch still reads the raw file as its last tier, because
        without an injected id a ``claude -p`` child's SessionStart hook would
-       overwrite it; that read is a label for a child, never a T1 scope.
+       overwrite it. That read is mostly a label for a child; when the
+       dispatch-level T1 mint fails, the forwarded ``NX_SESSION_ID`` lets
+       the child borrow that session's lease (nexus-ylof9).
     5. ``None``.
 
     Returns ``None`` when nothing in the chain resolves. Callers choose
