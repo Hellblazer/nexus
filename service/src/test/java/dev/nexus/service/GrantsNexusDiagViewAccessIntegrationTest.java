@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -16,12 +17,16 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * bead nexus-lhuhe (P1) — the privilege-proof companion to
@@ -258,6 +263,69 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                         + "nexus.tuple_claim_log and nexus.tuple_tenants after a full "
                         + "changelog walk (bead nexus-f1pbh)")
                     .isEmpty();
+            }
+        }
+    }
+
+    /**
+     * RDR-222 Phase 1 (bead nexus-yye8l.1, Sam's ruling 2026-10-18): after a full
+     * production-shaped walk, nexus_svc holds SELECT, INSERT, UPDATE and DELETE on
+     * {@code nexus.request_ledger} (from the grants-nexus-svc-1 loop and its default
+     * privileges, with no per-table edit), and nexus_diag holds NOTHING on it. The
+     * ledger's {@code response} column stores sweep samples carrying document titles
+     * and nexus_diag bypasses RLS, so a diag grant would expose titles across tenants.
+     */
+    @Test
+    void requestLedger_svcHasDml_diagIsDenied() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("request_ledger is deliberately not diag-readable (nexus-yye8l.1)")
+            .doesNotContain("request_ledger");
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                UUID key = UUID.randomUUID();
+                OffsetDateTime now = OffsetDateTime.now();
+                scope.withTenant("ledger-grants", ctx -> ctx.insertInto(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.TENANT_ID, "ledger-grants")
+                    .set(REQUEST_LEDGER.REQUEST_ID, key)
+                    .set(REQUEST_LEDGER.ROUTE, "/v1/vectors/gc/quarantine-orphans")
+                    .set(REQUEST_LEDGER.BODY_SHA256, new byte[32])
+                    .set(REQUEST_LEDGER.STATE, "in_flight")
+                    .set(REQUEST_LEDGER.HOLDER, UUID.randomUUID())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, now.plusSeconds(95))
+                    .set(REQUEST_LEDGER.STARTED_AT, now)
+                    .execute());
+                int updated = scope.withTenant("ledger-grants", ctx -> ctx.update(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.STATE, "committed")
+                    .setNull(REQUEST_LEDGER.HOLDER)
+                    .set(REQUEST_LEDGER.FINISHED_AT, now)
+                    .where(REQUEST_LEDGER.REQUEST_ID.eq(key))
+                    .execute());
+                assertThat(updated).as("nexus_svc UPDATE").isEqualTo(1);
+                String state = scope.withTenant("ledger-grants", ctx -> ctx.select(REQUEST_LEDGER.STATE)
+                    .from(REQUEST_LEDGER).where(REQUEST_LEDGER.REQUEST_ID.eq(key))
+                    .fetchOne(REQUEST_LEDGER.STATE));
+                assertThat(state).as("nexus_svc SELECT").isEqualTo("committed");
+                int deleted = scope.withTenant("ledger-grants", ctx -> ctx.deleteFrom(REQUEST_LEDGER)
+                    .where(REQUEST_LEDGER.REQUEST_ID.eq(key)).execute());
+                assertThat(deleted).as("nexus_svc DELETE").isEqualTo(1);
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "request_ledger"))
+                    .as("nexus_diag must hold no SELECT on nexus.request_ledger")
+                    .hasMessageContaining("permission denied for table request_ledger");
             }
         }
     }

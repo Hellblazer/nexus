@@ -1102,6 +1102,7 @@ _ALL_TENANT_TABLES = [
     "nexus.pdf_pipeline",
     "nexus.plans",
     "nexus.relevance_log",
+    "nexus.request_ledger",  # RDR-222 Phase 1 (nexus-yye8l.1, vectors-033; mirrors health._RLS_TENANT_TABLES)
     "nexus.retention_markers",
     "nexus.routing_events",  # nexus-gjv9b PART 2 (mirrors health._RLS_TENANT_TABLES)
     "nexus.search_telemetry",

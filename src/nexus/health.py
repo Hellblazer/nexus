@@ -3774,6 +3774,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.pdf_pipeline",
     "nexus.plans",
     "nexus.relevance_log",
+    # nexus.request_ledger: RDR-222 Phase 1 (nexus-yye8l.1, vectors-033-
+    # request-ledger.xml), the per-request idempotency ledger for mutating
+    # engine routes; ENABLE + FORCE + tenant_isolation.
+    "nexus.request_ledger",
     "nexus.retention_markers",
     # nexus.routing_events: nexus-gjv9b PART 2 (telemetry-011-routing-
     # events.xml), replacing routing_log.jsonl. Append-only event log, same
