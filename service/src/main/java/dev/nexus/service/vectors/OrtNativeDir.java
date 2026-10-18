@@ -643,6 +643,9 @@ public final class OrtNativeDir {
             } catch (Error e) {
                 log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
                 handoff.complete(null);
+                if (e instanceof VirtualMachineError) {
+                    throw e; // as uidOf and processUid: the caller goes on unlocked, the VM error is not swallowed
+                }
                 return;
             }
             if (!handoff.complete(held) && held != null) {

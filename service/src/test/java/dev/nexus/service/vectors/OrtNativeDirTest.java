@@ -766,10 +766,19 @@ class OrtNativeDirTest {
     void anInterruptWhileWaitingForTheLockIsWarnedKeepsTheFlagAndCarriesOn(@TempDir Path root) throws Exception {
         rootWithBrokenVersionDir(root);
         CountDownLatch neverReleased = new CountDownLatch(1);
+        // Interrupt only once the acquirer is entered: from then on the caller has nothing left to do but
+        // wait on the handoff, so the interrupt cannot land in extraction I/O (a fixed sleep could, on a
+        // loaded box, and fail the extraction with ClosedByInterruptException).
+        CountDownLatch entered = new CountDownLatch(1);
+        OrtNativeDir.LockAcquirer acquirer = (file, bound, abandoned) -> {
+            entered.countDown();
+            neverReleased.await();
+            return null;
+        };
         Thread main = Thread.currentThread();
         Thread interrupter = new Thread(() -> {
             try {
-                Thread.sleep(300);
+                entered.await();
             } catch (InterruptedException ignored) {
                 return;
             }
@@ -782,7 +791,7 @@ class OrtNativeDirTest {
             long t0 = System.nanoTime();
             List<String> warnings = warnings(() -> {
                 result.set(ensureWith(root, OrtNativeDir.Identity.current(), Duration.ofSeconds(30),
-                        parkedOn(neverReleased)));
+                        acquirer));
                 interruptedAfter.set(Thread.currentThread().isInterrupted());
             });
             assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0)).as("woken by the interrupt, "
@@ -889,6 +898,31 @@ class OrtNativeDirTest {
         assertThat(uid).as("the EFFECTIVE uid, the second field").isEqualTo(4321);
         assertThat(reader).hasValue(0);
         assertThat(names(dir)).as("nothing was created").containsExactly("status");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+        "Name:\tjava\nGid:\t1\t1\t1\t1\n",            // no Uid: line
+        "Uid:\t1234\n",                               // one field
+        "Uid:\t1234\tabc\t1234\t1234\n",              // non-numeric effective uid
+        "Uid:\t1234\t4294967295\t1234\t1234\n",       // over int range
+        "Uid:\n",                                     // empty
+    })
+    void aMalformedProcStatusGivesNoUid(String body, @TempDir Path dir) throws Exception {
+        assertThat(OrtNativeDir.uidFromProcStatus(Files.writeString(dir.resolve("status"), body))).isNull();
+    }
+
+    @Test
+    void theLockAttemptRunsOnANamedDaemonThread(@TempDir Path root) throws Exception {
+        var seen = new java.util.concurrent.atomic.AtomicReference<Thread>();
+        OrtNativeDir.acquireBounded(root.resolve(OrtNativeDir.LOCK_FILE), Duration.ofSeconds(5),
+                (file, bound, abandoned) -> {
+                    seen.set(Thread.currentThread());
+                    return null;
+                });
+        assertThat(seen.get()).isNotNull().isNotSameAs(Thread.currentThread());
+        assertThat(seen.get().isDaemon()).isTrue();
+        assertThat(seen.get().getName()).isEqualTo("ort-native-dir-lock");
     }
 
     @Test
