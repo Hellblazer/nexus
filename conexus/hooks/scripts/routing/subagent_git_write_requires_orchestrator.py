@@ -481,13 +481,15 @@ stated price. Accepted false positives: ``echo gh pr checkout`` and a
 nexus-dsr6a: ``git config`` WRITES deny (``core.hooksPath`` redirects the hooks
 that run on the orchestrator's later commits; ``user.*`` rewrites authorship).
 READS stay allowed (``--get*``, ``--list``/``-l``, ``--show-origin``/``-scope``, a
-bare key, ``git config get|list``) in a command that cannot rebuild text; in one
-that can, a standalone ``config`` word after ``git`` denies. A config command is
-allowed only as a PROVEN read: a quote, a backslash or ``{ } * ? [`` make the
-argument count unprovable. A linked worktree is exempt from the verb scan but
-not from a config write that reaches shared state (only ``--worktree`` writes
-pass there). The decision, the ``--global``/``--system``/``--file`` choice and
-the known limits are in the block comment above ``_CONFIG_STRICT_RE``. The
+bare key, ``git config get|list``) in PLAIN text, judged on the RAW command: no
+quote, backslash, ``{ } * ? [``, ``$``, backtick or recombination. In any other
+text a standalone ``config`` word after ``git``, or one inside a substitution,
+denies, except a get read made of exact flags. A linked worktree is exempt from
+the verb scan but not from a config write that reaches shared state (only
+``--worktree`` writes of a key that runs no code pass there, in plain text, and
+only if no other repository is named). The decision, the
+``--global``/``--system``/``--file`` choice and the known limits are in the block
+comment above ``_CONFIG_STRICT_RE``. The
 change only ADDS a denial after the unchanged verb scan, so nothing that denied
 before allows now.
 
@@ -501,7 +503,7 @@ import re
 import shlex
 import subprocess
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 
 # RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
 # `python3`, so PATH decides the interpreter. Put back the resolution
@@ -954,50 +956,63 @@ def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> st
 #: subagent needs. What a write does is the reason it is guarded:
 #: ``core.hooksPath`` redirects which hook code runs on the orchestrator's later
 #: commits, merges and checkouts, and ``user.*`` rewrites authorship (the
-#: 2026-09-12 identity overwrite). Two rules, split exactly as the
-#: ``merge-base`` exemption is (nexus-7mgnd): a read-only exemption applies only
-#: to text that cannot rebuild a word.
+#: 2026-09-12 identity overwrite).
 #:
-#: - STRICT, when ``_may_recombine`` says the text can build a word it does not
-#:   spell: a standalone ``config`` word after the first git (or hub) command
-#:   denies, read forms included (``_CONFIG_STRICT_RE``). ``git $(echo config)
-#:   user.name x``, ``git $(basename /config) user.name x`` and ``echo $(git
-#:   config user.name)`` all land here. "Standalone" means not glued to a word
-#:   character, ``.``, ``-`` or ``/``: a path or file name that contains
-#:   ``config`` (``src/config.py``, ``conexus/config/``, ``~/.config/nexus``,
-#:   ``.git/config``, ``db-config.sh``, ``config_cmd``) does not count, while
-#:   ``HEAD:config`` and ``=config`` do. The one path shape that counts is a
-#:   final component that a substitution closes (``$(basename /x/config)``),
-#:   because that is how a shell builds the word; ``$(basename /x/config/)`` is
-#:   closed too. Price: ``echo "$(git config user.name)"`` and ``git config
-#:   --get a | sort`` deny, like every other verb.
-#: - RELAXED, when the text is literal: ``_config_relaxed_match`` splits the text
-#:   into simple commands and finds a ``config`` word that is the git SUBCOMMAND
-#:   (the first word after git that is not a global option or its value; a
-#:   ``config`` that follows another subcommand, ``git grep config``, ``git log
-#:   -S config``, is that command's argument and is not the verb), or one named
-#:   after ``alias.<name>=`` / ``GIT_CONFIG_VALUE_<n>=`` (how ``-c
-#:   alias.c=config`` reaches it), or a ``git-config`` program. It denies unless
-#:   the words that follow are a PROVEN read (``_config_write_form``).
+#: ONE DECISION, made from the RAW command: is the text PLAIN? Quote stripping,
+#: brace expansion, escapes, ``$(echo X)`` resolution and the segment split all
+#: change what the words are, and every earlier form of this guard failed by
+#: trusting a count or a cursor over text the shell reads differently (rounds 1
+#: to 3 each closed one spelling and the next review found another). So the
+#: judgment is not made from normalized text. The command is plain only if
+#: nothing in the RAW command can change a word, a word boundary or a segment:
+#: no quote, backslash or CR (``_CONFIG_NONPLAIN_RE``), no ``{ } * ? [``, no
+#: ``$``, backtick, ``<(`` or ``>(`` (``_CAPTURE_RE``), and nothing
+#: ``_may_recombine`` flags (an executor, a pipe into a non-filter, a redirect to
+#: a file). An empty token needs a quote, so it is covered. A ``config`` word
+#: inside a command substitution makes the command non-plain by definition.
+#:
+#: - PLAIN: ``_config_relaxed_match`` splits the text into simple commands (the
+#:   split is exact when nothing is quoted) and finds a ``config`` word that is
+#:   the git SUBCOMMAND (the first word after git that is not a global option or
+#:   its value; a ``config`` after another subcommand, ``git grep config``,
+#:   ``git log -S config``, is that command's argument and is not the verb), or a
+#:   ``git-config`` program. It denies unless the words that follow are a PROVEN
+#:   read (``_config_read_kind``).
+#: - NOT PLAIN: ``_config_strict_match``. Any standalone ``config`` word after
+#:   the first git (or hub) command denies (``_CONFIG_STRICT_RE``), whatever
+#:   follows it, and so does a ``config`` inside a ``$( )``, backtick or ``${ }``
+#:   span in the raw command, with the path narrowing off (``config.py``,
+#:   ``x-config``, ``/config``: how a shell builds the word,
+#:   ``$(basename /x/config.py .py)``, ``$(echo x-config | cut -d- -f2)``).
+#:   "Standalone" means not glued to a word character, ``.``, ``-`` or ``/``
+#:   outside a span, so ``src/config.py``, ``conexus/config/``, ``~/.config``,
+#:   ``.git/config``, ``db-config.sh`` and ``config_cmd`` do not count, while
+#:   ``HEAD:config`` and ``=config`` do. One exemption: a standalone ``config``
+#:   followed by a PROVEN GET READ (``--get*``, ``-l``/``--list``, ``get``/
+#:   ``list``) whose flags are all exact read flags with no valued flag, in a
+#:   command with no ``$``, backtick or recombination anywhere, passes. A get
+#:   read cannot write whatever follows it, and every word before the get flag
+#:   is an exact flag, so nothing the shell rewrites can change what git runs.
+#:   Price (measured, nexus-dsr6a): a bare-key read or a ``--file`` read with a
+#:   quote anywhere in the command denies, and so does ``echo "$(git config
+#:   --get a)"``; a ``--worktree`` write with a quoted value denies in a linked
+#:   worktree.
 #:
 #: A config command is allowed only as a proven read. The read test is a
 #: whitelist, so anything it does not know denies: only exact flags from
 #: ``_CONFIG_READ_FLAGS`` (git accepts abbreviated long options, so ``--unse`` is
 #: not a read), at most one positional unless a get or list flag (or the
 #: ``get``/``list`` subcommand) is present, and no first positional of
-#: ``set``/``unset``/``rename-section``/``remove-section``/``edit``.
+#: ``set``/``unset``/``rename-section``/``remove-section``/``edit``. git stops
+#: reading options at the first positional (measured on 2.53), so ``git config
+#: user.name --global`` is a write.
 #:
-#: That test counts words, and the shell decides what the words are. Anything it
-#: could expand or re-split makes the count unprovable, so outside get/list mode
-#: it denies (reads with ``--get*``, ``-l``/``--list`` or ``get``/``list`` stay
-#: allowed, arity is irrelevant there):
-#: - a quote character or a backslash anywhere in the raw command. Quote
-#:   stripping erases a value (``user.name ' '``, ``user.name ''``) and lets a
-#:   quoted separator move text out of the segment (``core.hooksPath ';x'``,
-#:   ``user.name '>/dev/null'``, ``'2>&1'``, ``'<x'``, ``'&'``, ``'('``,
-#:   ``$'\n'``), and each of those reads as a bare-key read and writes;
-#: - ``{ } * ? [`` in the arguments: brace expansion makes one word several
-#:   (``user.{name,email}``, ``{--unset,user.name}``) and a glob matches files.
+#: Aliases: a ``-c alias.<x>=...``, ``--config-env alias.<x>=VAR``,
+#: ``GIT_CONFIG_KEY_<n>=alias.<x>`` or ``GIT_CONFIG_PARAMETERS`` carrying an alias
+#: denies outright (``_CONFIG_ALIAS_INJECT_RE``): the alias value can name
+#: ``config`` through a variable the text never spells (``CFG=config git
+#: --config-env=alias.c=CFG c user.name x``), and a subagent has no need to
+#: define one on the command line.
 #:
 #: ``--global`` and ``--system`` WRITES deny: they rewrite identity and hooks
 #: for every repository on the box, the shared checkout included. ``--file`` /
@@ -1005,7 +1020,7 @@ def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> st
 #: repo, but a text-only guard cannot show a path is outside it (``.git/config``,
 #: ``~/.gitconfig``, ``.gitmodules`` and a symlink under ``/tmp`` are all
 #: reachable), and a subagent has no need to write a config file there. READS
-#: with every one of those flags pass.
+#: with every one of those flags pass in plain text.
 #:
 #: Linked worktree: a worktree is exempt from the verb scan, but NOT from a
 #: config write that reaches shared state. A plain ``git config`` there writes
@@ -1014,29 +1029,60 @@ def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> st
 #: or the whole box. Allowed from a worktree: reads, and ``--worktree`` writes
 #: (the per-worktree file; git refuses ``--worktree`` in a repo with linked
 #: worktrees unless ``extensions.worktreeConfig`` is on, measured on git 2.53,
-#: so it cannot reach the common file) when the command names no other
-#: repository (``-C``, ``--git-dir``, ``--work-tree``). ``--worktree`` must
-#: precede the first positional and no scope flag, abbreviated or not, may
-#: appear.
+#: so it cannot reach the common file) in PLAIN text when the command names no
+#: other repository: no ``-C``, ``--git-dir``, ``--work-tree``, and no
+#: ``GIT_DIR=``, ``GIT_COMMON_DIR=`` or ``GIT_WORK_TREE=`` assignment (bare, via
+#: ``env`` or exported), any of which points git at the primary and writes ITS
+#: ``config.worktree``. ``--worktree`` must precede the first positional and no
+#: scope flag, abbreviated or not, may appear. A key that runs code for whoever
+#: commits or runs git in that worktree denies even with ``--worktree``
+#: (``core.hooksPath`` and any ``*.hooksPath``, ``core.fsmonitor``,
+#: ``core.sshCommand``, ``include.path``, ``includeIf.*``, ``alias.*``,
+#: ``core.editor``, ``gpg.*.program``, ``credential.*.helper`` and the like,
+#: ``_config_code_key``): the orchestrator commits there.
 #:
 #: Out of scope for this verb guard: raw writes to ``.git/config`` or
 #: ``.git/hooks/*`` (``printf ... >> .git/config``, ``sed -i``, ``tee``), and
-#: ``cd`` into another checkout first (the tool call's cwd decides, as for every
-#: other verb). A separate bead covers raw file writes.
+#: ``cd``/``pushd`` into another checkout first (the tool call's cwd decides, as
+#: for every other verb). A separate bead covers raw file writes.
 #:
 #: Known limits, the same kind as a variable-held ``checkout``: a config verb the
 #: text never spells after ``git`` (``c=config; git $c user.name x``,
-#: ``git con{fig,}``), an alias defined in a config file or the environment, and
-#: ``--config-env`` naming an alias whose value is not in the text.
+#: ``git con{fig,}``, ``git con*`` with a file named ``config`` in the cwd), an
+#: alias defined in a config file, and a substitution nested more than one level
+#: deep (``_CONFIG_SPAN_RE`` reads one level).
 _CONFIG_STRICT_RE = re.compile(
     r"(?<![\w.\-/])config(?![\w.\-/])|(?<=/)config(?=/?[)`}])"
 )
+#: Inside a substitution span the narrowing is off: ``config`` bounded by no
+#: letter or digit counts (``config.py``, ``x-config``, ``/config``, ``x_config``).
+_CONFIG_SPAN_RE = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`|\$\{[^{}]*\}")
+_CONFIG_IN_SPAN_RE = re.compile(r"(?<![A-Za-z0-9])config(?![A-Za-z0-9])")
+#: Raw characters that change a word, a word boundary or a segment: a quote, a
+#: backslash, CR (normalization turns it into a command separator, bash keeps it
+#: as a character), brace expansion and globs. ``$`` and backtick are
+#: ``_CAPTURE_RE``.
+_CONFIG_NONPLAIN_RE = re.compile(r"""['"\\\r{}*?\[]""")
 _CONFIG_SEGMENT_SPLIT_RE = re.compile(r"[;&|()\n]")
 _CONFIG_REDIRECT_RE = re.compile(r"(?<!\d)\d*<{1,3}\s*[^\s;&|()<>]*")
 _DASHED_CONFIG_RE = re.compile(r"git-config(?:\.(?:exe|cmd|bat|com|sh))?")
-_CONFIG_META_RE = re.compile(r"[{}*?\[]")
-_GIT_CONFIG_VALUE_RE = re.compile(r"GIT_CONFIG_VALUE_\d+")
 _WORD_RE = re.compile(r"\S+")
+#: Words and breaks for the argument walk of the get-read exemption: a break
+#: character ends the command, a newline included.
+_CONFIG_ARG_WALK_RE = re.compile(r"[^\s;&|()<>`]+|[;&|()<>`\n]")
+_CONFIG_ARG_BREAKS = frozenset(";&|()<>`\n")
+#: Words the exemption reads before it gives up and denies: a cap keeps the walk
+#: linear when a command holds thousands of ``config`` words.
+_CONFIG_ARG_WORDS_CAP = 32
+#: ``-c alias.x=``, ``--config-env alias.x=``, ``GIT_CONFIG_KEY_n=alias.x`` and an
+#: alias inside ``GIT_CONFIG_PARAMETERS`` (a value holds several quoted entries,
+#: so the scan crosses spaces; the bound keeps a repeated prefix linear).
+_CONFIG_ALIAS_INJECT_RE = re.compile(
+    r"(?i)(?<![\w-])-c\s+alias\.|--config-env(?:=|\s+)alias\.|"
+    r"GIT_CONFIG_KEY_\d+=\s*alias\.|GIT_CONFIG_PARAMETERS=[^\n;&|]{0,400}?alias\."
+)
+#: Variables that point git at another repository.
+_GIT_REPO_ENV_RE = re.compile(r"(?<!\w)GIT_(?:DIR|COMMON_DIR|WORK_TREE)=")
 #: A segment with more ``config`` verbs than this denies without being read: each
 #: one re-reads the arguments after it, and a cap keeps the walk linear.
 _CONFIG_MAX_WORDS_PER_SEGMENT = 8
@@ -1066,6 +1112,18 @@ _CONFIG_READ_SUBCOMMANDS = frozenset({"get", "list"})
 #: Scope flags a ``--worktree`` write must not carry. Git takes any unique prefix
 #: of a long option, so the test is a prefix test (``_config_scope_flag``).
 _CONFIG_SCOPE_LONG_FLAGS = ("--global", "--system", "--local", "--file", "--blob")
+#: Keys that run code, or redirect what runs, for whoever commits or runs git
+#: where they are set (lowercased; section and variable names are case-folded).
+_CONFIG_CODE_KEYS = frozenset({
+    "core.fsmonitor", "core.sshcommand", "core.editor", "core.pager",
+    "core.askpass", "core.gitproxy", "include.path", "diff.external",
+    "sequence.editor", "init.templatedir", "gpg.program",
+})
+_CONFIG_CODE_KEY_PREFIXES = ("includeif.", "alias.", "pager.")
+_CONFIG_CODE_KEY_SUFFIXES = (
+    ".hookspath", ".program", ".helper", ".driver", ".textconv", ".clean",
+    ".smudge", ".process", ".cmd", ".command",
+)
 #: git's global options that take the NEXT word as their value. ``--exec-path``
 #: and the like take none (a value needs ``=``). Of these, the ones that point
 #: git at another repository.
@@ -1074,6 +1132,27 @@ _GIT_VALUED_GLOBALS = frozenset({
     "--attr-source", "--super-prefix",
 })
 _GIT_OTHER_REPO_GLOBALS = frozenset({"-C", "--git-dir", "--work-tree"})
+
+
+class _ConfigView(NamedTuple):
+    """What the config rule may trust about a command, judged on the RAW text.
+
+    *raw*: the command as written. *cursor*: plain text, so the segment split
+    and the subcommand cursor of ``_config_relaxed_match`` are exact. *reads*:
+    nothing can rebuild text (no capture, executor, file redirect or non-filter
+    pipe), so a proven get read may be excused in text that is not plain."""
+
+    raw: str
+    cursor: bool
+    reads: bool
+
+
+def _config_view(command: str, relaxed: bool) -> _ConfigView:
+    """The config view of *command*; *relaxed* is ``not _may_recombine`` of its
+    normalized form."""
+    reads = relaxed and _CAPTURE_RE.search(command) is None
+    cursor = reads and _CONFIG_NONPLAIN_RE.search(command) is None
+    return _ConfigView(command, cursor, reads)
 
 
 def _config_known_read_flag(a: str) -> bool:
@@ -1092,11 +1171,22 @@ def _config_scope_flag(a: str) -> bool:
     return a.startswith("-f")
 
 
+def _config_code_key(word: str) -> bool:
+    """True when *word* names a config key that runs code or redirects what runs
+    (see ``_CONFIG_CODE_KEYS``)."""
+    k = word.lower()
+    return (
+        k in _CONFIG_CODE_KEYS
+        or k.startswith(_CONFIG_CODE_KEY_PREFIXES)
+        or k.endswith(_CONFIG_CODE_KEY_SUFFIXES)
+    )
+
+
 def _config_worktree_scoped(args: list[str]) -> bool:
     """True when *args* write the per-worktree config file and nothing wider:
-    ``--worktree`` before the first positional and no scope flag anywhere (a
-    scope flag after the first positional is a value to this git, a flag to
-    another, so it denies too)."""
+    ``--worktree`` before the first positional, no scope flag anywhere (a scope
+    flag after the first positional is a value to this git, a flag to another,
+    so it denies too) and no key that runs code."""
     seen = False
     in_flags = True
     i = 0
@@ -1104,7 +1194,7 @@ def _config_worktree_scoped(args: list[str]) -> bool:
     while i < n:
         a = args[i]
         i += 1
-        if _config_scope_flag(a):
+        if _config_scope_flag(a) or _config_code_key(a):
             return False
         if in_flags:
             if a == "--worktree":
@@ -1116,8 +1206,9 @@ def _config_worktree_scoped(args: list[str]) -> bool:
     return seen
 
 
-def _config_not_a_proven_read(args: list[str], *, quoted: bool) -> bool:
-    """True unless *args*, the words after a ``config`` word, are a proven read.
+def _config_read_kind(args: list[str], *, valued_ok: bool = True) -> str | None:
+    """``"get"`` for a get or list read, ``"bare"`` for a bare-key read, ``None``
+    unless *args*, the words after a ``config`` word, are a proven read.
 
     Left to right, so a valued flag takes its next word whatever it looks like
     (``--file --get k v`` writes ``k`` to a file named ``--get``). In the legacy
@@ -1128,9 +1219,9 @@ def _config_not_a_proven_read(args: list[str], *, quoted: bool) -> bool:
     a flag; an unknown one still denies, in case another git reads it as a flag.
     The ``get``/``list`` subcommands parse their own options throughout.
 
-    Outside get/list mode the verdict rests on counting words, so *quoted* (a
-    quote or backslash in the raw command) and any ``{ } * ? [`` in a word make
-    the count unprovable and deny; see the block comment above.
+    The count of words is only trusted in plain text (the caller's job). With
+    *valued_ok* False a valued flag (``-f x``, ``--file=x``, ``--type=bool``)
+    is not a read at all: its value is free text a quote can give whitespace.
     """
     get_mode = False
     sub_read = False
@@ -1143,14 +1234,18 @@ def _config_not_a_proven_read(args: list[str], *, quoted: bool) -> bool:
         if a.startswith("-"):
             if positionals and not sub_read:
                 if not _config_known_read_flag(a):
-                    return True
+                    return None
             elif a in _CONFIG_GET_FLAGS:
                 get_mode = True
                 continue
             elif a in _CONFIG_VALUED_FLAGS:
+                if not valued_ok:
+                    return None
                 i += 1
                 continue
             elif _config_known_read_flag(a):
+                if not valued_ok and a.startswith(_CONFIG_JOINED_PREFIXES):
+                    return None
                 continue
             elif sub_read and (
                 a in _CONFIG_SUBCOMMAND_READ_FLAGS
@@ -1158,23 +1253,23 @@ def _config_not_a_proven_read(args: list[str], *, quoted: bool) -> bool:
             ):
                 continue
             else:
-                return True
+                return None
         elif positionals == 0 and not get_mode:
             if a in _CONFIG_WRITE_SUBCOMMANDS:
-                return True
+                return None
             if a in _CONFIG_READ_SUBCOMMANDS:
                 sub_read = True
         positionals += 1
     if get_mode or sub_read:
-        return False
-    return quoted or positionals > 1 or any(_CONFIG_META_RE.search(a) for a in args)
+        return "get"
+    return "bare" if positionals <= 1 else None
 
 
-def _config_write_form(args: list[str], *, quoted: bool, worktree: bool = False) -> bool:
+def _config_write_form(args: list[str], *, worktree: bool = False) -> bool:
     """True unless *args* are a proven read. With *worktree* (a proven linked
     worktree, and the command names no other repository) a ``--worktree`` write
-    is not one either."""
-    if not _config_not_a_proven_read(args, quoted=quoted):
+    of a key that runs no code is not one either."""
+    if _config_read_kind(args) is not None:
         return False
     return not (worktree and _config_worktree_scoped(args))
 
@@ -1187,7 +1282,7 @@ class _GitGlobals:
     to a ``config`` word and says whether that word is the subcommand (a
     ``config`` after ``log``/``grep`` is an argument; one that is the VALUE of
     ``-C`` is a directory). The cursor only moves forward, so a segment costs
-    one pass however many ``config`` words it holds."""
+    one pass however many ``config`` words it holds. Exact only on PLAIN text."""
 
     __slots__ = ("pos", "skip", "sub", "other_repo")
 
@@ -1216,21 +1311,22 @@ class _GitGlobals:
         return not self.sub and not self.skip
 
 
-def _config_relaxed_match(text: str, *, quoted: bool, worktree: bool = False) -> bool:
-    """True when literal *text* holds a ``config`` command that is not a proven
+def _config_relaxed_match(text: str, *, worktree: bool = False) -> bool:
+    """True when PLAIN *text* holds a ``config`` command that is not a proven
     read (see the block comment above). Linear: one split, one token pass per
     segment with a forward-only cursor for the subcommand, and at most
     ``_CONFIG_MAX_WORDS_PER_SEGMENT`` argument reads each. With *worktree*, a
-    ``--worktree`` write (and no other repository named) is not a hit."""
+    ``--worktree`` write (and no other repository named, by option or by
+    ``GIT_DIR=``) is not a hit."""
     text = _SAFE_REDIRECT_RE.sub(" ", text)
     text = _CONFIG_REDIRECT_RE.sub(" ", text)
+    if worktree and _GIT_REPO_ENV_RE.search(text) is not None:
+        worktree = False
     for seg in _CONFIG_SEGMENT_SPLIT_RE.split(text):
         if "config" not in seg:
             continue
         gl: _GitGlobals | None = None
         words = 0
-        prev_tok = ""
-        prev_end = -1
         for m in _PATHISH_TOKEN_RE.finditer(seg):
             tok = m.group().rstrip("/")
             base = tok[tok.rfind("/") + 1:]
@@ -1241,79 +1337,106 @@ def _config_relaxed_match(text: str, *, quoted: bool, worktree: bool = False) ->
                 verb = True
             elif tok == "config":
                 if s > 0 and seg[s - 1] == "=":
-                    # `-c alias.c=config`, `GIT_CONFIG_VALUE_0=config`: the key
-                    # names an alias or a value that becomes the subcommand.
-                    # `--grep=config` is a search term.
-                    verb = prev_end == s - 1 and (
-                        prev_tok.lower().startswith("alias.")
-                        or _GIT_CONFIG_VALUE_RE.fullmatch(prev_tok) is not None
-                    )
-                    exempt = False
+                    # `-c core.x=config` sets a VALUE. An alias that names config
+                    # is `_CONFIG_ALIAS_INJECT_RE`'s; `--grep=config` is a search
+                    # term.
+                    pass
                 elif gl is not None:
-                    # A word glued to the front (`{config,x}`) cannot be told
-                    # from the subcommand, so it counts.
+                    # A word glued to the front cannot be told from the
+                    # subcommand, so it counts.
                     verb = (s > 0 and not seg[s - 1].isspace()) or gl.at_subcommand(seg, s)
                     exempt = worktree and not gl.other_repo
             if verb:
                 words += 1
                 if words > _CONFIG_MAX_WORDS_PER_SEGMENT:
                     return True
-                if _config_write_form(seg[m.end():].split(), quoted=quoted, worktree=exempt):
+                if _config_write_form(seg[m.end():].split(), worktree=exempt):
                     return True
             if "git" in base and _GIT_BASENAME_RE.fullmatch(base):
                 gl = _GitGlobals(m.end())
             elif "hub" in base and _HUB_TOKEN_RE.fullmatch(tok):
                 gl = _GitGlobals(m.end())
-            prev_tok = tok
-            prev_end = m.end()
+    return False
+
+
+def _config_get_read(text: str, pos: int) -> bool:
+    """True when the words after *pos* (just past a ``config`` word), up to the
+    first command break, are a proven GET read made only of exact read flags
+    (``_config_read_kind`` with *valued_ok* False). More than
+    ``_CONFIG_ARG_WORDS_CAP`` words is unprovable and False."""
+    args: list[str] = []
+    for m in _CONFIG_ARG_WALK_RE.finditer(text, pos):
+        w = m.group()
+        if w in _CONFIG_ARG_BREAKS:
+            break
+        if len(args) == _CONFIG_ARG_WORDS_CAP:
+            return False
+        args.append(w)
+    return _config_read_kind(args, valued_ok=False) == "get"
+
+
+def _config_strict_match(text: str, view: _ConfigView, git_end: int) -> bool:
+    """True when *text*, which is NOT plain, holds a ``config`` word after the
+    first git (or hub) command at *git_end* that is not an excused get read, or
+    the raw command holds ``config`` inside a substitution span."""
+    for m in _CONFIG_STRICT_RE.finditer(text, git_end):
+        if not (view.reads and _config_get_read(text, m.end())):
+            return True
+    raw = view.raw
+    if "$" in raw or "`" in raw:
+        raw_end = _first_git_command(raw) or 0
+        for sp in _CONFIG_SPAN_RE.finditer(raw):
+            if sp.end() > raw_end and _CONFIG_IN_SPAN_RE.search(sp.group()) is not None:
+                return True
     return False
 
 
 def _config_match(
-    normalized_text: str, *, relaxed: bool, quoted: bool, worktree: bool = False,
+    normalized_text: str, view: _ConfigView, *, worktree: bool = False,
 ) -> str | None:
     """``"config"`` when *normalized_text* holds a git (or hub) command and a
     ``config`` command that is not a proven read, else ``None``. See the block
-    comment above ``_CONFIG_STRICT_RE``. *worktree* admits ``--worktree``
-    writes in relaxed text; text that can rebuild a word is unprovable and
-    denies either way."""
+    comment above ``_CONFIG_STRICT_RE``. *view* is the RAW-text judgment of
+    whether the text is plain; *worktree* admits ``--worktree`` writes in plain
+    text."""
     ends = [
         e for e in (_first_git_command(normalized_text), _first_hub_command(normalized_text))
         if e is not None
     ]
     if not ends:
         return None
-    if relaxed:
-        hit = _config_relaxed_match(normalized_text, quoted=quoted, worktree=worktree)
+    if _CONFIG_ALIAS_INJECT_RE.search(normalized_text) is not None:
+        return "config"
+    if view.cursor:
+        hit = _config_relaxed_match(normalized_text, worktree=worktree)
     else:
-        hit = _CONFIG_STRICT_RE.search(normalized_text, min(ends)) is not None
+        hit = _config_strict_match(normalized_text, view, min(ends))
     return "config" if hit else None
 
 
 def _config_hit(
-    normalized_text: str, *, relaxed: bool, quoted: bool, worktree: bool = False,
+    normalized_text: str, view: _ConfigView, *, worktree: bool = False,
 ) -> str | None:
     """``_config_match`` over the normalized text and its zero-expansion form."""
-    return _config_match(
-        normalized_text, relaxed=relaxed, quoted=quoted, worktree=worktree,
-    ) or _config_match(
-        _delete_all_expansions(normalized_text), relaxed=relaxed, quoted=quoted,
-        worktree=worktree,
+    return _config_match(normalized_text, view, worktree=worktree) or _config_match(
+        _delete_all_expansions(normalized_text), view, worktree=worktree,
     )
 
 
 def _primary_match(
-    normalized_text: str, *, relaxed: bool = False, quoted: bool = False,
+    normalized_text: str, *, relaxed: bool = False, view: _ConfigView | None = None,
 ) -> str | None:
     """The first write verb, HEAD-moving ``gh`` phrase or non-read ``git
     config`` in *normalized_text*, as a short name, or ``None``. The verb scan
     (``_verb_match``) runs first and is unchanged; ``config`` (nexus-dsr6a)
     only ever ADDS a denial after it, so no command that denied before allows
-    now."""
+    now. Without a *view* the text is treated as not plain."""
     hit = _verb_match(normalized_text, relaxed=relaxed)
     if hit is not None:
         return hit
-    return _config_match(normalized_text, relaxed=relaxed, quoted=quoted)
+    if view is None:
+        view = _ConfigView(normalized_text, False, False)
+    return _config_match(normalized_text, view)
 
 
 def _verb_match(normalized_text: str, *, relaxed: bool = False) -> str | None:
@@ -2047,18 +2170,23 @@ def _deny_message(agent_type: str, verb_names: str, *,
             "`--list`/`-l`, `--show-origin`, a bare `git config <key>`, and "
             "`git config get|list`, as long as the command cannot rebuild text "
             "(no `$`, backtick, executor or non-filter pipe stage) and carries "
-            "no other write flag. A quote, a backslash or `{ } * ? [` in a "
-            "config command makes its argument count unprovable, so only a "
-            "`--get*`/`--list`/`get`/`list` read passes with them. Need a "
-            "config change? Hand it back to the orchestrator to run."
+            "no other write flag. A quote, a backslash, `{ } * ? [` or a "
+            "`config` inside `$( )` anywhere in the command makes the word "
+            "count unprovable, so only a `--get*`/`--list`/`get`/`list` read "
+            "made of exact flags passes with them. Defining an alias on the "
+            "command line (`-c alias.x=`, `--config-env alias.x=`) is denied "
+            "too. Need a config change? Hand it back to the orchestrator to "
+            "run."
         )
         if in_worktree:
             head += (
                 "\nA linked worktree is yours to rewrite, but a plain `git "
                 "config` there writes the common `.git/config` the primary "
                 "checkout reads. Only `git config --worktree <key> <value>` "
-                "(the per-worktree file; no -C/--git-dir may name another "
-                "repository) and reads pass."
+                "(the per-worktree file; no -C/--git-dir/GIT_DIR= may name "
+                "another repository, no quote or `$` in the command, and a "
+                "key that runs code such as core.hooksPath is refused) and "
+                "reads pass."
             )
     if undeterminable:
         head += (
@@ -2262,8 +2390,10 @@ def _remote_test_host_command(command: str) -> str | None:
     return host
 
 
-def _scan_command(command: str, normalized: str) -> tuple[str | None, str | None, bool, bool]:
-    """``(spliced_fragment, primary_match, relaxed, quoted)`` for a Bash
+def _scan_command(
+    command: str, normalized: str,
+) -> tuple[str | None, str | None, bool, _ConfigView]:
+    """``(spliced_fragment, primary_match, relaxed, config_view)`` for a Bash
     *command* and its ``_normalize_for_primary_scan`` form: the verdict of both
     gates, before any exemption.
 
@@ -2294,21 +2424,23 @@ def _scan_command(command: str, normalized: str) -> tuple[str | None, str | None
     still holds every `$`/backtick; the zero-expansion form has those deleted,
     so it must not decide this for itself.
 
-    nexus-dsr6a: *quoted* is a quote or backslash in the RAW command. Quote
-    stripping erases or moves arguments, which a ``git config`` read test that
-    counts words cannot see; see the block comment above `_CONFIG_STRICT_RE`.
+    nexus-dsr6a: *config_view* is the config rule's judgment of the RAW command
+    (is it plain, may a get read be excused). Normalized text has already had
+    quotes stripped and ``$(echo X)`` resolved, which a ``git config`` read test
+    that counts words cannot see; see the block comment above
+    `_CONFIG_STRICT_RE`.
     """
     spliced_fragment = _find_spliced_expansion(normalized)
     relaxed = not _may_recombine(normalized)
-    quoted = "'" in command or '"' in command or "\\" in command
+    view = _config_view(command, relaxed)
     primary_match = None
     if not spliced_fragment:
         primary_match = _primary_match(
-            normalized, relaxed=relaxed, quoted=quoted,
+            normalized, relaxed=relaxed, view=view,
         ) or _primary_match(
-            _delete_all_expansions(normalized), relaxed=relaxed, quoted=quoted,
+            _delete_all_expansions(normalized), relaxed=relaxed, view=view,
         )
-    return spliced_fragment, primary_match, relaxed, quoted
+    return spliced_fragment, primary_match, relaxed, view
 
 
 def body(payload: dict[str, Any]) -> None:
@@ -2334,7 +2466,7 @@ def body(payload: dict[str, Any]) -> None:
 
     normalized = _normalize_for_primary_scan(command)
 
-    spliced_fragment, primary_match, relaxed, quoted = _scan_command(command, normalized)
+    spliced_fragment, primary_match, _relaxed, config_view = _scan_command(command, normalized)
     if not spliced_fragment and primary_match is None:
         _lib.pass_through()
 
@@ -2364,9 +2496,7 @@ def body(payload: dict[str, Any]) -> None:
         # `--worktree` writes pass (git refuses them in a repo with linked
         # worktrees unless extensions.worktreeConfig is on, so they cannot
         # reach the common file); reads pass.
-        wt_config = _config_hit(
-            normalized, relaxed=relaxed, quoted=quoted, worktree=True,
-        ) is not None
+        wt_config = _config_hit(normalized, config_view, worktree=True) is not None
         if not wt_config:
             _lib.pass_through()
     # worktree is False (primary checkout) OR None (undeterminable) — EITHER

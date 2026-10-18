@@ -696,6 +696,9 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "sh -c 'git config user.name x'",
         "echo 'git config user.name x' | bash",
         "git config --get user.name | sh",
+        # a `$` anywhere in the RAW command is not plain, even when the scan
+        # resolves the substitution to a literal (nexus-dsr6a confirmation)
+        "git config --get " + D + "(echo user.name)",
         "git config --get user.name > out.txt",
         "git config --get user.name | xargs git config user.email",
         "for k in a b; do git config --get " + D + "k; done",
@@ -740,6 +743,92 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git config core.hooks*",
         "git config user.name x{,y}",
         "git config --worktree user.name ';x'",
+        # CR is a word character to bash and a command separator to the scan
+        "git config user.name \r x",
+    ],
+    # nexus-dsr6a confirmation B-A: a global option's value that is quoted,
+    # escaped, empty, braced or holds `; & (` made the subcommand cursor take a
+    # value word (or nothing) for the subcommand, so the later `config` read as
+    # an argument and each of these wrote (verified on real git, see
+    # test_every_config_deny_family_command_really_writes). A quote, backslash,
+    # `{ } * ? [` anywhere in the raw command is not plain, so none of them is
+    # read by the cursor.
+    "config_global_option_values": [
+        "git -c 'user.name=a b' config user.name x",
+        'git -c "user.name=a b" config user.name x',
+        "git -c user.name=a" + BS + " b config user.name x",
+        "git -C '' config user.name x",
+        'git -C "" config user.name x',
+        "git -C '{repo}/sp ace' config user.name x",
+        "git -C '{repo}/se;mi' config user.name x",
+        "git --namespace='a b' config user.name x",
+        "git --namespace 'a b' config user.name x",
+        "git -c 'x.y=1;2' config user.name x",
+        "git -c 'x.y=1&2' config user.name x",
+        "git -c 'x.y=1|2' config user.name x",
+        "git -c 'x.y=(a)' config user.name x",
+        "git -c x.y=1" + BS + ";2 config user.name x",
+        "git -c 'core.pager=less -R' config user.name x",
+        "git -c 'a b=c' config user.name x",
+        "git {--no-pager,--no-pager} config user.name x",
+        "git {-p,} config user.name x",
+        "git {-c,a.b=c} config user.name x",
+    ],
+    # nexus-dsr6a confirmation B-B and E: a config word inside a command
+    # substitution's payload makes the command non-plain by definition. The
+    # payload resolved to bare text (`$(echo config | cat)` became `config | cat`)
+    # whose pipe split the segment, so config saw no arguments and read as a
+    # bare-key read. Inside a span `config` adjoined by `.`, `-` or `/` counts.
+    "config_substitution_payload": [
+        "git " + D + "(echo config | cat) user.name x",
+        "git " + D + "(echo config ; true) user.name x",
+        "git " + D + "(echo config;) user.name x",
+        "git " + D + "(echo config 2>/dev/null) user.name x",
+        "git " + BT + "echo config | cat" + BT + " user.name x",
+        "git " + D + "(printf config | cat) core.hooksPath /tmp/x",
+        "git " + D + "(echo config|tr a-z a-z) user.name x",
+        "git -c x.y=1 " + D + "(echo config |cat) user.name x",
+        "git " + D + "{x:-config;} user.name x",
+        "git " + D + "(basename /x/config.py .py) user.name x",
+        "git " + D + "(echo x-config | cut -d- -f2) user.name x",
+        "git " + D + "(echo config.py | cut -d. -f1) user.name x",
+        "git " + D + "(cut -d- -f2 <<<x-config) user.name x",
+        "git " + D + "(echo x_config | cut -d_ -f2) user.name x",
+    ],
+    # nexus-dsr6a confirmation D: an alias defined on the command line can name
+    # config through a variable the text never spells.
+    "config_alias_injection": [
+        "CFG=config git --config-env=alias.c=CFG c user.name x",
+        "export CFG=config; git --config-env alias.c=CFG c user.name x",
+        "git --config-env alias.c=CFG c user.name x",
+        "git --config-env=ALIAS.c=CFG c user.name x",
+        "git -c alias.c=" + D + "CFG c user.name x",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=" + D + "CFG git c user.name x",
+        "GIT_CONFIG_PARAMETERS=\"'alias.c=config'\" git c user.name x",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=' config' git c user.name x",
+    ],
+    # nexus-dsr6a confirmation: the get-read exemption in non-plain text reads
+    # only exact read flags. A valued flag's value is free text a quote can give
+    # whitespace (`-f 'x --get'` is one file name, so the `--get` the scan saw is
+    # not a flag), and a `$` or braces in the flag run could be anything.
+    "config_get_exemption_is_exact": [
+        "git config -f 'x --get' user.name x",
+        "git config --file='x --get' user.name x",
+        "git config --file 'x' --get user.name 'y'",
+        "git config --default \"$x\" --get user.name",
+        "git config --get " + D + "x user.name",
+        "git config " + D + "x --get user.name",
+        "git config {--get,--unset} user.name",
+        "git config --glo'bal' user.name x",
+    ],
+    # nexus-dsr6a confirmation F, an ACCEPTED cost: a bare-key read with a quote
+    # anywhere in the command is not plain and its word count is unprovable, so
+    # it denies. A get/list read beside a quote stays allowed (the allow family).
+    "config_bare_read_beside_a_quote": [
+        "git config user.name || echo \"no name\"",
+        "git config 'user.name'",
+        "echo \"x\" && git config user.name",
+        "git config core.hooksPath; echo \"---\"",
     ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
@@ -834,9 +923,6 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "git config --get --default fallback user.name",
         "git config --includes --get user.name",
         "git config --get remote.origin.fetch '^+'",
-        # a command substitution of a literal is resolved before the scan, so
-        # this text spells a plain read
-        "git config --get " + D + "(echo user.name)",
         # scope flags with a read
         "git config --global --get user.name",
         "git config --global user.name",
@@ -933,6 +1019,13 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "git config get 'user.name'",
         "git config list '{a,b}'",
         "git config --get user.{name,email}",
+        # nexus-dsr6a confirmation: a quote in ANOTHER command does not make a
+        # get read unprovable (the exemption reads the flags after `config`).
+        "git config --get user.name || echo \"no name\"",
+        "echo \"x\" && git config --get user.name",
+        "git config --list; echo 'done'",
+        "git -c 'core.pager=less -R' config --list",
+        "git -C '' config --get user.name",
     ],
     "not_git": [
         "ls -la && echo commit",
@@ -1227,6 +1320,41 @@ _SHARED_CONFIG_WRITES = [
     "git config {--worktree,--global} user.name x",
     "git status; git config user.name x",
     "git commit -m x; git config --global user.name x",
+    # nexus-dsr6a confirmation C: a variable that points git at the primary
+    # disqualifies the --worktree exemption, as -C and --git-dir do (the write
+    # lands in the PRIMARY's config.worktree, which it reads). `cd`/`pushd` into
+    # the primary stay a documented limit: the tool call's cwd decides.
+    "GIT_DIR={primary}/.git git config --worktree user.name x",
+    "env GIT_DIR={primary}/.git git config --worktree user.name x",
+    "export GIT_DIR={primary}/.git; git config --worktree user.name x",
+    "GIT_COMMON_DIR={primary}/.git git config --worktree user.name x",
+    "GIT_WORK_TREE={primary} git config --worktree user.name x",
+    # nexus-dsr6a confirmation G: a key that runs code for whoever commits or
+    # runs git in that worktree is refused even with --worktree.
+    "git config --worktree core.hooksPath /tmp/x",
+    "git config --worktree core.hookspath /tmp/x",
+    "git config --worktree x.hooksPath /tmp/x",
+    "git config --worktree core.fsmonitor /tmp/x",
+    "git config --worktree core.sshCommand /tmp/x",
+    "git config --worktree include.path /tmp/x",
+    "git config --worktree includeIf.gitdir:/x/.path /tmp/x",
+    "git config --worktree includeIf.onbranch:main.path /tmp/x",
+    "git config --worktree alias.c '!x'",
+    "git config --worktree core.editor /tmp/x",
+    "git config --worktree gpg.ssh.program /tmp/x",
+    "git config --worktree credential.helper /tmp/x",
+    "git config --worktree --add core.hooksPath /tmp/x",
+    # B-A and B-B reach a worktree as well: the same quote, brace and capture
+    # rules apply, whatever the cwd.
+    "git -c 'user.name=a b' config user.name x",
+    "git -C '' config user.name x",
+    "git -C '{primary}/sp ace' config --worktree user.name x",
+    "git " + D + "(echo config | cat) user.name x",
+    "git " + D + "(echo config | cat) --worktree user.name x",
+    "git --config-env=alias.c=CFG c user.name x",
+    # F, accepted: a --worktree write with a quoted value is not plain.
+    "git config --worktree user.name ';x'",
+    "git config --worktree user.name 'a b'",
 ]
 
 
@@ -1266,12 +1394,11 @@ def test_a_worktree_write_and_every_config_read_pass_in_a_linked_worktree(
     everything else a worktree owns."""
     allowed = [
         "git config --worktree user.name x",
-        "git config --worktree core.hooksPath /tmp/x",
+        "git config --worktree core.sparseCheckout true",
         "git config --worktree --unset user.name",
         "git config --worktree --add a.b c",
-        "git config --worktree user.name ';x'",
-        "git config --worktree user.name 'a b'",
         "git status; git config --worktree user.name x",
+        "git config --get user.name || echo \"no name\"",
         "git config --get user.name",
         "git config user.name",
         "git config --global --get user.name",
@@ -1311,6 +1438,126 @@ def test_git_refuses_a_worktree_write_without_the_extension_so_it_cannot_reach_t
     assert _config_read(linked_worktree, "--worktree", "--get", "zz.probe") == "1"
     subprocess.run(["git", "config", "zz.plain", "1"], cwd=linked_worktree, check=True)
     assert _config_read(shared_repo, "--local", "--get", "zz.plain") == "1"
+
+
+def _sandbox_env(box: pathlib.Path) -> dict[str, str]:
+    """An environment in which a config write can reach only *box*: its own HOME
+    and global file, no system file."""
+    home = box / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    return {
+        "PATH": os.environ["PATH"], "HOME": str(home),
+        "GIT_CONFIG_GLOBAL": str(home / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@a",
+        "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@a",
+    }
+
+
+def _config_snapshot(paths: list[pathlib.Path]) -> dict[str, str | None]:
+    return {str(p): p.read_text() if p.is_file() else None for p in paths}
+
+
+#: Commands in the new deny families that a real git does NOT turn into a
+#: config write (the guard denies them anyway: they are the same shapes), each
+#: with the reason, so the real-git test below is not vacuous for the rest.
+_NOT_REAL_WRITES = {
+    # The expansion yields the one word `config;`, which is no git command.
+    "git " + D + "{x:-config;} user.name x": "semicolon is part of the word",
+    # `-c 'a b=c'` is an invalid key, git stops before the subcommand.
+    "git -c 'a b=c' config user.name x": "invalid -c key",
+    # A leading space makes the alias value ` config`, which git does not run.
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=' config' git c user.name x": "space",
+    # No CFG variable is set: the alias has an empty value (the next test sets it).
+    "git --config-env alias.c=CFG c user.name x": "CFG unset",
+    "git --config-env=ALIAS.c=CFG c user.name x": "CFG unset",
+    "git -c alias.c=" + D + "CFG c user.name x": "CFG unset",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=" + D + "CFG git c user.name x": "CFG unset",
+}
+_REAL_WRITE_FAMILIES = (
+    "config_global_option_values", "config_substitution_payload", "config_alias_injection",
+)
+
+
+def test_every_config_deny_family_command_really_writes_config(tmp_path):
+    """The new deny families are not hypothetical: each command, run for real in
+    a sandbox, changes a config file (the repo's, or the other repository a `-C`
+    names), and the hook denies it. The ones git itself turns into no write are
+    listed with a reason and still must deny."""
+    ran = 0
+    for family in _REAL_WRITE_FAMILIES:
+        for template in _DENY_FAMILIES[family]:
+            box = tmp_path / f"box{ran}"
+            main = box / "main"
+            main.mkdir(parents=True)
+            env = _sandbox_env(box)
+            subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
+            watched = [main / ".git" / "config"]
+            for name in ("sp ace", "se;mi"):
+                (main / name).mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=main / name, check=True, env=env)
+                watched.append(main / name / ".git" / "config")
+            cmd = template.replace("{repo}", str(main))
+            before = _config_snapshot(watched)
+            subprocess.run(
+                ["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True,
+                check=False, timeout=20,
+            )
+            wrote = _config_snapshot(watched) != before
+            if template in _NOT_REAL_WRITES:
+                assert not wrote, f"{template!r} was listed as not a write but wrote"
+            else:
+                assert wrote, f"[{family}] {template!r} did not change any config file"
+            assert _denied(cmd, main), f"[{family}] {template!r} was not denied"
+            ran += 1
+    assert ran >= 40, f"only {ran} commands were run; the families shrank"
+
+
+def test_the_config_alias_through_a_variable_really_writes_and_denies(tmp_path):
+    """D with the variable actually set: `CFG=config git --config-env=alias.c=CFG
+    c user.name x` and the exported form write, and both deny."""
+    cmds = [
+        "CFG=config git --config-env=alias.c=CFG c user.name x",
+        "export CFG=config; git --config-env alias.c=CFG c user.name x",
+        "export CFG=config; git -c alias.c=" + D + "CFG c user.name x",
+    ]
+    for i, cmd in enumerate(cmds):
+        box = tmp_path / f"d{i}"
+        main = box / "main"
+        main.mkdir(parents=True)
+        env = _sandbox_env(box)
+        subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
+        cfg = main / ".git" / "config"
+        before = cfg.read_text()
+        subprocess.run(["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True, timeout=20)
+        assert cfg.read_text() != before, f"{cmd!r} did not write"
+        assert _denied(cmd, main), cmd
+
+
+def test_a_git_dir_assignment_really_redirects_a_worktree_write_into_the_primary(
+    shared_repo, linked_worktree, tmp_path,
+):
+    """C, measured: with `extensions.worktreeConfig` on, `GIT_DIR=<primary>/.git
+    git config --worktree user.name x` run from the linked worktree writes the
+    PRIMARY's `config.worktree`, which the primary reads. The plain --worktree
+    write is the control: it lands in the worktree's own file and passes."""
+    env = _sandbox_env(tmp_path / "sandbox")
+    subprocess.run(
+        ["git", "config", "extensions.worktreeConfig", "true"], cwd=shared_repo, check=True, env=env,
+    )
+    primary_file = shared_repo / ".git" / "config.worktree"
+    control = "git config --worktree zz.control 1"
+    subprocess.run(["bash", "-c", control], cwd=linked_worktree, env=env, check=True)
+    assert not primary_file.exists(), "the control reached the primary"
+    assert not _denied(control, linked_worktree), control
+    for cmd in (
+        f"GIT_DIR={shared_repo}/.git git config --worktree user.name x",
+        f"env GIT_DIR={shared_repo}/.git git config --worktree user.name x",
+        f"GIT_WORK_TREE={shared_repo} GIT_DIR={shared_repo}/.git git config --worktree user.name x",
+    ):
+        primary_file.unlink(missing_ok=True)
+        subprocess.run(["bash", "-c", cmd], cwd=linked_worktree, env=env, check=False)
+        assert primary_file.is_file() and "user" in primary_file.read_text(), cmd
+        assert _denied(cmd, linked_worktree), cmd
 
 
 # ---------------------------------------------------------------------------
@@ -1429,6 +1676,19 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     # are each O(1).
     ("git " + "-C x " * 6_000 + "config user.name y", True),
     ("git " + "-c a=b " * 5_000 + "config --get user.name", False),
+    # nexus-dsr6a confirmation: the raw-text judgment (one regex over the command),
+    # the span scan and the get-read walk. A get read with more words than the
+    # walk cap is unprovable and denies; a long run of excused reads is one pass
+    # each; unclosed or repeated substitutions are linear.
+    ("git config --get 'q' " + "a " * 20_000, True),
+    ("git config -l 'q'; " * 2_000, False),
+    ("git " + "$(" * 15_000 + "x", False),
+    ("git x " + BT * 30_000, False),
+    ("git x " + "$(echo a) " * 6_000, False),
+    ("git x " + "$(echo a config.py) " * 2_000, True),
+    ("git 'q' " + "x/config " * 5_000, False),
+    ("git config user.name\r" * 3_000, True),
+    ("git " + "GIT_CONFIG_PARAMETERS=a " * 2_000, False),
     ("git log " + "config " * 8_000, False),
     ("git grep " + "config " * 4_000 + "; git status; " * 2_000, False),
 ]
