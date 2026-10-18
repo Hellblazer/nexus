@@ -240,7 +240,7 @@ def test_cli_page_and_scores_do_not_depend_on_pool_depth(cli_env, mock_t3, n):
                  "--n", str(n)],
             )
         assert result.exit_code == 0, result.output
-        rows = json.loads(result.output)
+        rows = json.loads(result.stdout)
         assert len(rows) == n
         pages[depth] = [(r["id"], r["hybrid_score"]) for r in rows]
     assert len(pages) >= 3
