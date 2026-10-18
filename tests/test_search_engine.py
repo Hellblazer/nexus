@@ -2427,9 +2427,12 @@ class TestBoostWindow:
         calibrated. A window cut on RAW distance would hold 30 code rows and no prose
         at all, and the page would lose rows today's shows; cut on the calibrated
         scale, the page equals the unwindowed deep-pool page at every depth."""
+        from nexus.corpus import voyage_model_for_collection
+
+        # The cloud prefix map gives code__ and knowledge__ their two distinct models.
         monkeypatch.setattr(
             "nexus.corpus.embedding_model_for_collection_calibrated",
-            lambda name: "voyage-code-3" if name.startswith("code__") else "voyage-context-3",
+            voyage_model_for_collection,
         )
 
         def pool_k(k):  # per-collection k, as the engine route serves it
