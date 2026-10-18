@@ -263,7 +263,9 @@ def test_calibration_factor_for_unrecognized_model_gets_default(cloud_mode) -> N
     `search_engine._threshold_for_collection` already uses for an
     unrecognized collection prefix -- provably NOT voyage-code-3's
     factor."""
-    factor = _calibration_factor_for_model("bge-base-en-v15-768")
+    # bge-base-en-v15-768 used to be this test's unlisted model; it has its own
+    # measured entry since RDR-210 P1.5 (nexus-hf29s).
+    factor = _calibration_factor_for_model("all-minilm-l6-v2-384")
     assert factor == pytest.approx(0.45 / 0.55)
     assert factor != pytest.approx(_calibration_factor_for_model("voyage-code-3"))
 

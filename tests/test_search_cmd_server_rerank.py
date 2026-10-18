@@ -202,9 +202,14 @@ def test_degraded_rerank_is_surfaced_on_stderr(runner, cloud_env):
     assert "HTTP 500" in res.output
 
 
-def test_partial_degrade_scored_rows_lead_and_degrade_still_surfaced(runner, cloud_env):
-    """One collection degraded, one scored: scored rows lead (by score), the
-    degraded collection's rows follow, and the degrade is surfaced."""
+def test_partial_degrade_orders_every_row_by_the_boosted_score_and_still_surfaces_it(
+    runner, cloud_env,
+):
+    """One collection degraded, one scored: RDR-210 Technical Design 12 stops
+    "scored rows lead" (it sank the degraded family's rows), so every row
+    follows the boosted/calibrated order, and the degrade is surfaced. Both
+    collections here share one model, so the order is raw distance. The
+    cross-family case is in tests/test_hf29s_cross_family_ranking.py."""
     results = [
         _result("unscored", "knowledge__test", 0.05),
         _result("scored-low", "rdr__nexus", 0.3, score=0.2),
@@ -219,7 +224,7 @@ def test_partial_degrade_scored_rows_lead_and_degrade_still_surfaced(runner, clo
     assert res.exit_code == 0, res.output
     assert "server rerank degraded" in res.output
     items = json.loads(res.stdout)
-    assert [i["id"] for i in items] == ["scored-high", "scored-low", "unscored"]
+    assert [i["id"] for i in items] == ["unscored", "scored-low", "scored-high"]
 
 
 def test_stale_engine_surfaces_upgrade_convergence_note(runner, cloud_env):

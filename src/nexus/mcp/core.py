@@ -3104,19 +3104,33 @@ def _search_render(
             )
             if lexical_rerank:
                 # Same consumption as the CLI's: scored rows lead in server
-                # relevance order; rows a degraded collection left unscored
-                # follow in boosted order, since the two scales differ.
-                scored = [r for r in results if "rerank_score" in r.metadata]
-                for r in scored:
-                    r.hybrid_score = float(r.metadata["rerank_score"])
-                scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-                results = scored + [r for r in results if "rerank_score" not in r.metadata]
+                # relevance order; rows beyond the engine's rerank cap follow
+                # in boosted order, since the two scales differ. RDR-210
+                # Technical Design 12 (nexus-hf29s): when a collection
+                # DEGRADED and others were scored, "scored rows lead" would
+                # sink the degraded family's rows, so every row stays in the
+                # calibrated hybrid_score order apply_ranking_boosts set.
                 degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded"))
+                scored = [r for r in results if "rerank_score" in r.metadata]
+                partial_rerank = bool(degraded) and bool(scored)
+                if partial_rerank:
+                    # apply_ranking_boosts already ordered the rows (calibrated
+                    # window order, then distance order past the window).
+                    pass
+                else:
+                    for r in scored:
+                        r.hybrid_score = float(r.metadata["rerank_score"])
+                    scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+                    results = scored + [r for r in results if "rerank_score" not in r.metadata]
                 if degraded:
                     rerank_note = (
                         f"lexical rerank degraded in {len(degraded)} collection(s) "
                         f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
-                        "their lexical rows are in vector-distance order and may be cut"
+                        + (
+                            "all rows are in calibrated distance order"
+                            if partial_rerank
+                            else "their lexical rows are in vector-distance order and may be cut"
+                        )
                     )
             if clustered:
                 # apply_ranking_boosts sorts by hybrid_score globally, which
@@ -3135,6 +3149,10 @@ def _search_render(
                     # best rerank score and each cluster's rows by score,
                     # scored rows first.
                     def _score(r) -> float:
+                        if partial_rerank:
+                            # Mixed scales: the calibrated hybrid_score orders
+                            # every row (Technical Design 12, nexus-hf29s).
+                            return r.hybrid_score
                         s = r.metadata.get("rerank_score")
                         return float(s) if s is not None else float("-inf")
 
@@ -3863,6 +3881,22 @@ def _group_collections_by_model(target: list[str]) -> list[list[str]]:
     return list(groups.values())
 
 
+def _group_calibration_factor(group: list[str]) -> float:
+    """The cross-model distance factor for one model-homogeneous *group*
+    (RDR-210 Technical Design 12): the group's model is its catalog row's
+    ``embedding_model`` (the same authority :func:`_group_collections_by_model`
+    groups by), and a group with no row falls to the model its name carries,
+    never to a guess from the prefix."""
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred for startup cost (rare/branch-local)
+    from nexus.scoring import _calibration_factor_for_model  # noqa: PLC0415 — deferred for startup cost (rare/branch-local)
+
+    try:
+        model = collection_model(group[0])
+    except CollectionNotRegisteredError:
+        model = embedding_model_for_collection_calibrated(group[0])
+    return _calibration_factor_for_model(model)
+
+
 def _distance_key(row: dict) -> float:
     """Sort key for combined-query merge rows: missing OR ``None`` -> +inf.
 
@@ -3933,13 +3967,16 @@ def _grouped_combined_query(
     — matching ``search_topic_scoped``'s existing (uncaught) per-collection
     loop.
 
-    CAVEAT: when *target* spans more than one embedding model, the merge
-    ranks rows by raw cosine distance across DIFFERENT embedding-model
-    vector spaces (e.g. ``voyage-code-3`` vs ``voyage-context-3``).
-    Distance values from different models are not a rigorously comparable
-    metric — the merge order can carry a systematic per-model bias. This is
-    the same class of accepted caveat ``search_topic_scoped`` already
-    documents for its own per-collection merge.
+    Merge order (RDR-210 Technical Design 12, nexus-hf29s): when *target*
+    spans more than one embedding model, rows are ordered by CALIBRATED
+    distance, the raw distance times the model's factor from
+    :func:`nexus.scoring._calibration_factor_for_model` (the same table
+    ``apply_hybrid_scoring`` pools over). Raw cosine distance is not
+    comparable across models: a bge hit and a Voyage hit at the same raw
+    distance are not equally relevant, so a raw-distance sort sinks one
+    family. The rows' own ``distance`` is left as the engine reported it.
+    A single-model target sorts on raw distance, as before (one common
+    factor cannot change the order).
 
     *t3* (nexus-vply6 fix round 2, point 3 — "every read path names it
     identically") is passed through to
@@ -3957,16 +3994,23 @@ def _grouped_combined_query(
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.errors import classify_vector_service_error  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
-    rows: list[dict] = []
-    for group in _group_collections_by_model(target):
+    groups = _group_collections_by_model(target)
+    # One factor per group, applied only when more than one group merges.
+    factors = (
+        [_group_calibration_factor(g) for g in groups] if len(groups) > 1 else None
+    )
+    keyed: list[tuple[float, dict]] = []
+    for i, group in enumerate(groups):
         try:
-            rows.extend(call(group))
+            group_rows = call(group)
         except VectorServiceError as exc:
             raise classify_vector_service_error(
                 exc, collections=group, t3=t3,
             ) from exc
-    rows.sort(key=_distance_key)
-    return rows
+        factor = 1.0 if factors is None else factors[i]
+        keyed.extend((_distance_key(r) * factor, r) for r in group_rows)
+    keyed.sort(key=lambda kr: kr[0])
+    return [r for _, r in keyed]
 
 
 def _dedup_by_id(rows: list[dict]) -> list[dict]:

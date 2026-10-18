@@ -74,9 +74,16 @@ _FRECENCY_WEIGHT: float = 0.3
 # guess — while cloud-mode (and local-mode-opted-into-Voyage) legacy
 # names keep the real per-content-type split. See that function's
 # docstring for the full design.
+#
+# RDR-210 Technical Design 12 (nexus-hf29s): ``bge-base-en-v15-768`` is
+# listed at the 0.325 best-F1 threshold measured by 210-research-17 (a
+# factor of 0.45/0.325 = 1.38). It was an unlisted model before, so it fell
+# to the 0.55 default (0.818) and a bge hit and a Voyage hit competed on
+# scales that disagreed by ~1.7x.
 _CALIBRATION_THRESHOLDS_BY_MODEL: dict[str, float] = {
     "voyage-code-3": 0.45,
     "voyage-context-3": 0.65,
+    "bge-base-en-v15-768": 0.325,
 }
 _CALIBRATION_BASELINE: float = _CALIBRATION_THRESHOLDS_BY_MODEL["voyage-code-3"]
 _CALIBRATION_DEFAULT_THRESHOLD: float = 0.55  # matches config.py's "default" key
@@ -89,9 +96,9 @@ def _calibration_factor_for_model(model: str) -> float:
     ``raw_distance * factor`` rescales onto voyage-code-3's absolute
     range. voyage-code-3 itself gets 1.0 (the baseline, no change); a
     model with a more lenient threshold gets a factor < 1.0, shrinking
-    its distances proportionally. An unrecognized model (anything other
-    than the two Voyage models this table knows) falls to the same
-    "default" bucket ``search_engine._threshold_for_collection`` already
+    its distances proportionally, and a tighter one (bge, 0.325) a factor
+    > 1.0. An unrecognized model (anything this table does not list)
+    falls, and logs once that it did, to the same "default" bucket ``search_engine._threshold_for_collection`` already
     uses for an unrecognized collection prefix.
 
     Callers MUST gate on :func:`_resolve_calibration_factors`'s
@@ -99,8 +106,31 @@ def _calibration_factor_for_model(model: str) -> float:
     unconditionally, this function has no way to know whether the
     result set actually spans more than one model.
     """
-    threshold = _CALIBRATION_THRESHOLDS_BY_MODEL.get(model, _CALIBRATION_DEFAULT_THRESHOLD)
+    threshold = _CALIBRATION_THRESHOLDS_BY_MODEL.get(model)
+    if threshold is None:
+        _log_unlisted_model_once(model)
+        threshold = _CALIBRATION_DEFAULT_THRESHOLD
     return _CALIBRATION_BASELINE / threshold
+
+
+#: Models already reported as unmeasured, so a search that resolves the same
+#: unlisted model for every collection logs it once per process, not per call.
+_UNLISTED_MODELS_LOGGED: set[str] = set()
+
+
+def _log_unlisted_model_once(model: str) -> None:
+    """Say, once per model, that *model* has no measured calibration entry
+    and is scored with the default (RDR-210 Technical Design 12: an
+    unmeasured model keeps the default and logs that it did)."""
+    if model in _UNLISTED_MODELS_LOGGED:
+        return
+    _UNLISTED_MODELS_LOGGED.add(model)
+    _log.warning(
+        "calibration_model_unlisted",
+        model=model,
+        default_threshold=_CALIBRATION_DEFAULT_THRESHOLD,
+        consequence="cross-model distances for this model use the default factor",
+    )
 
 
 def _resolve_calibration_factors(

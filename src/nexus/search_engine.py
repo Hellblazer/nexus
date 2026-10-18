@@ -15,7 +15,7 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
-from nexus.corpus import embedding_model_for_collection_name
+from nexus.corpus import LOCAL_EMBEDDING_MODELS, embedding_model_for_collection_name
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
@@ -588,6 +588,29 @@ def _threshold_for_collection(name: str, cfg: dict) -> float | None:
     return thresholds.get("default")
 
 
+#: Engine embedder families under which the Voyage-calibrated thresholds can
+#: apply to at least one collection: Voyage-only and dual (Voyage + bge).
+#: ``onnx-local`` (bge only) filters nothing.
+_THRESHOLD_ENGINE_MODES: frozenset[str] = frozenset({"voyage", "dual"})
+
+
+def _threshold_for_collection_model(name: str, cfg: dict) -> float | None:
+    """:func:`_threshold_for_collection`, withheld from a collection whose
+    own embedding model is a local one (bge, MiniLM).
+
+    RDR-210 Technical Design 12 (nexus-hf29s): thresholds are chosen per
+    collection by its model, not by the engine's mode. The Voyage value
+    admits every bge result (off-topic bge top-10 minimum distance 0.369
+    against 0.65, 210-research-17) and the measured bge threshold's F1 (0.47)
+    is too low to filter on, so a bge collection gets none on any engine, as
+    on a keyless engine today. A name that carries no model token (a legacy
+    two-segment name) keeps the prefix threshold, as before.
+    """
+    if _model_token(name) in LOCAL_EMBEDDING_MODELS:
+        return None
+    return _threshold_for_collection(name, cfg)
+
+
 def _voyage_thresholds_active(t3: Any) -> bool:
     """True when distance thresholds should apply for this T3 handle.
 
@@ -616,7 +639,10 @@ def _voyage_thresholds_active(t3: Any) -> bool:
     # can no longer silently regress search quality (Gap 3), and the signal is
     # what actually embedded the corpus. Unknown (probe failed) → thresholds
     # off: never guess Voyage; a down service fails the search itself anyway.
-    return t3.embedding_mode() == "voyage"
+    # RDR-210 Technical Design 12 (nexus-hf29s): a "dual" engine serves a
+    # Voyage family beside the bge one, so thresholds are on for it too;
+    # _threshold_for_collection_model then keeps them off the bge family.
+    return t3.embedding_mode() in _THRESHOLD_ENGINE_MODES
 
 
 def _overfetch_multiplier(collection_name: str) -> int:
@@ -629,6 +655,13 @@ def _overfetch_multiplier(collection_name: str) -> int:
         if collection_name.startswith(prefix):
             return 4
     return 2
+
+
+def _model_token(name: str) -> str | None:
+    """The embedding-model token *name* carries, ``None`` for a name that has
+    none. The one name-parse site in this module (the RDR-204 parse census
+    counts them), shared by model grouping and the per-family thresholds."""
+    return embedding_model_for_collection_name(name)
 
 
 def _group_collections_by_embedding_model(collections: list[str]) -> list[list[str]]:
@@ -658,7 +691,7 @@ def _group_collections_by_embedding_model(collections: list[str]) -> list[list[s
     """
     groups: dict[str, list[str]] = {}
     for name in collections:
-        key = embedding_model_for_collection_name(name) or name
+        key = _model_token(name) or name
         groups.setdefault(key, []).append(name)
     return list(groups.values())
 
@@ -1345,7 +1378,7 @@ def search_cross_corpus(
             return None
         if threshold_override is not None:
             return threshold_override
-        return _threshold_for_collection(col, cfg)
+        return _threshold_for_collection_model(col, cfg)
 
     def _to_result(r: dict, col: str) -> SearchResult:
         """One engine row as a :class:`SearchResult` attributed to *col*."""
