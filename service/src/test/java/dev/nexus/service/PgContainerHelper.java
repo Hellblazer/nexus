@@ -399,9 +399,14 @@ public final class PgContainerHelper {
      * DEFINER function) cannot migrate as the superuser. After this, migrate with
      * {@code SchemaMigrator.migrate} over a pool connected as {@code adminRole}.
      *
-     * <p><b>ONLY call this against a {@link #startDedicated()} container, before any product migration.</b>
-     * Runs through its own Liquibase bookkeeping tables, so the owner's later product walk does not find a
-     * superuser-owned {@code databasechangelog}.
+     * <p><b>The precondition is a dedicated, virgin container from {@link #startDedicated()}, before any
+     * product migration.</b> Role creation is idempotent ({@code IF NOT EXISTS}), so a role that already
+     * exists keeps its attributes: this call does not change them, and nothing in it detects the mismatch.
+     * A rerun after a migration with the same parameters is safe (the relocation helpers are reinstalled);
+     * {@code SchemaRollbackRoundTripIntegrationTest} does exactly that after a rollback drops the
+     * {@code nexus} schema. Runs through its own Liquibase bookkeeping tables, so the owner's later product
+     * walk does not find a superuser-owned {@code databasechangelog}. Equivalent to the five-argument
+     * overload with both flags {@code true}.
      *
      * @param su        superuser connection
      * @param adminRole the owner role to create (the production nexus_admin equivalent)
@@ -416,8 +421,13 @@ public final class PgContainerHelper {
      * from production's provisioning (nexus-cbo4a, pre-walk bootstrap fold): {@code monitorAdminOption=false}
      * omits {@code GRANT pg_monitor TO adminRole WITH ADMIN OPTION} (the falsification case of
      * {@code GrantsPgMonitorTest}); {@code svcInherits=false} creates {@code nexus_svc} NOINHERIT, as
-     * production does. Safe to call again on the same container (every statement is idempotent), e.g. to
-     * reinstall the relocation helpers after a rollback dropped the {@code nexus} schema.
+     * production does.
+     *
+     * <p>Same precondition as the three-argument overload: a dedicated virgin container from
+     * {@link #startDedicated()}. A pre-existing role's attributes are NOT changed, so on a container where
+     * {@code nexus_svc} already exists {@code svcInherits} has no effect. A rerun after a migration with the
+     * same parameters is safe (every statement is idempotent), as
+     * {@code SchemaRollbackRoundTripIntegrationTest} does after a rollback dropped the {@code nexus} schema.
      */
     public static void bootstrapNonSuperuserOwner(Connection su, String adminRole, String adminPass,
                                                   boolean monitorAdminOption, boolean svcInherits) throws Exception {

@@ -824,12 +824,16 @@ class RawSqlGateTest {
      * (role-001 creates the role). Kept raw by decision: the pgjdbc
      * plan-cache probe in {@code PgSessionStatementTimeoutIntegrationTest}
      * (the test IS about reusing one JDBC PreparedStatement 8x, which jOOQ
-     * cannot express), {@code SchemaMigratorIntegrationTest}'s bespoke
-     * admin/svc role bootstrap and the {@code DO $$ ... LOOP} DDL blocks in
+     * cannot express) and the {@code DO $$ ... LOOP} DDL blocks in
      * {@code SharedCluster}/{@code Taxonomy011ForeignOwnedDiagViewTest}
-     * (role/ownership DDL, not reads), and the ~40 single-site {@code DO $$
-     * CREATE ROLE nexus_svc} bootstraps in files with no other catalog read
-     * (a role-bootstrap shape, the next by-shape pass).
+     * (role/ownership DDL, not reads). Batch 7 also left the ~40 single-site
+     * {@code DO $$ CREATE ROLE nexus_svc} bootstraps in files with no other
+     * catalog read, and {@code SchemaMigratorIntegrationTest}'s admin/svc role
+     * bootstrap, for a later by-shape pass. The nexus-cbo4a pre-walk bootstrap
+     * fold took the dedicated-container admin/svc bootstraps of twelve files,
+     * {@code SchemaMigratorIntegrationTest} among them, onto
+     * {@code PgContainerHelper#bootstrapNonSuperuserOwner}; see the per-file
+     * entries below.
      *
      * <p>Batch 7 fold-in (critique T2 [24685]): the first pass missed 49
      * catalog reads that reached the database through a LOCAL wrapper --
@@ -997,14 +1001,15 @@ class RawSqlGateTest {
         // bootstrap sites; that mechanism was deleted before merge (a
         // pre-existing install has no relocator role to REASSIGN from --
         // see search-path-001-relocate-vector-extensions.xml's header).
-        // The shipped mechanism instead consolidates all 8 sites' bootstrap
-        // into ONE shared helper, bootstrapVectorExtensionsForFreshWalk
-        // (plain CREATE EXTENSION x2 as the superuser, plus installing the
-        // SECURITY DEFINER nexus.ensure_vector_extensions_relocated() /
-        // _unrelocated() pair search-path-001's own guard calls mid-walk),
-        // which is why the final ceiling here is LOWER than the pre-batch
-        // baseline despite the new SECURITY DEFINER function bodies' own
-        // raw SQL. Round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated
+        // The shipped mechanism instead consolidated all 8 sites' bootstrap
+        // into ONE shared helper (plain CREATE EXTENSION x2 as the superuser,
+        // plus installing the SECURITY DEFINER
+        // nexus.ensure_vector_extensions_relocated() / _unrelocated() pair
+        // search-path-001's own guard calls mid-walk), which is why the
+        // ceiling then was LOWER than the pre-batch baseline despite the new
+        // SECURITY DEFINER function bodies' own raw SQL. That helper is gone:
+        // the same statements now live in db.changelog-test-nonsuper-owner.xml
+        // and run through PgContainerHelper#bootstrapNonSuperuserOwner. Round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated
         // IMPORTANT 1): 79 -> 81 (REVOKE EXECUTE ... FROM PUBLIC hardening
         // on both SECURITY DEFINER mirrors, closing the gap between this
         // and Python's own relocate_vector_extensions_to_nexus_schema,
@@ -1032,19 +1037,15 @@ class RawSqlGateTest {
         // CHUNKS/CATALOG_COLLECTIONS). changesetExecType onto the same
         // databasechangelog schema-agnostic form.
         //
-        // [Superseded by the nexus-cbo4a pre-walk bootstrap fold: the two bootstrap shapes named
-        // next are gone, see this file's entry below. The chunks seed INSERT is still kept raw.]
-        // Kept raw with reasons, all documented inline at their site:
-        // bootstrapVectorExtensionsForFreshWalk's 9-site DBA bootstrap (same class as
-        // SchemaRollbackRoundTripIntegrationTest's own kept-raw copy of this exact
-        // method), 8 occurrences of a 5-site admin/svc role bootstrap against a
-        // dedicated container (bootstrap() plus 7 aged-box tests -- CREATE ROLE /
-        // GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION, no
-        // jOOQ typed-DSL form), and one chunks seed INSERT (test 13,
-        // lateUpgradingDeployment...) whose bare, deliberately UNQUALIFIED ::vector
-        // cast is the test's own subject (VectorBinding always renders the
-        // schema-qualified ::nexus.vector, which would silently change what that one
-        // statement proves).
+        // Kept raw, with its reason documented inline at its site: one chunks seed
+        // INSERT (test 13, lateUpgradingDeployment...) whose bare, deliberately
+        // UNQUALIFIED ::vector cast is the test's own subject (VectorBinding always
+        // renders the schema-qualified ::nexus.vector, which would silently change
+        // what that one statement proves). The 9-site vector-extensions bootstrap and
+        // the 5-site admin/svc role bootstrap (bootstrap() plus the aged-box tests)
+        // that the lines below count are PgContainerHelper#bootstrapNonSuperuserOwner
+        // now; the nexus-jl08t lines below are the ceiling ledger as it stood when
+        // they were written.
         // nexus-jl08t: 50 -> 56. Test 18 (the "aged database" reexecuted_changesets
         // pin) adds a NINTH occurrence of this file's own documented 5-site
         // admin/svc role bootstrap against a dedicated container (same class as
@@ -1107,19 +1108,14 @@ class RawSqlGateTest {
         // the column's ACTUAL Postgres type varies by rollback depth, so a fixed
         // generated-table Field would be WRONG at half this file's call sites; this is
         // the ladder-file mid-walk CAUTION the task brief names, applied to reads
-        // rather than DDL). [Superseded by the nexus-cbo4a pre-walk bootstrap fold: the
-        // bootstrapVectorExtensionsForFreshWalk and dbaBootstrap sites named next are gone.]
-        // Kept raw with reasons, all documented inline at their site:
-        // bootstrapVectorExtensionsForFreshWalk's 9-site CREATE EXTENSION/CREATE SCHEMA
-        // AUTHORIZATION/CREATE OR REPLACE FUNCTION block (DBA/superuser provisioning
-        // DDL mirroring nexus.db.pg_provision.py, no jOOQ typed form for any of the
-        // three shapes -- same class as SchemaMigratorIntegrationTest's own kept-raw
-        // admin/svc bootstrap), the CREATE ROLE nexus_diag BYPASSRLS bootstrap (cluster-
-        // level DDL, no typed form), one execute(sql) that replays grants-nexus-diag-1's
-        // own <sql> body verbatim (extractChangesetSql -- a re-expression would no
-        // longer be the SAME statement Liquibase executes), and dbaBootstrap's 5-site
-        // admin/svc role bootstrap against a dedicated container (same exclusion class,
-        // already named in this file's own javadoc history above).
+        // rather than DDL).
+        // Kept raw with reasons, all documented inline at their site: the CREATE ROLE
+        // nexus_diag BYPASSRLS bootstrap (cluster-level DDL, no typed form) and one
+        // execute(sql) that replays grants-nexus-diag-1's own <sql> body verbatim
+        // (extractChangesetSql -- a re-expression would no longer be the SAME
+        // statement Liquibase executes). The DBA/superuser provisioning block (the
+        // vector extensions, the nexus schema, the relocation helpers and the 5-site
+        // admin/svc role bootstrap) is PgContainerHelper#bootstrapNonSuperuserOwner now.
         // nexus-cbo4a pre-walk bootstrap fold: 16 -> 2. bootstrapVectorExtensionsForFreshWalk, dbaBootstrap's
         // role block and the post-rollback helper reinstall are PgContainerHelper.bootstrapNonSuperuserOwner
         // now (the reinstall is the same idempotent call). Of the two sites left, one is the CREATE ROLE

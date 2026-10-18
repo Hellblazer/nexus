@@ -435,8 +435,8 @@ class SchemaRollbackRoundTripIntegrationTest {
                 // session with no nexus.tenant GUC counts ZERO rows.
                 // SANCTIONED RAW: CREATE ROLE is cluster-level DDL with no jOOQ typed-DSL
                 // form (same category as role-001-1's own declared-irreversible role
-                // bootstrap and SchemaMigratorIntegrationTest's admin/svc role bootstrap,
-                // kept raw by decision per RawSqlGateTest's own javadoc).
+                // bootstrap). nexus_diag is deliberately not part of the shared
+                // bootstrapNonSuperuserOwner provisioning.
                 su.createStatement().execute(
                     "CREATE ROLE nexus_diag LOGIN PASSWORD 'nexus_diag_pass' "
                         + "NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
