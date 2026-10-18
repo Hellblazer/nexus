@@ -37,6 +37,7 @@ import nexus.db.http_vector_client as hvc
 import nexus.exporter as exporter_mod
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.catalog.multi_document_write import MultiDocumentImportWriter
+from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import index_model_for_collection
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
@@ -1221,3 +1222,85 @@ def test_an_imported_bundles_pdfs_get_keys_of_their_own_and_are_not_joined_as_sa
         if str(lnk.to_tumbler) in tumblers
     ]
     assert joined == [], joined
+
+
+# ── nexus-mjikf: a whole imported document keeps its source's own content key ──
+
+
+def test_the_source_key_is_used_only_for_a_whole_document_of_one_group() -> None:
+    unique = _document_completion_hash("F" * 64, "1.1.1")
+    whole = [("HA" * 32, 3)]
+    assert _document_completion_hash("F" * 64, "1.1.1", whole, 3) == "HA" * 32
+    assert _document_completion_hash("F" * 64, "1.1.1", whole, 2) == unique          # a row short
+    assert _document_completion_hash("F" * 64, "1.1.1", [None], 3) == unique         # poisoned group
+    assert _document_completion_hash("F" * 64, "1.1.1", [("", 3)], 3) == unique      # source not complete
+    assert _document_completion_hash("F" * 64, "1.1.1", [("HA" * 32, None)], 3) == unique  # an old bundle
+    assert _document_completion_hash("F" * 64, "1.1.1", whole + whole, 6) == unique  # two groups
+    assert _document_completion_hash("F" * 64, "1.1.1", [("HA" * 32, True)], 1) == unique
+
+
+def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:
+    """A natively indexed, complete pdf document owning *texts* at positions 0..n-1."""
+    uri = f"file:///mjikf/{coll}/{name}.pdf"
+    doc = str(cat.register(owner=owner, title=name, content_type="pdf", physical_collection=coll,
+                           source_uri=uri))
+    chashes = [_chash(t) for t in texts]
+    cat.write_manifest_many(
+        [(doc, [{"chash": c, "position": i} for i, c in enumerate(chashes)])], collection=coll,
+        chunks=[{"chash": c, "text": t, "metadata": {}, "embedding": _vec(700 + i).tolist()}
+                for i, (c, t) in enumerate(zip(chashes, texts))],
+        embedding_model=_MODEL)
+    cat.begin_index_run(doc, key, "native-run", coll)
+    cat.complete_index_run(doc, key, len(chashes))
+    return doc
+
+
+def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_truncated_one_does_not(
+    t2_service_env, tmp_path,
+) -> None:
+    from nexus.catalog.link_generator import generate_pdf_corpus_links  # noqa: PLC0415 — this test only
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    cat = make_catalog_writer()
+    try:
+        owner = cat.register_owner("knowledge", "curator")
+        src = "docs__mjikf-src__bge-base-en-v15-768__v1"
+        dst = "docs__mjikf-dst__bge-base-en-v15-768__v1"
+        ka, kb = _chash("mjikf bytes of a"), _chash("mjikf bytes of b")
+        shared = "mjikf a boilerplate page"
+        a = _native_pdf(cat, owner, src, "a", ka, ["mjikf a page 1", shared, "mjikf a page 3"])
+        b = _native_pdf(cat, owner, src, "b", kb, ["mjikf b page 1", shared])
+        assert Tumbler.parse(a).segments < Tumbler.parse(b).segments    # a owns the shared chunk on export
+        native_copy = _native_pdf(cat, owner, dst, "a-native", ka, ["mjikf a page 1", shared, "mjikf a page 3"])
+
+        f = tmp_path / "src.nxexp"
+        export_collection(db=client, collection_name=src, output_path=f)
+        result = import_collection(db=client, input_path=f, target_collection=dst)
+        assert result["imported_count"] >= 4, result
+
+        imp_a = reader.by_source_uri(f"file:///mjikf/{src}/a.pdf")
+        imp_b = reader.by_source_uri(f"file:///mjikf/{src}/b.pdf")
+        assert imp_a is not None and imp_b is not None
+        # source_uri is tenant-unique, so the import resolves to the source documents themselves only
+        # when they live in the target; here they live in src, so the import COPIED them.
+        copies = [e for e in reader.all_documents(content_type="pdf") if e.physical_collection == dst]
+        by_title = {e.title: e for e in copies}
+        assert by_title["a"].index_content_hash == ka, by_title["a"]
+        assert by_title["b"].index_content_hash not in (kb, ka), by_title["b"]   # truncated: unique key
+
+        writer = make_catalog_writer()
+        try:
+            generate_pdf_corpus_links(reader, writer=writer)
+        finally:
+            writer.close()
+        ends = {str(by_title["a"].tumbler), native_copy}
+        joined = {
+            (str(lnk.from_tumbler), str(lnk.to_tumbler))
+            for t in ends for lnk in reader.link_query(from_t=t, link_type="same-as")
+        }
+        assert any(set(pair) == ends for pair in joined), joined
+        b_links = reader.link_query(from_t=str(by_title["b"].tumbler), link_type="same-as")
+        assert b_links == [], b_links
+    finally:
+        cat.close()

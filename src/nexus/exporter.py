@@ -335,6 +335,12 @@ def _resolve_export_owners(
             "title": entry.title,
             "content_type": entry.content_type,
             "position": position,
+            # nexus-mjikf: what an import needs to stamp the document with its own content key:
+            # the source document's index_content_hash, only when it is complete, and its manifest
+            # row count, so the import can tell a whole document from one whose shared chunks
+            # were written under another owner (the import uses the key only when it holds every row).
+            "index_content_hash": entry.index_content_hash if entry.index_state == "complete" else "",
+            "manifest_rows": len(manifests.get(chosen, [])),
         }
     return owners
 
@@ -651,6 +657,14 @@ def _locate_owner_group(
     if position is None:
         position = group["seen"]
     group["seen"] += 1
+    # nexus-mjikf: the source document's (content key, manifest rows), as long as every record of
+    # the group names the same pair; any disagreement, or a record without it, poisons it to None.
+    pair = (
+        (owner_meta.get("index_content_hash") or "", owner_meta.get("manifest_rows"))
+        if isinstance(owner_meta, dict) else ("", None)
+    )
+    if group.setdefault("source", pair) != pair:
+        group["source"] = None
     return group, position
 
 
@@ -798,19 +812,26 @@ def _prepass_groups(
     return groups
 
 
-def _document_completion_hash(file_hash: str, doc_id: str) -> str:
-    """The ``index_content_hash`` an imported document is stamped ``complete`` with (nexus-8hhbk): a
-    hash of this file and this document, which matches no other document.
+def _document_completion_hash(
+    file_hash: str, doc_id: str, sources: list[tuple[str, Any] | None] | None = None, rows: int = 0,
+) -> str:
+    """The ``index_content_hash`` an imported document is stamped ``complete`` with.
 
-    The file's own sha256, stamped on every document as before, made all of one bundle's PDFs
-    share a key, so the same-as linker (keyed on ``index_content_hash``) joined them all. A chunk's
-    ``content_hash`` metadata is not a safe per-document key either: it is the first writer's value
-    (chunks are content-addressed and never rewritten, so it can name another file), and a document
-    whose shared chunks were exported under another owner arrives with part of its manifest, which
-    a true file hash would then mark current for a native ``nx index`` instead of re-indexing it
-    (critique of 9e9716276). The unique key keeps the old staleness behaviour: a native index of
-    the same file reads it as changed and re-indexes, as the bundle hash did. The begin fence and
-    resume still use the file's sha256 (:class:`MultiDocumentImportWriter`)."""
+    The source document's own key (nexus-mjikf) when the import holds that document whole: it came
+    from ONE owner group, every record of the group carried the same (key, manifest rows) pair, the
+    key is non-empty (the source was complete), and the records number exactly the source's manifest
+    rows. The document is then the same content, so it keys same-as with a native copy and a later
+    native ``nx index`` of the same bytes reads it as current.
+
+    Otherwise a hash of this file and this document, which matches no other document (nexus-8hhbk):
+    the file's sha256, stamped on every document as before, made all of one bundle's PDFs share a
+    key, and a document missing rows (a chunk it shares was exported under another owner, a chunk
+    sits at two positions, or the export filtered one out) must not read as current. A chunk's own
+    ``content_hash`` metadata is never used: it is the first writer's value."""
+    if sources is not None and len(sources) == 1 and sources[0] is not None:
+        key, source_rows = sources[0]
+        if key and isinstance(source_rows, int) and not isinstance(source_rows, bool) and source_rows == rows:
+            return key
     return hashlib.sha256(f"nexus-import:{file_hash}:{doc_id}".encode()).hexdigest()
 
 
@@ -904,6 +925,8 @@ class _OwnerImport:
         self._kept: dict[str, dict[str, Any]] = {}        # tumbler -> chash sets, counts, index_state
         self._doc_of: dict[str, str] = {}                 # group key -> the document it resolved to
         self._doc_figures: dict[str, tuple[int, int]] = {}   # tumbler -> (records, highest position)
+        #: tumbler -> each of its owner groups' source (key, manifest rows) pair, or None (nexus-mjikf)
+        self._doc_sources: dict[str, list[tuple[str, Any] | None]] = {}
         self._group_failed: set[str] = set()              # group keys that did not resolve (reported)
         self._live_legacy: dict[str, Any] = {}
         self._reader: Any = None
@@ -1020,6 +1043,7 @@ class _OwnerImport:
             self._doc_of[key] = doc
             total, top = self._doc_figures.get(doc, (0, -1))
             self._doc_figures[doc] = (total + g["seen"], max(top, g.get("maxpos", -1)))
+            self._doc_sources.setdefault(doc, []).append(g.get("source"))
 
     # ── one page ──────────────────────────────────────────────────────────────
 
@@ -1200,7 +1224,8 @@ class _OwnerImport:
                 continue
             self._import_writer.register_document(
                 d, total_rows=total, max_position=max_position, resume=d in resumable,
-                completion_hash=_document_completion_hash(self.file_hash, d))
+                completion_hash=_document_completion_hash(
+                    self.file_hash, d, self._doc_sources.get(d), total))
             self._state[d] = "resume" if d in resumable else "write"
 
     # ── end of stream ─────────────────────────────────────────────────────────
