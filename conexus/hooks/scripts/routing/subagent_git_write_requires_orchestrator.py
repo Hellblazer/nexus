@@ -496,17 +496,26 @@ before allows now.
 nexus-k66o5: three more additions, all after the verb scan. (a) Verbs that write
 config as a side effect (``git remote add|remove|rm|rename|set-url|set-head|
 set-branches|prune``, ``git branch -u|--set-upstream-to|--unset-upstream|-t|
---track``, ``git push|fetch|pull -u|--set-upstream``, ``git checkout|switch
--t|--track``, ``git submodule init|sync|add|deinit|set-url|set-branch``, and the
-other verbs named at ``_sidefx_match``) deny in the shared tree AND in a linked
-worktree, because the config they write is the common one the primary reads. The
-one exception is ``git push|fetch|pull -u|--set-upstream``: in a proven linked
-worktree whose command names no other repository it passes (it writes only
-``branch.<b>.remote|merge``, keys that run no code, and ``git push -u origin
-<branch>`` is the documented flow for a worktree's branch); in the shared tree, or
-with ``-C``, ``--git-dir``, ``--work-tree``, a ``GIT_DIR=``-style variable, a
-quoted ``cd`` or ``env -C``, it denies. In the shared tree ``-c|-C|--copy|-M|--move|--delete`` of a branch and ``git branch
-<name> <start-point>`` deny as well; a worktree owns its branches. (b) ``-c
+--track``, ``git push -u|--set-upstream``, ``git fetch|pull --set-upstream``,
+``git checkout|switch -t|--track``, ``git submodule init|sync|add|deinit|set-url|
+set-branch``, and the other verbs named at ``_sidefx_match``) deny in the shared
+tree AND in a linked worktree, because the config they write is the common one the
+primary reads. The one exception is the upstream forms: in a proven linked worktree
+whose command names no other repository (no ``-C``, ``--git-dir``, ``--work-tree``,
+``GIT_DIR=``-style variable, quoted ``cd`` or ``env -C``) they pass only when they
+write the upstream of the worktree's own branch to a plain remote name and run
+nothing (``_sx_upstream_own``): the remote word is a plain name (not a path, URL,
+``.``, ``..``, or a word with ``/ : @ ~ $``), no ``--repo``, ``--receive-pack``,
+``--exec`` or ``--upload-pack`` option appears, every option is one the walk knows,
+a push has no ``--all``, ``--mirror`` or ``--branches``, and each push refspec has
+``HEAD`` or the current branch as its source (``git push -u origin develop`` and
+``develop:other`` write ``branch.develop.*``, the primary's). A bare ``git push -u``
+passes. Anything else denies, as does every form in the shared tree. (``pull -u`` is
+no upstream form and ``fetch -u`` is ``--update-head-ok``; only ``--set-upstream``
+sets one on those two, and on the current branch.) The shared tree also denies
+``-c|-C|--copy|-M|--move|--delete`` of a branch; a worktree is not denied them, and
+the rule cannot tell its own branch from a shared one, so a shared branch's copy,
+move or delete from a worktree passes (a known limit). (b) ``-c
 help.autocorrect=<anything but 0|never|false|off|no|show>`` (also ``--config-env``,
 ``GIT_CONFIG_KEY_n``, ``GIT_CONFIG_PARAMETERS``) denies everywhere, since it makes
 a mistyped verb run (``git -c help.autocorrect=immediate confg user.name x`` writes
@@ -520,11 +529,13 @@ still allows, since a broken guard must not brick every agent's Bash.
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 # RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
@@ -2130,27 +2141,48 @@ def _config_hit(
 #:   ``-v``, ``show``, ``get-url`` and ``update`` read.
 #: - ``git branch -u|--set-upstream-to|--unset-upstream|-t|--track`` write
 #:   ``branch.<name>.*``. In the SHARED tree ``-c|-C|-M|--copy|--move|--delete|
-#:   --edit-description`` (a branch's config copied, moved or dropped) deny too. A
-#:   linked worktree owns its own branches, so those pass there, as ``-d|-D|-m``
-#:   always have. The short ``-d|-D|-m`` stay the verb scan's, unchanged: it does not
+#:   --edit-description`` (a branch's config copied, moved or dropped) deny too. They
+#:   are NOT denied in a linked worktree, as ``-d|-D|-m`` never were: an agent's own
+#:   branches are the normal case there, and the text cannot tell a branch it made
+#:   from a shared one, so ``git branch -M|-C|--delete`` of a shared branch from a
+#:   worktree passes (a known limit, not an enforced ownership). The short
+#:   ``-d|-D|-m`` stay the verb scan's, unchanged: it does not
 #:   match ``-dr`` (delete a remote-tracking ref, a ref write and no config; 9
 #:   subagent commands in the transcripts), and neither does this rule. NOT covered:
 #:   ``git branch <name> <remote-ref>``, which tracks by default
 #:   (``branch.autoSetupMerge``) as ``git checkout -b`` and ``git switch -c`` do from
 #:   a worktree; a rule for it denied ``git branch -f <name> <sha>``, a real
 #:   subagent command that writes no config.
-#: - ``git push|fetch|pull -u|--set-upstream``, ``git checkout|switch -t|--track``,
-#:   ``git worktree add --track``: an upstream is written. A verb word that follows
-#:   ``stash``, ``lfs``, ``subtree`` or ``notes`` is that command's own (``git stash
-#:   push -u`` keeps untracked files; 45 of the first 107 worktree denials were it). ``push``, ``checkout``
+#: - ``git push -u|--set-upstream``, ``git fetch|pull --set-upstream``, ``git
+#:   checkout|switch -t|--track``, ``git worktree add --track``: an upstream is
+#:   written (``pull -u`` is no upstream form, and ``fetch -u`` is
+#:   ``--update-head-ok``; ``fetch|pull --set-upstream`` write the current branch's
+#:   upstream only). A verb word that follows ``stash``, ``lfs``, ``subtree`` or
+#:   ``notes`` is that command's own (``git stash push -u`` keeps untracked files; 45
+#:   of the first 107 worktree denials were it) only when that word IS git's
+#:   subcommand (``_sx_subcommand_index``): ``git --namespace lfs remote set-url``
+#:   and ``git -C notes remote set-url`` are git's own ``remote``. ``push``, ``checkout``
 #:   and ``switch`` were already denied in the shared tree through the verb scan
-#:   (pinned by the tests); the worktree is the new part. EXCEPT ``push|fetch|pull
-#:   -u|--set-upstream`` (``_sx_upstream``): in a proven linked worktree with no
-#:   other repository named they pass, because they write only ``branch.<b>.remote``
-#:   and ``branch.<b>.merge`` in the common config, keys that run no code, and ``git
-#:   push -u origin <branch>`` is the documented worktree push flow (62 of the 65
-#:   transcript commands that the first version of this rule denied and the base
-#:   allowed were it). "No other repository" is: before the verb, only global options
+#:   (pinned by the tests); the worktree is the new part. EXCEPT the upstream forms
+#:   (``_sx_upstream``): in a proven linked worktree with no other repository named
+#:   they pass when ``_sx_upstream_own`` holds. A push can write the upstream of EVERY
+#:   branch its refspecs name: ``git push -u origin develop`` and ``develop:other``
+#:   write ``branch.develop.*``, a branch of the primary, and ``--all`` and
+#:   ``--mirror`` write all of them (measured). So each refspec must have ``HEAD`` or
+#:   the worktree's current branch (``_current_branch``, read only then) as its
+#:   source, with no ``--all``, ``--mirror`` or ``--branches``. The remote word must be
+#:   a plain name (a path or URL is written into the branch's config as its remote),
+#:   and ``--repo``, ``--receive-pack``, ``--exec`` and ``--upload-pack`` (or a unique
+#:   prefix) deny: the first names the target and the others run a program. An option
+#:   the walk does not know may take a value, which would be read as the remote, so it
+#:   denies. A remote word that is a plain name but no configured remote is a relative
+#:   path to git; it can only become the remote of the worktree's own branch (a known
+#:   limit). ``git push -u origin <branch>`` of the worktree's own branch is the
+#:   documented worktree push flow (62 of the 65 transcript commands that the first
+#:   version of this rule denied and the base allowed were it). A one-line ``git
+#:   switch -c x && git push -u origin x`` denies (the branch is read before the
+#:   command runs); ``git push -u origin HEAD`` passes. "No other repository" is:
+#:   before the verb, only global options
 #:   that leave the repository alone (``_sx_other_repo``: no ``-C``, ``--git-dir``,
 #:   ``--work-tree``, ``--exec-path``, no quoted or expanded word, no word that is not
 #:   an option); and in the raw command no ``GIT_DIR=``, ``GIT_COMMON_DIR=``,
@@ -2168,13 +2200,19 @@ def _config_hit(
 #:   word ``checkout``; in a linked worktree it writes the common config, but the 10
 #:   transcript commands that ran it were all on scratch clones, ``git -C
 #:   <scratch>/nexus sparse-checkout set ...``, which the text cannot tell from the
-#:   primary).
+#:   primary; it writes ``extensions.worktreeConfig``). Also not covered, known
+#:   limits: ``scalar register|reconfigure`` (a separate binary that writes the
+#:   common config), ``gh repo set-default`` (writes ``remote.<n>.gh-resolved``),
+#:   and a command word built by brace expansion in the command position itself
+#:   (``g{i,i}t``), which no word list reads.
 #: - ``-c help.autocorrect=<v>`` (also ``--config-env``, ``GIT_CONFIG_KEY_n`` and
 #:   ``GIT_CONFIG_PARAMETERS``) with a value that lets git run a guessed verb:
 #:   ``git -c help.autocorrect=immediate confg user.name x`` writes config. Only
 #:   ``0``, ``never``, ``false``, ``off``, ``no`` and ``show`` pass (they print a
 #:   hint and run nothing); a value read from the environment or a variable cannot
-#:   be known and denies. Typos are never enumerated.
+#:   be known and denies, and so does a ``GIT_CONFIG_PARAMETERS`` anywhere in a
+#:   command that also spells ``help.autocorrect`` (its entries are quoted text of any
+#:   length, so the key's place in the list is not read). Typos are never enumerated.
 #: - a brace EXPANSION in the SUBCOMMAND word (``git ch{e..e}ckout``, ``git
 #:   {config,user.name} x``): the shell builds the verb at run time. A brace word is
 #:   one with ``{``, a comma or ``..`` inside the braces, and a ``}`` after
@@ -2238,7 +2276,10 @@ _SIDEFX_QUICK_RE = re.compile(
     r"remote|branch|submodule|push|fetch|pull|checkout|switch|worktree|maintenance|"
     r"lfs|(?i:autocorrect)|[{}]"
 )
-_SIDEFX_SEG_SPLIT_RE = re.compile(r"[;&|\n]")
+#: A simple command ends at ``; & | newline``, but not at the ``&`` of a redirection
+#: (``2>&1``, ``>&2``, ``&>f``): the words after it are still this command's, and a
+#: cut there would hide a remote from ``_sx_upstream_own``.
+_SIDEFX_SEG_SPLIT_RE = re.compile(r"[;|\n]|(?<![<>])&(?!>)")
 _SIDEFX_MAX_SUBS = 16
 #: What stands glued to the ``git`` of the command word: ``-remote`` of
 #: ``git-remote``, ``.exe`` of ``git.exe``, ``-lfs.exe`` of ``git-lfs.exe``.
@@ -2257,11 +2298,11 @@ _AUTOCORRECT_SAFE = frozenset({"0", "never", "false", "off", "no", "show"})
 _AUTOCORRECT_C_RE = re.compile(
     r"(?i)(?<![\w-])-c\s+help\.autocorrect(?=[=\s;&|()<>]|\Z)(?:=([^\s;&|()<>]*))?"
 )
-#: The value cannot be known: it is read from an environment variable or a
-#: parameter list (the bound keeps a repeated prefix linear).
+#: The value cannot be known: it is read from an environment variable. A
+#: ``GIT_CONFIG_PARAMETERS`` list is handled apart (``_sx_autocorrect``): its value
+#: is quoted text that may hold any character and any length before the key.
 _AUTOCORRECT_INJECT_RE = re.compile(
-    r"(?i)--config-env(?:=|\s+)help\.autocorrect|GIT_CONFIG_KEY_\d+=\s*help\.autocorrect|"
-    r"GIT_CONFIG_PARAMETERS=[^\n;&|]{0,400}?help\.autocorrect"
+    r"(?i)--config-env(?:=|\s+)help\.autocorrect|GIT_CONFIG_KEY_\d+=\s*help\.autocorrect"
 )
 _SX_REMOTE_WRITES = frozenset({
     "add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune",
@@ -2277,6 +2318,41 @@ _SX_BRANCH_VALUED_LONG = frozenset({
     "sort", "format", "contains", "no-contains", "merged", "no-merged", "points-at",
 })
 _SX_PUSH_VALUED = frozenset({"push-option", "receive-pack", "exec", "repo"})
+#: What ``push|fetch|pull -u|--set-upstream`` may carry for the worktree allow
+#: (``_sx_upstream_own``). The remote is the first non-option word, so every option
+#: that takes a value must be known (its value is not the remote), and an option the
+#: walk does not know may take one, and denies. These name a repository or a program
+#: to run: ``--repo`` is the push target, the other three run a program (and any
+#: unique prefix of them).
+_SX_UP_DENIED_LONG = ("repo", "receive-pack", "exec", "upload-pack")
+#: Long options that take no value, or only an attached one (``--signed=if-asked``).
+_SX_UP_FLAG_LONG = frozenset({
+    "set-upstream", "force", "force-with-lease", "force-if-includes", "no-force-with-lease",
+    "no-force-if-includes", "dry-run", "verbose", "quiet", "tags", "no-tags", "follow-tags",
+    "atomic", "no-atomic", "verify", "no-verify", "thin", "no-thin", "progress", "no-progress",
+    "porcelain", "prune", "no-prune", "prune-tags", "no-prune-tags", "signed", "no-signed",
+    "recurse-submodules", "no-recurse-submodules", "ipv4", "ipv6", "all", "append",
+    "keep", "update-head-ok", "update-shallow", "unshallow", "refetch", "multiple", "auto-gc",
+    "no-auto-gc", "auto-maintenance", "no-auto-maintenance", "write-fetch-head",
+    "no-write-fetch-head", "show-forced-updates", "no-show-forced-updates", "stdin",
+    "ff", "no-ff", "ff-only", "rebase", "no-rebase", "squash", "no-squash", "commit",
+    "no-commit", "edit", "no-edit", "autostash", "no-autostash", "verify-signatures",
+    "no-verify-signatures", "stat", "no-stat", "summary", "no-summary", "log", "no-log",
+    "signoff", "no-signoff", "allow-unrelated-histories", "gpg-sign", "no-gpg-sign",
+})
+#: Long options whose value may be the next word.
+_SX_UP_VALUED_LONG = frozenset({
+    "push-option", "server-option", "depth", "deepen", "shallow-since", "shallow-exclude",
+    "jobs", "negotiation-tip", "refmap", "filter", "strategy", "strategy-option",
+})
+_SX_UP_FLAG_SHORT = "ufnvqptakPr46"
+_SX_UP_VALUED_SHORT = "ojsX"
+#: The remote is a plain name: no ``/ : @ ~ $``, quote, dot start. ``.`` and ``..``
+#: are directories, a path or a URL is another repository.
+_SX_REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+#: A redirection word: an optional fd (or ``&``), then ``<`` or ``>`` (``2>&1``,
+#: ``>>``, ``>f``, ``&>f``). Alone (``2>``) it takes the next word as its target.
+_SX_REDIRECT_RE = re.compile(r"(?:\d*|&)[<>]+")
 #: Global options that take the next word as their value and leave the repository
 #: alone (``-C``, ``--git-dir`` and ``--work-tree`` do not: ``_sx_other_repo``).
 _SX_VALUED_GLOBALS = frozenset({"-c", "--config-env", "--namespace", "--attr-source"})
@@ -2285,6 +2361,16 @@ _SX_VALUED_GLOBALS = frozenset({"-c", "--config-env", "--namespace", "--attr-sou
 #: whose command names no other repository (``_sidefx_match``), the only level at
 #: which ``push|fetch|pull -u`` passes (``_sx_upstream``).
 _SX_SHARED, _SX_WORKTREE, _SX_WORKTREE_OWN = 0, 1, 2
+#: The branch a linked worktree is on, read on demand (``_current_branch``): only
+#: a ``git push -u`` with a refspec asks. ``None`` is a detached HEAD or an unreadable
+#: one, which leaves ``HEAD`` the only refspec that is the worktree's own.
+BranchOf = Callable[[], str | None]
+
+
+def _no_branch() -> str | None:
+    return None
+
+
 #: A word that makes the next one its own subcommand, not git's: ``git stash push
 #: -u`` (include untracked), ``git lfs pull``, ``git subtree push``.
 _SX_OWN_VERBS_AFTER = frozenset({"stash", "lfs", "subtree", "notes"})
@@ -2352,11 +2438,11 @@ def _sx_flag_scan(
     return None
 
 
-def _sx_remote(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_remote(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     return _sx_action("remote", words, k, _SX_REMOTE_WRITES)
 
 
-def _sx_submodule(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_submodule(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     for j in range(k, len(words)):
         w = words[j]
         if w.startswith("-"):
@@ -2367,7 +2453,7 @@ def _sx_submodule(words: list[str], k: int, worktree: int) -> _Sidefx | None:
     return None
 
 
-def _sx_branch(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_branch(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     i, n = k, len(words)
     while i < n:
         w = words[i]
@@ -2415,8 +2501,84 @@ def _sx_other_repo(words: list[str], k: int) -> bool:
     return False
 
 
+def _sx_own_refspec(spec: str, current: str | None) -> bool:
+    """True when a ``git push`` refspec sets the upstream of the branch the worktree
+    is on and of no other: its source is ``HEAD`` or the current branch (also as
+    ``refs/heads/<current>``, with a leading ``+``). ``git push -u origin develop``
+    writes ``branch.develop.*`` even from a worktree on another branch, and that
+    branch is the primary's. The destination (``HEAD:newb``) does not matter."""
+    src = spec.removeprefix("+").partition(":")[0]
+    if src == "HEAD":
+        return True
+    return current is not None and src in (current, "refs/heads/" + current)
+
+
+def _sx_upstream_own(
+    sub: str, words: list[str], k: int, branch_of: BranchOf,
+) -> bool:
+    """True when the ``push|fetch|pull -u|--set-upstream`` at ``words[k - 1]`` writes
+    the upstream of the worktree's own branch to a named remote and runs nothing:
+    every option is one the walk knows (an unknown one may take a value, and then
+    the word after it is not the remote); none names a repository or a program
+    (``--repo``, ``--receive-pack``, ``--exec``, ``--upload-pack``, or a prefix of
+    one), nor, for a push, every branch (``--all``, ``--mirror``, ``--branches``);
+    the first non-option word, when there is one, is a plain remote name
+    (``_SX_REMOTE_NAME_RE``: not a path, URL, ``.``, ``..`` or word with ``$ ~ @``);
+    and each refspec of a push is ``_sx_own_refspec``. A bare ``git push -u`` names
+    nothing and passes. ``branch_of`` is read only when a refspec needs it."""
+    positional: list[str] = []
+    i, n = k, len(words)
+    options_ended = False
+    while i < n:
+        w = words[i]
+        i += 1
+        redirect = _SX_REDIRECT_RE.match(w)
+        if redirect is not None:
+            # `2>&1` is cut into `2>` and `1` at the `&`; `> f` is an operator and its
+            # target: neither is the remote, a refspec or an option's value
+            if redirect.end() == len(w):
+                i += 1
+            continue
+        if options_ended:
+            positional.append(w)
+        elif w == "--":
+            options_ended = True
+        elif w.startswith("--"):
+            name, eq, _ = w[2:].partition("=")
+            if _sx_prefix(name, *_SX_UP_DENIED_LONG):
+                return False
+            if sub == "push" and _sx_prefix(name, "all", "branches", "mirror"):
+                return False
+            if name in _SX_UP_VALUED_LONG:
+                if not eq:
+                    i += 1
+            elif not (name in _SX_UP_FLAG_LONG or _sx_prefix(name, "set-upstream")):
+                return False
+        elif w.startswith("-") and len(w) > 1:
+            for pos, ch in enumerate(w[1:], 1):
+                if ch in _SX_UP_FLAG_SHORT:
+                    continue
+                if ch in _SX_UP_VALUED_SHORT:
+                    if pos == len(w) - 1:
+                        i += 1
+                    break
+                return False
+        else:
+            positional.append(w)
+    if _MASK_OPAQUE in positional:
+        return False  # a quoted phrase the tokenizer could not read: it may be a path
+    if not positional:
+        return True
+    if _SX_REMOTE_NAME_RE.fullmatch(positional[0]) is None:
+        return False
+    if sub == "push" and positional[1:]:
+        current = branch_of()
+        return all(_sx_own_refspec(spec, current) for spec in positional[1:])
+    return True
+
+
 def _sx_upstream(
-    sub: str, words: list[str], k: int, worktree: int, shorts: str,
+    sub: str, words: list[str], k: int, worktree: int, branch_of: BranchOf, shorts: str,
     valued_long: frozenset[str] = frozenset(), valued_short: str = "",
 ) -> _Sidefx | None:
     """``push|fetch|pull -u|--set-upstream``. It writes ``branch.<b>.remote`` and
@@ -2424,45 +2586,49 @@ def _sx_upstream(
     ``git push -u origin <branch>`` is the documented flow for a worktree's branch.
     So it passes at ``_SX_WORKTREE_OWN`` (a proven linked worktree, no other
     repository named by a global option, ``GIT_DIR=``-style variable, quoted ``cd``
-    or ``env -C``), and denies in the shared tree and wherever another repository
-    may be the one written."""
+    or ``env -C``) when the command also names no repository and no program after
+    the verb and writes no branch the worktree does not own (``_sx_upstream_own``),
+    and denies in the shared tree and wherever another repository, a path or a
+    shared branch may be the one written."""
     hit = _sx_flag_scan(sub, words, k, shorts, ("set-upstream",), valued_long, valued_short)
     if hit is None or worktree != _SX_WORKTREE_OWN or _sx_other_repo(words, k):
         return hit
-    return None
+    if _sx_upstream_own(sub, words, k, branch_of):
+        return None
+    return hit
 
 
-def _sx_push(words: list[str], k: int, worktree: int) -> _Sidefx | None:
-    return _sx_upstream("push", words, k, worktree, "u", _SX_PUSH_VALUED, "o")
+def _sx_push(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
+    return _sx_upstream("push", words, k, worktree, branch_of, "u", _SX_PUSH_VALUED, "o")
 
 
-def _sx_fetch(words: list[str], k: int, worktree: int) -> _Sidefx | None:
-    return _sx_upstream("fetch", words, k, worktree, "")
+def _sx_fetch(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
+    return _sx_upstream("fetch", words, k, worktree, branch_of, "")
 
 
-def _sx_pull(words: list[str], k: int, worktree: int) -> _Sidefx | None:
-    return _sx_upstream("pull", words, k, worktree, "")
+def _sx_pull(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
+    return _sx_upstream("pull", words, k, worktree, branch_of, "")
 
 
-def _sx_checkout(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_checkout(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     return _sx_flag_scan("checkout", words, k, "t", ("track",))
 
 
-def _sx_switch(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_switch(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     return _sx_flag_scan("switch", words, k, "t", ("track",))
 
 
-def _sx_worktree(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_worktree(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     if _sx_first_arg(words, k) != "add":
         return None
     return _sx_flag_scan("worktree add", words, k, "", ("track",))
 
 
-def _sx_maintenance(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_maintenance(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     return _sx_action("maintenance", words, k, _SX_MAINTENANCE_WRITES)
 
 
-def _sx_lfs(words: list[str], k: int, worktree: int) -> _Sidefx | None:
+def _sx_lfs(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
     return _sx_action("lfs", words, k, _SX_LFS_WRITES)
 
 
@@ -2476,9 +2642,17 @@ _SX_CHECKERS = {
 
 def _sx_autocorrect(text: str) -> _Sidefx | None:
     """A ``help.autocorrect`` setting that lets git run a verb it guessed."""
-    if "utocorrect" not in text and "UTOCORRECT" not in text.upper():
+    upper = text.upper()
+    if "UTOCORRECT" not in upper:
         return None
     if _AUTOCORRECT_INJECT_RE.search(text) is not None:
+        return _Sidefx("help.autocorrect")
+    # The value of GIT_CONFIG_PARAMETERS is a list of quoted entries; where the key
+    # sits in it (past a long entry, after a quoted `;` `|` `&` or a newline) is
+    # not read. The variable and the key anywhere in the command deny: a value
+    # that is not the variable's cannot be told from one that is, and the price is
+    # one rephrase for the command that names both and sets a safe value.
+    if "GIT_CONFIG_PARAMETERS" in upper and "HELP.AUTOCORRECT" in upper:
         return _Sidefx("help.autocorrect")
     for m in _AUTOCORRECT_C_RE.finditer(text):
         value = m.group(1)
@@ -2535,25 +2709,49 @@ def _sx_segment_words(seg: str) -> list[str] | None:
     return words
 
 
-def _sx_words(words: list[str], worktree: int, brace: bool = True) -> _Sidefx | None:
+def _sx_subcommand_index(words: list[str]) -> int:
+    """Index of git's subcommand word: the first word that is not a global option
+    or that option's value (``-C notes`` and ``--namespace lfs`` are options, not
+    the commands ``notes`` and ``lfs``). ``len(words)`` when there is none."""
+    i, n = 0, len(words)
+    while i < n:
+        w = words[i]
+        if w in _GIT_VALUED_GLOBALS:
+            i += 2
+        elif w.startswith("-"):
+            i += 1
+        else:
+            return i
+    return n
+
+
+def _sx_words(
+    words: list[str], worktree: int, brace: bool = True, branch_of: BranchOf = _no_branch,
+) -> _Sidefx | None:
     hit = _sx_brace(words) if brace else None
     if hit is not None:
         return hit
     checked = 0
+    sub = _sx_subcommand_index(words)
+    # the word after `stash`, `lfs`, `subtree` or `notes` is that command's own verb
+    # only when that word IS the subcommand
+    own = sub + 1 if sub < len(words) and words[sub] in _SX_OWN_VERBS_AFTER else -1
     for k, w in enumerate(words):
         check = _SX_CHECKERS.get(w)
-        if check is None or (k and words[k - 1] in _SX_OWN_VERBS_AFTER):
+        if check is None or k == own:
             continue
         checked += 1
         if checked > _SIDEFX_MAX_SUBS:
             return _Sidefx(f"more than {_SIDEFX_MAX_SUBS} verb words")
-        hit = check(words, k + 1, worktree)
+        hit = check(words, k + 1, worktree, branch_of)
         if hit is not None:
             return hit
     return None
 
 
-def _sidefx_loose(text: str, worktree: int, brace: bool = True) -> _Sidefx | None:
+def _sidefx_loose(
+    text: str, worktree: int, brace: bool = True, branch_of: BranchOf = _no_branch,
+) -> _Sidefx | None:
     """The side-effect verdict of *text* read one simple command at a time.
     Parentheses and backticks become blanks first, so a word is never glued to
     the ``)`` that closes a subshell (``(cd /tmp; git submodule init)``) and a
@@ -2565,7 +2763,7 @@ def _sidefx_loose(text: str, worktree: int, brace: bool = True) -> _Sidefx | Non
             continue
         words = _sx_segment_words(seg)
         if words:
-            hit = _sx_words(words, worktree, brace)
+            hit = _sx_words(words, worktree, brace, branch_of)
             if hit is not None:
                 return hit
     return None
@@ -2604,17 +2802,22 @@ def _sidefx_data_hit(view: _ConfigView, worktree: int, brace: bool = True) -> _S
 
 def _sidefx_match(
     normalized_text: str, view: _ConfigView, *, worktree: bool = False, brace: bool = True,
+    branch_of: BranchOf = _no_branch,
 ) -> _Sidefx | None:
     """The first side-effect verb, ``help.autocorrect`` setting or brace in the
     subcommand word in *normalized_text* (block comment above), or ``None``. In a
     command the tokenizer read (*view*.cursor) the words come from its masked text,
     where a quoted phrase is one word; otherwise from the normalized text.
-    *worktree* is the call from a proven linked worktree: the branch forms that
-    only touch the agent's own branches pass there, and so does ``push|fetch|pull
-    -u`` when the raw command also names no other repository (no ``GIT_DIR=``-style
+    *worktree* is the call from a proven linked worktree: the branch copy, move and
+    delete forms are not denied there (an agent's own branches are the normal case; a
+    shared one is not told apart), and the ``push|fetch|pull`` upstream forms pass
+    when ``_sx_upstream_own`` holds and the raw command also names no other
+    repository (no ``GIT_DIR=``-style
     variable, quoted ``cd`` or ``env -C`` anywhere; ``-C``, ``--git-dir`` and
     ``--work-tree`` are read per command at ``_sx_other_repo``). *brace* is False
-    for the zero-expansion form, whose deleted expansions shift the words."""
+    for the zero-expansion form, whose deleted expansions shift the words.
+    *branch_of* reads the worktree's current branch, for the ``git push -u <remote>
+    <refspec>`` allow (``_sx_upstream_own``)."""
     if _SIDEFX_QUICK_RE.search(normalized_text) is None:
         return None
     hit = _sx_autocorrect(normalized_text)
@@ -2626,21 +2829,23 @@ def _sidefx_match(
         level = _SX_WORKTREE_OWN if own else _SX_WORKTREE
     if view.cursor:
         return (
-            _sidefx_loose(view.text, level, brace)
+            _sidefx_loose(view.text, level, brace, branch_of)
             or _sidefx_data_hit(view, level, brace)
         )
-    return _sidefx_loose(normalized_text, level, brace)
+    return _sidefx_loose(normalized_text, level, brace, branch_of)
 
 
 def _sidefx_hit(
     normalized_text: str, view: _ConfigView, *, worktree: bool = False,
+    branch_of: BranchOf = _no_branch,
 ) -> _Sidefx | None:
     """``_sidefx_match`` over the normalized text and its zero-expansion form."""
-    hit = _sidefx_match(normalized_text, view, worktree=worktree)
+    hit = _sidefx_match(normalized_text, view, worktree=worktree, branch_of=branch_of)
     if hit is not None or view.cursor:
         return hit
     return _sidefx_match(
         _delete_all_expansions(normalized_text), view, worktree=worktree, brace=False,
+        branch_of=branch_of,
     )
 
 
@@ -3422,6 +3627,24 @@ def _in_linked_worktree(cwd: str) -> bool | None:
     return gd != cd
 
 
+def _current_branch(cwd: str) -> str | None:
+    """The branch ``cwd`` is on (``git symbolic-ref --short -q HEAD``), or ``None``
+    for a detached HEAD, a non-repository or any failure. ``None`` leaves ``HEAD``
+    the only refspec ``git push -u`` may name (``_sx_own_refspec``)."""
+    try:
+        git = _exec_path.which_off_cwd("git")
+        if git is None:
+            return None
+        out = subprocess.run(
+            [git, "symbolic-ref", "--short", "-q", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+        )
+    except Exception:  # noqa: BLE001 -- unreadable: no branch is the worktree's own
+        return None
+    name = out.stdout.strip()
+    return name if out.returncode == 0 and name else None
+
+
 def _deny_message(agent_type: str, verb_names: str, *,
                   undeterminable: bool = False, in_worktree: bool = False,
                   sidefx: bool = False) -> str:
@@ -3495,12 +3718,13 @@ def _deny_message(agent_type: str, verb_names: str, *,
         if in_worktree:
             head += (
                 "\nA linked worktree shares this config with the primary "
-                "checkout, so these verbs deny there too (`git branch -c|-M|"
-                "--delete` of your own branches, `git branch <name> "
-                "<start-point>` and `git push -u origin <branch>` pass; the "
-                "last one denies again when the command names another "
-                "repository with -C, --git-dir, --work-tree, GIT_DIR= or a "
-                "quoted cd)."
+                "checkout, so these verbs deny there too. `git push -u "
+                "<remote> HEAD` (or the current branch's name) passes, with a "
+                "plain remote name; a path or URL as the remote, another "
+                "branch as the refspec, `--all`, `--mirror`, `--repo`, "
+                "`--receive-pack`, `--exec`, `--upload-pack` and any "
+                "command that names another repository with -C, --git-dir, "
+                "--work-tree, GIT_DIR= or a quoted cd deny."
             )
     if undeterminable:
         head += (
@@ -3819,7 +4043,10 @@ def body(payload: dict[str, Any]) -> None:
         # runs a guessed verb and a brace in the subcommand word (nexus-k66o5).
         wt_hit = (
             _config_hit(normalized, config_view, worktree=True)
-            or _sidefx_hit(normalized, config_view, worktree=True)
+            or _sidefx_hit(
+                normalized, config_view, worktree=True,
+                branch_of=functools.cache(lambda: _current_branch(cwd)),
+            )
         )
         if wt_hit is None:
             _lib.pass_through()
