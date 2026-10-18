@@ -34,6 +34,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -96,8 +104,10 @@ import java.util.function.UnaryOperator;
  *
  * <p><b>A published directory is never destroyed in place.</b> A directory that fails the completeness
  * check is renamed aside to {@code .broken-<random>} and deleted from there, under an in-JVM monitor
- * and a file lock on {@code <root>/.lock}, with the check repeated inside the lock, so a sibling that
- * has just published a whole directory is never moved out from under its loader.
+ * and a file lock on {@code <root>/.lock}, with the check repeated inside the lock and again just before
+ * the move, so a sibling that has just published a whole directory is not moved out from under its loader.
+ * The lock is opened and taken on a daemon thread bounded by {@link #LOCK_TIMEOUT}; past that recovery goes
+ * on unlocked (the pre-move re-check is then the guard, narrowing the race, not closing it).
  *
  * <p><b>Operator wins.</b> If {@code onnxruntime.native.path} is already set (a {@code -D} flag, a
  * native-image runtime option), nothing here runs and ORT loads from that directory as it always has.
@@ -133,9 +143,11 @@ public final class OrtNativeDir {
     static final String LOCK_FILE = ".lock";
 
     /**
-     * How long broken-directory recovery waits for the cross-process file lock before going on without
-     * it (as when the filesystem refuses the lock). A lock daemon that is down (NFS) blocks a plain
-     * {@code lock()} forever; this keeps boot bounded. The wait is only on the recovery path.
+     * How long broken-directory recovery waits to open and lock {@code <root>/.lock} before going on
+     * without it (as when the filesystem refuses the lock). The WHOLE acquisition, the open and every
+     * {@code tryLock}, runs on a daemon thread the caller abandons after this long, because on a hard
+     * NFS mount with a dead lock daemon either call can block in the kernel where no deadline of ours
+     * runs. The wait is only on the recovery path.
      */
     static final Duration LOCK_TIMEOUT = Duration.ofSeconds(10);
 
@@ -201,43 +213,115 @@ public final class OrtNativeDir {
         }
     }
 
+    /** Reads one file attribute; the test seam for {@link #uidOf(Path, AttributeReader, LinkOption...)}. */
+    @FunctionalInterface
+    interface AttributeReader {
+        Object read(Path path, String attribute, LinkOption... options) throws IOException;
+    }
+
     /**
      * The {@code unix:uid} of {@code dir}, following links exactly as the owner-name read does (a
      * different rule here would let a link owned by us vouch for a foreign directory), or null when the
      * platform has no such attribute.
      */
     static Integer uidOf(Path dir) {
+        return uidOf(dir, Files::getAttribute);
+    }
+
+    /**
+     * {@link #uidOf(Path)} through {@code reader}. Null on any failure to read, including an
+     * {@link Error} a native image throws for an attribute it did not register (a
+     * {@code LinkageError} or a missing-registration error): the caller then judges by name instead of
+     * the boot failing. A {@link VirtualMachineError} is never swallowed.
+     */
+    static Integer uidOf(Path dir, AttributeReader reader, LinkOption... options) {
         try {
-            return Files.getAttribute(dir, "unix:uid") instanceof Integer i ? i : null;
-        } catch (IOException | RuntimeException e) {
+            return reader.read(dir, "unix:uid", options) instanceof Integer i ? i : null;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (IOException | RuntimeException | Error e) {
             return null;
         }
     }
 
+    /** Set once the "no process uid" warning has been logged, so a boot says it once. */
+    private static final AtomicBoolean UID_WARNED = new AtomicBoolean();
+
     /**
-     * The uid this process runs as, read from a file it creates in {@code java.io.tmpdir} and deletes
-     * at once (a new file is owned by the process's effective uid, on any unix and in a container with
-     * no passwd entry; no native call, nothing for native-image to register). Null when there is no
-     * unix view or no file can be created.
+     * The uid this process runs as. On Linux it is the effective uid in {@code /proc/self/status}
+     * (a file read: nothing is created, no link can be raced; {@code unix:uid} of {@code /proc/self}
+     * would be root for a process that is not dumpable). Elsewhere, or when that is unreadable, it is
+     * the uid of a file this process creates in {@code java.io.tmpdir} and deletes at once (a new file
+     * is owned by the effective uid), read without following links. Null when there is no unix view
+     * (silent: there is no uid to have) or when a unix view exists but no uid could be had (WARN once:
+     * ownership is then judged by name, which refuses the user's own directory in a container with no
+     * passwd entry).
      */
     static Integer processUid() {
+        return processUid(Path.of("/proc/self/status"), Path.of(System.getProperty("java.io.tmpdir")),
+                Files::getAttribute, UID_WARNED);
+    }
+
+    static Integer processUid(Path procStatus, Path tmpDir, AttributeReader reader, AtomicBoolean warned) {
         try {
             if (!FileSystems.getDefault().supportedFileAttributeViews().contains("unix")) {
                 return null;
             }
-            Path probe = Files.createTempFile("nx-ort-uid", null);
-            try {
-                return uidOf(probe);
-            } finally {
+            Integer fromProc = uidFromProcStatus(procStatus);
+            if (fromProc != null) {
+                return fromProc;
+            }
+            Integer fromProbe = uidFromProbeFile(tmpDir, reader);
+            if (fromProbe != null) {
+                return fromProbe;
+            }
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (RuntimeException | Error e) {
+            log.debug("event=ort_native_dir_uid_error error=\"{}\"", e.toString());
+        }
+        if (warned.compareAndSet(false, true)) {
+            log.warn("event=ort_native_dir_uid_unavailable note=\"this platform has a unix view but the process "
+                    + "uid could not be read; directory ownership is judged by owner name only, which can "
+                    + "refuse your own directory when the user has no passwd entry\"");
+        }
+        return null;
+    }
+
+    /** The effective uid (second field of the {@code Uid:} line), or null when absent or malformed. */
+    static Integer uidFromProcStatus(Path status) {
+        try {
+            if (!Files.isRegularFile(status)) {
+                return null;
+            }
+            for (String line : Files.readAllLines(status)) {
+                if (line.startsWith("Uid:")) {
+                    String[] f = line.substring(4).trim().split("\\s+");
+                    return f.length >= 2 ? Integer.valueOf(f[1]) : null;
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            log.debug("event=ort_native_dir_uid_proc_unreadable error=\"{}\"", e.toString());
+        }
+        return null;
+    }
+
+    private static Integer uidFromProbeFile(Path tmpDir, AttributeReader reader) {
+        Path probe = null;
+        try {
+            probe = Files.createTempFile(tmpDir, "nx-ort-uid", null);
+            return uidOf(probe, reader, LinkOption.NOFOLLOW_LINKS);
+        } catch (IOException e) {
+            log.debug("event=ort_native_dir_uid_probe_failed error=\"{}\"", e.toString());
+            return null;
+        } finally {
+            if (probe != null) {
                 try {
                     Files.deleteIfExists(probe);
                 } catch (IOException ignored) {
                     // a leftover empty file in tmp is harmless
                 }
             }
-        } catch (IOException | RuntimeException e) {
-            log.debug("event=ort_native_dir_uid_unavailable error=\"{}\"", e.toString());
-            return null;
         }
     }
 
@@ -352,13 +436,20 @@ public final class OrtNativeDir {
         return ensure(root, osName, osArchName, resources, Identity.named(user), afterSeen, LOCK_TIMEOUT);
     }
 
+    /** The full seam set minus the lock acquirer: the real open-and-lock. */
+    static Result ensure(Path root, String osName, String osArchName, Resources resources, Identity user,
+                         Consumer<Path> afterSeen, Duration lockTimeout) {
+        return ensure(root, osName, osArchName, resources, user, afterSeen, lockTimeout,
+                OrtNativeDir::openAndPollLock);
+    }
+
     /**
      * {@link #ensure(Path, String, String, Resources, String)} with a test seam: {@code afterSeen} runs
      * with the version directory right after each existence check that found it (in {@code ensure}
      * and again in {@code recover}), so a test can make a sibling's rename-aside land exactly there.
      */
     static Result ensure(Path root, String osName, String osArchName, Resources resources, Identity user,
-                         Consumer<Path> afterSeen, Duration lockTimeout) {
+                         Consumer<Path> afterSeen, Duration lockTimeout, LockAcquirer acquirer) {
         String platform = osArch(osName, osArchName);
         if (platform == null) {
             return new Result(null, Outcome.UNAVAILABLE);
@@ -398,7 +489,7 @@ public final class OrtNativeDir {
                 if (reusable(finalDir, user)) {
                     return new Result(finalDir, Outcome.REUSED);
                 }
-                return recover(root, stage, finalDir, user, failure, afterSeen, lockTimeout);
+                return recover(root, stage, finalDir, user, failure, afterSeen, lockTimeout, acquirer);
             } finally {
                 deleteTree(stage);
             }
@@ -415,11 +506,10 @@ public final class OrtNativeDir {
      * deleted in place.
      */
     private static Result recover(Path root, Path stage, Path finalDir, Identity user, IOException lastFailure,
-                                  Consumer<Path> afterSeen, Duration lockTimeout) throws IOException {
+                                  Consumer<Path> afterSeen, Duration lockTimeout, LockAcquirer acquirer)
+            throws IOException {
         synchronized (RECOVERY) {
-            try (FileChannel ch = FileChannel.open(root.resolve(LOCK_FILE),
-                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                 FileLock ignored = lockOrNull(ch, lockTimeout)) {
+            try (Held ignored = acquireBounded(root.resolve(LOCK_FILE), lockTimeout, acquirer)) {
                 for (int attempt = 0; attempt < 3; attempt++) {
                     // Immediately before acting: a sibling may have published a whole directory.
                     if (reusable(finalDir, user)) {
@@ -432,6 +522,11 @@ public final class OrtNativeDir {
                             return new Result(null, Outcome.UNAVAILABLE);
                         }
                         if (t != Trust.ABSENT) {
+                            // Immediately before the move: an unlocked racer must not move aside a
+                            // directory a sibling published since the check at the top of this pass.
+                            if (reusable(finalDir, user)) {
+                                return new Result(finalDir, Outcome.REUSED);
+                            }
                             Path aside = root.resolve(BROKEN_PREFIX + UUID.randomUUID().toString().substring(0, 8));
                             try {
                                 Files.move(finalDir, aside, StandardCopyOption.ATOMIC_MOVE);
@@ -458,38 +553,136 @@ public final class OrtNativeDir {
         return new Result(null, Outcome.UNAVAILABLE);
     }
 
-    /**
-     * A file lock for cross-process exclusion, or null when the filesystem will not give one or another
-     * process still holds it after {@code timeout} (the caller then goes on unlocked, as when the lock is
-     * refused). A bounded {@code tryLock} loop, never {@code lock()}: that blocks without end when the
-     * lock daemon is gone.
-     */
-    private static FileLock lockOrNull(FileChannel ch, Duration timeout) {
-        long deadline = System.nanoTime() + timeout.toNanos();
-        while (true) {
+    /** The open lock file and the lock on it; closing releases both. Null stands for "no lock". */
+    record Held(FileChannel channel, FileLock lock) implements AutoCloseable {
+        @Override
+        public void close() {
             try {
-                FileLock lock = ch.tryLock();
-                if (lock != null) {
-                    return lock;
+                if (lock != null && lock.isValid()) {
+                    lock.release();
                 }
             } catch (IOException | RuntimeException e) {
-                log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
-                return null;
-            }
-            if (System.nanoTime() - deadline >= 0) {
-                log.warn("event=ort_native_dir_lock_timeout timeout_ms={} note=\"another process held the "
-                        + "recovery lock for the whole wait; continuing without it\"", timeout.toMillis());
-                return null;
+                log.debug("event=ort_native_dir_lock_release_failed error=\"{}\"", e.toString());
             }
             try {
-                Thread.sleep(LOCK_POLL.toMillis());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.warn("event=ort_native_dir_lock_timeout timeout_ms={} note=\"interrupted while waiting for the "
-                        + "recovery lock; continuing without it\"", timeout.toMillis());
-                return null;
+                channel.close();
+            } catch (IOException | RuntimeException e) {
+                log.debug("event=ort_native_dir_lock_close_failed error=\"{}\"", e.toString());
             }
         }
+    }
+
+    /**
+     * Opens {@code lockFile} and takes the lock on it, returning null when the filesystem refuses (an
+     * {@link IOException} is thrown for that) or the attempt was {@code abandoned}, and throwing
+     * {@link TimeoutException} when another process holds it for {@code timeout}. It runs on its own
+     * thread, so it may block as long as the kernel makes it; it must close what it opened unless it
+     * returns it.
+     */
+    @FunctionalInterface
+    interface LockAcquirer {
+        Held acquire(Path lockFile, Duration timeout, BooleanSupplier abandoned)
+                throws IOException, InterruptedException, TimeoutException;
+    }
+
+    /** The real acquisition: open, then a {@code tryLock} loop (never {@code lock()}) until the deadline. */
+    private static Held openAndPollLock(Path lockFile, Duration timeout, BooleanSupplier abandoned)
+            throws IOException, InterruptedException, TimeoutException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        FileChannel ch = FileChannel.open(lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        boolean handedOver = false;
+        try {
+            while (!abandoned.getAsBoolean()) {
+                FileLock lock = ch.tryLock();
+                if (lock != null) {
+                    handedOver = true;
+                    return new Held(ch, lock);
+                }
+                if (System.nanoTime() - deadline >= 0) {
+                    throw new TimeoutException("recovery lock held by another process");
+                }
+                Thread.sleep(LOCK_POLL.toMillis());
+            }
+            return null;
+        } finally {
+            if (!handedOver) {
+                try {
+                    ch.close();
+                } catch (IOException ignored) {
+                    // nothing to do
+                }
+            }
+        }
+    }
+
+    /**
+     * The recovery lock, or null when the filesystem will not give one, another process still holds it
+     * after {@code timeout}, or the open and lock did not finish by then (the caller goes on unlocked,
+     * as when the lock is refused). The whole acquisition runs on a named daemon thread of its own, never
+     * a shared pool: a kernel call stuck on a dead NFS lock daemon strands only that thread, and a later
+     * recovery does not wait behind it. Exactly one side owns what the attempt opened: if the caller has
+     * given up (the future is cancelled) when the attempt finishes, the attempt closes it itself.
+     */
+    static Held acquireBounded(Path lockFile, Duration timeout, LockAcquirer acquirer) {
+        CompletableFuture<Held> handoff = new CompletableFuture<>();
+        Thread t = new Thread(() -> {
+            Held held;
+            try {
+                held = acquirer.acquire(lockFile, timeout, handoff::isDone);
+            } catch (TimeoutException e) {
+                handoff.completeExceptionally(e);
+                return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handoff.complete(null);
+                return;
+            } catch (IOException | RuntimeException e) {
+                log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
+                handoff.complete(null);
+                return;
+            } catch (Error e) {
+                log.debug("event=ort_native_dir_lock_unavailable error=\"{}\"", e.toString());
+                handoff.complete(null);
+                return;
+            }
+            if (!handoff.complete(held) && held != null) {
+                held.close();
+            }
+        }, "ort-native-dir-lock");
+        t.setDaemon(true);
+        t.start();
+        try {
+            return handoff.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException e) {
+            return givenUp(handoff, timeout, "did not finish opening and locking it");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return givenUp(handoff, timeout, "interrupted while waiting for it");
+        } catch (ExecutionException | CancellationException e) {
+            if (e.getCause() instanceof TimeoutException) {
+                warnLockTimeout(timeout, "another process held it for the whole wait");
+            }
+            return null;
+        }
+    }
+
+    /** The caller stops waiting: cancel the handoff, or take what finished in the instant before. */
+    private static Held givenUp(CompletableFuture<Held> handoff, Duration timeout, String why) {
+        if (handoff.cancel(true)) {
+            warnLockTimeout(timeout, why);
+            return null;
+        }
+        try {
+            return handoff.getNow(null);
+        } catch (CompletionException | CancellationException e) {
+            warnLockTimeout(timeout, why);
+            return null;
+        }
+    }
+
+    private static void warnLockTimeout(Duration timeout, String why) {
+        log.warn("event=ort_native_dir_lock_timeout timeout_ms={} note=\"the recovery lock: {}; "
+                + "continuing without it\"", timeout.toMillis(), why);
     }
 
     /** Creates the root, mode 0755 at most (the umask can only narrow it) where the platform has modes. */
