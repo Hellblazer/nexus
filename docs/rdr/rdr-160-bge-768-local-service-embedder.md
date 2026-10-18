@@ -72,7 +72,8 @@ forced re-embed for every future local user.
    (voyage-code-3 for `code__`, voyage-context-3 for `docs__`/`rdr__`/
    `knowledge__`) and refuses bge collections; keyless boots this RDR's
    bge-768-only behavior unchanged. The carve-out was decided 2026-06-15 (Sam),
-   the same day as this RDR, and is bounded to the embedding and rerank API.
+   the same day as this RDR, and is bounded to the embedding and rerank API,
+   stated as an allowlist (nexus-qfy01): The local engine connects only to the Voyage API (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and `VoyageReranker`, and only when keyed, optionally through the operator's proxy (`EgressProxy`); and to its database at `NX_DB_URL` over JDBC. Nothing else. A source census and a runtime witness (`service/src/test/java/dev/nexus/service/EgressGuardCensus.java`, `EgressRuntimeWitnessTest.java`; nexus-qfy01, RDR-210) hold that list.
    Sam requires local mode to support both embedders at once (2026-09-15);
    today's engine serves one per boot, and RDR-210 tracks the dual-mode engine
    that would let this item and the next both hold simultaneously.

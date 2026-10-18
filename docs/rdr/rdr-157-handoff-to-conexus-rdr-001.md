@@ -86,7 +86,8 @@ the consumer.**
 
   *(Amended 2026-09-15, nexus-umm29.)* This invariant has one sanctioned
   exception: the third-party embedding and rerank API (Voyage). The carve-out
-  was decided 2026-06-15 (Sam) and is bounded to that API. Local mode must
+  was decided 2026-06-15 (Sam) and is bounded to that API, stated as an
+  allowlist (nexus-qfy01): The local engine connects only to the Voyage API (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and `VoyageReranker`, and only when keyed, optionally through the operator's proxy (`EgressProxy`); and to its database at `NX_DB_URL` over JDBC. Nothing else. A source census and a runtime witness (`service/src/test/java/dev/nexus/service/EgressGuardCensus.java`, `EgressRuntimeWitnessTest.java`; nexus-qfy01, RDR-210) hold that list. Local mode must
   support both bge-768 and Voyage at once (Sam, 2026-09-15); today it serves
   one per boot, picked by whether `NX_VOYAGE_API_KEY` reaches the service —
   RDR-210 tracks the dual-mode engine that closes the gap.

@@ -160,7 +160,12 @@ locked the architecture:
    > and `docs__`/`rdr__`/`knowledge__` with voyage-context-3, and reranks with
    > Voyage (`Main.java`); without it, it embeds with the bundled bge-768 (RDR-160)
    > and refuses voyage collections. The carve-out was decided 2026-06-15 (Sam) and
-   > is bounded to the embedding and rerank API. Local mode must support both
+   > is bounded to the embedding and rerank API, stated as an allowlist (nexus-qfy01):
+   > the local engine connects only to the Voyage API (`api.voyageai.com`) from
+   > `VoyageEmbedder`, `CceEmbedder` and `VoyageReranker`, and only when keyed,
+   > optionally through the operator's proxy (`EgressProxy`); and to its database at
+   > `NX_DB_URL` over JDBC. Nothing else. A source census and a runtime witness
+   > (`EgressGuardCensus`, `EgressRuntimeWitnessTest`) hold that list. Local mode must support both
    > embedders at once (Sam, 2026-09-15); today it serves one per boot — RDR-210
    > tracks the dual-mode engine that closes the gap.
    >
