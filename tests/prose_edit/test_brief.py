@@ -669,3 +669,11 @@ def test_brief_py_is_stdlib_only_and_never_imports_nexus() -> None:
             imported.add(node.module.split(".")[0])
     assert "nexus" not in imported
     assert imported <= set(sys.stdlib_module_names) | {"__future__"}, imported
+
+
+def test_the_skill_substitutes_its_arguments_exactly_once() -> None:
+    """Claude Code replaces every ``$ARGUMENTS`` in SKILL.md, inside backticks too.
+    A second one (it sat inside the rule against building shell strings from the
+    arguments) pasted a stdin text into the turn a second time, and a small model
+    read the repeat as garbled input and stopped (nexus-ger02.26 measurement)."""
+    assert SKILL.read_text(encoding="utf-8").count("$ARGUMENTS") == 1
