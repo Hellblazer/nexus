@@ -2,7 +2,8 @@
 title: "Request Identity for Mutating Engine Routes"
 id: RDR-222
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-10-18
 priority: medium
 author: Sam
 reviewed-by: self
@@ -1135,6 +1136,8 @@ of record; nothing is trimmed. The record is larger than Phase 1 needs
 because it keeps that design.
 
 ## Revision History
+
+- 2026-10-18: accept residual dispositions: residual 1 [BLOCKS-PLANNING] carried by bead nexus-zxgld (Sam's choice); residual 2 [DISCOVER-AT-IMPLEMENTATION] carried by bead nexus-zxgld (Phase 1). Round 2 Significants: bead nexus-icdmw.
 
 - 2026-10-18: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `0b2ec059b`; critique `nexus_rdr/222-gate-critique-2026-10-18-r2`.
 
