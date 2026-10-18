@@ -769,7 +769,11 @@ use, carrying the document's aspects and highlights with it.
     - The dimension-orphan finder compares each collection's declared model with
       the set of models this install can serve: the engine's `embedding_models`
       plus every Voyage model, which a key would
-      serve. A collection is listed only when its model is in neither. A served
+      serve, plus the current local model (bge; Sam, 2026-10-18): a keyed engine
+      without the bge files reports only the Voyage set, but `nx init` serves the
+      bge collection again while `prune --yes` would destroy it. A collection is
+      listed only when its model is in none of these (a stale minilm-384
+      generation is). A served
       collection can then never be listed, and a Voyage collection on a keyless
       engine is reported as "needs the key", not as an orphan. When
       `embedding_models` is absent (an engine older than that field), the finder

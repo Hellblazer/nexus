@@ -614,6 +614,13 @@ _VOYAGE_MODEL_TOKENS: frozenset[str] = frozenset({
     "voyage-code-3", "voyage-context-3", "voyage-3",
 })
 
+#: The current local embedder (Sam, 2026-10-18). A bge collection is never an
+#: orphan merely because the engine reports no bge model: a keyed engine with no
+#: bge files reports only the Voyage set, but `nx init` provisions the files and
+#: serves the collection again, while `prune --yes` would have destroyed it. A
+#: stale local generation (minilm-384) is still an orphan.
+_LOCAL_MODEL_TOKENS: frozenset[str] = frozenset({"bge-base-en-v15-768"})
+
 
 def _engine_embedding_models(t3: Any) -> frozenset[str] | None:
     """The engine's ``GET /version`` ``embedding_models`` as a set, or
@@ -695,8 +702,9 @@ def _find_dimension_mismatched_collections(
     install cannot serve (orphans from a prior embedder generation — GH #1113).
 
     The rule (RDR-210 Technical Design 10): a collection is an orphan only
-    when its model is in NEITHER the engine's served ``embedding_models`` NOR
-    the Voyage model set. A served collection can never be listed.
+    when its model is in NONE of: the engine's served ``embedding_models``, the
+    Voyage model set, or the current local model (bge). A served collection can
+    never be listed, and neither can one the install could serve after ``nx init``.
 
     Returns ``(mismatches, skipped_non_conformant, active_label)``.
     ``mismatches`` items: ``{name, declared_model, declared_dim, served_models,
@@ -723,7 +731,7 @@ def _find_dimension_mismatched_collections(
     skipped = 0
     if engine_models is None:
         return mismatches, skipped, active_label
-    served = engine_models | _VOYAGE_MODEL_TOKENS
+    served = engine_models | _VOYAGE_MODEL_TOKENS | _LOCAL_MODEL_TOKENS
 
     for c in t3.list_collections():
         name = c["name"]

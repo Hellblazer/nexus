@@ -103,14 +103,30 @@ def test_keyless_engine_does_not_orphan_a_voyage_collection(
     assert _VOYAGE_CTX not in _names(mismatches)
 
 
-def test_voyage_only_engine_lists_a_bge_collection_it_does_not_serve(
+def test_voyage_only_engine_never_lists_a_bge_collection_as_an_orphan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rule is the model set, not a hard-coded family: a bge collection on
-    an engine that serves no bge is an orphan, and one it serves is not."""
+    """Sam, 2026-10-18: a keyed engine that merely lacks the bge files reports only
+    the Voyage set, but `nx init` serves the bge collection again, so it is never
+    an orphan. A stale local generation (minilm-384) still is."""
     _serve(monkeypatch, {"embedding_mode": "voyage", "embedding_models": _VOYAGE_ALL})
     mismatches, _, _ = _find_dimension_mismatched_collections(_FakeEngineT3(_ALL, "voyage"))
-    assert sorted(_names(mismatches)) == sorted([_MINILM, _BGE_COLL])
+    assert _names(mismatches) == [_MINILM]
+
+
+def test_prune_yes_on_a_voyage_only_engine_deletes_no_bge_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.db.collection_purge import CascadeCounts
+
+    _serve(monkeypatch, {"embedding_mode": "voyage", "embedding_models": _VOYAGE_ALL})
+    t3 = _FakeEngineT3(_ALL, "voyage")
+    with patch(
+        "nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts(),
+    ) as cascade:
+        result = _prune(t3, "--yes")
+    assert result.exit_code == 0, result.output
+    assert [call.args[1] for call in cascade.call_args_list] == [_MINILM]
 
 
 @pytest.mark.parametrize(
@@ -151,11 +167,12 @@ def test_unrecognised_mode_string_does_not_decide_anything(
 def test_empty_models_list_is_a_verdict_not_unreadable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An engine that really reports ``[]`` serves nothing locally: only the
-    Voyage set protects collections. Distinct from the field being absent."""
+    """An engine that really reports ``[]`` serves nothing locally: the Voyage set and
+    the current local model (bge) still protect collections. Distinct from the field
+    being absent."""
     _serve(monkeypatch, {"embedding_mode": "voyage", "embedding_models": []})
     mismatches, _, label = _find_dimension_mismatched_collections(_FakeEngineT3(_ALL, "voyage"))
-    assert sorted(_names(mismatches)) == sorted([_MINILM, _BGE_COLL])
+    assert _names(mismatches) == [_MINILM]
     assert label != "unknown"
 
 

@@ -648,12 +648,13 @@ def test_prune_surfaces_cascade_failures(
 
 
 def test_prune_with_failed_service_cascade_counts_only_confirmed_deletes(
-    runner, env_creds, mock_db,
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """nexus-oq5gd: same rule as delete: an unconfirmed delete is not counted
     as deleted, the loop still visits every collection, and the exit is non-zero."""
     from nexus.db.collection_purge import CascadeCounts
 
+    _serve_models(monkeypatch, _VOYAGE_MODELS)  # RDR-210 P1.3: the engine's embedding_models decides
     mock_db.embedding_mode.return_value = "voyage"
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     fake = CascadeCounts(
