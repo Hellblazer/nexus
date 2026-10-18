@@ -234,6 +234,15 @@ public final class NexusService {
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
     private final Runnable reaperScheduledTask;
 
+    /** RDR-222 Phase 1 (nexus-yye8l.3): the request ledger the retention arm prunes. */
+    private final dev.nexus.service.db.RequestLedger requestLedger;
+
+    /** Days a finished or lease-expired ledger row is kept, from NX_REQUEST_LEDGER_RETENTION_DAYS (default 7). */
+    private final int requestLedgerRetentionDays;
+
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the ledger retention arm. */
+    private final Runnable requestLedgerRetentionTask;
+
     /**
      * RDR-227 Step 2 (bead nexus-43ulx.23): the source of {@code GET /v1/status}'s {@code per_collection_indexes}
      * object. Bound late, by {@link #perCollectionIndexes(java.util.function.Supplier)}: the status route is
@@ -537,6 +546,7 @@ public final class NexusService {
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
         // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
         var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
+        this.requestLedger = requestLedger;
         var requestsCtx = server.createContext("/v1/requests",
                 new dev.nexus.service.http.RequestHandler(requestLedger));
         requestsCtx.getFilters().addAll(authFilter);
@@ -682,6 +692,15 @@ public final class NexusService {
             );
         }
 
+        // RDR-222 Phase 1 (bead nexus-yye8l.3): the request-ledger retention arm, on the SAME sweepScheduler at the
+        // SAME cadence. It is not gated on the vector backend or the tuple registry: the ledger is a plain table.
+        this.requestLedgerRetentionDays = dev.nexus.service.db.RequestLedger.resolveRetentionDays(System::getenv);
+        this.requestLedgerRetentionTask = surviving("request_ledger_retention_failed",
+            () -> runScheduledLedgerRetention(OffsetDateTime.now(ZoneOffset.UTC)));
+        this.sweepScheduler.scheduleAtFixedRate(
+            this.requestLedgerRetentionTask, SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+        );
+
         // RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, a THIRD scheduled task on the SAME
         // sweepScheduler, at its own interval (NX_REAPER_INTERVAL_SECONDS, default one hour). It recomputes what
         // is reapable from the manifest on every pass, so it is the safety net for the post-commit sweep's
@@ -803,6 +822,25 @@ public final class NexusService {
                 }
             }
         };
+    }
+
+    /**
+     * One cycle of the request-ledger retention arm (RDR-222 Phase 1, bead nexus-yye8l.3): one
+     * {@code withTenant} delete pass per tenant, cutoff = {@code now} minus the retention days. Tenants are
+     * {@link #reaperTenants()}, the default tenant plus every tenant in {@code service_tokens}, not
+     * {@link #runScheduledTupleSweep}'s {@code tuple_tenants}, which is tuple-specific. Every keyed request is
+     * authenticated, so every ledger tenant holds a token; a tenant that lost its last token is skipped until it
+     * holds one again, the safe direction (a liveness gap, never a wrong deletion). A live lease is later than the
+     * cutoff, so a running attempt's row is never deleted. A tenant's failure is logged and the next still runs.
+     * Package-private so a test drives the exact method the scheduler runs.
+     */
+    List<dev.nexus.service.db.RequestLedger.RetentionPass> runScheduledLedgerRetention(OffsetDateTime now) {
+        return requestLedger.retainAll(reaperTenants(), now.minusDays(requestLedgerRetentionDays));
+    }
+
+    /** The Runnable the scheduler runs for ledger retention. Package-private for the wiring test. */
+    Runnable requestLedgerRetentionTask() {
+        return requestLedgerRetentionTask;
     }
 
     /** The tenant set the scheduled reaper visits. Package-private for the wiring test. */

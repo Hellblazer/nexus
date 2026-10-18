@@ -15,8 +15,11 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
+import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
 
@@ -54,6 +57,12 @@ public final class RequestLedger {
     static final String IN_FLIGHT = "in_flight";
     static final String COMMITTED = "committed";
     static final String FAILED = "failed";
+
+    /** The retention setting: days a finished (or lease-expired) row is kept. */
+    public static final String RETENTION_ENV = "NX_REQUEST_LEDGER_RETENTION_DAYS";
+
+    /** Retention when {@link #RETENTION_ENV} is unset or invalid (Sam, 2026-10-17). */
+    public static final int DEFAULT_RETENTION_DAYS = 7;
 
     private static final int SHA256_BYTES = 32;
     private static final int MAX_CLAIM_ROUNDS = 3;
@@ -300,6 +309,72 @@ public final class RequestLedger {
         }
         return new Status(kind, row.route(), row.startedAt(), row.leaseUntil(), row.finishedAt(),
             row.responseStatus(), row.responseJson());
+    }
+
+    // ── retention (nexus-yye8l.3) ────────────────────────────────────────────
+
+    /** One tenant's retention pass: rows deleted, and whether the pass failed (then {@code deleted} is 0). */
+    public record RetentionPass(String tenant, int deleted, boolean failed) {
+    }
+
+    /**
+     * Retention in days from {@link #RETENTION_ENV}, read through {@code env}. Unset or blank is
+     * {@link #DEFAULT_RETENTION_DAYS}. A value that is not a positive integer also falls back to
+     * the default, with exactly one WARN line.
+     */
+    public static int resolveRetentionDays(Function<String, String> env) {
+        String raw = env.apply(RETENTION_ENV);
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_RETENTION_DAYS;
+        }
+        try {
+            int days = Integer.parseInt(raw.strip());
+            if (days > 0) {
+                return days;
+            }
+        } catch (NumberFormatException e) {
+            // falls through to the single WARN below
+        }
+        log.warn("event=request_ledger_retention_invalid setting={} value={} using_days={}",
+            RETENTION_ENV, raw, DEFAULT_RETENTION_DAYS);
+        return DEFAULT_RETENTION_DAYS;
+    }
+
+    /**
+     * Delete {@code tenant}'s old rows in one transaction and return the count: a {@code committed}
+     * or {@code failed} row finished before {@code cutoff}, or an {@code in_flight} row whose lease
+     * ran out before {@code cutoff}. A live lease is later than any cutoff taken from the past, so a
+     * live {@code in_flight} row never matches, whatever its {@code started_at}. A row whose lease
+     * is NULL does not match either (NULL is not less than anything).
+     *
+     * <p>The tenant filter is explicit as well as enforced by RLS, as in {@link #key}.
+     */
+    public int retain(String tenant, OffsetDateTime cutoff) {
+        return scope.withTenant(tenant, ctx -> ctx.deleteFrom(REQUEST_LEDGER)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(tenant))
+            .and(REQUEST_LEDGER.STATE.in(COMMITTED, FAILED).and(REQUEST_LEDGER.FINISHED_AT.lt(cutoff))
+                .or(REQUEST_LEDGER.STATE.eq(IN_FLIGHT).and(REQUEST_LEDGER.LEASE_UNTIL.lt(cutoff))))
+            .execute());
+    }
+
+    /**
+     * One {@link #retain} pass per tenant, each logged at INFO. A tenant's failure is logged at WARN
+     * and the next tenant still runs. The caller supplies the tenant list because the ledger is
+     * FORCE RLS: a tenant cannot be enumerated from the table itself.
+     */
+    public List<RetentionPass> retainAll(List<String> tenants, OffsetDateTime cutoff) {
+        List<RetentionPass> passes = new ArrayList<>(tenants.size());
+        for (String tenant : tenants) {
+            try {
+                int deleted = retain(tenant, cutoff);
+                log.info("event=request_ledger_retention tenant={} deleted={}", tenant, deleted);
+                passes.add(new RetentionPass(tenant, deleted, false));
+            } catch (RuntimeException e) {
+                log.warn("event=request_ledger_retention_tenant_failed tenant={} reason={}", tenant, e.toString());
+                passes.add(new RetentionPass(tenant, 0, true));
+            }
+        }
+        return passes;
     }
 
     // ── internals ────────────────────────────────────────────────────────────
