@@ -388,6 +388,23 @@ _RESTART_SIGNATURES: tuple[type[OSError], ...] = (
 )
 
 
+def _proves_request_not_executed(exc: Exception) -> bool:
+    """True when *exc* shows the server never ran the request (nexus-utbip).
+
+    A refused connection never reached the server; a 401 was rejected before the
+    handler ran. A reset, abort or broken pipe proves nothing: the server may
+    have run a non-idempotent sweep to completion before the drop, so a resend
+    can repeat a move that already committed (nexus-ll31n).
+    """
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 401
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(getattr(exc, "reason", None), ConnectionRefusedError)
+    return isinstance(exc, ConnectionRefusedError)
+
+
 def _is_retryable_endpoint_error(exc: Exception) -> bool:
     """The three auto-restart signatures (dual-review S2 added RST):
 
@@ -1419,6 +1436,10 @@ def _request(
         # auto-restart signature); it propagates straight to the _get/_post handler,
         # which reframes it for managed endpoints (nexus-kf679).
         if not _is_retryable_endpoint_error(exc):
+            raise
+        # nexus-utbip: a non-idempotent sweep route is resent only on evidence the
+        # server never ran it; a reset or broken pipe may follow a completed move.
+        if no_auto_retry and not _proves_request_not_executed(exc):
             raise
         _log.info(
             "vector_endpoint_reresolve",
