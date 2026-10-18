@@ -345,20 +345,169 @@ class OrtNativeDirTest {
     }
 
     @Test
-    void aWritableFinalDirectoryTheCurrentUserOwnsIsTightenedAndReusedInPlace(@TempDir Path root) throws Exception {
+    void aWritableFinalDirectoryIsNeverReusedEvenWithAPlantedLibraryAndAMatchingSizeManifest(@TempDir Path root)
+            throws Exception {
         assumePosix(root);
         Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+        Object oldKey = Files.readAttributes(dir, BasicFileAttributes.class).fileKey();
+        // Another user (the directory is world-writable) swaps in a library and rewrites .sizes to match,
+        // so the completeness check alone would call it whole.
+        byte[] planted = "planted-by-another-user".getBytes(StandardCharsets.UTF_8);
+        StringBuilder sizes = new StringBuilder();
+        for (String name : List.of("onnxruntime", "onnxruntime4j_jni")) {
+            Files.write(lib(dir, name), planted);
+            sizes.append(OrtNativeDir.mapLibraryName(name)).append('=').append(planted.length).append('\n');
+        }
+        Files.writeString(dir.resolve(OrtNativeDir.SIZES_FILE), sizes.toString());
         Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxrwxrwx"));
-        Object key = Files.readAttributes(dir, BasicFileAttributes.class).fileKey();
 
         OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
 
-        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.REUSED);
+        assertThat(r.outcome()).as("re-extracted, not reused").isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
         assertThat(r.dir()).isEqualTo(dir);
-        assertThat(mode(dir)).isEqualTo("rwxr-xr-x");
         assertThat(Files.readAttributes(dir, BasicFileAttributes.class).fileKey())
-                .as("tightened in place, not replaced").isEqualTo(key);
-        assertThat(lib(dir, "onnxruntime")).isRegularFile();
+                .as("the old directory is gone, not tightened in place").isNotEqualTo(oldKey);
+        assertThat(Files.readAllBytes(lib(dir, "onnxruntime")))
+                .as("the planted bytes are not what is loaded").isNotEqualTo(planted).hasSize(64 * 1024);
+        assertThat(mode(dir)).as("the replacement is the stage's private mode").isEqualTo("rwx------");
+        assertThat(names(root)).as("the old directory was deleted from its .broken-* name")
+                .allMatch(nm -> nm.equals(dir.getFileName().toString()) || nm.equals(".lock"));
+    }
+
+    @Test
+    void aWritableFinalDirectoryIsReplacedWhateverItsOtherBitsAre(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        for (String m : List.of("rwxrwxr-x", "rwxr-xrwx", "rwxrwxrwx")) {
+            Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+            Object oldKey = Files.readAttributes(dir, BasicFileAttributes.class).fileKey();
+            Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString(m));
+
+            OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
+
+            assertThat(r.outcome()).as(m).isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+            assertThat(Files.readAttributes(r.dir(), BasicFileAttributes.class).fileKey()).as(m).isNotEqualTo(oldKey);
+        }
+    }
+
+    /** chmod with a symbolic or octal mode; the JDK cannot set setuid/setgid/sticky. */
+    private static void chmod(String mode, Path p) throws Exception {
+        Process pr = new ProcessBuilder("chmod", mode, p.toString()).redirectErrorStream(true).start();
+        String out = new String(pr.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertThat(pr.waitFor()).as("chmod %s: %s", mode, out).isZero();
+    }
+
+    private static int special(Path p) {
+        return OrtNativeDir.specialBits(p);
+    }
+
+    private static void assumeSpecialBitsReadable(Path p) throws Exception {
+        assumePosix(p);
+        chmod("1777", p);
+        Assumptions.assumeTrue(special(p) != 0, "unix:mode attribute not available on this platform");
+    }
+
+    @Test
+    void aRootWithSetgidOrStickyIsRefusedAndItsBitsAreUntouched(@TempDir Path base) throws Exception {
+        Path probe = Files.createDirectory(base.resolve("probe"));
+        assumeSpecialBitsReadable(probe);
+        for (String m : List.of("2775", "1777", "4775")) {
+            Path root = Files.createDirectory(base.resolve("root-" + m));
+            chmod(m, root);
+            int before = special(root);
+            String modeBefore = mode(root);
+            assertThat(before).as(m).isNotZero();
+
+            List<String> warnings = warnings(() -> {
+                OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
+                assertThat(r.outcome()).as(m).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+                assertThat(r.dir()).isNull();
+            });
+
+            assertThat(special(root)).as("%s: special bits untouched", m).isEqualTo(before);
+            assertThat(mode(root)).as("%s: no chmod at all", m).isEqualTo(modeBefore);
+            assertThat(names(root)).as("%s: nothing extracted", m).isEmpty();
+            assertThat(warnings).anySatisfy(w -> assertThat(w).contains("reason=special_bits")
+                    .contains("remedy=").contains(root.toString()));
+        }
+    }
+
+    @Test
+    void aSetgidRootThatIsNotGroupOrWorldWritableNeedsNoChmodAndStaysTrusted(@TempDir Path base) throws Exception {
+        Path root = Files.createDirectory(base.resolve("root"));
+        assumeSpecialBitsReadable(root);
+        chmod("2755", root);
+        int before = special(root);
+
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
+
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+        assertThat(special(root)).isEqualTo(before);
+    }
+
+    @Test
+    void aTightenWarnsAtWarnLevelNamingTheDirTheModesAndTheRemedy(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwxrwxr-x"));
+
+        List<String> warnings = warnings(() ->
+                assertThat(OrtNativeDir.ensure(root, OS, ARCH, small()).outcome())
+                        .isEqualTo(OrtNativeDir.Outcome.EXTRACTED));
+
+        assertThat(warnings).anySatisfy(w -> assertThat(w).contains("event=ort_native_dir_tightened")
+                .contains(root.toString()).contains("old_mode=rwxrwxr-x").contains("new_mode=rwxr-xr-x")
+                .contains("NX_ORT_NATIVE_DIR").contains("owner-writable only"));
+    }
+
+    @Test
+    void everyRefusalSaysWhy(@TempDir Path base) throws Exception {
+        assumePosix(base);
+        String me = System.getProperty("user.name");
+        // foreign_owner
+        Path foreign = Files.createDirectory(base.resolve("foreign"));
+        assertThat(warnings(() -> OrtNativeDir.trusted(foreign, "not-the-owner")))
+                .anySatisfy(w -> assertThat(w).contains("reason=foreign_owner").contains("expected_owner=\"not-the-owner\""));
+        // unknown_user
+        Path unknown = Files.createDirectory(base.resolve("unknown"));
+        Files.setPosixFilePermissions(unknown, PosixFilePermissions.fromString("rwxrwxrwx"));
+        assertThat(warnings(() -> OrtNativeDir.trusted(unknown, null)))
+                .anySatisfy(w -> assertThat(w).contains("reason=unknown_user").contains("expected_owner=\"unknown\"")
+                        .doesNotContain("expected_owner=\"null\""));
+        // symlink
+        Path target = Files.createDirectory(base.resolve("target"));
+        Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rwxrwxr-x"));
+        Path link = Files.createSymbolicLink(base.resolve("link"), target);
+        assertThat(warnings(() -> OrtNativeDir.trusted(link, me)))
+                .anySatisfy(w -> assertThat(w).contains("reason=symlink"));
+        // tighten_failed / tighten_ineffective
+        Path failing = Files.createDirectory(base.resolve("failing"));
+        Files.setPosixFilePermissions(failing, PosixFilePermissions.fromString("rwxrwxr-x"));
+        assertThat(warnings(() -> OrtNativeDir.trusted(failing, me, (d, perms) -> {
+            throw new IOException("chmod refused");
+        }))).anySatisfy(w -> assertThat(w).contains("reason=tighten_failed").contains("chmod refused"));
+        assertThat(warnings(() -> OrtNativeDir.trusted(failing, me, (d, perms) -> { })))
+                .anySatisfy(w -> assertThat(w).contains("reason=tighten_ineffective"));
+    }
+
+    /** The WARN messages {@link OrtNativeDir} logs while {@code body} runs. */
+    private static List<String> warnings(ThrowingRunnable body) throws Exception {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OrtNativeDir.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            body.run();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+        return appender.list.stream()
+                .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList();
+    }
+
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
     }
 
     @Test

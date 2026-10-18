@@ -63,14 +63,21 @@ import java.util.function.UnaryOperator;
  * be created or written, the property is left unset and ORT behaves exactly as before.
  *
  * <p><b>Trust (POSIX).</b> A shared native library is code the engine loads, so the root and the
- * version directory must be owned by the current user and not writable by group or others. One the
- * current user owns that is group- or world-writable (a {@code mkdir} under umask 0002, Ubuntu's
- * default) is tightened ({@code g-w,o-w}, nothing else), re-read and re-checked, and used if the
- * re-check passes; the change is logged as {@code ort_native_dir_tightened}. Anything else (owned by
- * someone else, a symbolic link, a failed or ineffective chmod) warns and returns
- * {@link Outcome#UNAVAILABLE} (ORT's old temp-directory path). The stage keeps
- * the mode {@code createTempDirectory} gave it (0700), so a directory one user extracted is not
- * reusable by another: a cache shared across users falls back per user. Windows skips the check.
+ * version directory must be owned by the current user and not writable by group or others. Only the
+ * ROOT is ever tightened: a root the current user owns that is group- or world-writable (a
+ * {@code mkdir} under umask 0002, Ubuntu's default) gets {@code g-w,o-w} (nothing else), is re-read
+ * without following links and re-checked, and is used if the re-check passes; that is logged at WARN
+ * as {@code ort_native_dir_tightened} with the old and new modes. A root with a setuid, setgid or sticky
+ * bit is never chmodded (Java's chmod would clear the bit): it is refused with
+ * {@code reason=special_bits}. A root someone else owns, a symbolic link, an unknown user and a failed
+ * or ineffective chmod are refused too, each with its own {@code reason}, and the engine falls back to
+ * ORT's old temp-directory path ({@link Outcome#UNAVAILABLE}). A group- or world-writable VERSION
+ * directory is never tightened and reused, because another user could already have planted a library
+ * in it: once the root is trusted it is treated as untrusted content, renamed aside to
+ * {@code .broken-*} and extracted afresh (see recovery below); one that cannot be replaced is refused.
+ * The stage keeps the mode {@code createTempDirectory} gave it (0700), so a directory one user
+ * extracted is not reusable by another: a cache shared across users falls back per user. Windows skips
+ * the check and changes no permissions.
  *
  * <p><b>Integrity.</b> Each library's size is recorded in {@value #SIZES_FILE} when it is extracted;
  * a directory is complete only when every required library is present at its recorded size, so a
@@ -246,10 +253,12 @@ public final class OrtNativeDir {
             // Before the reuse return: a stage left by a killed starter is removed by ANY later start.
             sweepStale(root, Instant.now());
             if (Files.exists(finalDir)) {
-                if (!trusted(finalDir, user)) {
+                // A writable version dir is not tightened and reused: it goes through recover() below.
+                Trust t = versionDirTrust(finalDir, user, true);
+                if (t == Trust.UNTRUSTED) {
                     return new Result(null, Outcome.UNAVAILABLE);
                 }
-                if (isComplete(finalDir)) {
+                if (t == Trust.TRUSTED && isComplete(finalDir)) {
                     return new Result(finalDir, Outcome.REUSED);
                 }
             }
@@ -264,8 +273,8 @@ public final class OrtNativeDir {
                     fsyncDirectory(root);
                     return new Result(finalDir, Outcome.EXTRACTED);
                 }
-                // Lost a race (or a broken directory sits there): use the winner's if it is whole.
-                if (isComplete(finalDir)) {
+                // Lost a race (or a broken directory sits there): use the winner's if it is whole and trusted.
+                if (reusable(finalDir, user)) {
                     return new Result(finalDir, Outcome.REUSED);
                 }
                 return recover(root, stage, finalDir, user, failure);
@@ -292,11 +301,11 @@ public final class OrtNativeDir {
                  FileLock ignored = lockOrNull(ch)) {
                 for (int attempt = 0; attempt < 3; attempt++) {
                     // Immediately before acting: a sibling may have published a whole directory.
-                    if (isComplete(finalDir)) {
+                    if (reusable(finalDir, user)) {
                         return new Result(finalDir, Outcome.REUSED);
                     }
                     if (Files.exists(finalDir, LinkOption.NOFOLLOW_LINKS)) {
-                        if (!trusted(finalDir, user)) {
+                        if (versionDirTrust(finalDir, user, true) == Trust.UNTRUSTED) {
                             return new Result(null, Outcome.UNAVAILABLE);
                         }
                         Path aside = root.resolve(BROKEN_PREFIX + UUID.randomUUID().toString().substring(0, 8));
@@ -317,7 +326,7 @@ public final class OrtNativeDir {
                 }
             }
         }
-        if (isComplete(finalDir)) {
+        if (reusable(finalDir, user)) {
             return new Result(finalDir, Outcome.REUSED);
         }
         log.warn("event=ort_native_dir_publish_failed target=\"{}\" error=\"{}\"", finalDir, lastFailure);
@@ -366,19 +375,38 @@ public final class OrtNativeDir {
         view.setPermissions(tightened);
     }
 
+    /** Setuid, setgid and sticky: the bits {@code PosixFilePermission} cannot carry and a chmod would clear. */
+    private static final int SPECIAL_BITS = 07000;
+
+    /**
+     * The setuid/setgid/sticky bits of {@code dir} itself (never through a link), or 0 where the
+     * platform's {@code unix:mode} attribute is not available (then behaviour is as before this check).
+     */
+    static int specialBits(Path dir) {
+        try {
+            Object mode = Files.getAttribute(dir, "unix:mode", LinkOption.NOFOLLOW_LINKS);
+            return mode instanceof Integer i ? i & SPECIAL_BITS : 0;
+        } catch (IOException | RuntimeException e) {
+            return 0;
+        }
+    }
+
     /** {@link #trusted(Path, String, Tightener)} with the real chmod. */
     static boolean trusted(Path dir, String user) {
         return trusted(dir, user, OrtNativeDir::chmodNoGroupOtherWrite);
     }
 
     /**
-     * POSIX: {@code dir} must be owned by {@code user} and not writable by group or others, or a
-     * planted library could be loaded into the engine. A directory the current user owns that is
-     * group- or world-writable (a {@code mkdir} under umask 0002, Ubuntu's default) is tightened to
-     * remove those two write bits, then re-read and re-checked; it is trusted only if the re-check
-     * passes. A directory someone else owns, a symbolic link (never chmod through one), an unknown
-     * user (ownership unproven) and a failed or ineffective chmod are all refused. Other platforms:
-     * true. A false return warns.
+     * Trust for the ROOT. POSIX: {@code dir} must be owned by {@code user} and not writable by group
+     * or others, or a planted library could be loaded into the engine. A directory the current user
+     * owns that is group- or world-writable (a {@code mkdir} under umask 0002, Ubuntu's default) is
+     * tightened to remove those two write bits, then re-read (without following links) and
+     * re-checked; it is trusted only if the re-check passes. Refused, each with a {@code reason}: a
+     * directory someone else owns ({@code foreign_owner}), an unknown user whose ownership is unproven
+     * ({@code unknown_user}), a symbolic link ({@code symlink}; never chmod through one), a directory
+     * with setuid, setgid or sticky set ({@code special_bits}; a chmod would clear them), a chmod that
+     * failed ({@code tighten_failed}) and one that did not take effect ({@code tighten_ineffective}).
+     * Other platforms: true. A false return warns.
      */
     static boolean trusted(Path dir, String user, Tightener tightener) {
         PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
@@ -393,31 +421,110 @@ public final class OrtNativeDir {
             if (ownerOk && !writableByGroupOrOthers(perms)) {
                 return true;
             }
-            String tightenNote = "";
-            if (user != null && user.equals(owner) && !Files.isSymbolicLink(dir)) {
-                try {
-                    tightener.tighten(dir, perms);
-                    PosixFileAttributes after = view.readAttributes();
-                    Set<PosixFilePermission> now = after.permissions();
-                    if (user.equals(after.owner().getName()) && !writableByGroupOrOthers(now)) {
-                        log.info("event=ort_native_dir_tightened dir=\"{}\" old_mode={} new_mode={}",
-                                dir, PosixFilePermissions.toString(perms), PosixFilePermissions.toString(now));
-                        return true;
-                    }
-                    tightenNote = " tighten=ineffective";
-                } catch (IOException | RuntimeException e) {
-                    tightenNote = " tighten=failed tighten_error=\"" + e + "\"";
-                }
+            String mode = PosixFilePermissions.toString(perms);
+            if (user != null && !user.equals(owner)) {
+                return refuse(dir, "foreign_owner", owner, user, mode, "");
             }
-            log.warn("event=ort_native_dir_untrusted dir=\"{}\" owner=\"{}\" expected_owner=\"{}\" mode={}{} "
-                            + "note=\"must be owned by the current user and not group- or world-writable; "
-                            + "onnxruntime-java will extract into the temp directory on this start\"",
-                    dir, owner, user, PosixFilePermissions.toString(perms), tightenNote);
-            return false;
+            if (user == null) {
+                return refuse(dir, "unknown_user", owner, user, mode, "");
+            }
+            if (Files.isSymbolicLink(dir)) {
+                return refuse(dir, "symlink", owner, user, mode, "");
+            }
+            int special = specialBits(dir);
+            if (special != 0) {
+                return refuse(dir, "special_bits", owner, user, mode, String.format(
+                        " special_mode=0%o remedy=\"the engine does not chmod a directory with setuid, setgid or "
+                                + "sticky set; run chmod g-w,o-w on it yourself or point %s elsewhere\"",
+                        special, ROOT_ENV));
+            }
+            PosixFileAttributeView noFollow = Files.getFileAttributeView(dir, PosixFileAttributeView.class,
+                    LinkOption.NOFOLLOW_LINKS);
+            try {
+                tightener.tighten(dir, perms);
+                PosixFileAttributes after = (noFollow != null ? noFollow : view).readAttributes();
+                Set<PosixFilePermission> now = after.permissions();
+                if (user.equals(after.owner().getName()) && !writableByGroupOrOthers(now)) {
+                    log.warn("event=ort_native_dir_tightened dir=\"{}\" old_mode={} new_mode={} "
+                                    + "note=\"group and other write were removed; to keep a shared directory, "
+                                    + "point {} elsewhere or make it owner-writable only\"",
+                            dir, mode, PosixFilePermissions.toString(now), ROOT_ENV);
+                    return true;
+                }
+                return refuse(dir, "tighten_ineffective", owner, user, mode, "");
+            } catch (IOException | RuntimeException e) {
+                return refuse(dir, "tighten_failed", owner, user, mode, " tighten_error=\"" + e + "\"");
+            }
         } catch (IOException e) {
-            log.warn("event=ort_native_dir_untrusted dir=\"{}\" error=\"{}\"", dir, e.toString());
+            log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable error=\"{}\"", dir, e.toString());
             return false;
         }
+    }
+
+    /** {@link #refuse(Path, String, String, String, String, String)} that stays silent when not announcing. */
+    private static boolean refuse(boolean announce, Path dir, String reason, String owner, String user,
+                                  String mode, String extra) {
+        return announce ? refuse(dir, reason, owner, user, mode, extra) : false;
+    }
+
+    /** Logs why a directory is not trusted and returns false. */
+    private static boolean refuse(Path dir, String reason, String owner, String user, String mode, String extra) {
+        log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason={} owner=\"{}\" expected_owner=\"{}\" "
+                        + "mode={}{} note=\"must be owned by the current user and not group- or world-writable; "
+                        + "onnxruntime-java will extract into the temp directory on this start\"",
+                dir, reason, owner, user == null ? "unknown" : user, mode, extra);
+        return false;
+    }
+
+    /** What the version directory is, for {@link #versionDirTrust}. */
+    private enum Trust { TRUSTED, WRITABLE_OWNED, UNTRUSTED }
+
+    /**
+     * Trust for the VERSION directory, which is never tightened: another user may already have written
+     * into a group- or world-writable one. {@code TRUSTED} (owned by {@code user}, not writable by
+     * group or others, or a non-POSIX platform); {@code WRITABLE_OWNED} (the current user owns it but
+     * group or others can write: untrusted content, to be renamed aside and extracted afresh; warns);
+     * {@code UNTRUSTED} (foreign owner, unknown user, symbolic link: refused, warns).
+     */
+    private static Trust versionDirTrust(Path dir, String user, boolean announce) {
+        PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
+        if (view == null) {
+            return Trust.TRUSTED;
+        }
+        try {
+            PosixFileAttributes a = view.readAttributes();
+            String owner = a.owner().getName();
+            String mode = PosixFilePermissions.toString(a.permissions());
+            boolean writable = writableByGroupOrOthers(a.permissions());
+            if (user != null && !user.equals(owner)) {
+                refuse(announce, dir, "foreign_owner", owner, user, mode, "");
+                return Trust.UNTRUSTED;
+            }
+            if (!writable) {
+                return Trust.TRUSTED;
+            }
+            if (user == null) {
+                refuse(announce, dir, "unknown_user", owner, user, mode, "");
+                return Trust.UNTRUSTED;
+            }
+            if (Files.isSymbolicLink(dir)) {
+                refuse(announce, dir, "symlink", owner, user, mode, "");
+                return Trust.UNTRUSTED;
+            }
+            if (announce) log.warn("event=ort_native_dir_writable_replaced dir=\"{}\" owner=\"{}\" mode={} "
+                            + "note=\"a group- or world-writable version directory is not trusted and is not "
+                            + "tightened; it is replaced by a fresh extraction\"",
+                    dir, owner, mode);
+            return Trust.WRITABLE_OWNED;
+        } catch (IOException e) {
+            if (announce) log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable error=\"{}\"", dir, e.toString());
+            return Trust.UNTRUSTED;
+        }
+    }
+
+    /** A complete version directory that is also trusted as it stands (never a writable one). */
+    private static boolean reusable(Path finalDir, String user) {
+        return isComplete(finalDir) && versionDirTrust(finalDir, user, false) == Trust.TRUSTED;
     }
 
     private static boolean writableByGroupOrOthers(Set<PosixFilePermission> perms) {
