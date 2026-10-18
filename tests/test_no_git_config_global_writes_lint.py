@@ -186,6 +186,13 @@ def _tracked_scripts() -> list[pathlib.Path]:
 #: already excluded by the leading-`#` check.
 _SELF = pathlib.Path(__file__).resolve()
 
+#: The subagent git-write guard's tests feed --global/--system commands to the
+#: guard as DATA (its deny tables), and every real git run in that file goes
+#: through a sandbox env that points GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
+#: into tmp_path; test_the_real_git_sandbox_keeps_global_and_system_writes_in_the_box
+#: pins that condition (nexus-dsr6a).
+_GUARD_DATA_FILE = (REPO_ROOT / "tests" / "test_routing_subagent_git_write.py").resolve()
+
 
 def _tracked_python_files() -> list[pathlib.Path]:
     files = _git_tracked("*.py")
@@ -196,6 +203,7 @@ def _tracked_python_files() -> list[pathlib.Path]:
         and ".venv" not in p.parts
         and "node_modules" not in p.parts
         and p.resolve() != _SELF
+        and p.resolve() != _GUARD_DATA_FILE
     ]
 
 

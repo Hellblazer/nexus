@@ -1447,10 +1447,29 @@ def _sandbox_env(box: pathlib.Path) -> dict[str, str]:
     home.mkdir(parents=True, exist_ok=True)
     return {
         "PATH": os.environ["PATH"], "HOME": str(home),
+        # NOSYSTEM stops git READING the system file; GIT_CONFIG_SYSTEM is what
+        # keeps a --system WRITE out of /etc/gitconfig when this runs as root.
         "GIT_CONFIG_GLOBAL": str(home / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": str(home / "systemconfig"),
         "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@a",
         "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@a",
     }
+
+
+def test_the_real_git_sandbox_keeps_global_and_system_writes_in_the_box(tmp_path):
+    """The deny tables in this file hold --global/--system commands as DATA, and
+    test_no_git_config_global_writes_lint exempts this file on that condition: any
+    real git run here goes through _sandbox_env, so a --global or --system write
+    lands in the sandbox, never in the host's ~/.gitconfig or /etc/gitconfig."""
+    env = _sandbox_env(tmp_path / "box")
+    for scope in ("--global", "--system"):
+        subprocess.run(
+            ["git", "config", scope, "zz.probe", "1"],
+            env=env, check=True, capture_output=True, cwd=tmp_path,
+        )
+    home = tmp_path / "box" / "home"
+    assert "probe" in (home / "gitconfig").read_text()
+    assert "probe" in (home / "systemconfig").read_text()
 
 
 def _config_snapshot(paths: list[pathlib.Path]) -> dict[str, str | None]:
