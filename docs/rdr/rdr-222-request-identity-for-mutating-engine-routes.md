@@ -8,7 +8,7 @@ author: Sam
 reviewed-by: self
 created: 2026-09-27
 related_issues: [nexus-ll31n, nexus-wvek6, nexus-mfw6c, nexus-r46u9, nexus-w94eo, nexus-vhyar, nexus-8hdg9]
-related_rdrs: [RDR-181, RDR-191, RDR-192, RDR-193, RDR-108, RDR-103]
+related_rdrs: [RDR-181, RDR-191, RDR-192, RDR-193, RDR-108, RDR-103, RDR-225, RDR-229]
 ---
 
 # RDR-222: Request Identity for Mutating Engine Routes
@@ -17,7 +17,8 @@ related_rdrs: [RDR-181, RDR-191, RDR-192, RDR-193, RDR-108, RDR-103]
 > If wrong, abandon code and iterate RDR.
 > Prose: see REGISTER.md beside this template.
 
-Draft written read-only against develop b1d900fd6, 2026-09-27. No code changed.
+Draft written read-only against develop b1d900fd6, 2026-09-27. Phase 0 has
+since shipped (`engine-service-v0.1.137`); no other phase has code.
 
 ## Problem Statement
 
@@ -39,8 +40,15 @@ nothing about the outcome. Three beads are one problem seen from three places:
    sweep gate (a per-collection Postgres advisory lock) the first call still
    held and got an opaque 500, read as a rollback for five minutes. The
    auto-retry half is fixed (`_NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES` in
-   `src/nexus/db/gateway_backoff.py`, shipped v7.58.0). The three-state question
-   is still unanswerable.
+   `src/nexus/db/gateway_backoff.py`, shipped v7.58.0). The incident ran the
+   unbounded sweep. Since then the indexer and `nx t3` call the bounded sweep
+   loop (`row_limit`, nexus-a6mon), each batch under a 25 s statement bound
+   and a 2 s lock bound, and fall back to the unbounded form only on an engine
+   without it (222-research-8, -9). What is left of Gap 1: a bounded batch
+   still runs close to the edge bound (25 s plus the 2 s lock wait plus pool
+   wait, against about 30 s), the expire route runs with no statement bound,
+   and none of them reports committed, in flight or rolled back. The
+   three-state question is still unanswerable.
 #### Gap 2: A retried upsert can embed the same chunks twice (nexus-wvek6)
 
 **nexus-wvek6 (duplicate embeds).** A retried `upsert-chunks` page that
@@ -58,8 +66,9 @@ nothing about the outcome. Three beads are one problem seen from three places:
    `ON CONFLICT` (`metadata = chunks.metadata || EXCLUDED.metadata`, nexus-w94eo).
    An idempotency key does not help here: run N+1 is a different request.
 
-Terms used below. A **chash** is the SHA-256 of a chunk's text and is its row
-identity in `nexus.chunks`. The **fence** is the per-document run record on
+Terms used below. A **chash** is the SHA-256 of a chunk's text; since
+RDR-225 a row of `nexus.chunks` is identified by `(tenant_id, collection,
+chash, embedding_model)` (vectors-030 :677, 222-research-12). The **fence** is the per-document run record on
 `nexus.catalog_documents` (catalog-020: `index_state`, `index_content_hash`,
 `index_run_id`, `index_started_at`), stamped `indexing` before a run's first
 chunk and `complete` after its verified last manifest write. **Tenant RLS** is
@@ -93,13 +102,13 @@ record now carries to implementation.
 - The sweep routes run one SQL function inside one `withTenant`
   transaction under the RDR-191 sweep gate (an advisory lock) and write a
   `nexus.gc_audit` row in that same transaction.
-- One managed engine instance today (Decisions on the open questions, 4).
+- One managed engine instance today (open question 7, answered 2026-10-17).
 
 ## Research Findings (measurements done for this draft)
 
 ### Investigation
 
-All three are code reads against develop b1d900fd6. No production data was
+All five (M-a to M-e) are code reads against develop b1d900fd6. No production data was
 read; where a number needs production, the exact query is given and the number
 is left unknown. On 2026-10-18 the load-bearing claims were re-read at
 develop ecd51d2c3 and filed as T2 research records `nexus_rdr/222-research-1`
@@ -126,6 +135,20 @@ both). Phase 0's production readings are in the Decisions after Phase 0.
 - **✅ Verified** (source search): the sweep gate, `gc_audit` in the move
   transaction, and the request deadline exist (M-e).
   *Source: 222-research-7.*
+- **✅ Verified** (source search): there are four sweep routes, with plain,
+  bounded and floored repository forms; production calls the bounded and
+  floored forms. *Source: 222-research-8.*
+- **✅ Verified** (source search): only the bounded forms carry an effective
+  statement bound (25 s) and lock bound (2 s); the unbounded forms and the
+  expire route carry none. *Source: 222-research-9.*
+- **✅ Verified** (source search): the sweep handler builds its response
+  body after the repository transaction, and `quarantine-restore` commits
+  once per quarantine sibling. *Source: 222-research-10.*
+- **✅ Verified** (source search): AuthFilter path-restricts only the mint
+  and board-ci scopes; the client carries per-request values in
+  thread-locals, not new parameters. *Source: 222-research-11.*
+- **❓ Assumed** (docs only): `Idempotency-Key` passes through the managed
+  edge. Only two other custom headers are known to. *Source: 222-research-13.*
 
 The measurements behind these entries follow.
 
@@ -274,6 +297,10 @@ LIMIT 200;
 
 #### M-d. Reassessing mfw6c's harm (found while doing M-c)
 
+(Caveat, 2026-10-18: this argument reads the model from the conformant
+name. RDR-229 retires that shape for new collections, so it must be restated
+against the registry row before Phase 3 is ever reopened; 222-research-6.)
+
 - **Verified (source).** For a conformant collection name
   (`<content_type>__<owner>__<model>__v<n>`, RDR-103) the collection's model
   segment is the embedder authority: `EmbedderRouter` refuses to embed a
@@ -302,19 +329,24 @@ LIMIT 200;
   nexus-kl2z6) already commits chunk rows, manifest rows and the completion
   stamp for one document in ONE short transaction, with embedding outside it
   (`CombinedWriteService` javadoc; `CatalogHandler.handleManifestWriteMany`).
-  That is most of the brittleness proposal's P3 "document-commit route" for
+  That is most of the "document-commit route" proposed as P3 of the
+  indexing brittleness proposal (T2 `nexus/indexing-brittleness-proposal-2026-09-25`,
+  which proposes reopening RDR-193 with it; RDR-193 has no such route) for
   the repo indexer path. The streaming PDF path (the w94eo exposure) does not
   use it: it streams `upsert-chunks` pages, then an `update-metadata` post-pass,
   then `index-run/complete`.
 - **Verified (source).** The sweep SQL functions write a `nexus.gc_audit` row in
   the same transaction as the move (catalog-033, catalog-037/hygiene-008),
-  under the sweep gate (`pg_advisory_xact_lock(hashtext('sweepgate:...'))`
-  with `lock_timeout 2000`, `statement_timeout 25000`).
+  under the sweep gate (`pg_advisory_xact_lock(hashtext('sweepgate:...'))`).
+  The bounded forms run under `lock_timeout 2000` and `statement_timeout
+  25000`, set before the call; the unbounded forms have no effective
+  statement bound (222-research-9).
 - **Verified (source).** A request deadline already exists end to end
   (nexus-8hdg9): `AuthFilter` mints it into `RequestContext` from
   `X-Nexus-Request-Deadline-Ms` or `NX_EMBED_DEADLINE_MS` (default 300 s), and
-  the client sends 540 s on `upsert-chunks`. The ledger lease below derives
-  from it.
+  the client sends 540 s on `upsert-chunks`. The ledger lease for
+  `upsert-chunks` derives from it; a sweep lease derives from the sweep's own
+  bounds (Technical Design 2).
 - **Verified (source).** Custom request headers already cross the edge
   (`X-Nexus-Request-Deadline-Ms`, `X-Nexus-Tenant`).
 
@@ -353,9 +385,13 @@ ledger at all.
   `write_manifest_many` page that carries chunks; each `put`. It must NOT be
   minted in `_post`/`_request`: `_vector_with_retry` and
   `write_with_registration_retry` re-invoke `_post` for each attempt, so a key
-  minted there changes per attempt and defeats the design. `_post` and
-  `_request_once` gain a `headers` pass-through; the T2/catalog httpx client
-  (`_refreshable_client.py`) gets the same.
+  minted there changes per attempt and defeats the design. The key reaches
+  the request the way the client already carries per-request values: a
+  thread-local, set at the minting call site and cleared in a `finally` around
+  the call, read by `_request_once` when it builds headers (the
+  `_response_header_capture` pattern; new parameters on `_request_once` and
+  `_post` are deliberately avoided there, 222-research-11). The catalog httpx
+  client (`_refreshable_client.py`) needs the same only in Phase 2.
 - The header is optional. No header means today's behavior on every route.
 
 #### 2. Request ledger (engine)
@@ -385,11 +421,21 @@ zero-grants lesson).
 
 Protocol for a request carrying a key:
 
-1. **Claim** (short transaction, or the first statement of an existing one):
-   `INSERT ... VALUES (..., state='in_flight', holder=:nonce,
-   lease_until = clock_timestamp() + deadline + 60 s) ON CONFLICT DO NOTHING`.
+1. **Claim**, in a transaction that commits before the work starts: its
+   own short transaction for the sweeps (one extra pool checkout per keyed
+   sweep), the first statement of the existing partition transaction for
+   `upsert-chunks` (Phase 2). A claim folded into the sweep's own transaction
+   would be invisible until commit, so the status route could never say
+   `in_flight`. `INSERT ... VALUES (..., state='in_flight', holder=:nonce,
+   lease_until = clock_timestamp() + :lease) ON CONFLICT DO NOTHING`. The
+   lease is the attempt's own bound plus a 30 s margin: for a keyed sweep,
+   its statement bound plus its lock bound (25 s + 2 s, so 57 s); for
+   `upsert-chunks`, the request deadline (`NX_EMBED_DEADLINE_MS`). A sweep
+   attempt cannot outlive its lease while still holding the sweep gate,
+   because its statement bound ends it first.
    On conflict, read the row:
-   - `body_sha256` differs: **422** `{"error":"idempotency_key_reused"}`.
+   - `route` or `body_sha256` differs: **422**
+     `{"error":"idempotency_key_reused"}`.
    - `committed`: **replay** the stored status and response, header
      `Idempotency-Replayed: true`. No work runs.
    - `in_flight` and `lease_until > clock_timestamp()`: **409**
@@ -408,16 +454,43 @@ Protocol for a request carrying a key:
    "committed" commit together or not at all, and an attempt whose lease has
    expired can never commit later, so "rolled back" is stable once reported.
    (`clock_timestamp()`, not `now()`: `now()` is the transaction START time.)
-4. **Failure.** On an exception, a best-effort separate transaction sets
-   `state='failed'`, `holder=NULL`, `response_status`. If the engine dies, the
-   lease expiry covers it.
+4. **Failure.** On an exception before the mutation's transaction commits,
+   a best-effort separate transaction sets `state='failed'`, `holder=NULL`,
+   `response_status`, guarded `WHERE holder=:nonce AND state='in_flight'`. The
+   catch wraps only the work up to that commit. An exception after the commit
+   (writing the response to a client the edge has already cut, say) never
+   touches the row, so a committed request can never read `rolled_back`. If
+   the engine dies, the lease expiry covers it.
 
 Where the marker goes per route:
 
-- **Sweeps** (`quarantineOrphans`, `quarantineOrphansBounded`,
-  `restoreRereferenced`, `expireQuarantine`): each is one `withTenant`
-  transaction around one SQL function call, so the marker UPDATE goes in the
-  same `ctx` after the call. Exact three-state semantics.
+- **Sweeps.** Phase 1 keys these, and only these (222-research-8, -9):
+
+  | route | repository form keyed | client method |
+  |---|---|---|
+  | `/gc/quarantine-orphans` with `row_limit` | `quarantineOrphansBounded` | `gc_quarantine_orphans_bounded` |
+  | `/gc/quarantine-orphans` with `floor_fraction` | `quarantineOrphansFloored` (bounded) | `gc_quarantine_orphans_bounded` with a floor |
+  | `/gc/restore-rereferenced` with `row_limit` | `restoreRereferencedBounded` | `gc_restore_rereferenced_bounded` |
+  | `/gc/expire-quarantine` | `expireQuarantine`, run with the 25 s statement bound when keyed (the route passes 0 today) | `gc_expire_quarantine` |
+
+  Not keyed: the unbounded `quarantineOrphans` and `restoreRereferenced`
+  (they have no effective statement bound, so no lease can cover them; an
+  engine that has the ledger also has the bounded forms, and the client only
+  falls back to the unbounded ones on an older engine), and
+  `/gc/quarantine-restore`, which commits once per quarantine sibling and so
+  cannot carry one marker; it keeps its typed 503 busy body with the audit ids
+  it wrote. Unkeyed routes keep `is_non_idempotent_sweep_path`.
+  Each keyed form is one `withTenant` transaction around one SQL function
+  call. The marker UPDATE goes in that transaction after the call. The
+  response body is built by the handler after the repository returns
+  (222-research-10), so the four keyed repository methods take a
+  `LedgerMarker` callback, run inside the transaction with the outcome
+  record; it builds the body with the handler's own body builder (moved to a
+  static function of the outcome and the request echoes) and writes the
+  marker. Replay then returns the body the first caller would have seen.
+  A keyed sweep whose lock bound trips (another attempt still holds the
+  gate) returns a typed 503 `{"error":"sweep_gate_busy"}` with
+  `Retry-After`, never the opaque 500, and marks only its own row failed.
 - **upsert-chunks**: two committed transactions exist today (the RDR-181
   have-vector metadata refresh in `resolveNeedEmbedIdx`, then the INSERT). The
   marker goes in the INSERT transaction (or, when every chash was settled by
@@ -434,7 +507,9 @@ Where the marker goes per route:
 
 Stored response: the route's full JSON body, capped at 64 KB (Sam,
 2026-10-17). A sweep `sample` (up to 5,000 chashes under the `gc_audit`
-clamp) can exceed the cap; the stored copy then truncates the sample to fit,
+clamp) can exceed the cap, and for a large sweep it usually does: the
+indexer asks for 5,000 (222-research-12). The stored copy then truncates the
+sample to fit,
 with `sample_truncated: true` and the `gc_audit` row id, and the full list
 stays in `gc_audit`. (How a too-large sample is cut is this draft's reading
 of the cap, not a separate ruling.)
@@ -452,8 +527,13 @@ is revisited only if that measurement argues for it.
 
 #### 3. Status route
 
-`GET /v1/requests/<request_id>` (new `RequestHandler`; `AuthFilter`'s scope
-table must admit it for tenant-scope tokens), tenant-scoped by RLS:
+`GET /v1/requests/<request_id>` (new `RequestHandler`, registered with
+`AuthFilter` like every other `/v1` context; AuthFilter path-restricts only
+the mint and board-ci scopes, so tenant-scope tokens reach it,
+222-research-11), tenant-scoped by RLS. It answers **200** with a `state`
+body for every row below, `unknown` included. **404** comes only from an
+engine without the route (the old engine's `{"error":"not found"}`), never
+from this route:
 
 | ledger row | reported state |
 |---|---|
@@ -471,15 +551,15 @@ execute once).
 - **Sweeps (ll31n).** On a gateway code or a socket timeout, do not resend
   and do not report failure. Poll `GET /v1/requests/<id>` (every 5 s, up to the
   lease): `committed` returns the stored outcome as if the call had
-  succeeded; `rolled_back` resends with the same key; `in_flight` keeps
-  polling; a 404 from the status route (older engine) falls back to today's
-  behavior (surface the gateway error). This replaces "never retry" with
+  succeeded; `rolled_back` and `unknown` resend with the same key;
+  `in_flight` keeps polling; a 404 from the status route (older engine)
+  falls back to today's behavior (surface the gateway error). This replaces "never retry" with
   "retry safely by key". `gateway_backoff.is_non_idempotent_sweep_path`
   stays, and applies only when no key was sent.
 - **upsert-chunks (wvek6).** Keep the r46u9 30 s floor on a 504, then resend
   with the same key. A 409 `request_in_flight` means poll status, not
   re-POST. A replay counts as the ack (the `upserted` echo check at
-  `http_vector_client.py:2733-2742` runs against the replayed body).
+  `http_vector_client.py:3037-3038` runs against the replayed body).
 - **Capability.** The engine echoes `Idempotency-Key` on any response where
   it recorded the request; the client caches "this engine keeps a ledger"
   per endpoint and skips status polling otherwise.
@@ -513,7 +593,7 @@ execute once).
   rows and then stamps the document row) for 40P01; `DeadlockRetry` covers a
   residual deadlock, as it does today.
 
-#### 6. Relation to RDR-193's document-commit route (brittleness P3)
+#### 6. Relation to the proposed document-commit route (brittleness proposal P3)
 
 The document-commit route narrows mfw6c's window from "a whole embed" to
 "one short transaction" but does not close it: a delayed commit request from
@@ -701,7 +781,7 @@ is never refused.
 
 ## Implementation Plan
 
-### Phase 0: instrument (engine only, no wire change) and query (conexus)
+### Phase 0 (SHIPPED, engine-service-v0.1.137): instrument (engine only, no wire change) and query (conexus)
 
 - Raced-embed counter: `RETURNING chash, (xmax = 0)` on the `upsert-chunks`
   INSERT and in `CombinedWriteService`; `event=upsert_embed_raced` log line;
@@ -743,12 +823,23 @@ is never refused.
   `tests/test_health_service_checks.py`.
 - `RequestLedger` component (constructor-injected into `VectorHandler` and
   `RequestHandler`), claim/marker/fail/status, retention arm.
-- Keyed handling on the three GC routes; `GET /v1/requests/<id>`.
-- Client: key minting in `gc_quarantine_orphans`, `gc_restore_rereferenced`,
-  `gc_expire_quarantine`; status polling on ambiguity; 409/422 handling.
+- Keyed handling on the four sweep forms in the Technical Design 2 table
+  (`LedgerMarker` callback, typed `sweep_gate_busy` 503);
+  `GET /v1/requests/<id>`.
+- Client: key minting, through the thread-local, in
+  `gc_quarantine_orphans_bounded` (with and without a floor),
+  `gc_restore_rereferenced_bounded` and `gc_expire_quarantine`; status
+  polling on ambiguity, `unknown` resending with the same key; 409/422
+  handling.
+- Logs: one INFO line per replay, 409, 422 and takeover
+  (`event=request_ledger_*`), and the ledger row count in `GET /v1/status`.
+- Changeset order: after `vectors-030` and after any RDR-229 changeset that
+  redefines the quarantine functions.
+- Before the client half ships: confirm with conexus that the managed edge
+  passes `Idempotency-Key` (222-research-13).
 - Engine cut, deploy, then the client release (choreography (a)).
 
-### Phase 2: content-addressed writes (closes wvek6)
+### Phase 2 (DEFERRED, Sam 2026-09-28): content-addressed writes (closes wvek6)
 
 - Keyed handling on `upsert-chunks`, then `store-put` and `write_many` with
   chunks; claim folded into the existing partition transaction.
@@ -759,7 +850,7 @@ is never refused.
 - Exit: `raced_embeds_total` from Phase 0 reads near zero on the same
   workload after this ships.
 
-### Phase 3: run fence on document-scoped writes (mfw6c), conditional
+### Phase 3 (CLOSED, Sam 2026-09-28; design of record only): run fence on document-scoped writes (mfw6c)
 
 - Engine: shared advisory lock + `index_run_id` compare in the three
   metadata-merging transactions; exclusive in `beginIndexRun`; `stale_run`.
@@ -774,47 +865,60 @@ depends on nothing in Phases 0-2.
 
 ## Test Plan
 
+### Phase 1
+
 Java (engine, jOOQ only, real Postgres substrate):
 
 - `RequestLedgerTest`: claim; replay of committed (no work runs: assert the
-  embedder/SQL-function invocation count stays flat); 409 on in-flight; 422 on
-  a changed body; takeover after lease expiry; an attempt whose lease expired
-  mid-work cannot commit and its mutation rolls back; failed then resend
-  executes once.
-- RLS: tenant B cannot read tenant A's ledger rows; the status route returns
-  404/unknown across tenants.
+  SQL-function invocation count stays flat); 409 on in-flight; 422 on a
+  changed body, and 422 on the same key and body sent to a different route;
+  takeover after lease expiry; an attempt whose lease expired mid-work cannot
+  commit and its mutation rolls back; failed then resend executes once; a
+  committed request followed by an exception (the response write fails)
+  still reads `committed`.
+- RLS: tenant B cannot read tenant A's ledger rows; the status route answers
+  200 `unknown` for another tenant's id.
 - Sweep route: two concurrent same-key calls produce one 200 and one 409; a
   status read during the held sweep (test hook holding the transaction) says
-  `in_flight`, after commit `committed` with the true `moved`.
+  `in_flight`, after commit `committed` with the true `moved`; a same-key
+  takeover that meets a gate still held answers 503 `sweep_gate_busy`.
+- Replay body: a replayed keyed sweep returns the same body the first call
+  returned (`floor`, `row_limit`, `remaining` included).
+- Retention: deletes only terminal rows past the cutoff and expired in-flight
+  rows past the cutoff; never a live lease.
+
+Python (client):
+
+- The key is identical across `_request`'s gateway retries and
+  `_vector_with_retry` attempts, and the thread-local is clear after the call
+  (fake server recording headers).
+- 409 `request_in_flight` leads to status polling, never a re-POST;
+  `unknown` resends with the same key.
+- Old engine (header ignored, status 404) reproduces today's behavior exactly.
+- Scenario on the engine substrate, the ll31n replay: a keyed bounded sweep
+  held past a client socket timeout reports committed with the true moved
+  count and no 500.
+- Wire-contract lint entries; the local-service gate, because shared HTTP
+  client plumbing (`_request_once` headers) changes.
+
+Minimum viable validation for Phase 1: the ll31n replay scenario on a real
+substrate, plus the `RequestLedgerTest` post-commit-exception case.
+
+### Kept with the deferred and closed design (Phases 2 and 3)
+
 - Upsert: two concurrent same-key pages invoke the embedder once
   (`onnxInvocationCount` or a counting fake embedder).
 - Phase 0 counter: two different keys over overlapping chashes, forced to
   interleave with the existing `afterExistencePartitionHookForTests` seam;
   `raced` equals the overlap.
-- Retention: deletes only terminal rows past the cutoff and expired in-flight
-  rows past the cutoff; never a live lease.
 - Phase 3: `beginIndexRun` for N+1 blocks while run N's write transaction
   holds the shared lock; a run-N write after begin merges no metadata and
   reports `stale_run`.
-
-Python (client):
-
-- The key is identical across `_request`'s gateway retries,
-  `_vector_with_retry` attempts, and `write_with_registration_retry` (fake
-  server recording headers).
-- 409 `request_in_flight` leads to status polling, never a re-POST.
-- Old engine (header ignored, status 404) reproduces today's behavior exactly.
-- Scenario on the engine substrate, the ll31n replay: a sweep held past a
-  client socket timeout reports committed with the true moved count and no
-  500.
+- The key is identical across `write_with_registration_retry` attempts.
 - Scenario, the w94eo case-1 shape: three 504s on one page, embedder called
   once for that page, and nothing in flight when the post-pass runs.
-- Wire-contract lint entries; the local-service gate, because shared HTTP
-  client plumbing (`_post`/`_request_once` headers) changes.
-
-Minimum viable validation: the two scenarios above on a real substrate, plus
-Phase 0's counter reading a non-zero value under a forced overlap and zero
-under the keyed Phase 2 path.
+- Phase 0's counter reads non-zero under a forced overlap and zero under the
+  keyed Phase 2 path.
 
 ## Decisions (Sam, 2026-09-27)
 
@@ -881,7 +985,8 @@ and 6 on 2026-10-18. The list stays as asked.
 2. Retention default (proposed 7 days) and whether to store full responses or
    summaries only.
 3. Own RDR, or an amendment inside RDR-193 (deferred)? The brittleness
-   proposal places P1/P3 there; this draft argues for a separate record
+   proposal (T2 `nexus/indexing-brittleness-proposal-2026-09-25`) proposes
+   reopening RDR-193 for its P3; this draft argues for a separate record
    because the ledger is route-generic and RDR-193 is about reconcile and
    taxonomy.
 4. mfw6c: M-d weakens the harm argument (the embedding_model revert rewrites
@@ -902,30 +1007,44 @@ and 6 on 2026-10-18. The list stays as asked.
 No contradictions found between the research findings, the decisions and the
 proposed solution after this revision. Two the gate restructure found and
 fixed: the stored-response cap (16 KiB in the Technical Design against Sam's
-64 KB) and open question 6 (marked answered when no ruling existed).
+64 KB) and open question 6 (marked answered when no ruling existed). Gate
+round 1 found the rest: the status route's 404 for two meanings, the sweep
+inventory, the Test Plan's two acceptance bars and the phase labels, all
+fixed in this revision.
 
 ### Assumption Verification
 
-Two findings remain assumed, and neither is on Phase 1's path. The M-c
-query (222-research-5) gates only Phase 3, which is closed. The M-d
-downgrade (222-research-6) also concerns only Phase 3, and has to be restated
-against the registry row (RDR-229) if Phase 3 is ever reopened. Phase 1
-rests on 222-research-2, -3 and -7, all verified at ecd51d2c3.
+Phase 1 rests on 222-research-2 (no request identity today), -7 (sweep
+gate, `gc_audit`, deadline), -8 (sweep route census), -9 (sweep bounds),
+-10 (handler and transaction shape) and -11 (route admission, client
+plumbing), all verified by source search. Two Phase 1 items are not
+verified: `Idempotency-Key` passing the managed edge (222-research-13,
+assumed; checked with conexus before the client half ships, Phase 1) and
+the IETF draft's 409/422 semantics (recalled, not re-read; the design states
+its own 409/422 rules, so it does not depend on the draft). The other two
+assumed findings, 222-research-5 and -6, concern only Phase 3, which is
+closed.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| `TenantScope.withTenant` commit and default isolation | engine | Source Search (222-research-3) |
+| sweep routes, repository forms, client methods | engine, client | Source Search (222-research-8) |
+| bounded sweep statement and lock bounds | engine `PgSession`, changelogs | Source Search (222-research-9) |
+| sweep body built after the transaction; restore per sibling | engine `VectorHandler` | Source Search (222-research-10) |
+| AuthFilter scope gates; client thread-local plumbing | engine `AuthFilter`, client | Source Search (222-research-11) |
+| `Idempotency-Key` across the managed edge | conexus edge | Assumed (222-research-13) |
 | sweep SQL functions write `gc_audit` under the sweep gate | engine changelogs | Source Search (222-research-7) |
 | `X-Nexus-Request-Deadline-Ms` / `NX_EMBED_DEADLINE_MS` | engine `RequestDeadline`, `AuthFilter` | Source Search (222-research-7) |
 | `Idempotency-Key` 409/422 semantics | IETF httpapi draft | Docs Only, recalled, not re-read |
 
 ### Scope Verification
 
-The Minimum Viable Validation in the Test Plan is in scope for Phase 1: the
-ll31n replay scenario on a real substrate, a sweep held past a client socket
-timeout that reports committed with the true moved count and no 500.
+The Minimum Viable Validation is in scope for Phase 1 and is stated once,
+in the Test Plan: the ll31n replay scenario on a real substrate (a keyed
+bounded sweep held past a client socket timeout reports committed with the
+true moved count and no 500), plus the post-commit-exception case in
+`RequestLedgerTest`.
 
 ### Cross-Cutting Concerns
 
@@ -940,6 +1059,8 @@ timeout that reports committed with the true moved count and no 500.
   own phase.
 - **Secret/credential lifecycle**: N/A; the key is a client-minted UUIDv7,
   not a secret.
+- **Observability**: INFO lines for replays, 409s, 422s and takeovers, and
+  the ledger row count in `GET /v1/status` (Phase 1).
 - **Memory management**: stored responses are capped at 64 KB per row;
   retention bounds the table to about a week of keyed requests.
 
@@ -950,6 +1071,10 @@ of record; nothing is trimmed. The record is larger than Phase 1 needs
 because it keeps that design.
 
 ## Revision History
+
+- 2026-10-18: Gate round 1 — PASSED (0 Critical, 11 Significant, 0 ship-blocker(s)); commit `674dcfe43`; critique `nexus_rdr/222-gate-critique-2026-10-18-r1`.
+
+- 2026-10-18: gate round 1 findings S1-S11 fixed (status route answers 200 for every state and 404 only from an old engine; sweep lease from the sweep's own bounds; guarded failure marker; keyed sweep table; claim committed before the work; route compared on replay; thread-local key plumbing; phase status labels and a Phase 1 Test Plan; Phase 1 research records 222-research-8 to -13; stale citations), with observations 1, 2, 4, 5 and 7. Sources in 222-research-8 to -13.
 
 - 2026-10-18: restructured for the gate (Context, Investigation and Key
   Discoveries, the Alternatives layout, Trade-offs, Finalization Gate); the
