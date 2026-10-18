@@ -81,13 +81,19 @@ rules:
     rationale: >-
       phase 1 (detect and report only) of the outcome check that replaces
       further spelling-level guard work (nexus-i93tz): PreToolUse snapshots
-      the primary checkout's shared git state (config, config.worktree,
-      hooks/ and the core.hooksPath target, info/attributes, info/exclude,
-      HEAD, the checked-out branch's ref), PostToolUse and PostToolUseFailure
-      diff it and report every change to the subagent, the user banner and
-      the routing log. Never denies, never restores. One script registered
-      for three events, so it spends two of the per-call Bash hook slots
-      (the Pre half and one of the two post events, which alternate).
+      the project repository's shared state (config, config.worktree,
+      the top level of hooks/ and the core.hooksPath target, info/attributes,
+      info/exclude, HEAD, the checked-out branch's ref), PostToolUse and
+      PostToolUseFailure diff it. A change to a risky key is reported to the
+      subagent (decision block), the user banner and the routing log; routine
+      upstream-tracking config and HEAD or branch movement are logged only. A
+      hook inside a subagent cannot reach the parent conversation, so findings
+      are queued and the main conversation's own PreToolUse on Bash (this same
+      script) returns them at the orchestrator's next Bash call. Never denies,
+      never restores. Does not cover the primary's index or working tree. One
+      script registered for three events, so it spends two of the per-call
+      Bash hook slots (the Pre half and one of the two post events, which
+      alternate).
     escape_token: "none (report-only: there is nothing to escape)"
     # Fail-closed on the REPORT side instead: a missing or incomplete snapshot
     # is reported UNVERIFIED, never skipped (the vacuous-gate doctrine). The

@@ -20,73 +20,250 @@ same few files, so this script looks at those files before and after the call.
 One script, three registrations (hooks.json), dispatched on the payload's
 ``hook_event_name``:
 
-* ``PreToolUse`` (Bash): take a snapshot, store it under
+* ``PreToolUse`` (Bash), subagent call: take a snapshot, store it under
   ``<config>/git-integrity/<session_id>/<tool_use_id>.json``. Says nothing on
   the clean path. It NEVER denies; phase 1 only reports.
-* ``PostToolUse`` / ``PostToolUseFailure`` (Bash): re-snapshot, diff, report.
-  ``PostToolUse`` does not fire for a Bash call that exits non-zero, which is
-  precisely a call that can write ``.git/config`` and then fail, so both
-  events are registered.
+* ``PostToolUse`` / ``PostToolUseFailure`` (Bash), subagent call: re-snapshot,
+  diff, report. ``PostToolUse`` does not fire for a Bash call that exits
+  non-zero, which is precisely a call that can write ``.git/config`` and then
+  fail, so both events are registered.
+* ``PreToolUse`` (Bash), MAIN-conversation call (no ``agent_id``): drain the
+  findings subagents queued (see REPORT CHANNEL). With nothing queued this costs
+  one ``stat`` of one path.
 
-Active only for a SUBAGENT call (payload carries ``agent_id``, the guard's own
-gate) whose ``cwd`` or ``CLAUDE_PROJECT_DIR`` resolves to a repository. A linked
-worktree resolves to the common git directory it shares with the primary, which
-is what gets snapshotted.
+WHICH REPOSITORY. Only the project's. The snapshot covers the common git
+directory of ``CLAUDE_PROJECT_DIR``'s repository, or of the call's ``cwd`` when
+``CLAUDE_PROJECT_DIR`` is unset. A subagent working in some other repository
+(a scratch clone) is silent: that is not the shared state this protects. A
+linked worktree resolves to the common directory it shares with the primary.
+PostToolUse compares the roots stored in the Pre snapshot, never roots derived
+from its own ``cwd``, so a ``cd`` inside the call changes nothing.
 
 WHAT IS SNAPSHOTTED (the common git directory ``C`` of the primary): ``C/config``
-and ``C/config.worktree`` (parsed to keys), ``C/hooks/`` (name, mode, sha256 per
-entry) plus the ``core.hooksPath`` target directory when one is configured,
-``C/info/attributes`` and ``C/info/exclude``, ``C/HEAD``, and the value of the
-branch the primary has checked out (loose ref, else ``packed-refs``). A linked
-worktree's own HEAD, index, refs and ``config.worktree`` are out of scope.
+and ``C/config.worktree`` (parsed to keys), ``C/hooks/`` (top level only: name,
+mode, sha256 per entry; subdirectories are not hashed) plus the
+``core.hooksPath`` target directory when one is configured, ``C/info/attributes``
+and ``C/info/exclude``, ``C/HEAD``, and the value of the branch the primary has
+checked out (loose ref, else ``packed-refs``; not compared on a reftable
+repository).
 
-REPORT CHANNEL. Claude Code feeds a PostToolUse hook's output to the model that
-made the call, here the subagent: ``decision: "block"`` with ``reason`` (the
-tool already ran; the reason lands next to the tool result) and
-``hookSpecificOutput.additionalContext`` (``PostToolUseFailure`` has no
-decision, so it carries the report as ``additionalContext``). ``systemMessage``
-is shown to the user. Nothing documented carries a subagent's hook output to
-the PARENT conversation, which sees only the subagent's final message, so the
-report is also written to the routing log (``log_routing_event``: the engine's
-``routing_events`` table, else the drop meter) and the subagent's context states
-that the report belongs in its hand-back. See the bead for the verdict.
+NOT COVERED, stated plainly:
+
+* the primary's index and working tree (``git -C <primary> add``, ``reset --hard``,
+  ``checkout -- .``): the older spelling guard remains the only defence there;
+* a linked worktree's own ``config.worktree``, HEAD, index and refs
+  (``git sparse-checkout set`` in a worktree, ``git config --worktree``);
+* anything under ``hooks/`` below the top level, refs other than the primary's
+  checked-out branch, global and system git config;
+* a backgrounded Bash command (``run_in_background``): its Post fires when the
+  call returns, so only writes made during that start window are seen;
+* a repository where a cap bites (more than 300 hook entries, more than 1500
+  config keys, a config over 512 KiB): the rest is not compared by name, and the
+  log records a coverage note once per session, but it is not a "change".
+
+SEVERITY. Two kinds of difference:
+
+* CHANGE (reaches the subagent as ``decision: "block"`` with a user banner):
+  any config key other than the routine ones below, the primary's
+  ``config.worktree``, ``hooks/``, a ``core.hooksPath`` target, ``info/*``.
+* INFO (log and orchestrator drain only; no decision, no banner): the routine
+  products of sanctioned flows, i.e. ``branch.<name>.{remote,merge,pushremote,
+  rebase}`` (``worktree add -b X origin/...``, ``push -u``, ``branch
+  --set-upstream-to``, ``branch -D`` of a tracked branch) and movement of
+  ``HEAD`` or the checked-out branch's ref, which is usually the orchestrator
+  committing while a subagent runs.
+
+REPORT CHANNEL. A hook that runs inside a subagent cannot reach the parent
+conversation: PostToolUse output goes to the model that made the call, here the
+subagent, and ``systemMessage`` goes to the user. So a CHANGE is delivered three
+ways: to the subagent (``reason`` of the block, or ``additionalContext`` on a
+failing call; one copy of the text, not two), to the user (``systemMessage``),
+and queued for the orchestrator in ``<config>/git-integrity/<session_id>/
+findings.jsonl``. ``session_id`` is shared between a subagent and its parent.
+The main conversation's own ``PreToolUse`` on Bash (this same script, already
+running and exiting at the gate) claims that file by an atomic rename and
+returns it as ``hookSpecificOutput.additionalContext``, once. LATENCY: the
+orchestrator hears of a finding at its NEXT Bash call, which may be long after
+the subagent's call, and never if it makes no Bash call. Delivery to a real
+Claude Code orchestrator is expected to work as documented and has not been
+measured end to end. The documented alternative, a PostToolUse hook on the
+``Agent`` tool, is not built: it fires at launch for a background subagent, and
+the hook budget on Bash is spent (RDR-121 cap).
 
 FAIL CLOSED ON THE REPORT SIDE (the vacuous-gate doctrine). A snapshot that
 cannot be taken completely (a file that exists and cannot be read) is stored
 with the error and reported by Post. A Post with no snapshot to compare against
-is reported as UNVERIFIED, never skipped. The one silent no-op is "this call
-has nothing to protect" (no agent_id, or no repository in sight).
+is reported as UNVERIFIED, never skipped. The silent no-ops are "this call has
+nothing to protect" (no ``agent_id``, or no project repository in sight) and
+the covered-but-not-compared cases above, which are logged as coverage notes.
 
-CONCURRENCY. The orchestrator works in the primary while a subagent runs, so
-HEAD and ref movement is reported as "changed during a subagent call (may be
-the orchestrator)", not as an accusation. The same footer applies to every line:
-the check sees bytes, not authors.
+SECRETS. A report never carries a token. Values are shown only for a short
+list of sections, command-valued keys are dropped when they look
+credential-bearing, URLs lose userinfo, query and fragment, ``alias.*`` values
+are never shown, and a subsection that names a URL or holds ``:`` or ``@``
+(``url."https://x-access-token:T@github.com/".insteadOf``,
+``credential."https://u:p@host".username``) is shown as ``section.<redacted>.key``
+and stored under a hash, so the state file holds no such name either. Residual:
+a command-valued key (``filter``, ``diff``, ``merge``, ``pager``, ``hook``) is
+shown with only 32+ character tokens and credential-looking words removed.
 
 Standard library only: hook scripts run under ``uv tool run python`` with no
 ``nexus`` import, and this runs on every Bash call. No process is spawned (the
-repository is found by walking up for ``.git``), so the added cost is one
-interpreter start plus a few dozen small file reads. Measured (macOS, this
-repository with 29 branches and 19 hook entries, hooks.json's own ``uv tool
-run`` launch, median of 20, two runs, bare interpreter start 20 ms): a
-main-conversation call exits at the `agent_id` gate in 22-27 ms; a subagent Pre
-costs 32-39 ms and a subagent Post 32-37 ms, of which the snapshot itself is
-about 1 ms. For scale the credential guard measures 70-98 ms in the same
-harness, because the shared routing
+repository is found by walking up for ``.git``). Cost, measured through
+hooks.json's own ``uv tool run`` launch: see PENDING_RELEASE. The shared routing
 preamble's interpreter re-exec (about 50 ms) is left out here on purpose: it
-only serves scripts that import `nexus`, and this one imports the standard
-library alone.
+only serves scripts that import ``nexus``, and this one imports the standard
+library alone. The main-conversation path imports nothing beyond ``os`` and
+``sys`` unless findings are pending.
 """
 from __future__ import annotations
 
 import os
 import sys
 
+BEAD = "nexus-i93tz"
+RULE_NAME = "subagent_git_integrity_check"
+STATE_DIR = "git-integrity"
+FINDINGS_NAME = "findings.jsonl"
+MAX_FINDINGS_BYTES = 256 * 1024
+
+
+# ---------------------------------------------------------------------------
+# The main-conversation fast path: stdlib `os` and `sys` only, defined BEFORE
+# the gate so a main call pays for nothing else.
+# ---------------------------------------------------------------------------
+
+
+def _config_base() -> str:
+    """Same resolution as ``_endpoint_resolve.default_config_dir`` (a parity test
+    compares them), written out here so the fast path imports nothing."""
+    chosen = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
+    return chosen if chosen else os.path.join(os.path.expanduser("~"), ".config", "nexus")
+
+
+def _safe_id(value: str) -> str | None:
+    """A path component made from an id, or ``None`` when no safe one exists.
+    Empty, and ids made only of dots (``.``, ``..``), are refused: they would
+    name the parent directory."""
+    cleaned = "".join(
+        ch if (ch.isascii() and ch.isalnum()) or ch in "_.-" else "_" for ch in value
+    )[:96]
+    if not cleaned or not cleaned.strip("."):
+        return None
+    return cleaned
+
+
+def _session_dir(session_id: str) -> str | None:
+    sid = _safe_id(session_id)
+    return os.path.join(_config_base(), STATE_DIR, sid) if sid else None
+
+
+def _raw_string_field(raw: str, key: str) -> str:
+    """The string value of top-level-looking ``"key": "value"`` in *raw* JSON,
+    found without parsing. A value holding an escape is refused (``""``)."""
+    needle = f'"{key}"'
+    at = raw.find(needle)
+    if at < 0:
+        return ""
+    i = at + len(needle)
+    n = len(raw)
+    while i < n and raw[i] in " \t\r\n":
+        i += 1
+    if i >= n or raw[i] != ":":
+        return ""
+    i += 1
+    while i < n and raw[i] in " \t\r\n":
+        i += 1
+    if i >= n or raw[i] != '"':
+        return ""
+    end = raw.find('"', i + 1)
+    value = raw[i + 1:end] if end > 0 else ""
+    return "" if "\\" in value else value
+
+
+def _drain_text(records: list[dict]) -> str:
+    lines = [
+        f"git-integrity check ({BEAD}): {len(records)} finding(s) queued by subagent Bash calls "
+        "since your last Bash call. The check sees bytes, not authors, and phase 1 restored nothing."
+    ]
+    for rec in records:
+        who = rec.get("agent") or "subagent"
+        lines.append(f"- {who}:")
+        for tag, text in rec.get("lines", []):
+            lines.append(f"    [{tag}] {text}")
+    lines.append(
+        "INFO lines are routine flows (upstream tracking config, HEAD or branch movement) and may be "
+        "your own work. CHANGE lines were also shown to the subagent and the user."
+    )
+    return "\n".join(lines)
+
+
+def _drain_main(payload: dict) -> None:
+    """Claim and return the queued findings once, from a main-conversation
+    ``PreToolUse`` on Bash."""
+    if str(payload.get("agent_id") or "") or payload.get("tool_name") != "Bash":
+        return
+    if payload.get("hook_event_name") != "PreToolUse":
+        return
+    session = _session_dir(str(payload.get("session_id") or ""))
+    if session is None:
+        return
+    import json  # noqa: PLC0415 -- only when findings are pending: the fast path stays at os/sys cost
+
+    pending = os.path.join(session, FINDINGS_NAME)
+    claimed = f"{pending}.drain.{os.getpid()}"
+    try:
+        os.rename(pending, claimed)  # atomic: of two racing calls, one wins
+    except OSError:
+        return
+    records: list[dict] = []
+    try:
+        with open(claimed, encoding="utf-8", errors="replace") as fh:
+            for line in fh.read(MAX_FINDINGS_BYTES + 4096).splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    records.append(rec)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(claimed)
+        except OSError:
+            pass
+    if not records:
+        return
+    sys.stdout.write(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "additionalContext": _drain_text(records),
+    }}))
+    sys.stdout.flush()
+
+
+def _main_conversation(raw: str) -> None:
+    """Fast path for a payload with no ``agent_id``: one ``stat`` when nothing is
+    pending; the payload is parsed only when something is."""
+    session = _session_dir(_raw_string_field(raw, "session_id"))
+    if session is None or not os.path.exists(os.path.join(session, FINDINGS_NAME)):
+        return
+    import json  # noqa: PLC0415 -- only when findings are pending: the fast path stays at os/sys cost
+
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return
+    if isinstance(payload, dict):
+        _drain_main(payload)
+
+
 # Cheap gate BEFORE any other import: the rule targets subagents, and a hook
 # fires on every Bash call. A payload with no `agent_id` key (the main
-# conversation) exits here at bare-interpreter cost. The key check is a
+# conversation) takes the fast path above and exits. The key check is a
 # superset test; `body` still requires a non-empty value.
 _RAW = sys.stdin.read() if __name__ == "__main__" else ""
 if __name__ == "__main__" and '"agent_id"' not in _RAW:
+    _main_conversation(_RAW)
     sys.exit(0)
 
 import hashlib  # noqa: E402
@@ -104,11 +281,8 @@ from typing import Any  # noqa: E402
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
-RULE_NAME = "subagent_git_integrity_check"
-BEAD = "nexus-i93tz"
-
 #: Snapshot caps. A pathological repository must not make a hook slow or its
-#: state file large; a capped snapshot says so, and the report says so.
+#: state file large; a capped snapshot says so in the log (once per session).
 MAX_CONFIG_BYTES = 512 * 1024
 MAX_CONFIG_KEYS = 1500
 MAX_HOOK_ENTRIES = 300
@@ -117,30 +291,50 @@ MAX_TEXT_LINES = 200
 MAX_TEXT_BYTES = 64 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024
 MAX_REPORT_LINES = 60
+MAX_FINDING_LINES = 40
 STALE_SNAPSHOT_SECONDS = 6 * 3600
 STALE_SESSION_SECONDS = 2 * 86400
-MAX_PRUNE_DIRS = 50
-
-PENDING = "pending"  # marker value, never a real sha
+#: Cross-session pruning scans every entry (a DirEntry stat is cheap) but runs
+#: at most once per PRUNE_INTERVAL_SECONDS and removes at most MAX_PRUNE_REMOVALS.
+MAX_PRUNE_SCAN = 5000
+MAX_PRUNE_REMOVALS = 200
+PRUNE_INTERVAL_SECONDS = 3600
+PRUNE_MARKER = ".last-prune"
 
 #: Config sections whose values are shown in a report. Everything else is
 #: reported by key name only (``credential.*``, ``http.*``, ``url.*`` and the
-#: like can hold tokens). A remote's url is shown with any userinfo removed.
+#: like can hold tokens). ``alias`` is deliberately absent: an alias is a free
+#: shell command. A remote's url is shown with userinfo, query and fragment removed.
 _SHOW_SECTIONS = frozenset({
     "core", "user", "init", "branch", "extensions", "include", "includeif",
-    "filter", "alias", "merge", "diff", "pager", "gc", "hook", "safe",
+    "filter", "merge", "diff", "pager", "gc", "hook", "safe",
     "worktree", "maintenance", "scalar", "feature", "fetch", "pull", "push",
     "sequence", "receive", "uploadpack", "submodule", "commit", "tag",
 })
 _SHOW_REMOTE_KEYS = frozenset({"url", "pushurl", "fetch", "push", "tagopt", "vcs"})
+#: Sections whose subsection names are URLs or URL patterns.
+_URL_SUBSECTIONS = frozenset({"url", "credential", "http", "includeif"})
+#: Keys written by sanctioned flows; a change to one is INFO, not a CHANGE.
+#: gh-merge-base (gh pr checkout), vscode-merge-base and description are bookkeeping
+#: that tools write beside a branch; none runs code.
+_ROUTINE_BRANCH_KEYS = frozenset({
+    "remote", "merge", "pushremote", "rebase",
+    "gh-merge-base", "vscode-merge-base", "description",
+})
 
-_NAME_OK = re.compile(r"[^A-Za-z0-9_.-]")
-_USERINFO = re.compile(r"(://)[^/@\s]*@")
+_URL_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"]+")
 _TOKENISH = re.compile(r"[A-Za-z0-9_\-]{32,}")
+_CREDENTIAL_WORDS = re.compile(r"(?i)(authorization|bearer|token|passw|secret|api[-_]?key|credential)")
 _SECTION = re.compile(
     r'^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]\s*(.*)$'
 )
 _KEYLINE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$")
+
+CHANGE = "CHANGE"
+INFO = "INFO"
+UNVERIFIED = "UNVERIFIED"
+#: One finding line: ``(tag, text)``.
+Line = tuple[str, str]
 
 
 # ---------------------------------------------------------------------------
@@ -205,15 +399,11 @@ def _top_of(common: str) -> str:
 
 
 def _roots(payload: dict[str, Any]) -> list[tuple[str, str]]:
-    """Distinct ``(common_dir, top)`` for the call's cwd and the project dir.
-    The project dir covers a command that ``cd``s out of a worktree into the
-    primary."""
-    seen: dict[str, str] = {}
-    for start in (str(payload.get("cwd") or ""), os.environ.get("CLAUDE_PROJECT_DIR", "")):
-        found = _common_dir_for(start)
-        if found and found[0] not in seen:
-            seen[found[0]] = found[1]
-    return sorted(seen.items())
+    """The one project repository: ``CLAUDE_PROJECT_DIR``'s, else the call's cwd's.
+    Any other repository the cwd happens to be in is not what this protects."""
+    start = os.environ.get("CLAUDE_PROJECT_DIR", "") or str(payload.get("cwd") or "")
+    found = _common_dir_for(start)
+    return [found] if found else []
 
 
 # ---------------------------------------------------------------------------
@@ -246,18 +436,38 @@ def _sha_file(path: str, cap: int = MAX_HASH_BYTES) -> tuple[str, int]:
         return digest.hexdigest(), os.fstat(fh.fileno()).st_size
 
 
-def _scrub(value: str) -> str:
-    value = _USERINFO.sub(r"\1***@", value)
+def _scrub_url(url: str) -> str:
+    """Drop userinfo (everything before the LAST ``@``, so a password holding
+    ``/`` goes too), the query string and the fragment."""
+    scheme, sep, rest = url.partition("://")
+    cut = min((i for i in (rest.find("?"), rest.find("#")) if i >= 0), default=-1)
+    tail = ""
+    if cut >= 0:
+        rest, tail = rest[:cut], "?<removed>"
+    if "@" in rest:
+        rest = "***@" + rest.rsplit("@", 1)[1]
+    return f"{scheme}{sep}{rest}{tail}"
+
+
+def _scrub(value: str, *, urlish: bool = False) -> str:
+    value = _URL_TEXT.sub(lambda m: _scrub_url(m.group(0)), value)
+    if urlish and "://" not in value and "@" in value:  # scp-like user:pass@host:path
+        value = "***@" + value.rsplit("@", 1)[1]
+    if _CREDENTIAL_WORDS.search(value):
+        return "<redacted: looks credential-bearing>"
     if not value.startswith(("/", "~", "./", "../")):  # a filesystem path is not a token
         value = _TOKENISH.sub("<redacted>", value)
     return value if len(value) <= 120 else value[:117] + "..."
 
 
-def _shown(key: str) -> bool:
-    section = key.split(".", 1)[0]
+def _shown(section: str, name: str) -> bool:
     if section == "remote":
-        return key.rsplit(".", 1)[-1] in _SHOW_REMOTE_KEYS
+        return name in _SHOW_REMOTE_KEYS
     return section in _SHOW_SECTIONS
+
+
+def _sub_is_sensitive(section: str, sub: str) -> bool:
+    return section in _URL_SUBSECTIONS or ":" in sub or "@" in sub
 
 
 def _strip_comment(value: str) -> str:
@@ -275,12 +485,13 @@ def _strip_comment(value: str) -> str:
 
 
 def _parse_config(text: str) -> tuple[dict[str, dict[str, Any]], bool]:
-    """``({canonical_key: {"d": display, "v": [[shown|None, sha16], ...]}}, capped)``.
+    """``({canonical_key: {"d": display, "s": section, "n": name, "v": [[shown|None, sha16], ...]}}, capped)``.
 
     Not a full git-config parser: section headers (including the old
     ``[section.sub]`` form), keys, comments and trailing-backslash joins.
     A misparse can only blur WHICH key changed, never hide that the file did:
-    the whole-file hash is compared first."""
+    the whole-file hash is compared first. A sensitive subsection is stored
+    only as a hash (canonical form) and shown as ``<redacted>``."""
     keys: dict[str, dict[str, Any]] = {}
     section = ""
     sub: str | None = None
@@ -312,14 +523,22 @@ def _parse_config(text: str) -> tuple[dict[str, dict[str, Any]], bool]:
             i += 1
         value = _strip_comment(raw)
         name = km.group(1)
-        canon = f"{section}.{sub}.{name.lower()}" if sub is not None else f"{section}.{name.lower()}"
-        display = f"{section}.{sub}.{name}" if sub is not None else f"{section}.{name}"
+        lname = name.lower()
+        if sub is None:
+            canon, display = f"{section}.{lname}", f"{section}.{name}"
+        elif _sub_is_sensitive(section, sub):
+            canon = f"{section}.<h:{_h(sub.encode())[:12]}>.{lname}"
+            display = f"{section}.<redacted>.{name}"
+        else:
+            canon, display = f"{section}.{sub}.{lname}", f"{section}.{sub}.{name}"
         if canon not in keys:
             if len(keys) >= MAX_CONFIG_KEYS:
                 capped = True
                 continue
-            keys[canon] = {"d": display, "v": []}
-        keys[canon]["v"].append([_scrub(value) if _shown(canon) else None, _h(value.encode())[:16]])
+            keys[canon] = {"d": display, "s": section, "n": lname, "v": []}
+        urlish = section == "remote" and lname in ("url", "pushurl")
+        shown = _scrub(value, urlish=urlish) if _shown(section, lname) else None
+        keys[canon]["v"].append([shown, _h(value.encode())[:16]])
         if canon == "core.hookspath":
             # The resolver needs the real path, not the display form (long
             # values are truncated there).
@@ -408,9 +627,6 @@ def _ref_value(common: str, ref: str, errors: list[str]) -> dict[str, Any]:
         for raw in packed.decode("utf-8", "replace").splitlines():
             if raw.endswith(needle) and not raw.startswith(("#", "^")):
                 return {"ref": ref, "sha": raw.split(" ", 1)[0], "where": "packed"}
-    if os.path.isdir(os.path.join(common, "reftable")):
-        errors.append(f"{ref} cannot be read: this repository uses the reftable ref backend")
-        return {"ref": ref, "sha": None, "where": "reftable"}
     return {"ref": ref, "sha": None, "where": "missing"}
 
 
@@ -431,6 +647,7 @@ def _hooks_path_dirs(common: str, top: str, cfg: dict[str, Any], wcfg: dict[str,
 
 def snapshot(common: str, top: str) -> dict[str, Any]:
     errors: list[str] = []
+    notes: list[str] = []
     snap: dict[str, Any] = {"common": common, "top": top}
     snap["config"] = _config_entry(os.path.join(common, "config"), "config", errors)
     snap["config.worktree"] = _config_entry(os.path.join(common, "config.worktree"), "config.worktree", errors)
@@ -447,8 +664,18 @@ def snapshot(common: str, top: str) -> dict[str, Any]:
     branch_ref = None
     if raw and raw.startswith("ref:"):
         branch_ref = raw[4:].strip()
-    snap["branch"] = _ref_value(common, branch_ref, errors) if branch_ref else None
+    if branch_ref and os.path.isdir(os.path.join(common, "reftable")):
+        snap["branch"] = {"ref": branch_ref, "sha": None, "where": "reftable"}
+        notes.append("reftable ref backend: the checked-out branch's ref value is not compared")
+    else:
+        snap["branch"] = _ref_value(common, branch_ref, errors) if branch_ref else None
+    capped_dirs = [snap["hooks"], *extra.values()]
+    if any(isinstance(d, dict) and d.get("capped") for d in capped_dirs):
+        notes.append(f"a hooks directory has more than {MAX_HOOK_ENTRIES} entries: the rest are not compared")
+    if any(isinstance(c, dict) and c.get("capped") for c in (snap["config"], snap["config.worktree"])):
+        notes.append(f"a git config is over its cap ({MAX_CONFIG_KEYS} keys or {MAX_CONFIG_BYTES} bytes): later keys are not compared by name")
     snap["errors"] = errors
+    snap["notes"] = notes
     return snap
 
 
@@ -472,55 +699,141 @@ def _shrink(snap: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _state_dir(session_id: str) -> str:
-    base = str(_lib._default_config_dir())
-    return os.path.join(base, "git-integrity", _NAME_OK.sub("_", session_id)[:96] or "nosession")
-
-
 def _state_path(payload: dict[str, Any]) -> str | None:
-    tool_use_id = str(payload.get("tool_use_id") or "")
-    if not tool_use_id:
+    """The snapshot path, or ``None`` when the session id or the tool use id
+    is missing or unusable (empty, or only dots)."""
+    session = _session_dir(str(payload.get("session_id") or ""))
+    leaf = _safe_id(str(payload.get("tool_use_id") or ""))
+    if session is None or leaf is None:
         return None
-    session = str(payload.get("session_id") or "")
-    return os.path.join(_state_dir(session), _NAME_OK.sub("_", tool_use_id)[:128] + ".json")
+    return os.path.join(session, leaf[:128] + ".json")
+
+
+def _ensure_private_dirs(session_dir: str) -> None:
+    """Every level we own is 0700: ``makedirs(mode=)`` would apply it to the
+    leaf only. An existing level (left by an older run) is tightened."""
+    base = os.path.dirname(session_dir)
+    os.makedirs(os.path.dirname(base), mode=0o700, exist_ok=True)
+    for level in (base, session_dir):
+        try:
+            os.mkdir(level, 0o700)
+        except FileExistsError:
+            pass
+        os.chmod(level, 0o700)
+
+
+def _write_private(path: str, data: bytes, *, append: bool = False, exclusive: bool = False) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    if exclusive:
+        flags |= os.O_EXCL
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 def _prune(session_dir: str, now: float) -> None:
     """Remove snapshots a Post never consumed (call interrupted, or denied by
-    another hook), and whole session directories untouched for two days."""
+    another hook) and stale drain claims; and, at most once an hour, whole
+    session directories untouched for two days. The findings file and coverage
+    markers are not touched by the six-hour rule: only the two-day directory
+    rule removes them."""
     try:
         for name in os.listdir(session_dir):
+            if not (name.endswith((".json", ".tmp")) or ".drain." in name):
+                continue
             p = os.path.join(session_dir, name)
             try:
                 if now - os.stat(p).st_mtime > STALE_SNAPSHOT_SECONDS:
                     os.unlink(p)
             except OSError:
                 pass
-        parent = os.path.dirname(session_dir)
-        for n, name in enumerate(os.listdir(parent)):
-            if n >= MAX_PRUNE_DIRS:
-                break
-            p = os.path.join(parent, name)
-            if p != session_dir and now - os.stat(p).st_mtime > STALE_SESSION_SECONDS:
-                for leaf in os.listdir(p):
-                    os.unlink(os.path.join(p, leaf))
-                os.rmdir(p)
+    except OSError:
+        return
+    parent = os.path.dirname(session_dir)
+    marker = os.path.join(parent, PRUNE_MARKER)
+    try:
+        if now - os.stat(marker).st_mtime < PRUNE_INTERVAL_SECONDS:
+            return
+    except OSError:
+        pass
+    try:
+        with open(marker, "w", encoding="utf-8"):
+            pass
+        removed = 0
+        with os.scandir(parent) as scan:
+            for n, de in enumerate(scan):
+                if n >= MAX_PRUNE_SCAN or removed >= MAX_PRUNE_REMOVALS:
+                    break
+                try:
+                    if de.path == session_dir or not de.is_dir(follow_symlinks=False):
+                        continue
+                    if now - de.stat(follow_symlinks=False).st_mtime <= STALE_SESSION_SECONDS:
+                        continue
+                    for leaf in os.listdir(de.path):
+                        os.unlink(os.path.join(de.path, leaf))
+                    os.rmdir(de.path)
+                    removed += 1
+                except OSError:
+                    pass
     except OSError:
         pass
 
 
 def _store(path: str, snap: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     blob = json.dumps(snap, separators=(",", ":"))
     if len(blob) > MAX_SNAPSHOT_BYTES:
         blob = json.dumps(_shrink(snap), separators=(",", ":"))
     tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, blob.encode("utf-8"))
-    finally:
-        os.close(fd)
+    _write_private(tmp, blob.encode("utf-8"))
     os.replace(tmp, path)
+
+
+def _note_once(payload: dict[str, Any], notes: list[str]) -> None:
+    """Coverage notes go to the routing log once per session and note kind, so a
+    large repository does not log on every Bash call."""
+    session = _session_dir(str(payload.get("session_id") or ""))
+    for note in notes:
+        kind = _safe_id(note.split(":", 1)[0].replace(" ", "-"))
+        if session is not None and kind is not None:
+            try:
+                _ensure_private_dirs(session)
+                _write_private(os.path.join(session, f"note-{kind}"), b"", exclusive=True)
+            except FileExistsError:
+                continue
+            except OSError:
+                pass
+        _lib.log_routing_event(
+            rule=RULE_NAME, outcome="integrity_coverage_note", tool_name="Bash",
+            command_fragment=note[:200], session_id=str(payload.get("session_id") or ""),
+        )
+
+
+def _queue_finding(payload: dict[str, Any], lines: list[Line]) -> None:
+    """Append one finding record for the orchestrator's next Bash call. Quiet on
+    failure: the subagent and the user were told through the other channels."""
+    session = _session_dir(str(payload.get("session_id") or ""))
+    if session is None:
+        return
+    who = str(payload.get("agent_type") or "subagent")
+    agent_id = str(payload.get("agent_id") or "")
+    record = {
+        "ts": time.time(),
+        "agent": f"{who} ({agent_id[:12]})" if agent_id else who,
+        "lines": [list(ln) for ln in lines[:MAX_FINDING_LINES]],
+    }
+    try:
+        _ensure_private_dirs(session)
+        path = os.path.join(session, FINDINGS_NAME)
+        try:
+            if os.stat(path).st_size > MAX_FINDINGS_BYTES:
+                return
+        except FileNotFoundError:
+            pass
+        _write_private(path, (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"), append=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -534,35 +847,41 @@ def _short(sha: str | None) -> str:
     return (sha or "none")[:12]
 
 
-def _diff_config(label: str, a: dict[str, Any], b: dict[str, Any], out: list[str]) -> None:
+def _key_tag(entry: dict[str, Any]) -> str:
+    """INFO for the branch tracking keys sanctioned flows write; CHANGE otherwise."""
+    if entry.get("s") == "branch" and entry.get("n") in _ROUTINE_BRANCH_KEYS:
+        return INFO
+    return CHANGE
+
+
+def _diff_config(label: str, a: dict[str, Any], b: dict[str, Any], out: list[Line]) -> None:
     if a.get("unreadable") or b.get("unreadable"):
         return  # already reported as a snapshot error
     if a.get("present") != b.get("present"):
-        out.append(f"{label}: {'created' if b.get('present') else 'deleted'}")
+        out.append((CHANGE, f"{label}: {'created' if b.get('present') else 'deleted'}"))
         return
     if not a.get("present") or a.get("sha") == b.get("sha"):
         return
     ak, bk = a.get("keys"), b.get("keys")
     if ak is None or bk is None:
-        out.append(f"{label}: file changed (size {a.get('size')} -> {b.get('size')} bytes; too large to name keys)")
+        out.append((CHANGE, f"{label}: file changed (size {a.get('size')} -> {b.get('size')} bytes; too large to name keys)"))
         return
     named = 0
     for canon in sorted(set(ak) | set(bk)):
         av, bv = ak.get(canon), bk.get(canon)
-        disp = (bv or av)["d"]
+        entry = bv or av
+        disp = entry["d"]
         if av is None:
-            out.append(f"{label}: key {disp} ADDED{_values(bv)}")
+            out.append((_key_tag(entry), f"{label}: key {disp} ADDED{_values(bv)}"))
         elif bv is None:
-            out.append(f"{label}: key {disp} REMOVED{_values(av)}")
+            out.append((_key_tag(entry), f"{label}: key {disp} REMOVED{_values(av)}"))
         elif [x[1] for x in av["v"]] != [x[1] for x in bv["v"]]:
-            out.append(f"{label}: key {disp} CHANGED (before{_values(av)}; after{_values(bv)})")
+            out.append((_key_tag(entry), f"{label}: key {disp} CHANGED (before{_values(av)}; after{_values(bv)})"))
         else:
             continue
         named += 1
     if named == 0:
-        out.append(f"{label}: file bytes changed with no key-level difference (comment, whitespace or an unparsed form)")
-    if a.get("capped") or b.get("capped"):
-        out.append(f"{label}: key list capped at {MAX_CONFIG_KEYS}; later keys were not compared by name")
+        out.append((CHANGE, f"{label}: file bytes changed with no key-level difference (comment, whitespace or an unparsed form)"))
 
 
 def _values(entry: dict[str, Any] | None) -> str:
@@ -574,19 +893,19 @@ def _values(entry: dict[str, Any] | None) -> str:
     return " (" + ", ".join(repr(v) if v is not None else "<not shown>" for v in vals) + ")"
 
 
-def _diff_dir(label: str, a: dict[str, Any], b: dict[str, Any], out: list[str]) -> None:
+def _diff_dir(label: str, a: dict[str, Any], b: dict[str, Any], out: list[Line]) -> None:
     if a.get("unreadable") or b.get("unreadable"):
         return
     if a.get("present") != b.get("present"):
-        out.append(f"{label}/: directory {'created' if b.get('present') else 'deleted'}")
+        out.append((CHANGE, f"{label}/: directory {'created' if b.get('present') else 'deleted'}"))
     ae = a.get("entries", {}) if a.get("present") else {}
     be = b.get("entries", {}) if b.get("present") else {}
     for name in sorted(set(ae) | set(be)):
         x, y = ae.get(name), be.get(name)
         if x is None:
-            out.append(f"{label}/{name}: ADDED ({y[0]}, mode {y[1]}, sha256 {_short(y[2]) if y[0] == 'file' else y[2]})")
+            out.append((CHANGE, f"{label}/{name}: ADDED ({y[0]}, mode {y[1]}, sha256 {_short(y[2]) if y[0] == 'file' else y[2]})"))
         elif y is None:
-            out.append(f"{label}/{name}: REMOVED (was {x[0]}, mode {x[1]})")
+            out.append((CHANGE, f"{label}/{name}: REMOVED (was {x[0]}, mode {x[1]})"))
         elif x != y:
             parts = []
             if x[0] != y[0]:
@@ -595,25 +914,23 @@ def _diff_dir(label: str, a: dict[str, Any], b: dict[str, Any], out: list[str]) 
                 parts.append(f"mode {x[1]} -> {y[1]}")
             if x[2] != y[2] or x[3] != y[3]:
                 parts.append(f"sha256 {_short(x[2])} -> {_short(y[2])}" if x[0] == "file" else f"target {x[2]} -> {y[2]}")
-            out.append(f"{label}/{name}: CHANGED ({', '.join(parts)})")
-    if a.get("capped") or b.get("capped"):
-        out.append(f"{label}/: more than {MAX_HOOK_ENTRIES} entries; the rest were not compared")
+            out.append((CHANGE, f"{label}/{name}: CHANGED ({', '.join(parts)})"))
 
 
-def _diff_text(label: str, a: dict[str, Any], b: dict[str, Any], out: list[str]) -> None:
+def _diff_text(label: str, a: dict[str, Any], b: dict[str, Any], out: list[Line]) -> None:
     if a.get("unreadable") or b.get("unreadable"):
         return
     if a.get("present") != b.get("present"):
         created = bool(b.get("present"))
         lines = (b if created else a).get("lines") or []
         shown = ", ".join(repr(x) for x in lines[:5])
-        out.append(f"{label}: {'created' if created else 'deleted'}" + (f" ({'content' if created else 'was'}: {shown})" if shown else ""))
+        out.append((CHANGE, f"{label}: {'created' if created else 'deleted'}" + (f" ({'content' if created else 'was'}: {shown})" if shown else "")))
         return
     if not a.get("present") or a.get("sha") == b.get("sha"):
         return
     al, bl = a.get("lines"), b.get("lines")
     if al is None or bl is None:
-        out.append(f"{label}: changed (size {a.get('size')} -> {b.get('size')} bytes)")
+        out.append((CHANGE, f"{label}: changed (size {a.get('size')} -> {b.get('size')} bytes)"))
         return
     added = [x for x in bl if x not in al]
     removed = [x for x in al if x not in bl]
@@ -622,11 +939,11 @@ def _diff_text(label: str, a: dict[str, Any], b: dict[str, Any], out: list[str])
         detail += "; added " + ", ".join(repr(x) for x in added[:5])
     if removed:
         detail += "; removed " + ", ".join(repr(x) for x in removed[:5])
-    out.append(f"{label}: changed (+{len(added)} -{len(removed)} lines{detail})")
+    out.append((CHANGE, f"{label}: changed (+{len(added)} -{len(removed)} lines{detail})"))
 
 
-def diff_root(a: dict[str, Any], b: dict[str, Any]) -> list[str]:
-    out: list[str] = []
+def diff_root(a: dict[str, Any], b: dict[str, Any]) -> list[Line]:
+    out: list[Line] = []
     _diff_config("config", a["config"], b["config"], out)
     _diff_config("config.worktree", a["config.worktree"], b["config.worktree"], out)
     _diff_dir("hooks", a["hooks"], b["hooks"], out)
@@ -638,23 +955,26 @@ def diff_root(a: dict[str, Any], b: dict[str, Any]) -> list[str]:
             # The key change is reported above; also name what is now live.
             now = b["hooksPath"].get(d, {})
             names = sorted(now.get("entries", {})) if now.get("present") else []
-            out.append(
+            out.append((
+                CHANGE,
                 f"{label}: {'now' if d in b['hooksPath'] else 'no longer'} the hooks directory"
-                + (f" (entries: {', '.join(names[:10])})" if names else "")
-            )
+                + (f" (entries: {', '.join(names[:10])})" if names else ""),
+            ))
     _diff_text("info/attributes", a["info/attributes"], b["info/attributes"], out)
     _diff_text("info/exclude", a["info/exclude"], b["info/exclude"], out)
     ah, bh = a["HEAD"], b["HEAD"]
     if not (ah["unreadable"] or bh["unreadable"]) and ah["raw"] != bh["raw"]:
-        out.append(f"HEAD: {ah['raw']!r} -> {bh['raw']!r}, {_MAY_BE_ORCHESTRATOR}")
+        out.append((INFO, f"HEAD: {ah['raw']!r} -> {bh['raw']!r}, {_MAY_BE_ORCHESTRATOR}"))
     ar, br = a["branch"], b["branch"]
+    if (ar and ar["where"] == "reftable") or (br and br["where"] == "reftable"):
+        return out  # the ref value cannot be read here; logged as a coverage note
     if ar and br and ar["ref"] == br["ref"]:
         if ar["sha"] != br["sha"] and "unreadable" not in (ar["where"], br["where"]):
-            out.append(f"{ar['ref']}: {_short(ar['sha'])} -> {_short(br['sha'])}, {_MAY_BE_ORCHESTRATOR}")
+            out.append((INFO, f"{ar['ref']}: {_short(ar['sha'])} -> {_short(br['sha'])}, {_MAY_BE_ORCHESTRATOR}"))
     elif ar and not br:
-        out.append(f"{ar['ref']}: the primary no longer has this branch checked out, {_MAY_BE_ORCHESTRATOR}")
+        out.append((INFO, f"{ar['ref']}: the primary no longer has this branch checked out, {_MAY_BE_ORCHESTRATOR}"))
     elif br and not ar:
-        out.append(f"{br['ref']}: now the primary's checked-out branch at {_short(br['sha'])}, {_MAY_BE_ORCHESTRATOR}")
+        out.append((INFO, f"{br['ref']}: now the primary's checked-out branch at {_short(br['sha'])}, {_MAY_BE_ORCHESTRATOR}"))
     return out
 
 
@@ -668,35 +988,70 @@ def _emit(obj: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def _post_envelope(event: str, report: str, summary: str) -> dict[str, Any]:
-    env: dict[str, Any] = {
-        "hookSpecificOutput": {"hookEventName": event, "additionalContext": report},
-        "systemMessage": summary,
-    }
-    if event == "PostToolUse":
-        # The tool already ran. `reason` lands next to the tool result; the
-        # block carries no veto. PostToolUseFailure has no decision field.
-        env["decision"] = "block"
-        env["reason"] = report
-    return env
-
-
-def _report(header: str, lines: list[str]) -> str:
+def _report(header: str, lines: list[Line]) -> str:
     shown = lines[:MAX_REPORT_LINES]
+    body_lines = [f"- [{tag}] {text}" for tag, text in shown]
     if len(lines) > MAX_REPORT_LINES:
-        shown.append(f"... and {len(lines) - MAX_REPORT_LINES} more")
+        body_lines.append(f"... and {len(lines) - MAX_REPORT_LINES} more")
     return (
-        f"{header}\n"
-        + "\n".join(f"- {ln}" for ln in shown)
-        + "\nPhase 1 reports only; nothing was restored. The check sees bytes, not authors: "
-        "any line can come from the orchestrator or a parallel agent working at the same time. "
-        "The orchestrator reads only the final hand-back of this subagent, so this report belongs in it."
+        f"{header}\n" + "\n".join(body_lines)
+        + "\nPhase 1 reports only; nothing was restored. The check sees bytes, not authors: any line can "
+        "come from the orchestrator or a parallel agent working at the same time. A hook inside a subagent "
+        "cannot reach the parent conversation; a copy is queued for the orchestrator and is expected to "
+        "reach it at its next Bash call. Put this in your hand-back as well."
     )
+
+
+def _context_env(event: str, text: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
+
+
+def _finish(payload: dict[str, Any], event: str, lines: list[Line]) -> None:
+    """Log, queue for the orchestrator, and tell the subagent and the user.
+    CHANGE lines block-and-banner; INFO lines are logged and queued only;
+    UNVERIFIED lines reach the subagent as context, with no banner."""
+    if not lines:
+        return
+    changes = [ln for ln in lines if ln[0] == CHANGE]
+    gaps = [ln for ln in lines if ln[0] == UNVERIFIED]
+    outcome = "integrity_change" if changes else ("integrity_unverified" if gaps else "integrity_info")
+    _lib.log_routing_event(
+        rule=RULE_NAME, outcome=outcome, tool_name="Bash",
+        command_fragment="; ".join(f"{tag}: {text}" for tag, text in lines)[:200],
+        session_id=str(payload.get("session_id") or ""),
+    )
+    _queue_finding(payload, lines)
+    if changes:
+        header = f"git-integrity check ({BEAD}): the primary checkout's shared git state changed during this Bash call."
+        if gaps:
+            header += " Part of the comparison is UNVERIFIED."
+        report = _report(header, lines)
+        banner = f"git-integrity ({BEAD}): {len(changes)} change(s), {len(gaps)} unverified; first: {changes[0][1][:140]}"
+        if event == "PostToolUse":
+            # The tool already ran; the block carries no veto. `reason` is the
+            # one copy of the text (no additionalContext beside it).
+            _emit({"decision": "block", "reason": report, "systemMessage": banner})
+        else:  # PostToolUseFailure has no decision field
+            env = _context_env(event, report)
+            env["systemMessage"] = banner
+            _emit(env)
+    elif gaps:
+        header = (
+            f"git-integrity check ({BEAD}): the primary checkout's shared git state could not be "
+            "fully verified for this Bash call (UNVERIFIED)."
+        )
+        _emit(_context_env(event, _report(header, lines)))
+    # INFO only: nothing for the subagent or the user.
 
 
 # ---------------------------------------------------------------------------
 # Hook bodies
 # ---------------------------------------------------------------------------
+
+
+def _pre_unverified(payload: dict[str, Any], text: str) -> None:
+    _queue_finding(payload, [(UNVERIFIED, text)])
+    _emit(_context_env("PreToolUse", f"git-integrity check ({BEAD}): {text}"))
 
 
 def _pre(payload: dict[str, Any]) -> None:
@@ -705,101 +1060,89 @@ def _pre(payload: dict[str, Any]) -> None:
         return
     path = _state_path(payload)
     if path is None:
-        _emit({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": (
-                f"git-integrity check ({BEAD}): the payload carries no tool_use_id, so no snapshot "
-                "was stored and this call's effect on the primary's git state will be reported UNVERIFIED."
-            ),
-        }})
+        _pre_unverified(
+            payload,
+            "the payload carries no usable session_id or tool_use_id, so no snapshot was stored "
+            "and this call's effect on the primary's git state will be reported UNVERIFIED.",
+        )
         return
-    snap: dict[str, Any] = {"v": 1, "taken_at": time.time(), "roots": []}
+    snap: dict[str, Any] = {"v": 2, "taken_at": time.time(), "roots": []}
     for common, top in roots:
         snap["roots"].append(snapshot(common, top))
     try:
+        _ensure_private_dirs(os.path.dirname(path))
         _prune(os.path.dirname(path), snap["taken_at"])
         _store(path, snap)
     except OSError as exc:
-        _emit({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": (
-                f"git-integrity check ({BEAD}): the snapshot could not be stored "
-                f"({exc.__class__.__name__}); this call's effect on the primary's git state "
-                "will be reported UNVERIFIED."
-            ),
-        }})
+        _pre_unverified(
+            payload,
+            f"the snapshot could not be stored ({exc.__class__.__name__}); this call's effect "
+            "on the primary's git state will be reported UNVERIFIED.",
+        )
+
+
+def _load_snapshot(path: str | None) -> tuple[dict[str, Any] | None, str]:
+    """``(snapshot, why_not)``; the file is consumed either way."""
+    if path is None:
+        return None, "the payload carries no usable session_id or tool_use_id, so there is no snapshot to compare against"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh), ""
+    except (OSError, ValueError) as exc:
+        return None, (
+            f"no readable pre-call snapshot ({exc.__class__.__name__}); the PreToolUse hook did not run "
+            "or its state was lost"
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _post(payload: dict[str, Any], event: str) -> None:
-    roots = _roots(payload)
-    if not roots:
-        return  # nothing to protect; the same test Pre applied
-    changes: list[str] = []  # bytes that differ
-    gaps: list[str] = []  # what could not be compared
     path = _state_path(payload)
-    before: dict[str, Any] | None = None
-    if path is None:
-        gaps.append("the payload carries no tool_use_id, so there is no snapshot to compare against")
+    before, why_not = _load_snapshot(path)
+    lines: list[Line] = []
+    if before is not None:
+        # The roots are the ones Pre stored, never ones derived from this
+        # call's cwd: a `cd` inside the call changes nothing.
+        roots = [(r["common"], r["top"]) for r in before.get("roots", []) if isinstance(r, dict) and "common" in r]
     else:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                before = json.load(fh)
-        except (OSError, ValueError) as exc:
-            gaps.append(
-                f"no readable pre-call snapshot ({exc.__class__.__name__}); the PreToolUse hook did not run "
-                "or its state was lost"
-            )
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        roots = _roots(payload)
+        if not roots:
+            return  # nothing to protect; the same test Pre applied
+        lines.append((UNVERIFIED, why_not))
     after_roots = [snapshot(common, top) for common, top in roots]
     if before is not None:
-        old = {r["common"]: r for r in before.get("roots", [])}
+        old = {r["common"]: r for r in before.get("roots", []) if isinstance(r, dict) and "common" in r}
         for new in after_roots:
             prior = old.get(new["common"])
             if prior is None:
-                gaps.append(f"{new['common']} is not in the pre-call snapshot")
                 continue
-            gaps.extend(f"pre-call snapshot incomplete: {err}" for err in prior.get("errors", []))
-            changes.extend(f"{new['top']}: {ln}" for ln in diff_root(prior, new))
-        changes.extend(
-            f"{common}: the git directory is gone after the call"
-            for common in sorted(set(old) - {r["common"] for r in after_roots})
-        )
+            lines.extend((UNVERIFIED, f"pre-call snapshot incomplete: {err}") for err in prior.get("errors", []))
+            lines.extend((tag, f"{new['top']}: {text}") for tag, text in diff_root(prior, new))
         if before.get("shrunk"):
-            gaps.append(
-                "pre-call snapshot exceeded its size cap; key and line detail was dropped, file hashes were compared"
-            )
+            lines.append((
+                UNVERIFIED,
+                "pre-call snapshot exceeded its size cap; key and line detail was dropped, file hashes were compared",
+            ))
+    notes: list[str] = []
     for new in after_roots:
-        gaps.extend(f"post-call snapshot incomplete: {err}" for err in new.get("errors", []))
-    if not changes and not gaps:
-        return
-    if changes:
-        header = f"git-integrity check ({BEAD}): the primary checkout's shared git state changed during this Bash call."
-        if gaps:
-            header += " Part of the comparison is UNVERIFIED."
-    else:
-        header = (
-            f"git-integrity check ({BEAD}): the primary checkout's shared git state could not be "
-            "fully verified for this Bash call (UNVERIFIED)."
-        )
-    lines = changes + gaps
-    _lib.log_routing_event(
-        rule=RULE_NAME, outcome="integrity_change" if changes else "integrity_unverified", tool_name="Bash",
-        command_fragment="; ".join(lines)[:200],
-        session_id=str(payload.get("session_id") or ""),
-    )
-    _emit(_post_envelope(
-        event, _report(header, lines),
-        f"git-integrity ({BEAD}): {len(changes)} change(s), {len(gaps)} unverified; first: {lines[0][:140]}",
-    ))
+        lines.extend((UNVERIFIED, f"post-call snapshot incomplete: {err}") for err in new.get("errors", []))
+        notes.extend(n for n in new.get("notes", []) if n not in notes)
+    if notes:
+        _note_once(payload, notes)
+    # CHANGE first, then INFO, then UNVERIFIED, for a readable report.
+    order = {CHANGE: 0, INFO: 1, UNVERIFIED: 2}
+    lines.sort(key=lambda ln: order[ln[0]])
+    _finish(payload, event, lines)
 
 
 def body(payload: dict[str, Any]) -> None:
     if not str(payload.get("agent_id") or ""):
-        return  # main conversation: the rule targets subagents only
+        _drain_main(payload)  # main conversation: drain what subagents queued
+        return
     if payload.get("tool_name") != "Bash":
         return
     event = str(payload.get("hook_event_name") or "")
@@ -807,25 +1150,15 @@ def body(payload: dict[str, Any]) -> None:
         try:
             _pre(payload)
         except Exception as exc:  # noqa: BLE001 -- Pre must never wedge a call
-            _emit({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": (
-                    f"git-integrity check ({BEAD}) crashed taking its snapshot "
-                    f"({exc.__class__.__name__}); this call will be reported UNVERIFIED."
-                ),
-            }})
+            _pre_unverified(
+                payload,
+                f"the check crashed taking its snapshot ({exc.__class__.__name__}); this call will be reported UNVERIFIED.",
+            )
     elif event in ("PostToolUse", "PostToolUseFailure"):
         try:
             _post(payload, event)
         except Exception as exc:  # noqa: BLE001 -- a crash is a report line, never silence
-            _emit(_post_envelope(
-                event,
-                _report(
-                    f"git-integrity check ({BEAD}) crashed comparing snapshots (UNVERIFIED).",
-                    [f"{exc.__class__.__name__}: {str(exc)[:160]}"],
-                ),
-                f"git-integrity ({BEAD}): check crashed, UNVERIFIED",
-            ))
+            _finish(payload, event, [(UNVERIFIED, f"the check crashed comparing snapshots: {exc.__class__.__name__}: {str(exc)[:160]}")])
 
 
 def main() -> None:

@@ -59,10 +59,12 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     # Handoff markers: a new session id, a pid and a timestamp.
     ("src/nexus/daemon/t1_handoff.py", "write_handoff_marker"): 1,
     ("src/nexus/daemon/t1_handoff.py", "write_handoff_marker_if_absent"): 1,
-    # A per-call git-state snapshot (nexus-i93tz): key names, 16-hex hashes of values, and display
-    # values only for non-secret sections with URL userinfo removed. Deleted by the Post hook that
-    # reads it; 0o600 because the hashes of undisplayed values are still not for other users.
-    ("conexus/hooks/scripts/routing/subagent_git_integrity_check.py", "_store"): 1,
+    # A per-call state snapshot, the queued findings and coverage markers (nexus-i93tz): key names
+    # (a URL-bearing subsection only as a hash), 16-hex hashes of values, and display values only
+    # for non-secret sections with URL userinfo, query and fragment removed. The snapshot is
+    # deleted by the Post hook that reads it; 0o600 because the hashes of undisplayed values are
+    # still not for other users.
+    ("conexus/hooks/scripts/routing/subagent_git_integrity_check.py", "_write_private"): 1,
 }
 
 #: Non-vacuity floor: files the sweep must read.
