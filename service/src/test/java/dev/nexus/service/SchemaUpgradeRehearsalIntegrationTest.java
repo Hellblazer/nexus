@@ -180,109 +180,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * old vs HEAD) is reached the same way a real aged fleet box reached it, and
      * the hop's row-DML changesets genuinely run.
      *
-     * <p>ROTATION POLICY (nexus-7z6s7): this pin rots. As HEAD advances the
-     * old-to-HEAD hop grows unboundedly, and once the fleet fully moves past
-     * this tag the "real aged box" justification goes stale. Advance it to the
-     * PREVIOUSLY-deployed engine tag whenever the cloud deployment reference
-     * (T2 {@code deployed-engine-version}) materially advances — the
-     * engine-release skill's post-deploy "bump downstream refs" step is the
-     * trigger point. When bumping, re-verify the two structural facts this
-     * test's design leans on: the tag's changelog tree must predate the
-     * newest guard-bearing changelog under test, and the divergence-injection
-     * file must be byte-identical between the tag and HEAD (see class javadoc).
-     * For the data leg, also re-verify the tag predates the newest row-DML
-     * changeset being exercised (currently catalog-013 / catalog-014) — a tag
-     * that already contains them turns that leg's assertions vacuous (the
-     * in-test changesetApplied gates fail loudly if that happens). Rotation
-     * also requires re-deriving the data leg's seed coverage by hand (the
-     * snapshot generator and the Python seed-coverage lint were deleted at
-     * cleanup step 10b).
-     *
-     * <p><strong>2026-09-13 rotation check (nexus-t1qbs): NOT rotated, and
-     * cannot be until the divergence point moves.</strong> The deployed
-     * engine has advanced to {@code engine-service-v0.1.117}; this pin was
-     * checked against the two structural facts above and both fail. {@code
-     * git diff engine-service-v0.1.117 HEAD -- service/src/main/resources/
-     * db/changelog} is EMPTY — v0.1.117's changelog tree is byte-identical
-     * to HEAD's, so it cannot serve as an "old" tree at all (a hop from it
-     * applies zero changesets). More generally, {@code catalog-013-chash-
-     * checks-validate.xml} first shipped at {@code engine-service-v0.1.33}
-     * (commit {@code e1cd25f1}, verified via {@code git cat-file -e
-     * <tag>:<path>}: v0.1.32 lacks it, v0.1.33 has it; catalog-014 follows
-     * at v0.1.35) — so EVERY tag from v0.1.33 through the current v0.1.117
-     * already contains catalog-013, and none of them can pass this test's own
-     * preconditions ({@code changesetApplied(..., "catalog-013-2", ...)
-     * .isFalse()} for the schema leg; the data leg's coverage-vacuity guard
-     * for the row-DML changesets). {@code engine-service-v0.1.17} therefore
-     * remains the only tag on the "previously-deployed" side of this
-     * project's tag history that predates the divergence-injection point,
-     * and stays pinned here rather than rotating to a tag that would make
-     * the rehearsal vacuous. The ROTATION POLICY above is not wrong, it is
-     * just inert for this particular injection point: it can fire again
-     * only once a NEW guard-bearing changeset newer than catalog-013/014 is
-     * chosen as the injection point for a future generation of this
-     * rehearsal (at which point OLD_TAG would move forward to whatever tag
-     * predates THAT changeset, not necessarily v0.1.17). No manifest/seed-
-     * coverage regeneration was needed for this check (OLD_TAG did not
-     * change); this class stayed green throughout.
-     *
-     * <p><strong>2026-09-14 rotation check (engine-service-v0.1.119 downstream
-     * bump, RDR-208 Phase 1 R1): STILL NOT rotated, same reason.</strong>
-     * {@code catalog-013-chash-checks-validate.xml} is present in both
-     * {@code engine-service-v0.1.118} and {@code engine-service-v0.1.119}
-     * (verified via {@code git cat-file -e <tag>:<path>}) — the divergence-
-     * injection point has not moved since the 2026-09-13 check above, so
-     * every candidate "previously-deployed" tag from v0.1.33 onward still
-     * fails this test's own precondition and {@code engine-service-v0.1.17}
-     * stays pinned. One thing DID change since the last check:
-     * {@code catalog-002-hygiene.xml} is no longer byte-identical between
-     * v0.1.17 and HEAD — {@code git diff engine-service-v0.1.17 HEAD --
-     * .../catalog-002-hygiene.xml} now shows a 3-line addition (commit
-     * {@code 729c61d5c}, nexus-f7dwp's mechanized DATA EFFECT disclosure
-     * backfill). The added text is a {@code <comment>} line only
-     * ("DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
-     * ... value"); no SQL statement changed, and {@code
-     * scripts/data_effect_lint.py}'s own contract is that this class of edit
-     * is checksum-neutral, so the divergence-injection point still reaches
-     * the same constraint-bearing state on the old leg. No manifest/seed-
-     * coverage regeneration needed (OLD_TAG did not change); this class
-     * stayed green throughout.
-     *
-     * <p><strong>2026-09-18 rotation check (engine-service-v0.1.128, conexus
-     * 7.52.0 release prep): STILL NOT rotated, same reason.</strong> {@code
-     * git diff engine-service-v0.1.119 engine-service-v0.1.128 --
-     * service/src/main/resources/db/changelog} shows four new files:
-     * {@code catalog-037-gc-quarantine-orphans-bounded.xml} (creates a new
-     * bounded-sweep FUNCTION and grants EXECUTE on it — no CHECK/NOT NULL
-     * added to any existing table, explicitly "No DATA EFFECT" per its own
-     * header), {@code memory-004-quarantine-and-rollup.xml} and {@code
-     * tuples-005-subspace-and-claim-log-indexes.xml} (unrelated tables), and
-     * this tag's own {@code tuples-006-announce-columns.xml} (two nullable/
-     * defaulted columns on {@code nexus.tuples}). None constrains existing
-     * data on an already-populated table, so none is a candidate
-     * divergence-injection point and the catalog-013/014 boundary this pin
-     * is anchored to has not moved. {@code catalog-013-chash-checks-
-     * validate.xml} itself picked up a checksum-neutral DATA EFFECT comment
-     * backfill in this range (no SQL statement changed, same class of edit
-     * as the catalog-002-hygiene.xml backfill the 2026-09-14 check already
-     * absorbed) — structurally unchanged. {@code engine-service-v0.1.17}
-     * stays pinned. No manifest/seed-coverage regeneration needed (OLD_TAG
-     * did not change).
-     *
-     * <p><strong>2026-10-07 rotation check (engine-service-v0.1.150, conexus
-     * 7.73.0 release prep): STILL NOT rotated, same reason.</strong> The
-     * release plan named {@code engine-service-v0.1.149} (the engine 7.72.1
-     * pinned) as the new OLD_TAG; the structural precondition fails for it.
-     * {@code git cat-file -e engine-service-v0.1.149:service/src/main/
-     * resources/db/changelog/catalog-013-chash-checks-validate.xml} succeeds,
-     * so the old leg applies catalog-013-2 and this class's own {@code
-     * changesetApplied(..., "catalog-013-2", ...).isFalse()} assertion would
-     * red; v0.1.17 lacks the file. The injection point has not moved
-     * (catalog-002-hygiene.xml still differs from v0.1.17 by the 3-line DATA
-     * EFFECT comment only). The v0.1.17-to-HEAD hop now also crosses the
-     * RDR-225 changesets (vectors-030-1 partitions {@code nexus.chunks} and
-     * {@code nexus.taxonomy_centroids}; vectors-031 follows), which the HEAD
-     * leg walks. {@code engine-service-v0.1.17} stays pinned.
+     * <p><strong>PINNED, never rotated (Sam 2026-10-17, nexus-dodjd).</strong>
+     * This tag is kept on purpose. The rehearsal's value is the longest real
+     * upgrade path a dormant install can take: a box last upgraded at
+     * v0.1.17 walks every changeset shipped since, so this hop exercises all
+     * of them against an old-shaped database. The former nexus-7z6s7 rotation
+     * policy (advance to the previously-deployed tag at each deploy) is
+     * retired for this test. It could never fire anyway: every tag from
+     * {@code engine-service-v0.1.33} onward contains {@code
+     * catalog-013-chash-checks-validate.xml} (v0.1.32 lacks it, v0.1.33 has
+     * it; catalog-014 follows at v0.1.35), so a rotated tag fails the schema
+     * leg's {@code changesetApplied(..., "catalog-013-2", ...).isFalse()}
+     * precondition and empties the data leg's row-DML coverage. Rotation
+     * checks on 2026-09-13 (v0.1.117), 2026-09-14 (v0.1.119), 2026-09-18
+     * (v0.1.128) and 2026-10-07 (v0.1.149) all reached that result. The
+     * divergence-injection file {@code catalog-002-hygiene.xml} differs from
+     * v0.1.17 only by a checksum-neutral 3-line DATA EFFECT comment (commit
+     * {@code 729c61d5c}), so the old leg still reaches the same
+     * constraint-bearing state. If a future guard-bearing changeset becomes
+     * the injection point, that is a new rehearsal generation with its own
+     * old tag, not a rotation of this one.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
