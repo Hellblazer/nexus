@@ -46,6 +46,8 @@ from nexus.errors import BatchWriteFailedError, NexusError
 from nexus.exporter import (
     _document_completion_hash,
     _file_sha256,
+    _locate_owner_group,
+    _resolve_export_owners,
     export_collection,
     import_collection,
 )
@@ -1227,16 +1229,71 @@ def test_an_imported_bundles_pdfs_get_keys_of_their_own_and_are_not_joined_as_sa
 # ── nexus-mjikf: a whole imported document keeps its source's own content key ──
 
 
+_KA = "ab" * 32
+
+
 def test_the_source_key_is_used_only_for_a_whole_document_of_one_group() -> None:
     unique = _document_completion_hash("F" * 64, "1.1.1")
-    whole = [("HA" * 32, 3)]
-    assert _document_completion_hash("F" * 64, "1.1.1", whole, 3) == "HA" * 32
+    whole = [(_KA, 3)]
+    assert _document_completion_hash("F" * 64, "1.1.1", whole, 3) == _KA
+    assert _document_completion_hash("F" * 64, "1.1.1", [("not-a-digest", 3)], 3) == unique
+    assert _document_completion_hash("F" * 64, "1.1.1", [(_KA.upper(), 3)], 3) == unique
+    assert _document_completion_hash("F" * 64, "1.1.1", [(12345, 3)], 3) == unique  # type: ignore[list-item]
     assert _document_completion_hash("F" * 64, "1.1.1", whole, 2) == unique          # a row short
     assert _document_completion_hash("F" * 64, "1.1.1", [None], 3) == unique         # poisoned group
     assert _document_completion_hash("F" * 64, "1.1.1", [("", 3)], 3) == unique      # source not complete
-    assert _document_completion_hash("F" * 64, "1.1.1", [("HA" * 32, None)], 3) == unique  # an old bundle
+    assert _document_completion_hash("F" * 64, "1.1.1", [(_KA, None)], 3) == unique      # an old bundle
     assert _document_completion_hash("F" * 64, "1.1.1", whole + whole, 6) == unique  # two groups
-    assert _document_completion_hash("F" * 64, "1.1.1", [("HA" * 32, True)], 1) == unique
+    assert _document_completion_hash("F" * 64, "1.1.1", [(_KA, True)], 1) == unique
+
+
+def test_a_group_whose_records_disagree_on_the_source_pair_is_poisoned() -> None:
+    groups: dict[str, dict] = {}
+    o = {"source_uri": "file:///x.pdf", "title": "x", "content_type": "pdf"}
+    _locate_owner_group(groups, {**o, "position": 0, "index_content_hash": _KA, "manifest_rows": 2},
+                        fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
+                        target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert groups["file:///x.pdf"]["source"] == (_KA, 2)
+    _locate_owner_group(groups, {**o, "position": 1, "index_content_hash": _KA, "manifest_rows": 3},
+                        fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
+                        target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert groups["file:///x.pdf"]["source"] is None
+    _locate_owner_group(groups, {**o, "position": 2, "index_content_hash": _KA, "manifest_rows": 2},
+                        fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
+                        target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert groups["file:///x.pdf"]["source"] is None, "a poisoned group never recovers"
+    old_bundle: dict[str, dict] = {}
+    _locate_owner_group(old_bundle, {**o, "position": 0}, fallback_source_uri="", fallback_title="",
+                        fallback_content_type="pdf", target_collection="docs__t__bge-base-en-v15-768__v1")
+    assert old_bundle["file:///x.pdf"]["source"] == ("", None)
+
+
+class _StubOwnerReader:
+    """The three batched reads _resolve_export_owners makes, over two documents sharing chunk c2."""
+
+    def __init__(self, state_a: str | None) -> None:
+        self._state_a = state_a
+
+    def docs_for_chashes(self, chashes):
+        return {"c1": ["1.1.1"], "c2": ["1.1.1", "1.1.2"], "c3": ["1.1.2"]}
+
+    def get_manifests(self, tumblers):
+        row = lambda c, p: type("Row", (), {"chash": c, "position": p})()  # noqa: E731
+        return {"1.1.1": [row("c1", 0), row("c2", 1)], "1.1.2": [row("c3", 0), row("c2", 1), row("c2", 2)]}
+
+    def resolve_many(self, tumblers):
+        mk = lambda t, k, st: type("E", (), {  # noqa: E731
+            "physical_collection": "docs__s", "source_uri": f"file:///{t}", "title": t,
+            "content_type": "pdf", "index_content_hash": k, "index_state": st})()
+        return {"1.1.1": mk("1.1.1", _KA, self._state_a), "1.1.2": mk("1.1.2", "cd" * 32, "complete")}
+
+
+@pytest.mark.parametrize("state_a,key_a", [("complete", _KA), ("indexing", ""), ("failed", ""), (None, "")])
+def test_export_writes_the_owners_key_only_when_complete_and_its_manifest_rows(state_a, key_a) -> None:
+    owners = _resolve_export_owners(_StubOwnerReader(state_a), ["c1", "c2", "c3"], "docs__s")
+    assert owners["c1"]["index_content_hash"] == key_a and owners["c1"]["manifest_rows"] == 2
+    assert owners["c2"]["source_uri"] == "file:///1.1.1"          # the lower tumbler owns the shared chunk
+    assert owners["c3"]["index_content_hash"] == "cd" * 32 and owners["c3"]["manifest_rows"] == 3
 
 
 def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:

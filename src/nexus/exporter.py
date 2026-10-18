@@ -13,8 +13,11 @@ Embeddings are stored as little-endian float32 bytes (numpy tobytes).
 
 nexus-wbfpw.31 (RDR-192 Step 5, client): each record MAY also carry an
 ``owner`` key -- ``{"source_uri": str, "title": str, "content_type": str,
-"position": int}`` -- naming the chunk's LIVE, own-collection catalog
-document at export time and its manifest position within it. This is an
+"position": int, "index_content_hash": str, "manifest_rows": int}`` -- naming
+the chunk's LIVE, own-collection catalog document at export time and its
+manifest position within it; the last two (nexus-mjikf) are that document's
+content key when it is complete ("" otherwise) and its manifest row count, so
+an import can stamp a document it holds whole with the key. This is an
 UNKNOWN key to every importer predating this change (older importers
 ignore unrecognized record fields), so ``FORMAT_VERSION`` is not bumped.
 Without it, an imported chunk has no catalog document or manifest row at
@@ -38,6 +41,7 @@ import fnmatch
 import gzip
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -812,6 +816,11 @@ def _prepass_groups(
     return groups
 
 
+#: The shape of a content key an import accepts from a bundle (a sha256 hex digest, the form every
+#: native index and nexus-8hhbk's import key take); anything else gets the unique key (nexus-mjikf).
+_CONTENT_KEY: re.Pattern[str] = re.compile(r"[0-9a-f]{64}")
+
+
 def _document_completion_hash(
     file_hash: str, doc_id: str, sources: list[tuple[str, Any] | None] | None = None, rows: int = 0,
 ) -> str:
@@ -830,7 +839,9 @@ def _document_completion_hash(
     ``content_hash`` metadata is never used: it is the first writer's value."""
     if sources is not None and len(sources) == 1 and sources[0] is not None:
         key, source_rows = sources[0]
-        if key and isinstance(source_rows, int) and not isinstance(source_rows, bool) and source_rows == rows:
+        if (isinstance(key, str) and _CONTENT_KEY.fullmatch(key)
+                and isinstance(source_rows, int) and not isinstance(source_rows, bool)
+                and source_rows == rows):
             return key
     return hashlib.sha256(f"nexus-import:{file_hash}:{doc_id}".encode()).hexdigest()
 
