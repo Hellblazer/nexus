@@ -1053,6 +1053,53 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "sh -c 'true && git-config user.name x'",
         "sh -c '/usr/lib/git-core/git-config user.name x'",
     ],
+    # nexus-13wz1 round 2: `env -S` reads `\_` as a blank, so the string needs
+    # no space. The local shell leaves `\_` alone inside quotes, and `env` splits
+    # it into the words of the command it runs.
+    "config_env_split_string_backslash_underscore_is_a_blank": [
+        "env -S'git" + BS + "_config" + BS + "_--global" + BS + "_user.name" + BS + "_x'",
+        "env -S'git" + BS + "_config --global user.name x'",
+        'env -S"git' + BS + "_config" + BS + "_--global" + BS + "_user.name" + BS + '_x"',
+        "env -Sgit" + BS + "_config" + BS + "_--global" + BS + "_user.name" + BS + "_x",
+        "env -S 'git" + BS + "_config" + BS + "_--global" + BS + "_user.name" + BS + "_x'",
+        "env --split-string='git" + BS + "_config" + BS + "_--global" + BS + "_user.name x'",
+        "env -u HOME -S'git" + BS + "_config" + BS + "_core.hooksPath" + BS + "_/x'",
+        "env -S'git" + BS + "_-c" + BS + "_core.x=1" + BS + "_config" + BS + "_user.name x'",
+    ],
+    "verbs_env_split_string_backslash_underscore_is_a_blank": [
+        "env -S'git" + BS + "_commit" + BS + "_-m" + BS + "_x'",
+        "env -S'git" + BS + "_add" + BS + "_-A'",
+        "env -S'git" + BS + "_push'",
+        "env -S'git" + BS + "_reset" + BS + "_--hard'",
+        'env -S"git' + BS + "_checkout" + BS + '_-- f"',
+        "env -Sgit" + BS + "_commit" + BS + "_-m" + BS + "_x",
+    ],
+    # nexus-13wz1 round 2: a doubled backslash in a DOUBLE-quoted string handed to a
+    # shell that runs it. The local shell turns it into one, and the far shell
+    # drops that one before a letter, so `gi<bs><bs>t` runs as `git`. No whole
+    # `git` word stands in the text. `ssh`, `tmux` and `watch` already read it for
+    # `config`; the generic shell runners and the verbs did not.
+    "config_backslash_splits_the_git_word_for_a_generic_runner": [
+        'sh -c "gi' + BS + BS + 't config user.name x"',
+        'bash -c "gi' + BS + BS + 't config user.name x"',
+        'eval "gi' + BS + BS + 't config user.name x"',
+        'xargs sh -c "gi' + BS + BS + 't config user.name x"',
+        'docker exec h sh -c "gi' + BS + BS + 't config user.name x"',
+        'timeout 5 sh -c "gi' + BS + BS + 't config user.name x"',
+        'env sh -c "gi' + BS + BS + 't config user.name x"',
+        'nohup sh -c "gi' + BS + BS + 't config user.name x"',
+        'sudo bash -c "g' + BS + BS + 'it config --global user.name x"',
+        'sh -c "gi' + BS + BS + 't config user.name $X"',
+    ],
+    "verbs_backslash_splits_the_git_word_for_a_runner": [
+        'sh -c "gi' + BS + BS + 't add -A"',
+        'bash -c "gi' + BS + BS + 't commit -m x"',
+        'ssh h "gi' + BS + BS + 't commit -m x"',
+        'ssh h "gi' + BS + BS + 't add -A"',
+        'eval "gi' + BS + BS + 't reset --hard"',
+        'xargs sh -c "gi' + BS + BS + 't push"',
+        'tmux send-keys "gi' + BS + BS + 't commit -m x" Enter',
+    ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
@@ -1104,6 +1151,14 @@ def test_the_2026_08_20_incident_commands_are_denied(shared_repo):
 # ---------------------------------------------------------------------------
 
 _ALLOW_FAMILIES: dict[str, list[str]] = {
+    # nexus-13wz1 round 2: the runner pass drops the second backslash of `\\n`, which
+    # glues `${X}` to the `n`; splices are judged on the form without that pass, so
+    # a read beside a runner and an escaped newline is not a splice.
+    "runner_pass_does_not_make_a_splice": [
+        'echo "${X}' + BS + BS + 'n" && ssh h uptime && git diff --stat',
+        'printf "%s' + BS + BS + 'n" "${local.conf}' + BS + BS + 'n" | ssh h tee /tmp/x; git status',
+        'sh -c "echo $HOME' + BS + BS + 'n"; git log --oneline -3',
+    ],
     "read_only_git": [
         "git status",
         "git diff",
@@ -1794,6 +1849,35 @@ _SHARED_CONFIG_WRITES = [
     "git config --worktree -- --global user.name x",
     "git config --worktree -- --unset user.name",
     "git config -- user.name x",
+    # nexus-13wz1 round 2: `\_` is a blank to `env -S`; a doubled backslash in a
+    # double-quoted string for a shell runner is one to the far shell.
+    "env -S'git" + BS + "_config" + BS + "_--global" + BS + "_user.name" + BS + "_x'",
+    "env -S'git" + BS + "_config --global user.name x'",
+    'env -S"git' + BS + "_config" + BS + "_--local" + BS + "_core.hooksPath" + BS + '_/x"',
+    "env -Sgit" + BS + "_config" + BS + "_user.name" + BS + "_x",
+    "env -S 'git" + BS + "_config" + BS + "_user.name" + BS + "_x'",
+    'sh -c "gi' + BS + BS + 't config user.name x"',
+    'bash -c "gi' + BS + BS + 't config --global user.name x"',
+    'eval "gi' + BS + BS + 't config user.name x"',
+    'xargs sh -c "gi' + BS + BS + 't config user.name x"',
+    'docker exec h sh -c "gi' + BS + BS + 't config user.name x"',
+    'timeout 5 sh -c "gi' + BS + BS + 't config user.name x"',
+    'env sh -c "gi' + BS + BS + 't config user.name x"',
+    'nohup sh -c "gi' + BS + BS + 't config user.name x"',
+    # a quoted `cd` after a keyword or a prefix word, and `env` changing directory
+    "if true; then cd '{primary}' && git config --worktree user.name x; fi",
+    "for d in a; do cd '{primary}'; git config --worktree user.name x; done",
+    "while true; do cd '{primary}' && git config --worktree user.name x; done",
+    "time cd '{primary}' && git config --worktree user.name x",
+    "! cd '{primary}' || git config --worktree user.name x",
+    "if cd '{primary}'; then git config --worktree user.name x; fi",
+    "true && cd '{primary}' && git config --worktree user.name x",
+    "command cd '{primary}' && git config --worktree user.name x",
+    "env -C '{primary}' git config --worktree user.name x",
+    "env -C {primary} git config --worktree user.name x",
+    "env --chdir={primary} git config --worktree user.name x",
+    "env --chdir '{primary}' git config --worktree user.name x",
+    "env -iC {primary} git config --worktree user.name x",
 ]
 
 
@@ -1884,6 +1968,14 @@ def test_a_worktree_write_and_every_config_read_pass_in_a_linked_worktree(
         "git config --worktree --unset -- user.name",
         "git config --worktree --add -- user.signingkey ABC",
         "git config --worktree --bool -- commit.gpgsign false",
+        # a read stays a read behind `--`
+        "git config --worktree --get -- user.name",
+        "git config --get -- user.name",
+        "git config --list --worktree --",
+        # `\_` in a string no `env -S` reads stays text; a doubled backslash with no
+        # runner and no git verb is only text
+        "echo 'git" + BS + "_config" + BS + "_user.name" + BS + "_x'",
+        'echo "gi' + BS + BS + 't config docs"',
         # an unquoted `cd` (the documented limit: the tool call's cwd decides)
         "cd src && git config --worktree user.name x",
         # nexus-13wz1: dashed prose in a quoted data argument is not a program
@@ -2155,6 +2247,37 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
     assert not _denied(control, wt), control
 
 
+def _runner_window_cmd(between: int) -> str:
+    """`sh -c '<fillers> git-config user.name x'` with exactly *between* words
+    between `sh` and `git-config` (the `-c` is one of them)."""
+    return "sh -c '" + " ".join(f"w{i}" for i in range(between - 1)) + " git-config user.name x'"
+
+
+def _env_s_window_cmd(between: int) -> str:
+    """`env <between words> -S'git config' user.name x`: *between* words (option
+    pairs, then one assignment when odd) stand between `env` and `-S`."""
+    words = ["-u", "V"] * (between // 2) + (["X=1"] if between % 2 else [])
+    return "env " + " ".join(words) + " -S'git config' user.name x"
+
+
+def test_the_twelve_word_window_of_the_dashed_runner_and_env_s_reads_is_a_pinned_limit(
+    shared_repo,
+):
+    """nexus-13wz1 round 2, a LIMIT and not a feature: a dashed `git-config` handed
+    to a shell runner is read only within twelve words after the runner
+    (`_DASHED_RUNNER_CMD_RE`), and the `env -S` reach (`_CONSUMER_RE`,
+    `_ENV_S_GLUED_RE`) is the same twelve words of options before the `-S`. A write
+    spelled past either bound is not seen. The bound keeps both searches linear;
+    this pins its exact edge, so moving it breaks here and the PENDING_RELEASE
+    `Not covered` note moves with it. Twelve words deny, thirteen pass."""
+    inside = [_runner_window_cmd(12), _env_s_window_cmd(12)]
+    outside = [_runner_window_cmd(13), _env_s_window_cmd(13)]
+    assert _not_denied(inside, shared_repo) == [], "a write inside the window must deny"
+    assert _denied_among(outside, shared_repo) == [], (
+        "the window grew or moved; update the limit in PENDING_RELEASE.md with it"
+    )
+
+
 def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(tmp_path):
     """The confirm-pass residuals, measured. Each command, run for real in a
     sandbox, changes the common config the primary reads, and the hook denies it
@@ -2171,7 +2294,8 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     stubs.mkdir(parents=True)
     (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
     (stubs / "git-config").write_text('#!/bin/sh\nexec git config "$@"\n')
-    for name in ("ssh", "git-config"):
+    (stubs / "docker").write_text('#!/bin/sh\nshift 2\nexec "$@"\n')
+    for name in ("ssh", "git-config", "docker"):
         (stubs / name).chmod(0o755)
     env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
     main = box / "main"
@@ -2197,6 +2321,18 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         "sh -c 'git-config user.name via-sh'",
         'bash -c "git-config core.hooksPath /tmp/hk3"',
         "eval 'git-config user.name via-eval'",
+        # `\_` is a blank to `env -S`; a doubled backslash in a double-quoted string
+        # is one to the far shell, which drops it before a letter
+        "env -S'git" + BS + "_config" + BS + "_user.name" + BS + "_via-us1'",
+        'env -S"git' + BS + "_config" + BS + "_core.hooksPath" + BS + '_/tmp/hk4"',
+        "env -S 'git" + BS + "_config user.name via-us2'",
+        'sh -c "gi' + BS + BS + 't config user.name via-sh2"',
+        'bash -c "g' + BS + BS + 'it config core.hooksPath /tmp/hk5"',
+        'eval "gi' + BS + BS + 't config user.name via-eval2"',
+        'env sh -c "gi' + BS + BS + 't config user.name via-env-sh"',
+        'nohup sh -c "gi' + BS + BS + 't config user.name via-nohup"',
+        'docker exec h sh -c "gi' + BS + BS + 't config user.name via-docker"',
+        'echo x | xargs sh -c "gi' + BS + BS + 't config user.name via-xargs"',
     ]
     for cmd in writes:
         before = _config_snapshot([common])
@@ -2241,6 +2377,51 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
                    f'cd "{main}" && git config --worktree user.name via-cd'):
         assert _denied(quoted, wt), quoted
     assert not _denied(f"cd {main} && git config --worktree user.name via-cd", wt)
+    # After a keyword or a prefix word, and through `env -C` / `--chdir`, the write
+    # lands in the primary's per-worktree file all the same. The quoted `cd` forms
+    # and `env`'s own directory options deny; the unquoted `cd` stays the limit.
+    primary_file = main / ".git" / "config.worktree"
+    for redirected in (
+        f"if true; then cd '{main}' && git config --worktree user.name via-if; fi",
+        f"for d in a; do cd '{main}'; git config --worktree user.name via-do; done",
+        f"time cd '{main}' && git config --worktree user.name via-time",
+        f"! cd '{main}' || git config --worktree user.name via-not",
+        f"env -C '{main}' git config --worktree user.name via-envc",
+        f"env -C {main} git config --worktree user.name via-envc2",
+    ):
+        before = _config_snapshot([primary_file])
+        subprocess.run(
+            ["bash", "-c", redirected], cwd=wt, env=env, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        assert _config_snapshot([primary_file]) != before, f"{redirected!r} did not write the primary"
+        assert _denied(redirected, wt), f"{redirected!r} was not denied from a linked worktree"
+    # GNU env spells the same option `--chdir` (BSD env on macOS has only `-C`, so
+    # it is not run here): it denies as `-C` does.
+    assert _denied(f"env --chdir={main} git config --worktree user.name via-chdir", wt)
+    # A read through `--` is a read: it writes nothing and passes.
+    for read in ("git config --worktree --get -- user.name", "git config --get -- user.name"):
+        assert not _denied(read, wt), read
+    # The verbs behind the same two spellings, run in the SHARED tree: each changes
+    # the primary's index, and each denies there.
+    for n, verb in enumerate((
+        "env -S'git" + BS + "_add" + BS + "_g1'",
+        'sh -c "gi' + BS + BS + 't add g2"',
+        'ssh h "gi' + BS + BS + 't add g3"',
+        'bash -c "gi' + BS + BS + 't add g4"',
+    )):
+        name = f"g{n + 1}"
+        (main / name).write_text("y")
+        run = subprocess.run(
+            ["bash", "-c", verb], cwd=main, env=env, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"], cwd=main, env=env,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        assert name in staged, f"{verb!r} did not stage {name}: {run.stderr}"
+        assert _denied(verb, main), f"{verb!r} was not denied in the shared tree"
 
 
 def test_a_worktree_commit_denied_for_a_config_word_says_to_reword_it(

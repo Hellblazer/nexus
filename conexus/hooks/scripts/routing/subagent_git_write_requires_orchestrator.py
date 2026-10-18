@@ -1002,7 +1002,8 @@ def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> st
 #: the reader cannot prove is refused). Limit, taken on purpose: tmux key names
 #: (``Space``) and an argument built by the consumer's own shell are not modelled.
 #: ``env -S STRING`` splits STRING and runs the words, so it is a consumer too
-#: (plain ``env VAR=1 git log`` is not). The shell unescapes a double-quoted body
+#: (plain ``env VAR=1 git log`` is not); its backslash-underscore is a blank
+#: (``_env_s_blanks``). The shell unescapes a double-quoted body
 #: (``_dq_unescape``: two backslashes, a backslash before a double quote, ``$`` or
 #: a backtick, backslash-newline) before the consumer sees it, and the consumer's
 #: shell then drops a backslash before an ordinary letter, so a body that keeps a
@@ -1161,7 +1162,10 @@ _STRING_RUNNER_RE = re.compile(
 #: command is the program: the strict rule does not weigh the arguments, as it
 #: does not for ``config``. A search term after a runner (``sh -c 'grep -n
 #: git-config docs'``) denies too, the strict rule's usual price. Linear: the
-#: word run cannot cross a break, and the lazy bound is twelve.
+#: word run cannot cross a break, and the lazy bound is twelve. LIMIT, taken on
+#: purpose and pinned by a boundary test: a ``git-config`` thirteen or more words
+#: after the runner (``sh -c`` and a dozen assignments before it) is not seen, and
+#: neither is an ``env -S`` behind thirteen or more words of options.
 _DASHED_RUNNER_CMD_RE = re.compile(
     _STRING_RUNNER_RE.pattern
     + r"(?:[ \t]+[^\s;&|(){}`]+){0,12}?[ \t]+"
@@ -1202,6 +1206,8 @@ def _repo_env_named(text: str) -> bool:
     if "'" not in text and '"' not in text:
         return False
     return _GIT_REPO_ENV_RE.search(text.replace("'", "").replace('"', "")) is not None
+
+
 #: A ``cd``/``pushd`` whose argument holds a quote (nexus-13wz1). Where the
 #: command changes directory is the documented limit, and an unquoted ``cd`` stays
 #: one: the tool call's cwd decides the worktree. A quoted path was never plain
@@ -1209,18 +1215,35 @@ def _repo_env_named(text: str) -> bool:
 #: config --worktree ...``; the tokenizer reads the quotes away and lets it pass.
 #: Quotes around a path are how an agent writes one that has a space or an odd
 #: character in it, which is also how it names another repository, so a quoted
-#: ``cd`` withdraws the ``--worktree`` exemption as ``GIT_DIR=`` does. The argument
-#: run ends at the next break, so a quote in a later command does not count.
+#: ``cd`` withdraws the ``--worktree`` exemption as ``GIT_DIR=`` does. The
+#: ``cd`` may follow a shell keyword or a prefix word (``then``, ``do``, ``else``,
+#: ``if``, ``while``, ``time [-p]``, ``!``, ``builtin``, ``command [-p]``) as well
+#: as a break. The argument run ends at the next break, so a quote in a later
+#: command does not count.
 _CD_QUOTED_RE = re.compile(
-    r"(?:^|[;&|(){}\n])[ \t]*(?:(?:builtin|command)[ \t]+)?(?:cd|pushd)(?=[ \t])"
+    r"(?:^|[;&|(){}\n])[ \t]*"
+    r"(?:(?:then|do|else|elif|if|while|until|time|!|builtin|command)[ \t]+"
+    r"(?:-\w+[ \t]+)*)*"
+    r"(?:cd|pushd)(?=[ \t])"
     r"[^;&|(){}\n'\"]*['\"]"
+)
+#: ``env`` changes directory itself (``env -C DIR``, ``env --chdir=DIR``, a cluster
+#: such as ``-iC``) before it runs the command, quoted or not: the same other
+#: checkout a ``cd`` names. The option may follow a dozen words of other options
+#: and values; the bound keeps the search linear (a limit, the same twelve as the
+#: ``env -S`` reach in ``_CONSUMER_RE``).
+_ENV_CHDIR_RE = re.compile(
+    r"(?<![\w.\-])env(?:\s+\S+){0,12}?\s+(?:-\w*C|--chdir)(?![\w])"
 )
 
 
 def _cd_quoted(raw: str) -> bool:
-    """True when *raw* has a ``cd`` or ``pushd`` with a quoted word (see
-    ``_CD_QUOTED_RE``)."""
-    return ("cd" in raw or "pushd" in raw) and _CD_QUOTED_RE.search(raw) is not None
+    """True when *raw* changes directory in a way the tool call's cwd does not say:
+    a ``cd`` or ``pushd`` with a quoted word (``_CD_QUOTED_RE``), or ``env -C`` /
+    ``--chdir`` (``_ENV_CHDIR_RE``)."""
+    if ("cd" in raw or "pushd" in raw) and _CD_QUOTED_RE.search(raw) is not None:
+        return True
+    return "env" in raw and _ENV_CHDIR_RE.search(raw) is not None
 
 
 #: A segment with more ``config`` verbs than this denies without being read: each
@@ -1711,13 +1734,21 @@ def _config_read_kind(args: list[str], *, valued_ok: bool = True) -> str | None:
     """
     get_mode = False
     sub_read = False
+    dashdash = False
     positionals = 0
     i = 0
     n = len(args)
     while i < n:
         a = args[i]
         i += 1
-        if a.startswith("-"):
+        if a == "--" and not dashdash and (positionals == 0 or get_mode or sub_read):
+            # Ends the options (nexus-13wz1): every word after it is a positional,
+            # whatever it looks like. A `--` after the key in the legacy form is a
+            # VALUE (`git config user.name --` sets it), so it falls to the branch
+            # below and denies unless a get mode is already on.
+            dashdash = True
+            continue
+        if a.startswith("-") and not dashdash:
             if positionals and not sub_read:
                 if not _config_known_read_flag(a):
                     return None
@@ -2269,9 +2300,33 @@ def _split_env_s(text: str) -> str:
     return _ENV_S_GLUED_RE.sub(r"\1 ", text)
 
 
-def _normalize_for_primary_scan(command: str) -> str:
+#: ``env -S`` reads a backslash-underscore as a blank (``env -S'git\_config\_k\_v'``
+#: runs ``git config k v``): the local shell leaves it alone inside quotes, and
+#: ``env`` splits the string into the words of the command it runs. The escape
+#: collapse turns it into ``_`` (so ``git_config_k_v``, no git command at all), so
+#: the blank goes back first, in everything after the first ``env -S`` or
+#: ``--split-string``. An unquoted ``-Sgit\_config`` that the local shell would
+#: have stripped reads as a blank too: the blunt, safe direction. Same twelve-word
+#: reach as ``_ENV_S_GLUED_RE`` (nexus-13wz1).
+_ENV_S_OPT_RE = re.compile(r"(?<![\w.\-])env(?:\s+\S+){0,12}?\s+(?:-\w*S|--split-string)")
+
+
+def _env_s_blanks(text: str) -> str:
+    """*text* with every backslash-underscore after the first ``env -S`` option
+    replaced by a space (see ``_ENV_S_OPT_RE``)."""
+    if "\\_" not in text or "env" not in text:
+        return text
+    m = _ENV_S_OPT_RE.search(text)
+    if m is None:
+        return text
+    return text[:m.end()] + text[m.end():].replace("\\_", " ")
+
+
+def _normalize_for_primary_scan(command: str, *, runner_pass: bool = True) -> str:
     """CRLF/CR -> LF, collapse continuations, decode/resolve expansions,
-    collapse escapes, strip quotes.
+    collapse escapes, strip quotes. With *runner_pass* False the second escape
+    collapse for a command that names a shell runner is skipped (see the comment
+    at the step): ``_scan_command`` judges splices and recombination on that form.
 
     Order matters throughout:
 
@@ -2312,7 +2367,18 @@ def _normalize_for_primary_scan(command: str) -> str:
     text = command.replace("\r\n", "\n").replace("\r", "\n")
     text = _CONTINUATION_RE.sub("", text)
     text = _expand_ansi_c_strings(text)
+    text = _env_s_blanks(text)
     text = _collapse_escapes(text)
+    if runner_pass and "\\" in text and _STRING_RUNNER_RE.search(text) is not None:
+        # A doubled backslash in a double-quoted string handed to a shell that
+        # runs it reaches that shell as one, which drops it before a letter
+        # (`sh -c "gi\\t add -A"` runs `git add -A`). The first collapse made it
+        # one; a second drops it. Only where a runner stands: elsewhere a literal
+        # backslash is text (nexus-13wz1). The second pass can glue an expansion to
+        # the letter after it (`"${x}\\n"` becomes `${x}n`), which is not a splice
+        # in anything the shell runs here, so `_scan_command` reads splices and
+        # recombination on the first-pass form.
+        text = _collapse_escapes(text)
     text = _resolve_param_defaults(text)
     text = _resolve_command_sub_literals(text)
     return _split_env_s(text.replace("'", "").replace('"', ""))
@@ -3097,8 +3163,12 @@ def _scan_command(
     that counts words cannot see; see the block comment above
     `_CONFIG_STRICT_RE`.
     """
-    spliced_fragment = _find_spliced_expansion(normalized)
-    relaxed = not _may_recombine(normalized)
+    # Splices and recombination are judged on the form without the runner pass
+    # (nexus-13wz1): the second backslash drop is how a far shell reads the text,
+    # and it can make an expansion look glued to a letter that is not.
+    judged = _normalize_for_primary_scan(command, runner_pass=False) if "\\" in command else normalized
+    spliced_fragment = _find_spliced_expansion(judged)
+    relaxed = not _may_recombine(judged)
     view = _config_view(command, relaxed)
     primary_match = None
     if not spliced_fragment:
