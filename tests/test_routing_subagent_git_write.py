@@ -2493,6 +2493,778 @@ def test_a_git_dir_assignment_really_redirects_a_worktree_write_into_the_primary
 
 
 # ---------------------------------------------------------------------------
+# nexus-k66o5: verbs that write config by side effect, help.autocorrect, and a
+# brace in the subcommand word. Every deny below is a command that changes
+# .git/config (or a ref, the index or the tree), proven by the real-write tests.
+# ---------------------------------------------------------------------------
+
+_BOX = "{box}"  # placeholder: the sandbox directory
+_SUB = "{subrepo}"  # placeholder: the submodule's own repository
+
+#: (command, setup, what a real run changes in the primary, shared_only).
+#: *setup* runs first, outside the hook. *kinds* is the set of state names the run
+#: must change at least one of: config, refs, index, tree, gitmodules. *shared_only*
+#: marks the commands that deny in the shared tree but pass in a linked worktree
+#: (a worktree agent's own branches: the verb scan never covered them there).
+_SIDEFX_REAL: list[tuple[str, str, frozenset[str], bool]] = [
+    # remote: every shape rewrites remote.<name>.*, shared by all worktrees
+    ("git remote add up2 /tmp/zz", "", frozenset({"config"}), False),
+    ("git remote add -f up2 /tmp/zz", "", frozenset({"config"}), False),
+    ("git remote remove origin", "", frozenset({"config"}), False),
+    ("git remote rm origin", "", frozenset({"config"}), False),
+    ("git remote rename origin o2", "", frozenset({"config"}), False),
+    ("git remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
+    ("git remote set-url --add origin /tmp/zz", "", frozenset({"config"}), False),
+    ("git remote set-url --push origin /tmp/zz", "", frozenset({"config"}), False),
+    ("git remote set-head origin feat", "", frozenset({"refs"}), False),
+    ("git remote set-head origin -d", "", frozenset({"refs"}), False),
+    ("git remote set-branches origin main", "", frozenset({"config"}), False),
+    ("git remote prune origin", "", frozenset({"refs"}), False),
+    ("git -C . remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
+    ("git -c core.pager=cat remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
+    ("git -c 'user.name=a b' remote set-url origin /tmp/zz", "", frozenset({"config"}), False),
+    # branch: upstream and tracking
+    ("git branch -u origin/feat", "", frozenset({"config"}), False),
+    ("git branch --set-upstream-to=origin/feat", "", frozenset({"config"}), False),
+    ("git branch --set-upstream-to origin/feat other", "", frozenset({"config"}), False),
+    ("git branch -uorigin/feat other", "", frozenset({"config"}), False),
+    ("git branch --unset-upstream tracked", "", frozenset({"config"}), False),
+    ("git branch --unset-upstream main", "", frozenset({"config"}), False),
+    ("git branch --track newb origin/feat", "", frozenset({"config"}), False),
+    ("git branch -t newb2 origin/feat", "", frozenset({"config"}), False),
+    ("git branch --tr newb3 origin/feat", "", frozenset({"config"}), False),
+    ("git branch -vt newb4 origin/feat", "", frozenset({"config"}), False),
+    # branch: config of a branch copied, moved or deleted
+    ("git branch -c tracked cp", "", frozenset({"config"}), True),
+    ("git branch --copy tracked cp2", "", frozenset({"config"}), True),
+    ("git branch -M tracked t2", "", frozenset({"config"}), True),
+    ("git branch --move tracked t3", "", frozenset({"config"}), True),
+    ("git branch --delete tracked", "", frozenset({"config"}), True),
+    # push, fetch and pull set an upstream
+    ("git push -u origin HEAD:newb", "", frozenset({"config"}), False),
+    ("git push --set-upstream origin HEAD:newb2", "", frozenset({"config"}), False),
+    ("git push -fu origin HEAD:newb3", "", frozenset({"config"}), False),
+    ("git fetch --set-upstream origin feat", "", frozenset({"config"}), False),
+    ("git pull --set-upstream origin feat", "", frozenset({"config"}), False),
+    # checkout and switch with --track (denied by the verb scan in the shared tree;
+    # pinned there, and denied by this rule in a linked worktree)
+    ("git checkout -t origin/feat", "", frozenset({"config"}), False),
+    ("git checkout --track origin/feat", "", frozenset({"config"}), False),
+    ("git checkout -b nb --track origin/feat", "", frozenset({"config"}), False),
+    ("git switch -t origin/feat", "", frozenset({"config"}), False),
+    ("git switch --track origin/feat", "", frozenset({"config"}), False),
+    ("git switch -c nb -t origin/feat", "", frozenset({"config"}), False),
+    ("git switch -c nb --track origin/feat", "", frozenset({"config"}), False),
+    ("git worktree add --track -b nbw " + _BOX + "/wx origin/feat", "", frozenset({"config"}), False),
+    # submodule
+    ("git submodule init", "", frozenset({"config"}), False),
+    ("git submodule init sm", "", frozenset({"config"}), False),
+    ("git submodule update --init", "", frozenset({"config"}), False),
+    ("git -c protocol.file.allow=always submodule add " + _SUB + " sm2", "",
+     frozenset({"config"}), False),
+    ("git submodule sync",
+     "git submodule update --init -q && git config submodule.sm.url /bogus",
+     frozenset({"config"}), False),
+    ("git submodule deinit sm", "git submodule update --init -q", frozenset({"config"}), False),
+    ("git submodule deinit -f sm", "git submodule update --init -q", frozenset({"config"}), False),
+    ("git submodule set-url sm /tmp/zz", "git submodule update --init -q",
+     frozenset({"config", "gitmodules"}), False),
+    ("git submodule set-branch --branch b sm", "", frozenset({"gitmodules"}), False),
+    # the other verbs that edit config as a step of their work (git sparse-checkout
+    # does too; it is left out on measurement, see test_sparse_checkout_*)
+    ("git maintenance register", "", frozenset({"config"}), False),
+    # a typo verb that git runs: the key makes git guess the verb and run it
+    ("git -c help.autocorrect=immediate confg user.name x", "", frozenset({"config"}), False),
+    ("git -c help.autocorrect=1 confg user.name x", "", frozenset({"config"}), False),
+    ("git -c HELP.AutoCorrect=immediate confg user.name x", "", frozenset({"config"}), False),
+    ("AC=immediate git --config-env=help.autocorrect=AC confg user.name x", "",
+     frozenset({"config"}), False),
+    ("AC=immediate git --config-env help.autocorrect=AC confg user.name x", "",
+     frozenset({"config"}), False),
+    ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=help.autocorrect GIT_CONFIG_VALUE_0=immediate git confg user.name x",
+     "", frozenset({"config"}), False),
+    ("GIT_CONFIG_PARAMETERS=\"'help.autocorrect=immediate'\" git confg user.name x", "",
+     frozenset({"config"}), False),
+    ("git -c help.autocorrect=immediate chekout -- f", "echo dirty > f", frozenset({"tree"}), False),
+    # a brace in the subcommand word: the shell builds the verb at runtime
+    ("git ch{e..e}ckout -- f", "echo dirty > f", frozenset({"tree"}), False),
+    ("git {checkout,--,f}", "echo dirty > f", frozenset({"tree"}), False),
+    ("git {reset,--hard}", "echo dirty > f", frozenset({"tree"}), False),
+    ("git re{s..s}et --hard", "echo dirty > f", frozenset({"tree"}), False),
+    ("git -c 'user.name=a b' ch{e..e}ckout -- f", "echo dirty > f", frozenset({"tree"}), False),
+    ("git c{o..o}nfig user.name x", "", frozenset({"config"}), False),
+    ("git {config,user.name} x", "", frozenset({"config"}), False),
+    ("git ad{d..d} f", "echo dirty > f", frozenset({"index"}), False),
+    ("git {commit,-q,--allow-empty,-m,x}", "", frozenset({"refs"}), False),
+]
+
+#: Real runs that change nothing and must pass (the reads of the same verbs).
+_SIDEFX_READS = [
+    "git remote",
+    "git remote -v",
+    "git remote show origin",
+    "git remote get-url origin",
+    "git remote update",
+    "git branch",
+    "git branch -vv",
+    "git branch -a",
+    "git branch -r",
+    "git branch --list",
+    "git branch --list 'ma*'",
+    "git branch --show-current",
+    "git branch --contains HEAD",
+    "git branch --merged main",
+    "git branch --sort=-committerdate",
+    "git branch --sort -committerdate",
+    "git branch -a --no-merged origin/feat",
+    "git branch --format='%(refname:short)'",
+    "git branch -a | sort -u",
+    "git branch -vv | grep -t x; true",
+    "git submodule",
+    "git submodule status",
+    "git submodule summary",
+    "git submodule foreach 'echo hi'",
+    "git submodule update",
+    "git fetch origin",
+    "git -c help.autocorrect=0 confg user.name x",
+    "git -c help.autocorrect=never confg user.name x",
+    "git -c help.autocorrect=false confg user.name x",
+    "git -c help.autocorrect=show confg user.name x",
+    "git -c help.autocorrect=off confg user.name x",
+    "git -c help.autocorrect=no confg user.name x",
+    "git log --oneline HEAD~{0,0}",
+    "git diff --stat -- {f,g}",
+    "git status --short {f,g}",
+    "git log --grep='remote set-url' --grep='branch -u' --oneline",
+    "git log -S'submodule init' --oneline",
+    "git grep -n 'remote set-url' -- f",
+    "echo 'git remote set-url x y' > /dev/null",
+    "echo 'git branch -u origin/main' > /dev/null",
+    "grep -rn 'push -u' f; true",
+]
+
+
+def _sidefx_box(box: pathlib.Path, where: str):
+    """A sandbox in which a side-effect command can really run: an upstream with
+    a submodule and branches `feat` and `stale`, a clone `main` of it (its
+    submodule not initialised; `stale` gone upstream, so `remote prune` has work;
+    a tracked branch `tracked`), and with *where* == "wt" a linked worktree.
+    Returns (env, primary, cwd)."""
+    env = _sandbox_env(box)
+    (box / "home" / "gitconfig").write_text('[protocol "file"]\n\tallow = always\n')
+
+    def g(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+    up, sub, main = box / "upstream", box / "subrepo", box / "main"
+    for repo in (up, sub):
+        repo.mkdir(parents=True)
+        g("init", "-q", "-b", "main", cwd=repo)
+        (repo / "f").write_text("x")
+        g("add", "f", cwd=repo)
+        g("commit", "-qm", "one", cwd=repo)
+    g("submodule", "add", "-q", str(sub), "sm", cwd=up)
+    g("commit", "-qm", "sm", cwd=up)
+    g("branch", "feat", cwd=up)
+    g("branch", "stale", cwd=up)
+    g("clone", "-q", str(up), str(main), cwd=box)
+    g("branch", "-D", "stale", cwd=up)
+    g("branch", "--track", "tracked", "origin/feat", cwd=main)
+    g("branch", "other", cwd=main)
+    cwd = main
+    if where == "wt":
+        cwd = box / "wt"
+        g("worktree", "add", "-q", "-b", "wtb", str(cwd), cwd=main)
+    return env, main, cwd
+
+
+def _sidefx_state(main: pathlib.Path, cwd: pathlib.Path) -> dict[str, str]:
+    """What a command could have changed, as one string per name."""
+    def text(p: pathlib.Path) -> str:
+        return p.read_text() if p.is_file() else ""
+
+    refs = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname) %(objectname) %(symref)"], cwd=main,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    cfgs = [text(main / ".git" / "config"), text(main / ".git" / "config.worktree")]
+    for extra in sorted((main / ".git" / "worktrees").glob("*/config.worktree")):
+        cfgs.append(text(extra))
+    return {
+        "config": "\n".join(cfgs),
+        "refs": refs + text(main / ".git" / "HEAD"),
+        "index": (main / ".git" / "index").read_bytes().hex() if (main / ".git" / "index").is_file() else "",
+        "tree": text(cwd / "f"),
+        "gitmodules": text(cwd / ".gitmodules"),
+    }
+
+
+def _sidefx_run(cmd: str, setup: str, where: str, tmp: pathlib.Path):
+    """Run *cmd* for real; return (names changed, denied in cwd, the box)."""
+    env, main, cwd = _sidefx_box(tmp / "box", where)
+    box = tmp / "box"
+    real = cmd.replace(_BOX, str(box)).replace(_SUB, str(box / "subrepo"))
+    if setup:
+        subprocess.run(["bash", "-c", setup], cwd=cwd, env=env, check=True, capture_output=True)
+    before = _sidefx_state(main, cwd)
+    subprocess.run(
+        ["bash", "-c", real], cwd=cwd, env=env, capture_output=True, text=True,
+        check=False, timeout=60,
+    )
+    after = _sidefx_state(main, cwd)
+    changed = frozenset(k for k in after if after[k] != before[k])
+    return changed, real, cwd
+
+
+@pytest.mark.parametrize(
+    "cmd,setup,kinds,shared_only", _SIDEFX_REAL,
+    ids=[f"{i:02d}-{c[0][:40].replace(' ', '_')}" for i, c in enumerate(_SIDEFX_REAL)],
+)
+def test_every_sidefx_deny_really_changes_state_and_denies_in_the_shared_tree(
+    cmd, setup, kinds, shared_only, tmp_path,
+):
+    """Each command, run for real in a sandbox primary, changes config (or the ref,
+    index, tree or .gitmodules the table names), and the hook denies the same text
+    from the primary."""
+    changed, real, cwd = _sidefx_run(cmd, setup, "main", tmp_path)
+    assert changed & kinds, f"{real!r} changed {sorted(changed)}, wanted one of {sorted(kinds)}"
+    assert _denied(real, cwd), f"{real!r} was not denied in the shared tree"
+
+
+#: Those that write config the primary reads when run from a linked worktree. The
+#: tree and index writes of a brace verb or a typo verb stay the worktree's own.
+_SIDEFX_WORKTREE_CONFIG = [
+    c for c, _, kinds, shared_only in _SIDEFX_REAL
+    if "config" in kinds and not shared_only
+]
+
+
+@pytest.mark.parametrize(
+    "cmd", _SIDEFX_WORKTREE_CONFIG,
+    ids=[f"{i:02d}-{c[:40].replace(' ', '_')}" for i, c in enumerate(_SIDEFX_WORKTREE_CONFIG)],
+)
+def test_every_sidefx_config_write_reaches_the_primary_from_a_linked_worktree_and_denies(
+    cmd, tmp_path,
+):
+    """The same commands from a LINKED WORKTREE write the common `.git/config`
+    the primary reads, so the hook denies them there too (where the verb scan
+    does not apply). `git branch -c/-M/--delete` and a branch created from a
+    remote-tracking ref are the worktree agent's own branches and are not here."""
+    setup = next(s for c, s, _, _ in _SIDEFX_REAL if c == cmd)
+    changed, real, cwd = _sidefx_run(cmd, setup, "wt", tmp_path)
+    assert "config" in changed, f"{real!r} from a worktree changed {sorted(changed)}, not the config"
+    assert _denied(real, cwd), f"{real!r} was not denied from a linked worktree"
+
+
+@pytest.mark.parametrize("cmd", _SIDEFX_READS, ids=[f"{i:02d}" for i in range(len(_SIDEFX_READS))])
+def test_every_sidefx_read_changes_nothing_and_passes(cmd, tmp_path):
+    changed, real, cwd = _sidefx_run(cmd, "", "main", tmp_path)
+    assert not changed, f"control {real!r} changed {sorted(changed)}"
+    assert not _denied(real, cwd), f"control {real!r} was wrongly denied in the shared tree"
+    changed, real, cwd = _sidefx_run(cmd, "", "wt", tmp_path / "w")
+    assert not changed, f"control {real!r} changed {sorted(changed)} from a worktree"
+    assert not _denied(real, cwd), f"control {real!r} was wrongly denied from a worktree"
+
+
+_SIDEFX_INNER = [
+    "git remote set-url origin /tmp/zz",
+    "git remote add x /tmp/zz",
+    "git branch -u origin/main",
+    "git branch --track nb origin/main",
+    "git submodule init",
+    "git push -u origin main",
+    "git fetch --set-upstream origin main",
+]
+_SIDEFX_WRAPPERS = [
+    "{c}",
+    "cd /tmp && {c}",
+    "true; {c}",
+    "{c} && echo done",
+    "(cd /tmp; {c})",
+    "echo ok\n{c}\necho done",
+    "env FOO=1 {c}",
+    "sudo {c}",
+    "nohup {c}",
+    "time {c}",
+    "xargs {c}",
+    "echo x | xargs {c}",
+    "sh -c '{c}'",
+    'bash -c "{c}"',
+    "eval '{c}'",
+    "ssh h '{c}'",
+    'ssh h "{c}"',
+    "git submodule foreach '{c}'",
+    "git rebase -x '{c}' HEAD~1",
+    "tmux send-keys '{c}' Enter",
+    "env -S'{c}'",
+    "echo 'x' && {c} # c",
+]
+_SIDEFX_SPELLINGS = [
+    "/usr/bin/git remote set-url origin x",
+    "git -C . remote set-url origin x",
+    "git -c core.pager=cat remote add x y",
+    "git -c 'user.name=a b' remote add x y",
+    "git --git-dir=.git remote rm origin",
+    "git --git-dir .git remote rm origin",
+    "git -C '' remote set-url o u",
+    "git remote 'set-url' o u",
+    'git remote "set-url" o u',
+    'git rem"ote" add x y',
+    "git rem'ote' add x y",
+    "git re" + BS + "mote add x y",
+    "git remote set" + BS + "-url o u",
+    "git remote $(echo set-url) o u",
+    "git remote set-url o $URL",
+    'git remote set-url o "$(cat u)"',
+    "git remote set-url ${o:-origin} u",
+    "git remote -v set-url o u",
+    "git remote --verbose rm o",
+    "git remote add -f x y",
+    "git remote add -t b -m m --tags x y",
+    "git remote   set-url   o   u",
+    "git remote\tset-url\to\tu",
+    "git-remote set-url o u",
+    "hub remote add x y",
+    "git branch -u origin/x",
+    "git branch  --set-upstream-to=origin/x",
+    "git branch --set-upstream-to origin/x b",
+    "git branch -uo/x",
+    "git branch -fu o/x",
+    "git branch --unset-upstream",
+    "git branch --unset-upstream b",
+    "git branch --track x o/y",
+    "git branch --track=direct x o/y",
+    "git branch --track=inherit x",
+    "git branch -t x o/y",
+    "git branch -vvt x o/y",
+    "git branch --set-upstream-to=o/x $B",
+    "git branch --set-upstream-to=o/x \"$(git rev-parse --abbrev-ref HEAD)\"",
+    "git -C /tmp/x branch -u o/y",
+    "git b" + BS + "ranch -u o/y",
+    "git submodule init",
+    "git submodule init sm",
+    "git submodule --quiet init",
+    "git submodule -q sync --recursive",
+    "git submodule add https://x/y z",
+    "git submodule deinit -f sm",
+    "git submodule deinit --all",
+    "git submodule set-url sm u",
+    "git submodule set-branch -b b sm",
+    "git submodule absorbgitdirs",
+    "git submodule update --init",
+    "git submodule update --init --recursive",
+    "git submodule update --recursive --init",
+    "git submodule update -f --in",
+    "git submodule 'init'",
+    "git submodule $A",
+    "git remote $A o u",
+    "git branch $(git rev-parse HEAD) -u origin/x",
+    "git branch ${B:-b} --set-upstream-to=origin/x",
+    "git push -u origin main",
+    "git push --set-upstream origin main",
+    "git push --set-up origin main",
+    "git push -fu origin main",
+    "git push origin main -u",
+    "git push origin main --set-upstream",
+    "git fetch --set-upstream origin main",
+    "git fetch origin --set-upstream",
+    "git pull --set-upstream origin main",
+    "git checkout -t origin/x",
+    "git checkout --track origin/x",
+    "git checkout --tra origin/x",
+    "git checkout -b x --track o/y",
+    "git switch -t origin/x",
+    "git switch --track origin/x",
+    "git switch -c x -t o/y",
+    "git switch -c x --track o/y",
+    "git worktree add --track -b x ../w o/y",
+    "git worktree add -b x --track ../w o/y",
+    "git maintenance register",
+    "git maintenance unregister",
+    "git maintenance start",
+    "git maintenance stop",
+    "git lfs install",
+    "git lfs uninstall",
+    "git lfs update",
+    "git lfs migrate import",
+    "git -c help.autocorrect=1 status",
+    "git -c help.autocorrect=immediate status",
+    "git -c help.autocorrect=prompt status",
+    "git -c help.autocorrect status",
+    "git -c help.autocorrect= status",
+    "git -c help.autocorrect=$X status",
+    "git -c 'help.autocorrect=1' status",
+    'git -c "help.autocorrect=1" status',
+    "git -c help.autocorr" + BS + "ect=1 status",
+    "git -c HELP.AUTOCORRECT=1 status",
+    "git -c help.autocorrect=1 -c user.name=x status",
+    "git -c help.autocorrect=0 -c help.autocorrect=1 status",
+    "git --config-env=help.autocorrect=AC status",
+    "git --config-env help.autocorrect=AC status",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=help.autocorrect GIT_CONFIG_VALUE_0=0 git status",
+    "GIT_CONFIG_PARAMETERS=\"'help.autocorrect=1'\" git status",
+    "export GIT_CONFIG_PARAMETERS=\"'user.name=a' 'help.autocorrect=1'\"; git status",
+    "env GIT_CONFIG_PARAMETERS=\"'help.autocorrect=1'\" git status",
+    "git -c help.autocorrect=immediate confg user.name x",
+    "git ch{e..e}ckout -- .",
+    "git ch{e,e}ckout -- .",
+    "git che{c,c}kout -- f",
+    "git re{set,set} --hard",
+    "git con{fig,fig} user.name x",
+    "git con{fig,} user.name x",
+    "git {status,log}",
+    "git {a..b}",
+    "git -C . ch{e..e}ckout -- .",
+    "git -c user.name=x ch{e..e}ckout -- .",
+    "git -c 'user.name=a b' ch{e..e}ckout -- .",
+    "git --git-dir=.git ch{e..e}ckout -- .",
+    "git --git-dir .git ch{e..e}ckout -- .",
+    "git -c a=b -C . ch{e..e}ckout -- .",
+    "/usr/bin/git ch{e..e}ckout -- .",
+    "true && git ch{e..e}ckout -- .",
+    "git foo ch{e..e}ckout -- .",
+    "git ad{d,d} -A",
+    "git c{o,o}mmit -m x",
+    "git pu{sh,sh}",
+    "env X=1 git ch{e..e}ckout -- .",
+    "sh -c 'git ch{e..e}ckout -- .'",
+    "git ch{e..e}ckout -- . # {x}",
+    # a data string a consumer runs, with no quoted word to join: a heredoc body
+    "ssh h <<'EOF'\ngit remote set-url origin /tmp/zz\nEOF",
+    "ssh h <<'EOF'\ngit branch -u origin/x\nEOF",
+    "ssh h <<'EOF'\ngit ch{e..e}ckout -- .\nEOF",
+]
+
+
+def _sidefx_cmds() -> list[str]:
+    out = []
+    for w in _SIDEFX_WRAPPERS:
+        for c in _SIDEFX_INNER:
+            out.append(w.replace("{c}", c))
+    return out + _SIDEFX_SPELLINGS + [c for c, _, _, _ in _SIDEFX_REAL if not c.startswith("AC=")]
+
+
+def test_the_sidefx_deny_shapes_are_denied_in_the_shared_tree(shared_repo):
+    cmds = [c.replace(_BOX, "/tmp/box").replace(_SUB, "/tmp/sub") for c in _sidefx_cmds()]
+    leaked = _not_denied(cmds, shared_repo)
+    assert len(cmds) >= 200, f"the table shrank to {len(cmds)}"
+    assert not leaked, f"{len(leaked)} command(s) were NOT denied in the shared tree: {leaked[:12]!r}"
+
+
+_SIDEFX_ALLOWED = [
+    # reads of the same verbs
+    "git remote",
+    "git remote -v",
+    "git remote --verbose",
+    "git remote show origin",
+    "git remote show -n origin",
+    "git remote get-url origin",
+    "git remote get-url --all origin",
+    "git remote update",
+    "git remote -v update",
+    "git remote | head -3",
+    "git remote -v | grep qwent",
+    "git remote get-url origin; gh repo view",
+    "git branch",
+    "git branch -a",
+    "git branch -r",
+    "git branch -v",
+    "git branch -vv",
+    "git branch -avv",
+    "git branch --list",
+    "git branch --list 'feature/*'",
+    "git branch -l 'feature/*'",
+    "git branch -a --list 'feature/*' 'fix/*'",
+    "git branch --show-current",
+    "git branch --contains HEAD",
+    "git branch --contains abc123 -a",
+    "git branch --no-contains abc123",
+    "git branch --merged",
+    "git branch --merged main",
+    "git branch --no-merged main",
+    "git branch -a --merged origin/main",
+    "git branch --points-at HEAD",
+    "git branch --sort=-committerdate",
+    "git branch --sort -committerdate",
+    "git branch --sort=committerdate --format='%(refname:short)'",
+    "git branch --format '%(refname:short)' --sort -committerdate",
+    "git branch --column",
+    "git branch --no-color",
+    "git branch --abbrev=8 -v",
+    "git branch --no-track",
+    "git branch newname",
+    "git branch --no-track newname origin/x",
+    "git -C /tmp/x branch -vv",
+    "git branch -vv | sort -u",
+    "git branch -a | sort -u | head",
+    "git branch --show-current | tr -d '\\n'",
+    "git branch -vv | grep -t foo",
+    "git branch -vv 2>&1 | grep -u foo",
+    "git branch -vv; sort -u f",
+    "git branch -vv && ls -t",
+    "git status && ls -t",
+    "git submodule",
+    "git submodule status",
+    "git submodule status --recursive",
+    "git submodule summary",
+    "git submodule foreach 'pwd'",
+    "git submodule foreach --recursive 'git status --short'",
+    "git submodule update",
+    "git submodule update --recursive",
+    "git submodule update --remote",
+    "git submodule --quiet status",
+    "git config --get submodule.sm.url",
+    "git ls-files --stage sm",
+    # reads that name the write verbs
+    "git log --grep='remote set-url' --oneline",
+    "git log --grep=\"branch -u\" --oneline",
+    "git log -S'submodule init' --oneline",
+    "git log -S 'remote set-url' --oneline",
+    "git grep -n 'remote set-url' -- docs",
+    "git grep -n 'branch --set-upstream-to' -- docs",
+    "grep -rn 'git remote set-url' docs/",
+    "grep -rn \"push -u\" scripts/",
+    "echo 'git remote set-url x y' > /dev/null",
+    "echo \"git branch -u origin/main\" | head -1",
+    "echo 'run git submodule init first'",
+    "cat <<'EOF' > /dev/null\ngit remote set-url origin x\ngit branch -u origin/main\nEOF",
+    "git show HEAD:docs/remote.md",
+    "ls -t; sort -u x; head -u",
+    "cd ~/git/nexus-wt/x && ls",
+    "git diff --stat",
+    "git status --short",
+    # help.autocorrect that cannot run a typo
+    "git -c help.autocorrect=0 status",
+    "git -c help.autocorrect=never status",
+    "git -c help.autocorrect=false status",
+    "git -c help.autocorrect=off status",
+    "git -c help.autocorrect=no status",
+    "git -c help.autocorrect=show status",
+    "git -c HELP.AutoCorrect=NEVER status",
+    "git -c 'help.autocorrect=never' status",
+    "git -c help.autocorrect=never -c user.name=x status",
+    "echo help.autocorrect=1",
+    "git config --get help.autocorrect",
+    "git log --grep='help.autocorrect' --oneline",
+    "grep -rn 'help.autocorrect' docs/",
+    "git -c help.autocorrectx=1 status",
+    "git -c core.help.autocorrect=1 status",
+    # a brace that is not in the subcommand word
+    "git log HEAD~{1,2}",
+    "git log --oneline HEAD~{0,1} HEAD~{2,3}",
+    "git diff {a,b}.txt",
+    "git diff --stat -- {src,tests}",
+    "git status --short {src,tests}",
+    "git show HEAD:{a,b}",
+    "git log --format={a,b}",
+    "git -C {a,b} status",
+    "git branch -dr hellmini/x",
+    "git branch -f z0o2p-pdf-final 43726e8891410f307cb4bf3e93f6ba989a4549a2",
+    "git branch -dr hellmini/x qwent/y",
+    'git -C "$R" rev-parse v1^{tree}',
+    "git rev-parse HEAD^{tree} v1^{tag}",
+    # the expansion in `-C "$R"` is deleted in the zero-expansion form, which would
+    # make `-C` take `log` as its value and read the brace word as the subcommand
+    'git -C "$R" log HEAD~{1,2}',
+    "git -C $R diff {a,b}.txt",
+    'git -C "$(git rev-parse --show-toplevel)" log HEAD~{0,1}',
+    "git -C $R cat-file -e HEAD^{tree} 2>/dev/null",
+    "git -C $R -c core.pager=cat rev-parse v1^{tree}",
+    "{ git --version; }",
+    "git --version && { git status; }",
+    "python3 -c 'import subprocess; subprocess.run([\"git\",\"show\",f\"{ref}:{f}\"])'",
+    "git log --pretty='%h {%s}' -1",
+    "git log --oneline | awk '{print $1}'",
+    "git log -- a{b}c",
+    "git log -- '{}'",
+    "git log -- 'a{b}c'",
+    "git status ${X}",
+    "git ${X} --version",
+    "git log ${X:-HEAD}",
+    "git log -1 --format=%H; echo {a,b}",
+    "git status; echo {a,b} git",
+    "echo {a,b}",
+    "awk '{print $1}' f | head -1",
+    "git log --pretty=format:'%h {%s}'",
+    "git log | awk '{print $1}'",
+]
+
+
+def test_the_sidefx_allow_shapes_are_not_denied_in_the_shared_tree(shared_repo):
+    blocked = _denied_among(_SIDEFX_ALLOWED, shared_repo)
+    assert not blocked, f"command(s) wrongly denied in the shared tree: {blocked!r}"
+
+
+def test_the_sidefx_allow_shapes_are_not_denied_in_a_linked_worktree(linked_worktree):
+    blocked = _denied_among(_SIDEFX_ALLOWED, linked_worktree)
+    assert not blocked, f"command(s) wrongly denied in a linked worktree: {blocked!r}"
+
+
+#: A linked worktree owns its branches: these deny in the shared tree only, as
+#: `branch -d/-D/-m` always have, and pass there.
+_SIDEFX_SHARED_ONLY = [
+    "git branch -c a b",
+    "git branch -C a b",
+    "git branch --copy a b",
+    "git branch --cop a b",
+    "git branch -M a b",
+    "git branch --move a b",
+    "git branch --delete a",
+    "git branch --del a",
+    "git branch -d a",
+    "git branch -D a",
+    "git branch -m a b",
+    "git branch --edit-description",
+]
+
+
+def test_branch_ref_and_config_writers_of_the_agents_own_branches_pass_in_a_worktree(
+    shared_repo, linked_worktree,
+):
+    assert _not_denied(_SIDEFX_SHARED_ONLY, shared_repo) == []
+    assert _denied_among(_SIDEFX_SHARED_ONLY, linked_worktree) == []
+
+
+def test_sparse_checkout_is_left_out_and_still_denied_in_the_shared_tree_by_the_verb_scan(
+    shared_repo, linked_worktree,
+):
+    """nexus-k66o5, measured and left out: `git sparse-checkout init|set|disable`
+    write the common config from a linked worktree, but all 10 transcript commands
+    that ran it were on scratch clones (`git -C <scratch>/nexus sparse-checkout
+    set`), which the text cannot tell from the primary. The shared tree still
+    denies it through the verb scan (the word `checkout`). Pinned, so adding it
+    later is a deliberate change."""
+    cmds = ["git sparse-checkout set a", "git sparse-checkout init", "git sparse-checkout disable"]
+    assert _not_denied(cmds, shared_repo) == []
+    assert _denied_among(cmds, linked_worktree) == []
+
+
+def test_branch_created_from_a_remote_ref_is_a_documented_limit(shared_repo, linked_worktree):
+    """nexus-k66o5, measured and left out: `git branch <name> origin/x` tracks by
+    default (`branch.autoSetupMerge`), as `git switch -c` does from a worktree. A
+    rule for it denied `git branch -f <name> <sha>`, a real subagent command that
+    writes no config, so it is not covered. Pinned, so adding it is deliberate."""
+    cmds = ["git branch newb origin/feat", "git branch newb origin/feat --quiet", "git branch -f x abc123"]
+    assert _denied_among(cmds, shared_repo) == []
+    assert _denied_among(cmds, linked_worktree) == []
+
+
+def test_a_verb_word_after_stash_lfs_subtree_or_notes_is_that_commands_own(linked_worktree):
+    """`git stash push -u` keeps untracked files (45 of the first 107 worktree
+    denials in the transcript replay were it); `git lfs pull`, `git subtree push`
+    and `git notes ...` are not git's `pull`/`push` either. In the shared tree the
+    verb scan denies `stash` and `push` regardless; this is the worktree."""
+    cmds = [
+        "git stash push -u -m wip",
+        "git stash push --include-untracked -m wip",
+        "git stash -u",
+        "git stash branch nb",
+        "git stash push -u -m 'x' -- f && git stash list",
+        "git lfs pull",
+        "git lfs fetch --all",
+        "git subtree pull --prefix=x origin main --squash",
+        "git notes --ref x push",
+    ]
+    assert _denied_among(cmds, linked_worktree) == []
+    # ... and the real thing right after one still denies
+    assert _not_denied([
+        "git stash push -u -m wip; git push -u origin x",
+        "git stash list && git push -u origin x",
+        "git stash push -u && git branch -u origin/x",
+    ], linked_worktree) == []
+
+
+def test_the_sidefx_deny_shapes_deny_in_a_linked_worktree_except_the_agents_own_branches(
+    linked_worktree,
+):
+    own = {c for c, _, _, shared_only in _SIDEFX_REAL if shared_only}
+    cmds = [
+        c.replace(_BOX, "/tmp/box").replace(_SUB, "/tmp/sub") for c in _sidefx_cmds() if c not in own
+    ]
+    assert len(cmds) >= 200, f"the table shrank to {len(cmds)}"
+    leaked = _not_denied(cmds, linked_worktree)
+    assert not leaked, f"{len(leaked)} command(s) were NOT denied from a linked worktree: {leaked[:12]!r}"
+
+
+def test_a_brace_in_the_subcommand_denies_even_where_the_verb_would_be_the_worktrees_own(
+    linked_worktree,
+):
+    """`git con{fig,} user.name x` is a config write the verb scan never saw (the
+    documented limit before this bead), and nothing tells a brace-built `config`
+    from a brace-built `checkout`, so a brace in the subcommand word denies from
+    a worktree too."""
+    for cmd in ("git con{fig,fig} user.name x", "git ch{e..e}ckout -- f", "git {status,log}"):
+        assert _denied(cmd, linked_worktree), cmd
+
+
+def test_the_sidefx_deny_message_names_the_family_and_what_stays_allowed(shared_repo):
+    reason = _verdict("git remote set-url origin /tmp/zz", shared_repo)["permissionDecisionReason"]
+    assert "remote set-url" in reason, reason
+    assert "nexus-k66o5" in reason, reason
+    assert "git remote -v" in reason, reason
+    assert "help.autocorrect" in reason, reason
+    plain = _verdict("git commit -m x", shared_repo)["permissionDecisionReason"]
+    assert "nexus-k66o5" not in plain, "the ordinary verb deny must not carry the note"
+    assert "`git config` writes are denied" not in reason, "a remote verb is not a `git config` write"
+
+
+def test_the_sidefx_deny_in_a_worktree_says_it_reaches_the_primary(linked_worktree):
+    reason = _verdict("git remote set-url origin /tmp/zz", linked_worktree)["permissionDecisionReason"]
+    assert "linked worktree" in reason and "nexus-k66o5" in reason, reason
+    assert "git config --worktree" not in reason, "the worktree note is about config keys, not remotes"
+
+
+@pytest.mark.parametrize("cmd,verb", [
+    ("git push -u origin main", "push"),
+    ("git push --set-upstream origin main", "push"),
+    ("git checkout -t origin/x", "checkout"),
+    ("git checkout --track origin/x", "checkout"),
+    ("git switch -t origin/x", "switch"),
+    ("git switch --track origin/x", "switch"),
+    ("git remote add x y", "add"),
+    ("git remote rm x", "rm"),
+    ("git remote prune origin", "prune"),
+    ("git submodule add u p", "add"),
+])
+def test_the_verbs_the_verb_scan_already_denied_in_the_shared_tree_stay_denied_by_it(
+    cmd, verb, shared_repo,
+):
+    """nexus-k66o5 (a): these write config by side effect and the shared-tree verb
+    scan already denied them through the verb word (`push`, `checkout`, `add`,
+    `rm`, `prune`). Pinned by the verb the deny names, so a change to the new rule
+    cannot silently be what keeps them denied; the worktree cases are the new
+    rule's."""
+    reason = _verdict(cmd, shared_repo)["permissionDecisionReason"]
+    assert f"git write verbs ({verb})" in reason, reason
+
+
+def test_help_autocorrect_values_that_cannot_run_a_typo_pass_and_the_rest_deny(shared_repo):
+    safe = ["0", "never", "false", "off", "no", "show", "NEVER", "False"]
+    risky = ["1", "5", "10", "immediate", "prompt", "true", "yes", "on", "-1", "", "Immediate", "$X"]
+    assert _denied_among([f"git -c help.autocorrect={v} status" for v in safe], shared_repo) == []
+    assert _not_denied([f"git -c help.autocorrect={v} status" for v in risky], shared_repo) == []
+
+
+def test_help_autocorrect_set_to_a_value_git_runs_really_runs_the_typo_and_a_safe_one_does_not(tmp_path):
+    """The premise, measured: with `immediate` git runs `confg` as `config` and
+    writes; with `0`, `never`, `false` and `show` it only prints a hint."""
+    for i, (value, wrote) in enumerate((
+        ("immediate", True), ("1", True), ("0", False), ("never", False),
+        ("false", False), ("show", False),
+    )):
+        box = tmp_path / f"v{i}"
+        env, main, _ = _sidefx_box(box, "main")
+        before = _sidefx_state(main, main)
+        subprocess.run(
+            ["git", "-c", f"help.autocorrect={value}", "confg", "user.name", "x"],
+            cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30,
+        )
+        changed = _sidefx_state(main, main) != before
+        assert changed == wrote, f"help.autocorrect={value}: wrote={changed}"
+        assert _denied(f"git -c help.autocorrect={value} confg user.name x", main) == wrote, value
+
+
+# ---------------------------------------------------------------------------
 # Fail-open at the hook level, and scan cost.
 # ---------------------------------------------------------------------------
 
@@ -2689,6 +3461,28 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     ('ssh h "git ' + (BS + BS) * 15_000 + ' x"', False),
     ('ssh h "' + ("git " + BS + BS + "q ") * 5_000 + '"', False),
     ('git log --grep="' + (BS + '"git' + BS + BS) * 8_000 + '"', False),
+    # nexus-k66o5: the side-effect walk reads each simple command's words once,
+    # evaluates at most a bounded number of verb words per command (past the bound
+    # it denies), and splits segments with a class that cannot backtrack.
+    ("git " + "remote " * 6_000 + "x", True),
+    ("git remote " + "-v " * 12_000, False),
+    ("git remote -v; " * 2_000, False),
+    ("git status; " * 3_000 + "git remote set-url o u", True),
+    ("git branch " + "-a " * 12_000, False),
+    ("git branch -a " + "x " * 12_000, False),
+    ("git branch " + "x " * 12_000, False),
+    ("git branch " + "--sort x " * 5_000, False),
+    ("git submodule " + "-q " * 12_000 + "init", True),
+    ("git submodule update " + "--recursive " * 5_000, False),
+    ("git fetch " + "--tags " * 6_000, False),
+    ("ssh h " + "'git remote -v' " * 2_000, False),
+    ("ssh h 'git remote set-url o u" + " y" * 12_000 + "'", True),
+    ("git " + "-c help.autocorrect=0 " * 1_500 + "status", False),
+    ("git " + "-c help.autocorrect=0 " * 1_500 + "-c help.autocorrect=1 status", True),
+    ("GIT_CONFIG_PARAMETERS=a " * 2_000 + "git status", False),
+    ("git log " + "x{a,b} " * 8_000, False),
+    ("git " + "-C {a,b} " * 5_000 + "log", False),
+    ("git " + "-C x " * 6_000 + "ch{e..e}ckout -- f", True),
 ]
 
 
