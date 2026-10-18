@@ -201,9 +201,11 @@ class GraphHopParityTest {
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                 CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                 CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .select(ctx.select(DSL.inline(TENANT_A), DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+            .select(ctx.select(DSL.val(TENANT_A, CATALOG_DOCUMENTS.TENANT_ID),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)), DSL.inline("exauthor"),
-                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"), DSL.inline(COLL_EXPLAIN))
+                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"),
+                    DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
                 .from(series))
             .execute();
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
@@ -221,19 +223,21 @@ class GraphHopParityTest {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
                 CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .select(ctx.select(DSL.inline(TENANT_A), DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
+            .select(ctx.select(DSL.val(TENANT_A, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
+                    DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.inline(0),
                     DSL.function("decode", SQLDataType.BLOB,
                         DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
                         DSL.inline("hex")),
-                    DSL.inline(COLL_EXPLAIN),
-                    DSL.inline(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN)))
+                    DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                    DSL.val(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN),
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
                 .from(series))
             .execute();
         // edges exseed --cites--> ex1..exN
         ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
                 CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
-            .select(ctx.select(DSL.inline(TENANT_A), DSL.inline("exseed"),
+            .select(ctx.select(DSL.val(TENANT_A, CATALOG_LINKS.TENANT_ID), DSL.inline("exseed"),
                     DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.inline("cites"), DSL.inline("test"))
                 .from(series))

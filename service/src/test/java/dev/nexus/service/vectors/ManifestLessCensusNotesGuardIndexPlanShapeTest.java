@@ -201,12 +201,14 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
         seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                 CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS,
                 CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.METADATA)
-            .select(seed.select(DSL.inline(TENANT), DSL.concat(DSL.inline(tumblerPrefix), i),
-                    DSL.concat(DSL.inline(titlePrefix), i), DSL.inline("prose"), DSL.inline("knowledge"),
-                    DSL.inline(collection),
+            .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENTS.TENANT_ID),
+                    DSL.concat(DSL.val(tumblerPrefix, CATALOG_DOCUMENTS.TUMBLER), i),
+                    DSL.concat(DSL.val(titlePrefix, CATALOG_DOCUMENTS.TITLE), i), DSL.inline("prose"),
+                    DSL.inline("knowledge"),
+                    DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
                     DSL.jsonbObject(DSL.key("doc_id").value(DSL.concat(
-                        DSL.md5(DSL.concat(DSL.inline(tag + "-a-"), i)),
-                        DSL.md5(DSL.concat(DSL.inline(tag + "-b-"), i))))))
+                        DSL.md5(DSL.concat(DSL.val(tag + "-a-", CATALOG_DOCUMENTS.TITLE), i)),
+                        DSL.md5(DSL.concat(DSL.val(tag + "-b-", CATALOG_DOCUMENTS.TITLE), i))))))
                 .from(series))
             .execute();
     }

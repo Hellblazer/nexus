@@ -1246,7 +1246,9 @@ class CatalogEngineDefects70Test {
     //
     // The Python coverage (tests/test_catalog_reconcile.py, 15 tests) died with
     // the local catalog because every one of them seeded DAMAGED catalog state
-    // via raw SQL with caller-pinned tumblers, and the service substrate exposes
+    // with caller-pinned tumblers written straight into the tables (the Java
+    // fixtures below write the same damage through the generated jOOQ tables),
+    // and the service substrate exposes
     // no public API that can create that damage — by design: writeManifestRows,
     // appendManifestChunks and purgeManifest all fold chunk_count, so no public
     // call can produce the count/manifest DISAGREEMENT the verb exists to repair.

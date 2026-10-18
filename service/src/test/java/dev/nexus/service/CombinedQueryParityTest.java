@@ -327,8 +327,10 @@ class CombinedQueryParityTest {
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                 TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                 TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-            .select(ctx.select(DSL.inline(TENANT_A), paddedChash(g), DSL.inline(topicId),
-                    DSL.inline(COLL_EXPLAIN), DSL.val(SEED_TS), DSL.inline(modelOf(su, TENANT_A, COLL_EXPLAIN)))
+            .select(ctx.select(DSL.val(TENANT_A, TOPIC_ASSIGNMENTS.TENANT_ID), paddedChash(g),
+                    DSL.val(topicId, TOPIC_ASSIGNMENTS.TOPIC_ID),
+                    DSL.val(COLL_EXPLAIN, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION), DSL.val(SEED_TS),
+                    DSL.val(modelOf(su, TENANT_A, COLL_EXPLAIN), TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                 .from(series))
             .execute();
     }
@@ -441,12 +443,14 @@ class CombinedQueryParityTest {
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.PROPOSED_METHOD, DOCUMENT_ASPECTS.CONFIDENCE,
                 DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                 DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-            .select(ctx.select(DSL.inline(TENANT_A), DSL.inline(COLL_ASPECT_EXPLAIN),
+            .select(ctx.select(DSL.val(TENANT_A, DOCUMENT_ASPECTS.TENANT_ID),
+                    DSL.val(COLL_ASPECT_EXPLAIN, DOCUMENT_ASPECTS.COLLECTION),
                     DSL.concat(DSL.inline("asx"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.inline("Uses gradient descent"), DSL.inline(0.9), DSL.val(SEED_TS),
                     DSL.inline("cqp-test-model"), DSL.inline("cqp-test-extractor"),
                     DSL.concat(DSL.inline("asx"), DSL.cast(g, SQLDataType.VARCHAR)),
-                    DSL.concat(DSL.inline("cqp://" + COLL_ASPECT_EXPLAIN + "/asx"), DSL.cast(g, SQLDataType.VARCHAR)))
+                    DSL.concat(DSL.val("cqp://" + COLL_ASPECT_EXPLAIN + "/asx", DOCUMENT_ASPECTS.SOURCE_URI),
+                        DSL.cast(g, SQLDataType.VARCHAR)))
                 .from(series))
             .execute();
     }
@@ -1517,9 +1521,12 @@ class CombinedQueryParityTest {
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                 CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                 CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .select(ctx.select(DSL.inline(tenantId), DSL.concat(DSL.inline(prefix), DSL.cast(g, SQLDataType.VARCHAR)),
-                    DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)), DSL.inline(author),
-                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"), DSL.inline(collection))
+            .select(ctx.select(DSL.val(tenantId, CATALOG_DOCUMENTS.TENANT_ID),
+                    DSL.concat(DSL.val(prefix, CATALOG_DOCUMENTS.TUMBLER), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.val(author, CATALOG_DOCUMENTS.AUTHOR),
+                    DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"),
+                    DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
                 .from(series))
             .execute();
     }
@@ -1531,8 +1538,10 @@ class CombinedQueryParityTest {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
                 CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .select(ctx.select(DSL.inline(tenantId), DSL.concat(DSL.inline(prefix), DSL.cast(g, SQLDataType.VARCHAR)),
-                    DSL.inline(0), paddedChash(chashN), DSL.inline(collection), DSL.inline(model))
+            .select(ctx.select(DSL.val(tenantId, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
+                    DSL.concat(DSL.val(prefix, CATALOG_DOCUMENT_CHUNKS.DOC_ID), DSL.cast(g, SQLDataType.VARCHAR)),
+                    DSL.inline(0), paddedChash(chashN), DSL.val(collection, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                    DSL.val(model, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
                 .from(series))
             .execute();
     }

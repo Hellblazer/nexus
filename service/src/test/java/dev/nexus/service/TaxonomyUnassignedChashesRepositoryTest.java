@@ -169,7 +169,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
         // route's purpose -- the own and cross passes are independent (bd
         // comment, nexus-iygza). assignFromChashes always runs BOTH passes in
         // one call, so this test seeds the cross ('projection') row directly
-        // (raw INSERT, same idiom TaxonomyAssignFromChashesRepositoryTest's
+        // (a direct INSERT onto the generated topic_assignments table, same idiom
+        // TaxonomyAssignFromChashesRepositoryTest's
         // crossPass_onConflict_greatestSimilarityWins_bothDirections uses) to
         // isolate the scenario: col carries an own centroid of its own
         // (has_taxonomy=true) that c1 was simply never run against.
@@ -355,16 +356,20 @@ class TaxonomyUnassignedChashesRepositoryTest {
                     CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                     CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
                     CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .select(seed.select(DSL.inline(TENANT_A), DSL.inline("unassigned-scale-doc"), i, indexChash(i), i,
-                        DSL.inline(col), DSL.inline(MODEL)).from(series))
+                .select(seed.select(DSL.val(TENANT_A, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
+                        DSL.inline("unassigned-scale-doc"), i, indexChash(i), i,
+                        DSL.val(col, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                        DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)).from(series))
                 .execute();
 
             // Own-collection assignments for every row EXCEPT the 5 scattered gaps.
             seed.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .select(seed.select(DSL.inline(TENANT_A), indexChash(i), DSL.inline(topicId),
-                        DSL.inline("centroid"), DSL.inline(col), DSL.inline(MODEL))
+                .select(seed.select(DSL.val(TENANT_A, TOPIC_ASSIGNMENTS.TENANT_ID), indexChash(i),
+                        DSL.val(topicId, TOPIC_ASSIGNMENTS.TOPIC_ID),
+                        DSL.inline("centroid"), DSL.val(col, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
+                        DSL.val(MODEL, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                     .from(series)
                     .where(i.notIn(java.util.Arrays.stream(unassignedIdx).boxed().toList())))
                 .execute();

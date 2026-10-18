@@ -17,9 +17,13 @@ import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -63,6 +67,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class Hygiene001NotNullMigrationRlsTest {
 
     private static final String TARGET_CHANGESET_ID = "hygiene-001-1";
+    private static final OffsetDateTime LEGACY_EXTRACTED_AT = OffsetDateTime.parse("2025-01-01T00:00:00Z");
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT_1 = "hygiene001-rls-tenant-1";
     private static final String TENANT_2 = "hygiene001-rls-tenant-2";
@@ -244,7 +249,7 @@ class Hygiene001NotNullMigrationRlsTest {
                     }
 
                     // NOT NULL genuinely took effect -- not merely "no NULL rows remain
-                    // right now". A raw INSERT with doc_id IS NULL must be rejected.
+                    // right now". An INSERT with doc_id IS NULL must be rejected.
                     assertThatThrownBy(() -> DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
                         .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT_1)
                         .set(DOCUMENT_ASPECTS.COLLECTION, "post-migration-coll")
@@ -296,31 +301,40 @@ class Hygiene001NotNullMigrationRlsTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + tenant + "', '" + collection + "')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + tenant + "', '" + tenant + "-doc-1', 'Doc', '" + collection + "')");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .execute();
 
             // Orphan: doc_id IS NULL, no catalog document attributes it (the
             // 554-row chroma:// class the changeset's header describes) --
             // must be DELETED.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects "
-                + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                + "   extractor_name, source_uri, doc_id) "
-                + "VALUES ('" + tenant + "', '" + collection + "', 'orphan.md', "
-                + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', 'legacy-extractor', "
-                + "'chroma://" + collection + "/orphan.md', NULL)");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
+                .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "orphan.md")
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, LEGACY_EXTRACTED_AT)
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "legacy-model")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "legacy-extractor")
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, "chroma://" + collection + "/orphan.md")
+                .setNull(DOCUMENT_ASPECTS.DOC_ID)
+                .execute();
 
             // Legit: doc_id already attributes to a real catalog document,
             // source_uri IS NULL (the straggler class) -- must SURVIVE with
             // doc_id unchanged and source_uri backfilled to ''.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects "
-                + "  (tenant_id, collection, source_path, extracted_at, model_version, "
-                + "   extractor_name, source_uri, doc_id) "
-                + "VALUES ('" + tenant + "', '" + collection + "', 'legit.md', "
-                + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', 'legacy-extractor', "
-                + "NULL, '" + tenant + "-doc-1')");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
+                .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "legit.md")
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, LEGACY_EXTRACTED_AT)
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "legacy-model")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "legacy-extractor")
+                .setNull(DOCUMENT_ASPECTS.SOURCE_URI)
+                .set(DOCUMENT_ASPECTS.DOC_ID, tenant + "-doc-1")
+                .execute();
         }
     }
 
@@ -362,10 +376,16 @@ class Hygiene001NotNullMigrationRlsTest {
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
             + "VALUES ('" + tenant + "', '" + collection + "', '" + legacyChash + "', "
             + "'legacy un-rekeyed chunk text', ('[" + "0,".repeat(383) + "0]')::vector)");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', '" + tenant + "-doc-1', 0, '" + legacyChash + "', '"
-            + collection + "')");
+        // The 16 ASCII characters become 16 raw bytes, the same value the bytea
+        // escape-format literal produced. chunk_index stays unset: a typed insert
+        // emits only the columns set.
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tenant + "-doc-1")
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, legacyChash.getBytes(StandardCharsets.US_ASCII))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .execute();
     }
 
     /**
@@ -384,10 +404,13 @@ class Hygiene001NotNullMigrationRlsTest {
      *       {@code now()} -- proving the fallback arm, not just the MIN arm.</li>
      * </ul>
      *
-     * {@code indexed_at} is TEXT (catalog-001-baseline.xml), so the two seeded
-     * values are ISO-8601 strings that also sort correctly LEXICOGRAPHICALLY as
-     * chronological order (same format/width, differing only in the month
-     * digits) -- matching what {@code min(d.indexed_at)} actually computes.
+     * {@code indexed_at} is already timestamptz at this walk point (catalog-031
+     * precedes hygiene-001 in the master changelog), so the two seeded values are
+     * real instants and {@code min(d.indexed_at)} is a chronological minimum.
+     *
+     * <p>The catalog_collections rows stay raw SQL: that table is outside the
+     * shape cbo4a batch 12 converted (catalog_documents, catalog_document_chunks,
+     * catalog_owners, catalog_links, topics, topic_assignments, document_aspects).
      */
     private static void seedCollectionCreatedAtScenario(PostgreSQLContainer<?> pg, String tenant)
             throws Exception {
@@ -398,16 +421,20 @@ class Hygiene001NotNullMigrationRlsTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + tenant + "', '" + collA + "')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "  (tenant_id, tumbler, title, physical_collection, indexed_at) "
-                + "VALUES ('" + tenant + "', '" + tenant + "-created-at-doc-1', 'Doc1', '"
-                + collA + "', '2026-01-01T00:00:00+00:00')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents "
-                + "  (tenant_id, tumbler, title, physical_collection, indexed_at) "
-                + "VALUES ('" + tenant + "', '" + tenant + "-created-at-doc-2', 'Doc2', '"
-                + collA + "', '2026-06-01T00:00:00+00:00')");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-created-at-doc-1")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc1")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collA)
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+                .execute();
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, tenant + "-created-at-doc-2")
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc2")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collA)
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2026-06-01T00:00:00Z"))
+                .execute();
 
             String collB = tenant + "__created-at-no-docs__v1";
             su.createStatement().execute(

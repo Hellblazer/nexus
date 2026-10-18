@@ -12,7 +12,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.postgresql.util.PSQLException;
+import org.jooq.exception.DataAccessException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
@@ -325,9 +325,9 @@ class ManifestVerifyTest {
             insertManifestRow(su, TENANT, docId, 0, chashBackfilled, COLLECTION);
             insertChunk1024(su, TENANT, COLLECTION, chashBackfilled);
 
-            PSQLException ex = org.junit.jupiter.api.Assertions.assertThrows(PSQLException.class, () ->
+            DataAccessException ex = org.junit.jupiter.api.Assertions.assertThrows(DataAccessException.class, () ->
                 insertManifestRowNullCollection(su, TENANT, docId, 1, chashPending));
-            assertThat(ex.getSQLState())
+            assertThat(ex.sqlState())
                 .as("the state is unrepresentable -- assert the not-null-violation SQLSTATE "
                     + "directly, not merely a row count of 0")
                 .isEqualTo("23502");

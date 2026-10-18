@@ -13,6 +13,7 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -23,7 +24,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Comparator;
 import java.util.stream.Stream;
@@ -168,8 +168,8 @@ class Taxonomy014TenantFkRepointTest {
             }).as("post-repoint schema: a cross-tenant parent_id reference must be REJECTED "
                 + "-- fk_topics_parent_tenant is tenant-scoped (tenant_id, parent_id) -> "
                 + "(tenant_id, id)")
-                .isInstanceOf(SQLException.class)
-                .satisfies(t -> assertThat(((SQLException) t).getSQLState()).isEqualTo("23503"));
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(t -> assertThat(((DataAccessException) t).sqlState()).isEqualTo("23503"));
         } finally {
             pg.stop();
             deleteRecursively(preRepointRoot);
