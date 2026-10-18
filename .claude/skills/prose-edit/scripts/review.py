@@ -520,7 +520,8 @@ def change_note(old: str, new: str) -> str:
 def _anchor(kind: str, n: object) -> str:
     """An explicit HTML anchor for the index links: `id` for a browser, `name` for older HTML readers. Both
     render as nothing. Typora's bundled Markdown Reference documents only heading targets for internal links,
-    so a jump to this anchor in Typora's rendered view is unverified (nexus-ger02.29)."""
+    but a hand check in Typora's rendered view (nexus-ger02.29, 2026-10-18) jumped to this anchor for an edit,
+    an edit inside Markdown link text, an unplaced proposal, a paragraph note and a query."""
     key = f"{kind.lower()}{n}"
     return f'<a id="{key}" name="{key}"></a>'
 
