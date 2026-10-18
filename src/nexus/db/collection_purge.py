@@ -81,9 +81,9 @@ def purge_collection_cascade(
     """Delete T3 collection *name* and cascade-purge all derived state.
 
     ``db`` is a ``T3Database`` (or any object exposing
-    ``delete_collection(name)``). The T3 delete tolerates an already-absent
-    collection (``t3_absent=True``) and still runs the cascade so a prior
-    half-delete is cleaned up.
+    ``delete_collection(name)``). The engine answers an already-absent
+    collection with zero counts, so the cascade still runs and a prior
+    half-delete (or an unconfirmed one that committed) is cleaned up.
 
     The engine deletes the origin's rows in its ``quarantine-`` siblings with
     it (audited, nexus-wbfpw.71). ``keep_quarantine=True`` asks it not to: for

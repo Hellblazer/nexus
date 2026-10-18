@@ -1157,8 +1157,9 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"reindex of '{name}' stopped: the delete is unconfirmed (the service cascade failed), so "
             f"the collection may or may not have been deleted. Run `nx collection info {name}`: if it "
             f"still lists chunks, re-run `nx collection reindex {name}`; if it reports not found, the "
-            f"delete committed and the collection must be re-indexed from its original sources "
-            f"(`nx index repo` for code, the md or pdf index verbs for documents)."
+            f"delete committed: re-index from the original sources (`nx index repo` for code, "
+            f"`nx index md` or `nx index pdf` for documents), and `nx collection delete {name}` "
+            f"then clears any pipeline rows the unconfirmed delete left."
         )
 
     # 3b. Re-register the catalog_collections registry row the cascade just

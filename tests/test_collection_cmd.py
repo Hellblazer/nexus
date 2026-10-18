@@ -791,6 +791,7 @@ def test_reindex_stops_when_the_service_did_not_confirm_the_delete(
     assert "nx collection info knowledge__test" in result.output
     assert "nx collection reindex knowledge__test" in result.output
     assert "reports not found" in result.output and "original sources" in result.output
+    assert "nx index md" in result.output and "nx collection delete knowledge__test" in result.output
     assert "service deleteCollection failed" in result.output
     index_md.assert_not_called()
     register.assert_not_called()
