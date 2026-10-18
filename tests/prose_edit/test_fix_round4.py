@@ -36,7 +36,7 @@ from tests.prose_edit.test_acceptance_tools import (
 )
 from tests.prose_edit.test_brief import NAMES_A_REPAIR, SKILL, brief_ok, run_brief, seed
 from tests.prose_edit.test_fix_round1 import _step
-from tests.prose_edit.test_fix_round3 import ESSAY, SEMICOLON_RULE, STALE_OPEN, _sheet_of, _treat
+from tests.prose_edit.test_fix_round3 import ESSAY, PLAIN_ENGLISH_RULE, STALE_OPEN, _sheet_of, _treat
 from tests.prose_edit.test_teach_acceptance import (
     AFTER,
     CARD,
@@ -262,10 +262,10 @@ def test_a_stale_treatment_names_the_remove_command_for_its_layer_and_the_comman
 
 def test_the_entry_the_skill_teaches_reaches_the_brief_through_add_entry(prose: Prose) -> None:
     """The author's flow of step 13, end to end: a document-layer entry written as the skill shows it."""
-    body = {"scalars": {}, "lists": {"site_page_section3_ignored": [f'"{SEMICOLON_RULE}" (semicolons are this essay\'s voice)']}}
-    assert "no semicolons" in _sheet_of(prose)
+    body = {"scalars": {}, "lists": {"site_page_section3_ignored": [f'"{PLAIN_ENGLISH_RULE}" (this essay\'s voice)']}}
+    assert "one term per concept" in _sheet_of(prose)
     prose.ok("add-entry", "--level", "doc", "--path", ESSAY, "--from-stdin", stdin=body)
-    assert "no semicolons" not in _sheet_of(prose)
+    assert "one term per concept" not in _sheet_of(prose)
     assert brief_ok(prose, "build", ESSAY, "--genre", "exploration-essay")
 
 

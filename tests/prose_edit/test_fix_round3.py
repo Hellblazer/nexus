@@ -202,7 +202,7 @@ def test_step_13_shows_the_stored_card_back_after_saving_it() -> None:
 # ---------------------------------------------------------------------------
 
 ESSAY = "docs/exploration/e.md"
-SEMICOLON_RULE = "Plain technical English for non-native readers..."
+PLAIN_ENGLISH_RULE = "Plain technical English for non-native readers..."
 STALE_OPEN = "A deleted rule..."
 
 
@@ -217,31 +217,31 @@ def _treat(kind: str, opening: str) -> dict:
     return {key: [f'"{opening}" (the author\'s choice for this essay)']}
 
 
-def test_a_document_entry_can_ignore_the_semicolon_rule_for_one_exploration_essay(prose: Prose) -> None:
-    assert "Active voice, no semicolons" in _sheet_of(prose)  # the genre layer applies it by default
-    seed(prose, "doc", lists=_treat("ignored", SEMICOLON_RULE), path=ESSAY)
-    assert "no semicolons" not in _sheet_of(prose)
-    assert "no semicolons" in _sheet_of(prose, "docs/exploration/other.md")  # another document keeps it
+def test_a_document_entry_can_ignore_the_plain_english_rule_for_one_exploration_essay(prose: Prose) -> None:
+    assert "one term per concept" in _sheet_of(prose)  # the genre layer applies it by default
+    seed(prose, "doc", lists=_treat("ignored", PLAIN_ENGLISH_RULE), path=ESSAY)
+    assert "one term per concept" not in _sheet_of(prose)
+    assert "one term per concept" in _sheet_of(prose, "docs/exploration/other.md")  # another document keeps it
 
 
 def test_a_document_entry_can_make_a_site_page_rule_query_only_or_note_only(prose: Prose) -> None:
-    seed(prose, "doc", lists=_treat("query_only", SEMICOLON_RULE), path=ESSAY)
+    seed(prose, "doc", lists=_treat("query_only", PLAIN_ENGLISH_RULE), path=ESSAY)
     sheet = _sheet_of(prose)
-    assert "QUERY ONLY" in sheet and "no semicolons" in sheet
+    assert "QUERY ONLY" in sheet and "one term per concept" in sheet
     rules = sheet[:sheet.index("QUERY ONLY")]
-    assert "no semicolons" not in rules  # moved out of the rules the editor applies as edits
-    seed(prose, "doc", lists=_treat("note_only", SEMICOLON_RULE), path="docs/exploration/n.md")
+    assert "one term per concept" not in rules  # moved out of the rules the editor applies as edits
+    seed(prose, "doc", lists=_treat("note_only", PLAIN_ENGLISH_RULE), path="docs/exploration/n.md")
     note = _sheet_of(prose, "docs/exploration/n.md")
-    assert "editor's note only" in note and "no semicolons" in note[note.index("editor's note only"):]
+    assert "editor's note only" in note and "one term per concept" in note[note.index("editor's note only"):]
 
 
 def test_the_narrower_layer_wins_when_repo_and_document_treat_the_same_rule_differently(prose: Prose) -> None:
-    seed(prose, "repo", lists=_treat("ignored", SEMICOLON_RULE))
-    assert "no semicolons" not in _sheet_of(prose)
-    seed(prose, "doc", lists=_treat("query_only", SEMICOLON_RULE), path=ESSAY)
+    seed(prose, "repo", lists=_treat("ignored", PLAIN_ENGLISH_RULE))
+    assert "one term per concept" not in _sheet_of(prose)
+    seed(prose, "doc", lists=_treat("query_only", PLAIN_ENGLISH_RULE), path=ESSAY)
     sheet = _sheet_of(prose)  # the document says query: it beats the repo's ignore
-    assert "QUERY ONLY" in sheet and "no semicolons" in sheet[sheet.index("QUERY ONLY"):]
-    assert "no semicolons" not in _sheet_of(prose, "docs/exploration/other.md")  # the repo ignore still holds there
+    assert "QUERY ONLY" in sheet and "one term per concept" in sheet[sheet.index("QUERY ONLY"):]
+    assert "one term per concept" not in _sheet_of(prose, "docs/exploration/other.md")  # the repo ignore still holds there
 
 
 def test_a_stale_document_treatment_stops_the_build_and_names_the_document_layer(prose: Prose) -> None:

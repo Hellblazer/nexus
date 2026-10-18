@@ -95,7 +95,7 @@ def test_site_page_rules_are_the_genre_layer(prose: Prose, repo: Path) -> None:
     (repo / "web").mkdir()
     (repo / "web" / "page.html").write_text("<p>hi</p>\n")
     sheet = _sheet(brief_ok(prose, "build", "web/page.html"))
-    rule = next(ln for ln in sheet.splitlines() if "Active voice, no semicolons" in ln)
+    rule = next(ln for ln in sheet.splitlines() if "No semicolons" in ln)
     assert rule.endswith(" (layer: genre)")
     query = next(ln for ln in sheet.splitlines() if "No corpus counts" in ln)
     note = next(ln for ln in sheet.splitlines() if "Motivate a new thing" in ln)

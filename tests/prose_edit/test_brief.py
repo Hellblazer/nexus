@@ -378,7 +378,7 @@ def test_a_how_to_brief_gets_section3_with_ignored_dropped_and_query_and_note_ma
     (repo / "web" / "page.html").write_text("<p>hi</p>\n")
     text = brief_ok(prose, "build", "web/page.html")
     sheet = text[text.index(ORDER[2]):text.index(ORDER[3])]
-    assert "Active voice, no semicolons" in sheet  # an applied rule, read from the real skill
+    assert "No semicolons" in sheet  # an applied rule, read from the real skill
     assert "The terms table holds" not in sheet and "Placeholders as" not in sheet
     assert "Rendered output blocks" not in sheet
     assert "QUERY" in sheet and "No corpus counts" in sheet
@@ -389,7 +389,7 @@ def test_a_how_to_brief_gets_section3_with_ignored_dropped_and_query_and_note_ma
 def test_a_reference_doc_brief_gets_no_section3(prose: Prose) -> None:
     seed(prose, "repo", lists={**TREATMENTS, "diagnostics": ["Q?"]})
     text = brief_ok(prose, "build", "docs/x.md")
-    assert "Active voice, no semicolons" not in text and "Motivate a new thing" not in text
+    assert "No semicolons" not in text and "Motivate a new thing" not in text
 
 
 def test_a_stale_treatment_stops_the_build_for_a_site_genre_only(prose: Prose) -> None:

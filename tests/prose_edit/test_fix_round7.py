@@ -25,7 +25,7 @@ from tests.prose_edit.conftest import ROOT, Prose
 from tests.prose_edit.test_acceptance_tools import ACC, _verdicts
 from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
 from tests.prose_edit.test_fix_round1 import _step
-from tests.prose_edit.test_fix_round3 import ESSAY, SEMICOLON_RULE, STALE_OPEN, _treat
+from tests.prose_edit.test_fix_round3 import ESSAY, PLAIN_ENGLISH_RULE, STALE_OPEN, _treat
 from tests.prose_edit.test_fix_round4 import _allowlist
 from tests.prose_edit.test_fix_round5 import GUARD, _bash, _plant_holder, box  # noqa: F401  (box is a fixture)
 
@@ -264,7 +264,7 @@ def test_the_malformed_and_doubled_entry_messages_name_a_remedy_with_the_allowli
     assert _on_the_allowlist(_remedy(proc.stderr)), proc.stderr
     prose.ok("entries", "--level", "repo", "--remove-item", 'site_page_section3_ignored="No..." (too short)')
     # the same rule given two treatments
-    seed(prose, "repo", lists={**_treat("ignored", SEMICOLON_RULE), **_treat("query_only", SEMICOLON_RULE)})
+    seed(prose, "repo", lists={**_treat("ignored", PLAIN_ENGLISH_RULE), **_treat("query_only", PLAIN_ENGLISH_RULE)})
     proc = run_brief(prose, "build", ESSAY, "--genre", "exploration-essay")
     assert proc.returncode == 1 and "more than one treatment" in proc.stderr
     assert _on_the_allowlist(_remedy(proc.stderr)), proc.stderr
