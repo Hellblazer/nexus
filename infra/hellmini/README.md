@@ -19,6 +19,7 @@ Host facts: T2 `nexus/hellmini-second-test-host-howto`.
 | `watchdog/actions-runner-watchdog` | `/usr/local/libexec/` (root:wheel 755) | Runner watchdog script, run every 60 s by launchd. |
 | `watchdog/local.actions-runner-watchdog.plist` | `/Library/LaunchDaemons/` (root:wheel 644) | The LaunchDaemon that runs it. |
 | `install-watchdog.sh` | `/var/db/actions-runner-watchdog` (root:wheel 700, state and log) | Installs, and drift-checks, the two watchdog files and the state directory. |
+| `tart/tart.rb` | `$(brew --repository nexus/local)/Formula/tart.rb` | The tart formula (local tap `nexus/local`) for the macOS test guest. Record, not installed by `install.sh`; host setup is in `tests/e2e/macos-guest/README.md`. |
 
 The hook and watchdog files in the repo are the source: the installers copy them
 repo to host, byte for byte (no SPDX header, so a repo copy and a live file compare

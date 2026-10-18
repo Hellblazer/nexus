@@ -20,6 +20,12 @@ set -uo pipefail
 
 phase="${1:-}"; MODE="${2:-auto}"
 [[ "$phase" == pre || "$phase" == post ]] || { echo "usage: row1.sh pre|post [MODE]" >&2; exit 2; }
+# This script installs nx, a LaunchAgent and a Claude Code session into the account
+# that runs it, and removes ~/nxmvv. It runs only inside a tart guest: a physical
+# Mac reports its own model (Mac17,16 on hellmini), a Virtualization.framework
+# guest reports VirtualMac.
+hwm="$(sysctl -n hw.model 2>/dev/null || true)"
+[[ "$hwm" == VirtualMac* ]] || { echo "row1.sh: refusing to run outside a tart guest (hw.model is '${hwm:-unknown}', not VirtualMac*)" >&2; exit 2; }
 D="$HOME/nxmvv"; OUT="$D/out"; PLUGIN="$D/plugin/conexus"
 mkdir -p "$OUT" "$HOME/proj"
 CHECKS="$OUT/checks-$phase.txt"; : >"$CHECKS"
@@ -28,8 +34,15 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 UIDN="$(id -u)"
 fails=0
 
+# The automation token arrives in the environment (claude_credentials.py run
+# --remote). It moves into an unexported shell variable here, so nx, uv,
+# launchctl and every other command this script starts never see it; only the
+# claude calls in turn() get it.
+TOK="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+unset CLAUDE_CODE_OAUTH_TOKEN
+
 # A clean environment: nothing from the ssh login or the harness leaks into the
-# row except the token and the model defaults claude_credentials.py sets.
+# row except the model defaults claude_credentials.py sets.
 for v in $(compgen -e | grep -E '^(NX_|NEXUS_|CLAUDECODE$|CLAUDE_CODE_ENTRYPOINT$|CLAUDE_CODE_SSE_PORT$|CLAUDE_PROJECT_DIR$|CLAUDE_PLUGIN_|CLAUDE_CONFIG_DIR$|UV_|VIRTUAL_ENV$|PYTHONPATH$|PYTHONHOME$)'); do unset "$v"; done
 export NX_NO_TELEMETRY=1
 # The image's Claude Code stays the version the image was built with.
@@ -47,7 +60,7 @@ check() {  # check <name> <0|1 (1 = pass)> <detail>
 command -v claude >/dev/null 2>&1 || { check deps 0 "claude is not on PATH ($PATH)"; exit 1; }
 command -v uv >/dev/null 2>&1 || { check deps 0 "uv is not on PATH ($PATH)"; exit 1; }
 [[ -d "$PLUGIN" ]] || { check deps 0 "no plugin at $PLUGIN"; exit 1; }
-[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || { check deps 0 "no automation token in the environment"; exit 1; }
+[[ -n "$TOK" ]] || { check deps 0 "no automation token in the environment"; exit 1; }
 
 PROMPT_SETUP="Nexus is not installed on this machine. My answer to the Nexus setup question: Local, and yes, start it at login. Please run the setup now and follow its status until it finishes, then tell me the final status."
 PROMPT_STORE='Use the nexus MCP tools. Store a short note with store_put: collection mvv-probe, title "mvv row probe", content "the quick brown fox checks RDR-228". Then search for "brown fox RDR-228" and quote the top result with its distance.'
@@ -55,7 +68,7 @@ PROMPT_SEARCH='Use the nexus MCP search tool to search for "brown fox RDR-228" a
 
 turn() {  # turn <file> <prompt>: one claude -p turn, bounded, output to a file
     echo "##### $(date -u +%FT%TZ) claude -p ($MODE): $1" >"$OUT/$1"
-    ( cd "$HOME/proj" && claude -p --permission-mode "$MODE" --plugin-dir "$PLUGIN" "$2" </dev/null >>"$OUT/$1" 2>&1 ) &
+    ( cd "$HOME/proj" && CLAUDE_CODE_OAUTH_TOKEN="$TOK" claude -p --permission-mode "$MODE" --plugin-dir "$PLUGIN" "$2" </dev/null >>"$OUT/$1" 2>&1 ) &
     local p=$! n=0
     while kill -0 "$p" 2>/dev/null; do
         sleep 5; n=$((n + 5))
@@ -67,6 +80,8 @@ turn() {  # turn <file> <prompt>: one claude -p turn, bounded, output to a file
 status_field() {  # status_field <key>: a field of the setup status.json
     /usr/bin/plutil -extract "$1" raw -o - "$HOME/.config/nexus/setup/status.json" 2>/dev/null
 }
+
+nx_version() { local v; v="$(nx --version 2>&1)"; echo "${v%%$'\n'*}"; }
 
 job_pid() { launchctl print "gui/$UIDN/$LABEL" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}'; }
 
@@ -98,7 +113,7 @@ if [[ "$phase" == pre ]]; then
     check launchd_job_running_pre "$([[ -n "$pid" ]] && echo 1 || echo 0)" "gui/$UIDN/$LABEL pid=${pid:-none}"
     echo "${pid:-}" >"$OUT/pre-job-pid"
     nx doctor >"$OUT/11-doctor-pre.txt" 2>&1; rc=$?
-    check doctor_pre "$([[ $rc -eq 0 ]] && echo 1 || echo 0)" "nx doctor exit $rc"
+    check doctor_pre "$([[ $rc -eq 0 ]] && echo 1 || echo 0)" "nx doctor exit $rc, nx $(nx_version)"
     memory_snapshot "after setup"
     turn 20-store.txt "$PROMPT_STORE"
     note_found 21-search-cli-pre.txt && ok=1 || ok=0
@@ -115,7 +130,10 @@ else
     pid=''
     for _ in $(seq 1 60); do pid="$(job_pid)"; [[ -n "$pid" ]] && break; sleep 5; done
     prev="$(cat "$OUT/pre-job-pid" 2>/dev/null || true)"
-    check launchd_job_running_post "$([[ -n "$pid" ]] && echo 1 || echo 0)" "gui/$UIDN/$LABEL pid=${pid:-none} (before the reboot: ${prev:-none})"
+    # A job that ran before the reboot and has the same pid now was not restarted by
+    # launchd: the reboot did not happen to this guest.
+    check launchd_job_running_post "$([[ -n "$pid" && -n "$prev" && "$pid" != "$prev" ]] && echo 1 || echo 0)" \
+        "gui/$UIDN/$LABEL pid=${pid:-none}, before the reboot ${prev:-none} (must be running, and a different pid), nx $(nx_version)"
     launchctl print "gui/$UIDN/$LABEL" >"$OUT/30-launchctl-post.txt" 2>&1
     ok=0
     for _ in $(seq 1 36); do nx doctor >"$OUT/31-doctor-post.txt" 2>&1 && { ok=1; break; }; sleep 5; done

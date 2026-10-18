@@ -13,10 +13,14 @@
 #   1 ensure the guest key on hellmini ($BASE/ssh/id_ed25519; it never leaves
 #     the host) and pull the source image when tart does not have it
 #   2 clone it to nexus-mac-build, 4 CPU / 6 GB, boot it headless
-#   3 through the guest agent (tart exec) authorize the key for admin
-#   4 over ssh run provision.sh: uv and Claude Code into ~/.local/bin, then check
-#     FileVault off, automatic login, passwordless sudo, no nx
-#   5 power the guest off and rename it to nexus-mac-clean, replacing an old one
+#   3 through the guest agent (tart exec) authorize the key for admin and pin the
+#     guest's ed25519 host key in $BASE/ssh/known_hosts (read through the agent,
+#     not the network)
+#   4 over ssh run provision.sh: uv and Claude Code into ~/.local/bin, new host keys
+#     unique to this image, key-only sshd, then check FileVault off, automatic
+#     login, passwordless sudo, no nx
+#   5 pin the regenerated host key, prove a strict ssh against the pin works
+#   6 power the guest off and rename it to nexus-mac-clean, replacing an old one
 #
 # Refuses (exit 75) while a suite holds the hellmini lease or a CI job runs.
 # SC2029: remote command lines are built here on purpose (plain tokens).
@@ -44,7 +48,7 @@ scp "${SSH_OPTS[@]}" -q "$here/host.sh" "$here/provision.sh" "$HOST:$BASE/" </de
 r "chmod +x $BASE/host.sh" || die "chmod"
 r "$BASE/host.sh tart --version" >/dev/null || die "tart is not installed on $HOST, or its account has no GUI session (README: host setup)"
 r "$BASE/host.sh guard"; rc=$?
-[[ $rc -eq 75 ]] && { say "hellmini is busy; not building"; exit 75; }
+[[ $rc -eq 75 ]] && { say "hellmini is busy (a suite, a CI job or a VM of ours, maybe a leftover nexus-mac-build: host.sh destroy nexus-mac-build); not building"; exit 75; }
 [[ $rc -eq 0 ]] || die "guard exit $rc"
 r "test -f $BASE/ssh/id_ed25519 || ssh-keygen -q -t ed25519 -N '' -C nexus-mac-guest -f $BASE/ssh/id_ed25519" || die "ssh-keygen"
 if ! r "$BASE/host.sh tart get $SRC >/dev/null 2>&1"; then
@@ -65,10 +69,14 @@ done
 [[ $ok -eq 1 ]] || die "the guest agent never answered (tart exec)"
 r "$BASE/host.sh tart exec -i nexus-mac-build /bin/bash -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >>~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys' <$BASE/ssh/id_ed25519.pub" \
     || die "cannot authorize the guest key"
+r "$BASE/host.sh hostkey nexus-mac-build" || die "cannot pin the guest's host key"
 r "$BASE/host.sh waitssh nexus-mac-build 300" >/dev/null || die "no ssh into the build VM"
 r "$BASE/host.sh gscp nexus-mac-build $BASE/provision.sh /Users/admin/provision.sh" || die "cannot stage provision.sh"
 say "provision"
 r "$BASE/host.sh gssh nexus-mac-build 'bash ~/provision.sh && rm -f ~/provision.sh'" || die "provision.sh failed"
+# provision.sh replaced the host keys: pin the new one, then prove sshd serves it.
+r "$BASE/host.sh hostkey nexus-mac-build" || die "cannot pin the regenerated host key"
+r "$BASE/host.sh gssh nexus-mac-build true" || die "strict ssh against the pinned host key failed"
 say "power off, then rename to nexus-mac-clean"
 r "$BASE/host.sh gssh nexus-mac-build 'sudo -n shutdown -h now'" >/dev/null 2>&1 || true
 r "$BASE/host.sh build-finish" || die "build-finish"
