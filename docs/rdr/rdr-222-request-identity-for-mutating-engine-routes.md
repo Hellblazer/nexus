@@ -1136,6 +1136,8 @@ because it keeps that design.
 
 ## Revision History
 
+- 2026-10-18: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `0b2ec059b`; critique `nexus_rdr/222-gate-critique-2026-10-18-r2`.
+
 - 2026-10-18: fix check of 00e637a13 (three runs, consensus PASS) findings fixed: floored sweep keyed only with `row_limit`; expire and floor-only quarantine left unkeyed with reasons; lease margin from the pool timeout; upsert lease from the per-request deadline; replay test and stored copy against the sample cap; in-process status counters instead of a row count; sweeps never gateway-retried, polling only after the key echo, resend cap of 3; `sweep_gate_busy` tied to the gate marker with a client rule; stale phase references. Sources in 222-research-14.
 
 - 2026-10-18: Gate round 1 — PASSED (0 Critical, 11 Significant, 0 ship-blocker(s)); commit `674dcfe43`; critique `nexus_rdr/222-gate-critique-2026-10-18-r1`.
