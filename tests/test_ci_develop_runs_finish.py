@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Every push to develop gets a CI run that finishes; PRs still cancel superseded runs.
+"""develop runs CI one run at a time with the newest push waiting; PRs still cancel superseded runs.
 
-Sam, 2026-10-17: with several sessions pushing, a develop run was cancelled by the
-next push and many commits never got a finished run. `cancel-in-progress: false`
-alone does not help, because GitHub keeps one pending run per concurrency group
-and a third push still cancels the second's queued run. So the group is unique
-per commit on develop and per ref elsewhere, and cancel-in-progress stays true.
+Sam, 2026-10-17: every develop commit must be covered by a finished CI run. Sam,
+2026-10-18 (labrun RDR-001 F15, nexus-1wf1s): one group per develop commit put 4-6
+develop runs in flight against a 10-shard cap, so they queued behind each other and
+crowded out hand runs. develop is linear, so one group per ref with no cancel in
+progress still covers every commit: a running develop run always finishes, and a newer
+push only replaces the single pending run, which then tests every commit before it.
+On every other ref a newer push cancels the run it supersedes (the 2026-07-06 rule).
+Cancelling on develop is not allowed back: under continuous pushes it livelocked.
 """
 
 from __future__ import annotations
@@ -18,15 +21,19 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
-#: The workflows that run on a push to develop and used to cancel each other.
-PER_COMMIT_ON_DEVELOP = ("ci.yml", "windows-pg-bundle-rehearsal.yml", "plugin-drift-ledger.yml")
+#: The workflows that run on a push to develop and share this rule.
+ONE_AT_A_TIME_ON_DEVELOP = ("ci.yml", "windows-pg-bundle-rehearsal.yml", "plugin-drift-ledger.yml")
 
-DEVELOP_KEY = "github.ref == 'refs/heads/develop' && github.sha || github.ref"
+CANCEL_OFF_DEVELOP = "${{ github.ref != 'refs/heads/develop' }}"
 
 
-@pytest.mark.parametrize("name", PER_COMMIT_ON_DEVELOP)
-def test_a_develop_push_gets_its_own_concurrency_group(name: str) -> None:
+@pytest.mark.parametrize("name", ONE_AT_A_TIME_ON_DEVELOP)
+def test_develop_runs_one_at_a_time_and_other_refs_cancel(name: str) -> None:
     concurrency = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))["concurrency"]
     group = concurrency["group"]
-    assert DEVELOP_KEY in group, f"{name}: develop pushes must be grouped per commit, got {group!r}"
-    assert concurrency["cancel-in-progress"] is True, f"{name}: PRs must still cancel superseded runs"
+    assert group.endswith("${{ github.ref }}"), f"{name}: one group per ref, got {group!r}"
+    assert "github.sha" not in group, f"{name}: a per-commit group puts every develop push in flight at once"
+    assert concurrency["cancel-in-progress"] == CANCEL_OFF_DEVELOP, (
+        f"{name}: a running develop run must finish and other refs must cancel superseded runs, "
+        f"got {concurrency['cancel-in-progress']!r}"
+    )

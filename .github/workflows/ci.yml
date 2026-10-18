@@ -18,17 +18,21 @@ on:
     branches: [main, develop]
 
 concurrency:
-  # One group per commit on develop, one per ref elsewhere (Sam,
-  # 2026-10-17): with several sessions pushing, the next push cancelled the
-  # last one's run and many develop commits never got a finished run. Every
-  # develop push now gets a run that finishes; sessions batch their commits
-  # and push less often instead. cancel-in-progress: false alone would not
-  # do it, because GitHub keeps one pending run per group and a third push
-  # still cancels the second's queued run. On PRs the 2026-07-06 CI-cost
-  # rule still holds: a newer push cancels the run it supersedes. main is
-  # not a push trigger, and tags run a different workflow.
-  group: ci-${{ github.ref == 'refs/heads/develop' && github.sha || github.ref }}
-  cancel-in-progress: true
+  # One run at a time on develop, the newest push waiting (Sam, 2026-10-18,
+  # labrun RDR-001 F15, nexus-1wf1s). The 2026-10-17 goal stands: every
+  # develop commit is covered by a finished run. develop is linear, so the
+  # run of the newest pending push tests every commit before it; a running
+  # develop run is never cancelled, and a newer push replaces only the one
+  # pending run. Replayed over 69 develop pushes this kept one develop run
+  # (6 shards) in flight instead of 4-6 that queued against the 10-shard
+  # cap, at 72-81% of the run-minutes. Trade-off: a red run can cover
+  # several commits, so finding the culprit may take a rerun of an earlier
+  # one. Do not return to cancelling on develop: under continuous pushes it
+  # livelocked (verdict p90 45-52 min). On PRs and every other ref the
+  # 2026-07-06 CI-cost rule holds: a newer push cancels the run it
+  # supersedes. main is not a push trigger, and tags run another workflow.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 jobs:
   lint:
