@@ -228,6 +228,11 @@ from uuid import uuid4
 import structlog
 
 from nexus import _locking
+from nexus._log_safe_url import (
+    endpoint_host_port as _endpoint_host_port,
+    log_endpoint as _log_endpoint,
+    scrub_transport_error,
+)
 from nexus._winsec import make_user_dir, open_private
 from nexus.rate_brake import parse_retry_after
 
@@ -529,20 +534,6 @@ def _parent_process_name() -> str | None:
         return None
 
 
-def _endpoint_host_port(url: str) -> str | None:
-    """``host[:port]`` of *url*, never userinfo, path or query (``_host`` is
-    the whole netloc, which carries ``user:password@`` when the URL does)."""
-    try:
-        parts = urllib.parse.urlsplit(url)
-        host = parts.hostname
-        if not host:
-            return None
-        port = parts.port
-        return f"{host}:{port}" if port else host
-    except Exception:  # noqa: BLE001 -- attribution must never fail a mint
-        return None
-
-
 def _mint_lock_creation_record(
     base_url: str, tenant: str, lock_path: Path, config_dir: Path,
 ) -> dict[str, Any]:
@@ -766,8 +757,11 @@ def _reap_one_lease(lease_path: Path, config_dir: Path, now: float) -> bool:
                 return False
             lease_fd = _open_plain_file(lease_path, os.O_RDONLY)
             try:
-                # Re-read under the lock: a minter publishes only while it
-                # holds this lock, so nothing changes the lease from here.
+                # Re-read under the lock: the guarded mint publishes only
+                # while it holds this lock. The refresh and unguarded paths
+                # publish without it, so a lease they replace between the
+                # inode check below and the unlink is lost, at the cost of
+                # one extra mint (nexus-fcwbd).
                 raw, mtime = os.read(lease_fd, _LEASE_READ_MAX_BYTES + 1), os.fstat(lease_fd).st_mtime
                 if not _lease_is_dead(raw, mtime, now) or not _fd_names_path(lease_fd, lease_path):
                     return False
@@ -810,10 +804,15 @@ def _reap_expired_leases(
 
     A lease is removed only while the SAME-KEY mint lock
     (``data_token_mint_lock.<same 64 hex>``) is held non-blocking by the
-    reaper, because a minter publishes its lease only while holding that lock;
-    a held lock means a mint may be mid-write and the lease is skipped. Under
-    the lock the lease is read again, and the path must still name the inode
-    that was read (:func:`_fd_names_path`) before it is unlinked. *now* is the
+    reaper. The guarded mint publishes its lease only while holding that lock,
+    so a held lock means a mint may be mid-write and the lease is skipped.
+    The refresh path in ``bearer_for`` and the unguarded mint publish WITHOUT
+    the lock. Under the lock the lease is read again, and the path must still
+    name the inode that was read (:func:`_fd_names_path`) before it is
+    unlinked; a lockless publisher whose ``os.replace`` lands between that
+    check and the ``os.unlink`` has its fresh lease removed. That residual
+    costs one extra mint by a sibling cold process, never an error, and is
+    accepted (nexus-fcwbd would publish refreshed leases under the lock). *now* is the
     wall clock the lease reader uses (``expires_at`` is wall-clock seconds).
     See :func:`_lease_is_dead` for what dead means.
     """
@@ -867,34 +866,6 @@ def _host(url: str) -> str:
         return netloc or url
     except Exception:  # noqa: BLE001 — a key-derivation helper must never raise
         return url
-
-
-def _log_endpoint(url: str) -> str:
-    """Log- and message-safe endpoint identity: ``host[:port]`` of *url*,
-    never userinfo, path or query (nexus-q26w1). A URL that does not parse
-    to a host yields a fixed placeholder, never the URL itself (the old
-    ``_host`` fallback echoed the whole string)."""
-    return _endpoint_host_port(url) or "<unparseable-endpoint>"
-
-
-def _redact_url_secrets(text: str, url: str) -> str:
-    """*text* with the userinfo and query of *url* replaced by ``<redacted>``.
-
-    For error text a transport raises about a URL (it can quote the part of
-    the URL it failed on). Longest secret first, so a password that contains
-    the user name is not left half-visible. If *url* does not parse at all,
-    the whole URL string is the secret.
-    """
-    secrets: list[str] = []
-    try:
-        parts = urllib.parse.urlsplit(url)
-        userinfo = parts.netloc.rpartition("@")[0]
-        secrets = [userinfo, parts.username or "", parts.password or "", parts.query]
-    except Exception:  # noqa: BLE001 — a scrubber must never raise
-        secrets = [url]
-    for secret in sorted({x for x in secrets if x}, key=len, reverse=True):
-        text = text.replace(secret, "<redacted>")
-    return text
 
 
 def _lease_key(base_url: str, tenant: str) -> str:
@@ -1684,18 +1655,25 @@ class DataTokenManager:
         status: int
         payload: dict[str, Any]
         for attempt in range(1, _MINT_MAX_ATTEMPTS + 1):
+            mint_error: DataTokenMintError | None = None
             try:
                 status, payload, resp_headers = self._poster(url, headers, body)
             except Exception as exc:  # noqa: BLE001 — any transport failure becomes the typed mint error
                 # A transport error can quote the URL it choked on:
                 # ``http.client.InvalidURL`` for ``https://user:pw@host`` says
-                # "nonnumeric port: 'pw@host'". Scrub before it is logged or
-                # raised (nexus-q26w1).
-                reason = _redact_url_secrets(str(exc), url)
+                # "nonnumeric port: 'pw@host'", and for a percent-encoded or
+                # colon-bearing password a decoded or truncated tail of it.
+                # The text is replaced whole when it quotes any of that
+                # (nexus-q26w1), and the error is raised OUTSIDE this handler:
+                # neither ``__cause__`` nor ``__context__`` may carry the
+                # original, whose message would print in a traceback.
+                reason = scrub_transport_error(exc, url)
                 _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url), error=reason)
-                raise DataTokenMintError(
+                mint_error = DataTokenMintError(
                     f"data-token mint request to {_log_endpoint(url)} failed: {reason}"
-                ) from exc
+                )
+            if mint_error is not None:
+                raise mint_error from None
 
             if status not in _RETRYABLE_MINT_STATUSES or attempt == _MINT_MAX_ATTEMPTS:
                 break

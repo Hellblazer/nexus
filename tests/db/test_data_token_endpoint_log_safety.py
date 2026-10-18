@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 import pytest
 import structlog
 
+from nexus._log_safe_url import scrub_transport_error
 from nexus.db import data_token
 from nexus.db.data_token import (
     DataTokenManager,
@@ -29,7 +31,6 @@ from nexus.db.data_token import (
     _host,
     _lease_key,
     _log_endpoint,
-    _redact_url_secrets,
 )
 from tests._module_seam import setattr_in
 
@@ -109,12 +110,70 @@ def test_the_old_helper_is_the_netloc_and_still_the_hash_input() -> None:
     assert _data_token_mint_lock_path("http://127.0.0.1:9999", TENANT, cfg).name == f"data_token_mint_lock.{plain}"
 
 
-def test_redaction_removes_userinfo_and_query_from_quoted_text() -> None:
-    quoted = f"nonnumeric port: '{PW}@127.0.0.1' while fetching {URL}"
-    out = _redact_url_secrets(quoted, URL)
+def test_scrub_withholds_text_that_quotes_the_credentials_and_keeps_the_rest() -> None:
+    quoted = ValueError(f"nonnumeric port: '{PW}@127.0.0.1' while fetching {URL}")
+    out = scrub_transport_error(quoted, URL)
     _assert_clean(out)
-    assert "127.0.0.1" in out  # only the secrets go
-    assert _redact_url_secrets("plain", "http://h") == "plain"
+    assert out.startswith("ValueError") and out.endswith("127.0.0.1:9999")
+    # text that quotes nothing of the URL's credentials survives unchanged
+    assert scrub_transport_error(OSError("connection refused"), "http://h:80") == "connection refused"
+    assert scrub_transport_error(OSError("plain"), "http://u:pw@h:80") == "plain"
+
+
+# Each is a form of the same secret that http.client / urllib can quote:
+# percent-encoded, colon-bearing, decoded, split on the last ':'.
+_SECRET_URLS = [
+    pytest.param("https://user:p%40ssSECRET@127.0.0.1", id="percent-encoded-at"),
+    pytest.param("https://user:a:b:SECRET@127.0.0.1", id="colons-in-password"),
+    pytest.param("https://user:p%3AwSECRET@127.0.0.1", id="percent-encoded-colon"),
+    pytest.param(f"https://user:{PW}@127.0.0.1", id="plain"),
+    pytest.param("https://user:p%40ssSECRET@127.0.0.1?token=SECRETQ", id="encoded-with-query"),
+]
+
+
+@pytest.mark.parametrize("url", _SECRET_URLS)
+def test_the_real_poster_error_carries_no_form_of_the_secret_anywhere(tmp_path: Path, url: str) -> None:
+    """Through the real ``_default_poster`` and the real manager. No port, so
+    ``http.client`` raises ``InvalidURL`` quoting a decoded or truncated tail of
+    the password before any network I/O. The secret, in no form, may appear
+    in an event, in the error message, or in the formatted traceback (the
+    error is not chained to the original)."""
+    with structlog.testing.capture_logs() as captured, pytest.raises(DataTokenMintError) as err:
+        _manager(tmp_path, data_token._default_poster).bearer_for(url, TENANT)
+    failed = [e for e in captured if e["event"] == "data_token_mint_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error"].startswith("InvalidURL")  # the type survives, the text does not
+    assert failed[0]["endpoint"] == "127.0.0.1"
+    rendered = repr(captured) + str(err.value) + "".join(traceback.format_exception(err.value))
+    for secret in ("SECRET", PW, "p@ss", "p%40ss", "p%3A", "a:b", "wSECRET", "user:"):
+        assert secret not in rendered, f"{secret!r} reached the output"
+    assert err.value.__cause__ is None and err.value.__context__ is None
+
+
+def test_each_scrub_rule_stands_alone() -> None:
+    """The rules overlap on the common quotes, so each is pinned by a text only
+    it catches."""
+    url = "https://user:p%3AwSECRET@127.0.0.1"
+    # an '@' alone (no form of the credentials in the text) is withheld
+    out = scrub_transport_error(ValueError("bad netloc 'zz@127.0.0.1'"), url)
+    assert "zz" not in out and out.startswith("ValueError")
+    # a ':'-split piece of the decoded password, quoted without any '@'
+    out = scrub_transport_error(ValueError("nonnumeric port: 'wSECRET'"), url)
+    assert "wSECRET" not in out and out.startswith("ValueError")
+    # the decoded whole password, quoted without any '@'
+    out = scrub_transport_error(ValueError("rejected p:wSECRET"), url)
+    assert "wSECRET" not in out
+    # the query, quoted without any '@'
+    out = scrub_transport_error(ValueError("GET failed ?token=QSECRETQ"), "https://h:1/p?token=QSECRETQ")
+    assert "QSECRETQ" not in out
+    # a short piece is matched as a whole token only: no spurious withholding
+    assert scrub_transport_error(OSError("timed out after 30s"), "https://u:ab@h:1") == "timed out after 30s"
+
+
+def test_the_scrub_does_not_depend_on_the_url_parsing() -> None:
+    """A URL that does not parse is itself the secret."""
+    assert "tok-NAKED" not in scrub_transport_error(ValueError("bad url tok-NAKED@host:80"), "tok-NAKED@host:80")
+    assert "tok-NAKED" not in scrub_transport_error(ValueError("bad url tok-NAKED"), "tok-NAKED@host:80")
 
 
 # ── every event across mint, reuse, renew, invalidate and lease write ────
@@ -206,15 +265,13 @@ def test_a_transport_error_that_quotes_the_url_is_scrubbed(tmp_path: Path) -> No
     _assert_clean(str(err.value))
 
 
-def test_the_real_poster_error_for_a_userinfo_url_is_scrubbed(tmp_path: Path) -> None:
-    """``https://user:pw@host`` (no port) makes ``http.client`` raise
-    ``InvalidURL: nonnumeric port: 'pw@host'`` before any network I/O. That
-    text used to be logged and re-raised as it came."""
-    url = f"https://user:{PW}@127.0.0.1"
+def test_a_transport_error_that_quotes_the_url_without_an_at_sign_is_still_withheld(tmp_path: Path) -> None:
+    def quoting(url: str, headers: dict, body: dict) -> tuple[int, dict, dict]:
+        raise RuntimeError(f"gave up on user and {PW}")
+
     with structlog.testing.capture_logs() as captured, pytest.raises(DataTokenMintError) as err:
-        _manager(tmp_path, data_token._default_poster).bearer_for(url, TENANT)
-    failed = [e for e in captured if e["event"] == "data_token_mint_failed"]
-    assert len(failed) == 1
-    assert "nonnumeric port" in failed[0]["error"]  # the cause survives, minus the secret
+        _manager(tmp_path, quoting).bearer_for(URL, TENANT)
     _assert_clean(captured)
     _assert_clean(str(err.value))
+    _assert_clean("".join(traceback.format_exception(err.value)))
+    assert "RuntimeError" in str(err.value)
