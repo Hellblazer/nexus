@@ -29,7 +29,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN",
-    "BLOCKED_WINERROR", "execution_blocked", "state",
+    "BLOCKED_WINERROR", "bundle_binary_blocked", "execution_blocked", "state",
 ]
 
 OFF = "off"
@@ -99,18 +99,9 @@ def _launch_unsigned_copy() -> None:
         run_bounded([probe, "--version"], timeout=30, stdin=subprocess.DEVNULL)
 
 
-def execution_blocked(
-    *,
-    platform: str | None = None,
-    launch: Callable[[], None] | None = None,
-) -> bool | None:
-    """True when Windows blocks an unsigned executable from running, False when
-    it runs, None when that cannot be told (not Windows, or the launch failed
-    for another reason). Never raises. *platform* and *launch* are seams."""
-    if (platform if platform is not None else sys.platform) != "win32":
-        return None
+def _classify_launch(launch: Callable[[], None]) -> bool | None:
     try:
-        (launch or _launch_unsigned_copy)()
+        launch()
     except OSError as exc:
         winerror = getattr(exc, "winerror", None)
         if winerror == BLOCKED_WINERROR:
@@ -121,3 +112,35 @@ def execution_blocked(
         _log.warning("sac_probe_inconclusive", error=type(exc).__name__)
         return None
     return False
+
+
+def execution_blocked(
+    *,
+    platform: str | None = None,
+    launch: Callable[[], None] | None = None,
+) -> bool | None:
+    """True when Windows blocks an unsigned executable from running, False when
+    it runs, None when that cannot be told (not Windows, or the launch failed
+    for another reason). Never raises. *platform* and *launch* are seams."""
+    if (platform if platform is not None else sys.platform) != "win32":
+        return None
+    return _classify_launch(launch or _launch_unsigned_copy)
+
+
+def bundle_binary_blocked(
+    path: str,
+    *,
+    platform: str | None = None,
+    launch: Callable[[], None] | None = None,
+) -> bool | None:
+    """True when Windows blocks the real bundle binary at *path* from running,
+    False when it runs, None when that cannot be told. The faithful probe
+    ``nx doctor`` uses once a bundle exists (nexus-gdqca): no stand-in, so
+    no signed-interpreter hole. Never raises. *platform* and *launch* are seams."""
+    if (platform if platform is not None else sys.platform) != "win32":
+        return None
+
+    def _run_it() -> None:
+        run_bounded([path, "--version"], timeout=30, stdin=subprocess.DEVNULL)
+
+    return _classify_launch(launch or _run_it)

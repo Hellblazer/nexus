@@ -262,3 +262,40 @@ def test_another_spawn_failure_is_not_taken_for_smart_app_control(
     with pytest.raises(OSError) as exc:
         pg_provision._run(["initdb.exe", "--version"], timeout=5)
     assert not isinstance(exc.value, PgSmartAppControlError)
+
+
+# ── The doctor row probes the real bundle binary (nexus-gdqca) ────────────────
+
+
+def test_bundle_binary_probe_reports_blocked_ran_and_inconclusive() -> None:
+    def _blocked() -> None:
+        raise _os_error_with_winerror(4551)
+
+    def _other() -> None:
+        raise _os_error_with_winerror(5)
+
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="win32", launch=_blocked) is True
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="win32", launch=lambda: None) is False
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="win32", launch=_other) is None
+    assert sac.bundle_binary_blocked("pg_ctl.exe", platform="darwin", launch=_blocked) is None
+
+
+def test_doctor_row_is_a_warning_when_on_but_nothing_is_blocked() -> None:
+    (row,) = health._check_smart_app_control(state=sac.ON, local=True, blocked=False)
+    assert (row.ok, row.warn, row.fatal) == (False, True, False)
+    assert "blocks" not in row.detail.split(":")[0]
+    assert "nothing" in row.detail
+
+
+@pytest.mark.parametrize("blocked", [True, None])
+def test_doctor_row_stays_fatal_when_blocked_or_unprobed(blocked: bool | None) -> None:
+    (row,) = health._check_smart_app_control(state=sac.ON, local=True, blocked=blocked)
+    assert (row.ok, row.warn, row.fatal) == (False, False, True)
+
+
+def test_doctor_does_not_probe_unless_on_and_local() -> None:
+    def _must_not_probe() -> bool:
+        raise _Tripwire
+
+    for state, local in [(sac.OFF, True), (sac.EVALUATION, True), (sac.ON, False)]:
+        health._check_smart_app_control(state=state, local=local, probe=_must_not_probe)

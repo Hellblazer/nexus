@@ -531,8 +531,9 @@ registry value alone is not trusted: on restored guests it said on while Windows
 blocked nothing, so the refusal first tries to run a never-seen copy of the
 Python interpreter. A signed interpreter would run under Smart App Control too,
 and then the install proceeds and can still fail with `[WinError 4551]`. `nx doctor` has a
-Smart App Control row (a failure when it is on in local mode, a warning in
-evaluation). Where Windows has no Smart App Control (the setting does not
+Smart App Control row (a failure when it is on in local mode and the bundle
+binary is blocked or cannot be tried, a warning when it is on but a program ran
+unblocked, a warning in evaluation). Where Windows has no Smart App Control (the setting does not
 exist, as on Windows 10 and older Windows 11), there is no row.
 
 A new Windows install starts in evaluation mode. On the same Home machine in

@@ -407,7 +407,30 @@ _SAC_GUIDE = (
 )
 
 
-def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[HealthResult]:
+_UNPROBED = object()
+
+
+def _probe_smart_app_control_enforcement() -> bool | None:
+    """True/False/None: does Windows block an unsigned program here. Runs the
+    real bundle binary when one is installed, else the unsigned stand-in
+    (nexus-gdqca)."""
+    from nexus import _smart_app_control as sac  # noqa: PLC0415 — Windows row only
+
+    try:
+        from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred, heavy import
+
+        return sac.bundle_binary_blocked(str(discover_pg_binaries().pg_ctl))
+    except Exception:  # noqa: BLE001 — no bundle yet: fall back to the stand-in
+        return sac.execution_blocked()
+
+
+def _check_smart_app_control(
+    *,
+    local: bool,
+    state: str | None = None,
+    blocked: object = _UNPROBED,
+    probe: Callable[[], bool | None] | None = None,
+) -> list[HealthResult]:
     """The Windows Smart App Control row (nexus-f9bgu.57). No row off Windows,
     and none on a Windows that has no Smart App Control (no policy value).
 
@@ -426,6 +449,18 @@ def _check_smart_app_control(*, local: bool, state: str | None = None) -> list[H
     if current == sac.OFF:
         return [HealthResult(label=label, ok=True, detail="off")]
     if current == sac.ON:
+        if local:
+            if blocked is _UNPROBED:
+                blocked = (probe or _probe_smart_app_control_enforcement)()
+            if blocked is False:
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        "on by the registry, but an unsigned program ran: nothing is "
+                        "blocked now. Windows can start enforcing; see the guide"
+                    ),
+                    fix_suggestions=[f"see {_SAC_GUIDE}"],
+                )]
         detail = (
             "on: Windows blocks the unsigned PostgreSQL bundle and the unsigned "
             "Python uv installs, so the local stack cannot run"
