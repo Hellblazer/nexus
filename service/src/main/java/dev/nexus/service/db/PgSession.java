@@ -471,6 +471,13 @@ public final class PgSession {
     }
 
     /**
+     * The text the quarantine SQL functions put in the 55P03 message they raise when the RDR-191 sweep gate wait
+     * times out (as opposed to a row-lock timeout, which carries no such text). {@code ChunkReaper} and the keyed
+     * sweep routes (RDR-222 Phase 1) tell the two apart by it.
+     */
+    public static final String SWEEP_GATE_MESSAGE_MARKER = "RDR-191 sweep gate";
+
+    /**
      * Bounds for one bounded quarantine batch ({@code gc_quarantine_orphans_bounded},
      * nexus-a6mon). The function body's own {@code set_config('statement_timeout',
      * '25000', true)} is INERT for the statement running it: Postgres arms

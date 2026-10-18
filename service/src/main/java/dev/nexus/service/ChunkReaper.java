@@ -169,7 +169,7 @@ final class ChunkReaper {
     private static final int STATEMENT_TIMEOUT_MS = 25_000;
     private static final int LOCK_TIMEOUT_MS = 2_000;
     /** Marker in the move function's own 55P03 message when the SWEEP GATE (not a row lock) timed out. */
-    private static final String GATE_MESSAGE_MARKER = "RDR-191 sweep gate";
+    private static final String GATE_MESSAGE_MARKER = dev.nexus.service.db.PgSession.SWEEP_GATE_MESSAGE_MARKER;
 
     /**
      * The reaper's settings. Defaults are Sam's rulings (2026-09-26 and 2026-10-01): hourly, 300 chunks per

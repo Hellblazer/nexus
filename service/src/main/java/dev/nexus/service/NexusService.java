@@ -526,7 +526,10 @@ public final class NexusService {
         // /v1/* — auth filter applied. catalogRepo wires RDR-204 Phase 1's
         // per-tenant ghost sweep + dormant marking (bead nexus-ft04v.3), fired
         // from AuthFilter.doFilter at each tenant's first request after boot.
-        var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo));
+        // IdempotencyKeyGuard (RDR-222 Phase 1, nexus-yye8l.5) follows AuthFilter on every context: an
+        // Idempotency-Key on a route that cannot use it is a 400, never an ignored key.
+        var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo),
+                new dev.nexus.service.http.IdempotencyKeyGuard());
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
@@ -625,7 +628,8 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy));
+                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy,
+                        requestLedger));
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
