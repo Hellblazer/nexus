@@ -517,6 +517,7 @@ cmd_destroy() {
 # macOS /bin/bash (3.2) into a signal-handler loop when a second signal arrived
 # during the cleanup (measured 2026-10-17: the process spun at 100% CPU, lease held).
 HOLD_SIG=''
+HOLD_DIR=''
 hold_end() {
     local why="$1"
     trap '' INT TERM HUP
@@ -527,6 +528,7 @@ hold_end() {
     fi
     build_lease_release suite
     echo "HOLD: released the suite lease"
+    rm -rf "$HOLD_DIR"
 }
 
 cmd_hold() {
@@ -541,10 +543,20 @@ cmd_hold() {
     source "$lib"
     need_run_uid
     HOLD_VM="$vm"
-    HOLD_SELF="$(cd -P "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+    # launch.sh starts this as $RD/host.sh and removes $RD when it ends, and a kept hold
+    # outlives that, so hold_end destroys through a private copy (nexus-2fn57: the destroy at
+    # the cap exited 127). mktemp -d makes the directory 0700.
+    HOLD_DIR="$(mktemp -d)" || die 3 "hold: cannot make a private directory"
+    HOLD_SELF="$HOLD_DIR/host.sh"
+    if ! cp "$(cd -P "$(dirname "$0")" && pwd -P)/$(basename "$0")" "$HOLD_SELF" || ! chmod 700 "$HOLD_SELF"; then
+        rm -rf "$HOLD_DIR"; die 3 "hold: cannot copy host.sh to $HOLD_DIR"
+    fi
     rc=0
     build_lease_acquire suite "mac-guest $vm" || rc=$?
-    if [[ $rc -ne 0 ]]; then echo "host.sh: hold: the suite lease is held or unavailable (exit $rc)" >&2; exit "$rc"; fi
+    if [[ $rc -ne 0 ]]; then
+        rm -rf "$HOLD_DIR"
+        echo "host.sh: hold: the suite lease is held or unavailable (exit $rc)" >&2; exit "$rc"
+    fi
     trap 'HOLD_SIG=TERM' TERM
     trap 'HOLD_SIG=INT' INT
     trap 'HOLD_SIG=HUP' HUP

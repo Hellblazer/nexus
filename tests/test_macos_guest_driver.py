@@ -728,6 +728,50 @@ def test_the_lifetime_cap_ends_a_hold_that_nobody_closes(h: Harness) -> None:
     assert h.leftovers()["lease"] == [] and not (h.root / "vms" / vm).exists()
 
 
+@_POSIX_ONLY
+def test_a_kept_hold_still_destroys_at_the_cap_after_its_run_directory_is_removed(h: Harness) -> None:
+    # launch.sh starts the hold as $RD/host.sh and removes $RD when it ends; a --keep-guest
+    # hold outlives that, and its destroy at the cap exited 127 (nexus-2fn57).
+    vm = "nx-mac-run-t4k"
+    (h.root / "vms" / vm).touch()
+    rd = h.tmp / "rd"
+    rd.mkdir()
+    shutil.copy2(h.host, rd / "host.sh")
+    proc = subprocess.Popen(
+        [str(rd / "host.sh"), "hold", vm, "keep"], env=h.env(NX_MAC_GUEST_LIFETIME_SECS="6"),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=h.tmp,
+        start_new_session=True,
+    )
+    h.procs.append(proc)
+    assert proc.stdout is not None and proc.stdin is not None
+    assert proc.stdout.readline().startswith("HOLD: acquired the suite lease")
+    proc.stdin.close()
+    proc.stdin = None
+    shutil.rmtree(rd)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert "was not destroyed" not in out, out
+    assert h.tart_calls("delete") == [f"delete {vm}"]
+    assert h.leftovers()["lease"] == [] and not (h.root / "vms" / vm).exists()
+    assert list((h.tmp / "tmp").iterdir()) == [], "the hold's private copy is removed"
+
+
+@_POSIX_ONLY
+def test_a_refused_hold_leaves_no_private_copy(h: Harness) -> None:
+    vm = "nx-mac-run-t4r"
+    (h.root / "vms" / vm).touch()
+    holder = _sleeper()
+    try:
+        h.hold_lease(holder.pid)
+        proc = _start_hold(h, vm)
+        proc.communicate(timeout=60)
+    finally:
+        holder.kill()
+        holder.wait()
+    assert proc.returncode == 75
+    assert list((h.tmp / "tmp").iterdir()) == []
+
+
 # ---- destroy -----------------------------------------------------------------------
 
 
