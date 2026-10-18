@@ -167,6 +167,96 @@ claude_start() {
     _lib_claude_start "$@"
 }
 
+# claude_start_enforced: claude_start WITHOUT --dangerously-skip-permissions
+# (nexus-qsmc5). Under the bypass flag every tool call is allowed whatever
+# settings.json says, so a scenario whose point is the permission system (a
+# defaultMode, an allow rule, a PermissionRequest hook) measures nothing with
+# claude_start. Such a scenario launches with this and proves the mode is in
+# force with a control: a call no rule grants must stop at a permission prompt
+# (cc_wait_permission_prompt). The pane is cleared first so an earlier session's
+# prompt in the scrollback cannot be read as this one's.
+claude_start_enforced() {
+    local CLAUDE_PERMISSION_FLAG=""
+    send_keys "clear" Enter
+    sleep 0.5
+    _tmux clear-history -t "$TMUX_SESSION" 2>/dev/null || true
+    claude_start "$@"
+}
+
+# cc_permission_prompt_up: 0 when the pane shows a pending permission prompt.
+cc_permission_prompt_up() {
+    local pane
+    pane="$(capture -60)"
+    grep -qE "Do you want to proceed\?" <<<"$pane"
+}
+
+# cc_wait_permission_prompt [timeout-seconds]: poll the pane for the prompt.
+cc_wait_permission_prompt() {
+    poll_for "Do you want to proceed\?" "${1:-90}" "a permission prompt"
+}
+
+# cc_dismiss_permission_prompt: answer a pending prompt with Escape (deny), so the
+# session can exit cleanly and the call never runs.
+cc_dismiss_permission_prompt() {
+    if cc_permission_prompt_up; then
+        _tmux send-keys -t "$TMUX_SESSION" Escape
+        sleep 1
+    fi
+    return 0
+}
+
+# cc_allow_rule_verdict <name> <rule> <control_prompt> <control_ran> <allowed_ran> <allowed_prompt> [report]
+# The verdict ladder of scenarios 05 and 06 (an allow rule granting an MCP tool
+# call), 1/0 flags. The allowed leg means nothing unless the CONTROL leg (a rule
+# that does not match the tool) stopped at a permission prompt without running
+# the tool: that is the proof permissions are enforced in these sessions. With
+# `report` (scenario 06, whose question is whether a rule SHAPE matches) either
+# honest answer passes: the tool ran with no prompt (matches) or the prompt is
+# pending (does not match); only "neither" is no answer.
+cc_allow_rule_verdict() {
+    local name="$1" rule="$2" cprompt="$3" cran="$4" aran="$5" aprompt="$6" mode="${7:-}"
+    echo "    ${name}: control prompt=$cprompt tool_ran=$cran; allowed prompt=$aprompt tool_ran=$aran"
+    if [[ "$cprompt" -ne 1 || "$cran" -ne 0 ]]; then
+        fail "${name}: the CONTROL session (a rule that does not match the tool) did not stop at a permission prompt (prompt=$cprompt tool_ran=$cran): permissions are not enforced in these sessions (launched with --dangerously-skip-permissions?), so the allowed leg proves nothing about $rule"
+    elif [[ "$aprompt" -eq 1 && "$aran" -eq 0 && "$mode" == "report" ]]; then
+        pass "${name}: $rule does NOT match: the call stopped at a permission prompt (and the tool did not run), as the control did, in the same mode"
+    elif [[ "$aprompt" -eq 1 ]]; then
+        fail "${name}: the allowed leg still stopped at a permission prompt: $rule did NOT grant the call"
+    elif [[ "$aran" -ne 1 ]]; then
+        fail "${name}: the allowed leg neither stopped at a prompt nor ran the tool: nothing to conclude about $rule"
+    elif [[ "$mode" == "report" ]]; then
+        pass "${name}: $rule MATCHES: the tool ran with no prompt, while a rule that does not match stopped at a permission prompt in the same mode"
+    else
+        pass "${name}: $rule granted the call with no prompt (the tool ran) while a rule that does not match stopped at a permission prompt in the same mode: the rule did it, not a bypass"
+    fi
+}
+
+# cc_preempt_verdict <hook_A> <ran_A> <prompt_A> <hook_B> <ran_B> <prompt_B>
+# The verdict ladder of scenario 07: does an allow rule preempt a PermissionRequest
+# hook? A = allow rule present, B = absent (1/0 flags). B is the control: with no
+# rule granting the call it must reach a permission gate, which is the hook
+# firing or the prompt appearing; neither means permissions are not enforced.
+cc_preempt_verdict() {
+    local ha="$1" ra="$2" pa="$3" hb="$4" rb="$5" pb="$6"
+    echo "    sub-A (allow present): hook_fired=$ha tool_ran=$ra prompt_pending=$pa"
+    echo "    sub-B (allow absent):  hook_fired=$hb tool_ran=$rb prompt_pending=$pb"
+    if [[ "$hb" -eq 0 && "$pb" -eq 0 ]]; then
+        fail "07: with NO allow rule the call neither reached the PermissionRequest hook nor stopped at a permission prompt: permissions are not enforced in these sessions (launched with --dangerously-skip-permissions?), so sub-A proves nothing"
+    elif [[ "$pa" -eq 1 ]]; then
+        fail "07: with the allow rule present the call still stopped at a permission prompt: the rule did not grant it"
+    elif [[ "$ra" -ne 1 ]]; then
+        fail "07: sub-A: the allow rule was present but the tool did not run (server not connected?), so the PermissionRequest gate cannot be assessed"
+    elif [[ "$hb" -eq 0 ]]; then
+        fail "07: sub-B stopped at a permission prompt but the PermissionRequest hook never fired: the hook does not govern this prompt (matcher or event), investigate"
+    elif [[ "$rb" -ne 1 ]]; then
+        fail "07: sub-B: the PermissionRequest hook fired and allowed the call but the tool did not run: the hook's allow was not honoured"
+    elif [[ "$ha" -eq 0 ]]; then
+        pass "07: the allow wildcard PREEMPTS the PermissionRequest hook (it fires only when no rule allows the call)"
+    else
+        pass "07: the PermissionRequest hook fires regardless of the allow rule (an auto-approver would still run if kept)"
+    fi
+}
+
 # ─── Live pane capture (CC_VAL_DEBUG_CAPTURE=1) ──────────────────────────────
 # The README's standing lesson is that every cc-val mystery is settled by
 # MEASURING the pane, and that a capture taken after the TUI exits is useless
@@ -447,28 +537,92 @@ cc_mcp_hook_ran() {
     ! grep -q "Hooks: mcp_tool hook error" "$CC_DEBUG_FILE"
 }
 
-# cc_hook_context_injected <event> <hook-ere>: 0 when the debug log shows Claude
-# Code ACCEPTED non-empty additionalContext from a hook of <event> whose command
-# (or mcp_tool target) matches <hook-ere>: `Hook <Event> (<command>) provided
-# additionalContext (N chars)`. A hook that finishes with status 0 and prints
-# nothing, or prints text Claude Code drops, never logs this line, so it is the
-# delivery half of the evidence cc_hook_ran/cc_mcp_hook_ran cannot give.
-cc_hook_context_injected() {
-    local event="$1" hook="$2"
-    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
-    grep -Eq "Hook ${event} \([^)]*${hook}[^)]*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE"
+# cc_report_context_lines: print (informational, never a verdict) the additionalContext
+# Claude Code accepted from hooks this session, from the debug log, so a probe that
+# read NONE can be told apart from a hook that never delivered anything. The line
+# names the hook's command, not its plugin; the sizes are the point.
+cc_report_context_lines() {
+    local lines
+    if [[ -z "${CC_DEBUG_FILE:-}" || ! -f "$CC_DEBUG_FILE" ]]; then
+        echo "    [debug] no debug log for this session"
+        return 0
+    fi
+    lines="$(grep -E 'Hook [A-Za-z]+ \(.*\) provided additionalContext' "$CC_DEBUG_FILE" | cut -c1-200 || true)"
+    if [[ -z "$lines" ]]; then
+        echo "    [debug] Claude Code accepted NO additionalContext from any hook this session"
+    else
+        echo "    [debug] additionalContext accepted from hooks this session:"
+        sed 's/^/    [debug]   /' <<<"$lines"
+    fi
+    return 0
 }
 
-# cc_subagent_replies: the text the dispatched subagents themselves answered,
-# read from their own transcripts (agent-<id>.jsonl under the session's
-# projects dir), one assistant text block per line group. The pane is NOT a
-# source for a subagent's answer: the main agent paraphrases it, redacts agent
-# ids ("internal ID - do not mention"), and sometimes disputes it, so a probe
-# token can be missing from the pane although the subagent said it (seen live,
-# 2026-10-17) or present there although the subagent did not.
-cc_subagent_replies() {
-    find "$TEST_HOME/.claude/projects" -name 'agent-*.jsonl' -print0 2>/dev/null | xargs -0 -r python3 -I -c '
-import json, sys
+# cc_hook_context_chars <event> <hook-ere> <plugin_id>: the sizes (one per line) of
+# the non-empty additionalContext Claude Code ACCEPTED from a hook of <event> of
+# plugin <plugin_id> whose command (or mcp_tool target) matches <hook-ere>: the
+# debug log's `Hook <Event> (<command>) provided additionalContext (N chars)`.
+# Returns 1 and prints nothing when there is none. A hook that finishes with
+# status 0 and prints nothing, or prints text Claude Code drops, never logs this
+# line, so it is the delivery half of the evidence cc_hook_ran/cc_mcp_hook_ran
+# cannot give; and N is the length of what was delivered, so a caller that knows
+# what the hook should emit can tell a partial delivery from a whole one.
+#
+# Scoped to the plugin like cc_mcp_hook_ran (nexus-qsmc5): an mcp_tool hook's
+# line names its plugin (`plugin:<name>:<server>/<tool>`), so the name is matched
+# whole; a command hook's line carries only the command (with
+# ${CLAUDE_PLUGIN_ROOT} unexpanded), so the plugin is established by the
+# `... (plugin <id>) finished with status 0` line for the same script
+# (cc_hook_ran). Two plugins that each run a command hook of the same script name
+# cannot be told apart by the log; the sn and conexus plugins do not.
+cc_hook_context_chars() {
+    local event="$1" hook="$2" id="${3:-}" plugin lines=""
+    plugin="${id%@*}"
+    [[ -n "$id" && -n "$plugin" && -n "$hook" ]] || return 1
+    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
+    lines="$(grep -E "Hook ${event} \(plugin:${plugin}:[^)]*${hook}[^)]*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE" || true)"
+    if [[ -z "$lines" ]] && cc_hook_ran "$event" "$id" "$hook"; then
+        # command hooks only: another plugin's mcp_tool line names its plugin and is not this one's
+        lines="$(grep -E "Hook ${event} \([^)]*${hook}[^)]*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE" | grep -vF " (plugin:" || true)"
+    fi
+    [[ -n "$lines" ]] || return 1
+    sed -E 's/.*\(([1-9][0-9]*) chars\)[[:space:]]*$/\1/' <<<"$lines"
+}
+
+# cc_hook_context_injected <event> <hook-ere> <plugin_id>: 0 when
+# cc_hook_context_chars finds delivered context.
+cc_hook_context_injected() {
+    local sizes
+    sizes="$(cc_hook_context_chars "$@")" || return 1
+    [[ -n "$sizes" ]]
+}
+
+# cc_hook_context_is_whole <event> <hook-ere> <plugin_id> <chars>...: 0 when the
+# plugin's hook delivered additionalContext of EXACTLY one of the given sizes.
+# The caller knows what the hook emits (the lengths of the files it concatenates),
+# so a delivery of only some of it, or of something else, does not pass
+# (nexus-qsmc5: scenario 18 could not tell a partial delivery from a whole one).
+cc_hook_context_is_whole() {
+    local event="$1" hook="$2" id="$3" got n w
+    shift 3
+    got="$(cc_hook_context_chars "$event" "$hook" "$id")" || return 1
+    for n in $got; do
+        for w in "$@"; do
+            if [[ "$n" == "$w" ]]; then return 0; fi
+        done
+    done
+    return 1
+}
+
+# _cc_transcript_items <text|tool_use> [find-predicates]: from the session
+# transcripts (*.jsonl under the sandbox's projects dir) the predicates select,
+# the assistant text blocks (kind text) or the names of the tools the assistant
+# called (kind tool_use), one per line.
+_cc_transcript_items() {
+    local kind="$1"
+    shift
+    find "$TEST_HOME/.claude/projects" -name '*.jsonl' "$@" -print0 2>/dev/null | CC_ITEM_KIND="$kind" xargs -0 -r python3 -I -c '
+import json, os, sys
+kind = os.environ["CC_ITEM_KIND"]
 for path in sys.argv[1:]:
     for line in open(path, encoding="utf-8", errors="replace"):
         try:
@@ -480,9 +634,39 @@ for path in sys.argv[1:]:
         content = (d.get("message") or {}).get("content")
         if isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
+                if not isinstance(block, dict):
+                    continue
+                if kind == "text" and block.get("type") == "text":
                     print(block.get("text", ""))
+                elif kind == "tool_use" and block.get("type") == "tool_use":
+                    print(block.get("name", ""))
 '
+}
+
+# cc_subagent_replies: the text the dispatched subagents themselves answered,
+# read from their own transcripts (agent-<id>.jsonl under the session's
+# projects dir), one assistant text block per line group. The pane is NOT a
+# source for a subagent's answer: the main agent paraphrases it, redacts agent
+# ids ("internal ID - do not mention"), and sometimes disputes it, so a probe
+# token can be missing from the pane although the subagent said it (seen live,
+# 2026-10-17) or present there although the subagent did not.
+cc_subagent_replies() {
+    _cc_transcript_items text -name 'agent-*.jsonl'
+}
+
+# cc_subagent_tool_uses: the names of the tools the dispatched subagents themselves
+# called (their own transcripts). A subagent that dispatches another one calls the
+# Task/Agent tool here, which no amount of text in its reply can fake (nexus-qsmc5).
+cc_subagent_tool_uses() {
+    _cc_transcript_items tool_use -name 'agent-*.jsonl'
+}
+
+# cc_session_replies: the same for the MAIN session (its own transcript, never a
+# subagent's). The pane shows the prompt and the hook output Claude Code prints,
+# so a marker a hook injected can be on the pane without the model ever having
+# seen it as context (nexus-qsmc5); the model's own text is the evidence.
+cc_session_replies() {
+    _cc_transcript_items text ! -name 'agent-*.jsonl'
 }
 
 # cc_wait_subagent_reply <ere> [timeout-seconds]: poll the subagents' own
@@ -492,10 +676,23 @@ cc_wait_subagent_reply() {
     for i in $(seq 1 $((timeout / 2))); do
         sleep 2
         local replies
-        replies="$(cc_subagent_replies)"
+        replies="$(cc_subagent_replies || true)"
         if grep -qE "$pat" <<<"$replies"; then return 0; fi
     done
     echo "    TIMEOUT waiting for a subagent reply matching: $pat (${timeout}s)"
+    return 1
+}
+
+# cc_wait_session_reply <ere> [timeout-seconds]: the same for the main session.
+cc_wait_session_reply() {
+    local pat="$1" timeout="${2:-180}" i
+    for i in $(seq 1 $((timeout / 2))); do
+        sleep 2
+        local replies
+        replies="$(cc_session_replies || true)"
+        if grep -qE "$pat" <<<"$replies"; then return 0; fi
+    done
+    echo "    TIMEOUT waiting for a session reply matching: $pat (${timeout}s)"
     return 1
 }
 

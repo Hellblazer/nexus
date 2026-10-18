@@ -32,6 +32,29 @@ while [ $# -gt 0 ]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+# stage_report_untracked <label> <pathspec...> (nexus-qsmc5): the stage takes
+# `git ls-files -co`, tracked files AND untracked non-ignored ones with their
+# working-tree content, so a stray file under src/ rides into the image or the
+# harness unseen (a live run once staged two stale untracked src files from an
+# overlaid tree). Say how many untracked files this stage took, and which (first
+# 20), so the run's output shows what was not committed.
+stage_report_untracked() {
+    local label="$1" listed count
+    shift
+    listed="$(git -C "$ROOT" ls-files -o --exclude-standard -- "$@")"
+    if [ -z "$listed" ]; then
+        echo "[stage] $label: 0 untracked files staged"
+        return 0
+    fi
+    count="$(wc -l <<<"$listed")"
+    count="${count//[[:space:]]/}"
+    echo "[stage] $label: $count untracked non-ignored file(s) staged from the working tree (not in git):"
+    sed -n '1,20p' <<<"$listed" | sed 's/^/[stage]     /'
+    if [ "$count" -gt 20 ]; then
+        echo "[stage]     ... and $((count - 20)) more"
+    fi
+}
+
 command -v docker > /dev/null || { echo "docker is required" >&2; exit 2; }
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     echo "CC-VAL CONTAINER UNVERIFIED: no automation token in the environment;" >&2
@@ -49,6 +72,7 @@ echo "[stage] harness + current plugin from $(git -C "$ROOT" rev-parse --short H
 mkdir -p "$STAGE/harness" "$STAGE/control"
 ( cd "$ROOT" && git ls-files -z -co --exclude-standard -- tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn ) \
     | tar -C "$ROOT" --null -T - -cf - | tar -x -C "$STAGE/harness"
+stage_report_untracked "harness" tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn
 
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$CONTROL_TAG" > /dev/null 2>&1; then
     git -C "$ROOT" fetch -q origin "refs/tags/$CONTROL_TAG:refs/tags/$CONTROL_TAG"
@@ -75,6 +99,7 @@ mkdir -p "$CTX/cli-src"
 cp "$HERE/Dockerfile" "$CTX/Dockerfile"
 ( cd "$ROOT" && git ls-files -z -co --exclude-standard -- src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml ) \
     | tar -C "$ROOT" --null -T - -cf - | tar -x -C "$CTX/cli-src"
+stage_report_untracked "cli-src" src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml
 [ -f "$CTX/cli-src/pyproject.toml" ] && [ -d "$CTX/cli-src/src/nexus" ] \
     || { echo "cli-src staging is missing pyproject.toml or src/nexus" >&2; exit 2; }
 

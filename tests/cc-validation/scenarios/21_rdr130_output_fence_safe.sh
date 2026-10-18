@@ -33,7 +33,7 @@ printf '\140\140\140\n'
 printf 'OUTFENCE-END-%s\n' "$((6*7))"
 ```
 
-Report verbatim whether the marker OUTFENCE-END-42 and the fenced block appear above.
+Report verbatim whether the marker that starts OUTFENCE-END- and ends with the product of six and seven, and the fenced block, appear above.
 EOF
 
 claude_start

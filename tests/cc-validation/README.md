@@ -311,7 +311,9 @@ the entire MCP stack broken. Two rules came out of the rework:
 
 Reworked for validity 2026-05-31: 05, 06, 07, 09, 10, 11, 14a, 14b, 16, 18, 19A,
 23. Verified valid as-is: 01, 17 (explicit-token),
-02/03/04/12/13/14c/15/20–22/24–26 (forensic/positive). (09/10's branch-1 token
+02/03/04/12/13/14c/15/20–22/24–26 (forensic/positive). (nexus-qsmc5 found 01-04, 11, 15, 17,
+21, 24 and 25 were NOT valid: a token or marker written whole in the prompt or command
+body, or a verdict read off the pane; and 05-07 ran under the bypass flag. Reworked.) (09/10's branch-1 token
 grep used to match the user's own turn-1 prompt in scrollback — fixed by
 requiring a compound `INHERIT-SEEN:<token>` / `ENVV-SEEN:<token>` that only the
 fork can emit.)
@@ -320,11 +322,17 @@ fork can emit.)
 
 The harness correctly surfaces these. A green here would be the bug:
 
-- **06** — infix wildcard `mcp__plugin_*__*` MATCHES across the `__` boundary
-  (contradicts the older `-p` finding).
-- **07** — under `skipDangerousModePermissionPrompt` the PermissionRequest gate
-  is bypassed entirely (tool auto-runs both with and without an allow rule, the
-  hook never fires) — so a PermissionRequest auto-approver is redundant.
+- **06** — infix wildcard `mcp__plugin_*__*` does NOT match across the `__`
+  boundary (Claude Code 2.1.302, measured without the bypass flag, nexus-qsmc5): the
+  call stops at a permission prompt exactly as a non-matching rule does. The earlier
+  entry here ("MATCHES") was read under `--dangerously-skip-permissions`, where every
+  call runs, and was no reading.
+- **07** — the allow wildcard PREEMPTS the PermissionRequest hook: with
+  `mcp__stub__*` allowed the hook never fires and the tool runs; with no rule the
+  hook fires and its `allow` runs the tool (nexus-qsmc5, same build and method). The
+  earlier entry ("under `skipDangerousModePermissionPrompt` the gate is bypassed
+  entirely, so a PermissionRequest auto-approver is redundant") was also read under the
+  bypass flag. `skipDangerousModePermissionPrompt` only skips the startup dialog.
 - **11** — inline-agent `mcpServers` ARE scoped to the subagent (confirmed), the
   documented behavior ("the subagent gets the tools; the parent conversation does
   not"). The inline server spawns at subagent dispatch (stub startup markers show
@@ -470,15 +478,43 @@ the `sn` plugin tree, and the `mcp` package for the stub server.
 
 **Probes must not match their own prompt.** The pane shows the prompt, and the
 subagent sees it too, so a marker or reply token written whole in the prompt
-satisfies the grep at once. Scenarios 12, 13 and 18 spell tokens and probe phrases
-as pieces ("the word FOUND immediately followed by -13B") and grep the joined form;
-`tests/test_cc_validation_plugin_install.py` fails if any of their prompts holds a
-probe whole. A fixed phrase can still be answered from the prompt, so scenario 12
-asks for the per-dispatch `Claimant id` the hook emits and compares the subagent's
-reply with the id in the debug log. The reply is read from the subagent's own
-transcript (`cc_subagent_replies`), never the pane: the main agent paraphrases it,
-redacts agent ids and may dispute it (seen live). Scenario 14b passes its "does not
-load" reading only when 14a showed the same stub loading in that run; otherwise SKIP.
+satisfies the grep at once. Scenarios 01-04, 11, 12, 13, 15, 17 and 18 (and the
+slash-command bodies of 21, 24 and 25) spell tokens and probe phrases as pieces
+("the word FOUND immediately followed by -13B") and grep the joined form;
+`tests/test_cc_validation_plugin_install.py` (`PROBES`) fails if any of their
+prompts, or for 17/21/24/25 their skill or command bodies, holds a probe whole. A
+fixed phrase can still be answered from the prompt, so scenario 12 asks for the
+per-dispatch `Claimant id` the hook emits and compares the subagent's reply with
+the id in the debug log. The reply is read from the subagent's own transcript
+(`cc_subagent_replies`; the main session's own is `cc_session_replies`), never the
+pane: the main agent paraphrases the reply, redacts agent ids and may dispute it,
+and the pane also prints a hook's own output (seen live). Scenario 17 also needs a
+subagent to have CALLED the Task/Agent tool (`cc_subagent_tool_uses`): the fork's
+own Task prompt is on the pane. Scenario 18 gates on the size of the context the
+plugin's hook delivered (`cc_hook_context_is_whole`: the debug log's
+`provided additionalContext (N chars)` must equal the lengths of the two section
+files), because the reply tokens cannot tell a partial delivery from a whole one.
+`cc_hook_context_injected` and `cc_hook_context_chars` are scoped to a plugin id.
+
+**Permission scenarios launch enforced (05-07).** `claude_start` passes
+`--dangerously-skip-permissions`, under which every call runs whatever
+`settings.json` says. A scenario about the permission system launches with
+`claude_start_enforced` (no bypass flag) and carries a control in the same mode:
+05 and 06 run a leg whose allow rule does not match the tool, which must stop at a
+"Do you want to proceed?" prompt without running it (`cc_allow_rule_verdict`); 07's
+no-allow sub-run must reach the PermissionRequest hook or the prompt
+(`cc_preempt_verdict`). A control that does not prompt fails the scenario: the
+session is not enforcing permissions. The census test fails for any scenario that
+pins `defaultMode` default/auto/plan and still launches through `claude_start`.
+
+**Scenario 14 waits for the agent, and reads the spawn.** `claude_wait` watches only
+the main session's spinner and the main agent does not spin while a subagent
+works, so 14 used to read its files, and end the session, mid-task (the agents'
+transcripts ended "[Request interrupted by user]"). It now waits for each agent's
+own `14X_DONE` reply. Scenario 14b no longer depends on whether the agent loaded
+and called the deferred tool: it passes on the stub's own `process_launched` marker
+(Claude Code spawned the server for the plugin agent), or, with no spawn, on
+14a's positive control that the same stub loads project-level; otherwise SKIP.
 
 ## Running in a container (and scenario 32's positive control)
 

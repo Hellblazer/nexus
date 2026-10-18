@@ -84,11 +84,22 @@ poll_until_gone() {
 #   2. Bypass permissions confirmation → Down + Enter
 #   3. Login selector (if credentials missing) → Down + Enter for option 2
 claude_start() {
+    # CLAUDE_PERMISSION_FLAG is the permission flag the session launches with:
+    # unset means --dangerously-skip-permissions (every e2e caller); SET, even to
+    # the empty string, replaces it, so a session that measures the permission
+    # system itself launches without the bypass (cc-validation's
+    # claude_start_enforced, nexus-qsmc5). Under the bypass the status bar says
+    # "bypass permissions on"; without it that sentinel never appears.
+    local perm_flag="${CLAUDE_PERMISSION_FLAG---dangerously-skip-permissions}"
+    local ready_re="bypass permissions on|Type a message"
+    if [[ "$perm_flag" != *--dangerously-skip-permissions* ]]; then
+        ready_re="Type a message|for shortcuts"
+    fi
     # CLAUDE_EXTRA_ARGS lets a caller inject launch flags (e.g. cc-val's
     # --mcp-config/--strict-mcp-config). Empty by default — no behavior change.
     # Through claude_fd_exec.sh: the token rides fd 3, not Claude's
     # environment (RDR-219, nexus-wauo1.36).
-    send_keys "bash '$CLAUDE_FD_EXEC' --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
+    send_keys "bash '$CLAUDE_FD_EXEC' ${perm_flag} ${CLAUDE_EXTRA_ARGS:-}" Enter
 
     # Give Claude time to initialize before checking screens.
     sleep 8
@@ -154,7 +165,7 @@ claude_start() {
             sleep 1
             break
 
-        elif echo "$pane" | grep -qiE "bypass permissions on|Type a message"; then
+        elif echo "$pane" | grep -qiE "$ready_re"; then
             # "bypass permissions on" only appears in the status bar at the main
             # prompt when --dangerously-skip-permissions is active.
             # This is more specific than "❯" which also appears in auth menus.

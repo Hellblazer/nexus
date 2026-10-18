@@ -43,6 +43,22 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
 EOF
 
 if cc_plugin_require "$REPO_ROOT/sn" sn nexus-plugins; then
+    # nexus-qsmc5: how many characters the hook must deliver for BOTH sections to
+    # have arrived. The probe fragments below can be joined from the prompt, and
+    # the reply tokens only say the model read the context it was given, so neither
+    # separates "both sections delivered" from "some context delivered". The debug
+    # log's `provided additionalContext (N chars)` does: N is the length of what the
+    # plugin's hook handed Claude Code, so it must equal the two section files'
+    # lengths (serena-section.md + context7-section.md), or those plus the worktree
+    # section (a subagent dispatched from a linked worktree gets that one first).
+    WHOLE18="$(python3 - "$REPO_ROOT/sn/hooks/scripts" <<'PY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1])
+n = {name: len((d / f"{name}-section.md").read_text(encoding="utf-8")) for name in ("serena", "context7", "worktree")}
+both = n["serena"] + n["context7"]
+print(both, both + n["worktree"])
+PY
+)"
     claude_start
     # Probe: ask the subagent for two anchor phrases that exist ONLY inside the
     # hook-injected sections. If hooks fire and the JSON envelope reaches the
@@ -84,10 +100,11 @@ if cc_plugin_require "$REPO_ROOT/sn" sn nexus-plugins; then
     echo "$OUT" | grep -qE "DOCS-OK-9F2K" && HAS_B=1
 
     if [[ $HAS_A -eq 1 && $HAS_B -eq 1 ]]; then
-        if cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID" && cc_hook_context_injected "SubagentStart" "subagent_start.py"; then
-            pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent, the debug log shows the plugin's SubagentStart hook finished and Claude Code accepted its additionalContext — JSON envelope works"
+        # shellcheck disable=SC2086 # WHOLE18 is a space-separated list of sizes
+        if cc_hook_ran "SubagentStart" "$CC_PLUGIN_ID" && cc_hook_context_is_whole "SubagentStart" "subagent_start.py" "$CC_PLUGIN_ID" $WHOLE18; then
+            pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent, the debug log shows the plugin's SubagentStart hook finished and Claude Code accepted exactly the two sections' text (${WHOLE18%% *} chars) — JSON envelope works"
         else
-            fail "Both phrases reached the subagent but the debug log ($CC_DEBUG_FILE) does not show the SubagentStart hook of $CC_PLUGIN_ID finishing and delivering additionalContext — the content did not come from the plugin's hook"
+            fail "Both phrases reached the subagent but the debug log ($CC_DEBUG_FILE) does not show the SubagentStart hook of $CC_PLUGIN_ID finishing and delivering additionalContext of exactly the whole sections (want one of: $WHOLE18; delivered: $(cc_hook_context_chars "SubagentStart" "subagent_start.py" "$CC_PLUGIN_ID" | tr '\n' ' ' || true)) — the content was not delivered whole by the plugin's hook"
         fi
     elif [[ $HAS_A -eq 1 && $HAS_B -eq 0 ]]; then
         fail "Serena section injected but Context7 missing — partial delivery"

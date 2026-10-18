@@ -62,7 +62,7 @@ claude_start
 # ACTUAL access forensically: ask the parent to CALL the stub with a parent-
 # specific payload and check STUB_LOG. A landed payload is hard proof the parent
 # holds the tool; its absence is proof it does not.
-claude_prompt "Attempt to call the mcp__stub__record tool with payload='PARENT-CALL-PROBE'. If that tool is not available to you, reply with the literal token PARENT-NO-STUB."
+claude_prompt "Attempt to call the mcp__stub__record tool with payload='PARENT-CALL-PROBE'. If that tool is not available to you, reply with the word PARENT immediately followed by -NO-STUB (no space)."
 claude_wait 30
 parent_called_stub=0
 [[ -s "$STUB_LOG" ]] && grep -q "PARENT-CALL-PROBE" "$STUB_LOG" && parent_called_stub=1
@@ -70,7 +70,9 @@ parent_called_stub=0
 # "model ignored the probe". Require the parent to have EXPLICITLY reported the
 # tool absent (PARENT-NO-STUB) so a non-compliant model doesn't read as scoped.
 parent_denied=0
-capture -60 | grep -q "PARENT-NO-STUB" && parent_denied=1
+cc_wait_session_reply "PARENT-NO-STUB" 20 > /dev/null || true
+REPLIES11="$(cc_session_replies || true)"
+grep -q "PARENT-NO-STUB" <<<"$REPLIES11" && parent_denied=1
 
 claude_prompt "Use the Task tool to dispatch the scoped-tool-agent. Description='scope test'. Prompt: 'Run your instructions exactly.'"
 claude_wait 90

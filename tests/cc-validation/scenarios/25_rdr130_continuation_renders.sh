@@ -28,7 +28,7 @@ description: RDR-130 P2 continuation preamble probe
 
 !`nx command-context continuation -- "$ARGUMENTS"`
 
-Report verbatim whether the "**Target file:**" line and the "## Working state" heading appear above.
+Report verbatim whether the line that names the target file and the heading that names the working state appear above.
 EOF
 
 claude_start

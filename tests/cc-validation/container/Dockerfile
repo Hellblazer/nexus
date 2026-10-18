@@ -42,13 +42,17 @@ USER root
 # a develop plugin then runs against the develop CLI, and a release branch works
 # before its version is published. Installed system-wide (the harness points HOME
 # at its sandbox) and found by the plugin's launcher through PATH.
-COPY cli-src /tmp/cli-src
-RUN mkdir -p /opt/uv-tools /opt/uv-python \
+#
+# The source is bind-mounted for the one RUN that builds the wheel, never COPYed
+# (nexus-qsmc5): a COPY layer keeps the whole tree in the image after a later
+# `rm -rf`, which only hides it. `rw` lets the build write beside the sources; those
+# writes are discarded with the mount and never reach a layer.
+RUN --mount=type=bind,source=cli-src,target=/tmp/cli-src,rw \
+    mkdir -p /opt/uv-tools /opt/uv-python \
     && UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_INSTALL_DIR=/opt/uv-python \
        uv tool install /tmp/cli-src \
     && chmod -R a+rX /opt/uv-tools /opt/uv-python \
-    && test -x /usr/local/bin/nx-mcp \
-    && rm -rf /tmp/cli-src
+    && test -x /usr/local/bin/nx-mcp
 # The harness points HOME at its sandbox, so ~/.local/bin/claude would no longer
 # resolve inside a scenario; put claude on the system PATH.
 RUN ln -s /home/nexus/.local/bin/claude /usr/local/bin/claude \

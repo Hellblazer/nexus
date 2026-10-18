@@ -28,7 +28,7 @@ description: RDR-130 P2 agent-relay preamble probe
 
 !`nx command-context analyze-code`
 
-Report verbatim whether the "### Source Locations" heading and the "**Project type:**" list appear above.
+Report verbatim whether the heading that names the source locations and the list that begins with the project type appear above.
 EOF
 
 claude_start

@@ -3,8 +3,18 @@
 # Earlier finding: single-token echo doesn't visibly inject; multi-line bash does.
 # Where's the threshold?
 
+# nexus-qsmc5: the old prompt wrote $marker WHOLE ("Is the literal text $marker
+# there?"), the pane shows the prompt, and the grep below matched the pane, so
+# every variant read "visible" off its own prompt (and the always-pass branches hid
+# it). The prompt now names the marker in two pieces, the reply tokens are spelled
+# in pieces and tagged per probe (the sandbox keeps every earlier probe's
+# transcript), and the verdict reads the SUBAGENT's own transcript
+# (cc_subagent_replies): visible only if its reply carries the whole marker.
 probe_inject() {
     local label="$1" command="$2" marker="$3"
+    local tail15="${marker##*-}"
+    local head15="${marker%"$tail15"}"
+    local tag="${label}S"
     cat > "$TEST_HOME/.claude/settings.json" <<EOF
 {
   "skipDangerousModePermissionPrompt": true,
@@ -17,18 +27,28 @@ probe_inject() {
   }
 }
 EOF
+    CC_DEBUG_FILE="$TEST_HOME/cc-debug-${label}.log"; rm -f "$CC_DEBUG_FILE"
     claude_start
-    claude_prompt "Use Task to dispatch the general-purpose agent. Description='$label'. Prompt: 'Examine your context. Is the literal text $marker there? Reply YES with the marker, or NO.'"
-    claude_wait 90
-    if capture -300 | grep -qE "$marker"; then
+    claude_prompt "Use Task to dispatch the general-purpose agent. Description='$label'. Prompt: 'Do not use any tools. Examine your context, apart from this message. Is the text ${head15} immediately followed by ${tail15} (no space) anywhere in it? If yes, reply with the word FOUND immediately followed by -${tag} (no space), then a space, then that whole text. If no, reply with the word NONE immediately followed by -${tag} (no space).'"
+    cc_wait_subagent_reply "FOUND-${tag}|NONE-${tag}" 180 || true
+    local replies found_line
+    replies="$(cc_subagent_replies || true)"
+    found_line="$(grep -F "FOUND-${tag}" <<<"$replies" || true)"
+    if [[ "$found_line" == *"$marker"* ]]; then
         echo "    [$label] $marker VISIBLE"
         pass "[$label] visible — plain stdout DID inject"
         result_visible=1
-    else
+    elif grep -qF "NONE-${tag}" <<<"$replies"; then
         echo "    [$label] $marker NOT visible"
         pass "[$label] not visible — this style does not inject"
         result_visible=0
+    else
+        echo "    [$label] $marker INDETERMINATE"
+        fail "[$label] indeterminate — the subagent answered neither FOUND-${tag} with the whole marker nor NONE-${tag}"
+        result_visible=-1
     fi
+    cc_report_context_lines
+    cc_keep_evidence "$label"
     claude_exit
 }
 
