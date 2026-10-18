@@ -66,13 +66,70 @@ chunk and `complete` after its verified last manifest write. **Tenant RLS** is
 Postgres row-level security keyed on the `nexus.tenant` setting that
 `TenantScope.withTenant` stamps per transaction.
 
+## Context
+
+### Background
+
+The problem surfaced on 2026-09-16 during the owner-1.1 cleanup (nexus-ll31n,
+Gap 1): a sweep that committed was reported as failed, and its auto-retry
+then failed against the sweep gate the first call still held. The auto-retry
+half shipped in v7.58.0. What remains is that no response, and no read
+afterwards, tells a caller whether a mutating request committed, is still
+running, or rolled back. Gaps 2 and 3 are the same blindness on the write
+routes. Phase 0 of this RDR (the raced-embed counter) shipped in
+`engine-service-v0.1.137` and read small (Decisions after Phase 0), which
+deferred Gap 2 and closed Gap 3. Phase 1, the ledger for sweeps, is what this
+record now carries to implementation.
+
+### Technical Environment
+
+- The engine: Java, `com.sun.net.httpserver`, jOOQ over Postgres with
+  Liquibase changesets, tenant isolation by RLS through `TenantScope`.
+- The managed edge in front of the cloud engine cuts a request at a fixed
+  bound (about 30 s; 55 s on the embed-write routes since conexus PR #358).
+- The client: Python, `HttpVectorClient` and the catalog HTTP client, with
+  gateway retry in `src/nexus/db/gateway_backoff.py` and the r46u9 30 s
+  resend floor after a 504.
+- The sweep routes run one SQL function inside one `withTenant`
+  transaction under the RDR-191 sweep gate (an advisory lock) and write a
+  `nexus.gc_audit` row in that same transaction.
+- One managed engine instance today (Decisions on the open questions, 4).
+
 ## Research Findings (measurements done for this draft)
+
+### Investigation
 
 All three are code reads against develop b1d900fd6. No production data was
 read; where a number needs production, the exact query is given and the number
-is left unknown.
+is left unknown. On 2026-10-18 the load-bearing claims were re-read at
+develop ecd51d2c3 and filed as T2 research records `nexus_rdr/222-research-1`
+to `-7`; they still hold, and only some line numbers moved (the records give
+both). Phase 0's production readings are in the Decisions after Phase 0.
 
-### M-a. Are duplicate-chash embeds logged, and what would count them?
+### Key Discoveries
+
+- **✅ Verified** (source search): one request never embeds a duplicate
+  chash twice (M-a). *Source: 222-research-1.*
+- **✅ Verified** (source search): the engine carries no request identity
+  today; Phase 0's raced-embed signal is live. *Source: 222-research-2.*
+- **✅ Verified** (source search): the existence partition sees only
+  committed rows, so the duplicate window is a whole embed (M-b).
+  *Source: 222-research-3.*
+- **✅ Verified** (source search): no write compares `index_run_id`; chunk
+  metadata carries no run id (M-c). *Source: 222-research-4.*
+- **❓ Assumed** (source search): the M-c detection query would fire on a
+  real late commit. It has no known positive. *Source: 222-research-5.*
+- **❓ Assumed** (source search): the M-d harm downgrade holds. It rests on
+  the conformant collection name naming the model, which RDR-229 retires for
+  new collections (Sam, 2026-10-18), so it must be restated against the
+  registry row before Phase 3 is ever built. *Source: 222-research-6.*
+- **✅ Verified** (source search): the sweep gate, `gc_audit` in the move
+  transaction, and the request deadline exist (M-e).
+  *Source: 222-research-7.*
+
+The measurements behind these entries follow.
+
+#### M-a. Are duplicate-chash embeds logged, and what would count them?
 
 - **Verified (source).** Within ONE request a duplicate chash is never embedded
   twice: `PgVectorRepository.upsertChunksInternal` de-duplicates ids first-wins
@@ -120,7 +177,7 @@ is left unknown.
     `grep -h "vector_gateway_retry_embed_write_504" <captured-log> | awk '{print $1}' | sort | uniq -c`
     (KeyValueRenderer format; each line is one floored resend after a 504).
 
-### M-b. Does the RDR-181 existence partition see uncommitted rows?
+#### M-b. Does the RDR-181 existence partition see uncommitted rows?
 
 - **Verified (source), it does not.** `resolveNeedEmbedIdx`
   (`PgVectorRepository.java:3864-3939`) runs inside its own
@@ -137,7 +194,7 @@ is left unknown.
   `CombinedWriteService` has the same shape (partition in its own short
   transaction, embed outside, per-doc write transactions after).
 
-### M-c. Can a real late cross-run commit be detected from existing data?
+#### M-c. Can a real late cross-run commit be detected from existing data?
 
 - **Verified (source).** The fence carries `index_run_id` and
   `index_started_at` (timestamptz since catalog-031; engine clock, stamped by
@@ -215,7 +272,7 @@ LIMIT 200;
   NULL `index_started_at` are out of reach. The result is unknown until
   conexus runs it.
 
-### M-d. Reassessing mfw6c's harm (found while doing M-c)
+#### M-d. Reassessing mfw6c's harm (found while doing M-c)
 
 - **Verified (source).** For a conformant collection name
   (`<content_type>__<owner>__<model>__v<n>`, RDR-103) the collection's model
@@ -239,7 +296,7 @@ LIMIT 200;
   over-work, not loss); and provenance keys (`session_id`, `source_agent`).
   mfw6c is real but lower-severity than filed.
 
-### M-e. Existing pieces this design reuses
+#### M-e. Existing pieces this design reuses
 
 - **Verified (source).** The combined write (`write_many` with `chunks`,
   nexus-kl2z6) already commits chunk rows, manifest rows and the completion
@@ -286,10 +343,10 @@ ledger at all.
 
 #### 1. Request id
 
-- Header `Idempotency-Key: <uuid>` (name is an open question; the IETF httpapi
-  draft `draft-ietf-httpapi-idempotency-key-header` uses this name with 409 for
-  a concurrent duplicate and 422 for a key reused with a different body, which
-  matches this design. Documented, recalled, to re-read at research).
+- Header `Idempotency-Key: <uuid>` (Sam, 2026-10-17, with the IETF httpapi
+  draft's semantics: `draft-ietf-httpapi-idempotency-key-header` uses this
+  name with 409 for a concurrent duplicate and 422 for a key reused with a
+  different body. Documented, recalled, not re-read).
 - The client mints a UUIDv7 (time-ordered, so retention and log reading sort
   naturally) ONCE per logical request, at the call site that owns it: each page
   in `HttpVectorClient.upsert_chunks`'s page loop; each `gc_*` call; each
@@ -375,20 +432,23 @@ Where the marker goes per route:
   docs must say so.
 - **store-put, write_many with chunks**: same pattern, Phase 2.
 
-Stored response: the route's JSON body, capped at 16 KiB. The sweep `sample`
-(up to 5,000 chashes under the `gc_audit` clamp) is truncated to 20 entries in
-the stored copy with `sample_truncated: true` and the `gc_audit` row id; the
-full list is in `gc_audit`.
+Stored response: the route's full JSON body, capped at 64 KB (Sam,
+2026-10-17). A sweep `sample` (up to 5,000 chashes under the `gc_audit`
+clamp) can exceed the cap; the stored copy then truncates the sample to fit,
+with `sample_truncated: true` and the `gc_audit` row id, and the full list
+stays in `gc_audit`. (How a too-large sample is cut is this draft's reading
+of the cap, not a separate ruling.)
 
 Retention: a scheduled engine arm (the tuple-sweep scheduling pattern in
 `NexusService.runScheduledTupleSweep`) deletes terminal rows older than
-`NX_REQUEST_LEDGER_RETENTION_DAYS` (proposed 7) and in_flight rows whose lease
+`NX_REQUEST_LEDGER_RETENTION_DAYS` (default 7, Sam 2026-10-17) and in_flight rows whose lease
 expired more than that long ago. Never an in_flight row within its lease.
 
 Size: one row per keyed mutating request. Indexing runs are the volume
 (one row per `upsert-chunks` page, 16 chunks per page local, 64 CCE, 300 code),
-so 7 days of rows is the order of pages indexed in a week. Measure after
-Phase 2 before settling the retention default.
+so 7 days of rows is the order of pages indexed in a week. Measure the table
+after Phase 2 keys the write routes; the 7-day default (Sam, 2026-10-17)
+is revisited only if that measurement argues for it.
 
 #### 3. Status route
 
@@ -489,22 +549,84 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
 
 ## Alternatives Considered
 
-- **A `request_id` column on `gc_audit`.** Sweeps already write `gc_audit` in
-  the move transaction, so a row with the id means committed. Cheap, sweep
-  only, and it cannot tell in-flight from rolled back (no row either way).
-  A reasonable Phase-1-lite if Sam wants the sweep half without a new table.
-- **Async jobs for sweeps** (202 + poll, the `RekeyJobs`/RDR-193 `EngineJobs`
-  shape). Solves the edge timeout but the registry is in memory per instance
-  (state lost on restart reads as unknown), and it changes the response
-  contract, so it is not additive.
-- **In-flight coalescing** (nexus-8hdg9 Option D: a process-wide map from
-  chash set to a future). Bounds duplicate embeds on one instance, keeps no
-  durable status, and does not answer ll31n.
-- **Client-side census before and after** (the operator practice during the
-  ll31n incident). Racy: a census taken before the open transaction ends
-  reports nothing moved.
-- **Making the key required on sweep routes.** Would make ll31n protection
-  universal but breaks every old client; not additive. Open question below.
+### Alternative 1: A `request_id` column on `gc_audit` (Phase 1-lite)
+
+**Description**: sweeps already write `gc_audit` in the move transaction, so
+a row carrying the caller's id means committed.
+
+**Pros**:
+
+- Cheap: one column, no new table, sweeps only.
+
+**Cons**:
+
+- No row reads the same for in flight and rolled back, the ambiguity Gap 1
+  exists to remove.
+
+**Reason for rejection**: Sam, 2026-10-18 (open question 6): Phase 1 builds
+the full ledger.
+
+### Alternative 2: Async jobs for sweeps
+
+**Description**: 202 plus polling, the `RekeyJobs` / RDR-193 `EngineJobs`
+shape.
+
+**Pros**:
+
+- Removes the edge timeout from the sweep path.
+
+**Cons**:
+
+- The job registry is in memory per instance, so a restart turns every
+  running job into unknown.
+- Changes the response contract, so it is not additive.
+
+**Reason for rejection**: loses state on restart and breaks old clients.
+
+### Alternative 3: In-flight coalescing
+
+**Description**: nexus-8hdg9 Option D, a process-wide map from a chash set
+to a future.
+
+**Pros**:
+
+- Bounds duplicate embeds on one instance.
+
+**Cons**:
+
+- Keeps no durable status, so it does not answer Gap 1.
+
+**Reason for rejection**: answers Gap 2 only, and only per instance.
+
+### Alternative 4: Client-side census before and after
+
+**Description**: the operator practice during the ll31n incident.
+
+**Pros**:
+
+- Needs no engine change.
+
+**Cons**:
+
+- Racy: a census taken before the open transaction ends reports nothing
+  moved.
+
+**Reason for rejection**: it produced the wrong answer in the incident.
+
+### Alternative 5: Make the key required on sweep routes
+
+**Description**: refuse a keyless sweep.
+
+**Pros**:
+
+- Gap 1 protection would be universal.
+
+**Cons**:
+
+- Breaks every old client and every hand call; not additive.
+
+**Reason for rejection**: Sam, 2026-10-17 (open question 5): a keyless sweep
+is never refused.
 
 ## What this does NOT close
 
@@ -526,6 +648,56 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
 - **The other brittleness items**: fail-open follow-ups (P0.1), stale vectors
   and vector provenance (P4, tysei), the server-side reconcile (RDR-193).
 - **Status after retention**: a purged request reads `unknown`.
+
+## Trade-offs
+
+### Consequences
+
+- Positive: a keyed sweep reports committed, in flight or rolled back
+  exactly, and a resend with the same key is safe in every state.
+- Positive: every piece is additive; old clients and old engines behave as
+  today (Wire contract and paired release).
+- Negative: one new tenant table, with its RLS policy, grants and the
+  hand-kept lists a new tenant table needs (Phase 1).
+- Negative: a keyed write route gains a claim INSERT and a marker UPDATE in
+  existing transactions (Phase 2's throughput A/B measures it).
+- Negative: unkeyed callers, sole abandoned attempts and multi-request
+  operations stay outside the guarantee (What this does NOT close).
+
+### Risks and Mitigations
+
+- **Risk**: an attempt outlives its lease and commits after another attempt
+  took over. **Mitigation**: the marker UPDATE is guarded on the holder and
+  on `lease_until > clock_timestamp()` inside the mutation's own
+  transaction; zero rows throws, and the mutation rolls back with it.
+- **Risk**: the claim adds a pool checkout on the upsert path (the open
+  RDR-181 pool risk). **Mitigation**: the claim folds into the existing
+  partition transaction as its first statement.
+- **Risk**: `resolveNeedEmbedIdx` swallows exceptions into "embed
+  everything", which would hide a claim conflict. **Mitigation**: the claim
+  conflict raises a typed exception outside that swallow (Technical Design
+  2); a test pins it.
+- **Risk**: the ledger table lands with no grants (the v0.1.78 zero-grants
+  lesson). **Mitigation**: grants go in the runAlways `grants-nexus-svc.xml`
+  and `grants-nexus-diag.xml` families, and the PITR-fork Liquibase walk runs
+  before the tag.
+- **Risk**: the managed service scales past one instance and the retention
+  arm or capability echo runs per instance. **Mitigation**: none built yet,
+  by decision (open question 7); revisit at scale-out.
+
+### Failure Modes
+
+- Visible: a 409 `request_in_flight` or a 422 `idempotency_key_reused`, each
+  with its own `error` code; the client dispatches on `error`.
+- Visible: a status read of `unknown` for a request older than retention or
+  sent to an engine without the ledger. A resend with the same key is safe.
+- Silent if wrong: the client mints the key per attempt instead of per
+  logical request (inside `_post`), which defeats the design without an
+  error. The client test that the key is identical across every retry layer
+  guards it (Test Plan).
+- Recovery: an engine crash leaves an `in_flight` row; its lease expires and
+  the next same-key attempt takes over. Diagnosis: read the ledger row
+  through `GET /v1/requests/<id>` or as the diag role.
 
 ## Implementation Plan
 
@@ -690,10 +862,19 @@ fixed by catalog-043, nexus-brxnp).
 
 Record: T2 `nexus/decision-rdr222-open-questions-2026-10-17`.
 
+## Decision on open question 6 (Sam, 2026-10-18)
+
+1. **No Phase 1-lite.** Phase 1 builds the full `request_ledger` and the
+   status route. A `gc_audit.request_id` column alone cannot tell in flight
+   from rolled back, which is the Gap 1 incident.
+
+Record: T2 `nexus/decision-rdr222-q6-2026-10-18`. (This draft earlier said
+open question 6 was answered on 2026-09-27; that record answers 3 and 4 only.)
+
 ## Open Questions (for Sam)
 
-All seven are answered: 3, 4 and 6 in the earlier decisions, and 1, 2, 5 and
-7 in the decisions of 2026-10-17 above. The list stays as asked.
+All seven are answered: 3 and 4 on 2026-09-27, 1, 2, 5 and 7 on 2026-10-17,
+and 6 on 2026-10-18. The list stays as asked.
 
 1. Header name: `Idempotency-Key` (IETF draft semantics) or a house
    `X-Nexus-Request-Id`.
@@ -714,7 +895,66 @@ All seven are answered: 3, 4 and 6 in the earlier decisions, and 1, 2, 5 and
    uses the database clock and holds either way, but the capability echo and
    retention arm should run once per database, not once per instance.
 
+## Finalization Gate
+
+### Contradiction Check
+
+No contradictions found between the research findings, the decisions and the
+proposed solution after this revision. Two the gate restructure found and
+fixed: the stored-response cap (16 KiB in the Technical Design against Sam's
+64 KB) and open question 6 (marked answered when no ruling existed).
+
+### Assumption Verification
+
+Two findings remain assumed, and neither is on Phase 1's path. The M-c
+query (222-research-5) gates only Phase 3, which is closed. The M-d
+downgrade (222-research-6) also concerns only Phase 3, and has to be restated
+against the registry row (RDR-229) if Phase 3 is ever reopened. Phase 1
+rests on 222-research-2, -3 and -7, all verified at ecd51d2c3.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `TenantScope.withTenant` commit and default isolation | engine | Source Search (222-research-3) |
+| sweep SQL functions write `gc_audit` under the sweep gate | engine changelogs | Source Search (222-research-7) |
+| `X-Nexus-Request-Deadline-Ms` / `NX_EMBED_DEADLINE_MS` | engine `RequestDeadline`, `AuthFilter` | Source Search (222-research-7) |
+| `Idempotency-Key` 409/422 semantics | IETF httpapi draft | Docs Only, recalled, not re-read |
+
+### Scope Verification
+
+The Minimum Viable Validation in the Test Plan is in scope for Phase 1: the
+ll31n replay scenario on a real substrate, a sweep held past a client socket
+timeout that reports committed with the true moved count and no 500.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: additive on the wire both ways; the client release bumps
+  `REQUIRED_ENGINE_VERSION` to the engine tag carrying the engine half.
+- **Build tool compatibility**: N/A.
+- **Licensing**: N/A.
+- **Deployment model**: engine first, then the client tag (choreography (a));
+  one managed instance assumed.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: the key is optional; each route is keyed in its
+  own phase.
+- **Secret/credential lifecycle**: N/A; the key is a client-minted UUIDv7,
+  not a secret.
+- **Memory management**: stored responses are capped at 64 KB per row;
+  retention bounds the table to about a week of keyed requests.
+
+### Proportionality
+
+Phases 2 and 3 are deferred and closed respectively, and stay as the design
+of record; nothing is trimmed. The record is larger than Phase 1 needs
+because it keeps that design.
+
 ## Revision History
+
+- 2026-10-18: restructured for the gate (Context, Investigation and Key
+  Discoveries, the Alternatives layout, Trade-offs, Finalization Gate); the
+  stored-response cap corrected to Sam's 64 KB; Sam's ruling on open question
+  6 (no Phase 1-lite) recorded; research records 222-research-1 to -7 filed.
 
 - 2026-10-17: Sam's answers to open questions 1, 2, 5 and 7 recorded (Idempotency-Key, 7 days with full responses up to 64 KB, keyless sweeps stay allowed, one managed instance).
 
