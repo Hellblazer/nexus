@@ -14,10 +14,17 @@ runs under test on every host; production callers pass neither.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from typing import Callable
 
-__all__ = ["ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN", "state"]
+__all__ = [
+    "ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN",
+    "execution_blocked", "state",
+]
 
 OFF = "off"
 ON = "on"
@@ -60,3 +67,41 @@ def state(
     if value is None:
         return ABSENT
     return _BY_VALUE.get(value, UNKNOWN)
+
+
+#: ERROR_ACCESS_DISABLED_BY_POLICY: "An Application Control policy has blocked
+#: this file", the code CreateProcess returns for a blocked unsigned binary.
+_BLOCKED_WINERROR = 4551
+
+
+def _launch_unsigned_copy() -> None:
+    """Run a never-seen unsigned executable: this interpreter copied with one
+    byte appended, so its signature no longer verifies and its hash is new.
+    That is the control that separated an enforcing Smart App Control from a
+    registry value that only says "on" (T2
+    ``nexus_rdr/224-sac-on-baseline-control-2026-10-17``)."""
+    with tempfile.TemporaryDirectory(prefix="nx-sac-probe-") as tmp:
+        probe = os.path.join(tmp, "nx-sac-probe.exe")
+        shutil.copyfile(sys.executable, probe)
+        with open(probe, "ab") as handle:
+            handle.write(b"\0")
+        subprocess.run([probe, "--version"], check=False, capture_output=True, timeout=30)
+
+
+def execution_blocked(
+    *,
+    platform: str | None = None,
+    launch: Callable[[], None] | None = None,
+) -> bool | None:
+    """True when Windows blocks an unsigned executable from running, False when
+    it runs, None when that cannot be told (not Windows, or the launch failed
+    for another reason). Never raises. *platform* and *launch* are seams."""
+    if (platform if platform is not None else sys.platform) != "win32":
+        return None
+    try:
+        (launch or _launch_unsigned_copy)()
+    except OSError as exc:
+        return True if getattr(exc, "winerror", None) == _BLOCKED_WINERROR else None
+    except Exception:  # noqa: BLE001 — an unrunnable probe is "inconclusive", never a crash
+        return None
+    return False

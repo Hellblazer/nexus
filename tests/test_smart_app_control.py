@@ -63,9 +63,65 @@ def test_the_remedy_names_the_install_guide_section() -> None:
 # ── The provisioning guard ────────────────────────────────────────────────────
 
 
-def test_refuse_raises_when_smart_app_control_is_on() -> None:
+def test_refuse_raises_when_smart_app_control_is_on_and_blocks() -> None:
     with pytest.raises(PgSmartAppControlError):
-        refuse_smart_app_control(read_state=lambda: sac.ON)
+        refuse_smart_app_control(read_state=lambda: sac.ON, probe=lambda: True)
+
+
+def test_refuse_raises_when_on_and_the_probe_is_inconclusive() -> None:
+    # The registry says on; a probe that could not run proves nothing against it.
+    with pytest.raises(PgSmartAppControlError):
+        refuse_smart_app_control(read_state=lambda: sac.ON, probe=lambda: None)
+
+
+def test_refuse_is_silent_when_on_but_an_unsigned_binary_runs() -> None:
+    # nexus-vv068: the registry said on while Windows blocked nothing (restored
+    # guests, T2 nexus_rdr/224-sac-on-baseline-control-2026-10-17).
+    refuse_smart_app_control(read_state=lambda: sac.ON, probe=lambda: False)
+
+
+def test_probe_is_not_run_for_any_other_state() -> None:
+    def _must_not_probe() -> bool:
+        raise _Tripwire
+
+    for state in (sac.OFF, sac.EVALUATION, sac.UNKNOWN, sac.ABSENT, sac.NOT_WINDOWS):
+        refuse_smart_app_control(read_state=lambda s=state: s, probe=_must_not_probe)
+
+
+# ── The enforcement probe ─────────────────────────────────────────────────────
+
+
+def test_probe_is_not_windows_off_windows_and_never_launches() -> None:
+    def _must_not_launch() -> None:
+        raise _Tripwire
+
+    assert sac.execution_blocked(platform="darwin", launch=_must_not_launch) is None
+
+
+def _os_error_with_winerror(code: int) -> OSError:
+    # OSError ignores its winerror argument off Windows; set the attribute so
+    # the Windows branch runs on any host.
+    exc = OSError(0, "blocked")
+    exc.winerror = code  # type: ignore[attr-defined]
+    return exc
+
+
+def test_probe_reports_blocked_on_winerror_4551() -> None:
+    def _launch() -> None:
+        raise _os_error_with_winerror(4551)
+
+    assert sac.execution_blocked(platform="win32", launch=_launch) is True
+
+
+def test_probe_reports_not_blocked_when_the_binary_runs() -> None:
+    assert sac.execution_blocked(platform="win32", launch=lambda: None) is False
+
+
+def test_probe_is_inconclusive_on_any_other_failure() -> None:
+    def _launch() -> None:
+        raise _os_error_with_winerror(5)
+
+    assert sac.execution_blocked(platform="win32", launch=_launch) is None
 
 
 @pytest.mark.parametrize(

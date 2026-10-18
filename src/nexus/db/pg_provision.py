@@ -113,6 +113,7 @@ from typing import Callable, NamedTuple
 import structlog
 
 from nexus._smart_app_control import ON as _SAC_ON
+from nexus._smart_app_control import execution_blocked as _sac_execution_blocked
 from nexus._smart_app_control import state as smart_app_control_state
 from nexus._winsec import grant_user_tree_access, restrict_to_owner
 from nexus.bounded_subprocess import run_bounded
@@ -256,15 +257,24 @@ def smart_app_control_remedy() -> str:
     )
 
 
-def refuse_smart_app_control(read_state: Callable[[], str] | None = None) -> None:
+def refuse_smart_app_control(
+    read_state: Callable[[], str] | None = None,
+    probe: Callable[[], bool | None] | None = None,
+) -> None:
     """Refuse local provisioning when Smart App Control is on (nexus-f9bgu.57).
 
-    Only the ``on`` state refuses. Evaluation mode is not refused, though
-    Windows can switch it on later, and an unreadable state is not grounds to
-    refuse; ``nx doctor`` warns about both. *read_state* is the test seam.
+    Only the ``on`` state refuses, and only if an unsigned executable is not
+    seen to run: the registry value alone said "on" on guests where Windows
+    blocked nothing (nexus-vv068). A blocked or inconclusive probe refuses.
+    Evaluation mode is not refused, though Windows can switch it on later, and
+    an unreadable state is not grounds to refuse; ``nx doctor`` warns about
+    both. *read_state* and *probe* are the test seams.
     """
     current = (read_state or smart_app_control_state)()
     if current != _SAC_ON:
+        return
+    if (probe or _sac_execution_blocked)() is False:
+        _log.warning("pg_provision_smart_app_control_on_but_not_enforcing")
         return
     _log.error("pg_provision_refused_smart_app_control")
     raise PgSmartAppControlError(smart_app_control_remedy())
