@@ -711,7 +711,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         body: dict[str, Any] = {"name": name}
         if keep_quarantine:
             body["keep_quarantine"] = True
-        result = self._post("/collections/delete", body)
+        # idempotent=False (nexus-oq5gd, nexus-ll31n sibling): a blind resend
+        # after a read timeout re-runs a physical delete whose own count then
+        # describes the already-emptied collection, so the caller sees a
+        # smaller (often zero) map for a delete that fully succeeded.
+        result = self._post("/collections/delete", body, idempotent=False)
         return (result or {}).get("deleted", {}) or {}
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1704,8 +1708,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         alias cycle — the server's ``CatalogRepository.MergeRefused``
         message, unwrapped by the shared ``_raise_for_status`` machinery.
         """
+        # idempotent=False (nexus-oq5gd, nexus-ll31n sibling): the merge is
+        # effect-idempotent, but a blind resend after a read timeout reports
+        # the already-merged state (zero ``links_remapped`` etc.) as the
+        # outcome of this call.
         result = self._post(
             "/merge", {"duplicate": str(duplicate), "canonical": str(canonical)},
+            idempotent=False,
         )
         return dict(result or {})
 
@@ -1995,7 +2004,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         it propagates the raw ``httpx.HTTPStatusError`` so the CLI verb can
         tell "engine too old" apart from "engine answered".
         """
-        return self._post("/ghost-sweep", {"dry_run": dry_run}) or {}
+        # idempotent=False (nexus-oq5gd, nexus-ll31n sibling): a
+        # population-discovery sweep; a blind resend after a read timeout
+        # reports the post-sweep population (``ghosts_deleted`` ~ 0), not
+        # what the first attempt did.
+        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=False) or {}
 
     def gc_audit_list(
         self,
