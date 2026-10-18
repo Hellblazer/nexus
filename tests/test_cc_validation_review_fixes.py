@@ -271,6 +271,54 @@ def test_debug_log_reader_parses_a_command_that_holds_parentheses_and_brackets()
     assert mod.finished(log, "SubagentStart", "STDOUT-X")
 
 
+def test_debug_log_reader_reads_the_quoted_records_claude_code_writes() -> None:
+    """Claude Code quotes a record whose command held a newline, writing it escaped on one line:
+    `[DEBUG] "Hooks: ... finished with status 0 (31ms)"`. The line below is the real 15c record
+    from chas evidence cc-val-evidence-20261018T013757Z; the ijate reader first missed it, so a
+    live 15c read 'no finished line' and failed (critique of 21257211c)."""
+    mod = _debug_log_module()
+    real_15c = (
+        "2026-10-18T01:39:22.496Z [DEBUG] \"Hooks: SubagentStart:general-purpose [printf 'Line one of "
+        "context.\\nLine two with marker STDOUT-15C-MARKER-W3J.\\nLine three.\\n'] finished with status 0 "
+        "(31ms)\"\n"
+        "2026-10-18T01:39:22.496Z [DEBUG] \"Hook SubagentStart:general-purpose (SubagentStart) success:"
+        "\\nLine one of context.\\nLine two with marker STDOUT-15C-MARKER-W3J.\\nLine three.\"\n"
+    )
+    assert mod.finished(real_15c, "SubagentStart", "STDOUT-15C-MARKER-W3J")
+    assert not mod.finished(real_15c, "SubagentStart", "STDOUT-OTHER")
+    assert mod.context_sizes(real_15c, "SubagentStart") == []
+    quoted_accept = (
+        "2026-10-18T01:39:22.497Z [DEBUG] \"Hook SubagentStart (printf 'a (b)\\nc') provided "
+        "additionalContext (12 chars)\"\n"
+    )
+    assert mod.context_sizes(quoted_accept, "SubagentStart") == [12]
+    assert mod.context_sizes("\"Hook SubagentStart (echo x) provided additionalContext (3 chars)\"\n", "SubagentStart") == [3]
+
+
+def test_an_acceptance_line_in_an_unknown_shape_is_reported_not_dropped(tmp_path: pathlib.Path) -> None:
+    """A record the splitter does not recognise folds into the one above and its acceptance is
+    lost, which reads as 'accepted no context': the answer a NONE probe passes on. The reader
+    counts acceptance lines it could not parse and the CLI refuses a reading (UNPARSED, exit 3)."""
+    mod = _debug_log_module()
+    known = _hook_lines("SubagentStart", "echo (a)", 7)
+    assert mod.unparsed_acceptances(known, "SubagentStart") == 0
+    for odd in (
+        "2026-10-18 01:39:22,497 DEBUG Hook SubagentStart (echo x) provided additionalContext (5 chars)\n",
+        "  [debug] Hook SubagentStart (echo x) provided additionalContext (5 chars)\n",
+        "2026-10-18T01:39:22.497Z [DEBUG] Hook SubagentStart (echo x) provided additionalContext (5 chars) extra\n",
+    ):
+        text = "2026-10-18T01:39:22.400Z [DEBUG] something before\n" + odd
+        assert mod.context_sizes(text, "SubagentStart") == [], odd
+        assert mod.unparsed_acceptances(text, "SubagentStart") == 1, odd
+        log = tmp_path / "cc-debug.log"
+        log.write_text(text)
+        proc = subprocess.run(
+            ["python3", "-I", str(LIB / "debug_log.py"), "context", str(log), "SubagentStart"],
+            capture_output=True, text=True, check=False,
+        )
+        assert (proc.returncode, proc.stdout.strip()) == (3, "UNPARSED"), odd
+
+
 def test_debug_log_reader_keeps_one_record_from_swallowing_the_next() -> None:
     """The records are told apart: an empty injection from one hook must not let the pattern run
     on into the next record and report that record's size under this one, and another event's
@@ -342,7 +390,7 @@ def test_an_unreadable_claude_version_fails_both_answers() -> None:
     recorded answer or a new one, so 06 and 07 fail instead of passing with an INFO line."""
     for scenario, answers in (("06", ("matches", "does-not-match")), ("07", ("preempts", "fires-regardless"))):
         for answer in answers:
-            for version in ("unknown", ""):
+            for version in ("unknown", "", "Claude", "warning:", "2", "v2.1.302"):
                 verdict, out = _check(version, scenario, answer)
                 assert verdict.startswith("FAIL:"), (scenario, answer, version, out)
                 assert "Claude Code version could not be read" in verdict, verdict

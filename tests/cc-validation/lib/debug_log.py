@@ -7,7 +7,9 @@
     debug_log.py context <log> <event>             print, one per line, the size of every
                                                    non-empty additionalContext Claude Code
                                                    accepted from a <event> hook; exit 0 when
-                                                   there is at least one
+                                                   there is at least one; print UNPARSED and
+                                                   exit 3 when an acceptance line is in a shape
+                                                   the reader does not know
 
 The log records a command hook as ``Hooks: <Event>:<matcher> [<command>] finished with status
 0 (Nms)`` and an accepted injection as ``Hook <Event> (<command>) provided additionalContext
@@ -26,9 +28,11 @@ import sys
 
 # A debug-log record starts on a line that begins with an ISO timestamp, a ``[LEVEL]`` tag, or
 # ``Hook``/``Hooks`` (the older, bare shape). A hook command can span lines, so its continuation
-# lines belong to the record they follow; they are not record starts.
-_RECORD_START = re.compile(r"^(?:\d{4}-\d{2}-\d{2}T\S+ |\[[A-Z]+\] |Hooks?[ :])", re.M)
-_HEAD = r"(?:\d{4}-\d{2}-\d{2}T\S+ )?(?:\[[A-Z]+\] )?"
+# lines belong to the record they follow; they are not record starts. Claude Code also writes a
+# record whose command held a newline QUOTED, escaped on one line (``[DEBUG] "Hooks: ...
+# (31ms)"``), so the message may open with a '"' and the record may end with one.
+_RECORD_START = re.compile(r'^(?:\d{4}-\d{2}-\d{2}T\S+ |\[[A-Z]+\] |"?Hooks?[ :])', re.M)
+_HEAD = r'(?:\d{4}-\d{2}-\d{2}T\S+ )?(?:\[[A-Z]+\] )?"?'
 _MAX_COMMAND = 2000
 
 
@@ -56,7 +60,7 @@ def context_sizes(text: str, event: str) -> list[int]:
     the same record, so a ')' inside the command (or a look-alike of the suffix in the middle of
     a line) does not end it, and a record never reads on into the next one."""
     pattern = re.compile(
-        rf"{_HEAD}Hook {re.escape(event)} \(.{{0,{_MAX_COMMAND}}}?\) provided additionalContext \(([0-9]+) chars\)[ \t]*$",
+        rf"{_HEAD}Hook {re.escape(event)} \(.{{0,{_MAX_COMMAND}}}?\) provided additionalContext \(([0-9]+) chars\)\"?[ \t]*$",
         re.S | re.M,
     )
     sizes = []
@@ -64,6 +68,23 @@ def context_sizes(text: str, event: str) -> list[int]:
         if (m := pattern.match(rec)) is not None and int(m.group(1)) > 0:
             sizes.append(int(m.group(1)))
     return sizes
+
+
+def unparsed_acceptances(text: str, event: str) -> int:
+    """How many lines name a <event> hook's accepted additionalContext that :func:`context_sizes`
+    did not read as a record, empty ones included. The record splitter knows the shapes Claude
+    Code has written; a new shape would otherwise drop silently and read as 'accepted no
+    context', which is the answer a NONE probe passes on (review of 21257211c)."""
+    pattern = re.compile(
+        rf"{_HEAD}Hook {re.escape(event)} \(.{{0,{_MAX_COMMAND}}}?\) provided additionalContext \(([0-9]+) chars\)\"?[ \t]*$",
+        re.S | re.M,
+    )
+    parsed = sum(1 for rec in _records(text) if pattern.match(rec) is not None)
+    raw = sum(
+        1 for line in text.splitlines()
+        if f"Hook {event} " in line and "provided additionalContext (" in line
+    )
+    return max(0, raw - parsed)
 
 
 def main(argv: list[str]) -> int:
@@ -76,6 +97,9 @@ def main(argv: list[str]) -> int:
     text = path.read_text(encoding="utf-8", errors="replace")
     if argv[1] == "finished":
         return 0 if len(argv) == 5 and finished(text, argv[3], argv[4]) else 1
+    if unparsed_acceptances(text, argv[3]):
+        print("UNPARSED")
+        return 3
     sizes = context_sizes(text, argv[3])
     for size in sizes:
         print(size)

@@ -1146,16 +1146,20 @@ def _whole_in_prompts(prompts: list[str], probes: list[str] | set[str]) -> list[
 _RENDER_CALL = re.compile(r'^\s*cc_command_render_check\s+"([^"]+)"\s+\w+\s+(.+)$', re.M)
 _QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _S15_MARKER = re.compile(r"STDOUT-15[A-F]-MARKER-[A-Z0-9]{3}")
+#: The call lines that RUN a 15 leg. The 15e and 15f markers sit inside their control functions, so
+#: counting markers alone could not see a deleted control invocation (critique of 21257211c).
+_S15_CALL = re.compile(r'^\s*(probe_inject "15[a-f]"|control_dead_hook|control_live_injection)\s*(?:$|\s)', re.M)
 
 
 def _judged_strings(num: str, source: str) -> set[str]:
     """What a scenario whose verdict is read from a transcript or a debug log (not from a reply
-    pattern) looks for: the hook markers of 15 (a-d and the dead-hook control), and for 21, 24 and
+    pattern) looks for: the hook markers of 15 (a-f) plus the call line that runs each of its six
+    legs, and for 21, 24 and
     25 the header and every needle of each cc_command_render_check call, keyed by the call's label.
     Dropping one of them from the scenario drops the count (nexus-ijate)."""
     code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
     if num == "15":
-        return set(_S15_MARKER.findall(code))
+        return set(_S15_MARKER.findall(code)) | {f"call:{c}" for c in _S15_CALL.findall(code)}
     if num in {"21", "24", "25"}:
         return {f"{label}:{arg}" for label, rest in _RENDER_CALL.findall(code) for arg in _QUOTED.findall(rest)}
     return set()
@@ -1168,11 +1172,11 @@ def _judged_strings(num: str, source: str) -> set[str]:
 #: `len(set(PROBES[num]) | tokens) >= 1` could not fail: PROBES[num] is a nonempty literal).
 #: 15, 21, 24 and 25 judge a transcript or a log, not a reply pattern; their token floor used to be
 #: 0, which only asked that a probe string occur in the source and so could not fail either. Now:
-#: 15 the six hook markers (15a-f); 21 the header and the block of 21 and of its control 21b
+#: 15 the six hook markers (15a-f) and the six call lines that run its legs; 21 the header and the block of 21 and of its control 21b
 #: (four); 24 and 25 the header and the two needles (three each).
 FLOORS = {
     "1": (1, 2), "2": (1, 3), "3": (1, 3), "4": (1, 3), "11": (2, 3), "12": (1, 2), "13": (3, 6),
-    "15": (1, 6), "17": (2, 3), "18": (1, 4), "21": (4, 4), "24": (2, 3), "25": (2, 3),
+    "15": (1, 12), "17": (2, 3), "18": (1, 4), "21": (4, 4), "24": (2, 3), "25": (2, 3),
 }
 
 

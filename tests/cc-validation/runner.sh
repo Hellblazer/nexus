@@ -244,8 +244,8 @@ _cc_fail() { cc_note "$1" "FAIL: $2"; fail "$2"; }
 #                                   can be claimed (nexus-ijate)
 cc_version_check() {
     local scenario="$1" ver="$2" answer="$3" what="$4" out verdict since observed
-    if [[ -z "$ver" || "$ver" == "unknown" ]]; then
-        _cc_fail "$scenario" "${scenario}: the Claude Code version could not be read (claude --version printed nothing and no claude-version.txt): ${what}; with no version the answer cannot be compared with docs/tables/cc-version-answers.toml"
+    if ! [[ "$ver" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+        _cc_fail "$scenario" "${scenario}: the Claude Code version could not be read (claude --version and claude-version.txt gave '${ver}', not a dotted version number): ${what}; with no version the answer cannot be compared with docs/tables/cc-version-answers.toml"
         return 0
     fi
     local table="${CC_VAL_VERSION_TABLE:-$REPO_ROOT/docs/tables/cc-version-answers.toml}"
@@ -684,6 +684,10 @@ cc_injection_reading() {
     if cc_cmd_hook_finished "$event" "$marker"; then fin=1; fi
     sizes="$(cc_event_context_chars "$event" || true)"
     sizes="${sizes//$'\n'/,}"
+    if [[ "$sizes" == *UNPARSED* ]]; then
+        echo "MISMATCH the debug log has a $event accepted-context line in a shape the reader does not know (lib/debug_log.py); no reading is possible until it is taught the shape"
+        return 0
+    fi
     if [[ -n "$found_line" && "$found_line" == *"$marker"* ]]; then
         if [[ $fin -eq 1 && -n "$sizes" ]]; then
             echo "VISIBLE"
