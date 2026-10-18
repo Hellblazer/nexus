@@ -2690,9 +2690,9 @@ class TestAgentIntegration:
     def test_session_summary_shows_link_count(self, catalog_env, tmp_path, monkeypatch):
         """session-summary should print link graph total at the end.
 
-        The command runs the VCS log in the cwd under a 5 s bound and returns early
-        ("Could not determine recent file changes.") when that fails, before the link
-        count is printed. Run from the checkout, ``--since 99999`` walked the whole
+        The command runs the VCS log in the cwd under a 5 s bound and prints
+        "Could not determine recent file changes." when that fails (before
+        nexus-s2ci9 it then returned without the link count). Run from the checkout, ``--since 99999`` walked the whole
         history (56,000 file lines at this writing, most of the 4 s this test's call
         took on a quiet host) and a loaded pool host hit the bound (nexus-ys8a4). The
         test is about the link line, so it runs in a repo of its own with one commit:
@@ -2715,6 +2715,22 @@ class TestAgentIntegration:
         assert "Could not determine recent file changes" not in result.output, result.output
         # The link graph line itself, not any "link" ("No linked RDRs found" also matches)
         assert "Link graph:" in result.output, result.output
+
+    def test_session_summary_git_timeout_keeps_link_count(self, catalog_env, monkeypatch):
+        """nexus-s2ci9: a VCS log that times out drops only the file-change part.
+
+        The link count needs no VCS, so it is printed after the notice.
+        """
+        def _timeout(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 5))
+
+        monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", _timeout)
+        self._make_catalog_with_links(catalog_env)
+        result = CliRunner().invoke(main, ["catalog", "session-summary"])
+        assert result.exit_code == 0, result.output
+        assert "Could not determine recent file changes." in result.output, result.output
+        assert "No files modified" not in result.output, result.output
+        assert "Link graph: 1 links active." in result.output, result.output
 
 
 class TestGcCommand:

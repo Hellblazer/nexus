@@ -216,6 +216,9 @@ def session_summary_cmd(since: str) -> None:
         click.echo("Catalog not initialized — skipping session summary.")
         return
 
+    # nexus-s2ci9: a failed or timed-out git log drops only the file-change
+    # part; the link count below needs no git and is still printed.
+    files: set[str] | None
     try:
         result = run_bounded(
             [
@@ -230,11 +233,11 @@ def session_summary_cmd(since: str) -> None:
         files = {f.strip() for f in result.stdout.splitlines() if f.strip()}
     except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         click.echo("Could not determine recent file changes.")
-        return
+        files = None
 
-    if not files:
+    if files is not None and not files:
         click.echo(f"No files modified {since_label}.")
-    else:
+    elif files:
         # nexus-xnz0o: replaced raw SQL with catalog API (uniform across backends).
         found_any = False
         for fp in sorted(files):
