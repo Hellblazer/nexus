@@ -243,9 +243,11 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
 
 def _default_threshold_for(col: str) -> float | None:
     from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
-    from nexus.search_engine import _threshold_for_collection  # noqa: PLC0415 — deferred import
+    from nexus.search_engine import _threshold_for_collection_model  # noqa: PLC0415 — deferred import
 
-    return _threshold_for_collection(col, load_config())
+    # The same per-collection rule search applies: a local-model (bge, MiniLM)
+    # collection has no Voyage-calibrated threshold, so the probe must not judge it by one.
+    return _threshold_for_collection_model(col, load_config())
 
 
 def _neighbour_probe(

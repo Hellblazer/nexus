@@ -79,7 +79,9 @@ _FRECENCY_WEIGHT: float = 0.3
 # listed at the 0.325 best-F1 threshold measured by 210-research-17 (a
 # factor of 0.45/0.325 = 1.38). It was an unlisted model before, so it fell
 # to the 0.55 default (0.818) and a bge hit and a Voyage hit competed on
-# scales that disagreed by ~1.7x.
+# scales that disagreed by ~1.7x. The inversion count at this factor was NOT
+# run (the per-query distance lists behind 210-research-17 are gone), so the
+# value is interim: nexus-t189m (P4.3) re-measures it on real distances.
 _CALIBRATION_THRESHOLDS_BY_MODEL: dict[str, float] = {
     "voyage-code-3": 0.45,
     "voyage-context-3": 0.65,
