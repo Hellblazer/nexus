@@ -25,8 +25,11 @@ log_inventory() {
 # transcript ended "[Request interrupted by user]" after its ToolSearch load and
 # before any Write or tool call (14a, 14b, and 14c's missing call). The agents'
 # own replies are the completion signal (each body ends "reply <token>").
+# On a timeout it says WHICH agent never replied: the model sometimes finishes its work and
+# omits the token (2 of 4 live runs), and the 240 s that costs is otherwise unexplained.
 wait_agent_done() {
-    cc_wait_subagent_reply "$1" "${2:-240}" || true
+    cc_wait_subagent_reply "$1" "${2:-240}" || echo "    [$1] the agent never replied $1 within ${2:-240}s: it did not finish, or finished without the token (its transcript is reported below)"
+    return 0
 }
 
 # nexus-qsmc5: did Claude Code SPAWN the stub for this run? The stub logs
@@ -50,6 +53,10 @@ report_agents() {
     cc_keep_evidence "$label"
     return 0
 }
+
+# Each part (14a, 14b, 14c) starts from cc_reset_transcripts (runner.sh): the transcripts of an
+# earlier part's session and agent must not be read, or kept as evidence, as this part's
+# (the per-part report below lists tool calls and replies of EVERY transcript there).
 
 # Positive control for 14b (nexus-spwp2 review): 14b's "inline mcpServers do NOT
 # load" reading is only a finding if, in THIS run, the same stub definition
@@ -90,7 +97,7 @@ EOF
 
 : > "$STUB_LOG"
 rm -f "$TEST_HOME/14a_tools.txt"
-rm -rf "$TEST_HOME/.claude/projects"
+cc_reset_transcripts
 
 CC_DEBUG_FILE="$TEST_HOME/cc-debug-14a.log"; rm -f "$CC_DEBUG_FILE"
 claude_start
@@ -175,7 +182,7 @@ EOF
 
 : > "$STUB_LOG"
 rm -f "$TEST_HOME/14b_tools.txt"
-rm -rf "$TEST_HOME/.claude/projects"
+cc_reset_transcripts
 
 if cc_plugin_require "$TEST_HOME/.claude/test-plugin" test-plugin local-marketplace; then
 claude_start
@@ -252,7 +259,7 @@ EOF
 
 : > "$STUB_LOG"
 rm -f "$TEST_HOME/14c_tools.txt"
-rm -rf "$TEST_HOME/.claude/projects"
+cc_reset_transcripts
 
 # cd into TEST_HOME so .mcp.json is at the workspace root
 send_keys "cd $TEST_HOME" Enter; sleep 0.3

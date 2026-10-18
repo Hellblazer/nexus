@@ -9,7 +9,9 @@
 #            a permission prompt and the tool must NOT run. That is the proof
 #            permissions are enforced in these sessions.
 #   allowed  allow = ["mcp__stub__*"]: the tool must run with no prompt pending.
-# cc_allow_rule_verdict (runner.sh) fails the scenario unless both hold.
+# cc_allow_rule_verdict (runner.sh) fails the scenario unless both hold; its lines say
+# which Claude Code build they were observed on. Each leg's evidence (stub log, pane tail,
+# transcripts, settings) and the verdict lines are kept (cc_keep_evidence, cc_note).
 
 scenario "05 perms_wildcard_suffix: mcp__stub__* should auto-allow (permissions enforced, control prompts)"
 
@@ -23,11 +25,11 @@ EOT
 send_keys "cd $TEST_HOME" Enter
 sleep 0.3
 
-# _s05_leg <allow-rule> <payload> <expect-prompt 0|1>: one enforced session.
+# _s05_leg <allow-rule> <payload> <expect-prompt 0|1> <evidence-label>: one enforced session.
 # Sets LEG_PROMPT (a permission prompt was pending when the call settled) and
 # LEG_RAN (the stub logged the call).
 _s05_leg() {
-    local rule="$1" payload="$2" expect_prompt="$3"
+    local rule="$1" payload="$2" expect_prompt="$3" label="$4"
     cat > "$TEST_HOME/.claude/settings.json" <<EOT
 {
   "skipDangerousModePermissionPrompt": true,
@@ -35,6 +37,7 @@ _s05_leg() {
 }
 EOT
     : > "$STUB_LOG"
+    cc_reset_transcripts
     claude_start_enforced
     # Deferred-tool warmup (see README "Deferred MCP tools"): force schema load before
     # the measured call so it doesn't race discovery (the scenario-16 root cause).
@@ -52,13 +55,15 @@ EOT
     if [[ $LEG_PROMPT -eq 0 && $LEG_RAN -eq 0 ]]; then
         capture -30 | sed 's/^/    | /'
     fi
+    cc_save_pane 60
+    cc_keep_evidence "$label"
     cc_dismiss_permission_prompt
     claude_exit
 }
 
-_s05_leg "mcp__stub__*" "suffix-wildcard-test" 0
+_s05_leg "mcp__stub__*" "suffix-wildcard-test" 0 "05-allowed"
 ALLOWED_PROMPT=$LEG_PROMPT; ALLOWED_RAN=$LEG_RAN
-_s05_leg "mcp__other__*" "suffix-control-test" 1
+_s05_leg "mcp__other__*" "suffix-control-test" 1 "05-control"
 cc_allow_rule_verdict "05" "mcp__stub__*" "$LEG_PROMPT" "$LEG_RAN" "$ALLOWED_RAN" "$ALLOWED_PROMPT"
 
 send_keys "cd $REPO_ROOT" Enter

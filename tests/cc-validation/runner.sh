@@ -205,55 +205,119 @@ cc_dismiss_permission_prompt() {
     return 0
 }
 
+# cc_claude_version: the Claude Code build this session runs, first word of
+# `claude --version` ("2.1.302"), else of the claude-version.txt the container
+# entrypoint wrote into the evidence directory, else "unknown". Every verdict of a
+# scenario whose answer has changed between Claude Code releases (06, 07) carries it.
+cc_claude_version() {
+    local v=""
+    v="$(claude --version 2>/dev/null | awk 'NR==1{print $1}')" || true
+    if [[ -z "$v" && -n "${CC_VAL_EVIDENCE_DIR:-}" && -f "$CC_VAL_EVIDENCE_DIR/claude-version.txt" ]]; then
+        v="$(awk 'NR==1{print $1}' "$CC_VAL_EVIDENCE_DIR/claude-version.txt")"
+    fi
+    printf '%s' "${v:-unknown}"
+}
+
+# cc_note <label> <line>: print a verdict-related line and, when the container mounted
+# an evidence directory, append it to <evidence>/<label>/verdict.txt, so the run's
+# verdict survives the container (nexus-qsmc5: 05-07 left no record of their own).
+cc_note() {
+    echo "    $2"
+    if [[ -n "${CC_VAL_EVIDENCE_DIR:-}" ]]; then
+        mkdir -p "$CC_VAL_EVIDENCE_DIR/$1" 2>/dev/null && printf '%s\n' "$2" >> "$CC_VAL_EVIDENCE_DIR/$1/verdict.txt"
+    fi
+    return 0
+}
+
+# _cc_pass / _cc_fail <label> <message>: pass()/fail() that also record the line.
+_cc_pass() { cc_note "$1" "PASS: $2"; pass "$2"; }
+_cc_fail() { cc_note "$1" "FAIL: $2"; fail "$2"; }
+
+# cc_version_check <scenario> <claude-version> <answer> <observation>
+# The version-answer table (docs/tables/cc-version-answers.toml): scenarios 06 and 07
+# ask questions whose answers have flipped across Claude Code releases, so a run
+# compares what it OBSERVED with what was recorded for the same build.
+#   recorded version, same answer   pass, saying so
+#   recorded version, other answer  FAIL "answer changed since <version>"
+#   unrecorded version              INFO "record this version's answer", then pass
+cc_version_check() {
+    local scenario="$1" ver="$2" answer="$3" what="$4" out verdict since observed
+    local table="${CC_VAL_VERSION_TABLE:-$REPO_ROOT/docs/tables/cc-version-answers.toml}"
+    if ! out="$(python3 -I "$REPO_ROOT/tests/cc-validation/lib/version_answers.py" lookup "$table" "$scenario" "$ver" "$answer" 2>&1)"; then
+        _cc_fail "$scenario" "${scenario}: observed on Claude Code ${ver}: ${what}; the version-answer table could not be read: ${out}"
+        return 0
+    fi
+    verdict="$(cut -f1 <<<"$out")"; since="$(cut -f2 <<<"$out")"; observed="$(cut -f3 <<<"$out")"
+    case "$verdict" in
+        agrees)
+            _cc_pass "$scenario" "${scenario}: observed on Claude Code ${ver}: ${what} (the answer recorded for ${since} on ${observed})" ;;
+        changed)
+            _cc_fail "$scenario" "${scenario}: observed on Claude Code ${ver}: ${what}; answer changed since ${since} (recorded ${observed}): read why before touching docs/tables/cc-version-answers.toml, and rely on neither answer" ;;
+        *)
+            cc_note "$scenario" "INFO: no answer is recorded for Claude Code ${ver}: record this version's answer (${answer}) in docs/tables/cc-version-answers.toml"
+            _cc_pass "$scenario" "${scenario}: observed on Claude Code ${ver}: ${what} (no recorded answer for this version)" ;;
+    esac
+    return 0
+}
+
 # cc_allow_rule_verdict <name> <rule> <control_prompt> <control_ran> <allowed_ran> <allowed_prompt> [report]
 # The verdict ladder of scenarios 05 and 06 (an allow rule granting an MCP tool
 # call), 1/0 flags. The allowed leg means nothing unless the CONTROL leg (a rule
 # that does not match the tool) stopped at a permission prompt without running
 # the tool: that is the proof permissions are enforced in these sessions. With
 # `report` (scenario 06, whose question is whether a rule SHAPE matches) either
-# honest answer passes: the tool ran with no prompt (matches) or the prompt is
-# pending (does not match); only "neither" is no answer.
+# honest answer is an observation, not a pass or a fail: it is compared with the
+# answer recorded for this Claude Code version (cc_version_check). Every line
+# says which build it observed.
 cc_allow_rule_verdict() {
     local name="$1" rule="$2" cprompt="$3" cran="$4" aran="$5" aprompt="$6" mode="${7:-}"
-    echo "    ${name}: control prompt=$cprompt tool_ran=$cran; allowed prompt=$aprompt tool_ran=$aran"
+    local ver; ver="$(cc_claude_version)"
+    local obs="observed on Claude Code ${ver}"
+    cc_note "$name" "${name}: ${obs}: control prompt=$cprompt tool_ran=$cran; allowed prompt=$aprompt tool_ran=$aran"
     if [[ "$cprompt" -ne 1 || "$cran" -ne 0 ]]; then
-        fail "${name}: the CONTROL session (a rule that does not match the tool) did not stop at a permission prompt (prompt=$cprompt tool_ran=$cran): permissions are not enforced in these sessions (launched with --dangerously-skip-permissions?), so the allowed leg proves nothing about $rule"
+        _cc_fail "$name" "${name}: ${obs}: the CONTROL session (a rule that does not match the tool) did not stop at a permission prompt (prompt=$cprompt tool_ran=$cran): permissions are not enforced in these sessions (launched with --dangerously-skip-permissions?), so the allowed leg proves nothing about $rule"
     elif [[ "$aprompt" -eq 1 && "$aran" -eq 0 && "$mode" == "report" ]]; then
-        pass "${name}: $rule does NOT match: the call stopped at a permission prompt (and the tool did not run), as the control did, in the same mode"
+        cc_version_check "$name" "$ver" "does-not-match" "the call with the rule $rule stopped at a permission prompt and the tool did not run, as the control did, in the same mode"
     elif [[ "$aprompt" -eq 1 ]]; then
-        fail "${name}: the allowed leg still stopped at a permission prompt: $rule did NOT grant the call"
+        _cc_fail "$name" "${name}: ${obs}: the allowed leg still stopped at a permission prompt: $rule did NOT grant the call"
     elif [[ "$aran" -ne 1 ]]; then
-        fail "${name}: the allowed leg neither stopped at a prompt nor ran the tool: nothing to conclude about $rule"
+        _cc_fail "$name" "${name}: ${obs}: the allowed leg neither stopped at a prompt nor ran the tool: nothing to conclude about $rule"
     elif [[ "$mode" == "report" ]]; then
-        pass "${name}: $rule MATCHES: the tool ran with no prompt, while a rule that does not match stopped at a permission prompt in the same mode"
+        cc_version_check "$name" "$ver" "matches" "the call with the rule $rule ran the tool with no prompt, while a rule that does not match stopped at a permission prompt in the same mode"
     else
-        pass "${name}: $rule granted the call with no prompt (the tool ran) while a rule that does not match stopped at a permission prompt in the same mode: the rule did it, not a bypass"
+        _cc_pass "$name" "${name}: ${obs}: $rule granted the call with no prompt (the tool ran) while a rule that does not match stopped at a permission prompt in the same mode: the rule did it, not a bypass"
     fi
 }
 
 # cc_preempt_verdict <hook_A> <ran_A> <prompt_A> <hook_B> <ran_B> <prompt_B>
-# The verdict ladder of scenario 07: does an allow rule preempt a PermissionRequest
-# hook? A = allow rule present, B = absent (1/0 flags). B is the control: with no
-# rule granting the call it must reach a permission gate, which is the hook
-# firing or the prompt appearing; neither means permissions are not enforced.
+# The verdict ladder of scenario 07: with an allow rule present, does the
+# PermissionRequest hook still fire? A = allow rule present, B = absent (1/0 flags).
+# B is the control: with no rule granting the call it must reach a permission gate,
+# which is the hook firing or the prompt appearing; neither means permissions are not
+# enforced. The answer to the question is an observation for THIS Claude Code build
+# (it has changed between releases): it is compared with the answer recorded for the
+# same version (cc_version_check), never asserted.
 cc_preempt_verdict() {
     local ha="$1" ra="$2" pa="$3" hb="$4" rb="$5" pb="$6"
-    echo "    sub-A (allow present): hook_fired=$ha tool_ran=$ra prompt_pending=$pa"
-    echo "    sub-B (allow absent):  hook_fired=$hb tool_ran=$rb prompt_pending=$pb"
+    local ver; ver="$(cc_claude_version)"
+    local obs="observed on Claude Code ${ver}"
+    cc_note "07" "07: ${obs}"
+    cc_note "07" "sub-A (allow present): hook_fired=$ha tool_ran=$ra prompt_pending=$pa"
+    cc_note "07" "sub-B (allow absent):  hook_fired=$hb tool_ran=$rb prompt_pending=$pb"
     if [[ "$hb" -eq 0 && "$pb" -eq 0 ]]; then
-        fail "07: with NO allow rule the call neither reached the PermissionRequest hook nor stopped at a permission prompt: permissions are not enforced in these sessions (launched with --dangerously-skip-permissions?), so sub-A proves nothing"
+        _cc_fail "07" "07: ${obs}: with NO allow rule the call neither reached the PermissionRequest hook nor stopped at a permission prompt: permissions are not enforced in these sessions (launched with --dangerously-skip-permissions?), so sub-A proves nothing"
     elif [[ "$pa" -eq 1 ]]; then
-        fail "07: with the allow rule present the call still stopped at a permission prompt: the rule did not grant it"
+        _cc_fail "07" "07: ${obs}: with the allow rule present the call still stopped at a permission prompt: the rule did not grant it"
     elif [[ "$ra" -ne 1 ]]; then
-        fail "07: sub-A: the allow rule was present but the tool did not run (server not connected?), so the PermissionRequest gate cannot be assessed"
+        _cc_fail "07" "07: ${obs}: sub-A: the allow rule was present but the tool did not run (server not connected?), so the PermissionRequest gate cannot be assessed"
     elif [[ "$hb" -eq 0 ]]; then
-        fail "07: sub-B stopped at a permission prompt but the PermissionRequest hook never fired: the hook does not govern this prompt (matcher or event), investigate"
+        _cc_fail "07" "07: ${obs}: sub-B stopped at a permission prompt but the PermissionRequest hook never fired: the hook does not govern this prompt (matcher or event), investigate"
     elif [[ "$rb" -ne 1 ]]; then
-        fail "07: sub-B: the PermissionRequest hook fired and allowed the call but the tool did not run: the hook's allow was not honoured"
+        _cc_fail "07" "07: ${obs}: sub-B: the PermissionRequest hook fired and allowed the call but the tool did not run: the hook's allow was not honoured"
     elif [[ "$ha" -eq 0 ]]; then
-        pass "07: the allow wildcard PREEMPTS the PermissionRequest hook (it fires only when no rule allows the call)"
+        cc_version_check "07" "$ver" "preempts" "with the allow rule present the PermissionRequest hook did not fire and the tool ran; with no allow rule the hook fired and its allow ran the tool"
     else
-        pass "07: the PermissionRequest hook fires regardless of the allow rule (an auto-approver would still run if kept)"
+        cc_version_check "07" "$ver" "fires-regardless" "the PermissionRequest hook fired both with the allow rule present and with none, and the tool ran"
     fi
 }
 
@@ -361,6 +425,13 @@ chmod 600 "$TEST_HOME/.env.test"
 
 # ─── Scenario helpers ─────────────────────────────────────────────────────────
 
+# cc_reset_transcripts: forget every session and subagent transcript so far. A scenario
+# part that reads transcripts starts from this, so it reads only its own session's.
+cc_reset_transcripts() {
+    rm -rf "$TEST_HOME/.claude/projects"
+}
+export -f cc_reset_transcripts
+
 # Wipe per-scenario state without disturbing the OAuth/credentials/plugin bits.
 reset_scenario_state() {
     # NOTE (2026-05-31): scenarios write `.mcp.json` to the WORKSPACE ROOT
@@ -375,6 +446,11 @@ reset_scenario_state() {
           "$STUB_LOG" "$HOOK_LOG"
     rm -rf "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
     mkdir -p "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
+    # nexus-qsmc5: every reader of a session or subagent transcript (cc_subagent_replies,
+    # cc_session_replies, cc_session_user_text, cc_nested_dispatch_facts) walks the whole
+    # projects dir, so an earlier scenario's transcripts would be read as this one's
+    # (a 17 verdict satisfied by 01's Agent call, a 21 verdict by 19's expansion).
+    cc_reset_transcripts
     # Restore the dangerous-mode bypass — every scenario needs it.
     echo '{"skipDangerousModePermissionPrompt": true}' > "$TEST_HOME/.claude/settings.json"
     # A plugin installed by an earlier scenario must not leak into this one.
@@ -494,12 +570,22 @@ cc_keep_evidence() {
     local d="$CC_VAL_EVIDENCE_DIR/${1:-plugin}" f
     mkdir -p "$d"
     for f in "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" "$TEST_HOME/.claude/settings.json" \
-             "$TEST_HOME/.claude/plugins/installed_plugins.json" "${CC_DEBUG_FILE:-}"; do
+             "$TEST_HOME/.claude/plugins/installed_plugins.json" "${CC_DEBUG_FILE:-}" \
+             "${STUB_LOG:-}" "${HOOK_LOG:-}" "$TEST_HOME/pane-tail.txt"; do
         _cc_evidence_copy "$f" "$d"
     done
     while IFS= read -r f; do
         _cc_evidence_copy "$f" "$d"
     done < <(find "$TEST_HOME/.claude/projects" -name '*.jsonl' 2>/dev/null)
+    return 0
+}
+
+# cc_save_pane [lines]: write the pane's last lines to $TEST_HOME/pane-tail.txt, which
+# cc_keep_evidence keeps. The pane is NOT a verdict source (a subagent's reply, a
+# hook's output are read from transcripts and the debug log); it is the record of
+# what a permission prompt looked like.
+cc_save_pane() {
+    capture "-${1:-60}" > "$TEST_HOME/pane-tail.txt" 2>/dev/null || true
     return 0
 }
 
@@ -554,6 +640,112 @@ cc_report_context_lines() {
         echo "    [debug] additionalContext accepted from hooks this session:"
         sed 's/^/    [debug]   /' <<<"$lines"
     fi
+    return 0
+}
+
+# cc_cmd_hook_finished <event> <needle>: 0 when the debug log ($CC_DEBUG_FILE) shows a
+# settings.json command hook of <event> whose command contains <needle> (letters, digits,
+# '-', '_') finished with status 0: the hook ran. A hook that is mis-registered leaves no
+# such line, and its subagent's NONE would read the same as a hook that ran and was ignored.
+cc_cmd_hook_finished() {
+    [[ "${2:-}" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
+    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
+    python3 -I "$REPO_ROOT/tests/cc-validation/lib/debug_log.py" finished "$CC_DEBUG_FILE" "$1" "$2"
+}
+
+# cc_event_context_chars <event>: the sizes, one per line, of the non-empty additionalContext
+# Claude Code ACCEPTED from any <event> hook this session (the debug log's `Hook <Event>
+# (<command>) provided additionalContext (N chars)`); returns 1 when there is none. These
+# scenarios register one hook, so "any" is that hook.
+cc_event_context_chars() {
+    [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
+    python3 -I "$REPO_ROOT/tests/cc-validation/lib/debug_log.py" context "$CC_DEBUG_FILE" "$1"
+}
+
+# cc_injection_reading <event> <marker> <tag> <replies>: one line, the reading of a
+# plain-stdout injection probe (scenarios 01 and 15), from BOTH the subagent's answer and
+# the debug log, which must agree:
+#   VISIBLE            the subagent reported the whole marker (its code is in no prompt) AND
+#                      the hook finished AND Claude Code accepted additionalContext from it
+#   NOT-VISIBLE        the subagent answered NONE AND the hook finished AND Claude Code
+#                      accepted no additionalContext
+#   MISMATCH <why>     the two disagree, or the log shows the hook never ran: a NONE with no
+#                      finished line is what a dead hook looks like (nexus-qsmc5)
+#   INDETERMINATE <why> the subagent answered neither
+cc_injection_reading() {
+    local event="$1" marker="$2" tag="$3" replies="$4" found_line fin=0 sizes=""
+    found_line="$(grep -F "FOUND-${tag}" <<<"$replies" || true)"
+    if cc_cmd_hook_finished "$event" "$marker"; then fin=1; fi
+    sizes="$(cc_event_context_chars "$event" || true)"
+    sizes="${sizes//$'\n'/,}"
+    if [[ -n "$found_line" && "$found_line" == *"$marker"* ]]; then
+        if [[ $fin -eq 1 && -n "$sizes" ]]; then
+            echo "VISIBLE"
+        else
+            echo "MISMATCH the subagent reported the whole marker but the debug log shows hook_finished=$fin and accepted additionalContext=${sizes:-none}"
+        fi
+    elif grep -qF "NONE-${tag}" <<<"$replies"; then
+        if [[ -n "$sizes" ]]; then
+            echo "MISMATCH the subagent answered NONE but the debug log shows Claude Code accepted additionalContext ($sizes chars) from a $event hook"
+        elif [[ $fin -ne 1 ]]; then
+            echo "MISMATCH the subagent answered NONE but the debug log has no finished-with-status-0 line for the hook: it may never have run, and then NONE proves nothing"
+        else
+            echo "NOT-VISIBLE"
+        fi
+    else
+        echo "INDETERMINATE the subagent answered neither FOUND-${tag} with the whole marker nor NONE-${tag}"
+    fi
+}
+
+# cc_expanded_command_has <header> <needle>...: look in the main session's user turns (not the
+# model's text, not the pane) for a slash command that Claude Code expanded. Returns
+#   0  the turn carrying <header> (a line of the command's own body) also carries every <needle>
+#      (fixed strings, newlines allowed): the `!` injection's output reached the model
+#   1  the body reached the model but a needle is missing: the injection produced something else
+#   2  no user turn carries <header>: the command never reached the model
+#   3  a user turn carries Claude Code's own shell-error text
+cc_expanded_command_has() {
+    local header="$1" text needle
+    shift
+    text="$(cc_session_user_text || true)"
+    [[ "$text" == *"$header"* ]] || return 2
+    if grep -qiE 'Shell command failed|\(eval\):|No such command' <<<"$text"; then return 3; fi
+    for needle in "$@"; do
+        [[ "$text" == *"$needle"* ]] || return 1
+    done
+    return 0
+}
+
+# cc_wait_user_text <fixed-string> [timeout-seconds]: poll the main session's user turns
+# for <fixed-string> (the slash command's header), then give the turn a moment to finish.
+cc_wait_user_text() {
+    local want="$1" timeout="${2:-90}" i text
+    for i in $(seq 1 $((timeout / 2))); do
+        sleep 2
+        text="$(cc_session_user_text || true)"
+        if [[ "$text" == *"$want"* ]]; then sleep 2; return 0; fi
+    done
+    echo "    TIMEOUT waiting for a user turn carrying: $want (${timeout}s)"
+    return 1
+}
+
+# cc_command_render_check <label> <render|empty> <header> <needle>...: the verdict of a
+# slash-command injection scenario (21, 24, 25), read from the expanded command in the
+# session transcript (cc_expanded_command_has). `render`: every needle must be there.
+# `empty` (a negative control whose injection prints nothing): the body must have reached
+# the model and the needles must NOT be there, which is the proof the check discriminates.
+cc_command_render_check() {
+    local label="$1" expect="$2" header="$3" rc=0
+    shift 3
+    cc_expanded_command_has "$header" "$@" || rc=$?
+    case "$rc:$expect" in
+        0:render) _cc_pass "$label" "${label}: the expanded command in the session transcript carries the injection's output (${#} marker(s) found in the user turn; the model's own account was not consulted)" ;;
+        1:render) _cc_fail "$label" "${label}: the command body reached the model but the injection's output is not in it: the \`!\` block did not run or its output was mangled" ;;
+        1:empty)  _cc_pass "$label" "${label}: negative control: with an injection that prints nothing the command body reached the model and the output markers are absent, so the check does discriminate" ;;
+        0:empty)  _cc_fail "$label" "${label}: negative control failed: the output markers are in the user turn although the injection prints nothing, so the check cannot tell a rendered injection from an absent one" ;;
+        2:*)      _cc_fail "$label" "${label}: no user turn of the main session carries the command body ('${header}'): the command never reached the model, nothing to conclude" ;;
+        3:*)      _cc_fail "$label" "${label}: Claude Code reported a shell error in the expanded command: the injection errored" ;;
+    esac
     return 0
 }
 
@@ -613,25 +805,37 @@ cc_hook_context_is_whole() {
     return 1
 }
 
-# _cc_transcript_items <text|tool_use> [find-predicates]: from the session
+# _cc_transcript_items <text|tool_use|user_text> [find-predicates]: from the session
 # transcripts (*.jsonl under the sandbox's projects dir) the predicates select,
-# the assistant text blocks (kind text) or the names of the tools the assistant
-# called (kind tool_use), one per line.
+# the assistant text blocks (kind text), the names of the tools the assistant
+# called (kind tool_use), or the user turns' text, tool results excluded (kind
+# user_text), one per line.
 _cc_transcript_items() {
     local kind="$1"
     shift
     find "$TEST_HOME/.claude/projects" -name '*.jsonl' "$@" -print0 2>/dev/null | CC_ITEM_KIND="$kind" xargs -0 -r python3 -I -c '
 import json, os, sys
 kind = os.environ["CC_ITEM_KIND"]
+want = "user" if kind == "user_text" else "assistant"
 for path in sys.argv[1:]:
     for line in open(path, encoding="utf-8", errors="replace"):
         try:
             d = json.loads(line)
         except ValueError:
             continue
-        if d.get("type") != "assistant":
+        if not isinstance(d, dict) or d.get("type") != want:
             continue
         content = (d.get("message") or {}).get("content")
+        if kind == "user_text":
+            # what was SENT to the model as a user turn (a typed prompt, an expanded slash
+            # command); a tool_result block is tool output, not a turn
+            if isinstance(content, str):
+                print(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        print(block.get("text", ""))
+            continue
         if isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
@@ -667,6 +871,21 @@ cc_subagent_tool_uses() {
 # seen it as context (nexus-qsmc5); the model's own text is the evidence.
 cc_session_replies() {
     _cc_transcript_items text ! -name 'agent-*.jsonl'
+}
+
+# cc_session_user_text: the user turns of the MAIN session as sent to the model, tool
+# results excluded: the typed prompt and, for a slash command, the command body AFTER
+# Claude Code expanded its `!` injections. This is the only place the expansion's
+# output can be read without trusting the model's account of it, and the model's
+# own text (cc_session_replies) is not in it (nexus-qsmc5: 21, 24 and 25 judged the pane).
+cc_session_user_text() {
+    _cc_transcript_items user_text ! -name 'agent-*.jsonl'
+}
+
+# cc_nested_dispatch_facts <nested-token-ere> <blocked-token-ere>: key=value lines about
+# what the dispatched subagents did, from their own transcripts (lib/agent_facts.py).
+cc_nested_dispatch_facts() {
+    python3 -I "$REPO_ROOT/tests/cc-validation/lib/agent_facts.py" "$TEST_HOME/.claude/projects" "$1" "$2"
 }
 
 # cc_wait_subagent_reply <ere> [timeout-seconds]: poll the subagents' own

@@ -67,9 +67,11 @@ def _num(path: pathlib.Path) -> str:
 
 def _bash_function(path: pathlib.Path, name: str) -> str:
     text = path.read_text(encoding="utf-8")
-    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.S | re.M)
+    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.S | re.M) or re.search(
+        rf"^{re.escape(name)}\(\) \{{ .*\}}$", text, re.M
+    )
     assert m, f"{name}() not found in {path}"
-    return m.group(0)
+    return m.group(0) + "\n"
 
 
 def _dependents() -> dict[str, pathlib.Path]:
@@ -388,10 +390,13 @@ def test_the_runner_wrapper_still_adds_the_launch_args_for_the_enforced_launcher
 # --- the permission scenarios prove permissions are enforced ----------------------
 
 
-def _flags_verdict(fn_name: str, args: list[str]) -> str:
+def _flags_verdict(fn_name: str, args: list[str], version: str = "2.1.302") -> str:
+    deps = ["cc_note", "_cc_pass", "_cc_fail", "cc_version_check"]
     script = (
-        'pass() { echo "PASS:$*"; }\nfail() { echo "FAIL:$*"; }\n'
-        + _bash_function(RUNNER, fn_name) + f"\n{fn_name} " + " ".join(f'"{a}"' for a in args) + "\n"
+        f'REPO_ROOT="{REPO}"\npass() {{ echo "PASS:$*"; }}\nfail() {{ echo "FAIL:$*"; }}\n'
+        + "\n".join(_bash_function(RUNNER, d) for d in deps) + "\n"
+        + _bash_function(RUNNER, fn_name)
+        + f"\ncc_claude_version() {{ printf '%s' '{version}'; }}\n{fn_name} " + " ".join(f'"{a}"' for a in args) + "\n"
     )
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -402,7 +407,7 @@ def test_cc_allow_rule_verdict_needs_the_control_to_prompt_and_the_rule_to_grant
     def v(cprompt: int, cran: int, aran: int, aprompt: int) -> str:
         return _flags_verdict("cc_allow_rule_verdict", ["05", "mcp__stub__*", str(cprompt), str(cran), str(aran), str(aprompt)])
 
-    assert v(1, 0, 1, 0).startswith("PASS:")
+    assert v(1, 0, 1, 0).startswith("PASS:") and "observed on Claude Code 2.1.302" in v(1, 0, 1, 0)
     # the control did not prompt: the session bypasses permissions, so a tool run proves nothing
     assert "not enforced" in v(0, 1, 1, 0) and v(0, 1, 1, 0).startswith("FAIL:")
     assert v(0, 0, 1, 0).startswith("FAIL:")
@@ -422,9 +427,12 @@ def test_cc_preempt_verdict_treats_the_no_allow_run_as_the_control() -> None:
     # B reached no gate at all (no hook, no prompt): permissions are not enforced, whatever A did
     assert "not enforced" in v(0, 1, 0, 0, 1, 0) and v(0, 1, 0, 0, 1, 0).startswith("FAIL:")
     assert v(0, 1, 0, 0, 0, 0).startswith("FAIL:")
-    # the answers the scenario exists to give
-    assert v(0, 1, 0, 1, 1, 0).startswith("PASS:") and "PREEMPTS" in v(0, 1, 0, 1, 1, 0)
-    assert v(1, 1, 0, 1, 1, 0).startswith("PASS:") and "regardless" in v(1, 1, 0, 1, 1, 0)
+    # the answers the scenario observes: the recorded one for 2.1.302 (preempts) agrees, the other is a change
+    agrees = v(0, 1, 0, 1, 1, 0)
+    assert agrees.startswith("PASS:") and "observed on Claude Code 2.1.302" in agrees
+    assert "did not fire and the tool ran" in agrees and "PREEMPTS" not in agrees
+    changed = v(1, 1, 0, 1, 1, 0)
+    assert changed.startswith("FAIL:") and "answer changed since 2.1.302" in changed
     # a prompt that the allow rule did not clear
     assert v(0, 0, 1, 1, 1, 0).startswith("FAIL:") and "did not grant" in v(0, 0, 1, 1, 1, 0)
     # sub-A did not run the tool
@@ -435,20 +443,35 @@ def test_cc_preempt_verdict_treats_the_no_allow_run_as_the_control() -> None:
     assert "not honoured" in v(0, 1, 0, 1, 0, 0)
 
 
-def test_cc_allow_rule_verdict_report_mode_accepts_either_honest_answer() -> None:
-    """Scenario 06 asks whether a rule SHAPE matches: matches and does-not-match are both
-    answers, but only behind a control that proves the mode prompts."""
-    def v(cprompt: int, cran: int, aran: int, aprompt: int) -> str:
-        return _flags_verdict("cc_allow_rule_verdict", ["06", "mcp__plugin_*__*", str(cprompt), str(cran), str(aran), str(aprompt), "report"])
+def test_cc_allow_rule_verdict_report_mode_compares_with_the_recorded_answer() -> None:
+    """Scenario 06 asks whether a rule SHAPE matches: an observation, compared with the answer
+    recorded for the running Claude Code version, and only behind a control that proves the
+    mode prompts."""
+    def v(cprompt: int, cran: int, aran: int, aprompt: int, version: str = "2.1.302") -> str:
+        return _flags_verdict("cc_allow_rule_verdict", ["06", "mcp__plugin_*__*", str(cprompt), str(cran), str(aran), str(aprompt), "report"], version)
 
-    assert v(1, 0, 1, 0).startswith("PASS:") and "MATCHES" in v(1, 0, 1, 0)
-    assert v(1, 0, 0, 1).startswith("PASS:") and "does NOT match" in v(1, 0, 0, 1)
+    # the answer recorded for 2.1.302 (does-not-match) agrees, and the line names the build
+    agrees = v(1, 0, 0, 1)
+    assert agrees.startswith("PASS:") and "observed on Claude Code 2.1.302" in agrees
+    assert "stopped at a permission prompt" in agrees and "recorded for 2.1.302 on 2026-10-18" in agrees
+    # the other answer on the same build is a change, not a pass
+    changed = v(1, 0, 1, 0)
+    assert changed.startswith("FAIL:") and "answer changed since 2.1.302" in changed and "observed on Claude Code 2.1.302" in changed
     # no control prompt: no answer, in either direction
     assert v(0, 1, 1, 0).startswith("FAIL:") and v(0, 1, 0, 1).startswith("FAIL:")
     # neither a prompt nor a tool run (server not connected)
     assert v(1, 0, 0, 0).startswith("FAIL:")
     # and a prompt that the tool ran through is not a clean answer
     assert v(1, 0, 1, 1).startswith("FAIL:")
+
+
+def test_the_pass_text_of_06_states_no_direction_as_fact() -> None:
+    for fn, args in (("cc_allow_rule_verdict", ["06", "mcp__plugin_*__*", "1", "0", "0", "1", "report"]),
+                     ("cc_allow_rule_verdict", ["06", "mcp__plugin_*__*", "1", "0", "1", "0", "report"])):
+        for version in ("2.1.302", "9.9.9"):
+            line = _flags_verdict(fn, args, version)
+            assert f"observed on Claude Code {version}" in line
+            assert " MATCHES" not in line and "does NOT match" not in line and "PREEMPTS" not in line, line
 
 
 def test_cc_report_context_lines_is_informational(tmp_path: pathlib.Path) -> None:
@@ -560,7 +583,11 @@ def _helpers() -> str:
              "cc_keep_evidence", "cc_plugin_uninstall_all", "cc_hook_ran", "cc_mcp_hook_ran",
              "cc_hook_context_chars", "cc_hook_context_injected", "cc_hook_context_is_whole",
              "_cc_transcript_items", "cc_subagent_replies", "cc_subagent_tool_uses", "cc_session_replies",
-             "cc_wait_subagent_reply", "cc_wait_session_reply", "cc_report_context_lines"]
+             "cc_wait_subagent_reply", "cc_wait_session_reply", "cc_report_context_lines",
+             "cc_session_user_text", "cc_nested_dispatch_facts", "cc_reset_transcripts", "cc_save_pane",
+             "cc_cmd_hook_finished", "cc_event_context_chars", "cc_injection_reading",
+             "cc_expanded_command_has", "cc_wait_user_text", "cc_command_render_check",
+             "cc_claude_version", "cc_note", "_cc_pass", "_cc_fail", "cc_version_check"]
     return "\n".join(_bash_function(RUNNER, n) for n in names)
 
 
@@ -582,7 +609,7 @@ def _run(tmp_path: pathlib.Path, body: str, mode: str = "ok", **extra: str) -> s
     (home / ".claude").mkdir(parents=True, exist_ok=True)
     env = {
         "PATH": f"{fakebin}:{os.environ['PATH']}", "HOME": str(tmp_path / "realhome"),
-        "TEST_HOME": str(home), "FAKE_CLAUDE_MODE": mode, **extra,
+        "TEST_HOME": str(home), "FAKE_CLAUDE_MODE": mode, "REPO_ROOT": str(REPO), **extra,
     }
     prelude = (
         'set -u\nfail() { echo "FAILCALL:$*"; }\nskip() { echo "SKIPCALL:$*"; }\n_SCENARIO="t scenario"\n'
@@ -953,11 +980,66 @@ def test_14_reads_the_payload_case_insensitively_and_keeps_each_part_apart(tmp_p
     log.write_text('{"tool": "record", "payload": "14C-PROOF", "ts": 1}\n')
     r = subprocess.run(["bash", "-c", f'grep -qi "14c-PROOF" "{log}" && echo HIT || echo MISS'], capture_output=True, text=True)
     assert r.stdout.strip() == "HIT"
-    # each part starts with no transcripts of the parts before it, so the per-part report is that part's
-    assert code.count('rm -rf "$TEST_HOME/.claude/projects"') == 3
     for label in ("14a", "14b", "14c"):
         assert f'report_agents "{label}"' in code, label
     assert "cc_keep_evidence" in _bash_snippet(code, "report_agents")
+
+
+def test_14_parts_do_not_see_each_others_transcripts(tmp_path: pathlib.Path) -> None:
+    """Run scenario 14 end to end with a simulated Claude Code: dispatching agent14X writes that
+    part's subagent transcript (and replies 14X_DONE). Each part's report, and the evidence it keeps,
+    must hold only its own part's transcripts, whatever the earlier parts left behind (a count of rm
+    lines cannot fail on non-isolation; this can)."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    deps = "\n".join(_bash_function(RUNNER, n) for n in (
+        "_cc_transcript_items", "cc_subagent_replies", "cc_subagent_tool_uses", "cc_wait_subagent_reply", "cc_reset_transcripts"))
+    script = f'''
+set -euo pipefail
+REPO_ROOT="{REPO}"; TEST_HOME="{home}"; STUB_LOG="{tmp_path}/stub.log"; REPO_ROOT_UNUSED=1
+sleep() {{ :; }}
+pass() {{ echo "PASS:$*"; }}; fail() {{ echo "FAIL:$*"; }}; skip() {{ echo "SKIP:$*"; }}
+scenario() {{ echo "SCENARIO:$1"; }}; scenario_end() {{ :; }}
+write_agent() {{ :; }}; send_keys() {{ :; }}; claude_start() {{ :; }}; claude_wait() {{ :; }}; claude_exit() {{ :; }}
+cc_plugin_require() {{ return 0; }}; cc_plugin_uninstall_all() {{ :; }}
+cc_keep_evidence() {{ mkdir -p "{kept}/$1"; cp -R "$TEST_HOME/.claude/projects/." "{kept}/$1/" 2>/dev/null || true; }}
+# the simulated Claude Code: a dispatch of agent14X writes that part's subagent transcript
+claude_prompt() {{
+  case "$1" in
+    *"dispatch agent14"*)
+      x="${{1#*dispatch agent14}}"; x="${{x:0:1}}"
+      mkdir -p "$TEST_HOME/.claude/projects/-p/s/subagents"
+      printf '{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"PART-%s-ONLY 14%s_DONE"}}]}}}}\\n' "$x" "${{x^^}}" \\
+        > "$TEST_HOME/.claude/projects/-p/s/subagents/agent-$x.jsonl" ;;
+  esac
+}}
+{deps}
+'''
+    body = S14.read_text(encoding="utf-8")
+    r = subprocess.run(["bash", "-c", script + body + "\necho REACHED_END\n"], capture_output=True, text=True)
+    assert "REACHED_END" in r.stdout, f"{r.stdout}{r.stderr}"
+    for part, others in (("a", "bc"), ("b", "ac"), ("c", "ab")):
+        files = {p.name for p in (kept / f"14{part}").rglob("*.jsonl")}
+        assert files == {f"agent-{part}.jsonl"}, f"14{part} kept {sorted(files)}"
+        report = [ln for ln in r.stdout.splitlines() if ln.startswith(f"    [14{part}] reply|")]
+        assert report and all(f"PART-{part}-ONLY" in ln for ln in report), report
+        assert not any(f"PART-{o}-ONLY" in ln for ln in report for o in others), report
+
+
+def test_wait_agent_done_says_which_agent_never_replied(tmp_path: pathlib.Path) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    deps = "\n".join(_bash_function(RUNNER, n) for n in ("_cc_transcript_items", "cc_subagent_replies", "cc_wait_subagent_reply"))
+    script = (
+        f'TEST_HOME="{home}"\nsleep() {{ :; }}\n{deps}\n'
+        + _bash_snippet(S14.read_text(encoding="utf-8"), "wait_agent_done")
+        + '\nwait_agent_done "14B_DONE" 4; echo "rc=$?"\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "rc=0" in r.stdout, r.stdout + r.stderr   # a missing token must not stop the scenario
+    assert "TIMEOUT" in r.stdout and "[14B_DONE] the agent never replied 14B_DONE within 4s" in r.stdout, r.stdout
 
 
 def test_stub_spawned_reads_the_stubs_own_startup_marker(tmp_path: pathlib.Path) -> None:
@@ -996,7 +1078,8 @@ PROBES = {
     "12": ["Claimant id:", "check before duplicating sibling work"],
     "13": ["UNIQUE-PROJECT-A-MARKER-KQX73", "UNIQUE-PLUGIN-B-MARKER-WYZ91", "UNIQUE-CONTROL-C-MARKER-RJF44"],
     # 15 builds its prompt from variables; the markers are 15's probe_inject arguments
-    "15": ["$marker", "${marker}", "STDOUT-15A-MARKER-Q9X", "STDOUT-15B-MARKER-T7K", "STDOUT-15C-MARKER-W3J", "STDOUT-15D-MARKER-R2P"],
+    "15": ["$marker", "${marker}", "STDOUT-15A-MARKER-Q9X", "STDOUT-15B-MARKER-T7K", "STDOUT-15C-MARKER-W3J", "STDOUT-15D-MARKER-R2P",
+           "STDOUT-15E-MARKER-K4M"],
     "17": ["NESTED-AGENT-OK", "NESTED-SPAWN-BLOCKED", "FORK-PARENT-OK"],
     "18": ["project-from-cwd", "fetch current docs"],
     # slash-command probes: the command body becomes the prompt the model quotes from
@@ -1042,16 +1125,80 @@ def _whole_in_prompts(prompts: list[str], probes: list[str] | set[str]) -> list[
     return [(probe, p[:60]) for probe in sorted(probes) for p, sq in squashed if probe in p or probe in sq]
 
 
+#: The per-scenario non-vacuity floor of the lint above: (claude_prompts examined, reply tokens
+#: found in the scenario's own wait/grep patterns), as counted when the floor was set. A scenario
+#: that loses a prompt or a pattern drops below it and fails, instead of being linted over less
+#: (the old `len(set(PROBES[num]) | tokens) >= 1` could not fail: PROBES[num] is a nonempty literal).
+#: 15, 21, 24 and 25 judge a transcript or a log, not a reply pattern, so their token floor is 0
+#: and their floor is that a probe of PROBES occurs in the scenario source at all.
+FLOORS = {
+    "1": (1, 2), "2": (1, 3), "3": (1, 3), "4": (1, 3), "11": (2, 3), "12": (1, 2), "13": (3, 6),
+    "15": (1, 0), "17": (2, 3), "18": (1, 4), "21": (4, 0), "24": (2, 0), "25": (2, 0),
+}
+
+
+def test_the_floor_table_covers_exactly_the_linted_scenarios() -> None:
+    assert set(FLOORS) == set(PROBES)
+
+
 @pytest.mark.parametrize("num", sorted(PROBES, key=int))
 def test_no_prompt_contains_its_own_probe_phrase_whole(num: str) -> None:
     path = _scenario(num)
     prompts = _prompts(path)
     tokens = _reply_tokens(path)
-    assert len(prompts) >= 1, f"scenario {num}: found no claude_prompt, so the census examined nothing"
     tokens -= SIDE_EFFECT_TOKENS.get(num, set())
-    assert len(set(PROBES[num]) | tokens) >= 1, f"scenario {num}: found {sorted(tokens)} reply tokens and {PROBES[num]} probes"
+    min_prompts, min_tokens = FLOORS[num]
+    assert len(prompts) >= max(1, min_prompts), f"scenario {num}: the census examined {len(prompts)} prompts, floor {min_prompts}"
+    assert len(tokens) >= min_tokens, f"scenario {num}: found {sorted(tokens)} reply tokens, floor {min_tokens}"
+    if min_tokens == 0:
+        source = path.read_text(encoding="utf-8")
+        assert any(probe in source for probe in PROBES[num]), f"scenario {num}: none of {PROBES[num]} occurs in the scenario: the probe list is stale"
     hits = _whole_in_prompts(prompts, set(PROBES[num]) | tokens)
     assert not hits, f"scenario {num} writes a probe whole in its own prompt: {hits}"
+
+
+#: The hook markers of the injection probes, whose last characters (the code) must reach the
+#: subagent only through the hook (01-04, 15). A reply token like FOUND-01S is assembled by the
+#: model from pieces on purpose; a MARKER assembled from pieces in the prompt is the forgery.
+MARKERS = {
+    "1": ["SUB-PLAIN-MARKER-K7Q3"], "2": ["SUB-JSON-MARKER-X9P2"], "3": ["SUB-MCP-MARKER-W7K4"],
+    "4": ["SESS-PLAIN-MARKER-INTERACTIVE-Q9X"],
+    "15": ["STDOUT-15A-MARKER-Q9X", "STDOUT-15B-MARKER-T7K", "STDOUT-15C-MARKER-W3J", "STDOUT-15D-MARKER-R2P", "STDOUT-15E-MARKER-K4M"],
+}
+
+
+def _assembled_in_prompts(prompts: list[str], markers: list[str]) -> list[tuple[str, str]]:
+    """Prompts from whose pieces a marker can be put together: some split marker = head + tail with
+    a head of 6+ characters and a tail of 3+ characters has BOTH halves in the prompt (the old 15
+    wrote the head and the code side by side: 'the text STDOUT-15A-MARKER- immediately followed by
+    Q9X'). A prompt that holds the head only, as the 01-04 prompts do, is not flagged."""
+    out = []
+    for marker in markers:
+        for prompt in prompts:
+            squashed = " ".join(prompt.split())
+            for k in range(6, len(marker) - 2):
+                if marker[:k] in squashed and marker[k:] in squashed:
+                    out.append((marker, prompt[:60]))
+                    break
+    return out
+
+
+@pytest.mark.parametrize("num", [n for n in sorted(MARKERS, key=int) if n != "15"])   # 15 builds its prompts at run time: test_scenario_15_withholds_the_code_and_reads_both_the_reply_and_the_log
+def test_no_prompt_holds_the_pieces_of_a_hook_marker(num: str) -> None:
+    prompts = _prompts(_scenario(num))
+    assert prompts, num
+    assert not _assembled_in_prompts(prompts, MARKERS[num]), f"scenario {num} lets the marker be put together from its prompt"
+
+
+def test_the_assembly_lint_catches_the_old_15_prompt_and_passes_the_new_ones() -> None:
+    old = "Is the text STDOUT-15A-MARKER- immediately followed by Q9X (no space) anywhere in it? If yes reply FOUND"
+    assert _assembled_in_prompts([old], MARKERS["15"])
+    # the head and the code apart, in any order or place
+    assert _assembled_in_prompts(["the code is Q9X. the text begins STDOUT-15A-MARKER-"], MARKERS["15"])
+    new = "Is the text STDOUT-15A-MARKER- immediately followed by a three-character code (no space) anywhere in it?"
+    assert not _assembled_in_prompts([new], MARKERS["15"])
+    for num in ("1", "2", "3", "4"):
+        assert not _assembled_in_prompts(_prompts(_scenario(num)), MARKERS[num])
 
 
 def test_the_prompt_census_counts() -> None:
@@ -1111,39 +1258,104 @@ def _run_prompt_text(path: pathlib.Path) -> list[str]:
     return _prompts(path)
 
 
-def test_scenario_15_builds_its_prompt_from_pieces(tmp_path: pathlib.Path) -> None:
-    """Run 15's probe_inject with stubs and look at the prompt it would type."""
-    text = (CCV / "scenarios" / "15_stdout_injection_thresholds.sh").read_text(encoding="utf-8")
-    fn_text = text[text.index("probe_inject() {"):text.index("\n# ── 15a")]   # the settings heredoc inside has a col-0 "}"
+S15 = CCV / "scenarios" / "15_stdout_injection_thresholds.sh"
+#: the four probe_inject calls of scenario 15: (label, hook command, marker)
+_S15_CALLS = re.findall(r'^probe_inject "(15[a-d])" "((?:[^"\\]|\\.)*)" "([A-Z0-9-]+)"$', S15.read_text(encoding="utf-8"), re.M)
+
+
+def _debug_log(event: str, command: str, *, finished: bool = True, accepted: int = 0) -> str:
+    lines = ["2026-10-18T00:27:47.111Z [DEBUG] Hooks: checkForNewResponses returning 0 responses, 0 hooks still pending"]
+    if finished:
+        lines.append(f"2026-10-18T00:27:50.560Z [DEBUG] Hooks: {event}:general-purpose [{command}] finished with status 0 (30ms)")
+    if accepted:
+        lines.append(f"2026-10-18T00:27:50.561Z [DEBUG] Hook {event} ({command}) provided additionalContext ({accepted} chars)")
+    return "\n".join(lines) + "\n"
+
+
+def _run_s15(tmp_path: pathlib.Path, label: str, command: str, marker: str, replies: str, debug_log: str, entry: str = "") -> tuple[str, str]:
+    """Run 15's probe_inject (or, with `entry`, another function of the scenario) for one marker with
+    the REAL reading helpers over a debug-log fixture and the given subagent replies; return (what
+    it printed, the prompt it typed)."""
+    text = S15.read_text(encoding="utf-8")
+    fn_text = text[text.index("_s15_session() {"):text.index("\n# ── 15a")]   # the settings heredoc inside has a col-0 "}"
     prompt_file = tmp_path / "prompt.txt"
     home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    dbg = tmp_path / f"cc-debug-{label}.log"
+    dbg.write_text(debug_log)
+    deps = "\n".join(_bash_function(RUNNER, n) for n in ("cc_cmd_hook_finished", "cc_event_context_chars", "cc_injection_reading"))
+    call = entry or f'probe_inject "{label}" {command!r} "{marker}"'
+    script = (
+        f'REPO_ROOT="{REPO}"\nTEST_HOME="{home}"\npass() {{ echo "PASS:$*"; }}\nfail() {{ echo "FAIL:$*"; }}\n'
+        f'claude_exit() {{ :; }}\nclaude_prompt() {{ printf "%s" "$1" > "{prompt_file}"; }}\n'
+        f'cc_reset_transcripts() {{ :; }}\ncc_keep_evidence() {{ :; }}\ncc_report_context_lines() {{ :; }}\n'
+        f'cc_wait_subagent_reply() {{ return 0; }}\ncc_subagent_replies() {{ printf "%s\\n" {replies!r}; }}\n'
+        + deps + "\n" + fn_text
+        # _s15_session points CC_DEBUG_FILE at $TEST_HOME and removes it: put the fixture back after claude_start
+        + f'\nclaude_start() {{ cp "{dbg}" "$CC_DEBUG_FILE"; }}\n'
+        + f'{call}\necho "VISIBLE=${{result_visible:-na}}"\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout, prompt_file.read_text()
 
-    def run(replies: str) -> tuple[str, str]:
-        script = (
-            f'TEST_HOME="{home}"\npass() {{ echo "PASS:$*"; }}\nfail() {{ echo "FAIL:$*"; }}\n'
-            f'claude_start() {{ :; }}\nclaude_exit() {{ :; }}\nclaude_prompt() {{ printf "%s" "$1" > "{prompt_file}"; }}\n'
-            f'cc_wait_subagent_reply() {{ return 0; }}\ncc_subagent_replies() {{ printf "%s\\n" {replies!r}; }}\n'
-            + fn_text + '\nprobe_inject "15a" "echo hi" "STDOUT-15A-MARKER-Q9X"\necho "VISIBLE=$result_visible"\n'
-        )
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-        assert r.returncode == 0, r.stderr
-        return r.stdout, prompt_file.read_text()
 
-    out, prompt = run("FOUND-15aS STDOUT-15A-MARKER-Q9X")
-    assert "STDOUT-15A-MARKER-Q9X" not in prompt, "the marker is in the prompt whole"
-    assert "STDOUT-15A-MARKER-" in prompt and "Q9X" in prompt and "FOUND-15aS" not in prompt and "NONE-15aS" not in prompt
-    assert "VISIBLE=1" in out and "PASS:" in out
-    out, _ = run("NONE-15aS")
-    assert "VISIBLE=0" in out and "PASS:" in out
-    # a FOUND without the whole marker, and no reply at all, are not readings
-    out, _ = run("FOUND-15aS something else")
-    assert "VISIBLE=-1" in out and "FAIL:" in out
-    out, _ = run("")
-    assert "VISIBLE=-1" in out and "FAIL:" in out
-    # the same marker under ANOTHER probe's tag is not this probe's reply
-    out, _ = run("FOUND-15bS STDOUT-15A-MARKER-Q9X")
-    assert "VISIBLE=-1" in out
+def test_scenario_15e_refuses_a_none_from_a_hook_that_never_ran(tmp_path: pathlib.Path) -> None:
+    marker, cmd = "STDOUT-15E-MARKER-K4M", "echo 'STDOUT-15E-MARKER-K4M'"
+    # NONE and no finished line: the reading refuses it, which is what the control asserts
+    out, prompt = _run_s15(tmp_path, "15e", cmd, marker, "NONE-15eS", _debug_log("SubagentStart", cmd, finished=False), entry="control_dead_hook")
+    assert "PASS:" in out and "negative control" in out and "FAIL:" not in out, out
+    assert 'zzz-no-such-agent' in (S15.read_text(encoding="utf-8")) and marker[-3:] not in prompt
+    # if the NONE WERE accepted (a finished hook, nothing delivered) the control would fail
+    out, _ = _run_s15(tmp_path, "15e", cmd, marker, "NONE-15eS", _debug_log("SubagentStart", cmd), entry="control_dead_hook")
+    assert "FAIL:" in out and "negative control failed" in out, out
+    # a subagent that did not answer is not the control's answer either
+    out, _ = _run_s15(tmp_path, "15e", cmd, marker, "", _debug_log("SubagentStart", cmd, finished=False), entry="control_dead_hook")
+    assert "FAIL:" in out, out
+
+
+def test_scenario_15_probes_are_what_the_test_runs() -> None:
+    labels = [c[0] for c in _S15_CALLS]
+    assert labels == ["15a", "15b", "15c", "15d"], f"the regex found {labels}: the test would examine nothing"
+    for _, _, marker in _S15_CALLS:
+        assert re.fullmatch(r"STDOUT-15[A-D]-MARKER-[A-Z0-9]{3}", marker), "the marker's code must be exactly three characters"
+
+
+def test_scenario_15_withholds_the_code_and_reads_both_the_reply_and_the_log(tmp_path: pathlib.Path) -> None:
+    for label, command, marker in _S15_CALLS:
+        cmd = command.replace("\\n", "\n")   # the JSON string decodes \n to a newline, as the debug log shows it
+        code = marker[-3:]
+        tag = f"{label}S"
+        # VISIBLE: the reply carries the whole marker, the hook finished, and context was accepted
+        out, prompt = _run_s15(tmp_path, label, command, marker, f"FOUND-{tag} {marker}", _debug_log("SubagentStart", cmd, accepted=40))
+        assert marker not in prompt and code not in prompt, "the code of the marker is in the prompt"
+        assert not _assembled_in_prompts([prompt], [marker]), "the marker can be put together from the prompt"
+        assert marker[:-3] in prompt and "FOUND-" + tag not in prompt and "NONE-" + tag not in prompt
+        assert "VISIBLE=1" in out and "PASS:" in out, out
+        # the old forgery: the subagent was handed head and tail and assembles the marker. With NO
+        # context accepted the log contradicts the reply, so it FAILs instead of reading VISIBLE
+        out, _ = _run_s15(tmp_path, label, command, marker, f"FOUND-{tag} {marker}", _debug_log("SubagentStart", cmd))
+        assert "VISIBLE=-1" in out and "FAIL:" in out, out
+        # NONE agrees with a finished hook that delivered nothing
+        out, _ = _run_s15(tmp_path, label, command, marker, f"NONE-{tag}", _debug_log("SubagentStart", cmd))
+        assert "VISIBLE=0" in out and "PASS:" in out, out
+        # NONE with no finished line is what a dead hook looks like
+        out, _ = _run_s15(tmp_path, label, command, marker, f"NONE-{tag}", _debug_log("SubagentStart", cmd, finished=False))
+        assert "VISIBLE=-1" in out and "FAIL:" in out and "no finished-with-status-0 line" in out, out
+        # NONE while the log shows accepted context is a mismatch
+        out, _ = _run_s15(tmp_path, label, command, marker, f"NONE-{tag}", _debug_log("SubagentStart", cmd, accepted=40))
+        assert "VISIBLE=-1" in out and "FAIL:" in out and "accepted additionalContext" in out, out
+        # a FOUND without the whole marker, and no reply at all, are not readings
+        out, _ = _run_s15(tmp_path, label, command, marker, f"FOUND-{tag} something else", _debug_log("SubagentStart", cmd, accepted=40))
+        assert "VISIBLE=-1" in out and "FAIL:" in out
+        out, _ = _run_s15(tmp_path, label, command, marker, "", _debug_log("SubagentStart", cmd, accepted=40))
+        assert "VISIBLE=-1" in out
+        # the marker under ANOTHER probe's tag is not this probe's reply
+        out, _ = _run_s15(tmp_path, label, command, marker, f"FOUND-{label}X {marker}", _debug_log("SubagentStart", cmd, accepted=40))
+        assert "VISIBLE=-1" in out
+        # the head alone is not the marker
+        out, _ = _run_s15(tmp_path, label, command, marker, f"FOUND-{tag} {marker[:-3]}", _debug_log("SubagentStart", cmd, accepted=40))
+        assert "VISIBLE=-1" in out
 
 
 def _block(path: pathlib.Path, start: str, end: str) -> str:
@@ -1169,12 +1381,20 @@ def _verdict_run(block: str, replies: str, extra: str = "") -> str:
     return next(ln for ln in r.stdout.splitlines() if ln.startswith(("PASS:", "FAIL:")))
 
 
+def _verdict_run_with_log(block: str, replies: str, debug_log: str, tmp_path: pathlib.Path, marker: str) -> str:
+    """Scenario 01's verdict block with the REAL reading helpers over a debug-log fixture."""
+    dbg = tmp_path / "cc-debug-01.log"
+    dbg.write_text(debug_log)
+    deps = "\n".join(_bash_function(RUNNER, n) for n in ("cc_cmd_hook_finished", "cc_event_context_chars", "cc_injection_reading"))
+    return _verdict_run(block, replies, extra=f'REPO_ROOT="{REPO}"\nCC_DEBUG_FILE="{dbg}"\n{deps}\n')
+
+
 @pytest.mark.parametrize(
     "num,var,marker,tag",
-    [("01", "REPLIES01", "SUB-PLAIN-MARKER-K7Q3", "01S"), ("02", "REPLIES02", "SUB-JSON-MARKER-X9P2", "02S"),
+    [("02", "REPLIES02", "SUB-JSON-MARKER-X9P2", "02S"),
      ("03", "REPLIES03", "SUB-MCP-MARKER-W7K4", "03S"), ("04", "REPLIES04", "SESS-PLAIN-MARKER-INTERACTIVE-Q9X", "04S")],
 )
-def test_scenarios_01_to_04_judge_the_reply_not_the_prompt(num: str, var: str, marker: str, tag: str) -> None:
+def test_scenarios_02_to_04_judge_the_reply_not_the_prompt(num: str, var: str, marker: str, tag: str) -> None:
     path = next(p for p in SCENARIOS if p.name.startswith(num + "_"))
     code = _code(path)
     assert "capture -300" not in code, "the pane shows the prompt and the hook's own output"
@@ -1184,33 +1404,126 @@ def test_scenarios_01_to_04_judge_the_reply_not_the_prompt(num: str, var: str, m
     # the pane-matching trap: the model quotes only the prompt's prefix, or only the token
     assert _verdict_run(block, f"FOUND-{tag} {marker.rsplit('-', 1)[0]}-").startswith("FAIL:")
     assert _verdict_run(block, f"FOUND-{tag}").startswith("FAIL:")
-    assert _verdict_run(block, "unrelated text").startswith("FAIL:")
-    none = _verdict_run(block, f"NONE-{tag}")
-    if num == "01":
-        assert none.startswith("PASS:") and "did NOT inject" in none   # the -p finding is a legitimate reading
-        assert "DID inject" in found
-    else:
-        assert none.startswith("FAIL:")
+    assert _verdict_run(block, "unrecorded text").startswith("FAIL:")
+    assert _verdict_run(block, f"NONE-{tag}").startswith("FAIL:")
     # the verdict reads the right transcripts
     assert ("cc_session_replies" if num == "04" else "cc_subagent_replies") in code
 
 
-def test_scenario_17_requires_a_subagent_to_have_called_the_task_tool() -> None:
+def test_scenario_01_judges_the_reply_and_needs_the_log_to_agree(tmp_path: pathlib.Path) -> None:
+    path = next(p for p in SCENARIOS if p.name.startswith("01_"))
+    code = _code(path)
+    assert "capture -300" not in code and "cc_subagent_replies" in code
+    block = _block(path, 'REPLIES01="$(cc_', "claude_exit")
+    marker, cmd, tag = "SUB-PLAIN-MARKER-K7Q3", "echo 'SUB-PLAIN-MARKER-K7Q3'", "01S"
+
+    def run(replies: str, **log: object) -> str:
+        return _verdict_run_with_log(block, replies, _debug_log("SubagentStart", cmd, **log), tmp_path, marker)  # type: ignore[arg-type]
+
+    found = run(f"FOUND-{tag} {marker}", accepted=30)
+    assert found.startswith("PASS:") and "DID inject" in found
+    # NONE passes only with the hook's finished line and no accepted context
+    none = run(f"NONE-{tag}")
+    assert none.startswith("PASS:") and "did NOT inject" in none
+    # a NONE with no finished line is a dead hook, not a finding
+    dead = run(f"NONE-{tag}", finished=False)
+    assert dead.startswith("FAIL:") and "no finished-with-status-0 line" in dead
+    # a NONE although the log shows context accepted: the log and the answer disagree
+    assert run(f"NONE-{tag}", accepted=30).startswith("FAIL:")
+    # a FOUND the log cannot back
+    assert run(f"FOUND-{tag} {marker}").startswith("FAIL:")
+    # the pane-matching trap: the prefix alone, the token alone, other text
+    assert run(f"FOUND-{tag} SUB-PLAIN-MARKER-", accepted=30).startswith("FAIL:")
+    assert run(f"FOUND-{tag}", accepted=30).startswith("FAIL:")
+    assert run("unrelated text", accepted=30).startswith("FAIL:")
+
+
+def _agent_file(proj: pathlib.Path, name: str, steps: list[tuple[str, object]]) -> None:
+    """Write a subagent transcript. Steps: ("text", str), ("call", (id, tool)), ("result", (id, is_error))."""
+    (proj / "subagents").mkdir(parents=True, exist_ok=True)
+    lines = []
+    for kind, val in steps:
+        if kind == "text":
+            lines.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": val}]}})
+        elif kind == "call":
+            cid, tool = val  # type: ignore[misc]
+            lines.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": cid, "name": tool, "input": {}}]}})
+        elif kind == "result":
+            cid, err = val  # type: ignore[misc]
+            block = {"type": "tool_result", "tool_use_id": cid, "content": "x"}
+            if err:
+                block["is_error"] = True
+            lines.append({"type": "user", "message": {"role": "user", "content": [block]}})
+    (proj / "subagents" / f"agent-{name}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+
+#: a fork that loaded the deferred tool, dispatched, and got a clean result; and the leaf's own transcript
+_FORK_OK = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", False)),
+            ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
+_LEAF_OK = [("text", "NESTED-AGENT-OK-17")]
+
+
+def _run17(tmp_path: pathlib.Path, agents: dict[str, list[tuple[str, object]]], replies_wait_ok: bool = True) -> str:
+    """Run scenario 17's verdict block over synthetic subagent transcripts and the real facts reader."""
     path = CCV / "scenarios" / "17_fork_can_spawn_subagent.sh"
     block = _block(path, 'REPLIES17="$(cc_', "claude_exit")
+    home = tmp_path / "home"
+    proj = home / ".claude" / "projects" / "-home-x" / "sess"
+    for name, steps in agents.items():
+        _agent_file(proj, name, steps)
+    deps = "\n".join(_bash_function(RUNNER, n) for n in ("_cc_transcript_items", "cc_subagent_replies", "cc_nested_dispatch_facts"))
+    script = (
+        f'set -euo pipefail\nREPO_ROOT="{REPO}"\nTEST_HOME="{home}"\npass() {{ echo "PASS:$*"; }}\nfail() {{ echo "FAIL:$*"; }}\n'
+        "cc_keep_evidence() { :; }\n" + deps + "\n" + block + "\necho REACHED_END\n"
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "REACHED_END" in r.stdout, f"the verdict block died before its end: {r.stdout}{r.stderr}"
+    return next(ln for ln in r.stdout.splitlines() if ln.startswith(("PASS:", "FAIL:")))
 
-    def run(replies: str, tools: str) -> str:
-        return _verdict_run(block, replies, extra=f"cc_subagent_tool_uses() {{ printf '%s\\n' {_shargs(tools)}; }}\n")
 
-    assert run("NESTED-AGENT-OK-17", "Skill\nTask").startswith("PASS:")
-    assert run("NESTED-AGENT-OK-17", "Agent").startswith("PASS:")
-    # the token without a dispatch is the pane trap again: not evidence of a spawn
-    blocked = run("NESTED-AGENT-OK-17", "Bash")
-    assert blocked.startswith("FAIL:") and "no subagent called the Task/Agent tool" in blocked
-    assert run("NESTED-SPAWN-BLOCKED-17", "").startswith("PASS:")
-    assert run("nothing", "Task").startswith("FAIL:")
-    # a tool named like Task is not Task
-    assert run("NESTED-AGENT-OK-17", "TaskList").startswith("FAIL:")
+def test_scenario_17_can_needs_a_successful_dispatch_and_a_token_from_another_transcript(tmp_path: pathlib.Path) -> None:
+    ok = _run17(tmp_path, {"fork": _FORK_OK, "leaf": _LEAF_OK})
+    assert ok.startswith("PASS:") and "CAN spawn" in ok
+    # the fork's Agent call ERRORED and the fork wrote the token itself (it was handed the pieces)
+    errored = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", True)),
+               ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
+    assert _run17(tmp_path / "a", {"fork": errored}).startswith("FAIL:")
+    # an Agent call that never came back is not a dispatch either
+    unanswered = [("call", ("t2", "Agent")), ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
+    assert _run17(tmp_path / "b", {"fork": unanswered}).startswith("FAIL:")
+    # the successful dispatch, but the token only in the fork's own transcript (the fork echoed or forged it)
+    assert _run17(tmp_path / "c", {"fork": _FORK_OK}).startswith("FAIL:")
+    # a successful dispatch whose leaf said something else
+    assert _run17(tmp_path / "d", {"fork": _FORK_OK, "leaf": [("text", "something else")]}).startswith("FAIL:")
+    # a token in a leaf transcript, but nobody dispatched (an earlier scenario's leftovers cannot be mistaken for it)
+    assert _run17(tmp_path / "e", {"leaf": _LEAF_OK}).startswith("FAIL:")
+    # a tool merely NAMED like the dispatcher is not the dispatcher
+    taskish = [("call", ("t2", "TaskList")), ("result", ("t2", False)), ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
+    assert _run17(tmp_path / "f", {"fork": taskish, "leaf": _LEAF_OK}).startswith("FAIL:")
+    # the old Task name still counts
+    task_fork = [("call", ("t2", "Task")), ("result", ("t2", False)), ("text", "FORK-PARENT-OK-17")]
+    assert _run17(tmp_path / "g", {"fork": task_fork, "leaf": _LEAF_OK}).startswith("PASS:")
+
+
+def test_scenario_17_cannot_needs_a_toolsearch_attempt_and_no_dispatch(tmp_path: pathlib.Path) -> None:
+    searched = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("text", "NESTED-SPAWN-BLOCKED-17")]
+    ok = _run17(tmp_path, {"fork": searched})
+    assert ok.startswith("PASS:") and "CANNOT spawn" in ok
+    # BLOCKED without ever trying to load the deferred tool: the model giving up
+    gave_up = _run17(tmp_path / "a", {"fork": [("text", "NESTED-SPAWN-BLOCKED-17")]})
+    assert gave_up.startswith("FAIL:") and "ToolSearch" in gave_up
+    # BLOCKED although it called the Agent tool
+    contradicted = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", True)),
+                    ("text", "NESTED-SPAWN-BLOCKED-17")]
+    assert _run17(tmp_path / "b", {"fork": contradicted}).startswith("FAIL:")
+    # neither token
+    assert _run17(tmp_path / "c", {"fork": [("text", "nothing")]}).startswith("FAIL:")
+
+
+def test_scenario_17_waits_for_the_forks_closing_reply() -> None:
+    """The Agent call's result is written into the fork's transcript after the leaf has answered."""
+    code = _code(CCV / "scenarios" / "17_fork_can_spawn_subagent.sh")
+    assert 'cc_wait_subagent_reply "FORK-PARENT-OK-17|NESTED-SPAWN-BLOCKED-17"' in code
 
 
 def test_scenario_17_tells_the_fork_to_load_the_deferred_task_tool_first() -> None:

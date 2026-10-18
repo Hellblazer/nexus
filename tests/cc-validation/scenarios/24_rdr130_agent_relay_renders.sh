@@ -8,6 +8,12 @@
 # the unchanged ## Action agent body (which invokes a skill and goes interactive).
 # Uses the real `nx command-context analyze-code` subcommand, so it also proves the
 # command-context group is reachable on the test PATH (the repo nx).
+#
+# nexus-qsmc5: the verdict used to grep the PANE for "Project type:" and "Source Locations",
+# which a model that saw no preamble can write while saying it is missing. It now reads the
+# expanded command out of the main session's TRANSCRIPT (cc_session_user_text): the user turn
+# Claude Code sent to the model must carry the subcommand's own output (neither string is in
+# the command source). The model's account is not consulted; it is told to say only DONE.
 
 scenario "24 rdr130_agent_relay_renders: inline !\`nx command-context analyze-code\` renders preamble"
 
@@ -28,23 +34,14 @@ description: RDR-130 P2 agent-relay preamble probe
 
 !`nx command-context analyze-code`
 
-Report verbatim whether the heading that names the source locations and the list that begins with the project type appear above.
+Do not use any tools. Reply with the single word DONE.
 EOF
 
 claude_start
 claude_prompt "/agentrelay-probe"
-claude_wait 90
-
-pane="$(capture -3000)"
-if grep -qiE 'No such command|Shell command failed|unmatched|\(eval\):' <<<"$pane"; then
-    fail "agent-relay injection errored (command-context group missing or injection broke)"
-    tail -25 <<<"$pane" | sed 's/^/    | /'
-elif grep -qF 'Project type:' <<<"$pane" && grep -qF 'Source Locations' <<<"$pane"; then
-    pass "inline !\`nx command-context analyze-code\` injected its preamble (end-to-end)"
-else
-    fail "no command-context preamble render evidence in pane"
-    tail -25 <<<"$pane" | sed 's/^/    | /'
-fi
-
+cc_wait_user_text "# Agent-relay Preamble Probe" 90 || true
+claude_wait 60
+cc_command_render_check "24" render "# Agent-relay Preamble Probe" "Project type:" "Source Locations"
+cc_keep_evidence "24"
 claude_exit
 scenario_end

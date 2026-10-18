@@ -1,0 +1,76 @@
+# What cc-validation scenarios 06 and 07 observed, per Claude Code version
+# (nexus-qsmc5). Both scenarios ask a question whose answer has flipped across
+# Claude Code releases, so neither answer is a durable fact about the product.
+# This table is the baseline a run compares itself with, nothing more:
+#
+#   a version listed here, same answer   the run agrees with the recorded reading
+#   a version listed here, other answer  the run FAILS "answer changed since <version>"
+#   a version not listed                 the run prints INFO "record this version's
+#                                        answer" and passes; add the rows below
+#
+# A Claude Code pin bump (container/Dockerfile ARG CLAUDE_CODE_VERSION) re-runs
+# 06 and 07 and updates this table. Nothing may be deleted, or relied on, on the
+# strength of a row here.
+#
+# Consumed by tests/cc-validation/lib/version_answers.py (stdlib only, so the
+# container's python can read it); linted by tests/test_tables_lint.py.
+#
+# version    a recorded Claude Code version, or "unrecorded" for every other one
+# answer_06  does the allow rule mcp__plugin_*__* match a tool named
+#            mcp__plugin_xxx_yyy__record, in a session that enforces permissions
+#              matches | does-not-match
+# answer_07  with an allow rule for the tool present, does the PermissionRequest
+#            hook for it still fire
+#              preempts          the hook did not fire; the allow rule cleared the call
+#              fires-regardless  the hook fired although the allow rule was present
+# observed   the day the recorded row was measured (a recorded row only)
+
+[table]
+id = "cc-version-answers"
+kind = "decision-table"
+version = 1
+
+[dimensions.scenario]
+domain = ["06", "07"]
+[dimensions.version]
+domain = ["2.1.302", "unrecorded"]
+[dimensions.answer_06]
+domain = ["matches", "does-not-match"]
+[dimensions.answer_07]
+domain = ["preempts", "fires-regardless"]
+
+[[row]]
+id = "06::2.1.302::does-not-match"
+match = { scenario = "06" }
+guard = { version = "2.1.302", answer_06 = "does-not-match" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-18" }
+
+[[row]]
+id = "06::2.1.302::matches"
+match = { scenario = "06" }
+guard = { version = "2.1.302", answer_06 = "matches" }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-18" }
+
+[[row]]
+id = "06::unrecorded"
+match = { scenario = "06" }
+guard = { version = "unrecorded", answer_06 = ["matches", "does-not-match"] }
+emit = { verdict = "unrecorded", since = "", observed = "" }
+
+[[row]]
+id = "07::2.1.302::preempts"
+match = { scenario = "07" }
+guard = { version = "2.1.302", answer_07 = "preempts" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-18" }
+
+[[row]]
+id = "07::2.1.302::fires-regardless"
+match = { scenario = "07" }
+guard = { version = "2.1.302", answer_07 = "fires-regardless" }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-18" }
+
+[[row]]
+id = "07::unrecorded"
+match = { scenario = "07" }
+guard = { version = "unrecorded", answer_07 = ["preempts", "fires-regardless"] }
+emit = { verdict = "unrecorded", since = "", observed = "" }

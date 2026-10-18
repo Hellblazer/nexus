@@ -1,0 +1,474 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""nexus-qsmc5 review fixes for the cc-validation harness, pinned by behaviour.
+
+Each test here fails without the fix it names: the 21/24/25 verdicts read the session
+transcript and not the model's account (and a no-op injection fails the same check), 06 and 07
+report an observation for the running Claude Code version against a checked table, evidence
+is kept for 05-07, transcripts are cleared between scenarios, the debug-log readers handle a
+multi-line hook command, and run.sh names the tracked files it stages that differ from HEAD.
+
+Nothing here starts Claude Code.
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import subprocess
+
+import pytest
+
+from tests.test_cc_validation_plugin_install import (
+    CCV,
+    REPO,
+    RUNNER,
+    SCENARIOS,
+    _bash_function,
+    _code,
+    _flags_verdict,
+    _helpers,
+    _num,
+    _run,
+)
+
+pytestmark = pytest.mark.lint
+
+TABLE = REPO / "docs" / "tables" / "cc-version-answers.toml"
+LIB = CCV / "lib"
+
+
+def _scenario_file(prefix: str) -> pathlib.Path:
+    return next(p for p in SCENARIOS if p.name.startswith(prefix))
+
+
+# --- the user-turn reader (21/24/25 read what was SENT to the model) -------------------
+
+
+def _main_transcript(tmp_path: pathlib.Path, lines: list[dict]) -> pathlib.Path:
+    proj = tmp_path / "home" / ".claude" / "projects" / "-home-x"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "main.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines) + "{not json\n")
+    return proj
+
+
+def _user(content: object) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+def _assistant(*blocks: dict) -> dict:
+    return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+
+
+def test_cc_session_user_text_is_the_user_turns_without_tool_results_or_the_models_text(tmp_path: pathlib.Path) -> None:
+    _main_transcript(tmp_path, [
+        _user("EXPANDED-TURN-A as a string"),
+        _user([{"type": "text", "text": "EXPANDED-TURN-B as a block"}]),
+        _user([{"type": "tool_result", "tool_use_id": "x", "content": "TOOL-OUTPUT-C"}]),
+        _assistant({"type": "text", "text": "MODEL-TEXT-D"}),
+        "not json",   # type: ignore[list-item]
+    ])
+    r = _run(tmp_path, "cc_session_user_text")
+    assert r.returncode == 0, r.stderr
+    assert "EXPANDED-TURN-A as a string" in r.stdout and "EXPANDED-TURN-B as a block" in r.stdout
+    assert "TOOL-OUTPUT-C" not in r.stdout and "MODEL-TEXT-D" not in r.stdout
+    # a subagent's user turn is not the main session's
+    proj = tmp_path / "home" / ".claude" / "projects" / "-home-x"
+    (proj / "agent-zz.jsonl").write_text(json.dumps(_user("SUBAGENT-TURN-E")) + "\n")
+    assert "SUBAGENT-TURN-E" not in _run(tmp_path, "cc_session_user_text").stdout
+
+
+# --- 21, 24, 25 against a simulated Claude Code ----------------------------------------
+
+#: What each command's injection prints, as the user turn would carry it after expansion.
+_OUTPUTS = {
+    "outfence-probe": "OUTFENCE-START\n```\ninside-output-fence\n```\nOUTFENCE-END-42",
+    "agentrelay-probe": "## Context\n- **Project type:** python\n### Source Locations\n- src/",
+    "continuation-probe": "**Target file:** /tmp/handoff.md\n## Working state\nclean",
+}
+#: What a model that saw NO injection writes about it: the strings the old pane grep looked for.
+_CLAIMS = {
+    "outfence-probe": "OUTFENCE-END-42 does not appear, and no fenced block either",
+    "agentrelay-probe": "There is no Source Locations heading and no Project type: list above",
+    "continuation-probe": "I see no Target file: line and no Working state heading",
+}
+
+_SIM = r'''
+import json, pathlib, re, sys
+home, prompt, mode, forge = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+name = prompt.split()[0].lstrip("/")
+outputs = json.loads(sys.argv[5]); claims = json.loads(sys.argv[6])
+src = (home / f"cmd-{name}.md").read_text()
+body = src.split("---\n", 2)[2]
+out = outputs.get(name, "") if (mode == "expands" and (name in outputs)) else ""
+if name == "outfence-noop" and forge == "1":
+    out = outputs["outfence-probe"]
+if mode in ("expands", "claims", "toolresult"):
+    shown = re.sub(r"```!\n.*?\n```", lambda m: out, body, flags=re.S)
+    shown = re.sub(r"!`[^`]*`", lambda m: out, shown)
+else:   # unexpanded: the body as written
+    shown = body
+proj = home / ".claude" / "projects" / "-home-x"
+proj.mkdir(parents=True, exist_ok=True)
+lines = [{"type": "user", "isMeta": True, "message": {"role": "user", "content": shown}}]
+claim = claims.get(name, "")
+if mode in ("claims", "toolresult"):
+    lines.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": claim}]}})
+if mode == "toolresult":
+    # the model ran Bash itself: the real strings are in a tool_result, which is not a user turn
+    real = outputs.get(name, "")
+    lines.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {}}]}})
+    lines.append({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "b1", "content": real}]}})
+with open(proj / "main.jsonl", "a") as fh:
+    for x in lines:
+        fh.write(json.dumps(x) + "\n")
+'''
+
+
+def _run_command_scenario(tmp_path: pathlib.Path, prefix: str, mode: str, forge_control: bool = False) -> list[str]:
+    """Source a command scenario with a simulated Claude Code and return its PASS:/FAIL: lines.
+    mode: expands (the injection ran), unexpanded (the body arrived raw), claims (raw body, and the
+    model wrote the old pane strings), toolresult (raw body; the model ran Bash itself), absent
+    (nothing reached the model)."""
+    path = _scenario_file(prefix)
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    sim = tmp_path / "sim.py"
+    sim.write_text(_SIM)
+    deps = "\n".join(_bash_function(RUNNER, n) for n in (
+        "_cc_transcript_items", "cc_session_user_text", "cc_reset_transcripts", "cc_wait_user_text",
+        "cc_expanded_command_has", "cc_command_render_check", "cc_note", "_cc_pass", "_cc_fail"))
+    script = f'''
+set -euo pipefail
+TEST_HOME="{home}"
+sleep() {{ :; }}
+pass() {{ echo "PASS:$*"; }}; fail() {{ echo "FAIL:$*"; }}
+scenario() {{ :; }}; scenario_end() {{ :; }}; claude_start() {{ :; }}; claude_wait() {{ :; }}; claude_exit() {{ :; }}
+cc_keep_evidence() {{ :; }}
+write_command() {{ cat "$2" > "$TEST_HOME/cmd-$1.md"; }}
+capture() {{ echo "PANE-SHOULD-NOT-BE-READ OUTFENCE-END-42 Source Locations Project type: Target file: Working state"; }}
+claude_prompt() {{ [ "{mode}" = absent ] || python3 "{sim}" "{home}" "$1" "{mode}" "{int(forge_control)}" '{json.dumps(_OUTPUTS)}' '{json.dumps(_CLAIMS)}'; }}
+{deps}
+'''
+    body = path.read_text(encoding="utf-8")
+    r = subprocess.run(["bash", "-c", script + body + "\necho REACHED_END\n"], capture_output=True, text=True)
+    assert "REACHED_END" in r.stdout, f"{r.stdout}{r.stderr}"
+    return [ln for ln in r.stdout.splitlines() if ln.startswith(("PASS:", "FAIL:"))]
+
+
+@pytest.mark.parametrize("prefix", ["21_", "24_", "25_"])
+def test_command_scenarios_pass_only_when_the_injection_output_reached_the_model(tmp_path: pathlib.Path, prefix: str) -> None:
+    expected_lines = 2 if prefix == "21_" else 1   # 21 also runs its negative control
+    ok = _run_command_scenario(tmp_path / "ok", prefix, "expands")
+    assert len(ok) == expected_lines and all(ln.startswith("PASS:") for ln in ok), ok
+    # the failing case of the review: the model saw nothing and WROTE the strings; the pane (stubbed
+    # to carry every string) says they are there. Both are ignored.
+    for mode in ("claims", "unexpanded", "toolresult"):
+        lines = _run_command_scenario(tmp_path / mode, prefix, mode)
+        assert lines[0].startswith("FAIL:"), (mode, lines)
+        assert "not in it" in lines[0] or "mangled" in lines[0], lines[0]
+    # nothing reached the model at all
+    absent = _run_command_scenario(tmp_path / "absent", prefix, "absent")
+    assert absent[0].startswith("FAIL:") and "never reached the model" in absent[0], absent
+
+
+def test_21_negative_control_fails_the_check_on_a_no_op_injection_and_notices_a_forged_one(tmp_path: pathlib.Path) -> None:
+    # honest no-op: the control part PASSES precisely because the output markers are absent
+    lines = _run_command_scenario(tmp_path / "a", "21_", "expands")
+    assert lines[1].startswith("PASS:") and "negative control" in lines[1] and "does discriminate" in lines[1]
+    # a no-op that nevertheless shows the markers (a check that cannot tell) FAILS the control
+    forged = _run_command_scenario(tmp_path / "b", "21_", "expands", forge_control=True)
+    assert forged[1].startswith("FAIL:") and "negative control failed" in forged[1], forged
+    # the control with the body missing is not a control either
+    assert _run_command_scenario(tmp_path / "c", "21_", "absent")[1].startswith("FAIL:")
+
+
+def test_the_command_scenarios_no_longer_read_the_pane() -> None:
+    for prefix in ("21_", "24_", "25_"):
+        code = _code(_scenario_file(prefix))
+        assert "capture -" not in code and "cc_command_render_check" in code and "cc_wait_user_text" in code, prefix
+    assert "cc_command_render_check \"21b\" empty" in _code(_scenario_file("21_"))
+
+
+def test_cc_expanded_command_has_return_codes(tmp_path: pathlib.Path) -> None:
+    def rc(n: int, turns: list[object], args: str) -> str:
+        case = tmp_path / f"case{n}"
+        _main_transcript(case, [_user(t) for t in turns])
+        r = _run(case, f'cc_expanded_command_has {args}; echo "rc=$?"')
+        return next(ln for ln in r.stdout.splitlines() if ln.startswith("rc="))
+
+    assert rc(1, ["# H\nout NEEDLE-A end"], '"# H" "NEEDLE-A"') == "rc=0"
+    assert rc(2, ["# H\nnothing"], '"# H" "NEEDLE-A"') == "rc=1"
+    assert rc(3, ["something else"], '"# H" "NEEDLE-A"') == "rc=2"
+    assert rc(4, ["# H\nShell command failed: x NEEDLE-A"], '"# H" "NEEDLE-A"') == "rc=3"
+    # every needle is required
+    assert rc(5, ["# H\nNEEDLE-A only"], '"# H" "NEEDLE-A" "NEEDLE-B"') == "rc=1"
+
+
+# --- the shell-level helpers (debug log) ------------------------------------------------
+
+
+def test_debug_log_reader_handles_a_command_that_spans_lines() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("debug_log", LIB / "debug_log.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    multi = "printf 'Line one.\nLine two with marker STDOUT-15C-MARKER-W3J.\nLine three.\n'"
+    log = f"[DEBUG] Hooks: SubagentStart:general-purpose [{multi}] finished with status 0 (30ms)\n[DEBUG] Hook SubagentStart ({multi}) provided additionalContext (61 chars)\n"
+    assert mod.finished(log, "SubagentStart", "STDOUT-15C-MARKER-W3J")
+    assert mod.context_sizes(log, "SubagentStart") == [61]
+    # another event, another command, status 1, and an empty context are not matches
+    assert not mod.finished(log, "SessionStart", "STDOUT-15C-MARKER-W3J")
+    assert not mod.finished(log, "SubagentStart", "STDOUT-15D-MARKER-R2P")
+    assert not mod.finished(log.replace("status 0", "status 1"), "SubagentStart", "STDOUT-15C-MARKER-W3J")
+    assert mod.context_sizes(log.replace("(61 chars)", "(0 chars)"), "SubagentStart") == []
+    assert mod.context_sizes(log, "SessionStart") == []
+    # a hook that printed nothing leaves only the finished line
+    assert mod.finished("Hooks: SubagentStart:x [echo 'M-K7Q3'] finished with status 0 (3ms)\n", "SubagentStart", "M-K7Q3")
+
+
+def test_cc_cmd_hook_finished_rejects_a_needle_with_regex_or_shell_characters(tmp_path: pathlib.Path) -> None:
+    dbg = tmp_path / "d.log"
+    dbg.write_text("Hooks: SubagentStart:x [echo 'M-K7Q3'] finished with status 0 (3ms)\n")
+    ok = _run(tmp_path, f'CC_DEBUG_FILE="{dbg}"; cc_cmd_hook_finished SubagentStart M-K7Q3 && echo YES || echo NO')
+    assert ok.stdout.strip() == "YES", ok.stdout + ok.stderr
+    for bad in ("M-K.*", "echo 'M-K7Q3'", ""):
+        r = _run(tmp_path, f'CC_DEBUG_FILE="{dbg}"; cc_cmd_hook_finished SubagentStart "{bad}" && echo YES || echo NO')
+        assert r.stdout.strip() == "NO", (bad, r.stdout + r.stderr)
+
+
+# --- 06 and 07: the version-answer table -------------------------------------------------
+
+
+def _check(version: str, scenario: str, answer: str, table: pathlib.Path | None = None) -> tuple[str, str]:
+    deps = "\n".join(_bash_function(RUNNER, n) for n in ("cc_note", "_cc_pass", "_cc_fail", "cc_version_check"))
+    env_table = f'CC_VAL_VERSION_TABLE="{table}"\n' if table else ""
+    script = (
+        f'REPO_ROOT="{REPO}"\n{env_table}pass() {{ echo "PASS:$*"; }}\nfail() {{ echo "FAIL:$*"; }}\n{deps}\n'
+        f'cc_version_check "{scenario}" "{version}" "{answer}" "the observation"\n'
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    verdict = next(ln for ln in r.stdout.splitlines() if ln.startswith(("PASS:", "FAIL:")))
+    return verdict, r.stdout
+
+
+def test_the_version_table_has_three_outcomes() -> None:
+    # a recorded version with the recorded answer: agrees
+    for scenario, answer in (("06", "does-not-match"), ("07", "preempts")):
+        verdict, _ = _check("2.1.302", scenario, answer)
+        assert verdict.startswith("PASS:") and "observed on Claude Code 2.1.302" in verdict
+        assert "recorded for 2.1.302 on 2026-10-18" in verdict
+    # a recorded version with the other answer: FAIL "answer changed since <version>"
+    for scenario, answer in (("06", "matches"), ("07", "fires-regardless")):
+        verdict, _ = _check("2.1.302", scenario, answer)
+        assert verdict.startswith("FAIL:") and "answer changed since 2.1.302" in verdict
+    # an unrecorded version, either answer: INFO "record this version's answer", and a pass
+    for scenario, answers in (("06", ("matches", "does-not-match")), ("07", ("preempts", "fires-regardless"))):
+        for answer in answers:
+            for version in ("2.1.303", "3.0.0", "unknown"):
+                verdict, out = _check(version, scenario, answer)
+                assert verdict.startswith("PASS:") and f"observed on Claude Code {version}" in verdict
+                assert "INFO: no answer is recorded for Claude Code" in out and "record this version's answer" in out
+
+
+def test_the_version_table_is_read_from_the_table_not_from_the_script(tmp_path: pathlib.Path) -> None:
+    """Add a version to a copy of the table and the same observation changes outcome."""
+    copy = tmp_path / "t.toml"
+    text = TABLE.read_text(encoding="utf-8")
+    copy.write_text(text.replace('domain = ["2.1.302", "unrecorded"]', 'domain = ["2.1.302", "9.9.9", "unrecorded"]') + '''
+[[row]]
+id = "06::9.9.9::matches"
+match = { scenario = "06" }
+guard = { version = "9.9.9", answer_06 = "matches" }
+emit = { verdict = "agrees", since = "9.9.9", observed = "2027-01-01" }
+
+[[row]]
+id = "06::9.9.9::does-not-match"
+match = { scenario = "06" }
+guard = { version = "9.9.9", answer_06 = "does-not-match" }
+emit = { verdict = "changed", since = "9.9.9", observed = "2027-01-01" }
+''')
+    shipped, out = _check("9.9.9", "06", "does-not-match")   # the shipped table does not know 9.9.9: INFO and a pass
+    assert shipped.startswith("PASS:") and "record this version's answer" in out
+    verdict, _ = _check("9.9.9", "06", "matches", table=copy)
+    assert verdict.startswith("PASS:") and "recorded for 9.9.9 on 2027-01-01" in verdict
+    assert _check("9.9.9", "06", "does-not-match", table=copy)[0].startswith("FAIL:")
+
+
+def test_an_unreadable_table_fails_the_scenario(tmp_path: pathlib.Path) -> None:
+    verdict, _ = _check("2.1.302", "06", "matches", table=tmp_path / "missing.toml")
+    assert verdict.startswith("FAIL:") and "could not be read" in verdict
+
+
+def test_the_container_pin_is_a_recorded_version_in_the_table() -> None:
+    """A pin bump without a table update fails here, as well as printing INFO in 06 and 07."""
+    pin = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", (CCV / "container" / "Dockerfile").read_text(encoding="utf-8"), re.M)
+    assert pin, "no ARG CLAUDE_CODE_VERSION in the Dockerfile"
+    import tomllib
+
+    table = tomllib.loads(TABLE.read_text(encoding="utf-8"))
+    recorded = [v for v in table["dimensions"]["version"]["domain"] if v != "unrecorded"]
+    assert pin.group(1) in recorded, f"pin {pin.group(1)} has no rows in docs/tables/cc-version-answers.toml: re-run 06 and 07 and record its answers"
+    for scenario in ("06", "07"):
+        rows = [r for r in table["row"] if r["match"]["scenario"] == scenario and pin.group(1) in (r["guard"]["version"] if isinstance(r["guard"]["version"], list) else [r["guard"]["version"]])]
+        assert len(rows) == 2, (scenario, [r["id"] for r in rows])   # one per possible answer
+    dockerfile = (CCV / "container" / "Dockerfile").read_text(encoding="utf-8")
+    assert "BUMPING THIS PIN re-runs scenarios 06 and 07" in dockerfile and "cc-version-answers.toml" in dockerfile
+
+
+def test_the_stage_carries_the_table_into_the_container() -> None:
+    run = _code(CCV / "container" / "run.sh")
+    assert "conexus sn docs/tables" in run
+    assert (LIB / "version_answers.py").is_file() and (LIB / "agent_facts.py").is_file() and (LIB / "debug_log.py").is_file()
+
+
+# --- 05, 06, 07: evidence kept, verdicts versioned, findings dated -----------------------
+
+
+@pytest.mark.parametrize("prefix", ["05_", "06_", "07_"])
+def test_permission_scenarios_keep_their_evidence_and_clear_transcripts_per_leg(prefix: str) -> None:
+    code = _code(_scenario_file(prefix))
+    keeps = re.findall(r'cc_keep_evidence "([^"$]+|\$label)"', code)
+    assert len(keeps) >= (2 if prefix == "07_" else 1), keeps
+    assert "cc_save_pane" in code
+    assert code.count("cc_reset_transcripts") >= 1 and code.count("cc_reset_transcripts") <= code.count("claude_start_enforced")
+    # every enforced start is preceded by a transcript reset in the same leg
+    for m in re.finditer(r"claude_start_enforced", code):
+        assert "cc_reset_transcripts" in code[max(0, m.start() - 120):m.start()], prefix
+
+
+def test_cc_keep_evidence_keeps_the_stub_log_hook_log_and_pane_tail_and_the_verdict(tmp_path: pathlib.Path) -> None:
+    ev = tmp_path / "evidence"
+    home = tmp_path / "home"
+    body = (
+        'echo stub-line > "$TEST_HOME/stub.log"; echo hook-line > "$TEST_HOME/hook.log"; echo pane-line > "$TEST_HOME/pane-tail.txt"\n'
+        'STUB_LOG="$TEST_HOME/stub.log"; HOOK_LOG="$TEST_HOME/hook.log"\n'
+        'cc_keep_evidence "05-allowed"; cc_note "05" "05: a verdict line"\n'
+        'echo stub-line > "$TEST_HOME/stub.log"; cc_note "05" "second line"\n'
+    )
+    r = _run(tmp_path, body, CC_VAL_EVIDENCE_DIR=str(ev))
+    assert r.returncode == 0, r.stderr
+    kept = {p.name for p in (ev / "05-allowed").iterdir()}
+    assert {"stub.log", "hook.log", "pane-tail.txt"} <= kept, kept
+    assert (ev / "05" / "verdict.txt").read_text().splitlines() == ["05: a verdict line", "second line"]
+    assert "05: a verdict line" in r.stdout and home.exists()
+    # and nothing is kept, nor created, when no evidence directory is mounted
+    (tmp_path / "n").mkdir()
+    r = _run(tmp_path / "n", 'cc_keep_evidence "x"; cc_note "x" "y"')
+    assert r.returncode == 0 and not (tmp_path / "n" / "evidence").exists()
+
+
+def test_cc_claude_version_reads_claude_then_the_evidence_file(tmp_path: pathlib.Path) -> None:
+    r = _run(tmp_path, "cc_claude_version")   # the fake claude has no --version: falls through
+    assert r.stdout == "unknown", r.stdout + r.stderr
+    ev = tmp_path / "ev"
+    ev.mkdir()
+    (ev / "claude-version.txt").write_text("2.1.302 (Claude Code)\n")
+    assert _run(tmp_path, "cc_claude_version", CC_VAL_EVIDENCE_DIR=str(ev)).stdout == "2.1.302"
+    fake = tmp_path / "fakebin" / "claude"
+    fake.write_text('#!/usr/bin/env bash\n[ "$1" = "--version" ] && echo "9.9.9 (Claude Code)" && exit 0\nexit 2\n')
+    fake.chmod(0o755)
+    r = subprocess.run(["bash", "-c", _bash_function(RUNNER, "cc_claude_version") + "\ncc_claude_version"], capture_output=True, text=True,
+                       env={"PATH": f"{fake.parent}:{os.environ['PATH']}", "HOME": str(tmp_path)})
+    assert r.stdout == "9.9.9", r.stdout + r.stderr
+
+
+def test_the_readme_records_06_and_07_as_dated_observations_not_findings() -> None:
+    readme = (CCV / "README.md").read_text(encoding="utf-8")
+    section = " ".join(readme[readme.index("## Known real findings"):readme.index("## Root causes resolved 2026-05-31")].split())
+    assert "A green here would be the bug" not in readme
+    assert section.count("Observed on 2.1.302 on 2026-10-18") == 2
+    assert section.count("This has flipped across Claude Code versions; re-measure on every pin bump") == 2
+    assert "nothing may be deleted, or relied on, on the strength of what is written here" in section
+    assert "stays as a hedge" in section
+    # 14b is no longer described as skipped because the plugin agent is not registered
+    assert "isn't even registered" not in readme and "Doubly unsupported" not in readme
+    assert "process_launched" in section[section.index("**14b**"):]
+    assert "Bumping the Claude Code pin" in section and "cc-version-answers.toml" in section
+
+
+def test_06_and_07_headers_are_observations_and_the_deleted_script_is_not_a_goal() -> None:
+    head06 = "\n".join(_scenario_file("06_").read_text(encoding="utf-8").splitlines()[:30])
+    assert "DOES match" not in head06 and "OBSERVATION, NOT A CONTRACT" in head06
+    head07 = "\n".join(_scenario_file("07_").read_text(encoding="utf-8").splitlines()[:30])
+    assert "delete auto-approve-nx-mcp.sh" not in _scenario_file("07_").read_text(encoding="utf-8")
+    assert "OBSERVATION, NOT A CONTRACT" in head07 and "hedge" in head07
+
+
+# --- reset_scenario_state ----------------------------------------------------------------
+
+
+def test_reset_scenario_state_forgets_every_earlier_transcript(tmp_path: pathlib.Path) -> None:
+    home = tmp_path / "home"
+    proj = home / ".claude" / "projects" / "-x" / "s" / "subagents"
+    proj.mkdir(parents=True)
+    (proj / "agent-old.jsonl").write_text(json.dumps(_assistant({"type": "text", "text": "OLD-SCENARIO-REPLY"})) + "\n")
+    (home / ".claude" / "projects" / "-x" / "main.jsonl").write_text(json.dumps(_assistant({"type": "text", "text": "OLD-MAIN"})) + "\n")
+    (home / ".claude" / "settings.json").write_text('{"stale": true}')
+    (home / ".mcp.json").write_text("{}")
+    reset = _bash_function(RUNNER, "reset_scenario_state")
+    body = (
+        reset + '\n_cc_plugins_baseline() { :; }\nSTUB_LOG="$TEST_HOME/stub.log"; HOOK_LOG="$TEST_HOME/hook.log"\n'
+        'echo "before: $(cc_subagent_replies | tr -d "\\n")"\nreset_scenario_state\n'
+        'echo "after: [$(cc_subagent_replies)] [$(cc_session_replies)]"\n'
+    )
+    r = _run(tmp_path, body)
+    assert "before: OLD-SCENARIO-REPLY" in r.stdout, r.stdout + r.stderr
+    assert "after: [] []" in r.stdout, r.stdout + r.stderr
+    assert not (home / ".claude" / "projects").exists()
+    # and the rest of the reset still happens
+    assert json.loads((home / ".claude" / "settings.json").read_text()) == {"skipDangerousModePermissionPrompt": True}
+    assert not (home / ".mcp.json").exists()
+
+
+# --- run.sh names the tracked files it stages that differ from HEAD --------------------------
+
+
+def test_run_sh_reports_the_modified_tracked_files_it_stages(tmp_path: pathlib.Path) -> None:
+    run_sh = CCV / "container" / "run.sh"
+    fn = _bash_function(run_sh, "stage_report_modified")
+    repo = tmp_path / "repo"
+    (repo / "src" / "nexus").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    def sh(*args: str) -> None:
+        subprocess.run(args, cwd=repo, check=True, capture_output=True, env=env)
+
+    sh("git", "init", "-q")
+    for name in ("a.py", "b.py"):
+        (repo / "src" / "nexus" / name).write_text("x\n")
+    (repo / "docs" / "outside.md").write_text("o\n")
+    sh("git", "add", "src", "docs")
+    sh("git", "commit", "-q", "-m", "init")
+
+    def report(*paths: str) -> str:
+        r = subprocess.run(["bash", "-c", f'ROOT="{repo}"\n{fn}\nstage_report_modified "cli-src" {" ".join(paths)}'],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+
+    assert "0 tracked files differ from HEAD" in report("src")
+    (repo / "src" / "nexus" / "a.py").write_text("changed\n")                 # unstaged edit
+    (repo / "src" / "nexus" / "b.py").write_text("changed too\n")
+    sh("git", "add", "src/nexus/b.py")                                          # staged edit
+    (repo / "docs" / "outside.md").write_text("changed\n")                    # outside the pathspec
+    out = report("src")
+    assert "2 tracked file(s) staged with working-tree content that differs from HEAD" in out, out
+    assert "src/nexus/a.py" in out and "src/nexus/b.py" in out and "outside.md" not in out
+    for i in range(25):
+        (repo / "src" / f"extra{i:02d}.py").write_text("e\n")
+        sh("git", "add", f"src/extra{i:02d}.py")
+        sh("git", "commit", "-q", "-m", f"e{i}")
+        (repo / "src" / f"extra{i:02d}.py").write_text("edited\n")
+    out = report("src")
+    assert "26 tracked file(s)" in out and "... and 6 more" in out, out   # b.py was committed with the first extra
+    code = _code(run_sh)
+    for label, paths in (("harness", "tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn docs/tables"),
+                         ("cli-src", "src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml")):
+        assert f'stage_report_modified "{label}" {paths}' in code and f'stage_report_untracked "{label}" {paths}' in code
+    assert _num(SCENARIOS[0]) == "1" and _helpers()   # the shared helpers this module leans on exist

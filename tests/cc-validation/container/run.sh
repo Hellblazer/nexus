@@ -12,7 +12,7 @@
 # Nothing here prints it.
 #
 # What it does: stages the tracked harness files (tests/cc-validation, the
-# e2e helpers, and the conexus and sn plugins of THIS checkout), extracts the control
+# e2e helpers, docs/tables, and the conexus and sn plugins of THIS tree), extracts the control
 # plugin from the git tag v7.64.1 with `git archive` (fetching the tag when the
 # clone lacks it), builds the toolchain image, and runs the scenario inside it
 # with the stage mounted read-only and an evidence directory mounted
@@ -55,6 +55,27 @@ stage_report_untracked() {
     fi
 }
 
+# stage_report_modified <label> <pathspec...> (nexus-qsmc5 review): the same for TRACKED files
+# whose working-tree content differs from HEAD (staged or not). The stage takes the working
+# tree's content while the banner below prints HEAD's sha, so a locally edited file rides in
+# under a sha that does not describe it. Say how many, and which (first 20).
+stage_report_modified() {
+    local label="$1" listed count
+    shift
+    listed="$(git -C "$ROOT" diff --name-only HEAD -- "$@")"
+    if [ -z "$listed" ]; then
+        echo "[stage] $label: 0 tracked files differ from HEAD"
+        return 0
+    fi
+    count="$(wc -l <<<"$listed")"
+    count="${count//[[:space:]]/}"
+    echo "[stage] $label: $count tracked file(s) staged with working-tree content that differs from HEAD:"
+    sed -n '1,20p' <<<"$listed" | sed 's/^/[stage]     /'
+    if [ "$count" -gt 20 ]; then
+        echo "[stage]     ... and $((count - 20)) more"
+    fi
+}
+
 command -v docker > /dev/null || { echo "docker is required" >&2; exit 2; }
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     echo "CC-VAL CONTAINER UNVERIFIED: no automation token in the environment;" >&2
@@ -70,9 +91,10 @@ mkdir -p "$EVID"; chmod 777 "$EVID"
 
 echo "[stage] harness + current plugin from $(git -C "$ROOT" rev-parse --short HEAD) (tracked and new files, working-tree content)"
 mkdir -p "$STAGE/harness" "$STAGE/control"
-( cd "$ROOT" && git ls-files -z -co --exclude-standard -- tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn ) \
+( cd "$ROOT" && git ls-files -z -co --exclude-standard -- tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn docs/tables ) \
     | tar -C "$ROOT" --null -T - -cf - | tar -x -C "$STAGE/harness"
-stage_report_untracked "harness" tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn
+stage_report_untracked "harness" tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn docs/tables
+stage_report_modified "harness" tests/cc-validation tests/e2e/lib.sh tests/e2e/lib conexus sn docs/tables
 
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$CONTROL_TAG" > /dev/null 2>&1; then
     git -C "$ROOT" fetch -q origin "refs/tags/$CONTROL_TAG:refs/tags/$CONTROL_TAG"
@@ -100,6 +122,7 @@ cp "$HERE/Dockerfile" "$CTX/Dockerfile"
 ( cd "$ROOT" && git ls-files -z -co --exclude-standard -- src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml ) \
     | tar -C "$ROOT" --null -T - -cf - | tar -x -C "$CTX/cli-src"
 stage_report_untracked "cli-src" src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml
+stage_report_modified "cli-src" src conexus/plans conexus/daemon dt/scripts README.md LICENSE pyproject.toml
 [ -f "$CTX/cli-src/pyproject.toml" ] && [ -d "$CTX/cli-src/src/nexus" ] \
     || { echo "cli-src staging is missing pyproject.toml or src/nexus" >&2; exit 2; }
 

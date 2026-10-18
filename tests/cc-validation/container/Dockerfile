@@ -4,6 +4,11 @@
 # run.sh and bind-mounted at run time, so editing a scenario never rebuilds the
 # image. Same base and install route as tests/e2e/hook-surface-shakeout.
 FROM debian:trixie-slim
+# BUMPING THIS PIN re-runs scenarios 06 and 07 and updates docs/tables/cc-version-answers.toml:
+# both ask questions whose answers have changed between Claude Code releases, and a bump with
+# no re-run would go green on a flipped answer (an unrecorded version prints INFO "record this
+# version's answer"; a recorded one whose answer changed FAILS). Nothing may be deleted or
+# relied on from those answers.
 # The Claude Code build the harness measures. run.sh reads this line and hands
 # it to the scenario as the expected `claude --version`, so a drifted image
 # fails the verdict instead of silently testing another build. The updater is
