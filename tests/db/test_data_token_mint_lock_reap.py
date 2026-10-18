@@ -230,17 +230,16 @@ def test_unlink_failure_never_reaches_the_mint(
     assert len(failed) == 1 and failed[0]["log_level"] == "debug"
 
 
-def test_lease_family_is_not_reaped_by_the_mint(tmp_path: Path) -> None:
-    """Pins the scope of THIS fix, not an impossibility: the lease family is
-    deferred to a sibling bead (the same-key mint lock is a lock to probe and
-    an expired lease is dead by definition), so for now the mint-time reap
-    leaves old lease files alone."""
+def test_the_mint_lock_reaper_leaves_the_lease_family_alone(tmp_path: Path) -> None:
+    """The two reapers are separate: ``_reap_stale_mint_locks`` never removes
+    a ``data_token_lease.*`` file, however old. Expired leases are
+    ``_reap_expired_leases``'s job (nexus-4gmw8,
+    ``tests/db/test_data_token_lease_reap.py``)."""
     lease = tmp_path / f"data_token_lease.{_hex(7)}"
     lease.write_bytes(b"{}")
     os.utime(lease, (OLD, OLD))
-    _manager(tmp_path).bearer_for(BASE_URL, TENANT)
+    assert _reap_stale_mint_locks(tmp_path) == 0
     assert lease.exists()
-    assert _data_token_lease_path(BASE_URL, TENANT, tmp_path).exists()
 
 
 # ── reaper safety (nexus-ndfc1 review: B1, H, W, T) ──────────────────────

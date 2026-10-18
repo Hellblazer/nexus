@@ -209,6 +209,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -320,6 +321,32 @@ _MINT_LOCK_REOPEN_MAX: int = 5
 
 #: The Windows reap skip is logged once per process, not once per mint.
 _reap_skip_logged: bool = False
+
+#: Exact shape of a lease file name (nexus-4gmw8): the prefix plus the full
+#: 64-hex :func:`_lease_key`. The lease reaper touches only a full match, so
+#: the ``.<pid>.<uuid>.tmp`` publish temp files, a backup suffix or the
+#: sibling ``data_token_mint_lock.*`` family are never candidates.
+_LEASE_NAME_RE: re.Pattern[str] = re.compile(re.escape(_DATA_TOKEN_LEASE_PREFIX) + r"[0-9a-f]{64}")
+
+#: A lease is reap-eligible once its ``expires_at`` is more than this many
+#: seconds in the past (nexus-4gmw8). The reader already refuses a lease at
+#: or below 20% of its TTL, so a lease past ``expires_at`` is dead to every
+#: reader; the margin is only slack for wall-clock disagreement between
+#: processes (a clock stepped back, a test's injected wall clock), so the
+#: reaper never removes a lease some other process may still count as live.
+_LEASE_EXPIRED_MARGIN_S: float = 300.0
+
+#: Most leases one mint may remove, and the cap on how many candidates (oldest
+#: write first) one call examines: ``4 * K``. A backlog drains over several
+#: mints. Same bound and same reasoning as :data:`_MINT_LOCK_REAP_MAX_PER_MINT`.
+_LEASE_REAP_MAX_PER_MINT: int = 8
+
+#: A lease file larger than this is not a lease; it is read no further and
+#: counts as unparseable.
+_LEASE_READ_MAX_BYTES: int = 64 * 1024
+
+#: Open flags that never follow a symlink and never block on a FIFO.
+_OPEN_PLAIN_FILE: int = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
 #: Poll interval while a non-blocking flock acquire attempt is retried
 #: (nexus-nnr26) -- mirrors nexus.db.t1._lock_guarded_mint_or_borrow's
@@ -592,11 +619,8 @@ def _reap_stale_mint_locks(
     Skipped on Windows: an open handle blocks the delete, so every attempt
     would fail; the scan is not run (one debug log per process).
 
-    The sibling ``data_token_lease.*`` family is NOT reaped here. It needs
-    the same treatment and is deferred to a sibling bead: the same-key mint
-    lock is the lock to probe, and a lease past its ``expires_at`` is dead by
-    definition (the reader returns None for it). Until that lands, expired
-    lease files stay.
+    The sibling ``data_token_lease.*`` family is reaped by
+    :func:`_reap_expired_leases` (nexus-4gmw8), not here.
     """
     global _reap_skip_logged
     if sys.platform == "win32":
@@ -661,15 +685,216 @@ def _reap_stale_mint_locks(
     return removed
 
 
+def _open_plain_file(path: str | Path, flags: int) -> int:
+    """Open *path* without following a symlink or blocking on a FIFO, and
+    require a regular file. Raises OSError otherwise (the fd is closed)."""
+    fd = os.open(str(path), flags | _OPEN_PLAIN_FILE)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{Path(path).name} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _lease_is_dead(raw: bytes, mtime: float, now: float) -> bool:
+    """Whether a lease file's content says it is past use (nexus-4gmw8).
+
+    Read the way :meth:`DataTokenManager._read_lease` reads it: JSON with the
+    current ``format_version`` and a numeric ``expires_at`` in wall-clock
+    seconds. Dead means ``expires_at`` is more than
+    :data:`_LEASE_EXPIRED_MARGIN_S` before *now*. A file that cannot be read
+    that way (not JSON, another format version, no or non-finite
+    ``expires_at``, oversize) is not known to be dead: it counts as dead only
+    when its own mtime is also older than :data:`_MINT_LOCK_STALE_AFTER_S`.
+    """
+    try:
+        if len(raw) > _LEASE_READ_MAX_BYTES:
+            raise ValueError("oversize")
+        data = json.loads(raw)
+        if data.get("format_version") != _LEASE_FORMAT_VERSION:
+            raise ValueError("format version")
+        expires_at = float(data["expires_at"])
+        if not math.isfinite(expires_at):
+            raise ValueError("expires_at")
+    except (ValueError, KeyError, TypeError, AttributeError):  # JSON and unicode decode errors are ValueErrors
+        return mtime < now - _MINT_LOCK_STALE_AFTER_S
+    return expires_at < now - _LEASE_EXPIRED_MARGIN_S
+
+
+def _open_reap_lock(lock_path: Path) -> tuple[int, bool]:
+    """Open the same-key mint lock for the lease reaper: ``(fd, created)``.
+
+    An existing lock is opened as it is (no mtime touch: that would keep a
+    stale lock alive for ever). A missing one is created, because a lease can
+    outlive its lock (the mint-lock reaper removes locks after a day); the
+    caller removes a file it created.
+    """
+    try:
+        return _open_plain_file(lock_path, os.O_WRONLY), False
+    except FileNotFoundError:
+        pass
+    try:
+        return open_private(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _OPEN_PLAIN_FILE), True
+    except FileExistsError:
+        return _open_plain_file(lock_path, os.O_WRONLY), False
+
+
+def _reap_one_lease(lease_path: Path, config_dir: Path, now: float) -> bool:
+    """Remove *lease_path* if it is dead, under its same-key mint lock.
+    True when removed. May raise OSError; the caller logs it."""
+    fd = _open_plain_file(lease_path, os.O_RDONLY)
+    try:
+        raw, mtime = os.read(fd, _LEASE_READ_MAX_BYTES + 1), os.fstat(fd).st_mtime
+    finally:
+        os.close(fd)
+    if not _lease_is_dead(raw, mtime, now):
+        return False  # the common case: a live lease costs one read
+
+    lock_path = config_dir / (_MINT_LOCK_PREFIX + lease_path.name[len(_DATA_TOKEN_LEASE_PREFIX):])
+    lock_fd, created = _open_reap_lock(lock_path)
+    try:
+        try:
+            _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: non-blocking same-key probe for the expired-lease reaper (nexus-4gmw8), not a lifecycle election
+        except BlockingIOError:
+            return False  # a minter holds it: it may be about to write this very lease
+        try:
+            # Same discipline as the mint-lock reaper: the lock only means
+            # something if it is the file the path names now.
+            if not _fd_names_path(lock_fd, lock_path):
+                return False
+            lease_fd = _open_plain_file(lease_path, os.O_RDONLY)
+            try:
+                # Re-read under the lock: a minter publishes only while it
+                # holds this lock, so nothing changes the lease from here.
+                raw, mtime = os.read(lease_fd, _LEASE_READ_MAX_BYTES + 1), os.fstat(lease_fd).st_mtime
+                if not _lease_is_dead(raw, mtime, now) or not _fd_names_path(lease_fd, lease_path):
+                    return False
+                os.unlink(str(lease_path))
+            finally:
+                os.close(lease_fd)
+            return True
+        finally:
+            try:
+                if created and _fd_names_path(lock_fd, lock_path):
+                    os.unlink(str(lock_path))  # a lock made only for this reap; a minter that opened it reopens
+            finally:
+                _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: release the expired-lease reaper's same-key lock (nexus-4gmw8)
+    finally:
+        os.close(lock_fd)
+
+
+def _reap_expired_leases(
+    config_dir: Path,
+    *,
+    now: float,
+    keep: Path | None = None,
+    max_removals: int = _LEASE_REAP_MAX_PER_MINT,
+) -> int:
+    """Remove expired ``data_token_lease.*`` files (nexus-4gmw8). Returns the
+    number removed.
+
+    One lease is written per (host:port, tenant) and nothing removed a lease
+    for an endpoint that never came back, so expired 0600 token files piled up
+    beside the mint locks. Called inline at mint time, after the mint-lock
+    reap, never from a background thread; never raises (every failure is a
+    ``debug`` log and the file is left alone).
+
+    Guards, the same as the mint-lock reaper's: an exact name match
+    (:data:`_LEASE_NAME_RE`), a regular file only (opened without following a
+    symlink and without blocking), never ``keep`` (the caller's own lease),
+    skipped on Windows (an open handle blocks the delete), at most
+    *max_removals* per call and ``4 * max_removals`` examined, oldest write
+    first so live leases cannot starve the dead ones.
+
+    A lease is removed only while the SAME-KEY mint lock
+    (``data_token_mint_lock.<same 64 hex>``) is held non-blocking by the
+    reaper, because a minter publishes its lease only while holding that lock;
+    a held lock means a mint may be mid-write and the lease is skipped. Under
+    the lock the lease is read again, and the path must still name the inode
+    that was read (:func:`_fd_names_path`) before it is unlinked. *now* is the
+    wall clock the lease reader uses (``expires_at`` is wall-clock seconds).
+    See :func:`_lease_is_dead` for what dead means.
+    """
+    if sys.platform == "win32":
+        return 0
+    removed = 0
+    try:
+        candidates: list[tuple[float, Path]] = []
+        with os.scandir(config_dir) as it:
+            for entry in it:
+                if not _LEASE_NAME_RE.fullmatch(entry.name):
+                    continue
+                if keep is not None and entry.name == keep.name:
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    candidates.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
+        candidates.sort(key=lambda c: c[0])
+    except Exception as exc:  # noqa: BLE001 -- the reap must never reach the mint
+        _log.debug("data_token_lease_reap_scan_failed", error=str(exc))
+        return 0
+
+    for _, lease_path in candidates[: max_removals * 4]:
+        if removed >= max_removals:
+            break
+        try:
+            if _reap_one_lease(lease_path, config_dir, now):
+                removed += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad file must not stop the rest or the mint
+            _log.debug("data_token_lease_reap_failed", file=lease_path.name, error=str(exc))
+    if removed:
+        _log.debug("data_token_lease_reaped", removed=removed)
+    return removed
+
+
 def _host(url: str) -> str:
-    """Return ``host[:port]`` for *url* — never the full URL (which may
-    carry a path) and never the credential — for log-safe endpoint identity.
+    """The whole netloc of *url*: ``[user[:password]@]host[:port]``.
+
+    This is the HASH INPUT of :func:`_lease_key`, and nothing else. It is
+    deliberately left as it was so no existing ``data_token_lease.*`` or
+    ``data_token_mint_lock.*`` file is renamed (changing it would orphan every
+    lease and lock on disk). It can carry userinfo, so it must never reach a
+    log event, an exception message or a file body: use :func:`_log_endpoint`
+    for those (nexus-q26w1).
     """
     try:
         netloc = urllib.parse.urlsplit(url).netloc
         return netloc or url
-    except Exception:  # noqa: BLE001 — logging helper must never raise
+    except Exception:  # noqa: BLE001 — a key-derivation helper must never raise
         return url
+
+
+def _log_endpoint(url: str) -> str:
+    """Log- and message-safe endpoint identity: ``host[:port]`` of *url*,
+    never userinfo, path or query (nexus-q26w1). A URL that does not parse
+    to a host yields a fixed placeholder, never the URL itself (the old
+    ``_host`` fallback echoed the whole string)."""
+    return _endpoint_host_port(url) or "<unparseable-endpoint>"
+
+
+def _redact_url_secrets(text: str, url: str) -> str:
+    """*text* with the userinfo and query of *url* replaced by ``<redacted>``.
+
+    For error text a transport raises about a URL (it can quote the part of
+    the URL it failed on). Longest secret first, so a password that contains
+    the user name is not left half-visible. If *url* does not parse at all,
+    the whole URL string is the secret.
+    """
+    secrets: list[str] = []
+    try:
+        parts = urllib.parse.urlsplit(url)
+        userinfo = parts.netloc.rpartition("@")[0]
+        secrets = [userinfo, parts.username or "", parts.password or "", parts.query]
+    except Exception:  # noqa: BLE001 — a scrubber must never raise
+        secrets = [url]
+    for secret in sorted({x for x in secrets if x}, key=len, reverse=True):
+        text = text.replace(secret, "<redacted>")
+    return text
 
 
 def _lease_key(base_url: str, tenant: str) -> str:
@@ -946,7 +1171,7 @@ class DataTokenManager:
                 if leased is not None:
                     self._cache[key] = leased
                     _log.info(
-                        "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                        "data_token_lease_reused", tenant=tenant, endpoint=_log_endpoint(base_url),
                     )
                     return leased.token
                 # nexus-nnr26: genuine miss AND no fresh lease — serialize
@@ -962,7 +1187,7 @@ class DataTokenManager:
             self._cache[key] = fresh
             self._write_lease(base_url, tenant, fresh)
             _log.info(
-                "data_token_refresh", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+                "data_token_refresh", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
             )
             return fresh.token
 
@@ -995,7 +1220,7 @@ class DataTokenManager:
                 # invalidated from the file it was about to lose.
                 self._delete_lease(base_url, tenant, expected_token=popped.token)
         if popped is not None:
-            _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+            _log.info("data_token_invalidated", tenant=tenant, endpoint=_log_endpoint(base_url))
 
     def _is_futile_locked(self, key: tuple[str, str]) -> bool:
         """The windowed futility check (Sam's decision, nexus-umue1 review
@@ -1067,7 +1292,7 @@ class DataTokenManager:
             # the delete, miss the cache, and borrow the token this call just
             # invalidated back out of the lease file (see invalidate).
             self._delete_lease(base_url, tenant, expected_token=popped.token)
-        _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+        _log.info("data_token_invalidated", tenant=tenant, endpoint=_log_endpoint(base_url))
         return True
 
     def mark_remint_futile(self, base_url: str, tenant: str) -> None:
@@ -1220,7 +1445,7 @@ class DataTokenManager:
         except OSError:
             return None  # absent — the common case, not worth a log line
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            _log.debug("data_token_lease_unparseable", tenant=tenant, endpoint=_host(base_url))
+            _log.debug("data_token_lease_unparseable", tenant=tenant, endpoint=_log_endpoint(base_url))
             return None
         if not token:
             return None
@@ -1269,7 +1494,7 @@ class DataTokenManager:
             os.replace(str(tmp), str(path))
         except OSError as exc:
             _log.warning(
-                "data_token_lease_write_failed", tenant=tenant, endpoint=_host(base_url), error=str(exc),
+                "data_token_lease_write_failed", tenant=tenant, endpoint=_log_endpoint(base_url), error=str(exc),
             )
 
     def _delete_lease(
@@ -1351,6 +1576,11 @@ class DataTokenManager:
             # own lock was just opened and touched, so it is never a
             # candidate. Inside the try so a BaseException cannot leak the fd.
             _reap_stale_mint_locks(config_dir, keep=lock_path)
+            # nexus-4gmw8: and expired leases, under their own same-key locks.
+            _reap_expired_leases(
+                config_dir, now=self._wall_clock(),
+                keep=_data_token_lease_path(base_url, tenant, config_dir),
+            )
 
             deadline = time.monotonic() + self._lock_wait_ceiling_seconds
             reopens = 0
@@ -1363,14 +1593,14 @@ class DataTokenManager:
                     leased = self._read_lease(base_url, tenant)
                     if leased is not None:
                         _log.info(
-                            "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                            "data_token_lease_reused", tenant=tenant, endpoint=_log_endpoint(base_url),
                         )
                         return leased
                     if time.monotonic() >= deadline:
                         raise DataTokenMintError(
                             f"data-token mint-on-miss lock wait exceeded "
                             f"{self._lock_wait_ceiling_seconds:.0f}s for "
-                            f"{_host(base_url)} tenant={tenant!r} — a sibling "
+                            f"{_log_endpoint(base_url)} tenant={tenant!r} — a sibling "
                             "process holds the mint lock without publishing "
                             "a lease. This can mean the sibling's own mint "
                             "failed or is genuinely stuck, OR that the mint "
@@ -1408,13 +1638,13 @@ class DataTokenManager:
                     leased = self._read_lease(base_url, tenant)
                     if leased is not None:
                         _log.info(
-                            "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                            "data_token_lease_reused", tenant=tenant, endpoint=_log_endpoint(base_url),
                         )
                         return leased
                     fresh = self._mint(base_url, tenant, credential)
                     self._write_lease(base_url, tenant, fresh)
                     _log.info(
-                        "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+                        "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
                     )
                     return fresh
                 finally:
@@ -1429,12 +1659,12 @@ class DataTokenManager:
         mint (which the credential otherwise allows) must not be blocked by
         an optimization."""
         _log.warning(
-            "data_token_mint_lock_unavailable", tenant=tenant, endpoint=_host(base_url), error=str(cause),
+            "data_token_mint_lock_unavailable", tenant=tenant, endpoint=_log_endpoint(base_url), error=str(cause),
         )
         fresh = self._mint(base_url, tenant, credential)
         self._write_lease(base_url, tenant, fresh)
         _log.info(
-            "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+            "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
         )
         return fresh
 
@@ -1457,9 +1687,14 @@ class DataTokenManager:
             try:
                 status, payload, resp_headers = self._poster(url, headers, body)
             except Exception as exc:  # noqa: BLE001 — any transport failure becomes the typed mint error
-                _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_host(url), error=str(exc))
+                # A transport error can quote the URL it choked on:
+                # ``http.client.InvalidURL`` for ``https://user:pw@host`` says
+                # "nonnumeric port: 'pw@host'". Scrub before it is logged or
+                # raised (nexus-q26w1).
+                reason = _redact_url_secrets(str(exc), url)
+                _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url), error=reason)
                 raise DataTokenMintError(
-                    f"data-token mint request to {_host(url)} failed: {exc}"
+                    f"data-token mint request to {_log_endpoint(url)} failed: {reason}"
                 ) from exc
 
             if status not in _RETRYABLE_MINT_STATUSES or attempt == _MINT_MAX_ATTEMPTS:
@@ -1481,7 +1716,7 @@ class DataTokenManager:
                 delay = _MINT_BACKOFF_SCHEDULE[attempt - 1]
             _log.warning(
                 "data_token_mint_retry",
-                tenant=body_tenant, endpoint=_host(url), status=status,
+                tenant=body_tenant, endpoint=_log_endpoint(url), status=status,
                 attempt=attempt, delay=delay, retry_after_present=retry_after is not None,
             )
             self._sleep(delay)
@@ -1489,7 +1724,7 @@ class DataTokenManager:
         if status == 403:
             err = payload.get("error", "") if isinstance(payload, dict) else str(payload)
             _log.error(
-                "data_token_mint_failed", tenant=body_tenant, endpoint=_host(url),
+                "data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url),
                 status=403, error=err,
             )
             # nexus-ssqk9: name BOTH the configured/requested tenant and the
@@ -1497,7 +1732,7 @@ class DataTokenManager:
             # tenant does not match its OWN bound tenant, and the client has
             # no way to learn that bound tenant except from this message.
             raise DataTokenMintError(
-                f"data-token mint failed (403) against {_host(url)}: {err}. "
+                f"data-token mint failed (403) against {_log_endpoint(url)}: {err}. "
                 f"Sent tenant={body_tenant!r} (mint_tenant config="
                 f"{configured_mint_tenant or '(unset)'!r}, caller-supplied "
                 f"tenant={tenant!r}). A mint-locked credential is bound to "
@@ -1508,11 +1743,11 @@ class DataTokenManager:
         if status != 200:
             err = payload.get("error", "") if isinstance(payload, dict) else str(payload)
             _log.error(
-                "data_token_mint_failed", tenant=body_tenant, endpoint=_host(url),
+                "data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url),
                 status=status, error=err,
             )
             raise DataTokenMintError(
-                f"data-token mint failed ({status}) against {_host(url)}: {err}. "
+                f"data-token mint failed ({status}) against {_log_endpoint(url)}: {err}. "
                 f"Remedy: verify the configured mint_token credential is valid, "
                 f"unrevoked, and (if mint-locked) bound to tenant {body_tenant!r} "
                 f"('nx config set mint_token <bearer>')."
@@ -1520,9 +1755,9 @@ class DataTokenManager:
 
         token = payload.get("data_token") if isinstance(payload, dict) else None
         if not token:
-            _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_host(url), error="no data_token in response")
+            _log.error("data_token_mint_failed", tenant=body_tenant, endpoint=_log_endpoint(url), error="no data_token in response")
             raise DataTokenMintError(
-                f"data-token mint against {_host(url)} returned no 'data_token' field"
+                f"data-token mint against {_log_endpoint(url)} returned no 'data_token' field"
             )
         ttl = payload.get("expires_in_seconds", self._default_ttl_seconds)
         try:

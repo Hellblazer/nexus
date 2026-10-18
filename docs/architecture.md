@@ -917,7 +917,10 @@ any other state (absent, corrupt, foreign, stale) is a clean miss and the
 manager mints as before. A lease-write failure is logged as a warning and
 NEVER fails the mint — the lease is an optimization, the mint is the
 source of truth. `invalidate()` (the 401 self-heal path) removes the lease
-file alongside the in-process entry, best-effort. `nx uninstall` removes
+file alongside the in-process entry, best-effort. A mint also removes up
+to 8 leases whose `expires_at` is more than 5 minutes past (nexus-4gmw8),
+each under its same-key `data_token_mint_lock.*`, so a lease for an
+endpoint that never returns does not stay for ever. `nx uninstall` removes
 every `data_token_lease.*` file unconditionally (not gated on
 `--remove-data`), alongside the managed credentials.
 
