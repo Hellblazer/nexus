@@ -142,11 +142,11 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_uv_entries() -> None:
-    """Non-vacuity: fifteen conexus entries and four sn entries launch through uv
+    """Non-vacuity: eighteen conexus entries (nexus-i93tz added three) and four sn entries launch through uv
     (7 until RDR-228, nexus-sv2wx.8, which put the six ``nx-hook`` entries and the
     session-end entry behind the launcher and added the setup notice hook)."""
     counts = {p: sum(1 for plugin, _, _ in _uv_entries() if plugin == p) for p in _PLUGINS}
-    assert counts == {"conexus": 15, "sn": 4}, counts
+    assert counts == {"conexus": 18, "sn": 4}, counts
 
 
 def test_a_launcher_entry_really_starts_the_launcher(tmp_path: Path) -> None:
