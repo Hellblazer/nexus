@@ -1439,7 +1439,8 @@ sends the RDR back to planning.
   with its ORT init gate and temp sweep). **Pass**: the image builds and boots
   dual, returns a 768-dimension bge vector, a cross-encoder rerank and, through a
   loopback stub on the URL-taking constructors, a 1024-dimension vector from each
-  Voyage class; exits 143 on SIGTERM, also during bge initialisation, with no
+  Voyage class; exits 143 on SIGTERM (POSIX) or 149 on CTRL_BREAK (Windows, the
+  RDR-224 clean-stop code), also during bge initialisation, with no
   crash report; a keyed boot without model files never loads ONNX runtime.
   **Fail**: any build error, reflection or JNI conflict, crash or wrong exit code.
 - **Voyage serving in the dual process.** linux-amd64, a real key from the
