@@ -592,7 +592,10 @@ class PciPlanAndRecallIntegrationTest {
                 try {
                     java.util.function.Supplier<Integer> buildPid = () -> asSuperuser.select(activityPid).from(activity)
                         .where(activityApp.eq(appName)).and(activityWait.eq("Lock")).limit(1).fetchOne(0, Integer.class);
-                    await("the concurrent build to wait on the blocker's lock", () -> buildPid.get() != null);
+                    // A Lock wait alone is not enough: the build can wait on an earlier lock, before its invalid catalog
+                    // entry is committed. The entry is committed once indexIsValid stops reading null.
+                    await("the concurrent build to commit its invalid entry and wait on the blocker's lock",
+                        () -> buildPid.get() != null && indexIsValid(targetIndex) != null);
                     Integer pid = buildPid.get();
 
                     // In flight: the catalog lists the index, and it is not valid.
