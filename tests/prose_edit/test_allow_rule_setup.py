@@ -11,7 +11,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from tests.prose_edit.conftest import Prose
@@ -35,13 +34,20 @@ def test_the_documented_path_command_is_the_base_every_work_directory_sits_under
     cmd = re.search(r"`(python3 -c '[^`]+')`", _setup())
     assert cmd, "Setup must give the command that prints <R>"
     code = cmd.group(1).split("'", 2)[1]
+    # TMPDIR reached through a symlink, as macOS's /var -> /private/var: the rule must name the target.
+    real = prose.tmp
+    real.mkdir(parents=True, exist_ok=True)
+    link = real.parent / "tmp-link"
+    link.symlink_to(real, target_is_directory=True)
+    prose.env["TMPDIR"] = str(link)
     printed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
-                             env=dict(os.environ)).stdout.strip()
-    assert printed == os.path.realpath(tempfile.gettempdir())
+                             env=prose.env).stdout.strip()
+    assert printed == os.path.realpath(real) and printed != str(link)
     work = Path(dict(line.split("=", 1) for line in brief_ok(prose, "tmpdir", "--ready").strip().splitlines())["WORK"])
     try:
-        assert str(work.parent) == printed
+        assert str(work.parent) == printed, "brief.py resolves the temp dir, so the rule must name the real path"
         rule_glob = "/" + printed.lstrip("/") + "/prose-edit-*/**"
         assert fnmatch.fnmatch(str(work / "brief.md"), rule_glob.replace("/**", "/*"))
+        assert not fnmatch.fnmatch(str(work / "brief.md"), str(link) + "/prose-edit-*/*")
     finally:
         brief_ok(prose, "rmtmp", str(work))
