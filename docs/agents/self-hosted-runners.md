@@ -14,7 +14,8 @@ on the lab pool's `lab-mac-m` class on the same machine, and the persistent
 `hellmini` runner keeps the mac-arm64 smoke (it needs Docker, which the pool
 lacks) and one leg of the signing rehearsal (Sam, 2026-09-28, nexus-yd9po). `qwentescence` (WSL) is a test host reachable by
 ssh, not a runner; its native Windows side is the separate `win-release` runner
-described below. `chas` (a native Ubuntu 26.04 box, 32 cores, 123 GB, ssh
+described below, and the place hand and agent Windows native builds run (through
+`lab-run-win`, below). `chas` (a native Ubuntu 26.04 box, 32 cores, 123 GB, ssh
 alias `chas-test`) is the test host for agents' hand runs and, since
 2026-10-10, the main host of the lab pool. Agents' full Python
 suites and engine suites go to chas first (2026-10-08, nexus-y10bw). hellmini takes
@@ -83,6 +84,24 @@ Windows asset, and with it `on` the Windows assets block promotion (P0.4). The
 runner (`gtr9-win`, service account `ghwin`; T2 `nexus/qwentescence-win-release-runner`)
 was registered and the variable turned `on` by an agent on 2026-10-06, each on Sam's
 explicit go; any later change to either needs the same explicit go.
+
+**Hand and agent Windows native builds** (GraalVM native-image with MSVC) run on
+qwentescence's Windows side through `C:\build\lab\lab-run-win.cmd`, never in WSL
+and never by a bare ssh build (labrun README, "Windows native builds", labrun
+PR #30):
+
+    ssh qwentescence 'cd C:\build\hand\<you>\...; C:\build\lab\lab-run-win.cmd .\mvnw.cmd -B -Pnative -Pprebuilt-jooq "-Dnative.image.maxheap=11g" package'
+
+`lab-run-win` and the `win-release` runner's job hooks share one build slot (a
+lock file in `C:\build\lab\lock`): a hand build waits for a running CI leg, and a
+CI leg waits at most 30 minutes for a hand build, then runs beside it, the wait
+counting against the job's timeout. A build started over ssh without
+`lab-run-win` is invisible to the slot. Quote every dotted `-D` argument (the ssh
+shell is PowerShell 5.1, which splits at the dot), work under
+`C:\build\hand\<you>`, and keep `maxheap` at 11g or below (the release leg uses
+12g and Windows-side memory is not booked). The GraalVM there follows the
+`java-version` pin in `.github/actions/windows-engine-leg/action.yml`; a bump
+there needs labrun's installer re-run with the new version.
 
 **Before approving a fork-PR run, read its diff for:**
 
