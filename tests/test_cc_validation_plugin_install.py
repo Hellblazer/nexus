@@ -814,6 +814,19 @@ def _chars(tmp_path: pathlib.Path, log: str, call: str) -> str:
     return r.stdout.strip()
 
 
+def test_cc_hook_context_chars_reads_a_command_that_holds_a_closing_parenthesis(tmp_path: pathlib.Path) -> None:
+    """nexus-ijate: `[^)]*` ended the command at its first ')', so a hook command with `$(...)` in it
+    delivered context that the grep did not see."""
+    ctx = (
+        "2026-10-17T21:31:37.346Z [DEBUG] Hook SubagentStart (python3 $(dirname ${CLAUDE_PLUGIN_ROOT})/hooks/scripts/subagent_start.py) "
+        "provided additionalContext (3462 chars)\n"
+    )
+    sn = '"SubagentStart" "subagent_start.py" "sn@nexus-plugins"'
+    assert _chars(tmp_path, _LOG_OK + ctx, f"cc_hook_context_chars {sn}") == "3462\nrc=0"
+    mcp = "Hook SubagentStart (plugin:conexus:nexus/hook_subagent_start (x)) provided additionalContext (4388 chars)\n"
+    assert _chars(tmp_path, mcp, 'cc_hook_context_chars "SubagentStart" "hook_subagent_start" "conexus@nexus-plugins"') == "4388\nrc=0"
+
+
 def test_cc_hook_context_chars_and_the_whole_delivery_gate(tmp_path: pathlib.Path) -> None:
     sn = '"SubagentStart" "subagent_start.py" "sn@nexus-plugins"'
     assert _chars(tmp_path, _LOG_OK + _CTX_OK, f"cc_hook_context_chars {sn}") == "3462\nrc=0"
@@ -1079,7 +1092,7 @@ PROBES = {
     "13": ["UNIQUE-PROJECT-A-MARKER-KQX73", "UNIQUE-PLUGIN-B-MARKER-WYZ91", "UNIQUE-CONTROL-C-MARKER-RJF44"],
     # 15 builds its prompt from variables; the markers are 15's probe_inject arguments
     "15": ["$marker", "${marker}", "STDOUT-15A-MARKER-Q9X", "STDOUT-15B-MARKER-T7K", "STDOUT-15C-MARKER-W3J", "STDOUT-15D-MARKER-R2P",
-           "STDOUT-15E-MARKER-K4M"],
+           "STDOUT-15E-MARKER-K4M", "STDOUT-15F-MARKER-H5N"],
     "17": ["NESTED-AGENT-OK", "NESTED-SPAWN-BLOCKED", "FORK-PARENT-OK"],
     "18": ["project-from-cwd", "fetch current docs"],
     # slash-command probes: the command body becomes the prompt the model quotes from
@@ -1104,11 +1117,16 @@ def _scenario(num: str) -> pathlib.Path:
     return next(p for p in SCENARIOS if _num(p) == num)
 
 
-def _prompts(path: pathlib.Path) -> list[str]:
-    out = _PROMPT.findall(_code(path))
-    if _num(path) in BODY_SCANNED:
-        out += _BODY.findall(path.read_text(encoding="utf-8"))
+def _prompts_of(num: str, source: str) -> list[str]:
+    code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+    out = _PROMPT.findall(code)
+    if num in BODY_SCANNED:
+        out += _BODY.findall(source)
     return out
+
+
+def _prompts(path: pathlib.Path) -> list[str]:
+    return _prompts_of(_num(path), path.read_text(encoding="utf-8"))
 
 
 def _reply_tokens(path: pathlib.Path) -> set[str]:
@@ -1125,36 +1143,89 @@ def _whole_in_prompts(prompts: list[str], probes: list[str] | set[str]) -> list[
     return [(probe, p[:60]) for probe in sorted(probes) for p, sq in squashed if probe in p or probe in sq]
 
 
+_RENDER_CALL = re.compile(r'^\s*cc_command_render_check\s+"([^"]+)"\s+\w+\s+(.+)$', re.M)
+_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_S15_MARKER = re.compile(r"STDOUT-15[A-F]-MARKER-[A-Z0-9]{3}")
+
+
+def _judged_strings(num: str, source: str) -> set[str]:
+    """What a scenario whose verdict is read from a transcript or a debug log (not from a reply
+    pattern) looks for: the hook markers of 15 (a-d and the dead-hook control), and for 21, 24 and
+    25 the header and every needle of each cc_command_render_check call, keyed by the call's label.
+    Dropping one of them from the scenario drops the count (nexus-ijate)."""
+    code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+    if num == "15":
+        return set(_S15_MARKER.findall(code))
+    if num in {"21", "24", "25"}:
+        return {f"{label}:{arg}" for label, rest in _RENDER_CALL.findall(code) for arg in _QUOTED.findall(rest)}
+    return set()
+
+
 #: The per-scenario non-vacuity floor of the lint above: (claude_prompts examined, reply tokens
-#: found in the scenario's own wait/grep patterns), as counted when the floor was set. A scenario
-#: that loses a prompt or a pattern drops below it and fails, instead of being linted over less
-#: (the old `len(set(PROBES[num]) | tokens) >= 1` could not fail: PROBES[num] is a nonempty literal).
-#: 15, 21, 24 and 25 judge a transcript or a log, not a reply pattern, so their token floor is 0
-#: and their floor is that a probe of PROBES occurs in the scenario source at all.
+#: found in the scenario's own wait/grep patterns PLUS the strings its transcript or log verdict
+#: looks for, _judged_strings), as counted when the floor was set. A scenario that loses a prompt,
+#: a pattern or a probe drops below it and fails, instead of being linted over less (the old
+#: `len(set(PROBES[num]) | tokens) >= 1` could not fail: PROBES[num] is a nonempty literal).
+#: 15, 21, 24 and 25 judge a transcript or a log, not a reply pattern; their token floor used to be
+#: 0, which only asked that a probe string occur in the source and so could not fail either. Now:
+#: 15 the six hook markers (15a-f); 21 the header and the block of 21 and of its control 21b
+#: (four); 24 and 25 the header and the two needles (three each).
 FLOORS = {
     "1": (1, 2), "2": (1, 3), "3": (1, 3), "4": (1, 3), "11": (2, 3), "12": (1, 2), "13": (3, 6),
-    "15": (1, 0), "17": (2, 3), "18": (1, 4), "21": (4, 0), "24": (2, 0), "25": (2, 0),
+    "15": (1, 6), "17": (2, 3), "18": (1, 4), "21": (4, 4), "24": (2, 3), "25": (2, 3),
 }
 
 
 def test_the_floor_table_covers_exactly_the_linted_scenarios() -> None:
     assert set(FLOORS) == set(PROBES)
+    assert all(tokens > 0 for _, tokens in FLOORS.values()), "a token floor of 0 asks for nothing"
+
+
+def _census_problems(num: str, source: str, prompts: list[str]) -> list[str]:
+    """Everything the census of scenario <num> objects to, for the scenario source as given."""
+    code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+    tokens = {
+        alt
+        for pat in _PATTERN_ARG.findall(code)
+        for alt in re.split(r"\||\.\*", pat)
+        if re.fullmatch(r"[A-Za-z0-9_-]{6,}", alt)
+    } - SIDE_EFFECT_TOKENS.get(num, set())
+    judged = _judged_strings(num, source)
+    min_prompts, min_tokens = FLOORS[num]
+    problems = []
+    if len(prompts) < max(1, min_prompts):
+        problems.append(f"scenario {num}: the census examined {len(prompts)} prompts, floor {min_prompts}")
+    if len(tokens) + len(judged) < min_tokens:
+        problems.append(f"scenario {num}: found {sorted(tokens)} reply tokens and {sorted(judged)} judged strings, floor {min_tokens}")
+    if hits := _whole_in_prompts(prompts, set(PROBES[num]) | tokens):
+        problems.append(f"scenario {num} writes a probe whole in its own prompt: {hits}")
+    return problems
 
 
 @pytest.mark.parametrize("num", sorted(PROBES, key=int))
 def test_no_prompt_contains_its_own_probe_phrase_whole(num: str) -> None:
     path = _scenario(num)
-    prompts = _prompts(path)
-    tokens = _reply_tokens(path)
-    tokens -= SIDE_EFFECT_TOKENS.get(num, set())
-    min_prompts, min_tokens = FLOORS[num]
-    assert len(prompts) >= max(1, min_prompts), f"scenario {num}: the census examined {len(prompts)} prompts, floor {min_prompts}"
-    assert len(tokens) >= min_tokens, f"scenario {num}: found {sorted(tokens)} reply tokens, floor {min_tokens}"
-    if min_tokens == 0:
-        source = path.read_text(encoding="utf-8")
-        assert any(probe in source for probe in PROBES[num]), f"scenario {num}: none of {PROBES[num]} occurs in the scenario: the probe list is stale"
-    hits = _whole_in_prompts(prompts, set(PROBES[num]) | tokens)
-    assert not hits, f"scenario {num} writes a probe whole in its own prompt: {hits}"
+    problems = _census_problems(num, path.read_text(encoding="utf-8"), _prompts(path))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("num", ["15", "21", "24", "25"])
+def test_dropping_a_token_probe_fails_the_census(num: str) -> None:
+    """nexus-ijate: the token floor of these four scenarios was 0, so removing a marker or a needle
+    from the scenario left the census green. Delete, in turn, every line that carries a judged
+    string: each deletion must fail the census (the floor equals the count, so the loss shows)."""
+    path = _scenario(num)
+    source = path.read_text(encoding="utf-8")
+    assert not _census_problems(num, source, _prompts(path))
+    judged = _judged_strings(num, source)
+    assert len(judged) == FLOORS[num][1], (num, sorted(judged))
+    lines = source.splitlines()
+    carriers = [i for i, ln in enumerate(lines) if _judged_strings(num, ln) and not ln.lstrip().startswith("#")]
+    assert carriers, f"scenario {num}: no line carries a judged string"
+    for i in carriers:
+        mutated = "\n".join(lines[:i] + lines[i + 1:])
+        assert len(_judged_strings(num, mutated)) < len(judged), (num, i + 1, lines[i])
+        assert any("judged strings, floor" in pr for pr in _census_problems(num, mutated, _prompts_of(num, mutated))), (num, i + 1, lines[i])
 
 
 #: The hook markers of the injection probes, whose last characters (the code) must reach the
@@ -1163,7 +1234,7 @@ def test_no_prompt_contains_its_own_probe_phrase_whole(num: str) -> None:
 MARKERS = {
     "1": ["SUB-PLAIN-MARKER-K7Q3"], "2": ["SUB-JSON-MARKER-X9P2"], "3": ["SUB-MCP-MARKER-W7K4"],
     "4": ["SESS-PLAIN-MARKER-INTERACTIVE-Q9X"],
-    "15": ["STDOUT-15A-MARKER-Q9X", "STDOUT-15B-MARKER-T7K", "STDOUT-15C-MARKER-W3J", "STDOUT-15D-MARKER-R2P", "STDOUT-15E-MARKER-K4M"],
+    "15": ["STDOUT-15A-MARKER-Q9X", "STDOUT-15B-MARKER-T7K", "STDOUT-15C-MARKER-W3J", "STDOUT-15D-MARKER-R2P", "STDOUT-15E-MARKER-K4M", "STDOUT-15F-MARKER-H5N"],
 }
 
 
@@ -1314,6 +1385,44 @@ def test_scenario_15e_refuses_a_none_from_a_hook_that_never_ran(tmp_path: pathli
     assert "FAIL:" in out, out
 
 
+_S15F_HOOK = re.search(r"hook_inject_15f\.py\" <<'EOF'\n(.*?)\nEOF", S15.read_text(encoding="utf-8"), re.S)
+
+
+def test_scenario_15f_is_a_positive_control_that_must_read_visible(tmp_path: pathlib.Path) -> None:
+    """nexus-ijate: 15a-d all read NONE live, so the VISIBLE branch of the reading had only unit
+    coverage. 15f registers a hook that DOES inject (JSON additionalContext, as 02 does) and passes
+    only if the reading comes out VISIBLE; a live run of 15 therefore exercises the branch."""
+    marker = "STDOUT-15F-MARKER-H5N"
+    cmd = f"python3 /x/.claude/hook_inject_15f.py {marker}"
+    run = lambda reply, log, sub="": _run_s15(tmp_path / sub, "15f", cmd, marker, reply, log, entry="control_live_injection")   # noqa: E731
+    out, prompt = run(f"FOUND-15fS {marker}", _debug_log("SubagentStart", cmd, accepted=70))
+    assert "PASS:" in out and "positive control" in out and "FAIL:" not in out, out
+    assert marker not in prompt and marker[-3:] not in prompt, "the code of the marker is in the prompt"
+    # the hook delivered but the subagent saw nothing, or nothing was delivered: the control FAILS
+    # (a reading stuck on NOT-VISIBLE would otherwise pass 15 for ever)
+    out, _ = run("NONE-15fS", _debug_log("SubagentStart", cmd), "a")
+    assert "FAIL:" in out and "positive control failed" in out and "PASS:" not in out, out
+    # the subagent reported the marker but the log shows nothing accepted: a mismatch, not a visible
+    out, _ = run(f"FOUND-15fS {marker}", _debug_log("SubagentStart", cmd), "b")
+    assert "FAIL:" in out and "PASS:" not in out, out
+    # no answer at all
+    out, _ = run("", _debug_log("SubagentStart", cmd, accepted=70), "c")
+    assert "FAIL:" in out and "PASS:" not in out, out
+
+
+def test_scenario_15f_hook_prints_json_additional_context_carrying_the_marker_it_is_given(tmp_path: pathlib.Path) -> None:
+    assert _S15F_HOOK, "scenario 15 writes no hook_inject_15f.py"
+    script = tmp_path / "hook_inject_15f.py"
+    script.write_text(_S15F_HOOK.group(1) + "\n")
+    r = subprocess.run(["python3", str(script), "STDOUT-15F-MARKER-H5N"], input="{}", capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["hookEventName"] == "SubagentStart" and "STDOUT-15F-MARKER-H5N" in out["additionalContext"]
+    # and the marker is in the registered command (the reading needs it there), not baked into the script
+    assert "H5N" not in _S15F_HOOK.group(1)
+    assert 'hook_inject_15f.py $marker"' in S15.read_text(encoding="utf-8")
+
+
 def test_scenario_15_probes_are_what_the_test_runs() -> None:
     labels = [c[0] for c in _S15_CALLS]
     assert labels == ["15a", "15b", "15c", "15d"], f"the regex found {labels}: the test would examine nothing"
@@ -1439,7 +1548,10 @@ def test_scenario_01_judges_the_reply_and_needs_the_log_to_agree(tmp_path: pathl
 
 
 def _agent_file(proj: pathlib.Path, name: str, steps: list[tuple[str, object]]) -> None:
-    """Write a subagent transcript. Steps: ("text", str), ("call", (id, tool)), ("result", (id, is_error))."""
+    """Write a subagent transcript. Steps: ("text", str), ("call", (id, tool)), ("result", (id, is_error)),
+    ("result", (id, is_error, agent_id)): a result that, as the real Agent tool's does, names the agent it
+    started in its text ("agentId: <id>"), or ("result_field", (id, agent_id)): the same id in the
+    entry's toolUseResult instead of its text."""
     (proj / "subagents").mkdir(parents=True, exist_ok=True)
     lines = []
     for kind, val in steps:
@@ -1448,17 +1560,23 @@ def _agent_file(proj: pathlib.Path, name: str, steps: list[tuple[str, object]]) 
         elif kind == "call":
             cid, tool = val  # type: ignore[misc]
             lines.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": cid, "name": tool, "input": {}}]}})
-        elif kind == "result":
-            cid, err = val  # type: ignore[misc]
+        elif kind in {"result", "result_field"}:
+            cid, err, *rest = val if kind == "result" else (val[0], False, val[1])  # type: ignore[misc]
             block = {"type": "tool_result", "tool_use_id": cid, "content": "x"}
+            entry: dict = {"type": "user", "message": {"role": "user", "content": [block]}}
+            if rest and kind == "result":
+                block["content"] = [{"type": "text", "text": f"Async agent launched successfully.\nagentId: {rest[0]} (internal ID - do not mention to user.)"}]
+            if rest and kind == "result_field":
+                entry["toolUseResult"] = {"status": "completed", "agentId": rest[0]}
             if err:
                 block["is_error"] = True
-            lines.append({"type": "user", "message": {"role": "user", "content": [block]}})
+            lines.append(entry)
     (proj / "subagents" / f"agent-{name}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
 
 
-#: a fork that loaded the deferred tool, dispatched, and got a clean result; and the leaf's own transcript
-_FORK_OK = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", False)),
+#: a fork that loaded the deferred tool, dispatched (the result names the agent it started, "leaf"),
+#: and got a clean result; and the leaf's own transcript
+_FORK_OK = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", False, "leaf")),
             ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
 _LEAF_OK = [("text", "NESTED-AGENT-OK-17")]
 
@@ -1485,7 +1603,7 @@ def test_scenario_17_can_needs_a_successful_dispatch_and_a_token_from_another_tr
     ok = _run17(tmp_path, {"fork": _FORK_OK, "leaf": _LEAF_OK})
     assert ok.startswith("PASS:") and "CAN spawn" in ok
     # the fork's Agent call ERRORED and the fork wrote the token itself (it was handed the pieces)
-    errored = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", True)),
+    errored = [("call", ("t1", "ToolSearch")), ("result", ("t1", False)), ("call", ("t2", "Agent")), ("result", ("t2", True, "leaf")),
                ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
     assert _run17(tmp_path / "a", {"fork": errored}).startswith("FAIL:")
     # an Agent call that never came back is not a dispatch either
@@ -1498,11 +1616,35 @@ def test_scenario_17_can_needs_a_successful_dispatch_and_a_token_from_another_tr
     # a token in a leaf transcript, but nobody dispatched (an earlier scenario's leftovers cannot be mistaken for it)
     assert _run17(tmp_path / "e", {"leaf": _LEAF_OK}).startswith("FAIL:")
     # a tool merely NAMED like the dispatcher is not the dispatcher
-    taskish = [("call", ("t2", "TaskList")), ("result", ("t2", False)), ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
+    taskish = [("call", ("t2", "TaskList")), ("result", ("t2", False, "leaf")), ("text", "FORK-PARENT-OK-17 NESTED-AGENT-OK-17")]
     assert _run17(tmp_path / "f", {"fork": taskish, "leaf": _LEAF_OK}).startswith("FAIL:")
     # the old Task name still counts
-    task_fork = [("call", ("t2", "Task")), ("result", ("t2", False)), ("text", "FORK-PARENT-OK-17")]
+    task_fork = [("call", ("t2", "Task")), ("result", ("t2", False, "leaf")), ("text", "FORK-PARENT-OK-17")]
     assert _run17(tmp_path / "g", {"fork": task_fork, "leaf": _LEAF_OK}).startswith("PASS:")
+
+
+def test_scenario_17_links_the_dispatch_to_the_transcript_by_agent_id(tmp_path: pathlib.Path) -> None:
+    """nexus-ijate: the token must be in the transcript of the agent THE DISPATCH STARTED. The fork's
+    Agent result names it (`agentId: <id>`, the file is agent-<id>.jsonl); before, any transcript
+    without an Agent call counted, so isolation rested on the reset alone."""
+    # the same token in a transcript the dispatch did not start: another agent's, not the leaf
+    assert _run17(tmp_path / "a", {"fork": _FORK_OK, "stray": _LEAF_OK}).startswith("FAIL:")
+    # the leaf is there but holds something else, and the token sits in the stray: still no link
+    assert _run17(tmp_path / "b", {"fork": _FORK_OK, "leaf": [("text", "something else")], "stray": _LEAF_OK}).startswith("FAIL:")
+    # both: the linked one carries the token, a stray beside it does not matter
+    assert _run17(tmp_path / "c", {"fork": _FORK_OK, "leaf": _LEAF_OK, "stray": [("text", "x")]}).startswith("PASS:")
+    # a dispatch result that names no agent cannot be linked to anything
+    anonymous = [("call", ("t2", "Agent")), ("result", ("t2", False)), ("text", "FORK-PARENT-OK-17")]
+    verdict = _run17(tmp_path / "d", {"fork": anonymous, "leaf": _LEAF_OK})
+    assert verdict.startswith("FAIL:") and "agent id" in verdict
+    # an ERRORED dispatch that names an agent links nothing
+    errored = [("call", ("t2", "Agent")), ("result", ("t2", True, "leaf")), ("text", "FORK-PARENT-OK-17")]
+    assert _run17(tmp_path / "e", {"fork": errored, "leaf": _LEAF_OK}).startswith("FAIL:")
+    # the id may come in the entry's toolUseResult, as a synchronous result carries it
+    by_field = [("call", ("t2", "Agent")), ("result_field", ("t2", "leaf")), ("text", "FORK-PARENT-OK-17")]
+    assert _run17(tmp_path / "f", {"fork": by_field, "leaf": _LEAF_OK}).startswith("PASS:")
+    # an id that is only a prefix of the transcript's id is not that transcript
+    assert _run17(tmp_path / "g", {"fork": _FORK_OK, "leaf2": _LEAF_OK}).startswith("FAIL:")
 
 
 def test_scenario_17_cannot_needs_a_toolsearch_attempt_and_no_dispatch(tmp_path: pathlib.Path) -> None:

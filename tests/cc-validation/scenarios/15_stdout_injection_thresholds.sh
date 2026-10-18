@@ -93,6 +93,43 @@ control_dead_hook() {
     esac
 }
 
+# Positive control (nexus-ijate): 15a-d all read NONE live, so the VISIBLE branch of the reading
+# (the subagent reports the whole marker AND the log shows the hook finished AND context accepted)
+# had only unit coverage. 15f registers a hook that DOES inject, the JSON additionalContext form
+# scenario 02 proves, with the marker on the command line (the reading needs it in the command)
+# and not in the script. The leg passes only if the reading comes out VISIBLE. A NOT-VISIBLE here
+# means either that JSON stopped injecting (read 02) or that the reading cannot see an injection;
+# either way a NONE from 15a-d would be worth nothing.
+control_live_injection() {
+    local label="15f" marker="STDOUT-15F-MARKER-H5N"
+    cat > "$TEST_HOME/.claude/hook_inject_15f.py" <<'EOF'
+#!/usr/bin/env python3
+import json, sys
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "SubagentStart",
+      "additionalContext": "Positive control for scenario 15. Marker: " + sys.argv[1]}}))
+EOF
+    chmod +x "$TEST_HOME/.claude/hook_inject_15f.py"
+    _s15_session "$label" "python3 $TEST_HOME/.claude/hook_inject_15f.py $marker" "$marker" ""
+    case "$S15_READING" in
+        VISIBLE)
+            echo "    [$label] $marker VISIBLE"
+            pass "[$label] positive control: a hook that injects (JSON additionalContext) read VISIBLE (the subagent reported the whole marker; the debug log shows the hook finished and its context accepted)"
+            result_visible=1 ;;
+        NOT-VISIBLE)
+            echo "    [$label] $marker NOT-VISIBLE"
+            fail "[$label] positive control failed: a hook that injects JSON additionalContext read NOT-VISIBLE (the subagent answered NONE and no context was accepted): either JSON stopped injecting (see 02) or the reading cannot see an injection, and then the NONE of 15a-d proves nothing"
+            result_visible=-1 ;;
+        MISMATCH*)
+            echo "    [$label] $marker MISMATCH"
+            fail "[$label] positive control failed: ${S15_READING#MISMATCH }"
+            result_visible=-1 ;;
+        *)
+            echo "    [$label] $marker INDETERMINATE"
+            fail "[$label] positive control failed: ${S15_READING#INDETERMINATE }"
+            result_visible=-1 ;;
+    esac
+}
+
 # ── 15a: single-line echo, single token (matches scenario 01 — control)
 scenario "15a single_token: echo 'TOKEN' (single line, single token)"
 probe_inject "15a" "echo 'STDOUT-15A-MARKER-Q9X'" "STDOUT-15A-MARKER-Q9X"
@@ -122,9 +159,16 @@ scenario "15e dead_hook_control: a NONE from a hook that never ran must be refus
 control_dead_hook
 scenario_end
 
+# ── 15f: positive control, a hook that does inject; the reading must be VISIBLE
+scenario "15f live_injection_control: a hook that injects JSON additionalContext must read VISIBLE"
+control_live_injection
+visible_15f=$result_visible
+scenario_end
+
 echo ""
 echo "    ──────────── 15 verdict ────────────"
 echo "    15a single token visible:    $visible_15a"
 echo "    15b single line prose:       $visible_15b"
 echo "    15c multi-line printf:       $visible_15c"
 echo "    15d two echoes:              $visible_15d"
+echo "    15f injecting hook (control): $visible_15f  (1 = VISIBLE was read, as it must be)"

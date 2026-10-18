@@ -51,16 +51,19 @@ cc_wait_subagent_reply "FORK-PARENT-OK-17|NESTED-SPAWN-BLOCKED-17" 240 || true
 # back without is_error, the nested token in a transcript that made no such call (the
 # leaf agent's own, never the fork's), and for BLOCKED whether the fork tried ToolSearch
 # and never called the tool. Only this scenario's transcripts are read (reset_scenario_state
-# clears the earlier scenarios').
+# clears the earlier scenarios'). nexus-ijate: the nested token must also sit in the transcript
+# of the agent THE DISPATCH STARTED, by id: the fork's Agent result names it ("agentId: <id>")
+# and the leaf's transcript is agent-<id>.jsonl, so a token in some other agent's transcript,
+# or a dispatch result that names no agent, is not evidence however the reset behaved.
 REPLIES17="$(cc_subagent_replies || true)"
 FACTS17="$(cc_nested_dispatch_facts "NESTED-AGENT-OK-17" "NESTED-SPAWN-BLOCKED-17" || true)"
 fact17() { sed -n "s/^$1=//p" <<<"$FACTS17"; }
 DISPATCHED17="$(fact17 dispatched)"; NESTED17="$(fact17 nested_elsewhere)"
 BLOCKED17="$(fact17 blocked)"; SEARCHED17="$(fact17 blocked_searched)"; BLOCKEDCALL17="$(fact17 blocked_dispatched)"
-TOOLS17="$(fact17 tools)"
+TOOLS17="$(fact17 tools)"; IDS17="$(fact17 dispatch_ids)"; UNLINKED17="$(fact17 nested_unlinked)"
 
 if [[ "$DISPATCHED17" == "1" && "$NESTED17" == "1" ]]; then
-    pass "forked subagent CAN spawn nested subagents (a subagent's Task/Agent call came back without error, and the nested token is in another subagent's own transcript) → context:fork viable for orchestrator skills"
+    pass "forked subagent CAN spawn nested subagents (a subagent's Task/Agent call came back without error and named the agent it started, ${IDS17}, and the nested token is in that agent's own transcript) → context:fork viable for orchestrator skills"
 elif [[ "$BLOCKED17" == "1" ]]; then
     if [[ "$SEARCHED17" == "1" && "$BLOCKEDCALL17" != "1" ]]; then
         pass "forked subagent CANNOT spawn nested subagents (it tried ToolSearch and never called the Task/Agent tool) → context:fork unsuitable for skills that use Agent tool"
@@ -70,7 +73,14 @@ elif [[ "$BLOCKED17" == "1" ]]; then
         fail "a subagent answered NESTED-SPAWN-BLOCKED-17 without trying ToolSearch to load the deferred Task/Agent tool (tools called by subagents: ${TOOLS17:-none}): the model giving up, not the tool being unavailable"
     fi
 elif grep -qE "NESTED-AGENT-OK-17" <<<"$REPLIES17"; then
-    fail "a subagent reply carries the nested token but there is no successful Task/Agent call in a subagent transcript plus the token in a different one (dispatched=${DISPATCHED17:-?}, nested_elsewhere=${NESTED17:-?}; tools called by subagents: ${TOOLS17:-none}): not evidence of a nested spawn"
+    if [[ "$DISPATCHED17" == "1" && -z "$IDS17" ]]; then
+        why17="the successful dispatch's result names no agent id, so the token cannot be linked to the agent it started"
+    elif [[ "$UNLINKED17" == "1" ]]; then
+        why17="the token is in the transcript of an agent no successful dispatch started (dispatch ids: ${IDS17:-none})"
+    else
+        why17="there is no successful Task/Agent call in a subagent transcript plus the token in the transcript of the agent it started"
+    fi
+    fail "a subagent reply carries the nested token but ${why17} (dispatched=${DISPATCHED17:-?}, nested_elsewhere=${NESTED17:-?}; tools called by subagents: ${TOOLS17:-none}): not evidence of a nested spawn"
 else
     fail "indeterminate — neither NESTED-AGENT-OK-17 nor NESTED-SPAWN-BLOCKED-17 in any subagent reply"
     echo "$REPLIES17" | tail -5 | sed 's/^/    | /'

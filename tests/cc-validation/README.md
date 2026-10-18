@@ -361,7 +361,8 @@ that does not enforce permissions.
 scenarios 06 and 07 and updates `docs/tables/cc-version-answers.toml` (add the new
 version's rows, or read why a recorded answer changed before touching it). A bump with no
 re-run leaves the table silent about the new build, so 06 and 07 are what announce it:
-an unrecorded version prints the INFO line, and a recorded one whose answer flipped FAILS.
+an unrecorded version prints the INFO line, a recorded one whose answer flipped FAILS, and so does a
+run that cannot read its Claude Code version at all ("unknown").
 Run them on every bump.
 
 ### Findings that are not version-sensitive
@@ -530,11 +531,17 @@ and the pane also prints a hook's own output (seen live). Scenario 17 reads what
 subagents DID, not what they wrote (`cc_nested_dispatch_facts`, `lib/agent_facts.py`):
 CAN needs a Task/Agent call whose result came back without `is_error` AND the nested
 token in a transcript that made no such call (the leaf agent's, never the fork's);
-CANNOT needs a `ToolSearch` call and no Task/Agent call in the fork's transcript. Scenarios
+CANNOT needs a `ToolSearch` call and no Task/Agent call in the fork's transcript. The token
+must sit in the transcript of the agent the dispatch STARTED, by id: the Agent result names it
+(`agentId: <id>`) and the leaf's transcript is `agent-<id>.jsonl`; a token in any other
+transcript, or a result that names no agent, fails (nexus-ijate). Scenarios
 01 and 15 (plain stdout) read the subagent's answer AND the debug log, which must agree
 (`cc_injection_reading`, `lib/debug_log.py`): NONE passes only with the hook's
 finished-with-status-0 line and no accepted `additionalContext`, VISIBLE only with both; 15
-withholds the marker's last three characters from its prompt, as 01-04 do. Scenarios 21, 24
+withholds the marker's last three characters from its prompt, as 01-04 do. 15e is the negative
+control (a hook that never runs must not read as NONE); 15f is the positive control (nexus-ijate):
+a hook that injects JSON `additionalContext` must read VISIBLE, so the VISIBLE branch has a live
+leg (15a-d all read NONE). Run it with `container/run.sh --scenario 15` on chas. Scenarios 21, 24
 and 25 read the expanded slash command out of the main session's transcript
 (`cc_session_user_text`, `cc_command_render_check`): the user turn Claude Code sent to the
 model must carry the injection's own output, whatever the model then says about it; 21b is

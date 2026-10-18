@@ -24,17 +24,46 @@ import re
 import sys
 
 
+# A debug-log record starts on a line that begins with an ISO timestamp, a ``[LEVEL]`` tag, or
+# ``Hook``/``Hooks`` (the older, bare shape). A hook command can span lines, so its continuation
+# lines belong to the record they follow; they are not record starts.
+_RECORD_START = re.compile(r"^(?:\d{4}-\d{2}-\d{2}T\S+ |\[[A-Z]+\] |Hooks?[ :])", re.M)
+_HEAD = r"(?:\d{4}-\d{2}-\d{2}T\S+ )?(?:\[[A-Z]+\] )?"
+_MAX_COMMAND = 2000
+
+
+def _records(text: str) -> list[str]:
+    starts = [m.start() for m in _RECORD_START.finditer(text)]
+    if not starts or starts[0] != 0:
+        starts.insert(0, 0)
+    return [text[a:b] for a, b in zip(starts, starts[1:] + [len(text)])]
+
+
 def finished(text: str, event: str, needle: str) -> bool:
-    pattern = (
-        rf"Hooks: {re.escape(event)}[^\[\n]*\[[^\]]*?{re.escape(needle)}[^\]]*\]"
-        r" finished with status 0"
+    """A ``Hooks: <Event>:<matcher> [<command>] finished with status 0`` record whose command holds
+    <needle>. The command is everything up to the ``] finished with status 0`` of its own record, so
+    a ']' inside it does not end it."""
+    pattern = re.compile(
+        rf"{_HEAD}Hooks: {re.escape(event)}[^\[\n]*\[(.{{0,{_MAX_COMMAND}}}?)\] finished with status 0\b", re.S
     )
-    return re.search(pattern, text) is not None
+    return any((m := pattern.match(rec)) is not None and needle in m.group(1) for rec in _records(text))
 
 
 def context_sizes(text: str, event: str) -> list[int]:
-    pattern = rf"Hook {re.escape(event)} \([^)]{{0,2000}}\) provided additionalContext \(([1-9][0-9]*) chars\)"
-    return [int(m) for m in re.findall(pattern, text)]
+    """The sizes of the non-empty additionalContext accepted from <event> hooks. A record is
+    ``Hook <Event> (<command>) provided additionalContext (N chars)``: the command is everything
+    between the first '(' and the ``) provided additionalContext (N chars)`` that ends a line of
+    the same record, so a ')' inside the command (or a look-alike of the suffix in the middle of
+    a line) does not end it, and a record never reads on into the next one."""
+    pattern = re.compile(
+        rf"{_HEAD}Hook {re.escape(event)} \(.{{0,{_MAX_COMMAND}}}?\) provided additionalContext \(([0-9]+) chars\)[ \t]*$",
+        re.S | re.M,
+    )
+    sizes = []
+    for rec in _records(text):
+        if (m := pattern.match(rec)) is not None and int(m.group(1)) > 0:
+            sizes.append(int(m.group(1)))
+    return sizes
 
 
 def main(argv: list[str]) -> int:

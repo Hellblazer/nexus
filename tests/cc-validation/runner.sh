@@ -240,8 +240,14 @@ _cc_fail() { cc_note "$1" "FAIL: $2"; fail "$2"; }
 #   recorded version, same answer   pass, saying so
 #   recorded version, other answer  FAIL "answer changed since <version>"
 #   unrecorded version              INFO "record this version's answer", then pass
+#   unreadable version ("unknown")  FAIL: no version, so neither a recorded nor a new answer
+#                                   can be claimed (nexus-ijate)
 cc_version_check() {
     local scenario="$1" ver="$2" answer="$3" what="$4" out verdict since observed
+    if [[ -z "$ver" || "$ver" == "unknown" ]]; then
+        _cc_fail "$scenario" "${scenario}: the Claude Code version could not be read (claude --version printed nothing and no claude-version.txt): ${what}; with no version the answer cannot be compared with docs/tables/cc-version-answers.toml"
+        return 0
+    fi
     local table="${CC_VAL_VERSION_TABLE:-$REPO_ROOT/docs/tables/cc-version-answers.toml}"
     if ! out="$(python3 -I "$REPO_ROOT/tests/cc-validation/lib/version_answers.py" lookup "$table" "$scenario" "$ver" "$answer" 2>&1)"; then
         _cc_fail "$scenario" "${scenario}: observed on Claude Code ${ver}: ${what}; the version-answer table could not be read: ${out}"
@@ -771,10 +777,10 @@ cc_hook_context_chars() {
     plugin="${id%@*}"
     [[ -n "$id" && -n "$plugin" && -n "$hook" ]] || return 1
     [[ -n "${CC_DEBUG_FILE:-}" && -f "$CC_DEBUG_FILE" ]] || return 1
-    lines="$(grep -E "Hook ${event} \(plugin:${plugin}:[^)]*${hook}[^)]*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE" || true)"
+    lines="$(grep -E "Hook ${event} \(plugin:${plugin}:.*${hook}.*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE" || true)"
     if [[ -z "$lines" ]] && cc_hook_ran "$event" "$id" "$hook"; then
         # command hooks only: another plugin's mcp_tool line names its plugin and is not this one's
-        lines="$(grep -E "Hook ${event} \([^)]*${hook}[^)]*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE" | grep -vF " (plugin:" || true)"
+        lines="$(grep -E "Hook ${event} \(.*${hook}.*\) provided additionalContext \([1-9][0-9]* chars\)" "$CC_DEBUG_FILE" | grep -vF " (plugin:" || true)"
     fi
     [[ -n "$lines" ]] || return 1
     sed -E 's/.*\(([1-9][0-9]*) chars\)[[:space:]]*$/\1/' <<<"$lines"

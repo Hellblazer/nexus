@@ -11,13 +11,19 @@ Nothing here starts Claude Code.
 """
 from __future__ import annotations
 
+import importlib.util
+import itertools
 import json
 import os
 import pathlib
 import re
 import subprocess
+import tomllib
 
 import pytest
+
+from nexus.tables.load import load_table
+from nexus.tables.resolve import resolve
 
 from tests.test_cc_validation_plugin_install import (
     CCV,
@@ -209,8 +215,6 @@ def test_cc_expanded_command_has_return_codes(tmp_path: pathlib.Path) -> None:
 
 
 def test_debug_log_reader_handles_a_command_that_spans_lines() -> None:
-    import importlib.util
-
     spec = importlib.util.spec_from_file_location("debug_log", LIB / "debug_log.py")
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
@@ -227,6 +231,64 @@ def test_debug_log_reader_handles_a_command_that_spans_lines() -> None:
     assert mod.context_sizes(log, "SessionStart") == []
     # a hook that printed nothing leaves only the finished line
     assert mod.finished("Hooks: SubagentStart:x [echo 'M-K7Q3'] finished with status 0 (3ms)\n", "SubagentStart", "M-K7Q3")
+
+
+def _debug_log_module():
+    spec = importlib.util.spec_from_file_location("debug_log", LIB / "debug_log.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _hook_lines(event: str, command: str, chars: int, ts: str = "2026-10-18T00:27:50.560Z") -> str:
+    return (
+        f"{ts} [DEBUG] Hooks: {event}:general-purpose [{command}] finished with status 0 (30ms)\n"
+        f"{ts} [DEBUG] Hook {event} ({command}) provided additionalContext ({chars} chars)\n"
+    )
+
+
+def test_debug_log_reader_parses_a_command_that_holds_parentheses_and_brackets() -> None:
+    """nexus-ijate: the accepted-context pattern stopped at the first ')' of the command, so a hook
+    whose command held one read as 'accepted no context' and the NONE branch passed on it. The
+    line is parsed from its real structure: the command is whatever sits between `Hook <Event> (`
+    and the `) provided additionalContext (N chars)` that ends the record."""
+    mod = _debug_log_module()
+    for command in (
+        "echo \"(marker) STDOUT-X\"",
+        "printf 'a)b\\nSTDOUT-X (c)\\n'",
+        "( echo STDOUT-X ) | cat",
+        "echo 'STDOUT-X [done]'; true",
+        "echo a ) provided additionalContext (9 chars",   # an ill-formed look-alike inside the command
+    ):
+        log = _hook_lines("SubagentStart", command, 61)
+        assert mod.context_sizes(log, "SubagentStart") == [61], command
+        assert mod.finished(log, "SubagentStart", "STDOUT-X") == ("STDOUT-X" in command), command
+    # the command spans lines AND holds ')'
+    multi = "printf 'one (1)\nSTDOUT-X (two)\nthree'"
+    log = _hook_lines("SubagentStart", multi, 33)
+    assert mod.context_sizes(log, "SubagentStart") == [33]
+    assert mod.finished(log, "SubagentStart", "STDOUT-X")
+
+
+def test_debug_log_reader_keeps_one_record_from_swallowing_the_next() -> None:
+    """The records are told apart: an empty injection from one hook must not let the pattern run
+    on into the next record and report that record's size under this one, and another event's
+    record is never read as this event's."""
+    mod = _debug_log_module()
+    empty_then_real = _hook_lines("SubagentStart", "echo (a)", 0) + _hook_lines("SubagentStart", "echo (b)", 7)
+    assert mod.context_sizes(empty_then_real, "SubagentStart") == [7]
+    other_event = _hook_lines("SubagentStart", "echo (a)", 0) + _hook_lines("SessionStart", "echo (b)", 7)
+    assert mod.context_sizes(other_event, "SubagentStart") == []
+    assert mod.context_sizes(other_event, "SessionStart") == [7]
+    # a hook record that never logged an acceptance does not borrow a later record's
+    no_accept = "2026-10-18T00:27:50.000Z [DEBUG] Hook SubagentStart (echo (a)) returned nothing\n" + _hook_lines("SessionStart", "echo (b)", 7)
+    assert mod.context_sizes(no_accept, "SubagentStart") == []
+    # two accepted records, both counted, in order
+    two = _hook_lines("SubagentStart", "echo (a)", 5) + _hook_lines("SubagentStart", "echo (b)", 9)
+    assert mod.context_sizes(two, "SubagentStart") == [5, 9]
+    # the old unprefixed shape (no timestamp, no level) still reads
+    assert mod.context_sizes("Hook SubagentStart (python3 /x/h.py) provided additionalContext (61 chars)\nnoise\n", "SubagentStart") == [61]
 
 
 def test_cc_cmd_hook_finished_rejects_a_needle_with_regex_or_shell_characters(tmp_path: pathlib.Path) -> None:
@@ -268,10 +330,23 @@ def test_the_version_table_has_three_outcomes() -> None:
     # an unrecorded version, either answer: INFO "record this version's answer", and a pass
     for scenario, answers in (("06", ("matches", "does-not-match")), ("07", ("preempts", "fires-regardless"))):
         for answer in answers:
-            for version in ("2.1.303", "3.0.0", "unknown"):
+            for version in ("2.1.303", "3.0.0"):
                 verdict, out = _check(version, scenario, answer)
                 assert verdict.startswith("PASS:") and f"observed on Claude Code {version}" in verdict
                 assert "INFO: no answer is recorded for Claude Code" in out and "record this version's answer" in out
+
+
+def test_an_unreadable_claude_version_fails_both_answers() -> None:
+    """nexus-ijate: "unknown" (claude --version empty and no claude-version.txt) is not an
+    unrecorded version, it is no version: a run on an unreadable build cannot say it saw a
+    recorded answer or a new one, so 06 and 07 fail instead of passing with an INFO line."""
+    for scenario, answers in (("06", ("matches", "does-not-match")), ("07", ("preempts", "fires-regardless"))):
+        for answer in answers:
+            for version in ("unknown", ""):
+                verdict, out = _check(version, scenario, answer)
+                assert verdict.startswith("FAIL:"), (scenario, answer, version, out)
+                assert "Claude Code version could not be read" in verdict, verdict
+                assert "no answer is recorded" not in out and "record this version's answer" not in out
 
 
 def test_the_version_table_is_read_from_the_table_not_from_the_script(tmp_path: pathlib.Path) -> None:
@@ -303,12 +378,86 @@ def test_an_unreadable_table_fails_the_scenario(tmp_path: pathlib.Path) -> None:
     assert verdict.startswith("FAIL:") and "could not be read" in verdict
 
 
+def _version_answers_module():
+    spec = importlib.util.spec_from_file_location("version_answers", LIB / "version_answers.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _parity(nexus_path: pathlib.Path, harness_path: pathlib.Path) -> tuple[list[str], set[str], int]:
+    """Resolve every assignment of the table's dimensions through nexus.tables.resolve (read from
+    <nexus_path>) and through lib/version_answers.py (read from <harness_path>). Returns the
+    disagreements, the ids of the rows the nexus resolution reached, and how many assignments were
+    examined. The harness lib is stdlib-only because the container has no nexus package; it
+    reimplements guard resolution, and this is the check that the two keep agreeing."""
+    va = _version_answers_module()
+    table = load_table(nexus_path)
+    names = sorted(table.dimensions)
+    disagreements: list[str] = []
+    reached: set[str] = set()
+    examined = 0
+    for values in itertools.product(*(table.dimensions[n].domain for n in names)):
+        assignment = dict(zip(names, values))
+        scenario, version = assignment["scenario"], assignment["version"]
+        answer = assignment[f"answer_{scenario}"]
+        examined += 1
+        res = resolve(table, assignment)
+        try:
+            theirs: object = va.lookup(str(harness_path), scenario, version, answer)
+        except SystemExit as exc:   # the harness found no single row
+            theirs = f"harness refused: {exc}"
+        if res.row is None:
+            disagreements.append(f"{assignment}: nexus refused ({res.refusal}), harness said {theirs}")
+            continue
+        reached.add(res.row.id)
+        out = res.row.outcome
+        ours = (out["verdict"], out.get("since", ""), out.get("observed", ""))   # type: ignore[index,union-attr]
+        if theirs != ours:
+            disagreements.append(f"{assignment}: nexus {ours}, harness {theirs}")
+    return disagreements, reached, examined
+
+
+def test_version_answers_resolves_every_row_of_the_shipped_table_as_nexus_tables_does() -> None:
+    """nexus-ijate: lib/version_answers.py reimplements guard resolution (stdlib only), so nothing
+    but this test says it still agrees with nexus.tables.resolve on the table it reads."""
+    disagreements, reached, examined = _parity(TABLE, TABLE)
+    assert not disagreements, disagreements
+    # non-vacuity: the whole product was examined and every row of the table was reached
+    table = load_table(TABLE)
+    assert examined == 16, examined
+    assert reached == {r.id for r in table.rows}, sorted({r.id for r in table.rows} - reached)
+    # a version the table does not list reads as "unrecorded" in the harness, as its domain value does in nexus
+    va = _version_answers_module()
+    assert va.lookup(str(TABLE), "06", "9.9.9", "matches") == va.lookup(str(TABLE), "06", "unrecorded", "matches")
+
+
+def test_the_version_answers_parity_check_catches_a_divergence(tmp_path: pathlib.Path) -> None:
+    """Negative control: the same comparison, over a harness table that differs from nexus's in one
+    emit and one guard, must report both (a parity check that passes on a diverged copy proves nothing)."""
+    text = TABLE.read_text(encoding="utf-8")
+    flipped = tmp_path / "flipped.toml"
+    old_emit = 'emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-18" }'
+    assert old_emit in text
+    flipped.write_text(text.replace(old_emit, old_emit.replace('"agrees"', '"changed"'), 1))
+    found, _, _ = _parity(TABLE, flipped)
+    # one row, reached by both values of the other scenario's answer
+    assert found and all("'agrees'" in f and "'changed'" in f for f in found), found
+    narrowed = tmp_path / "narrowed.toml"
+    old_guard = 'guard = { version = "unrecorded", answer_06 = ["matches", "does-not-match"] }'
+    assert old_guard in text
+    narrowed.write_text(text.replace(old_guard, 'guard = { version = "unrecorded", answer_06 = "matches" }', 1))
+    found, _, _ = _parity(TABLE, narrowed)
+    assert len(found) >= 1 and any("harness refused" in f for f in found), found
+    # and the table both sides read agreeing yields nothing, so the control is not just always-red
+    assert _parity(TABLE, TABLE)[0] == []
+
+
 def test_the_container_pin_is_a_recorded_version_in_the_table() -> None:
     """A pin bump without a table update fails here, as well as printing INFO in 06 and 07."""
     pin = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", (CCV / "container" / "Dockerfile").read_text(encoding="utf-8"), re.M)
     assert pin, "no ARG CLAUDE_CODE_VERSION in the Dockerfile"
-    import tomllib
-
     table = tomllib.loads(TABLE.read_text(encoding="utf-8"))
     recorded = [v for v in table["dimensions"]["version"]["domain"] if v != "unrecorded"]
     assert pin.group(1) in recorded, f"pin {pin.group(1)} has no rows in docs/tables/cc-version-answers.toml: re-run 06 and 07 and record its answers"
