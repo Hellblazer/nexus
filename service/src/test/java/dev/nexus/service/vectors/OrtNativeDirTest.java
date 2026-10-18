@@ -202,10 +202,9 @@ class OrtNativeDirTest {
         ExecutorService pool = Executors.newFixedThreadPool(n);
         try {
             for (int t = 0; t < trials; t++) {
-                // ensure() creates the root rwxr-xr-x, as it does in production. A root made here with
-                // Files.createDirectory inherits the host umask, and a 0002 umask (Ubuntu, lab-run on
-                // chas) makes it group-writable, which the owner check rightly refuses.
-                Path root = base.resolve("trial-" + t);
+                // Made with the host umask on purpose: a 0002 umask (Ubuntu, lab-run on chas) gives
+                // rwxrwxr-x, which ensure() tightens because the current user owns it (nexus-bk7nu).
+                Path root = Files.createDirectory(base.resolve("trial-" + t));
                 Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
                 assertThat(dir).as("trial %d: the first starter extracts", t).isNotNull();
                 Files.delete(lib(dir, "onnxruntime4j_jni"));
@@ -241,18 +240,96 @@ class OrtNativeDirTest {
                 "POSIX ownership and modes only");
     }
 
+    private static String mode(Path p) throws IOException {
+        return PosixFilePermissions.toString(Files.getPosixFilePermissions(p));
+    }
+
     @Test
-    void aGroupOrWorldWritableRootIsNotUsed(@TempDir Path root) throws Exception {
+    void aGroupWritableRootTheCurrentUserOwnsIsTightenedAndUsed(@TempDir Path root) throws Exception {
         assumePosix(root);
-        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwxrwx---"));
+        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwxrwxr-x"));
 
         OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
 
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+        assertThat(r.dir()).isNotNull();
+        assertThat(mode(root)).as("group write removed, nothing else changed").isEqualTo("rwxr-xr-x");
+        assertThat(lib(r.dir(), "onnxruntime")).isRegularFile();
+    }
+
+    @Test
+    void aWorldWritableRootTheCurrentUserOwnsIsTightenedAndKeepsItsOtherBits(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwxrwx-wx"));
+
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
+
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+        assertThat(mode(root)).isEqualTo("rwxr-x--x");
+    }
+
+    @Test
+    void aRootSomeoneElseOwnsIsNeverTightenedEvenWhenGroupWritable(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwxrwxr-x"));
+
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small(), "not-the-owner-of-this-dir");
+
         assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
         assertThat(r.dir()).isNull();
+        assertThat(mode(root)).as("a directory we do not own is left exactly as found").isEqualTo("rwxrwxr-x");
         assertThat(names(root)).as("nothing extracted into an untrusted root").isEmpty();
-        Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx----w-"));
-        assertThat(OrtNativeDir.ensure(root, OS, ARCH, small()).outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+    }
+
+    @Test
+    void aSymlinkedRootToAWritableDirectoryIsRefusedAndTheTargetIsNotChanged(@TempDir Path base) throws Exception {
+        assumePosix(base);
+        Path target = Files.createDirectory(base.resolve("target"));
+        Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rwxrwxr-x"));
+        Path link = Files.createSymbolicLink(base.resolve("link"), target);
+
+        OrtNativeDir.Result r = OrtNativeDir.ensure(link, OS, ARCH, small());
+
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+        assertThat(mode(target)).as("never chmod through a link").isEqualTo("rwxrwxr-x");
+        assertThat(names(target)).isEmpty();
+    }
+
+    @Test
+    void aFailedTightenIsRefusedAndTheModeIsLeftAsFound(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxrwxr-x"));
+
+        boolean trusted = OrtNativeDir.trusted(dir, System.getProperty("user.name"), (d, perms) -> {
+            throw new IOException("chmod refused");
+        });
+
+        assertThat(trusted).isFalse();
+        assertThat(mode(dir)).isEqualTo("rwxrwxr-x");
+    }
+
+    @Test
+    void aTightenThatDoesNotTakeEffectIsRefusedByTheRecheck(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxrwxr-x"));
+        int[] calls = {0};
+
+        boolean trusted = OrtNativeDir.trusted(dir, System.getProperty("user.name"), (d, perms) -> calls[0]++);
+
+        assertThat(calls[0]).as("tightening was attempted once").isEqualTo(1);
+        assertThat(trusted).as("a chmod that reported success but changed nothing is not believed").isFalse();
+    }
+
+    @Test
+    void aWorldWritableRootWithAnUnknownUserIsNotTightened(@TempDir Path dir) throws Exception {
+        assumePosix(dir);
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxrwxrwx"));
+
+        // user == null means the owner cannot be proved; the owner check is skipped, so tightening is too.
+        assertThat(OrtNativeDir.trusted(dir, null, (d, perms) -> {
+            throw new AssertionError("must not tighten a directory whose owner is unproven");
+        })).isFalse();
+        assertThat(mode(dir)).isEqualTo("rwxrwxrwx");
     }
 
     @Test
@@ -268,7 +345,7 @@ class OrtNativeDirTest {
     }
 
     @Test
-    void aWritableFinalDirectoryIsNeitherLoadedNorReplaced(@TempDir Path root) throws Exception {
+    void aWritableFinalDirectoryTheCurrentUserOwnsIsTightenedAndReusedInPlace(@TempDir Path root) throws Exception {
         assumePosix(root);
         Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
         Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxrwxrwx"));
@@ -276,10 +353,27 @@ class OrtNativeDirTest {
 
         OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
 
-        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.REUSED);
+        assertThat(r.dir()).isEqualTo(dir);
+        assertThat(mode(dir)).isEqualTo("rwxr-xr-x");
         assertThat(Files.readAttributes(dir, BasicFileAttributes.class).fileKey())
-                .as("a directory we do not trust is left exactly as found").isEqualTo(key);
+                .as("tightened in place, not replaced").isEqualTo(key);
         assertThat(lib(dir, "onnxruntime")).isRegularFile();
+    }
+
+    @Test
+    void aFinalDirectoryThatIsASymlinkToAWritableDirectoryIsNeitherLoadedNorTightened(@TempDir Path root)
+            throws Exception {
+        assumePosix(root);
+        Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+        Path moved = Files.move(dir, root.resolve("elsewhere"));
+        Files.setPosixFilePermissions(moved, PosixFilePermissions.fromString("rwxrwxrwx"));
+        Files.createSymbolicLink(dir, moved);
+
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small());
+
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.UNAVAILABLE);
+        assertThat(mode(moved)).as("never chmod through a link").isEqualTo("rwxrwxrwx");
     }
 
     @Test

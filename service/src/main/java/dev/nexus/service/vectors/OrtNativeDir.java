@@ -25,6 +25,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -62,8 +63,12 @@ import java.util.function.UnaryOperator;
  * be created or written, the property is left unset and ORT behaves exactly as before.
  *
  * <p><b>Trust (POSIX).</b> A shared native library is code the engine loads, so the root and the
- * version directory must be owned by the current user and not writable by group or others; otherwise
- * this warns and returns {@link Outcome#UNAVAILABLE} (ORT's old temp-directory path). The stage keeps
+ * version directory must be owned by the current user and not writable by group or others. One the
+ * current user owns that is group- or world-writable (a {@code mkdir} under umask 0002, Ubuntu's
+ * default) is tightened ({@code g-w,o-w}, nothing else), re-read and re-checked, and used if the
+ * re-check passes; the change is logged as {@code ort_native_dir_tightened}. Anything else (owned by
+ * someone else, a symbolic link, a failed or ineffective chmod) warns and returns
+ * {@link Outcome#UNAVAILABLE} (ORT's old temp-directory path). The stage keeps
  * the mode {@code createTempDirectory} gave it (0700), so a directory one user extracted is not
  * reusable by another: a cache shared across users falls back per user. Windows skips the check.
  *
@@ -342,11 +347,40 @@ public final class OrtNativeDir {
         }
     }
 
+    /** Removes group and other write from a directory; the test seam for {@link #trusted}. */
+    @FunctionalInterface
+    interface Tightener {
+        void tighten(Path dir, Set<PosixFilePermission> current) throws IOException;
+    }
+
+    /** The real chmod: {@code g-w,o-w}, never through a symbolic link. */
+    private static void chmodNoGroupOtherWrite(Path dir, Set<PosixFilePermission> current) throws IOException {
+        PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class,
+                LinkOption.NOFOLLOW_LINKS);
+        if (view == null) {
+            throw new IOException("no POSIX attribute view");
+        }
+        Set<PosixFilePermission> tightened = EnumSet.copyOf(current);
+        tightened.remove(PosixFilePermission.GROUP_WRITE);
+        tightened.remove(PosixFilePermission.OTHERS_WRITE);
+        view.setPermissions(tightened);
+    }
+
+    /** {@link #trusted(Path, String, Tightener)} with the real chmod. */
+    static boolean trusted(Path dir, String user) {
+        return trusted(dir, user, OrtNativeDir::chmodNoGroupOtherWrite);
+    }
+
     /**
      * POSIX: {@code dir} must be owned by {@code user} and not writable by group or others, or a
-     * planted library could be loaded into the engine. Other platforms: true. A false return warns.
+     * planted library could be loaded into the engine. A directory the current user owns that is
+     * group- or world-writable (a {@code mkdir} under umask 0002, Ubuntu's default) is tightened to
+     * remove those two write bits, then re-read and re-checked; it is trusted only if the re-check
+     * passes. A directory someone else owns, a symbolic link (never chmod through one), an unknown
+     * user (ownership unproven) and a failed or ineffective chmod are all refused. Other platforms:
+     * true. A false return warns.
      */
-    static boolean trusted(Path dir, String user) {
+    static boolean trusted(Path dir, String user, Tightener tightener) {
         PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
         if (view == null) {
             return true;
@@ -356,20 +390,38 @@ public final class OrtNativeDir {
             String owner = a.owner().getName();
             Set<PosixFilePermission> perms = a.permissions();
             boolean ownerOk = user == null || user.equals(owner);
-            boolean writable = perms.contains(PosixFilePermission.GROUP_WRITE)
-                    || perms.contains(PosixFilePermission.OTHERS_WRITE);
-            if (ownerOk && !writable) {
+            if (ownerOk && !writableByGroupOrOthers(perms)) {
                 return true;
             }
-            log.warn("event=ort_native_dir_untrusted dir=\"{}\" owner=\"{}\" expected_owner=\"{}\" mode={} "
+            String tightenNote = "";
+            if (user != null && user.equals(owner) && !Files.isSymbolicLink(dir)) {
+                try {
+                    tightener.tighten(dir, perms);
+                    PosixFileAttributes after = view.readAttributes();
+                    Set<PosixFilePermission> now = after.permissions();
+                    if (user.equals(after.owner().getName()) && !writableByGroupOrOthers(now)) {
+                        log.info("event=ort_native_dir_tightened dir=\"{}\" old_mode={} new_mode={}",
+                                dir, PosixFilePermissions.toString(perms), PosixFilePermissions.toString(now));
+                        return true;
+                    }
+                    tightenNote = " tighten=ineffective";
+                } catch (IOException | RuntimeException e) {
+                    tightenNote = " tighten=failed tighten_error=\"" + e + "\"";
+                }
+            }
+            log.warn("event=ort_native_dir_untrusted dir=\"{}\" owner=\"{}\" expected_owner=\"{}\" mode={}{} "
                             + "note=\"must be owned by the current user and not group- or world-writable; "
                             + "onnxruntime-java will extract into the temp directory on this start\"",
-                    dir, owner, user, PosixFilePermissions.toString(perms));
+                    dir, owner, user, PosixFilePermissions.toString(perms), tightenNote);
             return false;
         } catch (IOException e) {
             log.warn("event=ort_native_dir_untrusted dir=\"{}\" error=\"{}\"", dir, e.toString());
             return false;
         }
+    }
+
+    private static boolean writableByGroupOrOthers(Set<PosixFilePermission> perms) {
+        return perms.contains(PosixFilePermission.GROUP_WRITE) || perms.contains(PosixFilePermission.OTHERS_WRITE);
     }
 
     /**
