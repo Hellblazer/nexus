@@ -624,7 +624,7 @@ use, carrying the document's aspects and highlights with it.
    Voyage for new collections records `local.embed_model` or persists the key
    (`nx config set voyage_api_key --stdin`). That keeps Sam's Q1 rule (unset keeps
    keyed means Voyage; 2026-10-17) for a persisted key; narrowing "keyed" to a
-   persisted key is the author's decision. It closes a split:
+   persisted key is Sam's ruling (2026-10-17, gate round 2). It closes a split:
    `local_embed_model_is_voyage()` is False when no choice is recorded
    (`config.py:725-726`), so today a no-choice client with a key mints bge names
    while a keyed engine seeds the Voyage profile. The supervisor always passes
@@ -650,17 +650,24 @@ use, carrying the document's aspects and highlights with it.
    reranks every search with Voyage, including bge-only results; an engine whose
    profile is bge reranks with the cross-encoder even when keyed, and uses the
    key only to serve existing Voyage collections. A keyless engine uses the
-   cross-encoder. Under a degraded boot (Technical Design 2) the reranker follows
-   what the engine built (author's decision): a `voyage` profile with no key
-   reranks with the cross-encoder; with the bge files absent the engine builds
-   no ONNX component (Technical Design 1), so a keyed engine reranks with Voyage
-   even on a `bge` profile; keyless with no bge files is Technical Design 1's
-   boot failure. A cross-encoder whose own model files are missing degrades each
-   rerank with a warning, as today ("a not-yet-provisioned model degrades the
-   fused stage LOUD per request instead of failing boot", `Main.java:317-319`).
-   Nothing is sent to Voyage for a user who did not choose it, except rerank
-   text on a degraded `bge`-profile engine with no bge files, which serves only
-   Voyage collections.
+   cross-encoder. Under a degraded boot (Technical Design 2) the reranker still
+   follows the profile: a `voyage` profile with no key reranks with the
+   cross-encoder, and a `bge` profile never sends text to Voyage, with or without
+   the bge files (Sam, 2026-10-17, gate round 2). The engine builds the
+   cross-encoder whether or not it built the bge embedder: the cross-encoder
+   takes no embedder argument (`Main.java:334-335`: "new
+   dev.nexus.service.vectors.CrossEncoderReranker()"), its construction touches
+   no I/O (`CrossEncoderReranker.java:38-46`: "construction touches no I/O"), and
+   its files sit apart from the bge files (`CrossEncoderReranker.java:66`:
+   "/ms-marco-minilm-l6-v2/onnx/model.onnx"). Keyless with no bge files is
+   Technical Design 1's boot failure. A cross-encoder whose own model files are
+   missing, or that cannot load, skips the rerank with a warning, as today ("a
+   not-yet-provisioned model degrades the fused stage LOUD per request instead
+   of failing boot", `Main.java:328-330`). The admission gate the cross-encoder
+   shares is built at `Main.java:314` after the bge embedder; that it needs no
+   bge embedder is inferred, not read, and Phase 2 Step 4's test pins it.
+   Nothing is sent to Voyage for a user who did not choose it, and a `bge`-profile
+   engine sends no rerank text to Voyage.
 4. **Supervisor.** Pass the configured key regardless of `local.embed_model`
    when the engine binary the supervisor is about to spawn is at least the first
    dual tag, read from its install receipt (`read_installed_provenance`,
@@ -1315,9 +1322,9 @@ of the throughput for having none of these.
 
 - A keyed local install keeps serving its bge-768 collections.
 - A key the supervisor can find now always reaches an engine at or above the
-  first dual tag (Technical Design 4). A bge-profile engine with its bge files
-  still reranks locally (Technical Design 3), so the key causes Voyage traffic
-  only to embed for and search existing Voyage collections.
+  first dual tag (Technical Design 4). A bge-profile engine reranks
+  locally (Technical Design 3), with or without its bge files, so the key causes
+  Voyage traffic only to embed for and search existing Voyage collections.
 - The engine holds the bge model in memory on keyed installs that have it on
   disk, even if they use only Voyage (measured cost: Cross-Cutting Concerns,
   memory).
@@ -1535,8 +1542,11 @@ built, not only in the keyless branch (`Main.java:309`). **Test**:
 `StatusHandler` and `VersionHandler` tests for the dual shape; a test that a
 bge-profile engine with a key reranks with the cross-encoder and makes no Voyage
 rerank call; for the degraded boots, that a `voyage` profile with no key reranks
-with the cross-encoder and a keyed `bge` profile with no bge files reranks with
-Voyage and builds no ONNX component.
+with the cross-encoder; a keyed `bge` profile with no bge files builds the
+cross-encoder and no bge embedder, and makes no Voyage rerank call; the same
+engine with the cross-encoder files removed skips the rerank with a warning and
+still makes no Voyage rerank call; the shared admission gate is built with no bge
+embedder present.
 
 #### Step 5: Dual journey test
 
@@ -1792,8 +1802,10 @@ None open. Resolved by Sam on 2026-10-17 (T2
   serve, Voyage collections get 422 naming the key, and search reranks with the
   cross-encoder.
 - **Scenario**: `NX_EMBED_PROFILE=bge` with a key and no bge files — **Verify**:
-  the engine boots degraded naming the bge files, builds no ONNX component,
-  serves Voyage collections and reranks them with Voyage.
+  the engine boots degraded naming the bge files, builds no bge embedder, serves
+  Voyage collections, and search reranks with the cross-encoder and sends no
+  rerank text to Voyage; with the cross-encoder files removed it skips the rerank
+  with a warning and still sends none.
 - **Scenario**: no `local.embed_model` recorded, a key persisted in
   `config.yml` — **Verify**: the supervisor passes profile `voyage` and the
   client mints Voyage names; no `EmbeddingProfileMismatchError`.
@@ -1991,7 +2003,7 @@ round 1).
   whenever present to an engine at or above the first dual tag (Technical
   Design 4). Only a persisted key chooses the profile (Technical Design 2).
   Rotation is a service restart, as today. An ambient key on a bge profile
-  causes no rerank traffic while the bge files are present (Technical Design 3).
+  causes no rerank traffic (Technical Design 3).
 - **Memory management**: a keyed engine with bge files holds the bge model
   (about 416 MB on disk, `Bge768Embedder.java:243-250`) and the cross-encoder
   (about 87 MB, 210-research-11) beside the Voyage clients. The dual process's
