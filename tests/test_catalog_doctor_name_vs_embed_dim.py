@@ -415,7 +415,7 @@ def test_the_check_lists_collections_once_however_many_it_probes(t2_service_env)
     from nexus.catalog.factory import make_catalog_writer
 
     client = hvc.HttpVectorClient(tenant=t2_service_env)
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     names = [f"knowledge__z0us-{i}__bge-base-en-v15-768__v1" for i in range(6)]
     for i, name in enumerate(names):

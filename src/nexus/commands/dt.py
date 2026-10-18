@@ -171,7 +171,7 @@ def _stamp_page_gap(uuid: str, missing: list[int]) -> bool:
     reader = make_catalog_reader()
     if reader is None:
         return False
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     try:
         entry = reader.by_source_uri(f"x-devonthink-item://{uuid}")
         if entry is None:
@@ -408,10 +408,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
             uuid=uuid,
         )
         return False
-    # RDR-146 P2 (nexus-5p2ci.12): foreground, user-initiated dt write —
-    # the latency-sensitive op #1046 showed starved by background indexing.
-    # Tag interactive so the daemon prioritises it over a batch index burst.
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     try:
         # DEVONthink URI FIRST, file_path only as a fallback.
         #
@@ -521,8 +518,7 @@ def _link_semantic_record(uuid: str) -> bool:
     reader = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
     if reader is None:
         return False
-    # RDR-146 P2: foreground dt write — interactive priority (see above).
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     try:
         entry = reader.by_source_uri(dt_uri)
         if entry is None:
@@ -1813,9 +1809,8 @@ def incorporate_cmd(uuid: str) -> None:
             )
         tumbler = entry.tumbler
         # RDR-146 P1.2: generate_dt_links reads via the reader, writes
-        # (link_if_absent) via the write-only daemon proxy. Foreground,
-        # user-initiated: interactive priority (the #1046 starvation).
-        writer = make_catalog_writer(priority="interactive")
+        # (link_if_absent) via the write-only proxy.
+        writer = make_catalog_writer()
         links = generate_dt_links(cat, tumbler, uuid, writer=writer)
         writeback = writeback_record(uuid, str(tumbler))
         click.echo(f"tumbler:   {tumbler}")

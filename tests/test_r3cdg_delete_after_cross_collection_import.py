@@ -90,7 +90,7 @@ def _assert_home_gone_copy_kept(reader, client, *, src, dst, uri, chash) -> None
 def test_cli_delete_by_title_after_cross_collection_import(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     src, dst = _coll("cli-src"), _coll("cli-dst")
     _, uri, chash = _note(writer, client, owner, src, "r3cdg cli note", "r3cdg cli note body")
@@ -110,7 +110,7 @@ def test_cli_delete_by_title_after_cross_collection_import(t2_service_env, tmp_p
 def test_cli_delete_by_id_after_cross_collection_import(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     src, dst = _coll("id-src"), _coll("id-dst")
     _, uri, chash = _note(writer, client, owner, src, "r3cdg id note", "r3cdg id note body")
@@ -126,7 +126,7 @@ def test_cli_delete_by_id_after_cross_collection_import(t2_service_env, tmp_path
 def test_mcp_store_delete_after_cross_collection_import(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     src, dst = _coll("mcp-src"), _coll("mcp-dst")
     _, uri, chash = _note(writer, client, owner, src, "r3cdg mcp note", "r3cdg mcp note body")
@@ -151,7 +151,7 @@ def test_same_collection_shared_chash_is_still_retained(t2_service_env):
     printed "Deleted 0 entries" at exit 0 with the named note still live."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("shared")
     body = "r3cdg shared body"

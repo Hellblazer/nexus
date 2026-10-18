@@ -2673,7 +2673,7 @@ class TestIncorporateCmd:
         monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: fake_cat)
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_writer",
-            lambda priority: fake_writer,
+            lambda: fake_writer,
         )
         monkeypatch.setattr("nexus.catalog.dt_link_generator.generate_dt_links", fake_links)
         monkeypatch.setattr("nexus.dt_writeback.writeback_record", fake_writeback)
@@ -2735,7 +2735,7 @@ class TestPageCoverage:
             def close(self): pass
 
         monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
-        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda priority="": _Writer())
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
         facts = {"name": "DT Name", "url": "https://x/y.pdf", "year": 2013, "page_count": 20}
         assert dt_mod._stamp_dt_uri_on_entry(tmp_path / "a.pdf", "U1", facts=facts)
         tumbler, fields = updates[0]

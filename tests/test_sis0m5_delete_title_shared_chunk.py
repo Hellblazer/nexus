@@ -66,7 +66,7 @@ def test_delete_title_of_a_shared_chunk_note_removes_it_and_names_the_sharer(
 ):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("shared")
     body = "sis0m5 body both notes carry"
@@ -97,7 +97,7 @@ def test_delete_title_of_a_shared_chunk_note_removes_it_and_names_the_sharer(
 def test_delete_title_of_an_unshared_note_still_deletes_its_chunk(t2_service_env):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("solo")
     t, uri, chash = _note(writer, client, owner, col, "sis0m5 solo", "sis0m5 solo body")
@@ -155,7 +155,7 @@ def test_a_failed_reap_leaves_a_multi_chunk_document_whole(t2_service_env, fail)
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll(f"fail-{fail}")
     tumbler, uri, chashes = _two_chunk_note(writer, client, owner, col, "sis0m5 split")
@@ -179,7 +179,7 @@ def test_confirmation_prompt_counts_only_what_the_reap_touches(t2_service_env):
     --title, so the prompt must not count it."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("prompt")
     _t, uri, _c = _note(writer, client, owner, col, "sis0m5 prompt", "sis0m5 prompt body")
@@ -204,7 +204,7 @@ def test_a_ghost_titled_document_is_reaped_too(t2_service_env):
     the owner scope resolve_knowledge_doc_for_chash already uses."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("ghost")
     body = "sis0m5 ghost shared body"
@@ -232,7 +232,7 @@ def test_a_ghost_is_reaped_when_its_twin_wrote_the_chunk_last(t2_service_env):
     the ghost must come from the catalog's own title, not from the chunks."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col = _coll("ghost-first")
     body = "sis0m5 ghost-first shared body"
@@ -263,7 +263,7 @@ def test_the_kept_chunk_message_names_only_this_collections_holders(t2_service_e
     another collection neither protects this chunk nor belongs in the
     "still held by" line."""
     client = HttpVectorClient(tenant=t2_service_env)
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     col, other = _coll("holders-home"), _coll("holders-other")
     body = "sis0m5 body in two collections"

@@ -326,14 +326,14 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
 
 
 def make_catalog_writer(
-    *, config_dir: Optional[Path] = None, priority: Optional[str] = None,
+    *, config_dir: Optional[Path] = None,
 ) -> Any:
     """Return a write-only catalog proxy backed by the service.
 
     Returns a :class:`_ServiceCatalogWriter` that enforces the
     :data:`CATALOG_WRITE_OPS` whitelist and forwards writes to the Java
-    Postgres service via HTTP. *priority* is ignored (the service enforces
-    its own fairness); the parameter survives for call-site compatibility.
+    Postgres service via HTTP. The service enforces its own fairness, so
+    there is no priority argument (nexus-nhym2 removed the ignored one).
     The resolver call is validation only — see :func:`make_catalog_reader`.
     """
     from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — deferred to avoid import cycle

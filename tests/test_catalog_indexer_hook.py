@@ -642,8 +642,6 @@ class TestCatalogHookBatchedServiceMode:
     class _StubWriter:
         """Write-side stub with the surface _catalog_hook touches."""
 
-        priority = "interactive"
-
         def __init__(self, *, update_many_raises: bool = False, reconcile_tumbler: str = "1.10.41"):
             self.register_calls: list[dict] = []
             self.update_calls: list[dict] = []

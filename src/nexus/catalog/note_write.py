@@ -366,7 +366,7 @@ def write_note(
     if owns_cat:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
 
-        cat = make_catalog_writer(priority="interactive")
+        cat = make_catalog_writer()
     recorder = _AttemptRecorder(cat)
     try:
         try:
@@ -834,7 +834,7 @@ def stamp_note(outcome: PutNoteOutcome, *, cat: Any = None) -> PutNoteOutcome:
         if owns_cat:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
 
-            cat = make_catalog_writer(priority="interactive")
+            cat = make_catalog_writer()
         complete_document(cat, doc_id=doc, content_hash=outcome.content_hash, manifest_rows=rows)
     except IndexRunVerifyRefused as exc:
         refused = _stamp_refused(doc, outcome.collection, exc)

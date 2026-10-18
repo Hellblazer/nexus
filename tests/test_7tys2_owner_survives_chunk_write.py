@@ -39,7 +39,7 @@ def _clear_registration_cache():
 @pytest.mark.integration
 def test_reregistration_keeps_the_owner_the_collection_was_registered_with(t2_service_env):
     name = f"code__dbgslug-7tys2__{_MODEL}__v1"
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     reader = make_catalog_reader()
     writer.register_collection(
         name, content_type="code", owner_id=OWNER_SEGMENT, embedding_model=_MODEL,

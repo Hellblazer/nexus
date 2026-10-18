@@ -388,7 +388,7 @@ def test_only_a_document_this_file_left_unfinished_is_resumed_any_other_that_own
 ):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll(f"resume-{state}-{int(hash_is_file)}")
     uri = f"file:///z0o2p19/{dst}/resume.py"
@@ -607,7 +607,7 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
 ):
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll("overwrite")
     uri_y = f"file:///z0o2p19/{dst}/y.py"
@@ -739,7 +739,7 @@ def test_gate_xr789_shaped_import_owns_chunks_already_stored_ownerless_across_se
     complete, and the stored vectors are untouched (skip-existing sends no payload)."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = f"code__z0o2p19slug-2ad2825c__{_MODEL}__v1"
     cat.register_collection(dst, content_type="code", owner_id="z0o2p19slug-2ad2825c", embedding_model=_MODEL)
@@ -814,7 +814,7 @@ def test_a_kept_document_is_described_by_what_it_is_not_always_as_a_different_ch
     by the same rule as a finished one, but it is not "a document with a different chunk list": it is
     unfinished. The message says so and what the user can do."""
     client = HttpVectorClient(tenant=t2_service_env)
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     dst = _coll(f"keptmsg-{state}")
     f = tmp_path / "keptmsg.nxexp"
     doc, records = _a_dead_run_left(cat, dst, "keptmsg", state, "another-exports-hash")
@@ -852,7 +852,7 @@ def test_two_owner_groups_that_resolve_to_one_document_are_one_document_with_the
     the second group's rows would flip a complete document to failed."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst, src = _coll("twogroups"), _coll("twogroups-src")
     uri_a = f"file:///z0o2p19/{src}/two.py"
@@ -967,7 +967,7 @@ def test_the_snapshot_minus_written_sweep_list_runs_through_trailing_sweeps_agai
     Every other piece is pinned by a fake or by a Java test; this drives the composition end to end."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
-    cat = make_catalog_writer(priority="interactive")
+    cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll("trailsweep")
     uri = f"file:///z0o2p19/{dst}/big.py"

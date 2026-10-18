@@ -906,7 +906,7 @@ class _OwnerImport:
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.catalog.multi_document_write import MultiDocumentImportWriter  # noqa: PLC0415 — deferred to avoid import cycle
         self._reader = make_catalog_reader()
-        self._writer = make_catalog_writer(priority="interactive")
+        self._writer = make_catalog_writer()
         self._import_writer = MultiDocumentImportWriter(
             self._writer, collection=self.collection_name, content_hash=self.file_hash,
             embedding_model=self.embedding_model, force_re_embed=True, metadata_merge=True,

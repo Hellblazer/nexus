@@ -1958,16 +1958,9 @@ def get_catalog_writer():
     engine's HTTP catalog via ``_ServiceCatalogWriter`` (the T2-daemon
     routing this originally described died in RDR-158 P4, nexus-i711w).
     Always returns a writer proxy; callers ``.close()`` it when done.
-
-    RDR-146 P2 (nexus-5p2ci.12): MCP tool invocations are user-initiated and
-    latency-sensitive (``store_put`` / ``memory promote`` register through
-    ``catalog/store_hook.py``). The MCP server process is non-tty, so the
-    ``isatty()`` fallback would misclassify these as batch and make them yield
-    to (or be deferred behind) a background index burst. Tag interactive so
-    they take fairness priority, same as the foreground ``nx dt`` writes.
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
-    return make_catalog_writer(priority="interactive")
+    return make_catalog_writer()
 
 
 def require_catalog():

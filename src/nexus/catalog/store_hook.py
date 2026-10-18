@@ -942,7 +942,7 @@ def catalog_store_hook_tracked(
             # reachable only via this chash dedup, same shape as the
             # nexus-sdp0u ghost-reconcile fix-round below, could still
             # carry a stale/empty one).
-            writer = make_catalog_writer(priority="interactive")
+            writer = make_catalog_writer()
             writer.update(
                 existing.tumbler,
                 physical_collection=collection_name,
@@ -960,11 +960,7 @@ def catalog_store_hook_tracked(
         # except swallow that — turning this entire hook into a silent
         # no-op for every service-mode store_put (GH #1370 review finding).
         owner_t = reader.curator_owner_tumbler_by_name("knowledge")
-        # RDR-146 P2 (nexus-5p2ci.12): store_put / memory promote are
-        # user-initiated and latency-sensitive. The MCP server is non-tty, so
-        # the isatty() fallback would misclassify these as batch; tag
-        # interactive so they take fairness priority over a background index.
-        writer = make_catalog_writer(priority="interactive")
+        writer = make_catalog_writer()
         owner = owner_t if owner_t is not None else writer.register_owner(
             "knowledge", "curator"
         )
@@ -1169,7 +1165,7 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred, avoids import cycle
 
-        writer = make_catalog_writer(priority="interactive")
+        writer = make_catalog_writer()
         deleted = bool(writer.delete_document(Tumbler.parse(tumbler)))
         _log.warning(
             "store_put_ghost_register_compensated",
@@ -1266,7 +1262,7 @@ def restore_pre_call_stamp(
         # re-put reconciled onto the same document) — never clobber it.
         return
     try:
-        writer = make_catalog_writer(priority="interactive")
+        writer = make_catalog_writer()
         writer.update(catalog_doc_id, meta={"doc_id": pre_call_doc_id})
     except Exception:  # noqa: BLE001 — best-effort restore; the caller's own store_put error must still surface
         _log.warning(
@@ -1722,7 +1718,7 @@ def store_delete_catalog_cleanup(
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred, avoids import cycle
 
-        writer = make_catalog_writer(priority="interactive")
+        writer = make_catalog_writer()
         # nexus-mmkqe/rnqbw (RDR-191 GATE-2): retract chash_doc_id's own
         # manifest row(s) BEFORE tombstoning -- the anti-join now protects
         # a tombstoned owner's manifest row too (definition class b), so

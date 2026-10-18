@@ -157,7 +157,7 @@ class _Recording:
 def real_cat():
     from nexus.catalog.factory import make_catalog_writer
 
-    w = make_catalog_writer(priority="interactive")
+    w = make_catalog_writer()
     yield w
     w.close()
 
@@ -598,7 +598,7 @@ class TestConcurrentPuts:
         barrier = threading.Barrier(4)
 
         def worker():
-            w = make_catalog_writer(priority="interactive")
+            w = make_catalog_writer()
             try:
                 barrier.wait()
                 write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
@@ -636,7 +636,7 @@ class TestConcurrentPuts:
         barrier = threading.Barrier(2)
 
         def worker(pieces):
-            w = make_catalog_writer(priority="interactive")
+            w = make_catalog_writer()
             try:
                 barrier.wait()
                 write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=w)

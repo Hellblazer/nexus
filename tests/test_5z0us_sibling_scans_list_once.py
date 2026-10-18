@@ -27,7 +27,7 @@ _N = 5
 def _seed(client) -> list[str]:
     from nexus.catalog.factory import make_catalog_writer
 
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     names = [f"knowledge__z0us-sib-{i}__bge-base-en-v15-768__v1" for i in range(_N)]
     for i, name in enumerate(names):

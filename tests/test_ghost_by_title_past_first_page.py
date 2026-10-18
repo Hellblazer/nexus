@@ -23,7 +23,7 @@ def test_ghost_ranked_past_the_first_page_is_reconciled(t2_service_env):
     from nexus.catalog.store_hook import catalog_store_hook_tracked
 
     reader = make_catalog_reader()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     assert reader is not None
     owner = writer.register_owner("knowledge", "curator")
     # 70 matching decoys registered first: the page comes back in tumbler

@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 
 
 def _seed(client, src: str, title: str, body: str) -> str:
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
     source_uri = uri_for(src, title)
     assert source_uri is not None

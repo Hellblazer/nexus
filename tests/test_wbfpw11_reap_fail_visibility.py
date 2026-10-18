@@ -86,7 +86,7 @@ def test_a_stranded_superseded_chunk_is_hidden_from_search_and_counted(
     # the way a write with no sweep does, such as the first batch of a multi-batch
     # write: replace the manifest with `sweep` off.
     v2_chash = hashlib.sha256(v2.encode()).hexdigest()
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     try:
         writer.write_manifest_many(
             [(tumbler, [{"chash": v2_chash, "position": 0}])],
@@ -126,7 +126,7 @@ def test_a_stranded_superseded_chunk_is_hidden_from_search_and_counted(
 
 def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
-    writer = make_catalog_writer(priority="interactive")
+    writer = make_catalog_writer()
     owner = writer.register_owner("wbfpw11-live", "curator")
     runner = CliRunner()
     rows: dict[str, tuple[str, str, str]] = {}  # name -> (collection, chash, text)
