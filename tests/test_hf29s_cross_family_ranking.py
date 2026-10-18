@@ -5,8 +5,10 @@
 Technical Design 12. One engine can now hold a bge family and a Voyage family
 (``dual``), so every surface that merges across families needs one rule:
 
-- ``scoring.py`` lists ``bge-base-en-v15-768`` at the measured 0.325 (a factor
-  of 0.45/0.325 = 1.38); an unlisted model keeps the default and logs it.
+- ``scoring.py`` lists ``bge-base-en-v15-768`` at an INTERIM factor of 1.30
+  (Sam, 2026-10-18: the largest factor 210-research-17 counted inversions
+  for; the derived best-F1 factor is 1.38); an unlisted model keeps the default
+  and logs it.
 - ``_grouped_combined_query`` merges model groups by CALIBRATED distance.
 - Rerank-on merges (``nx search``, MCP ``search`` with ``lexical=true``) stop
   sorting scored rows ahead of unscored ones when a collection DEGRADED, and
@@ -76,8 +78,8 @@ def rows_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_bge_factor_is_the_measured_ratio_within_1e_6() -> None:
-    assert _calibration_factor_for_model(BGE) == pytest.approx(0.45 / 0.325, abs=1e-6)
-    assert _calibration_factor_for_model(BGE) == pytest.approx(1.384615, abs=1e-6)
+    assert _calibration_factor_for_model(BGE) == pytest.approx(1.30, abs=1e-6)
+    assert _calibration_factor_for_model(BGE) == pytest.approx(0.45 / (0.45 / 1.30), abs=1e-6)
     # The Voyage entries are untouched.
     assert _calibration_factor_for_model("voyage-code-3") == pytest.approx(1.0)
     assert _calibration_factor_for_model("voyage-context-3") == pytest.approx(0.45 / 0.65)
@@ -162,24 +164,25 @@ def test_bge_entry_orders_the_recorded_median_cases_correctly_in_both_directions
     assert _top(d2) == "bge-relevant"
 
 
-def test_tail_case_at_1_38_is_the_open_question_for_the_phase_4_measurement(
+def test_the_interim_1_30_keeps_the_tail_case_the_derived_1_38_loses(
     rows_by_name,
 ) -> None:
-    """Pins a LIMIT of the 1.38 entry, not a goal. On the recorded quantiles a
-    p90-relevant bge chunk (0.40 * 1.38 = 0.554) sits behind a MEDIAN off-topic
-    Voyage chunk (0.76 * 0.692 = 0.526). The record measured 3 and 1 inversions
-    at factors 1.15 to 1.30 and never counted 1.38 on its per-query data; this
-    is the direction in which a higher factor can only cost, so Phase 4 Step 3
-    (nexus-t189m) re-counts it on real data before the entry is final."""
+    """The reason the entry is held at 1.30 until Phase 4 Step 3 (nexus-t189m)
+    measures on real data. On the recorded quantiles a p90-relevant bge chunk
+    (0.40) sits ahead of a MEDIAN off-topic Voyage chunk (0.76 * 0.692 = 0.526)
+    at 1.30 (0.40 * 1.30 = 0.52) and behind it at the derived 1.38 (0.554). The
+    record counted inversions at 1.15 to 1.30 and never at 1.38 on its per-query
+    data. This test pins a LIMIT of the higher factor, not a goal."""
     tail = [
         _hit(VOY_RDR, "voyage-irrelevant", _VOY_OFFTOPIC_MEDIAN),
         _hit(BGE_DOCS, "bge-relevant", _BGE_RELEVANT_P90),
     ]
-    assert _top(tail) == "voyage-irrelevant"
-    # The same pair at the 1.15 the record did measure:
-    with patch.dict(scoring._CALIBRATION_THRESHOLDS_BY_MODEL, {BGE: 0.45 / 1.15}):
-        assert _top(tail) == "bge-relevant"
-    # Voyage p90 relevant against the closest bge off-topic chunk:
+    assert _top(tail) == "bge-relevant"
+    # The same pair at the derived 1.38 (threshold 0.325), which the record never counted:
+    with patch.dict(scoring._CALIBRATION_THRESHOLDS_BY_MODEL, {BGE: 0.325}):
+        assert _top(tail) == "voyage-irrelevant"
+    # Voyage p90 relevant against the closest bge off-topic chunk (a marginal inversion
+    # the factor cannot fix without breaking direction 1; the intended tripwire):
     assert _top([
         _hit(BGE_DOCS, "bge-irrelevant", _BGE_OFFTOPIC_MIN),
         _hit(VOY_RDR, "voyage-relevant", _VOY_RELEVANT_P90),
@@ -195,8 +198,8 @@ def test_grouped_combined_query_interleaves_by_calibrated_distance(
     monkeypatch.setattr(mcp_infra, "get_collection_row", _row_for)
     rows = {
         BGE_KNOW: [
-            {"id": "b1", "collection": BGE_KNOW, "distance": 0.33},   # 0.457
-            {"id": "b2", "collection": BGE_KNOW, "distance": 0.50},   # 0.692
+            {"id": "b1", "collection": BGE_KNOW, "distance": 0.33},   # 0.429
+            {"id": "b2", "collection": BGE_KNOW, "distance": 0.50},   # 0.650
         ],
         VOY_RDR: [
             {"id": "v1", "collection": VOY_RDR, "distance": 0.63},    # 0.436
@@ -207,7 +210,7 @@ def test_grouped_combined_query_interleaves_by_calibrated_distance(
         [BGE_KNOW, VOY_RDR], lambda group: list(rows[group[0]]),
     )
     # Raw-distance order would be b1 (0.33), b2 (0.50), v1 (0.63), v2 (0.70).
-    assert [r["id"] for r in merged] == ["v1", "b1", "v2", "b2"]
+    assert [r["id"] for r in merged] == ["b1", "v1", "v2", "b2"]
     # The engine's distances are reported untouched.
     assert {r["id"]: r["distance"] for r in merged} == {
         "b1": 0.33, "b2": 0.50, "v1": 0.63, "v2": 0.70,
@@ -290,9 +293,9 @@ def test_cli_one_group_degraded_falls_back_to_calibrated_order_with_the_warning(
     assert res.exit_code == 0, res.output
     assert "server rerank degraded" in res.output
     assert "rate limited" in res.output
-    # Calibrated: v-mid 0.436, b-rel 0.457, v-hi 0.519. The old "scored rows
-    # lead" order was v-hi, v-mid, b-rel and sank the degraded family's row.
-    assert [i["id"] for i in json.loads(res.stdout)] == ["v-mid", "b-rel", "v-hi"]
+    # Calibrated at the interim 1.30: b-rel 0.429, v-mid 0.436, v-hi 0.519. The old
+    # "scored rows lead" order was v-hi, v-mid, b-rel and sank the degraded family's row.
+    assert [i["id"] for i in json.loads(res.stdout)] == ["b-rel", "v-mid", "v-hi"]
 
 
 def test_cli_unscored_tail_without_a_degrade_still_trails_the_scored_rows(
@@ -357,7 +360,7 @@ def test_mcp_one_group_degraded_falls_back_to_calibrated_order_with_the_note() -
         "hf29s mcp one degraded", _mcp_rows(False, True),
         {BGE_KNOW: {"degraded": True, "error": "rate limited"}},
     )
-    assert out["ids"] == ["v-mid", "b-rel", "v-hi"]
+    assert out["ids"] == ["b-rel", "v-mid", "v-hi"]  # calibrated at the interim 1.30: 0.429, 0.436, 0.519
     # The degrade is still surfaced, and says what order the rows are in.
     # Served from the page cache, which carries the note of the entry it returns.
     try:

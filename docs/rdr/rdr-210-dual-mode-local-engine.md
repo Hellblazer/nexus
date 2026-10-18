@@ -806,12 +806,15 @@ use, carrying the document's aspects and highlights with it.
       warning; otherwise one rate-limited group sinks a whole family.
     - *Rerank-off surfaces* (MCP `query`'s plain path, the catalog-routed tools,
       and so `nx_answer`) merge by calibrated distance. `scoring.py`'s table gains
-      `bge-base-en-v15-768` at the measured 0.325, a factor of 0.45/0.325 = 1.38
-      (`scoring.py:76-79`); `_grouped_combined_query` (`mcp/core.py:3881-3946`)
+      `bge-base-en-v15-768` at an INTERIM factor of 1.30 (Sam, 2026-10-18; the
+      largest factor the record counted inversions for), not the derived 0.325
+      best-F1 threshold, which is a factor of 0.45/0.325 = 1.38; `_grouped_combined_query`
       sorts across groups by distance times that factor, not raw distance. An
       unmeasured model keeps the default and logs that it did. The record
-      reports inversion counts for 1.15 to 1.30 but not for the derived 1.38,
-      so Phase 1 Step 5 counts them at 1.38 before the entry is set.
+      reports inversion counts for 1.15 to 1.30 but not for 1.38, and the 20
+      per-query distance lists behind it are gone, so Phase 1 Step 5 could not
+      count 1.38. Phase 4 Step 3 (nexus-t189m) re-measures on real distances and
+      sets the final value; until then the table holds 1.30.
     - *Thresholds* are chosen per collection by its model, not by the engine's
       mode (`search_engine.py:552-580`): a Voyage collection gets its Voyage
       threshold on any engine, and a bge collection gets none, as on a keyless
@@ -1534,16 +1537,19 @@ against a profile that names another model.
 
 Implement Technical Design 12. It is client-only and lands here, before any
 engine can return two families to one search. **Tests**:
-- `scoring.py`: the bge factor is 0.45/0.325 within 1e-6; an unlisted model
-  still gets the default and logs it.
+- `scoring.py`: the bge factor is the interim 1.30 within 1e-6 (threshold
+  0.45/1.30); an unlisted model still gets the default and logs it.
 - `apply_hybrid_scoring` over a fixture of one bge and one Voyage group (the
   210-research-17 distances, recorded as test data): count the queries where an
   irrelevant chunk of one family outranks the best relevant chunk of the other.
-  At 1.38 the count must be below the 0.818 default's (12 and 5 of 20) in both
-  directions, and the test pins the observed count as its regression bound. The
-  record measured 1.15 to 1.30 at 3 and 1 but did not report 1.38; if 1.38 counts
-  more than that on the fixture, the step stops and Phase 4 Step 3 picks the
-  value before the table entry is set.
+  The 20 per-query lists were not recorded, so this step tests the RECORDED
+  QUANTILES through the real `apply_hybrid_scoring` and pins the two quantile
+  cases (closest off-topic bge chunk against a median relevant Voyage chunk, and
+  a median off-topic Voyage chunk against a p90-relevant bge chunk) at 1.30. The
+  record measured 1.15 to 1.30 at 3 and 1 inversions and did not report 1.38; at
+  the derived 1.38 the second case inverts, which is why the table holds 1.30
+  until Phase 4 Step 3 (nexus-t189m) counts real distances and sets the value.
+  No observed count is pinned as a regression bound because none exists.
 - `_grouped_combined_query`: rows from two groups interleave by calibrated
   distance, not raw distance.
 - Rerank-on merge: two groups both scored merge by `rerank_score`; one scored
@@ -1687,8 +1693,10 @@ measured Voyage's (split-merge against one request, Kendall tau against the
 noise floor); and count cross-family inversions on each surface. **Pass**: the
 bge factor's bootstrap interval overlaps 1.36 to 1.48; the cross-encoder's
 split-merge tau is within 0.01 of its noise floor; inversions on every surface no
-worse than the Phase 1 Step 5 fixture bound. **Fail**: revise Technical Design 12 before
-Phase 6. Record the result as a research finding.
+worse than the 210-research-17 recorded counts at 1.15 to 1.30 (3 and 1 of 20; Phase 1
+Step 5 pinned no count of its own because the per-query lists are gone), and the
+value in `scoring.py` (interim 1.30) is set from this measurement. **Fail**: revise
+Technical Design 12 before Phase 6. Record the result as a research finding.
 
 ### Phase 5: Gates
 
@@ -1870,8 +1878,8 @@ None open. Resolved by Sam on 2026-10-17 (T2
   collection's model.
 - **Scenario**: a merged list from a bge and a Voyage collection on a rerank-off
   surface (MCP `query`, a catalog-routed tool) — **Verify**: ordered by calibrated
-  distance with the bge factor; cross-family inversions within the Phase 1 Step 5
-  bound.
+  distance with the bge factor; cross-family inversions within the 210-research-17
+  recorded counts (3 and 1 of 20 at 1.15 to 1.30).
 - **Scenario**: one model group's rerank degrades, the other's does not —
   **Verify**: calibrated order with the warning; the degraded family is not sunk
   below every scored row.
