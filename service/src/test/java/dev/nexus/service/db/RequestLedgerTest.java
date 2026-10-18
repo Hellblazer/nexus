@@ -468,4 +468,88 @@ class RequestLedgerTest {
         assertThatThrownBy(() -> ledger.claim(TENANT, UUID.randomUUID(), ROUTE, new byte[31], BOUND_MS))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    // ── peekCommitted: the ledger's answer for a committed key, with nothing claimed ──
+
+    /** Every ledger row, with the columns a peek must leave alone (state, holder, lease, finish, status, response). */
+    private List<java.util.Map<String, Object>> ledgerSnapshot() {
+        return scope.withTenant(TENANT, ctx -> ctx.select(REQUEST_LEDGER.TENANT_ID, REQUEST_LEDGER.REQUEST_ID,
+                REQUEST_LEDGER.ROUTE, REQUEST_LEDGER.STATE, REQUEST_LEDGER.HOLDER, REQUEST_LEDGER.STARTED_AT,
+                REQUEST_LEDGER.LEASE_UNTIL, REQUEST_LEDGER.FINISHED_AT, REQUEST_LEDGER.RESPONSE_STATUS,
+                REQUEST_LEDGER.RESPONSE)
+            .from(REQUEST_LEDGER).orderBy(REQUEST_LEDGER.TENANT_ID, REQUEST_LEDGER.REQUEST_ID).fetch().intoMaps());
+    }
+
+    /** Peek and assert the table is exactly as it was: same rows, and each row's state, holder and lease. */
+    private RequestLedger.Claim peekLeavingTableUnchanged(String tenant, UUID key, String route, byte[] body) {
+        var before = ledgerSnapshot();
+        RequestLedger.Claim answer = ledger.peekCommitted(tenant, key, route, body);
+        assertThat(ledgerSnapshot()).as("peekCommitted writes nothing").isEqualTo(before);
+        return answer;
+    }
+
+    @Test
+    void peekCommitted_isNullForNoRow_aLiveInFlightRow_andAFailedRow() {
+        UUID absent = UUID.randomUUID();
+        UUID inFlight = UUID.randomUUID();
+        UUID failed = UUID.randomUUID();
+        ledger.claim(TENANT, inFlight, ROUTE, sha(30), BOUND_MS);
+        var f = (RequestLedger.Claimed) ledger.claim(TENANT, failed, ROUTE, sha(31), BOUND_MS);
+        ledger.failMarker(TENANT, failed, f.nonce(), 500);
+        RequestLedgerActivity.resetForTests();
+
+        assertThat(peekLeavingTableUnchanged(TENANT, absent, ROUTE, sha(32))).as("no row").isNull();
+        assertThat(exists(absent)).as("and a peek of an absent key creates none").isFalse();
+        assertThat(peekLeavingTableUnchanged(TENANT, inFlight, ROUTE, sha(30))).as("in_flight").isNull();
+        assertThat(peekLeavingTableUnchanged(TENANT, failed, ROUTE, sha(31))).as("failed").isNull();
+        // An in_flight row whose lease has run out is still not committed.
+        forceLeaseExpired(inFlight);
+        assertThat(peekLeavingTableUnchanged(TENANT, inFlight, ROUTE, sha(30))).as("lease-expired in_flight").isNull();
+        var counts = RequestLedgerActivity.snapshot();
+        assertThat(counts.replays()).isZero();
+        assertThat(counts.keyReused()).isZero();
+    }
+
+    @Test
+    void peekCommitted_isAReplayForACommittedKeyWithTheSameRouteAndBody() {
+        UUID key = UUID.randomUUID();
+        assertThat(runKeyed(key, ROUTE, sha(33), new AtomicInteger(), false)).isInstanceOf(RequestLedger.Claimed.class);
+        RequestLedgerActivity.resetForTests();
+
+        RequestLedger.Claim answer = peekLeavingTableUnchanged(TENANT, key, ROUTE, sha(33));
+
+        assertThat(answer).isInstanceOf(RequestLedger.Replay.class);
+        var replay = (RequestLedger.Replay) answer;
+        assertThat(replay.requestId()).isEqualTo(key);
+        assertThat(replay.status()).isEqualTo(200);
+        assertThat(JSONB.valueOf(replay.responseJson())).isEqualTo(JSONB.valueOf("{\"moved\": 3}"));
+        assertThat(RequestLedgerActivity.snapshot().replays()).as("counted as a replay, like a claim's").isEqualTo(1);
+        assertThat(eventLines("request_ledger_replay")).hasSize(1);
+    }
+
+    @Test
+    void peekCommitted_isKeyReusedForACommittedKeyWithAnotherRouteOrBody() {
+        UUID key = UUID.randomUUID();
+        assertThat(runKeyed(key, ROUTE, sha(34), new AtomicInteger(), false)).isInstanceOf(RequestLedger.Claimed.class);
+        RequestLedgerActivity.resetForTests();
+
+        RequestLedger.Claim otherBody = peekLeavingTableUnchanged(TENANT, key, ROUTE, sha(35));
+        RequestLedger.Claim otherRoute = peekLeavingTableUnchanged(TENANT, key, OTHER_ROUTE, sha(34));
+
+        assertThat(otherBody).isInstanceOf(RequestLedger.KeyReused.class);
+        assertThat(otherRoute).isInstanceOf(RequestLedger.KeyReused.class);
+        assertThat(((RequestLedger.KeyReused) otherRoute).storedRoute()).isEqualTo(ROUTE);
+        assertThat(RequestLedgerActivity.snapshot().keyReused()).isEqualTo(2);
+        assertThat(RequestLedgerActivity.snapshot().replays()).isZero();
+    }
+
+    @Test
+    void peekCommitted_readsAnotherTenantsCommittedKeyAsNoRow() {
+        UUID key = UUID.randomUUID();
+        assertThat(runKeyed(key, ROUTE, sha(36), new AtomicInteger(), false)).isInstanceOf(RequestLedger.Claimed.class);
+        RequestLedgerActivity.resetForTests();
+
+        assertThat(peekLeavingTableUnchanged("some-other-tenant", key, ROUTE, sha(36))).isNull();
+        assertThat(RequestLedgerActivity.snapshot().replays()).isZero();
+    }
 }
