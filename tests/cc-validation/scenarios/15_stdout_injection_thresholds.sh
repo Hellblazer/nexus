@@ -39,7 +39,10 @@ _s15_session() {
 EOF
     CC_DEBUG_FILE="$TEST_HOME/cc-debug-${label}.log"; rm -f "$CC_DEBUG_FILE"
     claude_start
-    claude_prompt "Use Task to dispatch the general-purpose agent. Description='$label'. Prompt: 'Do not use any tools. Examine your context, apart from this message. Is the text ${head15} immediately followed by a three-character code (no space) anywhere in it? If yes, reply with the word FOUND immediately followed by -${tag} (no space), then a space, then that whole text including its code. If no, reply with the word NONE immediately followed by -${tag} (no space).'"
+    # The dispatch tool is listed as Agent on current builds (Task on older ones) and may be
+    # deferred; without saying so the main agent sometimes decides it has no Task tool and
+    # answers the probe itself, which reads INDETERMINATE (live 15e and 15f, 2026-10-18).
+    claude_prompt "Use the Agent tool (older builds call it Task; if it is not directly callable, first load it with ToolSearch, query select:Agent) to dispatch the general-purpose agent, and do not answer the question yourself. Description='$label'. Prompt: 'Do not use any tools. Examine your context, apart from this message. Is the text ${head15} immediately followed by a three-character code (no space) anywhere in it? If yes, reply with the word FOUND immediately followed by -${tag} (no space), then a space, then that whole text including its code. If no, reply with the word NONE immediately followed by -${tag} (no space).'"
     cc_wait_subagent_reply "FOUND-${tag}|NONE-${tag}" 180 || true
     local replies
     replies="$(cc_subagent_replies || true)"
