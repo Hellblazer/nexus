@@ -342,7 +342,10 @@ def _resolve_export_owners(
             # nexus-mjikf: what an import needs to stamp the document with its own content key:
             # the source document's index_content_hash, only when it is complete, and its manifest
             # row count, so the import can tell a whole document from one whose shared chunks
-            # were written under another owner (the import uses the key only when it holds every row).
+            # were written under another owner (the import uses the key only when it holds every row
+            # and one of the document's chunks witnesses the key, _note_source_evidence). The entry is
+            # read after the manifests; a re-index landing between the two pairs a new key with old
+            # rows, whose chunks then carry the old key, so the witness check refuses it.
             "index_content_hash": entry.index_content_hash if entry.index_state == "complete" else "",
             "manifest_rows": len(manifests.get(chosen, [])),
         }
@@ -813,7 +816,41 @@ def _prepass_groups(
                         fallback_title=fallback_title, fallback_content_type=fallback_content_type,
                         target_collection=target_collection)
                 group["maxpos"] = max(group.get("maxpos", -1), position)
+                _note_source_evidence(group, meta, position)
     return groups
+
+
+def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
+    """nexus-mjikf: what lets the import trust a group's source key. A record whose chunk carries
+    the key as its ``content_hash`` WITNESSES it: a native index writes the file's hash on its
+    chunks, while a bundle-wide key stamped by a release before nexus-8hhbk, or an 8hhbk unique
+    key, matches no chunk. Two records at one position mean the group is not one whole manifest
+    (a live export can read a record twice and miss another), so the key is dropped."""
+    source = group.get("source")
+    if not source:
+        group.pop("positions", None)
+        return
+    if meta.get("content_hash") == source[0]:
+        group["witnessed"] = True
+    positions = group.setdefault("positions", set())
+    if position in positions:
+        group["source"] = None
+        group.pop("positions", None)
+        return
+    positions.add(position)
+
+
+def _whole_source(group: dict) -> tuple[str, Any] | None:
+    """The group's source (key, manifest rows) pair when the import holds that document whole and a
+    record witnessed the key (:func:`_note_source_evidence`): distinct positions exactly 0..rows-1.
+    Anything short of that is None, which gives the document the unique key."""
+    source = group.get("source")
+    if not source or not group.get("witnessed"):
+        return None
+    rows = source[1]
+    if not isinstance(rows, int) or isinstance(rows, bool):
+        return None
+    return source if group.get("positions") == set(range(rows)) else None
 
 
 #: The shape of a content key an import accepts from a bundle (a sha256 hex digest, the form every
@@ -1054,7 +1091,7 @@ class _OwnerImport:
             self._doc_of[key] = doc
             total, top = self._doc_figures.get(doc, (0, -1))
             self._doc_figures[doc] = (total + g["seen"], max(top, g.get("maxpos", -1)))
-            self._doc_sources.setdefault(doc, []).append(g.get("source"))
+            self._doc_sources.setdefault(doc, []).append(_whole_source(g))
 
     # ── one page ──────────────────────────────────────────────────────────────
 

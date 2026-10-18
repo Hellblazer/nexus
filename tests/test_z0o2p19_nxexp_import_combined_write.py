@@ -47,7 +47,9 @@ from nexus.exporter import (
     _document_completion_hash,
     _file_sha256,
     _locate_owner_group,
+    _note_source_evidence,
     _resolve_export_owners,
+    _whole_source,
     export_collection,
     import_collection,
 )
@@ -1268,6 +1270,31 @@ def test_a_group_whose_records_disagree_on_the_source_pair_is_poisoned() -> None
     assert old_bundle["file:///x.pdf"]["source"] == ("", None)
 
 
+def _group_of(pairs_and_hashes: list[tuple[int, str | None]], key: str = _KA, rows: int = 2) -> dict:
+    """One owner group built record by record the way the prepass builds it."""
+    groups: dict[str, dict] = {}
+    o = {"source_uri": "file:///w.pdf", "title": "w", "content_type": "pdf",
+         "index_content_hash": key, "manifest_rows": rows}
+    for position, content_hash in pairs_and_hashes:
+        group, pos = _locate_owner_group(
+            groups, {**o, "position": position}, fallback_source_uri="", fallback_title="",
+            fallback_content_type="pdf", target_collection="docs__t__bge-base-en-v15-768__v1")
+        meta = {} if content_hash is None else {"content_hash": content_hash}
+        _note_source_evidence(group, meta, pos)
+    return groups["file:///w.pdf"]
+
+
+def test_a_source_key_counts_only_when_a_chunk_witnesses_it_and_every_position_is_held_once() -> None:
+    assert _whole_source(_group_of([(0, _KA), (1, _KA)])) == (_KA, 2)
+    assert _whole_source(_group_of([(0, _KA), (1, None)])) == (_KA, 2)           # one witness is enough
+    # A release before nexus-8hhbk stamped the bundle sha256 on every document: no chunk carries it.
+    assert _whole_source(_group_of([(0, "ee" * 32), (1, "ee" * 32)])) is None
+    assert _whole_source(_group_of([(0, None), (1, None)])) is None
+    assert _whole_source(_group_of([(0, _KA), (0, _KA)])) is None                # a record read twice
+    assert _whole_source(_group_of([(0, _KA), (2, _KA)])) is None                # a position missing
+    assert _whole_source(_group_of([(0, _KA)])) is None                          # a row short
+
+
 class _StubOwnerReader:
     """The three batched reads _resolve_export_owners makes, over two documents sharing chunk c2."""
 
@@ -1304,7 +1331,7 @@ def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) ->
     chashes = [_chash(t) for t in texts]
     cat.write_manifest_many(
         [(doc, [{"chash": c, "position": i} for i, c in enumerate(chashes)])], collection=coll,
-        chunks=[{"chash": c, "text": t, "metadata": {}, "embedding": _vec(700 + i).tolist()}
+        chunks=[{"chash": c, "text": t, "metadata": {"content_hash": key}, "embedding": _vec(700 + i).tolist()}
                 for i, (c, t) in enumerate(zip(chashes, texts))],
         embedding_model=_MODEL)
     cat.begin_index_run(doc, key, "native-run", coll)
@@ -1336,9 +1363,6 @@ def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_tru
         result = import_collection(db=client, input_path=f, target_collection=dst)
         assert result["imported_count"] >= 4, result
 
-        imp_a = reader.by_source_uri(f"file:///mjikf/{src}/a.pdf")
-        imp_b = reader.by_source_uri(f"file:///mjikf/{src}/b.pdf")
-        assert imp_a is not None and imp_b is not None
         # source_uri is tenant-unique, so the import resolves to the source documents themselves only
         # when they live in the target; here they live in src, so the import COPIED them.
         copies = [e for e in reader.all_documents(content_type="pdf") if e.physical_collection == dst]
