@@ -2181,6 +2181,7 @@ nexus-a5rj8.1
 nexus-a66gd
 nexus-a6mon
 nexus-a6mon.1
+nexus-a6mys
 nexus-a795d
 nexus-a79y
 nexus-a8vr3

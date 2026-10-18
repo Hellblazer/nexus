@@ -3886,18 +3886,31 @@ cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `
 it got. It works in local and managed mode alike, over HTTP only.
 
 **Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
-threshold" row warns when a collection whose catalog content type is `docs`, `rdr` or `knowledge` holds `NX_SEARCH_EXACT_MAX_ROWS` rows or more
-(default 20,000, the engine's setting, read from `nx doctor`'s own environment, so a managed engine with a different
-value reads the default). From that size a collection is routed to its own HNSW index, and for prose that index's recall
-was measured at 0.9833 minimum on 10,308 and 14,300 rows, under the 0.99 target, and not at all above 20,000 rows. The
-warning names each such collection (largest first, five at most) with its physical row count (`stored_count`) and says
-to run the RDR-227 Gap 1 recall check on it: the recall of its index against an exact top-k at k 40, 60, 80, 100 and
-120, on query vectors written for the collection's own topics, 0.99 or better at every k. That check is a procedure
-(`nexus_rdr/227-research-12` in T2; RDR-227 Gap 1 and Phase 2b), not a packaged script. A `code` collection at any size
-does not warn (it measured recall 1.0 above the threshold), and a prose collection below it does not. A collection with
-no catalog content type is not classified; the row counts them in its detail, and is "not applicable" if none is classified. The `GET /v1/status`
-object carries counts only, so the row reads the collection listing. It is green and says "not applicable" when the
-listing is empty or cannot be read, as on a box with no engine.
+threshold" row warns when a live collection whose catalog content type is `docs`, `rdr` or `knowledge` holds more than
+`NX_SEARCH_EXACT_MAX_ROWS` rows (default 20,000). At or below that count the router runs the collection exact; above it
+the collection is routed to its own HNSW index once one is built (`NX_SEARCH_PCI_BUILD_MIN_ROWS`, `NX_SEARCH_PCI`; see
+docs/configuration.md). The threshold is read from `nx doctor`'s own shell. It is an engine setting, so a managed or
+service engine run with another value is invisible to the row, which then uses the default.
+
+What the warning claims depends on each named collection's embedding model, shown on its entry. On `voyage-context-3`
+the index measured 0.9833 minimum tail recall (mean 0.9992, no top-1 miss) at 10,308 rows (`docs__1-2`) and 14,300
+(`rdr__1-79`), under the 0.99 target, and was not measured above 20,000 rows. On any other model the row says "recall on
+<model> is unmeasured". `knowledge` collections are included by analogy: they share `voyage-context-3` with `docs` and
+`rdr`, but no `knowledge` collection was measured, and the warning says so. A `code` collection does not warn at any
+size: it measured recall 1.0 above the threshold, on `voyage-code-3` only. A prose collection exactly at the threshold
+is exact and does not warn. A collection whose `lifecycle_state` is `quarantine`, `dormant` or `disputed`, and a rename
+tombstone, are ignored.
+
+The only remedy the warning gives is to measure: for k of 40, 60, 80, 100 and 120, compare the collection's index top-k
+with an exact top-k, on query vectors written for the collection's own topics, and expect 0.99 or better at every k
+(RDR-227 Gap 1; nexus-a6mys will package it as a script). Raising `NX_SEARCH_EXACT_MAX_ROWS` keeps a collection exact and
+is the engine's remedy when the measurement fails, but it is engine-wide, bounded (docs/configuration.md names 30000
+for this; each exact arm reads every row of its collection, and the 27,893- and 29,355-row code collections
+went from 25-50 ms index arms to 0.6-0.9 s exact arms), and `nx doctor` cannot see the value the engine runs with, so the
+warning stays on after you raise it. A collection with no catalog content type is not classified; the row counts them in
+its detail, and is "not applicable" if none is classified. The `GET /v1/status` object carries counts only, so the row
+reads the collection listing, which `nx doctor` fetches once per run and shares with its "T3 collections" row. The row
+is green and says "not applicable" when the listing is empty or cannot be read, as on a box with no engine.
 
 **Chunk tenant isolation (nexus-wbfpw.48).** `nx doctor`'s "Chunk tenant isolation" row reads
 `chunks_tenant_isolation_intact` from `GET /v1/status`: true when no permissive row-level-security

@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
+_ENGINE_STATUS_UNSET: object = object()
+
 #: Credential-bearing phrases a service error body may echo back. The value
 #: after the key word is replaced, whatever its shape, so a rotated token or
 #: a raw api_key never reaches a log line (nexus-8ooxn / nexus-hcy4w).
@@ -979,7 +982,9 @@ def local_embedder_advisory(
     return None
 
 
-def _check_t3_local() -> list[HealthResult]:
+def _check_t3_local(collections: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """``collections``: the collection listing ``run_health_checks`` already fetched (``None`` when that fetch
+    raised), so one ``nx doctor`` run lists the collections once (nexus-qqoak). Left unset, this fetches its own."""
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="local (no API keys needed)"))
     # RDR-155 P4a.2 (nexus-1k8s1): the nexus-service serves T3 in local mode
@@ -1047,7 +1052,12 @@ def _check_t3_local() -> list[HealthResult]:
         # collections" here, NOT as a failure. That is intentional: the fatal
         # vector-service reachability probe (_check_vector_service) fires
         # separately and is the failure surface; this check is informational.
-        cols = make_t3().list_collections()
+        if collections is _ENGINE_STATUS_UNSET:
+            cols = make_t3().list_collections()
+        elif isinstance(collections, list):
+            cols = collections
+        else:
+            raise RuntimeError("the collection listing could not be fetched")
         col_count = len(cols)
         results.append(HealthResult(
             label="T3 collections", ok=True,
@@ -4136,10 +4146,6 @@ def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResu
 
 _OWNERLESS_WRITES_LABEL = "Ownerless writes"
 
-#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
-_ENGINE_STATUS_UNSET: object = object()
-
-
 def _status_int(value: object) -> int:
     """A counter from the engine's status body as an int; anything else is 0."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
@@ -4669,21 +4675,25 @@ _PROSE_INDEX_LABEL = "Prose collections at the index threshold"
 #: The engine's ``NX_SEARCH_EXACT_MAX_ROWS`` default. The setting lives in the engine's environment and the status
 #: body does not carry it, so this is the one client-side mirror of ``PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS``;
 #: ``tests/test_doctor_prose_index_recall_row.py`` reads the Java source and fails if the two drift. It equals
-#: ``NX_SEARCH_PCI_BUILD_MIN_ROWS`` (B), the row count at which a collection gets its own HNSW index (RDR-227).
+#: ``NX_SEARCH_PCI_BUILD_MIN_ROWS`` (B), the row count at which a collection becomes a candidate for its own HNSW
+#: index (RDR-227).
 DEFAULT_SEARCH_EXACT_MAX_ROWS = 20_000
 
-#: Content types whose chunks are prose, embedded with ``voyage-context-3`` (CLAUDE.md, collection prefix table):
-#: ``docs``, ``rdr`` and ``knowledge``. ``code`` embeds with ``voyage-code-3``, and RDR-227 measured code at or above
-#: B at recall 1.0 (``nexus_rdr/227-research-12``), so only prose is unmeasured. ``knowledge`` is included because
-#: it embeds with the same model as ``docs`` and ``rdr``.
+#: Content types whose chunks are prose: ``docs``, ``rdr`` and ``knowledge``. ``code`` is left out because RDR-227
+#: measured it above B at recall 1.0, on ``voyage-code-3`` only. ``knowledge`` is included by analogy, not by
+#: measurement: it shares ``voyage-context-3`` with ``docs`` and ``rdr``, which were measured; no ``knowledge``
+#: collection was. Including it is the safe side.
 _PROSE_CONTENT_TYPES = frozenset({"docs", "rdr", "knowledge"})
+
+#: The one embedding model the prose recall was measured on (docs__1-2 at 10,308 rows, rdr__1-79 at 14,300).
+_PROSE_MEASURED_MODEL = "voyage-context-3"
 
 #: How many collections the warning names before it says "and N more".
 _PROSE_INDEX_NAMED_MAX = 5
 
 
 def _prose_index_threshold() -> int:
-    """The row count at or above which the engine gives a collection its own index: ``NX_SEARCH_EXACT_MAX_ROWS``
+    """The row count above which the router sends a collection to its own index: ``NX_SEARCH_EXACT_MAX_ROWS``
     from this process's environment, else the engine default. Unset, blank, not an integer, out of the engine's
     range (0..1000000), or ``0`` (the router is off, which says nothing about where the index starts) all read as
     the default."""
@@ -4696,24 +4706,34 @@ def _prose_index_threshold() -> int:
 
 
 def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
-    """nexus-qqoak (RDR-227 residual): has a prose collection reached the per-collection index threshold?
+    """nexus-qqoak (RDR-227 residual): is a prose collection large enough to be routed to its own HNSW index?
 
-    A collection with at least ``NX_SEARCH_EXACT_MAX_ROWS`` rows (default 20,000) gets its own partial HNSW index
-    and is routed to it. For prose the index's recall was measured at 0.9833 minimum on 10,308 and 14,300 rows,
-    under the RDR's 0.99 target, and not measured at all at 20,000 rows or more (T2 ``nexus_rdr/227-research-12``;
-    RDR-227 § Phase 2b, "Prose"). Today no prose collection is that large, so they are scanned exactly and
-    nothing checks it. This row is that check: it warns, naming each such collection and its row count, and says
-    to run the RDR-227 Gap 1 recall check on it.
+    The router runs a statement exact when the collection holds at most ``NX_SEARCH_EXACT_MAX_ROWS`` (T) rows
+    (default 20,000) and sends it to the collection's own partial HNSW index above T, once the builder has made one
+    (``NX_SEARCH_PCI_BUILD_MIN_ROWS``, ``NX_SEARCH_PCI``). For prose on ``voyage-context-3`` that index's recall
+    was measured at 0.9833 minimum tail recall (mean 0.9992, no top-1 miss) at 10,308 and 14,300 rows, under the
+    RDR's 0.99 target, and not at all above 20,000 rows (T2 ``nexus_rdr/227-research-12``; RDR-227 Phase 2b,
+    "Prose"). Nothing measured it on any other model. Today no prose collection is that large. This row warns when
+    one is, naming each collection with its row count and embedding model.
+
+    The warning says only what the evidence supports for each collection's model: the measurement is quoted for
+    ``voyage-context-3`` and every other model is "unmeasured". Its only remedy is to measure: this row cannot see
+    the engine's ``NX_SEARCH_EXACT_MAX_ROWS`` (the doctor reads its own shell), so a hint to raise it would leave
+    the warning on after the operator did. ``knowledge`` collections are included by analogy and the text says so.
 
     The ``GET /v1/status`` ``per_collection_indexes`` object carries counts only, no names, content types or row
-    counts, so the row reads the collection listing (``list_collections``, the one round trip ``nx doctor``'s
-    "T3 collections" row already makes). It compares the PHYSICAL row count (``stored_count``, else ``count``),
-    the number the engine's router and builder count.
+    counts, so the row reads the collection listing (``collections``: the one ``run_health_checks`` already fetched,
+    ``None`` when that fetch raised; left unset, the row fetches its own). It compares the PHYSICAL row count
+    (``stored_count``, else ``count``), the number the router counts, and skips every collection that is not live
+    (:func:`nexus.db.http_vector_client.is_live_collection_row`: a ``lifecycle_state`` present and not ``live``, or
+    a rename tombstone).
 
     Not applicable (ok, no warning) when the listing cannot be read or is empty: ``list_collections`` returns ``[]``
-    on a transport failure, and a box with no collections has nothing to measure. A prose collection below the
-    threshold, and a ``code__*`` collection at any size, pass.
+    on a transport failure, and a box with no collections has nothing to measure. A prose collection at or below
+    the threshold (the router runs it exact), and a ``code__*`` collection at any size, pass.
     """
+    from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred to avoid circular import
+
     label = _PROSE_INDEX_LABEL
     rows: list | None
     if collections is _ENGINE_STATUS_UNSET:
@@ -4729,13 +4749,15 @@ def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> lis
         return [HealthResult(label=label, ok=True, detail="not applicable: no collection listing to read")]
 
     threshold = _prose_index_threshold()
-    over: list[tuple[str, int]] = []
+    over: list[tuple[str, int, str, str]] = []  # name, rows, content type, embedding model ("" when unknown)
     unclassified = 0
     for row in rows:
         name = row.get("name") if isinstance(row, dict) else None
         if not isinstance(name, str):
             unclassified += 1
             continue
+        if not is_live_collection_row(row):
+            continue  # a quarantined, dormant or disputed collection, or a rename tombstone: not a search target
         # The catalog row's content type is the authority (RDR-204); the name is never parsed (the collection-name
         # parse census counts every such site). A chunk-holding collection with no catalog row is counted and said.
         kind = row.get("content_type")
@@ -4746,8 +4768,9 @@ def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> lis
             continue
         stored = row.get("stored_count")
         n = _status_int(stored if isinstance(stored, int) and not isinstance(stored, bool) else row.get("count"))
-        if n >= threshold:
-            over.append((name, n))
+        if n > threshold:
+            model = row.get("embedding_model")
+            over.append((name, n, kind, model if isinstance(model, str) else ""))
     skipped = (f"; {unclassified} of {len(rows)} collections have no catalog content type and were not checked"
                if unclassified else "")
     if unclassified == len(rows):
@@ -4755,24 +4778,34 @@ def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> lis
                              "content types (an older engine, or no catalog rows)")]
     if not over:
         return [HealthResult(label=label, ok=True,
-                             detail=f"no prose collection has {threshold:,} rows or more{skipped}")]
+                             detail=f"no prose collection has more than {threshold:,} rows{skipped}")]
     over.sort(key=lambda item: (-item[1], item[0]))
-    named = ", ".join(f"{name} ({n:,} rows)" for name, n in over[:_PROSE_INDEX_NAMED_MAX])
+    named = ", ".join(f"{name} ({n:,} rows, {model or 'embedding model not in the listing'})"
+                      for name, n, _kind, model in over[:_PROSE_INDEX_NAMED_MAX])
     if len(over) > _PROSE_INDEX_NAMED_MAX:
         named += f", and {len(over) - _PROSE_INDEX_NAMED_MAX} more"
+    models = sorted({model for _name, _n, _kind, model in over})
+    evidence: list[str] = []
+    if _PROSE_MEASURED_MODEL in models:
+        evidence.append(
+            f"on {_PROSE_MEASURED_MODEL} that index measured 0.9833 minimum tail recall (mean 0.9992, no top-1 miss) "
+            "at 10,308 and 14,300 rows, under the 0.99 target, and was never measured above 20,000 rows")
+        if any(kind == "knowledge" and model == _PROSE_MEASURED_MODEL for _name, _n, kind, model in over):
+            evidence.append("knowledge collections were not themselves measured (docs and rdr collections on the "
+                            "same model were)")
+    for m in models:
+        if m != _PROSE_MEASURED_MODEL:
+            evidence.append(f"recall on {m or 'a collection whose embedding model is not in the listing'} is unmeasured")
     return [HealthResult(
         label=label, ok=False, warn=True,
-        detail=(f"{named}: at or above the per-collection index threshold of {threshold:,} rows, so searches use the "
-                "collection's own HNSW index, whose prose recall is unmeasured at this size (0.9833 minimum at "
-                f"10,308 and 14,300 rows, under the 0.99 target){skipped}"),
+        detail=(f"{named}: above {threshold:,} rows, the threshold read from this shell's NX_SEARCH_EXACT_MAX_ROWS "
+                "(default 20,000; the engine's own value is not visible to nx doctor). A collection above the "
+                "threshold is routed to its own HNSW index once one is built (NX_SEARCH_PCI_BUILD_MIN_ROWS, "
+                f"NX_SEARCH_PCI). Evidence: {'; '.join(evidence)}{skipped}"),
         fix_suggestions=[
-            "Run the RDR-227 Gap 1 recall check on each named collection: recall of its pci_ index against an "
-            "exact top-k, at k 40, 60, 80, 100 and 120, on query vectors written for the collection's own topics; "
-            "the target is 0.99 or better at every k. It is a procedure, not a packaged script: the method and a "
-            "prose result are T2 nexus_rdr/227-research-12 and docs/rdr/"
-            "rdr-227-per-collection-hnsw-above-the-router-threshold.md (Gap 1, and Phase 2b, \"Prose\")",
-            "If the recall is under 0.99, raise NX_SEARCH_EXACT_MAX_ROWS (engine environment) above the "
-            "collection's row count to keep it on the exact scan (docs/configuration.md, NX_SEARCH_EXACT_MAX_ROWS)",
+            "Measure the recall of each named collection's own HNSW index (RDR-227 Gap 1): for k of 40, 60, 80, 100 "
+            "and 120, compare the index's top-k with an exact top-k, on query vectors written for the collection's "
+            "own topics (not random vectors); the target is 0.99 or better at every k",
         ],
     )]
 
@@ -10908,9 +10941,18 @@ def run_health_checks(
     results.extend(_check_mint_token())
     results.extend(_check_static_service_token())  # nexus-xzeml
 
+    # nexus-qqoak: one collection listing per run, shared by the T3 collection count and the prose-index row. None
+    # means the fetch raised; each row then degrades as it did when it fetched for itself.
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        _collections: list | None = make_t3().list_collections()
+    except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+        _log.debug("doctor_collection_listing_failed", error=str(exc))
+        _collections = None
+
     _local = is_local_mode()
     if _local:
-        results.extend(_check_t3_local())
+        results.extend(_check_t3_local(_collections))
         results.extend(_check_service_bge_model())
         results.extend(_check_service_crossencoder_model())
     else:
@@ -11021,7 +11063,7 @@ def run_health_checks(
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
-    results.extend(_check_prose_index_recall())  # nexus-qqoak
+    results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
