@@ -726,6 +726,30 @@ def local_embed_model_is_voyage() -> bool:
     return choice.lower().startswith("voyage")
 
 
+def local_embed_profile() -> str:
+    """Return the embedder family new collections are minted for: ``voyage`` or ``bge``.
+
+    RDR-210 Technical Design 2. ``voyage`` when ``local.embed_model`` names a
+    Voyage model, or when no choice is recorded and ``config.yml`` PERSISTS a
+    Voyage key; ``bge`` otherwise. The key is read from the persisted file
+    only (:func:`persisted_credentials`), never through
+    :func:`get_credential`, whose environment leg comes first and so can
+    differ between the supervisor's process and a client's: an
+    environment-only key still reaches the engine and serves Voyage
+    collections, but does not choose the profile.
+
+    :func:`local_embed_model_is_voyage` keeps its choice-only meaning, which
+    ``nexus.commands.init`` relies on for its "Kept:" line; this function is
+    the one the client's write model and the supervisor's ``NX_EMBED_PROFILE``
+    both read, so the names the client mints and the profile the engine seeds
+    agree when no choice is recorded.
+    """
+    if local_embed_model_choice():
+        return "voyage" if local_embed_model_is_voyage() else "bge"
+    key = persisted_credentials(nexus_config_dir()).get("voyage_api_key", "")
+    return "voyage" if key.strip() else "bge"
+
+
 def catalog_path() -> Path:
     """Return the catalog directory path.
 

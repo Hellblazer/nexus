@@ -417,8 +417,8 @@ def _write_intent_embedding_model(content_type: str) -> str:
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode():
-        from nexus.config import local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-        if local_embed_model_is_voyage():
+        from nexus.config import local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+        if local_embed_profile() == "voyage":
             from nexus.config import get_credential, local_embed_model_choice  # noqa: PLC0415 — circular-dep avoidance (config)
             if not get_credential("voyage_api_key"):
                 raise LocalVoyageCredentialMissingError(
@@ -542,8 +542,8 @@ def _promoted_model_token_for_read(content_type: str) -> str:
     :class:`EmbeddingProfileEmptyError` for what must stay a pure,
     offline candidate-name construction.
     """
-    from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-    if is_local_mode() and local_embed_model_is_voyage():
+    from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+    if is_local_mode() and local_embed_profile() == "voyage":
         return canonical_embedding_model(content_type)
     return _write_intent_embedding_model(content_type)
 
@@ -685,8 +685,8 @@ def resolve_write_embedding_model(
                                  see nexus-ddmfg)
     ==========================  ==============================================
     """
-    from nexus.config import get_credential, is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-    if is_local_mode() and local_embed_model_is_voyage():
+    from nexus.config import get_credential, is_local_mode, local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+    if is_local_mode() and local_embed_profile() == "voyage":
         key_present = bool(get_credential("voyage_api_key"))
         if not key_present and collection_exists is not None:
             found = _probe_local_token_collections(collection_exists)
@@ -1484,8 +1484,8 @@ def t3_collection_name(
                 candidate = f"{ct}__{owner_segment}__{local_token}__v1"
                 return candidate != promoted and t3.collection_exists(candidate)  # type: ignore[attr-defined]
 
-            from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
-            if is_local_mode() and local_embed_model_is_voyage():
+            from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — circular-dep avoidance (config)
+            if is_local_mode() and local_embed_profile() == "voyage":
                 if not for_write:
                     found_token = _probe_local_token_collections(_bge_candidate_exists)
                     if found_token is not None:

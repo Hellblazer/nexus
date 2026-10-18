@@ -366,7 +366,7 @@ def test_resolve_calibration_factors_still_activates_for_legacy_names_local_mode
     cloud mode -- so calibration for THAT install's legacy names must
     still activate, not collapse to a spurious single-model no-op."""
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-    monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
+    monkeypatch.setattr("nexus.config.local_embed_profile", lambda: "voyage")  # RDR-210: the write model reads the profile
     factors = _resolve_calibration_factors([
         _r("code__myrepo", 0.30), _r("knowledge__myrepo", 0.30),
     ])

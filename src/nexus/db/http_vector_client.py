@@ -1078,14 +1078,47 @@ def per_collection_chunk_cap(
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
     # apply the memory-derived cap to every prefix (code included) before the
     # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
-    if _serving_embedding_mode() == "onnx-local":
+    mode = _serving_embedding_mode()
+    if mode == "onnx-local":
         return _ONNX_LOCAL_UPSERT_CHUNK_CAP
+    # RDR-210 Technical Design 10: on a voyage or dual engine the memory cap binds
+    # exactly the bge collections, decided by the collection's model, not the
+    # engine-wide mode string. An unresolvable collection on a dual engine could be
+    # either family: take the smaller cap, never widen a batch on a guess.
+    is_bge = _collection_is_bge(collection, row_resolver=row_resolver)
+    if is_bge:
+        return _ONNX_LOCAL_UPSERT_CHUNK_CAP
+    if is_bge is None and mode == "dual":
+        return min(_ONNX_LOCAL_UPSERT_CHUNK_CAP, _CCE_UPSERT_CHUNK_CAP)
     if not is_cce:
         return _CODE_UPSERT_CHUNK_CAP
     # Voyage CCE (or unknown mode, which stays on the conservative voyage
     # split — never widen a batch on a guess): slow server-side contextual
     # embedding behind the managed 30s gateway.
     return _CCE_UPSERT_CHUNK_CAP
+
+
+def _collection_is_bge(
+    collection: str, *, row_resolver: "Callable[[str], dict | None] | None" = None,
+) -> bool | None:
+    """Whether *collection* is written under a bge model: ``True`` for a ``bge*``
+    model, ``False`` for any other model, ``None`` when the model cannot be
+    determined without a network round trip.
+
+    RDR-210 Technical Design 10. The catalog row's ``embedding_model`` when a row
+    exists (authoritative), else the model segment of a conformant name; the same
+    row-preferred shape as :func:`_is_cce_collection`, and *row_resolver* is
+    forwarded the same way so the read never crosses tenants.
+    """
+    from nexus.corpus import embedding_model_for_collection_name, resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+    model = resolve_row_preferred(
+        collection, "embedding_model", embedding_model_for_collection_name,
+        row_resolver=row_resolver,
+    )
+    if not model:
+        return None
+    return str(model).lower().startswith("bge")
 
 
 def _is_cce_collection(
@@ -1193,6 +1226,10 @@ def _upsert_byte_budget(
     exists to bound.
     """
     if _serving_embedding_mode() == "onnx-local":
+        return None
+    # RDR-210 Technical Design 10: a bge collection is memory-bound, not Voyage-token
+    # bound, whatever the engine's mode; the byte budget exists only for Voyage batches.
+    if _collection_is_bge(collection, row_resolver=row_resolver):
         return None
     # RDR-204 Phase 3 (nexus-ft04v.26), class (b): see
     # per_collection_chunk_cap's comment and :func:`_is_cce_collection`
@@ -6013,7 +6050,7 @@ def _seed_from_probe(client: HttpVectorClient) -> None:
         # The probed engine serves the route: skip the single-flight
         # probe. A later write-off (edge refusal, 5xx) still resets it.
         client._per_collection_confirmed = True
-    if _probed_embedding_mode in ("voyage", "onnx-local"):
+    if _probed_embedding_mode in ("voyage", "onnx-local", "dual"):
         # nexus-vpa9q: the probe already read /version; seeding the memo saves
         # embedding_mode() a second GET /version on the first search.
         client._embedding_mode_memo = _probed_embedding_mode

@@ -702,7 +702,7 @@ if parsed is None:
 elif parsed < REQUIRED_ENGINE_VERSION:
     errs.append(f"release_version {parsed} below floor {REQUIRED_ENGINE_VERSION}")
 mode = body.get("embedding_mode")
-if mode not in ("voyage", "onnx-local"):
+if mode not in ("voyage", "onnx-local", "dual"):
     errs.append(
         f"embedding_mode missing/unknown through the edge (got {mode!r}) — "
         "voyage threshold gating, doctor dimension-orphan check, and "
