@@ -18,6 +18,7 @@ the family, and each assertion names the command that broke it.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import pathlib
@@ -731,7 +732,6 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git config user.name " + BS + ";x",
         "git config user.name x" + BS + " y",
         "git config 'user.name' 'x'",
-        "git config \"user.name\"",
         "git config {user.name,x}",
         "git config user.{name,email}",
         "git config user.name{,x}",
@@ -814,21 +814,82 @@ _DENY_FAMILIES: dict[str, list[str]] = {
     "config_get_exemption_is_exact": [
         "git config -f 'x --get' user.name x",
         "git config --file='x --get' user.name x",
-        "git config --file 'x' --get user.name 'y'",
         "git config --default \"$x\" --get user.name",
         "git config --get " + D + "x user.name",
         "git config " + D + "x --get user.name",
         "git config {--get,--unset} user.name",
         "git config --glo'bal' user.name x",
     ],
-    # nexus-dsr6a confirmation F, an ACCEPTED cost: a bare-key read with a quote
-    # anywhere in the command is not plain and its word count is unprovable, so
-    # it denies. A get/list read beside a quote stays allowed (the allow family).
-    "config_bare_read_beside_a_quote": [
-        "git config user.name || echo \"no name\"",
-        "git config 'user.name'",
-        "echo \"x\" && git config user.name",
-        "git config core.hooksPath; echo \"---\"",
+    # nexus-gvg6t: a dashed `git-config` program is a config command whatever is
+    # quoted or expanded around it. In text the quote-aware tokenizer cannot read
+    # (a `$`, a backslash) the strict rule used to miss it: `config` in
+    # `git-config` is glued to `-`, which the standalone test excludes.
+    "config_dashed_program_in_unreadable_text": [
+        'git-config user.name "' + D + 'x"',
+        'git-config --global user.name "' + D + '(whoami)"',
+        '/usr/bin/git-config user.name "A ' + D + 'B"',
+        "/usr/lib/git-core/git-config 'user.name' " + D + "x",
+        "git-config user.name " + BS + "x",
+        "git-config user.name x" + BS + " y",
+        "git-config.exe user.name " + D + "x",
+        # and the quoted forms the tokenizer reads: a write
+        'git-config user.name "A B"',
+        'git-config --global user.name "A B"',
+        '/usr/bin/git-config user.name "A B"',
+        "git-config 'user.name' x",
+    ],
+    # nexus-gvg6t: text the tokenizer cannot read exactly takes the strict rule,
+    # as before: an unclosed quote, a backslash or `$` outside data, an unquoted
+    # heredoc delimiter, a heredoc with no terminator. A quote glued to a word
+    # joins it as in the shell (`con"fig"` is `config`), so those still deny as
+    # the verb they spell.
+    "config_tokenizer_gives_up": [
+        "git config user.name 'x",
+        'git config user.name "x',
+        "git config user.name x'",
+        "git con'fig' user.name x",
+        'git con"fig" user.name x',
+        'git config user.name "a"b',
+        "git config user.name a'b'",
+        "git config user.name 'a'" + BS + "'" + "'b'",
+        'git config user.name "' + D + '(whoami)"',
+        'git config user.name "' + BT + 'whoami' + BT + '"',
+        'git config user.name "a ' + BS + ' b"',
+        'git config user.name "' + D + 'x" ; git commit -m "ok"',
+        "git config user.name x <<EOF\nbody\nEOF",
+        "git status; cat <<'EOF'\ngit config user.name x",
+        "git status; cat <<'EOF'\nconfig\nno terminator here",
+        "git config user.name <<'EOF'\nx\nEO",
+        'git "$(cat <<\'EOF\'\nconfig\nEOF\n)x" user.name y',
+        'git config user.name "$(cat <<\'EOF\'\nx\nEOF\n) y"',
+    ],
+    # nexus-gvg6t: quoted data is data to THIS shell, but not to a consumer that
+    # runs its argument as a command (ssh, git submodule foreach, git rebase -x,
+    # tmux send-keys, a heredoc fed to ssh). A `git config` write spelled out in
+    # data denies, with the same cursor; text a cursor cannot count (`$`, braces,
+    # globs) takes the strict rule.
+    "config_quoted_data_a_consumer_runs": [
+        "ssh localhost 'git config user.name x'",
+        'ssh localhost "git config user.name x"',
+        "git submodule foreach 'git config user.name x'",
+        "git submodule foreach --recursive \"git config core.hooksPath /tmp/x\"",
+        "git rebase -x 'git config user.name x' HEAD~1",
+        "tmux send-keys 'git config user.name x' Enter",
+        "ssh localhost 'git con\"\"fig user.name x'",
+        "ssh localhost 'git con" + BS + "fig user.name x'",
+        "ssh localhost 'git config {user.name,x}'",
+        "ssh localhost 'git config user.* x'",
+        "ssh localhost 'git " + D + "(basename /x/config.py .py) user.name x'",
+        "ssh localhost 'git " + D + "(echo config) user.name x'",
+        "ssh localhost 'git -c a.b=c config user.name x'",
+        "ssh localhost 'cd /x && git config --global user.name x'",
+        "ssh localhost 'git-config user.name x'",
+        "ssh localhost 'git config user.name x' # and a comment",
+        "ssh localhost <<'EOF'\ngit config user.name x\nEOF",
+        "ssh localhost <<'EOF'\ncd /x\ngit config --global core.hooksPath /tmp/x\nEOF",
+        "ssh localhost bash -s <<'EOF'\ngit config user.name x\nEOF",
+        "git status; ssh localhost <<'EOF'\ngit config user.name x\nEOF\ngit log",
+        "git log -1 --format='%s config' && ssh localhost 'git config user.name x'",
     ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
@@ -1026,6 +1087,70 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "git config --list; echo 'done'",
         "git -c 'core.pager=less -R' config --list",
         "git -C '' config --get user.name",
+    ],
+    # nexus-gvg6t: single-quoted text, a double-quoted string with no `$`, backtick
+    # or backslash in it, and a quoted-delimiter heredoc body are data: no
+    # expansion is possible in them, so the word `config` there is a search term,
+    # a message or a file name, not a verb. The cursor reads each as ONE word.
+    "config_quoted_text_is_data": [
+        'git grep "config"',
+        "git grep 'config' src",
+        'git log --grep="config" --oneline',
+        "git log --grep='config' --oneline",
+        "git log --grep 'fix(config)' --oneline",
+        'git log --grep="it' + "'" + 's config"',
+        "git log --grep='say \"config\"'",
+        'git log -S"config" --oneline',
+        'grep -rn "git config" docs',
+        "grep -rn 'git config' docs",
+        'git ls-files | grep "config"',
+        'git ls-files | grep -v "config" | head',
+        "git diff -- 'conexus/config/' | wc -l",
+        'git -C "{repo}" status',
+        "git -C '{repo}' log -S config --oneline",
+        'git show "HEAD:src/nexus/config.py" | sed -n 1,10p',
+        "git status; echo 'config'",
+        "echo 'git config'",
+        'echo "git config user.name"',
+        'git log -1 --format="%s" -- "config"',
+        # a quote glued to a word joins it, as in the shell
+        "git show HEAD:'src/nexus/config.py'",
+        "git log --grep=x'config'y --oneline",
+        'git log --grep="a"b --oneline',
+        "git grep -n 'con''fig' src",
+        # a quoted bare-key read, and a read beside any quoted text
+        'git config "user.name"',
+        "git config 'user.name'",
+        "git config 'remote.origin.url'",
+        'git config user.name || echo "no name"',
+        'echo "x" && git config user.name',
+        'git config core.hooksPath; echo "---"',
+        "git config --get 'user.name' || echo 'unset'",
+        "git config --file 'x' --get user.name 'y'",
+        "git config --get-regexp '^remote' | head",
+        "git config --get --default 'a b' user.name",
+        "git config --type 'bool' --get core.bare",
+        'git -c "core.pager=less -R" config --list',
+        # a heredoc body is data when its delimiter is quoted
+        "cat <<'EOF'\nthe config file\nEOF",
+        "git log -1; cat <<'EOF'\nfix(config): handle x\nEOF",
+        "git log -1; cat <<\"EOF\"\nfix(config): handle x\nEOF",
+        "git log -1; cat <<" + BS + "EOF\nfix(config): handle x\nEOF",
+        "git log -1; cat <<-'EOF'\n\tfix(config): handle x\n\tEOF",
+        "git log -1; cat <<'EOF' | head -3\nconfig.py and config.yml\nEOF",
+        "git log -1; cat <<'EOF'\nuse git config here\nEOF",
+        "git log -1; cat <<'EOF'\n" + D + "(this) " + BT + "that" + BT + " config\nEOF",
+        "git log -1; cat <<'A' <<'B'\nconfig\nA\nconfig\nB",
+        "git grep -n config <<< 'a config line'",
+        # a comment is not an argument
+        "git config user.name # c",
+        "git config user.name # set it to x",
+        "git config --get user.name # config",
+        "git config user.name   # c d e f",
+        "git log -1 # git config user.name x",
+        "git status\n# git config user.name x\ngit log -1",
+        "git config core.hooksPath # why",
+        "git config user.name #c",
     ],
     "not_git": [
         "ls -la && echo commit",
@@ -1352,9 +1477,44 @@ _SHARED_CONFIG_WRITES = [
     "git " + D + "(echo config | cat) user.name x",
     "git " + D + "(echo config | cat) --worktree user.name x",
     "git --config-env=alias.c=CFG c user.name x",
-    # F, accepted: a --worktree write with a quoted value is not plain.
-    "git config --worktree user.name ';x'",
-    "git config --worktree user.name 'a b'",
+    # nexus-gvg6t: the --worktree key list is an ALLOWLIST. Every key below ran
+    # code or redirected what runs, or is simply not on the list, and passed the
+    # old denylist.
+    "git config --worktree url.https://evil/.insteadOf https://github.com/",
+    "git config --worktree url.x.pushInsteadOf y",
+    "git config --worktree interactive.diffFilter /tmp/x",
+    "git config --worktree mergetool.m.path /tmp/x",
+    "git config --worktree difftool.d.path /tmp/x",
+    "git config --worktree mergetool.m.cmd /tmp/x",
+    "git config --worktree submodule.s.update '!/tmp/x'",
+    "git config --worktree remote.origin.uploadpack /tmp/x",
+    "git config --worktree remote.origin.receivepack /tmp/x",
+    "git config --worktree uploadpack.packObjectsHook /tmp/x",
+    "git config --worktree core.worktree /tmp/x",
+    "git config --worktree core.bare true",
+    "git config --worktree core.attributesFile /tmp/x",
+    "git config --worktree core.excludesFile /tmp/x",
+    "git config --worktree diff.tool x",
+    "git config --worktree merge.tool x",
+    "git config --worktree sendemail.smtpServer /tmp/x",
+    "git config --worktree some.unknown.key 1",
+    "git config --worktree a.b c",
+    "git config --worktree user.name.sub x",
+    "git config --worktree --unset url.x.insteadOf",
+    "git config --worktree -e",
+    "git config --worktree --rename-section user usr",
+    "git config --worktree --remove-section user",
+    "git config --worktree set core.bare true",
+    "git config --worktree --type bool core.bare true",
+    "git config --worktree --comment c core.bare true",
+    # A repository-pointing variable, quoted or not, anywhere in the command.
+    "GIT_DIR='{primary}/.git' git config --worktree user.name x",
+    'GIT_DIR="{primary}/.git" git config --worktree user.name x',
+    "env 'GIT_DIR={primary}/.git' git config --worktree user.name x",
+    "git config --worktree user.name x; GIT_COMMON_DIR='{primary}/.git' git status",
+    # A data string a consumer runs is held to the same rule.
+    "ssh localhost 'git config user.name x'",
+    "git submodule foreach 'git config --worktree core.hooksPath /tmp/x'",
 ]
 
 
@@ -1396,7 +1556,31 @@ def test_a_worktree_write_and_every_config_read_pass_in_a_linked_worktree(
         "git config --worktree user.name x",
         "git config --worktree core.sparseCheckout true",
         "git config --worktree --unset user.name",
-        "git config --worktree --add a.b c",
+        "git config --worktree --add user.signingkey ABC",
+        "git config --worktree user.name 'a b'",
+        "git config --worktree user.name ';x'",
+        'git config --worktree user.email "a@b.c"',
+        "git config --worktree core.sparseCheckout true",
+        "git config --worktree core.sparseCheckoutCone true",
+        "git config --worktree commit.gpgsign false",
+        "git config --worktree --bool commit.gpgsign false",
+        "git config --worktree --type=bool commit.gpgsign false",
+        "git config --worktree --unset commit.gpgsign",
+        "git config --worktree --replace-all user.name x",
+        "git config --worktree USER.NAME x",
+        "git config --worktree core.abbrev 12",
+        "git config --worktree color.ui never",
+        "git config --worktree --comment 'why' user.name x",
+        # nexus-gvg6t: quoted text is data in a linked worktree too
+        'git commit -m "fix(config): handle x"',
+        "git commit -m 'config'",
+        'git commit -m "$(cat <<\'EOF\'\nfix(config): handle x\n\nconfig.py reads the config file.\nEOF\n)"',
+        'git add f.txt && git commit -m "$(cat <<\'EOF\'\nuse git config here\nEOF\n)"',
+        "git commit -q -F - <<'EOF'\ntalk about git config user.name\nEOF",
+        'git grep "config"',
+        'git log --grep="config" --oneline',
+        "git config --get user.name # config",
+        "git config user.name # why",
         "git status; git config --worktree user.name x",
         "git config --get user.name || echo \"no name\"",
         "git config --get user.name",
@@ -1552,6 +1736,59 @@ def test_the_config_alias_through_a_variable_really_writes_and_denies(tmp_path):
         assert _denied(cmd, main), cmd
 
 
+def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
+    """nexus-gvg6t: quoted text is data to the shell that reads it, not to a
+    consumer that runs its argument. `git submodule foreach '<cmd>'` runs <cmd>
+    in each submodule, so a quoted `git config` writes the submodule's config for
+    real. The control, the same quoted text as an `echo` argument, writes nothing
+    and passes."""
+    box = tmp_path / "box"
+    env = _sandbox_env(box)
+    sub = box / "sub"
+    main = box / "main"
+    for repo in (sub, main):
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (sub / "f").write_text("x")
+    subprocess.run(["git", "add", "f"], cwd=sub, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "i"], cwd=sub, check=True, env=env)
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "s"],
+        cwd=main, check=True, env=env, capture_output=True,
+    )
+    watched = [main / ".git" / "modules" / "s" / "config", main / ".git" / "config"]
+    control = "git submodule foreach 'echo git config user.name via-foreach'"
+    before = _config_snapshot(watched)
+    subprocess.run(["bash", "-c", control], cwd=main, env=env, check=True, capture_output=True)
+    assert _config_snapshot(watched) == before, "the control wrote"
+    assert not _denied(control.replace("echo git config user.name via-foreach", "echo ok"), main)
+    for cmd in (
+        "git submodule foreach 'git config user.name via-foreach'",
+        'git submodule foreach "git config core.hooksPath /tmp/hk"',
+    ):
+        before = _config_snapshot(watched)
+        subprocess.run(["bash", "-c", cmd], cwd=main, env=env, check=True, capture_output=True)
+        assert _config_snapshot(watched) != before, f"{cmd!r} did not write"
+        assert _denied(cmd, main), cmd
+
+
+def test_a_worktree_commit_denied_for_a_config_word_says_to_reword_it(
+    shared_repo, linked_worktree,
+):
+    """nexus-gvg6t: a commit message the tokenizer cannot read (a `$(date)` beside
+    the word `config`) still denies in a linked worktree; the deny tells the agent
+    to reword it or pass it with -F, not to hand the commit back."""
+    cmd = 'git commit -m "fix(config): ' + D + '(date)"'
+    out = _verdict(cmd, linked_worktree)
+    assert out["permissionDecision"] == "deny", cmd
+    reason = out["permissionDecisionReason"]
+    assert "reword the message, or pass it with `git commit -F <file>`" in reason, reason
+    plain = _verdict("git config user.name x", shared_repo)["permissionDecisionReason"]
+    assert "reword the message" not in plain, "the primary checkout deny must not say it"
+    assert _denied(cmd, linked_worktree)
+    assert not _denied("git commit -F msg.txt", linked_worktree)
+
+
 def test_a_git_dir_assignment_really_redirects_a_worktree_write_into_the_primary(
     shared_repo, linked_worktree, tmp_path,
 ):
@@ -1564,7 +1801,7 @@ def test_a_git_dir_assignment_really_redirects_a_worktree_write_into_the_primary
         ["git", "config", "extensions.worktreeConfig", "true"], cwd=shared_repo, check=True, env=env,
     )
     primary_file = shared_repo / ".git" / "config.worktree"
-    control = "git config --worktree zz.control 1"
+    control = "git config --worktree user.zzcontrol 1"
     subprocess.run(["bash", "-c", control], cwd=linked_worktree, env=env, check=True)
     assert not primary_file.exists(), "the control reached the primary"
     assert not _denied(control, linked_worktree), control
@@ -1699,7 +1936,7 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     # the span scan and the get-read walk. A get read with more words than the
     # walk cap is unprovable and denies; a long run of excused reads is one pass
     # each; unclosed or repeated substitutions are linear.
-    ("git config --get 'q' " + "a " * 20_000, True),
+    ("git config --get " + BS + "q " + "a " * 20_000, True),
     ("git config -l 'q'; " * 2_000, False),
     ("git " + "$(" * 15_000 + "x", False),
     ("git x " + BT * 30_000, False),
@@ -1710,6 +1947,57 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     ("git " + "GIT_CONFIG_PARAMETERS=a " * 2_000, False),
     ("git log " + "config " * 8_000, False),
     ("git grep " + "config " * 4_000 + "; git status; " * 2_000, False),
+    # nexus-gvg6t: the quote-aware tokenizer reads the raw command once. Each case
+    # is one of its hostile shapes; CPU time of the whole hook process tree is
+    # what is measured (`_timed_verdict`), so a quadratic walk shows up.
+    # Many data strings: one `find` each, one word each.
+    ("git log " + "--grep='config' " * 3_000, False),
+    ("git log " + '--grep="it\'s config" ' * 1_500, False),
+    ("git config --get user.name " + "'a b' " * 8_000 + "; git config user.name x", True),
+    ("git status " + "'x' " * 12_000, False),
+    ("git status " + "\"x\" " * 12_000, False),
+    # Unbalanced and nested quote styles: the tokenizer gives up, the strict rule
+    # reads the rest. One scan each.
+    ("git config user.name '" + "x " * 20_000, True),
+    ("git config user.name \"" + "x " * 20_000, True),
+    ("git status " + "'\"" * 15_000, False),
+    ("git config --get a " + "'\"" * 15_000, False),
+    ("git config user.name x " + "'\"'" * 8_000, True),
+    ("git status " + "\"'\" " * 10_000, False),
+    ("git log " + "'a'b" * 8_000, False),
+    # glued quotes join into one word each; a get read has no word cap on the
+    # cursor path, and past the cap on the strict path it is unprovable
+    ("git config --get a " + "\"a\"\"b\" " * 4_000, False),
+    ("git config --get a " + "\"a\"\"b\" " * 4_000 + BS + "q", True),
+    # A quote character inside the other kind of quote, many times over.
+    ("git log " + "--grep=\"say 'config' now\" --grep='say \"config\" now' " * 800, False),
+    # 200 KB heredocs: a quoted body is skipped with one `find`; an unterminated
+    # one or a terminator-lookalike on every line is still one pass.
+    ("git log -1; cat <<'EOF'\n" + "the config file of git\n" * 9_000 + "EOF\n", False),
+    ("git log -1; cat <<'EOF'\n" + "git config word\n" * 12_000 + "EOF\n", False),
+    ("git log -1; cat <<'EOF'\n" + "EOFx\n" * 40_000 + "EOF\n", False),
+    ("git log -1; cat <<-'EOF'\n" + "\t\t\tEOFx\n" * 30_000 + "\tEOF\n", False),
+    ("ssh localhost <<'EOF'\n" + "echo x\n" * 30_000 + "git config user.name x\nEOF\n", True),
+    ("git status; cat <<'EOF'\n" + "config\n" * 40_000, True),
+    ("git status; cat <<'EOF'\n" + "x\n" * 100_000, False),
+    ("git log -1; " + "cat <<'A' <<'B' <<'C'\nconfig\nA\nconfig\nB\nconfig\nC\n" * 700, False),
+    ("git log -1; cat " + "<<'EOF' " * 4_000 + "\nx\nEOF\n", False),
+    ("git log -1; echo \"$(cat <<'EOF'\n" + "config git\n" * 16_000 + "EOF\n)\"", False),
+    ("git log -1; echo \"$(cat <<'EOF'\n" + "x\n" * 40_000 + "EOF\n)\" " * 3, False),
+    ("git log -1; echo \"$(cat <<'EOF'\n" + "x\n" * 40_000 + "EOF\n", False),
+    ("git status " + "<<< 'config' " * 3_000, False),
+    # Comments: one `find` to the end of the line.
+    ("git config --get a # " + "config git " * 4_000, False),
+    ("git config --get a # x\n" * 3_000, False),
+    ("git config user.name x # " + "c " * 12_000, True),
+    ("git status " + "#c " * 10_000, False),
+    # Data that names git and is run as a command by a consumer: each string is
+    # normalized once and read once.
+    ("ssh localhost " + "'git config --get a' " * 1_500, False),
+    ("ssh localhost 'git config user.name x" + " y" * 12_000 + "'", True),
+    ("echo '" + "git config --get a; " * 2_000 + "'", False),
+    ("git status; echo '" + "git x; " * 5_000 + "config'", False),
+    ("echo '" + "git " * 6_000 + "config user.name x'", True),
 ]
 
 
@@ -1831,8 +2119,6 @@ def test_the_chas_carve_out_is_not_vacuous(shared_repo):
     """Without the carve-out every allowed command above contains git and a
     write verb, so the primary rule would deny it: the allow test proves the
     carve-out fired, not that the scan missed the text."""
-    import importlib.util
-
     spec = importlib.util.spec_from_file_location("guard", SCRIPT)
     assert spec is not None and spec.loader is not None
     guard = importlib.util.module_from_spec(spec)
