@@ -782,6 +782,129 @@ class TestRegistrationSeamProfileCheck:
         writer.register_collection.assert_not_called()
 
 
+class TestRegistrationSeamExistingRowSkipsProfileComparison:
+    """RDR-210 P1.4 (nexus-no5rm, Gap 9). Under a dual engine whose profile
+    says Voyage, a write to an EXISTING bge collection must not be refused:
+    the engine never re-points an existing row (CatalogRepository.upsertCollection
+    existing-row branch; pinned in CatalogRepositoryTest), so the client's
+    profile comparison applies to new names only. Neutral bge tokens are
+    used for the row and the intent; the profile row is the off-profile
+    side."""
+
+    _BGE = "bge-base-en-v15-768"
+
+    def _writer_with_row(self, row: dict | None) -> MagicMock:
+        writer = _fake_writer()
+        writer.get_collection.return_value = row
+        return writer
+
+    def _local_bge_intent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+        )
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._BGE)
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
+
+    def test_a_write_to_an_existing_bge_row_passes_under_a_voyage_profile(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._local_bge_intent(monkeypatch)
+        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        name = f"docs__seam-existing-row__{self._BGE}__v1"
+        writer = self._writer_with_row(
+            {"name": name, "embedding_model": self._BGE, "superseded_by": ""},
+        )
+
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_called_once_with(
+            name, content_type="docs", owner_id="seam-existing-row",
+            embedding_model=self._BGE, model_version="v1",
+        )
+        assert name in corpus._REGISTERED_COLLECTIONS
+
+    def test_registering_a_new_bge_name_under_a_voyage_profile_is_still_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        self._local_bge_intent(monkeypatch)
+        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        name = f"docs__seam-new-name__{self._BGE}__v1"
+        writer = self._writer_with_row(None)
+
+        with pytest.raises(EmbeddingProfileMismatchError, match="restart"):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.get_collection.assert_called_once_with(name)
+        writer.register_collection.assert_not_called()
+        assert name not in corpus._REGISTERED_COLLECTIONS
+
+    def test_an_existing_row_of_another_model_does_not_excuse_the_mismatch(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only a row holding the intent's OWN model skips the comparison; a
+        row on a third model leaves the refusal in place."""
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        self._local_bge_intent(monkeypatch)
+        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        name = f"docs__seam-other-model__{self._BGE}__v1"
+        writer = self._writer_with_row(
+            {"name": name, "embedding_model": "minilm-l6-v2-384", "superseded_by": ""},
+        )
+
+        with pytest.raises(EmbeddingProfileMismatchError):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_not_called()
+
+    def test_explicit_kwargs_on_an_existing_same_model_row_pass_too(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit-kwargs callers (backfill, rename) skip the superseded read,
+        so the row is read only when the profile disagrees."""
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        name = f"docs__seam-explicit__{self._BGE}__v1"
+        override = {
+            "content_type": "docs", "owner_id": "seam-explicit",
+            "embedding_model": self._BGE, "model_version": "v1",
+        }
+        existing = self._writer_with_row({"name": name, "embedding_model": self._BGE})
+
+        ensure_collection_registered(name, registrar=lambda: existing, kwargs=override)
+
+        existing.register_collection.assert_called_once_with(name, **override)
+
+        corpus._REGISTERED_COLLECTIONS.clear()
+        absent = self._writer_with_row(None)
+        with pytest.raises(EmbeddingProfileMismatchError):
+            ensure_collection_registered(name, registrar=lambda: absent, kwargs=override)
+        absent.register_collection.assert_not_called()
+
+    def test_an_agreeing_profile_reads_no_row_on_the_explicit_path(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The extra read is paid only on disagreement."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        _stub_profile_reader(monkeypatch, {"docs": self._BGE})
+        name = f"docs__seam-agree__{self._BGE}__v1"
+        override = {
+            "content_type": "docs", "owner_id": "seam-agree",
+            "embedding_model": self._BGE, "model_version": "v1",
+        }
+        writer = self._writer_with_row(None)
+
+        ensure_collection_registered(name, registrar=lambda: writer, kwargs=override)
+
+        writer.get_collection.assert_not_called()
+        writer.register_collection.assert_called_once_with(name, **override)
+
+
 class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): ``kwargs``
     bypasses ``collection_registration_kwargs``'s generic name-derivation

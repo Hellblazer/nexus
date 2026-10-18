@@ -1813,6 +1813,11 @@ def _superseded_successor(row: object) -> str:
     return successor if isinstance(successor, str) else ""
 
 
+def _row_holds_model(row: object, model: str) -> bool:
+    """True when a ``/collections/get`` row exists and records *model*."""
+    return isinstance(row, dict) and row.get("embedding_model") == model
+
+
 def _row_from_client(client: object, name: str) -> object:
     """*name*'s catalog row via *client*. A scoped registrar hands back a full
     catalog client; the ambient writer is a write-only proxy whose
@@ -1994,7 +1999,11 @@ def ensure_collection_registered(
     same check there broke 155 unit tests that reach it with only the
     db/T3 layer mocked — a network call in that chokepoint was wrong,
     not under-fixtured). Profile disagrees -> :class:`EmbeddingProfileMismatchError`
-    naming the restart, registration refused before the wire call. No
+    naming the restart, registration refused before the wire call --
+    unless the collection's row ALREADY EXISTS holding the same model
+    (RDR-210 Gap 9, nexus-no5rm): the profile governs new names only,
+    the engine never re-points an existing row, so a write to an existing
+    bge collection under a Voyage-profile dual engine passes. No
     profile row for this content_type yet -> proceeds with intent
     unchanged (the bootstrap case: this registration is what seeds the
     row every later comparison reads, verified against
@@ -2104,19 +2113,31 @@ def ensure_collection_registered(
             # closed, like the retry path): one failed GET followed by a good
             # POST would otherwise revive the tombstone.
             writer = registrar() if implicit else None
+            existing_row: object = None
             try:
                 import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
                 if writer is not None:
-                    cold_successor = _superseded_successor(_row_from_client(writer, name))
+                    existing_row = _row_from_client(writer, name)
+                    cold_successor = _superseded_successor(existing_row)
                     if cold_successor:
                         raise SupersededCollectionWriteError(name, cold_successor)
                 if kwargs is None:
                     kwargs = collection_registration_kwargs(name)
                 profile_model = _profile_model_for_content_type(kwargs["content_type"])
                 if profile_model is not None and profile_model != kwargs["embedding_model"]:
-                    raise EmbeddingProfileMismatchError(
-                        kwargs["content_type"], kwargs["embedding_model"], profile_model,
-                    )
+                    # RDR-210 Gap 9 (nexus-no5rm): the profile governs NEW names
+                    # only. The engine never re-points an existing row
+                    # (CatalogRepository.upsertCollection), so a name whose row
+                    # already holds this model is not off-profile for a write.
+                    # An explicit-kwargs caller has not read the row yet; it
+                    # pays that read only here, on a disagreement.
+                    if writer is None:
+                        writer = registrar()
+                        existing_row = _row_from_client(writer, name)
+                    if not _row_holds_model(existing_row, kwargs["embedding_model"]):
+                        raise EmbeddingProfileMismatchError(
+                            kwargs["content_type"], kwargs["embedding_model"], profile_model,
+                        )
                 if writer is None:
                     writer = registrar()
                 try:

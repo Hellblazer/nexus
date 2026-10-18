@@ -2279,6 +2279,79 @@ class CatalogRepositoryTest {
             .isNull();
     }
 
+    @Test @Order(60)
+    void collection_upsert_existingRowIsNeverRepointedByAProfileNamingAnotherModel() throws Exception {
+        // RDR-210 P1.4 (nexus-no5rm), Gap 9: the client now skips its own profile
+        // comparison for a write to an EXISTING row of the same model, relying on
+        // the engine never re-pointing an existing row. This pins that engine side.
+        // Dual-engine shape: a bge row exists, then the tenant's profile for the
+        // content type is moved to Voyage (a restart under a Voyage key re-seeds the
+        // profile by upsert). The existing row must keep accepting its own model and
+        // keep its dimension; a NEW name off the profile must still be refused.
+        String tenant = "cat-profile-seam-tenant";
+        String contentType = "docs";
+        String bge = "bge-base-en-v15-768";
+        String voyage = "voyage-context-3";
+        String existing = "docs__cat-seam-owner__" + bge + "__v1";
+        String fresh = "docs__cat-seam-owner-new__" + bge + "__v1";
+        var coll = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+        var profile = dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
+
+        // No profile row yet: the request's own model seeds the row.
+        repo.upsertCollection(tenant, Map.of(
+            "name", existing, "content_type", contentType, "owner_id", "cat-seam-owner",
+            "embedding_model", bge, "model_version", "v1"));
+        Integer dimensionBefore;
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.select(coll.EMBEDDING_MODEL).from(coll)
+                    .where(coll.TENANT_ID.eq(tenant)).and(coll.NAME.eq(existing))
+                    .fetchOne(coll.EMBEDDING_MODEL))
+                .as("guard: the row was registered with the bge model").isEqualTo(bge);
+            dimensionBefore = ctx.select(coll.DIMENSION).from(coll)
+                    .where(coll.TENANT_ID.eq(tenant)).and(coll.NAME.eq(existing))
+                    .fetchOne(coll.DIMENSION);
+
+            // The profile moves to Voyage for this content type.
+            ctx.insertInto(profile, profile.TENANT_ID, profile.CONTENT_TYPE,
+                           profile.EMBEDDING_MODEL, profile.DIMENSION)
+               .values(tenant, contentType, voyage, 1024)
+               .onConflict(profile.TENANT_ID, profile.CONTENT_TYPE)
+               .doUpdate()
+               .set(profile.EMBEDDING_MODEL, voyage).set(profile.DIMENSION, 1024)
+               .execute();
+        }
+
+        // Existing row, its own (now off-profile) model: accepted, not re-pointed.
+        repo.upsertCollection(tenant, Map.of(
+            "name", existing, "content_type", contentType, "owner_id", "cat-seam-owner",
+            "embedding_model", bge, "model_version", "v1"));
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(coll.EMBEDDING_MODEL, coll.DIMENSION).from(coll)
+                    .where(coll.TENANT_ID.eq(tenant)).and(coll.NAME.eq(existing)).fetchOne();
+            assertThat(row.value1()).as("an existing row is never re-pointed by the profile").isEqualTo(bge);
+            assertThat(row.value2()).as("nor its dimension").isEqualTo(dimensionBefore);
+        }
+
+        // Naming the profile's model for the existing row is the change the engine refuses.
+        assertThatThrownBy(() -> repo.upsertCollection(tenant, Map.of(
+                "name", existing, "content_type", contentType, "owner_id", "cat-seam-owner",
+                "embedding_model", voyage, "model_version", "v1")))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining("already registered")
+            .hasMessageContaining(bge);
+
+        // A NEW name off the profile is refused, naming the profile's model, and leaves no row.
+        assertThatThrownBy(() -> repo.upsertCollection(tenant, Map.of(
+                "name", fresh, "content_type", contentType, "owner_id", "cat-seam-owner-new",
+                "embedding_model", bge, "model_version", "v1")))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining(voyage)
+            .hasMessageContaining(fresh);
+        assertThat(repo.getCollection(tenant, fresh)).isNull();
+    }
+
     @Test @Order(61)
     void collection_list() {
         var colls = repo.listCollections(TENANT_A);
