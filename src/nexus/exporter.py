@@ -795,7 +795,27 @@ def _prepass_groups(
                         fallback_title=fallback_title, fallback_content_type=fallback_content_type,
                         target_collection=target_collection)
                 group["maxpos"] = max(group.get("maxpos", -1), position)
+                # nexus-8hhbk: the source file's sha256 its chunks carry, so the document is stamped
+                # with its own content hash rather than the bundle's. Two distinct values already
+                # mean "no single hash", so no more are kept.
+                ch = meta.get("content_hash")
+                hashes = group.setdefault("content_hashes", [])
+                if isinstance(ch, str) and ch and ch not in hashes and len(hashes) < 2:
+                    hashes.append(ch)
     return groups
+
+
+def _document_completion_hash(file_hash: str, doc_id: str, content_hashes: set[str]) -> str:
+    """The ``index_content_hash`` an imported document is stamped ``complete`` with (nexus-8hhbk).
+
+    Its records' one source-file hash when they agree on exactly one: the document then keys
+    same-as with any other copy of those bytes, as a natively indexed one does. Otherwise (no
+    record carried one, or they disagree) a hash of this file and this document, which matches no
+    other document: stamping the bundle's own sha256 on every document, as before, made all of one
+    bundle's PDFs share one key and the same-as linker would join them all."""
+    if len(content_hashes) == 1:
+        return next(iter(content_hashes))
+    return hashlib.sha256(f"nexus-import:{file_hash}:{doc_id}".encode()).hexdigest()
 
 
 def _wire_embedding_model(
@@ -888,6 +908,7 @@ class _OwnerImport:
         self._kept: dict[str, dict[str, Any]] = {}        # tumbler -> chash sets, counts, index_state
         self._doc_of: dict[str, str] = {}                 # group key -> the document it resolved to
         self._doc_figures: dict[str, tuple[int, int]] = {}   # tumbler -> (records, highest position)
+        self._doc_hashes: dict[str, set[str]] = {}          # tumbler -> its records' source-file hashes
         self._group_failed: set[str] = set()              # group keys that did not resolve (reported)
         self._live_legacy: dict[str, Any] = {}
         self._reader: Any = None
@@ -1004,6 +1025,7 @@ class _OwnerImport:
             self._doc_of[key] = doc
             total, top = self._doc_figures.get(doc, (0, -1))
             self._doc_figures[doc] = (total + g["seen"], max(top, g.get("maxpos", -1)))
+            self._doc_hashes.setdefault(doc, set()).update(g.get("content_hashes", ()))
 
     # ── one page ──────────────────────────────────────────────────────────────
 
@@ -1183,7 +1205,8 @@ class _OwnerImport:
                 }
                 continue
             self._import_writer.register_document(
-                d, total_rows=total, max_position=max_position, resume=d in resumable)
+                d, total_rows=total, max_position=max_position, resume=d in resumable,
+                completion_hash=_document_completion_hash(self.file_hash, d, self._doc_hashes.get(d, set())))
             self._state[d] = "resume" if d in resumable else "write"
 
     # ── end of stream ─────────────────────────────────────────────────────────

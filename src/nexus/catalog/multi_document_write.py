@@ -130,9 +130,11 @@ class FinishResult:
 
 class _Doc:
     __slots__ = ("positions", "max_position", "tail", "total", "resume", "received", "begun", "written", "failed",
-                 "prior", "wrote", "sweep_rest", "done", "stamped", "refusal", "collisions", "awaiting")
+                 "prior", "wrote", "sweep_rest", "done", "stamped", "refusal", "collisions", "awaiting",
+                 "completion_hash")
 
-    def __init__(self, total: int, max_position: int, resume: bool) -> None:
+    def __init__(self, total: int, max_position: int, resume: bool, completion_hash: str | None = None) -> None:
+        self.completion_hash = completion_hash   # this document's own content hash for the stamp
         self.max_position = max_position
         self.positions: set[int] = set()     # every position claimed
         self.tail = max_position + 1         # where a colliding row goes: past every legitimate one
@@ -232,23 +234,38 @@ class MultiDocumentImportWriter:
 
     def register_document(
         self, doc_id: str, *, total_rows: int, max_position: int, resume: bool = False,
+        completion_hash: str | None = None,
     ) -> None:
         """Declare a document the run will write: *total_rows* rows over the whole run (its last page
         is the one that brings it there), *max_position* the highest position the caller will claim
         for it, and whether it is a *resume* (written with the append form throughout). Registering
         again with the same figures is a no-op; with other figures it is refused, because the first
         total would silently win and the document would be stamped complete at the smaller count (two
-        owner groups that resolve to one document are declared ONCE, with their combined figures)."""
+        owner groups that resolve to one document are declared ONCE, with their combined figures).
+
+        *completion_hash* is the content hash the document's ``complete`` stamp carries, when it is
+        not the run's: the run's hash (the file's sha256 for an import) begins the fence, and a resume
+        recognises an unfinished document by it, but stamped on every completed document it makes
+        all of one file's documents share an ``index_content_hash`` (nexus-8hhbk)."""
         if total_rows < 1:
             raise ValueError(f"register_document({doc_id!r}): total_rows must be positive, got {total_rows}")
         known = self._docs.get(doc_id)
         if known is None:
-            self._docs[doc_id] = _Doc(total_rows, max_position, resume)
+            self._docs[doc_id] = _Doc(total_rows, max_position, resume, completion_hash)
+        elif known.completion_hash != completion_hash:
+            raise ValueError(
+                f"register_document({doc_id!r}): already registered with completion_hash="
+                f"{known.completion_hash!r}; got {completion_hash!r}")
         elif (known.total, known.max_position, known.resume) != (total_rows, max_position, resume):
             raise ValueError(
                 f"register_document({doc_id!r}): already registered with total_rows={known.total}, "
                 f"max_position={known.max_position}, resume={known.resume}; got total_rows={total_rows}, "
                 f"max_position={max_position}, resume={resume}")
+
+    def _stamp_hash(self, doc_id: str) -> str:
+        """The content hash *doc_id*'s ``complete`` stamp carries."""
+        st = self._docs.get(doc_id)
+        return (st.completion_hash if st is not None else None) or self._content_hash
 
     def landed(self, doc_id: str) -> bool:
         """True when any row of *doc_id* landed (its first request committed)."""
@@ -609,7 +626,7 @@ class MultiDocumentImportWriter:
             if not group:
                 continue
             payload = self._payload(group, chunks)
-            stamp = {d: self._content_hash for d in group} if is_single and not self._defer else None
+            stamp = {d: self._stamp_hash(d) for d in group} if is_single and not self._defer else None
             resp = self._retrying(
                 self._cat.write_manifest_many, list(group.items()), stamp, sweep=is_single,
                 chunks=payload or None, collection=self._collection,
@@ -660,7 +677,7 @@ class MultiDocumentImportWriter:
             if len(sweep) > cap:
                 rests[doc_id] = sweep[cap:]
             elif not self._defer:
-                stamps[doc_id] = (self._content_hash, st.received + len(rows))
+                stamps[doc_id] = (self._stamp_hash(doc_id), st.received + len(rows))
         payload = self._payload(later, chunks)
         resp = self._retrying(
             self._cat.append_manifest_many, list(later.items()), collection=self._collection,
@@ -720,7 +737,7 @@ class MultiDocumentImportWriter:
                 if not rest:
                     final.add(d)
                     if not self._defer:
-                        stamps[d] = (self._content_hash, st.received)
+                        stamps[d] = (self._stamp_hash(d), st.received)
             resp = self._retrying(
                 self._cat.append_manifest_many, [(d, []) for d, _ in batch], collection=self._collection,
                 sweep_chashes=sweeps, complete=stamps or None, data=False)
@@ -769,7 +786,7 @@ class MultiDocumentImportWriter:
                 owed.append(d)
         for i in range(0, len(owed), MANIFEST_APPEND_MANY_MAX_DOCS):
             batch = owed[i:i + MANIFEST_APPEND_MANY_MAX_DOCS]
-            stamps = {d: (self._content_hash, self._docs[d].received) for d in batch}
+            stamps = {d: (self._stamp_hash(d), self._docs[d].received) for d in batch}
             resp = self._retrying(
                 self._cat.append_manifest_many, [(d, []) for d in batch], collection=self._collection,
                 complete=stamps, data=False)
