@@ -173,6 +173,17 @@ class PciCatalogTest {
     }
 
     @Test
+    void aValidIndexCannotRepresentALeftover() {
+        org.assertj.core.api.Assertions
+            .assertThatThrownBy(() -> new PciCatalog.Index(GOOD_NAME + "_ccnew", true, null, "c"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("valid index is never");
+        // The invalid pair still builds, and so does a valid unparsed index with no claim.
+        assertThat(new PciCatalog.Index(GOOD_NAME + "_ccnew", false, null, "c").leftover()).isTrue();
+        assertThat(new PciCatalog.Index(GOOD_NAME + "_ccnew", true, null).leftover()).isFalse();
+    }
+
+    @Test
     void snapshot_countsALeftoverOnItsOwn_notAsUnparsed_notAsInvalid_andNeverRoutesToIt() {
         var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
             new PciCatalog.Index(GOOD_NAME, true, "c"),

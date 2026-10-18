@@ -548,7 +548,10 @@ walk at `ef_search = 1000`.
   (`DROP INDEX CONCURRENTLY IF EXISTS`, the drop's existing 5 s lock timeout, reason
   `reindex_leftover`) with no check of `pg_stat_progress_create_index`: a reindex
   still running holds `ShareUpdateExclusiveLock` on the leaf, the drop times out
-  against it, and the next pass judges again. A leftover is still not one of the
+  against it, and the next pass judges again. Because the snapshot can be a pass
+  old, the drop re-reads `pg_index.indisvalid` for that name on its own session
+  immediately before the `DROP` and skips it, logging `pci_drop_skipped_stale` and
+  not `pci_index_dropped`, when the index is valid now or gone. A leftover is still not one of the
   builder's own for routing: never routed to, never counted against
   `NX_SEARCH_PCI_MAX_PER_LEAF`, never taken as "this collection has an index", and
   counted by the status object in `reindex_leftover` instead of `unparsed`. A valid
@@ -972,7 +975,7 @@ A standby engine, and an engine whose admin credentials were refused, read:
 The counts are global, not per tenant, like the existing `reaper` object on the
 same unauthenticated route. The object is additive and goes in the wire ledger;
 a client against an engine that predates it finds no key and reports
-not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed=`,
+not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed= reindex_leftover=`,
 and `event=pci_sweep_set_changed added_count= removed_count= added= removed=` when
 the router's set changed between two reads (`leaf:collection:index` entries, cut at
 20 with the exact counts; the first read after a boot lists what the boot found, and

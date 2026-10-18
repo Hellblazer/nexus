@@ -768,11 +768,6 @@ class PciReconcilerIntegrationTest {
 
     // -- REINDEX CONCURRENTLY leftovers (nexus-rn1yd, T2 nexus_rdr/227-decision-4-amendment-reindex-leftovers) ----------
 
-    /**
-     * Run {@code REINDEX INDEX CONCURRENTLY} on the base index as an operator would, with a writer holding the leaf
-     * open so the reindex stalls after it has committed its invalid {@code _ccnew} and is ended by its statement
-     * timeout: the genuine leftover. Returns the leftover's name.
-     */
     /** Session-level {@code set_config} on {@code conn}: the typed form of {@code SET name = value}. */
     static void setSession(Connection conn, String name, String value) {
         DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("set_config", SQLDataType.VARCHAR,
@@ -790,6 +785,11 @@ class PciReconcilerIntegrationTest {
 
     static final String REINDEX_APP = "pcirec-reindex";
 
+    /**
+     * Run {@code REINDEX INDEX CONCURRENTLY} on the base index as an operator would, with a writer holding the leaf
+     * open so the reindex stalls after it has committed its invalid {@code _ccnew} and is ended by its statement
+     * timeout: the genuine leftover. Returns the leftover's name.
+     */
     String reindexAndFailLeftBehind(String tenant, String baseIndex) throws Exception {
         PciCatalog.Leaf leaf = leaf(tenant);
         try (HeldWrite held = new HeldWrite(tenant);
@@ -849,6 +849,167 @@ class PciReconcilerIntegrationTest {
         assertThat(sweep.hasValidIndex(M384, tenant, collection)).isTrue();
         assertThat(statusJson(r, sweep).get("per_collection_indexes").get("reindex_leftover").asInt()).isZero();
         assertThat(r.reconcileOnce().drops()).as("a second pass has nothing left to drop").isZero();
+    }
+
+    /**
+     * An open transaction that has read the leaf and sits idle: it holds {@code AccessShareLock} on the leaf, and (as
+     * measured on PostgreSQL 17: {@code pg_stat_activity.backend_xmin} stays set) the snapshot of its read. The lock
+     * is what {@code REINDEX CONCURRENTLY} waits on after the swap, in "waiting for readers before marking dead"
+     * (REINDEX, step 5), which is where a {@code _ccold} is left behind. The snapshot is what it waits on earlier, in
+     * "waiting for old snapshots" (step 3), for every transaction that already holds one: a reader that opens BEFORE
+     * that wait holds the reindex before the swap, and one that opens during the wait is not waited for there.
+     */
+    final class HeldRead implements AutoCloseable {
+        private final Connection conn;
+        private boolean closed;
+
+        HeldRead(PciCatalog.Leaf leaf) throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(false);
+            DSL.using(conn, SQLDialect.POSTGRES).selectCount().from(DSL.table(DSL.name(leaf.schema(), leaf.name())))
+                .fetch();
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            conn.rollback();
+            conn.close();
+        }
+    }
+
+    /** The phase {@code pg_stat_progress_create_index} reports for the one create-index operation running, or null. */
+    String createIndexPhase() {
+        try {
+            return asSuperuser(su -> su.select(DSL.field(DSL.name("phase"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_progress_create_index"))).fetchOne(0, String.class));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** {@code {indisvalid, indisready}} of the index {@code name} in {@code schema}, read as the superuser. */
+    boolean[] validAndReady(String schema, String name) throws Exception {
+        return asSuperuser(su -> {
+            var row = su.select(DSL.field(DSL.name("i", "indisvalid"), Boolean.class),
+                    DSL.field(DSL.name("i", "indisready"), Boolean.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_index")).as("i"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("i", "indexrelid"))))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq(name))
+                .fetchOne();
+            return row == null ? null : new boolean[] {row.value1(), row.value2()};
+        });
+    }
+
+    /** What every other backend is doing, for a timeout message: state, wait, xmin, create-index phase, query. */
+    String activityDiagnostics() throws Exception {
+        return asSuperuser(su -> {
+            var a = DSL.table(DSL.name("pg_catalog", "pg_stat_activity")).as("a");
+            var p = DSL.table(DSL.name("pg_catalog", "pg_stat_progress_create_index")).as("p");
+            var rows = su.select(DSL.field(DSL.name("a", "pid")), DSL.field(DSL.name("a", "state")),
+                    DSL.field(DSL.name("a", "wait_event_type")), DSL.field(DSL.name("a", "wait_event")),
+                    DSL.field(DSL.name("a", "backend_xmin")), DSL.field(DSL.name("p", "phase")),
+                    DSL.field(DSL.name("a", "query")))
+                .from(a).leftJoin(p).on(DSL.field(DSL.name("p", "pid")).eq(DSL.field(DSL.name("a", "pid"))))
+                .where(DSL.field(DSL.name("a", "datname")).isNotNull())
+                .and(DSL.field(DSL.name("a", "pid")).ne(DSL.function("pg_backend_pid", Integer.class)))
+                .fetch();
+            return rows.formatCSV();
+        });
+    }
+
+    @Test
+    @Timeout(value = 120, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aRealReindexConcurrentlyCancelledAfterTheSwap_leavesAnInvalidCcold_thePassDropsItAsReindexLeftover_andTheNewBaseIndexKeepsServing()
+            throws Exception {
+        String tenant = newTenant("ricold");
+        String collection = name("swapped");
+        collection(tenant, collection, 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        PciReconciler r = reconciler(s, sweep);
+        assertThat(r.reconcileOnce().builds()).isEqualTo(1);
+        String base = PciCatalog.indexName(M384, tenant, collection);
+        String ccold = base + "_ccold";
+        PciCatalog.Leaf leaf = leaf(tenant);
+        AtomicReference<Throwable> reindexFailure = new AtomicReference<>();
+
+        HeldRead early = new HeldRead(leaf);
+        HeldRead late = null;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            setSession(su, "application_name", REINDEX_APP);
+            setSession(su, "statement_timeout", "60s");
+            CompletableFuture<Void> reindex = CompletableFuture.runAsync(() -> {
+                try {
+                    PgContainerHelper.runSuperuserDdlOutsideTransaction(su,
+                        "REINDEX INDEX CONCURRENTLY " + leaf.schema() + "." + base);
+                } catch (Exception e) {
+                    reindexFailure.set(e);
+                }
+            }, async);
+            // The early reader's snapshot holds the reindex in step 3 ("waiting for old snapshots"), after its
+            // validation snapshot was taken. A reader opened now is newer than that snapshot, so the step does not
+            // wait for it, but its AccessShareLock is what step 5 waits on.
+            await(() -> "waiting for old snapshots".equals(createIndexPhase()), "the reindex in step 3");
+            late = new HeldRead(leaf);
+            early.close();
+            // Step 4 committed (the new index took the base name and is valid; the old one is _ccold and invalid);
+            // the reindex is now stuck in step 5, waiting for the late reader's AccessShareLock.
+            try {
+                await(() -> leaf(tenant).indexes().stream().anyMatch(i -> i.name().equals(ccold) && i.leftover()),
+                    "the swapped-out _ccold, invalid");
+            } catch (AssertionError e) {
+                throw new AssertionError(e.getMessage() + " :: " + activityDiagnostics(), e);
+            }
+            assertThat(sweep.refresh()).isTrue();
+            assertThat(sweep.hasValidIndex(M384, tenant, collection)).as("the new base index serves").isTrue();
+
+            await(() -> "waiting for readers before marking dead".equals(createIndexPhase()),
+                "the reindex stuck in step 5, not past it");
+            asSuperuser(sctx -> sctx.select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN,
+                    DSL.field(DSL.name("pid"), Integer.class)))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.field(DSL.name("application_name"), String.class).eq(REINDEX_APP))
+                .fetch());
+            reindex.get(60, TimeUnit.SECONDS);
+        } finally {
+            early.close();
+            if (late != null) {
+                late.close();
+            }
+        }
+        assertThat(causedBy(reindexFailure.get(), "canceling statement due to user request"))
+            .as(String.valueOf(reindexFailure.get())).isTrue();
+
+        // The genuine article: PostgreSQL's own _ccold, invalid and still ready (step 5 never marked it dead).
+        assertThat(validAndReady(leaf.schema(), ccold)).containsExactly(false, true);
+        assertThat(validAndReady(leaf.schema(), base)).containsExactly(true, true);
+        assertThat(leaf(tenant).indexes()).filteredOn(i -> i.name().equals(ccold)).singleElement().satisfies(i -> {
+            assertThat(i.leftover()).isTrue();
+            assertThat(i.leftoverOf()).isEqualTo(collection);
+            assertThat(i.parsed()).isFalse();
+        });
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.status().reindexLeftover()).isEqualTo(1);
+
+        PassReport pass = r.reconcileOnce();
+
+        assertThat(pass.drops()).isEqualTo(1);
+        assertThat(pass.builds()).as("the new base index is valid; nothing to build").isZero();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_dropped") && l.contains("index=" + ccold)
+            && l.contains("reason=reindex_leftover"));
+        assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).containsExactly(base);
+        assertThat(leaf(tenant).indexes().get(0).valid()).isTrue();
+        assertThat(sweep.hasValidIndex(M384, tenant, collection)).isTrue();
+        assertThat(statusJson(r, sweep).get("per_collection_indexes").get("reindex_leftover").asInt()).isZero();
     }
 
     @Test

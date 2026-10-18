@@ -352,6 +352,43 @@ class PciBuilderSessionIntegrationTest {
     }
 
     @Test
+    void aLeftoverThatIsValidNow_isNeverDropped_theReReadBeforeTheDropSaysStale() throws Exception {
+        String collection = collectionName("leftover-valid");
+        String base = PciCatalog.indexName(M1024, T1, collection);
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        // A VALID index under a leftover-shaped name, as an operator's CREATE INDEX CONCURRENTLY finishing between
+        // the snapshot and the drop leaves; the drop is handed the STALE snapshot, which said invalid.
+        String name = base + "_ccnew3";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, "CREATE INDEX " + name + " ON " + leaf.schema() + "." + leaf.name()
+                + " USING hnsw (embedding_1024 nexus.vector_cosine_ops) WHERE collection = '" + collection + "'");
+        }
+        PciCatalog.Index staleSnapshot = new PciCatalog.Index(name, false, null, collection);
+        assertThat(indexOn(M1024, T1, name)).hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.drop(leaf, staleSnapshot)).isEqualTo(DdlOutcome.STALE);
+        }
+
+        assertThat(indexOn(M1024, T1, name)).as("the now-valid index was not dropped")
+            .hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+    }
+
+    @Test
+    void aLeftoverThatIsGone_isStale_notDone() throws Exception {
+        String collection = collectionName("leftover-gone");
+        String name = PciCatalog.indexName(M1024, T1, collection) + "_ccold";
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        assertThat(indexOn(M1024, T1, name)).isEmpty();
+        PciCatalog.Index staleSnapshot = new PciCatalog.Index(name, false, null, collection);
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.drop(leaf, staleSnapshot)).as("IF EXISTS would no-op; a vanished leftover is not a drop")
+                .isEqualTo(DdlOutcome.STALE);
+        }
+    }
+
+    @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aDropBlockedByAnOpenTransaction_givesUpAfterFiveSeconds_andLeavesTheIndex() throws Exception {
         String collection = collectionName("droptimeout");

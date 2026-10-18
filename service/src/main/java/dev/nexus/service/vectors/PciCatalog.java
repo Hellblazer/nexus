@@ -124,12 +124,18 @@ public final class PciCatalog {
      * @param valid        {@code pg_index.indisvalid}; false while a concurrent build runs and after one fails
      * @param collection   the collection its predicate selects, or {@code null} when the index is unparsed
      * @param leftoverOf   the collection its predicate selects when the index is a REINDEX CONCURRENTLY leftover
-     *                     (see the class comment), else {@code null}; never set together with {@code collection}
+     *                     (see the class comment), else {@code null}; never set together with {@code collection}, and
+     *                     never set on a valid index (the constructor refuses both)
      */
     public record Index(String name, boolean valid, String collection, String leftoverOf) {
         public Index {
             if (collection != null && leftoverOf != null) {
                 throw new IllegalArgumentException("an index is parsed or a leftover, not both: " + name);
+            }
+            if (valid && leftoverOf != null) {
+                // A leftover is INVALID by definition (leftoverCollection refuses a valid index). Refusing the pair
+                // here means no consumer, planner or executor, can ever be handed a valid index as a leftover.
+                throw new IllegalArgumentException("a valid index is never a REINDEX CONCURRENTLY leftover: " + name);
             }
         }
 

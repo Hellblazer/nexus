@@ -193,7 +193,9 @@ public final class PciReconcilePlanner {
         Set<String> served = new HashSet<>();
         int kept = 0;
         for (Index index : leaf.indexes()) {
-            if (index.leftover()) {
+            // A leftover is invalid by construction (PciCatalog.Index refuses a valid one); the check is the second
+            // line, so that a valid index can never be planned for a drop on the strength of a leftover claim.
+            if (index.leftover() && !index.valid()) {
                 // Not parsed in the routing sense: no served.add, no kept++, no cap slot, no build block.
                 drops.put(index.name(), new Drop(index.name(), index.leftoverOf(), DropReason.REINDEX_LEFTOVER));
                 continue;

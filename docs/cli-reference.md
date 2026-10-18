@@ -3870,8 +3870,8 @@ still reads green here; the per-collection refusals are in `gc_audit` (`reaper_r
 judged on the time alone.
 
 **Per-collection indexes (nexus-43ulx.24, RDR-227).** `nx doctor`'s "Per-collection indexes" row reads the
-`per_collection_indexes` object of the same `GET /v1/status` body: the read half's `valid`, `invalid` and `unparsed`
-counts and, under `this_engine`, `builder_state` (`ok`, `standby`, `off`, `auth_failed`, `no_privilege`), `failing` and
+`per_collection_indexes` object of the same `GET /v1/status` body: the read half's `valid`, `invalid`, `unparsed` and
+`reindex_leftover` counts and, under `this_engine`, `builder_state` (`ok`, `standby`, `off`, `auth_failed`, `no_privilege`), `failing` and
 `last_ddl_pass_at`. It fails (hard) on `auth_failed` (restart the engine after a `nexus_admin` rotation) and on
 `no_privilege` (the engine's admin role cannot create indexes on the leaves), checked before the counts so a dead builder
 cannot read green; it warns when `invalid` or `failing` is above zero, when a DDL pass has been in flight for more than an
@@ -3880,6 +3880,11 @@ hour (`pass_started_at`; there is no pass deadline), and when `builder_state` is
 engine's `sweep_seconds`, 600 when absent); it passes on `ok` and `standby` (a peer holds the builder lock; a standby
 with a fresh read passes `invalid` above zero with a note, since the invalid index may be the peer's build in flight), and
 on `off` with the note "builds disabled by `NX_SEARCH_PCI=0`". `unparsed` is shown, never a warning.
+`reindex_leftover` (nexus-rn1yd) counts the invalid `pci_<hash>_ccnew`/`_ccold` indexes a failed `REINDEX CONCURRENTLY`
+left behind, apart from `unparsed` (an index is counted once). The row shows it ("2 reindex leftover") and warns only
+when `builder_state` is `off`, because then nothing drops it (set `NX_SEARCH_PCI=1`, or `DROP INDEX CONCURRENTLY` it by
+hand); `auth_failed` and `no_privilege` already fail and carry the count, on `ok` the next pass drops it and on `standby`
+a peer does.
 The row is green and says "not applicable" when the engine cannot be reached or its status does not include the object (an
 older engine, or one still starting). An object the row
 cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `off` and `standby`, warns and names what
