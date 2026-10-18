@@ -221,13 +221,18 @@ try {
                 tar.exe -cf $t -C "$p\AppData\Local\uv" cache; "pack exit=$LASTEXITCODE"
             }
             $n
-            $tmp = NewTmp
-            Copy-Item -FromSession $s -Path $guestTar -Destination $tmp -Force
-            Invoke-Command -Session $s -ArgumentList $guestTar { param($t) Remove-Item -LiteralPath $t -Force }
-            Move-Item -LiteralPath $tmp -Destination $uvTar -Force
-            # One uv archive: it now holds what this install used, so it stands for this key alone.
-            $keep = @($keep | Where-Object { $_ -notlike 'conexus=*' }) + "conexus=$Key"
-            'harvested uv cache: {0:N0} MB' -f ((Get-Item $uvTar).Length / 1MB)
+            # A copy that fails part way must not be moved into place and recorded as harvested (nexus-okbiz).
+            $tmp = $null
+            try {
+                if ("$n" -notlike '*pack exit=0') { throw "the guest could not pack its uv cache ($n)" }
+                $tmp = NewTmp
+                Copy-Item -FromSession $s -Path $guestTar -Destination $tmp -Force -ErrorAction Stop
+                Invoke-Command -Session $s -ArgumentList $guestTar { param($t) Remove-Item -LiteralPath $t -Force }
+                Move-Item -LiteralPath $tmp -Destination $uvTar -Force -ErrorAction Stop
+                # One uv archive: it now holds what this install used, so it stands for this key alone.
+                $keep = @($keep | Where-Object { $_ -notlike 'conexus=*' }) + "conexus=$Key"
+                'harvested uv cache: {0:N0} MB' -f ((Get-Item $uvTar).Length / 1MB)
+            } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }; "harvest uv cache: $($_.Exception.Message)" }
         } else { "harvest: the uv archive already holds conexus=$Key" }
         if ($claudeVer -match '^[0-9]+\.[0-9]+\.[0-9]+$' -and $have -notcontains "claude=$claudeVer") {
             Copy-Item -FromSession $s -Path "$prof\.local\bin\claude.exe" -Destination (ClaudeBin $claudeVer) -Force
@@ -246,12 +251,15 @@ try {
             }
             $found
             if ($found -like 'pack exit=0') {
-                $tmp = NewTmp
-                Copy-Item -FromSession $s -Path $guestMt -Destination $tmp -Force
-                Invoke-Command -Session $s -ArgumentList $guestMt { param($t) Remove-Item -LiteralPath $t -Force }
-                Move-Item -LiteralPath $tmp -Destination $modelsTar -Force
-                $keep = @($keep | Where-Object { $_ -notlike 'models=*' }) + "models=$Key"
-                'harvested models: {0:N0} MB' -f ((Get-Item $modelsTar).Length / 1MB)
+                $tmp = $null
+                try {
+                    $tmp = NewTmp
+                    Copy-Item -FromSession $s -Path $guestMt -Destination $tmp -Force -ErrorAction Stop
+                    Invoke-Command -Session $s -ArgumentList $guestMt { param($t) Remove-Item -LiteralPath $t -Force }
+                    Move-Item -LiteralPath $tmp -Destination $modelsTar -Force -ErrorAction Stop
+                    $keep = @($keep | Where-Object { $_ -notlike 'models=*' }) + "models=$Key"
+                    'harvested models: {0:N0} MB' -f ((Get-Item $modelsTar).Length / 1MB)
+                } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }; "harvest models: $($_.Exception.Message)" }
             }
         } else { "harvest: the models archive already holds models=$Key" }
         # Install payloads (nexus-bpzt7). Each is filled on its own and a failure only skips that one.

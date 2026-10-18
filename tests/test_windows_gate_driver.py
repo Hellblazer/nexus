@@ -1582,6 +1582,12 @@ def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_on
     assert ".tar.new" not in code
     archives = _between(code, "$keep = @($have)", "$gp = Invoke-Command")
     assert archives.count("$tmp = NewTmp") == 2
+    # a copy or move that fails is caught: its temp is removed and the key is not recorded
+    for name, tar in (("uv cache", "$guestTar"), ("models", "$guestMt")):
+        seg = archives[archives.index(f"Copy-Item -FromSession $s -Path {tar}"):archives.index(f'"harvest {name}: ')]
+        assert "-Destination $tmp -Force -ErrorAction Stop" in seg and "Move-Item -LiteralPath $tmp" in seg and "-ErrorAction Stop" in seg.split("Move-Item", 1)[1], name
+        assert seg.index("Move-Item") < seg.index("$keep = ") < seg.index("catch { if ($tmp) { Remove-Item -LiteralPath $tmp"), name
+    assert "if (\"$n\" -notlike '*pack exit=0') { throw" in archives
     # the winget URL is a github.com Git for Windows release path with no ".." in it
     rx = next(m for m in re.findall(r"-match '(\^winget-git=[^']+)'", harvest))
     sha = "a" * 64
