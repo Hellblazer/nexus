@@ -956,6 +956,64 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "true && git-config user.name '" + D + "x'",
         "if true; then git-config user.name x; fi",
         "FOO=1 /usr/bin/git-config user.name " + D + "x docs/*.md",
+        # nexus-gvg6t confirm pass D3: a QUOTED dashed word in command position is
+        # the program too; only a quoted dashed word that is an argument is data
+        "'git-config' user.name x",
+        '"git-config" user.name x',
+        "sudo 'git-config' user.name x",
+        'env A=1 "git-config" user.name x',
+        "xargs 'git-config' user.name x",
+        "{ git-config user.name x; }",
+        "true && { 'git-config' user.name x; }",
+        "! git-config user.name x",
+        "time git-config user.name x",
+        "nohup git-config user.name x",
+        "ssh localhost 'git-config' user.name x",
+        "ssh localhost 'git-config user.name x'",
+        "ssh localhost <<'EOF'\ngit-config user.name x\nEOF",
+        "bash <<'EOF'\ngit-config user.name x\nEOF",
+        "git submodule foreach 'git-config user.name x'",
+        "git rebase -x 'git-config user.name x' HEAD~1",
+    ],
+    # nexus-gvg6t confirm pass D1: `env -S` splits its argument into words and
+    # runs them, as ssh joins and runs its arguments. A write spelled in the -S
+    # string (or across it and the words after it) is a config write.
+    "config_env_split_string_is_a_consumer": [
+        "env -S 'git config' user.name x",
+        'env -S "git config" --local core.hooksPath /x',
+        "env -S 'git config user.name x'",
+        "env -S 'git' config user.name x",
+        "env -S 'g''it config' user.name x",
+    ],
+    # The other spellings of the same option. Not in the real-git family: `-i`
+    # empties the environment, the long form is GNU only, and `env A=1 -S` ends
+    # option parsing at the assignment on some systems.
+    "config_env_split_string_spellings": [
+        "env -i -S 'git config' user.name x",
+        "env -iS 'git config' user.name x",
+        "env --split-string 'git config' user.name x",
+        "env --split-string='git config' user.name x",
+        "env A=1 -S 'git config' user.name x",
+        "env -u HOME -S 'git config' user.name x",
+        "env -S 'git config' -- user.name x",
+    ],
+    # nexus-gvg6t confirm pass D2: a double-quoted string is read by the shell
+    # (two backslashes are one) and then by the consumer's shell (a backslash
+    # before an ordinary letter is dropped), so the doubled backslash before `C`
+    # reaches the consumer as one and runs as `-C`. The doubled and the single
+    # backslash both deny.
+    "config_backslash_in_double_quoted_consumer_text": [
+        'git rebase -x "git -' + BS + BS + 'C . config user.name x" HEAD~1',
+        'git submodule foreach "git -' + BS + BS + 'C . config user.name x"',
+        'ssh h "git -' + BS + BS + 'C . config user.name x"',
+        'watch "git -' + BS + BS + 'C . config user.name x"',
+        'git rebase -x "git -' + BS + 'C . config user.name x" HEAD~1',
+        'ssh h "git -' + BS + 'C . config user.name x"',
+        'ssh h "git ' + BS + BS + 'config user.name x"',
+        'ssh h "git config ' + BS + BS + 'user.name x"',
+        'tmux send-keys "git -' + BS + BS + 'C . config user.name x" Enter',
+        'ssh h "git -' + BS + BS + 'c core.x=1 config user.name x"',
+        'ssh h "git -' + BS + BS + 'C . config --global user.name x"',
     ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
@@ -1226,6 +1284,39 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         "git status\n# git config user.name x\ngit log -1",
         "git config core.hooksPath # why",
         "git config user.name #c",
+    ],
+    # nexus-gvg6t confirm pass D3: the NAME `git-config` quoted as an argument, or
+    # as prose or a data string no consumer runs, is not a program. The base
+    # guard allowed every one of these; a dashed word is a verb in command
+    # position (or after a word that runs its arguments), not wherever it sits.
+    "config_quoted_dashed_name_is_an_argument": [
+        'git log --grep="git-config" --oneline',
+        "git log --grep='git-config' --oneline",
+        'grep -rn "git-config" docs/ src/',
+        'rg -n "git-config" docs src',
+        'find . -name "git-config*" -type f',
+        'git grep -n "git-config" -- docs',
+        'gh pr create --title "git-config" --body "x"',
+        'echo "git-config is documented"',
+        "echo 'git-config user.name x'",
+        'man "git-config" docs',
+        'ls "/usr/lib/git-core/git-config" docs',
+        'cat "git-config" x y',
+        'printf "%s %s\\n" "git-config" "x"',
+        'grep -n "git-config" a b',
+        'git diff -- "git-config" docs',
+        'git show "HEAD:git-config" -- docs',
+        'git log -S"git-config" --oneline',
+        "cat <<'EOF'\ngit-config user.name x\nEOF",
+        'git status; echo "git-config" "user.name x"',
+        'sed -n "/git-config/p" a b',
+        # `env` without -S runs no split string (nexus-gvg6t confirm pass D1)
+        "env FOO=1 git log",
+        "env -i git status",
+        "env -i FOO=1 git log --oneline -n 1",
+        'env LC_ALL=C git log --grep="git-config" --oneline',
+        "env -u HOME git status",
+        "env -C /tmp ls",
     ],
     "not_git": [
         "ls -la && echo commit",
@@ -1612,6 +1703,24 @@ _SHARED_CONFIG_WRITES = [
     "git rebase -x 'g''it config user.name x' HEAD~1",
     "ssh localhost 'git config user.name x'",
     "git submodule foreach 'git config --worktree core.hooksPath /tmp/x'",
+    # nexus-gvg6t confirm pass D1: `env -S` runs the words it splits.
+    "env -S 'git config' user.name x",
+    'env -S "git config" --local core.hooksPath /x',
+    "env -iS 'git config' user.name x",
+    "env --split-string='git config' user.name x",
+    # nexus-gvg6t confirm pass D2: a backslash in a double-quoted string a consumer
+    # runs. The consumer's shell drops it, so the option letter after it counts.
+    'git rebase -x "git -' + BS + BS + 'C . config user.name x" HEAD~1',
+    'git submodule foreach "git -' + BS + BS + 'C . config user.name x"',
+    'ssh h "git -' + BS + BS + 'C . config user.name x"',
+    'watch "git -' + BS + BS + 'C . config user.name x"',
+    'git rebase -x "git -' + BS + 'C . config user.name x" HEAD~1',
+    'ssh h "git -' + BS + 'C . config user.name x"',
+    # nexus-gvg6t confirm pass D3: the quoted program in command position, and the
+    # data a consumer runs, still deny from a worktree
+    "'git-config' user.name x",
+    "{ git-config user.name x; }",
+    "ssh localhost 'git-config user.name x'",
 ]
 
 
@@ -1686,6 +1795,20 @@ def test_a_worktree_write_and_every_config_read_pass_in_a_linked_worktree(
         "git config --list",
         "git config --local --get remote.origin.url",
         "git config get 'user.name'",
+        # nexus-gvg6t confirm pass D3: the quoted NAME `git-config` is an argument
+        'git commit -m "git-config" -m "git-config"',
+        'git commit -m "git-config is documented"',
+        'git log --grep="git-config" --oneline',
+        'grep -rn "git-config" docs/ src/',
+        'rg -n "git-config" docs src',
+        'find . -name "git-config*" -type f',
+        'git grep -n "git-config" -- docs',
+        'gh pr create --title "git-config" --body "x"',
+        'echo "git-config is documented"',
+        # env without -S runs no split string
+        "env FOO=1 git log",
+        "env -i git status",
+        "env -i FOO=1 git log --oneline -n 1",
         "git commit -m x",
         "git checkout -- f.txt",
         "git diff -- src/config.py | sort",
@@ -1781,6 +1904,7 @@ _REAL_WRITE_FAMILIES = (
     "config_global_option_values", "config_substitution_payload", "config_alias_injection",
     "config_quoted_global_option_before_config",
     "config_glued_empty_string_is_not_a_comment_start",
+    "config_env_split_string_is_a_consumer",
 )
 
 
@@ -1876,6 +2000,72 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
         subprocess.run(["bash", "-c", cmd], cwd=main, env=env, check=True, capture_output=True)
         assert _config_snapshot(watched) != before, f"{cmd!r} did not write"
         assert _denied(cmd, main), cmd
+
+
+def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies(tmp_path):
+    """nexus-gvg6t confirm pass D2, measured. The shell turns two backslashes in
+    double quotes into one; the consumer's own shell drops a backslash before an
+    ordinary letter, so `git -BSBSC . config ...` runs as `git -C . config ...`.
+    Each command below, run for real, changes a config file, and the hook denies
+    it from a LINKED WORKTREE (where the verb scan does not apply, so the config
+    rule alone decides). `ssh` and `watch` are stubs that run their arguments in
+    `sh -c`, as the real ones do on the far side. The read-only control writes
+    nothing and passes."""
+    box = tmp_path / "box"
+    env = _sandbox_env(box)
+    stubs = box / "stubs"
+    stubs.mkdir(parents=True)
+    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
+    (stubs / "watch").write_text('#!/bin/sh\nexec sh -c "$*"\n')
+    for name in ("ssh", "watch"):
+        (stubs / name).chmod(0o755)
+    env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
+    sub = box / "sub"
+    main = box / "main"
+    for repo in (sub, main):
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+        (repo / "f").write_text("x")
+        subprocess.run(["git", "add", "f"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True, env=env)
+        (repo / "f").write_text("xy")
+        subprocess.run(["git", "commit", "-qam", "two"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "s"],
+        cwd=main, check=True, env=env, capture_output=True,
+    )
+    subprocess.run(["git", "commit", "-qm", "sm"], cwd=main, check=True, env=env)
+    wt = box / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "wtb", str(wt)], cwd=main, check=True, env=env,
+    )
+    common = main / ".git" / "config"
+    sm_config = main / ".git" / "modules" / "s" / "config"
+    dq = '"git -' + BS + BS + 'C . config user.name {v}"'
+    one = '"git -' + BS + 'C . config user.name {v}"'
+    cases = [
+        # (command, where it runs, the file it must change)
+        ("git rebase -x " + dq.format(v="rb") + " HEAD~1", wt, common),
+        ("ssh h " + dq.format(v="ssh"), wt, common),
+        ("watch " + dq.format(v="watch"), wt, common),
+        ("git rebase -x " + one.format(v="rb1") + " HEAD~1", wt, common),
+        ("ssh h " + one.format(v="ssh1"), wt, common),
+        ("git submodule foreach " + dq.format(v="sub"), main, sm_config),
+        ("git submodule foreach " + one.format(v="sub1"), main, sm_config),
+    ]
+    for cmd, where, watched in cases:
+        before = _config_snapshot([watched])
+        subprocess.run(
+            ["bash", "-c", cmd], cwd=where, env=env, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        assert _config_snapshot([watched]) != before, f"{cmd!r} did not write"
+        assert _denied(cmd, wt), f"{cmd!r} was not denied in a linked worktree"
+    control = "ssh h " + dq.format(v="x").replace("config user.name x", "config --get user.name")
+    before = _config_snapshot([common])
+    subprocess.run(["bash", "-c", control], cwd=wt, env=env, capture_output=True, check=False)
+    assert _config_snapshot([common]) == before, "the control wrote"
+    assert not _denied(control, wt), control
 
 
 def test_a_worktree_commit_denied_for_a_config_word_says_to_reword_it(
@@ -2104,6 +2294,21 @@ _HOSTILE_GH: list[tuple[str, bool]] = [
     ("echo '" + "git config --get a; " * 2_000 + "'", False),
     ("git status; echo '" + "git x; " * 5_000 + "config'", False),
     ("echo '" + "git " * 6_000 + "config user.name x'", True),
+    # nexus-gvg6t confirm pass: `env -S` is searched within a dozen words of each
+    # `env`; a quoted dashed name is tested once per simple command; a double-quoted
+    # body is unescaped in one pass and read with and without its backslashes.
+    ("env " * 8_000 + "-S 'git config' user.name x", True),
+    ("env -i " * 6_000 + "FOO=1 git log", False),
+    ("git log " + "--grep=\"git-config\" " * 3_000, False),
+    ("echo " + "'git-config' " * 5_000 + "docs", False),
+    ("grep -rn " + "\"git-config\" " * 4_000 + "docs src", False),
+    ("ssh h " + "'git-config' " * 5_000 + "user.name x", True),
+    ("git log a=" + "b" * 30_000 + " 'git-config' docs src", False),
+    ('git rebase -x "git -' + BS + BS + 'C . config user.name x" HEAD~1 ' + "x " * 12_000, True),
+    ('ssh h "' + ("a" + BS + BS + "b ") * 8_000 + 'git config user.name x"', True),
+    ('ssh h "git ' + (BS + BS) * 15_000 + ' x"', False),
+    ('ssh h "' + ("git " + BS + BS + "q ") * 5_000 + '"', False),
+    ('git log --grep="' + (BS + '"git' + BS + BS) * 8_000 + '"', False),
 ]
 
 

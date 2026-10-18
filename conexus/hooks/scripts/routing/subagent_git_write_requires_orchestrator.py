@@ -1001,6 +1001,22 @@ def _gh_walk(t: str, *, wildcards: bool, armed_by_text: str | None = None) -> st
 #: git and ``config`` (a repeat cannot change a verdict past two copies; a count
 #: the reader cannot prove is refused). Limit, taken on purpose: tmux key names
 #: (``Space``) and an argument built by the consumer's own shell are not modelled.
+#: ``env -S STRING`` splits STRING and runs the words, so it is a consumer too
+#: (plain ``env VAR=1 git log`` is not). The shell unescapes a double-quoted body
+#: (``_dq_unescape``: two backslashes, a backslash before a double quote, ``$`` or
+#: a backtick, backslash-newline) before the consumer sees it, and the consumer's
+#: shell then drops a backslash before an ordinary letter, so a body that keeps a
+#: backslash is read as it stands and with every backslash removed
+#: (``"git -<bs><bs>C . config ..."`` runs as ``git -C . config ...``).
+#:
+#: A dashed ``git-config`` is a program wherever it stands when it is UNQUOTED in
+#: the command itself (the rule since before the tokenizer). A QUOTED one
+#: (``_QDASH`` marks it in the cursor's text) and one inside a data string or a
+#: joined command are programs only in command position or after a program that
+#: runs a command string (``_STRING_RUNNER_RE``): ``grep -n "git-config" docs``,
+#: ``git log --grep="git-config"`` and ``echo "git-config is documented"`` search
+#: for or print the name. A data string is read for a dashed program only when the
+#: command names such a runner.
 #:
 #: A quoted word that is not a plain word is ``Q`` in the cursor's text (``-Q`` when
 #: it starts with a dash). A ``Q`` where the subcommand may be (``git
@@ -1110,12 +1126,41 @@ _DASHED_CONFIG_RE = re.compile(r"git-config(?:\.(?:exe|cmd|bat|com|sh))?")
 #: ``command``, ``exec``, ``if``/``then``). An argument is not a program:
 #: ``grep -n "git-config" docs/*.md`` searches for the name. The run of prefix
 #: words cannot cross a break, so an attempt ends at the next break: linear.
+_DASHED_LEAD_WORDS = (
+    r"[A-Za-z_]\w*=[^\s;&|(){}`]*|sudo|doas|env|command|exec|nice|nohup|time|"
+    r"xargs|builtin|if|then|else|elif|do|while|until|!"
+)
 _DASHED_CONFIG_CMD_RE = re.compile(
     r"(?:^|[;&|(){}`\n])[ \t]*"
-    r"(?:(?:[A-Za-z_]\w*=[^\s;&|(){}`]*|sudo|doas|env|command|exec|nice|nohup|time|"
-    r"xargs|builtin|if|then|else|elif|do|while|until|!)[ \t]+)*"
+    r"(?:(?:" + _DASHED_LEAD_WORDS + r")[ \t]+)*"
     r"(?:[^\s;&|(){}`]*/)?git-config(?:\.(?:exe|cmd|bat|com|sh))?(?![\w.\-])"
 )
+#: The same command-position test for the cursor, one simple command at a time
+#: (``_config_relaxed_match``): what stands before the program word in a segment
+#: of plain text. ``match`` anchors it at the segment start and its end is where
+#: the program word begins.
+_DASHED_LEAD_RE = re.compile(
+    r"[ \t{}`]*(?:(?:" + _DASHED_LEAD_WORDS + r"|\{)[ \t]+)*"
+)
+#: Programs that take a command STRING and run it (``ssh host 'cmd'``, ``tmux
+#: send-keys 'cmd'``, ``sh -c 'cmd'``, ``git rebase -x 'cmd'``). A data string is
+#: read as command text only when the command names one; a wrapper that takes a
+#: command and its arguments (``sudo``, ``nice``, ``timeout``) hands a quoted
+#: word to a program, which does not run it. ``git-config`` inside a data string
+#: is a program only then. A word start is enough (no path prefix): ``/bin/sh``
+#: is a word start after ``/``.
+_STRING_RUNNER_RE = re.compile(
+    r"(?<![\w.\-])(?:ssh|mosh|tmux|screen|foreach|filter-branch|rebase|bisect|"
+    r"parallel|watch|xterm|difftool|mergetool|sh|bash|zsh|dash|ksh|fish|eval|su|"
+    r"runuser|script)(?![\w.\-])"
+)
+#: Marks a QUOTED word that is exactly the dashed program in the text the cursor
+#: reads (``'git-config'`` becomes ``<mark>git-config``). The quote is gone from
+#: that text, and a dashed name quoted as an argument (``grep -n "git-config"
+#: docs``, ``git log --grep="git-config"``) is a search term, not a program: an
+#: unmarked word is a program wherever it stands, as it always was; a marked one
+#: only in command position (``_DASHED_LEAD_RE``) or after a string runner.
+_QDASH = "\x01"
 _WORD_RE = re.compile(r"\S+")
 #: Words and breaks for the argument walk of the get-read exemption: a break
 #: character ends the command, a newline included.
@@ -1314,7 +1359,13 @@ class _JoinTrack:
                     res.append(_JOIN_OVERFLOW + " ".join(kept))
                     continue
                 words = kept
-            res.append(" ".join(words))
+            line = " ".join(words)
+            res.append(line)
+            # A backslash that a double-quoted body kept reaches the consumer's
+            # shell, which drops it before an ordinary letter (`-\C` runs as
+            # `-C`): the command is also read with every backslash removed.
+            if "\\" in line:
+                res.append(_data_squash(line))
         return tuple(res)
 
 
@@ -1351,6 +1402,27 @@ def _data_squash(body: str) -> str:
     """*body* with the characters a consumer's shell would drop from inside a word
     removed (quotes, backslashes), so ``gi""t`` and ``g\\it`` name ``git``."""
     return body.replace("'", "").replace('"', "").replace("\\", "")
+
+
+_DQ_ESCAPE_RE = re.compile(r'\\(\n)|\\([\\"$`])')
+
+
+def _dq_unescape(raw: str) -> str:
+    """The characters the shell makes of the body of a double-quoted string:
+    ``\\\\``, ``\\"``, ``\\$`` and a backslash before a backtick become the
+    character, a backslash-newline vanishes, and every other backslash stays. The
+    body *raw* is what ``_MASK_DQUOTE_RE`` matched, so it holds no unescaped
+    ``$`` or backtick."""
+    if "\\" not in raw:
+        return raw
+    return _DQ_ESCAPE_RE.sub(lambda m: m.group(2) or "", raw)
+
+
+def _quoted_dashed(word: str) -> bool:
+    """True when the plain word *word* names the dashed ``git-config`` program,
+    with or without a directory in front of it."""
+    base = word.rstrip("/")
+    return _DASHED_CONFIG_RE.fullmatch(base[base.rfind("/") + 1:]) is not None
 
 
 def _config_mask(command: str) -> _Masked | None:
@@ -1444,7 +1516,9 @@ def _config_mask(command: str) -> _Masked | None:
                 dm = _MASK_DQUOTE_RE.match(command, i)
                 if dm is None:
                     return None
-                body = content = dm.group(1)
+                # The shell unescapes the body; a consumer then reads what is
+                # left (`"git -\\\\C"` reaches it as `git -\\C`).
+                body = content = _dq_unescape(dm.group(1))
                 end_at = dm.end()
             if content == "":
                 # An empty string is a word only when nothing is glued to it:
@@ -1456,7 +1530,9 @@ def _config_mask(command: str) -> _Masked | None:
                 )
                 word = _MASK_OPAQUE if alone else ""
             elif _MASK_WORD_RE.fullmatch(content):
-                word = content
+                # A quoted dashed program name carries a mark: it is a program in
+                # command position, an argument anywhere else (`_QDASH`).
+                word = _QDASH + content if _quoted_dashed(content) else content
             else:
                 word = _MASK_OPAQUE_OPTION if content.startswith("-") else _MASK_OPAQUE
             out.append(word)
@@ -1468,6 +1544,10 @@ def _config_mask(command: str) -> _Masked | None:
             i = end_at
             if "git" in body or "git" in _data_squash(body):
                 data.append(body)
+                if "\\" in body:
+                    # The consumer's shell drops a backslash before an ordinary
+                    # letter, so the body is also read with every backslash gone.
+                    data.append(_data_squash(body))
         else:
             return None
     if pending:
@@ -1685,13 +1765,22 @@ class _GitGlobals:
         return self.quoted or (not self.sub and not self.skip)
 
 
-def _config_relaxed_match(text: str, *, worktree: bool = False) -> bool:
+def _config_relaxed_match(
+    text: str, *, worktree: bool = False, dashed: bool = True, in_data: bool = False,
+) -> bool:
     """True when PLAIN *text* holds a ``config`` command that is not a proven
     read (see the block comment above). Linear: one split, one token pass per
     segment with a forward-only cursor for the subcommand, and at most
     ``_CONFIG_MAX_WORDS_PER_SEGMENT`` argument reads each. With *worktree*, a
     ``--worktree`` write (and no other repository named, by option or by
-    ``GIT_DIR=``) is not a hit."""
+    ``GIT_DIR=``) is not a hit.
+
+    A dashed ``git-config`` word is the program when it is unquoted in the
+    command itself (wherever it stands, as before), and, when it was quoted
+    (``_QDASH``) or *text* is a string a consumer runs (*in_data*: a data string
+    or a joined command), only in command position or after a string runner. A
+    quoted name that is an argument (``grep -n "git-config" docs``) is a search
+    term. With *dashed* False the dashed word is never the program."""
     text = _SAFE_REDIRECT_RE.sub(" ", text)
     text = _CONFIG_REDIRECT_RE.sub(" ", text)
     if worktree and _GIT_REPO_ENV_RE.search(text) is not None:
@@ -1701,6 +1790,8 @@ def _config_relaxed_match(text: str, *, worktree: bool = False) -> bool:
             continue
         gl: _GitGlobals | None = None
         words = 0
+        lead_end = -1  # where the program word of this simple command starts
+        runner_at = 0  # where its first string runner starts
         for m in _PATHISH_TOKEN_RE.finditer(seg):
             tok = m.group().rstrip("/")
             base = tok[tok.rfind("/") + 1:]
@@ -1708,7 +1799,18 @@ def _config_relaxed_match(text: str, *, worktree: bool = False) -> bool:
             verb = False
             exempt = worktree
             if _DASHED_CONFIG_RE.fullmatch(base):
-                verb = True
+                if not dashed:
+                    pass
+                elif in_data or (s > 0 and seg[s - 1] == _QDASH):
+                    if lead_end < 0:
+                        lm = _DASHED_LEAD_RE.match(seg)
+                        lead_end = 0 if lm is None else lm.end()
+                        rm = _STRING_RUNNER_RE.search(seg)
+                        runner_at = len(seg) if rm is None else rm.start()
+                    start = s - 1 if s > 0 and seg[s - 1] == _QDASH else s
+                    verb = start == lead_end or runner_at < start
+                else:
+                    verb = True
             elif tok == "config":
                 if s > 0 and seg[s - 1] == "=":
                     # `-c core.x=config` sets a VALUE. An alias that names config
@@ -1749,12 +1851,14 @@ def _config_get_read(text: str, pos: int) -> bool:
     return _config_read_kind(args, valued_ok=False) == "get"
 
 
-def _config_strict_match(text: str, view: _ConfigView, git_end: int) -> bool:
+def _config_strict_match(
+    text: str, view: _ConfigView, git_end: int, *, dashed: bool = True,
+) -> bool:
     """True when *text*, which is NOT plain, holds a ``config`` word after the
     first git (or hub) command at *git_end* that is not an excused get read, a
-    ``git-config`` program token, or the raw command holds ``config`` inside a
-    substitution span."""
-    if _DASHED_CONFIG_CMD_RE.search(text) is not None:
+    ``git-config`` program token (unless *dashed* is False), or the raw command
+    holds ``config`` inside a substitution span."""
+    if dashed and _DASHED_CONFIG_CMD_RE.search(text) is not None:
         return True
     for m in _CONFIG_STRICT_RE.finditer(text, git_end):
         if not (view.reads and _config_get_read(text, m.end())):
@@ -1776,7 +1880,9 @@ def _config_strict_match(text: str, view: _ConfigView, git_end: int) -> bool:
 _CONFIG_DATA_META_RE = re.compile(r"[${}*?\[\r]")
 
 
-def _config_data_hit(data: tuple[str, ...], worktree: bool) -> bool:
+def _config_data_hit(
+    data: tuple[str, ...], worktree: bool, *, dashed: bool = True,
+) -> bool:
     """True when a data string that names ``git`` holds a ``git config`` write if
     a consumer runs it as a command (``ssh host 'git config user.name x'``,
     ``git submodule foreach 'git config ...'``, ``tmux send-keys '...'``). The
@@ -1784,7 +1890,9 @@ def _config_data_hit(data: tuple[str, ...], worktree: bool) -> bool:
     (quotes, escapes and ``$(echo config)`` resolved), or, when it holds a
     character the cursor cannot count (``_CONFIG_DATA_META_RE``), the strict
     rule. A string with no git command or no ``config`` after quote removal is
-    skipped without a scan."""
+    skipped without a scan. *dashed* is whether the command names a string
+    runner: only then is a ``git-config`` program in a data string a program
+    (``echo "git-config is documented"`` names a file, not a command)."""
     for d in data:
         n = _normalize_for_primary_scan(d)
         ends = [
@@ -1793,9 +1901,11 @@ def _config_data_hit(data: tuple[str, ...], worktree: bool) -> bool:
         if not ends or "config" not in n:
             continue
         if _CONFIG_DATA_META_RE.search(d) is None:
-            if _config_relaxed_match(n, worktree=worktree and not _repo_env_named(d)):
+            if _config_relaxed_match(
+                n, worktree=worktree and not _repo_env_named(d), dashed=dashed, in_data=True,
+            ):
                 return True
-        elif _config_strict_match(n, _ConfigView(d, False, False), min(ends)):
+        elif _config_strict_match(n, _ConfigView(d, False, False), min(ends), dashed=dashed):
             return True
     return False
 
@@ -1807,6 +1917,11 @@ _CONSUMER_RE = re.compile(
     r"(?<![\w.\-])(?:ssh|mosh|tmux|screen|foreach|filter-branch|rebase|bisect|xargs|"
     r"parallel|watch|xterm|difftool|mergetool|nohup|timeout|nice|setsid|flock|stdbuf|"
     r"sudo|doas|runuser)(?![\w.\-])"
+    # `env -S STRING` splits STRING into words and runs them (nexus-gvg6t confirm
+    # pass D1). Plain `env VAR=1 git log` runs no string, so it is not named. The
+    # option may follow a dozen other words (options and their values) or sit in
+    # a cluster (`-iS`); the bound keeps the search linear.
+    r"|(?<![\w.\-])env(?:\s+\S+){0,12}?\s+(?:-\w*S|--split-string)"
 )
 
 
@@ -1835,7 +1950,9 @@ def _config_joined_hit(joined: tuple[str, ...], worktree: bool) -> bool:
         if over:
             return True
         if _CONFIG_DATA_META_RE.search(j) is None:
-            if _config_relaxed_match(n, worktree=worktree and not _repo_env_named(j)):
+            if _config_relaxed_match(
+                n, worktree=worktree and not _repo_env_named(j), in_data=True,
+            ):
                 return True
         elif _config_strict_match(n, _ConfigView(j, False, False), min(ends)):
             return True
@@ -1855,7 +1972,9 @@ def _config_cursor_hit(view: _ConfigView, worktree: bool) -> bool:
         wt = worktree and not _repo_env_named(view.raw)
         hit = (
             _config_relaxed_match(view.text, worktree=wt)
-            or _config_data_hit(view.data, wt)
+            or _config_data_hit(
+                view.data, wt, dashed=_STRING_RUNNER_RE.search(view.text) is not None,
+            )
             or _config_joined_hit(view.joined, wt)
         )
         memo[worktree] = hit
