@@ -305,7 +305,8 @@ _VOYAGE_KEY_REMEDY = (
 _BGE_FILES_REMEDY = (
     "  - bge collection(s): the engine has no bge model files to serve them. Run "
     "`nx init` to provision the local models, then restart the service — "
-    "`nx daemon service stop && nx daemon service start`."
+    "`nx daemon service stop && nx daemon service start`. If this client is pointed at "
+    "a managed or Voyage-only engine, bge collections need a local engine."
 )
 
 

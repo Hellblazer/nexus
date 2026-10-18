@@ -16,20 +16,22 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "nexus"
 
-#: file (relative to src/nexus) -> number of mode-string decision sites, as reviewed.
-REVIEWED: dict[str, int] = {
-    "commands/collection.py": 6,
-    "commands/daemon.py": 2,
-    "commands/init.py": 1,
-    "commands/service_cmd.py": 1,
-    "corpus.py": 4,
-    "daemon/storage_service_daemon.py": 2,
-    "db/http_engine_status.py": 2,
-    "db/http_vector_client.py": 6,
-    "db/managed_endpoint.py": 5,
-    "errors.py": 1,
-    "mcp_infra.py": 3,
-    "search_engine.py": 3,
+#: file (relative to src/nexus) -> (number of mode-string decision sites, why they are right
+#: for a `dual` engine). A disposition per file, not just a count: swapping a reviewed site
+#: for a different compare must change a number or a reason a reviewer reads.
+REVIEWED: dict[str, tuple[int, str]] = {
+    "commands/collection.py": (4, "the orphan finder decides on the engine's embedding_models; the mode string is display only"),
+    "commands/daemon.py": (2, "prints /version embedding_mode in nx daemon status; display only, any string"),
+    "commands/init.py": (1, "prints the probed embedding_mode; display only"),
+    "commands/service_cmd.py": (1, "prints the capabilities embedding_mode; display only"),
+    "corpus.py": (4, "the four write-model sites compare local_embed_profile() == 'voyage' (the profile, not an engine mode); counted by the voyage-compare pattern"),
+    "daemon/storage_service_daemon.py": (2, "a log field naming onnx-local when no key is plumbed; Phase 3 gates the key plumbing on local_embed_profile() (nexus-wypwq)"),
+    "db/http_engine_status.py": (2, "formats the /v1/status mode into one line; the 'voyage' branch picks wording only, dual prints through"),
+    "db/http_vector_client.py": (6, "onnx-local keeps the engine-wide memory cap; voyage and dual decide by the collection's model (_collection_is_bge); the memo and probe seeding accept dual"),
+    "db/managed_endpoint.py": (5, "the capabilities dataclass carries embedding_mode verbatim; no decision is made on it"),
+    "errors.py": (1, "serving_mode is a diagnostic in the profile-mismatch error; the remedy is chosen by the collection's family"),
+    "mcp_infra.py": (3, "a warm-up probe step named embedding_mode; no decision"),
+    "search_engine.py": (3, "line ~618 turns Voyage-calibrated thresholds on only for 'voyage', so dual turns them off: owned by P1.5 (nexus-hf29s); the rest is the serving_mode diagnostic"),
 }
 
 
@@ -64,13 +66,19 @@ def _census() -> dict[str, int]:
 
 def test_every_mode_string_site_is_on_the_reviewed_list() -> None:
     found = _census()
-    assert sum(found.values()) >= sum(REVIEWED.values()), "census found fewer sites than reviewed: vacuous"
+    reviewed = {f: n for f, (n, _why) in REVIEWED.items()}
+    assert sum(found.values()) >= sum(reviewed.values()), "census found fewer sites than reviewed: vacuous"
     drift = {
-        f: (REVIEWED.get(f, 0), found.get(f, 0))
-        for f in sorted(set(REVIEWED) | set(found))
-        if REVIEWED.get(f, 0) != found.get(f, 0)
+        f: (reviewed.get(f, 0), found.get(f, 0))
+        for f in sorted(set(reviewed) | set(found))
+        if reviewed.get(f, 0) != found.get(f, 0)
     }
     assert not drift, (
         "mode-string decision sites changed (file: reviewed, found). Review each new site "
         f"for the `dual` value (RDR-210 TD10), then update REVIEWED: {drift}"
     )
+
+
+def test_every_reviewed_file_carries_a_reason() -> None:
+    thin = [f for f, (_n, why) in REVIEWED.items() if len(why.strip()) < 25]
+    assert not thin, f"a reviewed file needs a disposition, not a bare count: {thin}"

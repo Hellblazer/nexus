@@ -925,6 +925,28 @@ _ONNX_LOCAL_UPSERT_CHUNK_CAP = _resolve_onnx_local_upsert_chunk_cap(
 _CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
 
 
+def _read_once(
+    row_resolver: "Callable[[str], dict | None] | None",
+) -> "Callable[[str], dict | None] | None":
+    """Wrap *row_resolver* so a name is resolved at most once per call site.
+
+    The cap and the byte budget each ask two questions of the same catalog row (content
+    type for the CCE split, model for the bge split). For a client without a cached
+    resolver each resolution is an uncached ``list_collections`` round trip, so the two
+    questions share one read. ``None`` stays ``None`` (the default path is cached).
+    """
+    if row_resolver is None:
+        return None
+    seen: dict[str, "dict | None"] = {}
+
+    def _resolve(name: str) -> "dict | None":
+        if name not in seen:
+            seen[name] = row_resolver(name)
+        return seen[name]
+
+    return _resolve
+
+
 def per_collection_chunk_cap(
     collection: str, *, row_resolver: "Callable[[str], dict | None] | None" = None,
 ) -> int:
@@ -1069,6 +1091,7 @@ def per_collection_chunk_cap(
     # :func:`_is_cce_collection`. *row_resolver* (nexus-fryrd) is forwarded
     # verbatim -- the write path passes the calling client's OWN row
     # resolver so this content-type read never crosses tenants.
+    row_resolver = _read_once(row_resolver)
     is_cce = _is_cce_collection(collection, row_resolver=row_resolver)
     if is_cce is None:
         # Genuinely unresolvable (no row AND a non-conformant/legacy
@@ -1229,6 +1252,7 @@ def _upsert_byte_budget(
         return None
     # RDR-210 Technical Design 10: a bge collection is memory-bound, not Voyage-token
     # bound, whatever the engine's mode; the byte budget exists only for Voyage batches.
+    row_resolver = _read_once(row_resolver)
     if _collection_is_bge(collection, row_resolver=row_resolver):
         return None
     # RDR-204 Phase 3 (nexus-ft04v.26), class (b): see

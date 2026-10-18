@@ -886,6 +886,30 @@ class TestRegistrationSeamExistingRowSkipsProfileComparison:
             ensure_collection_registered(name, registrar=lambda: absent, kwargs=override)
         absent.register_collection.assert_not_called()
 
+    def test_the_skip_on_the_explicit_path_never_revives_a_superseded_name(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A superseded same-model off-profile row passes the model check; the skip
+        must still refuse it, or the upsert would clear superseded_by."""
+        from nexus.corpus import SupersededCollectionWriteError
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        name = f"docs__seam-superseded__{self._BGE}__v1"
+        override = {
+            "content_type": "docs", "owner_id": "seam-superseded",
+            "embedding_model": self._BGE, "model_version": "v1",
+        }
+        retired = self._writer_with_row(
+            {"name": name, "embedding_model": self._BGE, "superseded_by": "docs__seam-superseded__voyage-context-3__v1"},
+        )
+
+        with pytest.raises(SupersededCollectionWriteError):
+            ensure_collection_registered(name, registrar=lambda: retired, kwargs=override)
+
+        retired.register_collection.assert_not_called()
+        assert name not in corpus._REGISTERED_COLLECTIONS
+
     def test_an_agreeing_profile_reads_no_row_on_the_explicit_path(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

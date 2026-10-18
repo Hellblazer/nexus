@@ -76,3 +76,24 @@ def test_an_unknown_mode_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     _mode(monkeypatch, None)
     assert hvc.per_collection_chunk_cap(VOY_DOCS, row_resolver=_no_row) == hvc._CCE_UPSERT_CHUNK_CAP
     assert hvc.per_collection_chunk_cap(VOY_CODE, row_resolver=_no_row) == hvc._CODE_UPSERT_CHUNK_CAP
+
+
+def test_the_cap_and_the_budget_each_read_the_catalog_row_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mode(monkeypatch, "dual")
+    calls: list[str] = []
+
+    def resolver(name: str) -> dict:
+        calls.append(name)
+        return {"embedding_model": "voyage-code-3", "content_type": "code"}
+
+    hvc.per_collection_chunk_cap("legacy-name", row_resolver=resolver)
+    assert calls == ["legacy-name"]
+    calls.clear()
+    hvc._upsert_byte_budget("legacy-name", row_resolver=resolver)
+    assert calls == ["legacy-name"]
+
+
+def test_an_unknown_mode_gives_a_bge_collection_the_memory_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mode(monkeypatch, None)
+    assert hvc.per_collection_chunk_cap(BGE, row_resolver=_no_row) == hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP
+    assert hvc._upsert_byte_budget(BGE, row_resolver=_no_row) is None

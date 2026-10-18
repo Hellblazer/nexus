@@ -2138,6 +2138,12 @@ def ensure_collection_registered(
                         raise EmbeddingProfileMismatchError(
                             kwargs["content_type"], kwargs["embedding_model"], profile_model,
                         )
+                    # The skip must not revive a retired name: an explicit-kwargs
+                    # caller never ran the superseded read the implicit path did, and
+                    # the upsert below would clear superseded_by.
+                    skip_successor = _superseded_successor(existing_row)
+                    if skip_successor:
+                        raise SupersededCollectionWriteError(name, skip_successor)
                 if writer is None:
                     writer = registrar()
                 try:
