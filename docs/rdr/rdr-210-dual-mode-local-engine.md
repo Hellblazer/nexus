@@ -27,10 +27,10 @@ same-day choice of Alternative 1, and answered the draft's six open questions
 (T2 `nexus_rdr/210-open-questions-sam-2026-10-17`). The research findings that
 settle the draft's open technical questions are T2 `nexus_rdr/210-research-10` to
 `-19` (four of them spikes on chas). Every code citation below was re-read in a
-tree whose code is that of 4d08d3861, on develop 6cd90aab5 (drift audit: T2
-`nexus_rdr/210-drift-audit-2026-10-17`): the first pass at 4d08d3861, the gate
-round 1 fixes at 67529ac8a (T2 `nexus_rdr/210-research-20`) and the fix-check
-round at bad1c1b16 (T2 `nexus_rdr/210-research-21`). `git diff 4d08d3861..bad1c1b16`
+tree whose code is that of 42382fa3d, on develop 6cd90aab5 (drift audit: T2
+`nexus_rdr/210-drift-audit-2026-10-17`): the first pass at 42382fa3d, the gate
+round 1 fixes at ad64a703b (T2 `nexus_rdr/210-research-20`) and the fix-check
+round at 4bc078be1 (T2 `nexus_rdr/210-research-21`). `git diff 42382fa3d..4bc078be1`
 over `src`, `service` and `tests` is empty.
 
 Terms used throughout:
@@ -168,7 +168,7 @@ outbound paths in the engine:
    `CrossEncoderReranker`, `OnnxEmbedder`): a call to the cloud instance-metadata
    address at every tokenizer build, and a native-library download on GPU hosts.
    Library code, not visible to a main-source scan (210-research-10; not re-read
-   here). Both are closed by nexus-17jvq (ba8422171), which is not on develop.
+   here). Both are closed by nexus-17jvq (2416ce891), which is not on develop.
 - **Path 8.** JDBC to `NX_DB_URL`: the pool, `PciBuilderSession.java:243`,
    `BackendReaper.java:122`, `PoolerModeCheck.java:131`.
 
@@ -339,7 +339,7 @@ A second pass settled the questions the first left open:
 
 The spikes ran on local branches (`spike/nexus_911-rdr210-copy-cutover`
 0d3ebc1b8, `spike/nexus_911-rdr210-dual-native` a86b4d0d1), not on develop.
-Every cited line was re-read against the code of 4d08d3861 (Provenance names the
+Every cited line was re-read against the code of 42382fa3d (Provenance names the
 three passes); where a record and the code disagree,
 the code is cited and the disagreement is noted.
 
@@ -1383,7 +1383,7 @@ calibrated order and warns (Technical Design 12).
 - [ ] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv,
   claimed by another session) before Phase 2 Step 6.
 - [ ] The DJL instance-metadata and native-download paths closed (nexus-17jvq,
-  ba8422171, not on develop) before Phase 2 Step 6, whose runtime witness would
+  2416ce891, not on develop) before Phase 2 Step 6, whose runtime witness would
   otherwise fail on them.
 
 ### Minimum Viable Validation
@@ -1427,12 +1427,12 @@ sends the RDR back to planning.
   byte budget a pre-`dual` client would use (Technical Design 10). **Pass**: the
   same bound as the concurrent-load check. **Fail**: the wire ledger entry for
   `dual` carries a minimum client version instead.
-- **Native-library extraction (nexus-8ool4).** If nexus-8ool4 (c62708f91,
+- **Native-library extraction (nexus-8ool4).** If nexus-8ool4 (7467e0b74,
   `OrtNativeDir.applyAtBoot` on every boot) has landed by then, a keyed boot with
   no model files. **Pass**: boot memory within 10% of the spike's 161 MB, and
   either nothing extracted or the extraction recorded as accepted in the bead.
   Not applicable while nexus-8ool4 is off develop (no `OrtNativeDir` in main at
-  4d08d3861).
+  42382fa3d).
 
 #### Step 2: Mode string and per-collection decisions
 
@@ -2071,7 +2071,7 @@ and the per-table dispositions.
   ca3-census, egress-census, cutover-cascade-census, reembed-copy-options).
 - 2026-10-17: Sam resolved the revised draft's three Open Questions: remove the engine https fetcher and resolve route in every mode (nexus-3t0jv), a bge-profile engine reranks with the cross-encoder even when keyed, and the re-embed job deletes the superseded source (`--keep-source` opts out). Record: T2 nexus_rdr/210-open-questions-sam-2026-10-17.
 - 2026-10-17: research findings 210-research-10 to -19 folded in, every
-  "pending" marker replaced, cites re-read at 4d08d3861 (develop 6cd90aab5).
+  "pending" marker replaced, cites re-read at 42382fa3d (develop 6cd90aab5).
   Gap 2's init half marked landed; Gap 5 carries the eight-path egress census and
   Technical Design 7 an allowlist with a source census and a runtime witness
   (nexus-17jvq now a prerequisite); Gap 8 carries the CA-3 census. CA-1 verified
@@ -2083,5 +2083,5 @@ and the per-table dispositions.
   aspect tables re-homed in the move transaction, topic assignments rebuilt by
   discover rather than copied. Alternative 3 rewritten around the spike's race.
   Finalization Gate answered against this content.
-- 2026-10-17: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `924fa8256`; critique `nexus_rdr/210-gate-critique-2026-10-17-r1`.
-- 2026-10-18: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `5725ad8c7`; critique `nexus_rdr/210-gate-critique-2026-10-18-r2`.
+- 2026-10-17: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `c62709e9e`; critique `nexus_rdr/210-gate-critique-2026-10-17-r1`.
+- 2026-10-18: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `90a51e69d`; critique `nexus_rdr/210-gate-critique-2026-10-18-r2`.
