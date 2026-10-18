@@ -9,8 +9,8 @@ the RDR-144 384->768 migration originally called bare ``db.delete_collection``
 and so orphaned the old collection's catalog rows (doctor FAILs:
 t3-vs-catalog + collections-drift).
 
-This module is the single source of truth for that cascade so both the delete
-verb and the migration leave the same clean state. Pure (no ``click``):
+This module is the single source of truth for that cascade; its callers are
+``nx collection delete``, ``prune`` and ``reindex``. Pure (no ``click``):
 returns counts; callers render. Every step is best-effort so a partial
 environment (no catalog, no daemon) still deletes what it can.
 """
@@ -30,8 +30,8 @@ class CascadeCounts:
     ``failures`` carries a human-readable message for each derived-state step
     that raised. The physical T3 delete still happens (or already happened),
     but a non-empty ``failures`` means orphan rows may remain; callers should
-    surface it (``nx collection delete`` echoes to stderr, the migration folds
-    it into its outcome). Silence here was the regression both P4-follow-up
+    surface it (``nx collection delete``, ``prune`` and ``reindex`` echo it to
+    stderr). Silence here was the regression both P4-follow-up
     reviewers flagged.
     """
 
@@ -140,4 +140,7 @@ def purge_collection_cascade(
         _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
         counts.failures.append(f"service deleteCollection failed: {exc}")
         counts.service_delete_failed = True
+        # The delete is unconfirmed (it may not have committed), so the pipeline buffer of what may still be a
+        # live collection is left alone; a re-run of the delete takes it once the service confirms (nexus-69n4q).
+        return counts
     return _purge_pipeline_db(name, counts)

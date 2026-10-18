@@ -787,7 +787,10 @@ def test_reindex_stops_when_the_service_did_not_confirm_the_delete(
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
     assert result.exit_code != 0
     assert "unconfirmed" in result.output
+    assert "may or may not have been deleted" in result.output
+    assert "nx collection info knowledge__test" in result.output
     assert "nx collection reindex knowledge__test" in result.output
+    assert "reports not found" in result.output and "original sources" in result.output
     assert "service deleteCollection failed" in result.output
     index_md.assert_not_called()
     register.assert_not_called()

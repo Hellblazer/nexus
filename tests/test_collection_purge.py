@@ -181,3 +181,25 @@ def test_service_mode_endpoint_failure_recorded(
     assert any("service deleteCollection failed" in f for f in counts.failures)
     assert "service unreachable" in " ".join(counts.failures)
     assert counts.service_delete_failed is True  # nexus-oq5gd: delete is unconfirmed
+
+
+def test_an_unconfirmed_service_delete_leaves_the_pipeline_buffer_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-69n4q: the delete may not have committed, so a possibly live collection keeps its pipeline rows."""
+
+    class _BoomClient:
+        def delete_collection(self, name: str, **_kw: object) -> dict[str, int]:
+            raise RuntimeError("read timeout")
+
+    def _no_pipeline() -> object:
+        raise AssertionError("the pipeline buffer must not be touched after an unconfirmed delete")
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _BoomClient())
+    monkeypatch.setattr("nexus.db.http_pipeline_client.HttpPipelineDB", _no_pipeline)
+
+    counts = purge_collection_cascade(object(), "knowledge__svc3__minilm-l6-v2-384__v1")
+
+    assert counts.service_delete_failed is True
+    assert counts.pipeline_rows_deleted == 0
+    assert not any("pipeline-state cleanup failed" in f for f in counts.failures)

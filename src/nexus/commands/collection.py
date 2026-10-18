@@ -1151,9 +1151,14 @@ def reindex_cmd(name: str, force: bool) -> None:
     if cascade.service_delete_failed:
         # nexus-69n4q: the service never confirmed the delete (a read timeout makes ONE attempt since
         # nexus-oq5gd), so the old collection may still be there; re-indexing now would write into it.
+        # A timed-out delete may still have committed, taking the chunks' source list with it, so a blind
+        # re-run of reindex can dead-end on "not found": say how to tell the two cases apart.
         raise click.ClickException(
-            f"reindex of '{name}' stopped: the delete is unconfirmed (the service cascade failed). "
-            f"Re-run `nx collection reindex {name}`."
+            f"reindex of '{name}' stopped: the delete is unconfirmed (the service cascade failed), so "
+            f"the collection may or may not have been deleted. Run `nx collection info {name}`: if it "
+            f"still lists chunks, re-run `nx collection reindex {name}`; if it reports not found, the "
+            f"delete committed and the collection must be re-indexed from its original sources "
+            f"(`nx index repo` for code, the md or pdf index verbs for documents)."
         )
 
     # 3b. Re-register the catalog_collections registry row the cascade just
