@@ -1401,7 +1401,7 @@ calibrated order and warns (Technical Design 12).
 ### Prerequisites
 
 - [x] CA-1 verified on linux-amd64 (210-research-19); the remaining platforms and
-  loads are Phase 1 Step 1, which gates every engine step.
+  loads passed in Phase 1 Step 1 on 2026-10-18 (210-research-25 to -28).
 - [x] CA-5 verified by source; CA-2 verified where it is used, its residuals
   measured in Phase 4 Step 3 before Phase 6 ships.
 - [x] Non-engine doc sweep and the nexus-umm29 wording landed (f7cae33ec).
@@ -1448,14 +1448,16 @@ sends the RDR back to planning.
   one Voyage rerank return results while bge serves in the same process, and peak
   memory stays within the bge-only run's range plus 10%.
 - **Concurrent load.** linux-amd64, three concurrent writers to a bge collection
-  (`flush_concurrency=3`) with reranks running alongside. **Pass**: the dual
-  process's peak is within 10% of a bge-only process under the same load, and
-  under the 3.03 GB measured for bge-only at that concurrency
-  (`Bge768Embedder.java:101-105`).
+  (`flush_concurrency=3`) with a rerank loop running alongside. **Pass** (Sam,
+  2026-10-18): the dual process's peak is within 10% of a bge-only process under the
+  same load. The 3.03 GB figure measured for bge-only at that concurrency
+  (`Bge768Embedder.java:101-105`) came from a shakedown with no rerank loop and does
+  not bound this load: bge-only itself peaks at 4.5 to 6.9 GB here, so the absolute
+  peaks are recorded, not gated.
 - **Old-client request shape.** The same load sent with the Voyage chunk cap and
   byte budget a pre-`dual` client would use (Technical Design 10). **Pass**: the
-  same bound as the concurrent-load check. **Fail**: the wire ledger entry for
-  `dual` carries a minimum client version instead.
+  same relative bound as the concurrent-load check. **Fail**: the wire ledger entry
+  for `dual` carries a minimum client version instead.
 - **Native-library extraction (nexus-8ool4).** nexus-8ool4 (962a687bd, 7467e0b74)
   is on develop. `OrtNativeDir.applyAtBoot` (`Main.java:294`) extracts about 16 MB
   of ONNX runtime libraries under the cache tree and sets `onnxruntime.native.path`,
@@ -1470,6 +1472,15 @@ sends the RDR back to planning.
   reuses it, and a bge-profile rerank leaves no `onnxruntime-java*` directory in
   `/tmp`. **Fail**: any extraction on the cloud shape, or an ORT load outside the
   cache tree.
+
+**Run 2026-10-18 (nexus-6nhy3), all pass.** macOS arm64 native: T2
+`nexus_rdr/210-research-25`. Native-library extraction placement: `-26`. Windows
+x64 native, clean stop is exit 149 (CTRL_BREAK), not 143: `-27`. linux-amd64
+concurrent load and old-client shape, 18 serial runs, dual within 2.2% of bge-only
+at worst: `-28`, so the `dual` wire entry needs no minimum client version. The
+Voyage loopback stub was not used; a real key covered the 1024-dimension check on
+macOS and Windows. The real-key Voyage check ran on those two platforms, not on
+linux-amd64.
 
 #### Step 2: Mode string and per-collection decisions
 
