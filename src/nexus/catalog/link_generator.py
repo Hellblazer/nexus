@@ -836,7 +836,8 @@ def generate_pdf_corpus_links(
     Idempotent via ``link_if_absent``. Incremental when
     ``new_tumblers`` is supplied: only the new pdf entries emit
     links FROM them; the anchor side may be a pre-existing
-    tumbler (that's the desired join point).
+    tumbler (that's the desired join point). When the anchor itself is
+    new, every member of its group links to it (nexus-h0uy7).
 
     SOURCE and TARGET are the same content_type set here,
     ``{"pdf", "paper"}`` — unlike the filepath linkers, this generator
@@ -883,10 +884,13 @@ def generate_pdf_corpus_links(
         if len(group) < 2:
             continue
         anchor = min(group, key=lambda e: str(e.tumbler))
+        # nexus-h0uy7: a seeded anchor (new, or re-indexed into this group)
+        # has no links pointing at it yet, so every member links to it.
+        anchor_seeded = new_set is not None and str(anchor.tumbler) in new_set
         for member in group:
             if member.tumbler == anchor.tumbler:
                 continue
-            if new_set is not None and str(member.tumbler) not in new_set:
+            if new_set is not None and not anchor_seeded and str(member.tumbler) not in new_set:
                 continue
             try:
                 created = (writer if writer is not None else cat).link_if_absent(
@@ -907,10 +911,136 @@ def generate_pdf_corpus_links(
     return count
 
 
+def prune_stale_same_as_links(
+    cat: CatalogReader,
+    *,
+    writer: CatalogWriter | None = None,
+    scope: set[str] | None = None,
+    page: int = 200,
+) -> list[tuple[str, str]]:
+    """Retract ``content_hash_dedup`` same-as links whose endpoints no
+    longer share a content key (nexus-h0uy7).
+
+    :func:`generate_pdf_corpus_links` only ever adds links, and
+    ``begin_index_run`` overwrites ``index_content_hash`` on a re-index, so
+    a PDF whose bytes changed kept a same-as link to a document it no
+    longer duplicates. Run this AFTER the index run's fence has stamped
+    the new keys; :func:`relink_changed_pdfs` is the index-time caller.
+
+    A link is stale when an endpoint is no longer a pdf/paper document
+    (deleted, or retyped), or when both endpoints have a key and the keys
+    differ. An endpoint with no key, or whose registration key and index
+    key disagree (:func:`_settled_pdf_key`), is left alone: an unknown key
+    is not a changed one. A link another creator also asserted
+    (``co_discovered_by`` in its metadata) is kept, because ``unlink``
+    deletes the whole row. Each retraction is one ``unlink``, never a
+    bulk delete by creator. *scope*, when given, limits the pass to links
+    with an endpoint in it.
+
+    A full pass that finds no pdf/paper documents at all while dedup links
+    exist refuses, logging a warning: that reads as a failed fetch, and
+    acting on it would retract every link at once.
+
+    Returns the retracted ``(from, to)`` pairs.
+    """
+    candidates: list[tuple[str, str]] = []
+    offset = 0
+    while True:
+        batch = cat.link_query(
+            link_type="same-as", created_by="content_hash_dedup",
+            limit=page, offset=offset,
+        )
+        for link in batch:
+            if link.created_by != "content_hash_dedup" or link.link_type != "same-as":
+                continue
+            src, dst = str(link.from_tumbler), str(link.to_tumbler)
+            if scope is not None and src not in scope and dst not in scope:
+                continue
+            if (link.meta or {}).get("co_discovered_by"):
+                _log.info("pdf_same_as_prune_kept_co_asserted", member=src, anchor=dst)
+                continue
+            candidates.append((src, dst))
+        if len(batch) < page:
+            break
+        offset += page
+    if not candidates:
+        return []
+
+    key_by_tumbler: dict[str, str] = {
+        str(e.tumbler): _settled_pdf_key(e)
+        for content_type in ("pdf", "paper")
+        for e in _entries_of_type(cat, content_type)
+    }
+    if not key_by_tumbler:
+        _log.warning("pdf_same_as_prune_refused_empty_fetch", links=len(candidates))
+        return []
+
+    w = writer if writer is not None else cat
+    retracted: list[tuple[str, str]] = []
+    for src, dst in candidates:
+        if src in key_by_tumbler and dst in key_by_tumbler:
+            src_key, dst_key = key_by_tumbler[src], key_by_tumbler[dst]
+            if not src_key or not dst_key or src_key == dst_key:
+                continue
+        try:
+            w.unlink(src, dst, "same-as")
+        except Exception as exc:  # noqa: BLE001 — one failed retraction must not strand the rest
+            _log.warning("pdf_same_as_retract_failed", member=src, anchor=dst, error=str(exc))
+            continue
+        retracted.append((src, dst))
+        _log.info("pdf_same_as_link_retracted", member=src, anchor=dst)
+    return retracted
+
+
+def relink_changed_pdfs(
+    cat: CatalogReader, *, writer: CatalogWriter, changed: set[str],
+) -> tuple[int, int]:
+    """Index-time same-as maintenance for the documents a run changed
+    (nexus-h0uy7), called once the run's fence has stamped their keys.
+
+    Prunes stale dedup links touching *changed*, then links *changed*
+    plus the from-side of every retracted link, so a member whose anchor
+    was re-indexed with new bytes re-joins the next anchor of its group.
+    Returns ``(retracted, created)``.
+    """
+    if not changed:
+        return (0, 0)
+    # The prune scans only the dedup links (cheap) and fetches documents
+    # only when one touches the run, so it runs on every changed set; a
+    # PDF retyped to prose this run is caught here too.
+    retracted = prune_stale_same_as_links(cat, writer=writer, scope=changed)
+    # Linking fetches every pdf/paper document, so it runs only when the
+    # run changed one: a code-only run pays one resolve_many, not that.
+    entries = cat.resolve_many(sorted(changed))
+    seed = {
+        t for t, e in entries.items() if e.content_type in _PDF_CORPUS_SOURCE_TYPES
+    } | {src for src, _ in retracted}
+    if not seed:
+        return (len(retracted), 0)
+    created = generate_pdf_corpus_links(
+        cat, writer=writer, new_tumblers=[Tumbler.parse(t) for t in sorted(seed)],
+        new_content_types=frozenset(_PDF_CORPUS_SOURCE_TYPES),
+    )
+    return (len(retracted), created)
+
+
 def _pdf_content_hash(entry: CatalogEntry) -> str:
     """The file-content key for same-as grouping: ``index_content_hash``,
     else the pre-fence ``meta.content_hash``, else ``''`` (not groupable)."""
     return entry.index_content_hash or (entry.meta or {}).get("content_hash") or ""
+
+
+def _settled_pdf_key(entry: CatalogEntry) -> str:
+    """:func:`_pdf_content_hash` when the document's two keys agree, else
+    ``''`` (unknown). Registration rewrites ``meta.content_hash`` at once,
+    but ``index_content_hash`` moves only when the producer's
+    ``begin_index_run`` lands, which a skipped or deferred file never
+    reaches; until then the two disagree and neither is the bytes'
+    settled key, so the prune keeps the link (nexus-h0uy7)."""
+    meta_key = (entry.meta or {}).get("content_hash") or ""
+    if entry.index_content_hash and meta_key and entry.index_content_hash != meta_key:
+        return ""
+    return _pdf_content_hash(entry)
 
 
 
@@ -950,6 +1080,7 @@ class DryRunLinkWriter:
         self._existing: set[tuple[str, str, str]] = existing or set()
         self._seen: set[tuple[str, str, str]] = set()
         self._proposed: list[ProposedLink] = []
+        self._retracted: list[ProposedLink] = []
 
     def link_if_absent(
         self, from_t: object, to_t: object, link_type: str,
@@ -977,12 +1108,23 @@ class DryRunLinkWriter:
             "unconditionally and its volume would not appear in this preview."
         )
 
+    def unlink(self, from_t: object, to_t: object, link_type: str = "") -> int:
+        """Record a retraction (nexus-h0uy7's same-as prune); delete nothing."""
+        self._retracted.append(
+            ProposedLink(str(from_t), str(to_t), str(link_type), created_by="")
+        )
+        return 1
+
     def close(self) -> None:
         return None
 
     @property
     def proposed(self) -> list[ProposedLink]:
         return list(self._proposed)
+
+    @property
+    def retracted(self) -> list[ProposedLink]:
+        return list(self._retracted)
 
     def count_by_link_type(self) -> dict[str, int]:
         out: dict[str, int] = {}

@@ -194,6 +194,27 @@ def test_on_locked_skip_runs_when_unlocked(tmp_path: Path, registry, lock_home: 
     assert result == {"rdr_indexed": 0}
 
 
+def test_pdf_same_as_relink_runs_after_the_run_on_its_changed_set(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """nexus-h0uy7: the same-as prune runs once _run_index has returned,
+    when the fence has stamped the changed documents' keys, on the set the
+    run itself recorded as changed."""
+    def _fake_run(*_args, fence_run_state, **_kwargs):
+        fence_run_state["needs_fence"] = {"1.1.2": ("h", "docs__repo")}
+        return {}
+
+    seen: list[set[str]] = []
+    with patch("nexus.indexer._run_index", side_effect=_fake_run), \
+            patch("nexus.indexer._current_head", return_value="abc123"), \
+            patch(
+                "nexus.indexer._relink_changed_pdfs",
+                side_effect=lambda state: seen.append(set(state["needs_fence"])),
+            ):
+        index_repository(tmp_path, registry)
+    assert seen == [{"1.1.2"}]
+
+
 # ── on_locked=wait ────────────────────────────────────────────────────────────
 
 
