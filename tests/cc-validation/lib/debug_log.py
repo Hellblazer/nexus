@@ -72,19 +72,26 @@ def context_sizes(text: str, event: str) -> list[int]:
 
 def unparsed_acceptances(text: str, event: str) -> int:
     """How many lines name a <event> hook's accepted additionalContext that :func:`context_sizes`
-    did not read as a record, empty ones included. The record splitter knows the shapes Claude
+    did not read as a record, empty ones included, counted per record so a well-formed record
+    cannot offset an unread line elsewhere. The record splitter knows the shapes Claude
     Code has written; a new shape would otherwise drop silently and read as 'accepted no
     context', which is the answer a NONE probe passes on (review of 21257211c)."""
     pattern = re.compile(
         rf"{_HEAD}Hook {re.escape(event)} \(.{{0,{_MAX_COMMAND}}}?\) provided additionalContext \(([0-9]+) chars\)\"?[ \t]*$",
         re.S | re.M,
     )
-    parsed = sum(1 for rec in _records(text) if pattern.match(rec) is not None)
-    raw = sum(
-        1 for line in text.splitlines()
-        if f"Hook {event} " in line and "provided additionalContext (" in line
-    )
-    return max(0, raw - parsed)
+    unparsed = 0
+    for rec in _records(text):
+        # The prefix and the suffix of a multi-line command's record sit on different lines, so
+        # count suffix lines in every record that names the event (another event's line folded
+        # in counts too: a refused reading, never a false NONE).
+        raw = (
+            sum(1 for line in rec.splitlines() if "provided additionalContext (" in line)
+            if f"Hook {event} " in rec else 0
+        )
+        # A record parses as at most one acceptance; every other such line in it went unread.
+        unparsed += raw - (1 if raw and pattern.match(rec) is not None else 0)
+    return unparsed
 
 
 def main(argv: list[str]) -> int:

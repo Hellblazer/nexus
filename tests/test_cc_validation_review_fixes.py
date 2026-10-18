@@ -319,6 +319,16 @@ def test_an_acceptance_line_in_an_unknown_shape_is_reported_not_dropped(tmp_path
         assert (proc.returncode, proc.stdout.strip()) == (3, "UNPARSED"), odd
 
 
+def test_a_parsed_multiline_record_does_not_hide_an_unparsed_line() -> None:
+    """The count is per record: a well-formed record spanning several lines must not offset an
+    acceptance line elsewhere that the reader could not parse (confirmation of 5b9df9ca7)."""
+    mod = _debug_log_module()
+    multi = _hook_lines("SubagentStart", "printf 'one\ntwo\nthree'", 9)
+    odd = "  [debug] Hook SubagentStart (echo x) provided additionalContext (5 chars)\n"
+    assert mod.unparsed_acceptances(multi, "SubagentStart") == 0
+    assert mod.unparsed_acceptances(multi + odd, "SubagentStart") == 1
+
+
 def test_debug_log_reader_keeps_one_record_from_swallowing_the_next() -> None:
     """The records are told apart: an empty injection from one hook must not let the pattern run
     on into the next record and report that record's size under this one, and another event's
