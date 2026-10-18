@@ -95,6 +95,13 @@ class LocalModelProbeTest {
     }
 
     @Test
+    void theProbesCanonicalPathsEqualTheEmbeddersDefaults() {
+        String root = OnnxModelPaths.root();
+        assertThat(root + LocalModelProbe.BGE_MODEL_SUFFIX).isEqualTo(Bge768Embedder.DEFAULT_MODEL_PATH);
+        assertThat(root + LocalModelProbe.BGE_TOKENIZER_SUFFIX).isEqualTo(Bge768Embedder.DEFAULT_TOKENIZER_PATH);
+    }
+
+    @Test
     void theProbeSourceNeverReferencesTheOnnxRuntime() throws Exception {
         // Constructing a session on a missing model segfaults, and the native-library
         // location is fixed once by Main AFTER this probe runs. The probe may not
@@ -108,7 +115,7 @@ class LocalModelProbeTest {
                 .doesNotContain("OrtSession")
                 .doesNotContain("OrtNativeDir")
                 .doesNotContain("OrtInitGate")
-                .doesNotContain("new Bge768Embedder")
+                .doesNotContain("Bge768Embedder")
                 .doesNotContain("CrossEncoderReranker");
     }
 }

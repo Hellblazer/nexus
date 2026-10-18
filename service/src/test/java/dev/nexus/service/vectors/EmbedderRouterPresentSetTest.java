@@ -147,6 +147,19 @@ class EmbedderRouterPresentSetTest {
     }
 
     @Test
+    void voyageOnly_refusesAMinilmRow_withoutPointingAtBgeFiles() {
+        // bge files would not serve a minilm row: the hint must not name that remedy.
+        mark("docs__x__minilm-l6-v2-384__v1", "minilm-l6-v2-384", 384);
+        assertThatThrownBy(() -> voyageOnly().resolveEmbedderStrict(null, TENANT, "docs__x__minilm-l6-v2-384__v1"))
+            .isInstanceOf(EmbeddingModelUnavailableException.class)
+            .hasMessageContaining("cannot serve model 'minilm-l6-v2-384'")
+            .hasMessageNotContaining("nx init --service");
+        assertThatThrownBy(() -> voyageOnly().resolveEmbedderByModel("minilm-l6-v2-384"))
+            .hasMessageContaining("cannot serve model 'minilm-l6-v2-384'")
+            .hasMessageNotContaining("nx init --service");
+    }
+
+    @Test
     void resolveEmbedderByModel_followsThePresentSet() {
         assertThat(dual().resolveEmbedderByModel(BGE_TOKEN).modelToken()).isEqualTo(BGE_TOKEN);
         assertThat(dual().resolveEmbedderByModel("voyage-code-3")).isInstanceOf(VoyageEmbedder.class);

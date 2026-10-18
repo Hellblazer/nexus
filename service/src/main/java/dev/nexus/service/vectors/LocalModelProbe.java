@@ -48,9 +48,26 @@ public final class LocalModelProbe {
         }
     }
 
+    /**
+     * Canonical bge layout under the onnx_models root — the same files {@code
+     * Bge768Embedder} checks. Derived from {@link OnnxModelPaths} here, not read from
+     * the embedder's constants, so the probe never loads that class (a static ORT
+     * field there must not be able to break the probe contract). {@code
+     * LocalModelProbeTest} pins these equal to the embedder's defaults.
+     */
+    static final String BGE_MODEL_SUFFIX = "/bge-base-en-v1.5/onnx/model.onnx";
+    static final String BGE_TOKENIZER_SUFFIX = "/bge-base-en-v1.5/onnx/tokenizer.json";
+
     /** Probe the canonical bge artifact paths. Never throws. */
     public static Presence probe(String voyageKey) {
-        return probe(Bge768Embedder.DEFAULT_MODEL_PATH, Bge768Embedder.DEFAULT_TOKENIZER_PATH, voyageKey);
+        String root;
+        try {
+            root = OnnxModelPaths.root();
+        } catch (RuntimeException e) {
+            return new Presence(false, voyageKey != null && !voyageKey.isBlank(),
+                    "probe_error=" + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+        return probe(root + BGE_MODEL_SUFFIX, root + BGE_TOKENIZER_SUFFIX, voyageKey);
     }
 
     /**

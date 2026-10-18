@@ -576,9 +576,12 @@ public final class EmbedderRouter implements Embedder {
                  + "environment (supervisor plumbs it from the nexus credential "
                  + "chain when set).";
         }
-        if (!voyageModel && localEmbedder == null) {
-            return ". Local-model collections need the bge model files on disk; "
+        if (modelToken != null && modelToken.startsWith("bge-") && localEmbedder == null) {
+            return ". bge collections need the bge model files on disk; "
                  + "provision them with `nx init --service`.";
+        }
+        if (!voyageModel) {
+            return ". This engine cannot serve model '" + modelToken + "'.";
         }
         return ".";
     }
