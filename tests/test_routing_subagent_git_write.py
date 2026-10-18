@@ -1015,6 +1015,44 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         'ssh h "git -' + BS + BS + 'c core.x=1 config user.name x"',
         'ssh h "git -' + BS + BS + 'C . config --global user.name x"',
     ],
+    # nexus-13wz1: `env -S` with the string glued to the option. The shell joins
+    # `-S'git config'` into the one word `-Sgit config`, which env splits and
+    # runs; the word `-Sgit` is not `git` to a token scan, so the whole line
+    # read as having no git command (verbs too: `env -S'git commit -m x'`).
+    "config_env_split_string_glued_to_the_option": [
+        "env -S'git config' user.name x",
+        'env -S"git config" user.name x',
+        "env -iS'git config' user.name x",
+        "env -u HOME -S'git config' user.name x",
+        "env -S'git config user.name x'",
+        "env -S'git' config user.name x",
+        "env -Sgit config user.name x",
+        "env -S'git config' --local core.hooksPath /x",
+        "env -S'git commit -m x'",
+        "env -Sgit commit -m x",
+    ],
+    # nexus-13wz1: no whole `git` word survives in the text: the doubled
+    # backslash reaches the far shell as one, which drops it before a letter.
+    "config_backslash_splits_the_git_word": [
+        'ssh h "gi' + BS + BS + 't config user.name x"',
+        'ssh h "gi' + BS + 't config user.name x"',
+        'ssh h "g' + BS + BS + 'it config --global user.name x"',
+        'tmux send-keys "gi' + BS + BS + 't config user.name x" Enter',
+        'git submodule foreach "gi' + BS + BS + 't config user.name x"',
+        'git rebase -x "gi' + BS + BS + 't config user.name x" HEAD~1',
+        'watch "gi' + BS + BS + 't config user.name x"',
+    ],
+    # nexus-13wz1: a dashed `git-config` handed to a shell that runs it (an
+    # executor makes the text non-plain, so the strict rule decides).
+    "config_dashed_program_in_a_shell_string": [
+        "sh -c 'git-config user.name x'",
+        'bash -c "git-config user.name x"',
+        "bash -c 'git-config --global user.name x'",
+        "eval 'git-config user.name x'",
+        "sudo sh -c 'git-config user.name x'",
+        "sh -c 'true && git-config user.name x'",
+        "sh -c '/usr/lib/git-core/git-config user.name x'",
+    ],
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
@@ -1299,6 +1337,12 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
         'gh pr create --title "git-config" --body "x"',
         'echo "git-config is documented"',
         "echo 'git-config user.name x'",
+        # nexus-13wz1: the same prose with more words, and a read through a glued -S
+        "echo 'use git-config user.name x now'",
+        "printf '%s\\n' 'git-config user.name x'",
+        "echo 'git-config --global user.name x'",
+        "env -S'git log' --oneline",
+        "env -Sgit status",
         'man "git-config" docs',
         'ls "/usr/lib/git-core/git-config" docs',
         'cat "git-config" x y',
@@ -1721,6 +1765,35 @@ _SHARED_CONFIG_WRITES = [
     "'git-config' user.name x",
     "{ git-config user.name x; }",
     "ssh localhost 'git-config user.name x'",
+    # nexus-13wz1: the residuals of the confirm pass, each denied from a worktree.
+    "env -S'git config' user.name x",
+    'env -S"git config" --local core.hooksPath /x',
+    "env -iS'git config' user.name x",
+    "env -S'git config' --worktree core.hooksPath /tmp/x",
+    "env -Sgit config user.name x",
+    'ssh h "gi' + BS + BS + 't config user.name x"',
+    'ssh h "g' + BS + BS + 'it config --global user.name x"',
+    "sh -c 'git-config user.name x'",
+    'bash -c "git-config user.name x"',
+    "eval 'git-config user.name x'",
+    # A `cd` into the primary with a QUOTED path: the unquoted form stays the
+    # documented limit (the tool call's cwd decides), the quoted one reads as
+    # unprovable text, as it did before the tokenizer.
+    "cd '{primary}' && git config --worktree user.name x",
+    'cd "{primary}" && git config --worktree user.name x',
+    "cd '{primary}'; git config --worktree user.name x",
+    "pushd '{primary}' && git config --worktree user.name x",
+    "cd -P '{primary}' && git config --worktree user.name x",
+    "builtin cd '{primary}' && git config --worktree user.name x",
+    "git status\ncd '{primary}'\ngit config --worktree user.name x",
+    "(cd '{primary}' && git config --worktree user.name x)",
+    # `--` ends the options: the key after it is still checked.
+    "git config --worktree -- core.hooksPath /tmp/x",
+    "git config --worktree -- url.x.insteadOf y",
+    "git config -- --worktree user.name x",
+    "git config --worktree -- --global user.name x",
+    "git config --worktree -- --unset user.name",
+    "git config -- user.name x",
 ]
 
 
@@ -1805,6 +1878,20 @@ def test_a_worktree_write_and_every_config_read_pass_in_a_linked_worktree(
         'git grep -n "git-config" -- docs',
         'gh pr create --title "git-config" --body "x"',
         'echo "git-config is documented"',
+        # nexus-13wz1: `--` ends the options, so the key after it is the key;
+        # the same write passes with and without it
+        "git config --worktree -- user.name x",
+        "git config --worktree --unset -- user.name",
+        "git config --worktree --add -- user.signingkey ABC",
+        "git config --worktree --bool -- commit.gpgsign false",
+        # an unquoted `cd` (the documented limit: the tool call's cwd decides)
+        "cd src && git config --worktree user.name x",
+        # nexus-13wz1: dashed prose in a quoted data argument is not a program
+        "echo 'git-config user.name x'",
+        "echo 'git-config --global user.name x'",
+        "printf '%s\\n' 'git-config user.name x'",
+        "env -S'git log' --oneline",
+        "env -Sgit log --oneline",
         # env without -S runs no split string
         "env FOO=1 git log",
         "env -i git status",
@@ -2066,6 +2153,94 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
     subprocess.run(["bash", "-c", control], cwd=wt, env=env, capture_output=True, check=False)
     assert _config_snapshot([common]) == before, "the control wrote"
     assert not _denied(control, wt), control
+
+
+def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(tmp_path):
+    """The confirm-pass residuals, measured. Each command, run for real in a
+    sandbox, changes the common config the primary reads, and the hook denies it
+    from a LINKED WORKTREE (where only the config rule decides). `ssh` stubs the
+    far side with `sh -c`; `git-config` is a stub on PATH, as git-core's is on a
+    box that has it there. The controls (a read through the same shapes, and the
+    prose that only names the program) write nothing and pass. The `cd` into the
+    primary writes the primary's per-worktree file, which the primary reads: it
+    is run to show the unquoted form is the documented limit and the quoted one
+    is denied."""
+    box = tmp_path / "box"
+    env = _sandbox_env(box)
+    stubs = box / "stubs"
+    stubs.mkdir(parents=True)
+    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
+    (stubs / "git-config").write_text('#!/bin/sh\nexec git config "$@"\n')
+    for name in ("ssh", "git-config"):
+        (stubs / name).chmod(0o755)
+    env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
+    main = box / "main"
+    main.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
+    (main / "f").write_text("x")
+    subprocess.run(["git", "add", "f"], cwd=main, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=main, check=True, env=env)
+    wt = box / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "wtb", str(wt)], cwd=main, check=True, env=env,
+    )
+    common = main / ".git" / "config"
+    writes = [
+        "env -S'git config' user.name via-env",
+        'env -S"git config" user.name via-env2',
+        "env -S'git config user.name via-env3'",
+        "env -S'git' config user.name via-env4",
+        "env -Sgit config user.name via-env5",
+        "env -S'git config' core.hooksPath /tmp/hk",
+        'ssh h "gi' + BS + BS + 't config user.name via-ssh"',
+        'ssh h "g' + BS + BS + 'it config core.hooksPath /tmp/hk2"',
+        "sh -c 'git-config user.name via-sh'",
+        'bash -c "git-config core.hooksPath /tmp/hk3"',
+        "eval 'git-config user.name via-eval'",
+    ]
+    for cmd in writes:
+        before = _config_snapshot([common])
+        run = subprocess.run(
+            ["bash", "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        assert _config_snapshot([common]) != before, f"{cmd!r} did not write: {run.stderr}"
+        assert _denied(cmd, wt), f"{cmd!r} was not denied in a linked worktree"
+    controls = [
+        "env -S'git config' --get user.name",
+        "env -S'git log' --oneline",
+        "echo 'git-config user.name x'",
+        "printf '%s\\n' 'git-config user.name x'",
+    ]
+    for cmd in controls:
+        before = _config_snapshot([common])
+        subprocess.run(
+            ["bash", "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
+            check=False, timeout=60,
+        )
+        assert _config_snapshot([common]) == before, f"control {cmd!r} wrote"
+        assert not _denied(cmd, wt), f"control {cmd!r} was wrongly denied"
+    # `--worktree --`: with the extension on, the write lands in the worktree's
+    # own file and never in the common one, so the allowlisted key passes.
+    subprocess.run(
+        ["git", "config", "extensions.worktreeConfig", "true"], cwd=main, check=True, env=env,
+    )
+    before = _config_snapshot([common])
+    cmd = "git config --worktree -- user.name via-dashdash"
+    subprocess.run(["bash", "-c", cmd], cwd=wt, env=env, check=True, capture_output=True)
+    assert _config_snapshot([common]) == before, "`--worktree --` wrote the common config"
+    out = subprocess.run(
+        ["git", "config", "--worktree", "--get", "user.name"], cwd=wt, env=env,
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "via-dashdash"
+    assert not _denied(cmd, wt), cmd
+    # `cd` into the primary: the quoted forms deny. The unquoted form is the
+    # documented limit (the tool call's cwd, not the text, names the checkout).
+    for quoted in (f"cd '{main}' && git config --worktree user.name via-cd",
+                   f'cd "{main}" && git config --worktree user.name via-cd'):
+        assert _denied(quoted, wt), quoted
+    assert not _denied(f"cd {main} && git config --worktree user.name via-cd", wt)
 
 
 def test_a_worktree_commit_denied_for_a_config_word_says_to_reword_it(

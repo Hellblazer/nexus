@@ -1154,6 +1154,19 @@ _STRING_RUNNER_RE = re.compile(
     r"parallel|watch|xterm|difftool|mergetool|sh|bash|zsh|dash|ksh|fish|eval|su|"
     r"runuser|script)(?![\w.\-])"
 )
+#: The dashed program handed to a string runner in text the cursor cannot read
+#: (``sh -c 'git-config user.name x'``: an executor makes the text non-plain, and
+#: the strict rule's command-position test does not see past ``sh -c``). A
+#: ``git-config`` word within a dozen words after a runner in the same simple
+#: command is the program: the strict rule does not weigh the arguments, as it
+#: does not for ``config``. A search term after a runner (``sh -c 'grep -n
+#: git-config docs'``) denies too, the strict rule's usual price. Linear: the
+#: word run cannot cross a break, and the lazy bound is twelve.
+_DASHED_RUNNER_CMD_RE = re.compile(
+    _STRING_RUNNER_RE.pattern
+    + r"(?:[ \t]+[^\s;&|(){}`]+){0,12}?[ \t]+"
+    r"(?:[^\s;&|(){}`]*/)?git-config(?:\.(?:exe|cmd|bat|com|sh))?(?![\w.\-])"
+)
 #: Marks a QUOTED word that is exactly the dashed program in the text the cursor
 #: reads (``'git-config'`` becomes ``<mark>git-config``). The quote is gone from
 #: that text, and a dashed name quoted as an argument (``grep -n "git-config"
@@ -1189,6 +1202,27 @@ def _repo_env_named(text: str) -> bool:
     if "'" not in text and '"' not in text:
         return False
     return _GIT_REPO_ENV_RE.search(text.replace("'", "").replace('"', "")) is not None
+#: A ``cd``/``pushd`` whose argument holds a quote (nexus-13wz1). Where the
+#: command changes directory is the documented limit, and an unquoted ``cd`` stays
+#: one: the tool call's cwd decides the worktree. A quoted path was never plain
+#: text before the tokenizer, so the strict rule denied ``cd '<primary>' && git
+#: config --worktree ...``; the tokenizer reads the quotes away and lets it pass.
+#: Quotes around a path are how an agent writes one that has a space or an odd
+#: character in it, which is also how it names another repository, so a quoted
+#: ``cd`` withdraws the ``--worktree`` exemption as ``GIT_DIR=`` does. The argument
+#: run ends at the next break, so a quote in a later command does not count.
+_CD_QUOTED_RE = re.compile(
+    r"(?:^|[;&|(){}\n])[ \t]*(?:(?:builtin|command)[ \t]+)?(?:cd|pushd)(?=[ \t])"
+    r"[^;&|(){}\n'\"]*['\"]"
+)
+
+
+def _cd_quoted(raw: str) -> bool:
+    """True when *raw* has a ``cd`` or ``pushd`` with a quoted word (see
+    ``_CD_QUOTED_RE``)."""
+    return ("cd" in raw or "pushd" in raw) and _CD_QUOTED_RE.search(raw) is not None
+
+
 #: A segment with more ``config`` verbs than this denies without being read: each
 #: one re-reads the arguments after it, and a cap keeps the walk linear.
 _CONFIG_MAX_WORDS_PER_SEGMENT = 8
@@ -1585,7 +1619,7 @@ def _config_view(command: str, relaxed: bool) -> _ConfigView:
     masked = _config_mask(command)
     if masked is not None and not _may_recombine(masked.text):
         return _ConfigView(
-            command, True, reads, masked.text, masked.data, {}, masked.joined,
+            command, True, reads, _split_env_s(masked.text), masked.data, {}, masked.joined,
         )
     return _ConfigView(command, False, reads)
 
@@ -1634,7 +1668,17 @@ def _config_worktree_scoped(args: list[str]) -> bool:
             return False
         if key is not None:
             continue  # a value or pattern; only a scope flag matters, checked above
-        if a.startswith("-"):
+        if a == "--":
+            # Ends the options (nexus-13wz1): the next word is the KEY, whatever
+            # it looks like. `--worktree` must already have come before it, and
+            # the key is checked as any other (`-- --unset` is a key named
+            # `--unset`, which is not on the list).
+            if i < n and not _config_scope_flag(args[i]):
+                key = args[i]
+                i += 1
+            else:
+                return False
+        elif a.startswith("-"):
             if a == "--worktree":
                 seen = True
             elif a in _CONFIG_WORKTREE_VALUED:
@@ -1858,7 +1902,10 @@ def _config_strict_match(
     first git (or hub) command at *git_end* that is not an excused get read, a
     ``git-config`` program token (unless *dashed* is False), or the raw command
     holds ``config`` inside a substitution span."""
-    if dashed and _DASHED_CONFIG_CMD_RE.search(text) is not None:
+    if dashed and (
+        _DASHED_CONFIG_CMD_RE.search(text) is not None
+        or _DASHED_RUNNER_CMD_RE.search(text) is not None
+    ):
         return True
     for m in _CONFIG_STRICT_RE.finditer(text, git_end):
         if not (view.reads and _config_get_read(text, m.end())):
@@ -1969,7 +2016,7 @@ def _config_cursor_hit(view: _ConfigView, worktree: bool) -> bool:
     memo = view.memo if view.memo is not None else {}
     hit = memo.get(worktree)
     if hit is None:
-        wt = worktree and not _repo_env_named(view.raw)
+        wt = worktree and not _repo_env_named(view.raw) and not _cd_quoted(view.raw)
         hit = (
             _config_relaxed_match(view.text, worktree=wt)
             or _config_data_hit(
@@ -1993,9 +2040,13 @@ def _config_match(
         e for e in (_first_git_command(normalized_text), _first_hub_command(normalized_text))
         if e is not None
     ]
-    if not ends:
+    if not ends and not (view.cursor and (view.data or view.joined)):
+        # No git command in the text. A data string or joined consumer command can
+        # still spell one the text does not: `ssh h "gi\\\\t config ..."` has no
+        # whole `git` word, but the consumer's shell drops the backslash
+        # (nexus-13wz1). Only the cursor's own readers decide that.
         return None
-    if _CONFIG_ALIAS_INJECT_RE.search(normalized_text) is not None:
+    if ends and _CONFIG_ALIAS_INJECT_RE.search(normalized_text) is not None:
         return "config"
     if view.cursor:
         hit = _config_cursor_hit(view, worktree)
@@ -2200,6 +2251,24 @@ def _resolve_command_sub_literals(text: str) -> str:
     return _BACKTICK_ECHO_RE.sub(lambda m: m.group(2), text)
 
 
+#: ``env -S'git config' ...`` reaches ``env`` as the one word ``-Sgit config``,
+#: which ``env`` splits and runs. With the quotes gone the first word is ``-Sgit``,
+#: which a token scan does not take for ``git``, so the whole command read as
+#: having no git command at all (nexus-13wz1). The option letter and the string
+#: are separate words to ``env``; this puts the space back. Same reach as the
+#: ``env`` alternative of ``_CONSUMER_RE`` (a dozen words of options and values,
+#: or a cluster such as ``-iS``); an ``-S`` followed by a space is left alone.
+_ENV_S_GLUED_RE = re.compile(r"((?<![\w.\-])env(?:\s+\S+){0,12}?\s+-\w*S)(?=\S)")
+
+
+def _split_env_s(text: str) -> str:
+    """*text* with a space after each ``env`` ``-S`` option that has its string
+    glued on (see ``_ENV_S_GLUED_RE``)."""
+    if "env" not in text:
+        return text
+    return _ENV_S_GLUED_RE.sub(r"\1 ", text)
+
+
 def _normalize_for_primary_scan(command: str) -> str:
     """CRLF/CR -> LF, collapse continuations, decode/resolve expansions,
     collapse escapes, strip quotes.
@@ -2246,7 +2315,7 @@ def _normalize_for_primary_scan(command: str) -> str:
     text = _collapse_escapes(text)
     text = _resolve_param_defaults(text)
     text = _resolve_command_sub_literals(text)
-    return text.replace("'", "").replace('"', "")
+    return _split_env_s(text.replace("'", "").replace('"', ""))
 
 
 #: nexus-3c92m round 7 (coordinator correction of round 6): the round-6
