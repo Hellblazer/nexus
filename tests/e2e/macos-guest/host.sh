@@ -528,7 +528,7 @@ hold_end() {
     fi
     build_lease_release suite
     echo "HOLD: released the suite lease"
-    rm -rf "$HOLD_DIR"
+    [[ -z "$HOLD_DIR" ]] || rm -rf "$HOLD_DIR"
 }
 
 cmd_hold() {
