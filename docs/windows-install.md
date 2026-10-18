@@ -526,7 +526,11 @@ bundle would not have been enough on its own.
 
 In releases after conexus 7.80.0, where `nx` does run, `nx init` refuses with
 a message that links here when Smart App Control is on (measured on the Home
-machine on 2026-10-15), and `nx doctor` has a
+machine on 2026-10-15) and an unsigned stand-in executable does not run. The
+registry value alone is not trusted: on restored guests it said on while Windows
+blocked nothing, so the refusal first tries to run a never-seen copy of the
+Python interpreter. A signed interpreter would run under Smart App Control too,
+and then the install proceeds and can still fail with `[WinError 4551]`. `nx doctor` has a
 Smart App Control row (a failure when it is on in local mode, a warning in
 evaluation). Where Windows has no Smart App Control (the setting does not
 exist, as on Windows 10 and older Windows 11), there is no row.

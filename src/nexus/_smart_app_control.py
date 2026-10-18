@@ -9,7 +9,7 @@ state in ``HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy``, value
 guest went from 2 to 1 when it was switched on. A Windows without Smart App
 Control (Windows 10, older Windows 11) has no such value: :data:`ABSENT`.
 
-Stdlib only. ``platform`` and ``read_value`` are seams, so the Windows branch
+Stdlib and structlog only. ``platform`` and ``read_value`` are seams, so the Windows branch
 runs under test on every host; production callers pass neither.
 """
 from __future__ import annotations
@@ -20,6 +20,12 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable
+
+import structlog
+
+from nexus.bounded_subprocess import run_bounded
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "ABSENT", "EVALUATION", "NOT_WINDOWS", "OFF", "ON", "UNKNOWN",
@@ -75,17 +81,22 @@ _BLOCKED_WINERROR = 4551
 
 
 def _launch_unsigned_copy() -> None:
-    """Run a never-seen unsigned executable: this interpreter copied with one
-    byte appended, so its signature no longer verifies and its hash is new.
-    That is the control that separated an enforcing Smart App Control from a
-    registry value that only says "on" (T2
-    ``nexus_rdr/224-sac-on-baseline-control-2026-10-17``)."""
-    with tempfile.TemporaryDirectory(prefix="nx-sac-probe-") as tmp:
+    """Run a never-seen executable: this interpreter copied with random bytes
+    appended, so the hash is new on every probe.
+
+    Measured (T2 ``nexus_rdr/224-sac-on-baseline-control-2026-10-17``): the same
+    kind of control ran unblocked on a baseline whose Smart App Control was
+    not enforcing. The True branch (a 4551 from this stand-in) has not been
+    observed. A Authenticode-signed interpreter keeps its signature valid
+    under an appended tail, so it would run under Smart App Control too; the
+    stand-in is only faithful for an unsigned one such as uv's managed Python.
+    """
+    with tempfile.TemporaryDirectory(prefix="nx-sac-probe-", ignore_cleanup_errors=True) as tmp:
         probe = os.path.join(tmp, "nx-sac-probe.exe")
         shutil.copyfile(sys.executable, probe)
         with open(probe, "ab") as handle:
-            handle.write(b"\0")
-        subprocess.run([probe, "--version"], check=False, capture_output=True, timeout=30)
+            handle.write(os.urandom(8))
+        run_bounded([probe, "--version"], timeout=30, stdin=subprocess.DEVNULL)
 
 
 def execution_blocked(
@@ -101,7 +112,12 @@ def execution_blocked(
     try:
         (launch or _launch_unsigned_copy)()
     except OSError as exc:
-        return True if getattr(exc, "winerror", None) == _BLOCKED_WINERROR else None
-    except Exception:  # noqa: BLE001 — an unrunnable probe is "inconclusive", never a crash
+        winerror = getattr(exc, "winerror", None)
+        if winerror == _BLOCKED_WINERROR:
+            return True
+        _log.warning("sac_probe_inconclusive", error=type(exc).__name__, winerror=winerror)
+        return None
+    except Exception as exc:  # noqa: BLE001 — an unrunnable probe is "inconclusive", never a crash
+        _log.warning("sac_probe_inconclusive", error=type(exc).__name__)
         return None
     return False

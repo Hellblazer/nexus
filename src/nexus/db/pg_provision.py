@@ -263,8 +263,8 @@ def refuse_smart_app_control(
 ) -> None:
     """Refuse local provisioning when Smart App Control is on (nexus-f9bgu.57).
 
-    Only the ``on`` state refuses, and only if an unsigned executable is not
-    seen to run: the registry value alone said "on" on guests where Windows
+    Only the ``on`` state refuses, and only if an unsigned stand-in executable
+    is not seen to run (it has never been seen blocked, see the probe): the registry value alone said "on" on guests where Windows
     blocked nothing (nexus-vv068). A blocked or inconclusive probe refuses.
     Evaluation mode is not refused, though Windows can switch it on later, and
     an unreadable state is not grounds to refuse; ``nx doctor`` warns about

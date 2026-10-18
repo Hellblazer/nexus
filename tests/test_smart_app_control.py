@@ -18,6 +18,7 @@ import pytest
 from nexus import _smart_app_control as sac
 from nexus import health
 from nexus.db import pg_provision
+from tests._module_seam import setattr_in
 from nexus.db.pg_provision import (
     PgSmartAppControlError,
     provision,
@@ -136,6 +137,7 @@ def test_provision_refuses_before_touching_the_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(pg_provision, "smart_app_control_state", lambda: sac.ON)
+    monkeypatch.setattr(pg_provision, "_sac_execution_blocked", lambda: True)
     monkeypatch.setattr(
         pg_provision, "bootstrap_superuser", lambda: (_ for _ in ()).throw(_Tripwire())
     )
@@ -152,6 +154,7 @@ def test_init_refuses_before_the_bundle_download(
     from nexus.commands import init as init_cmd
 
     monkeypatch.setattr(pg_provision, "smart_app_control_state", lambda: sac.ON)
+    monkeypatch.setattr(pg_provision, "_sac_execution_blocked", lambda: True)
     monkeypatch.setattr(
         init_cmd, "_select_bundled_pg", lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire())
     )
@@ -195,3 +198,35 @@ def test_doctor_row_warns_for_evaluation_and_unknown(state: str) -> None:
 def test_doctor_row_passes_when_off() -> None:
     (row,) = health._check_smart_app_control(state=sac.OFF, local=True)
     assert row.ok
+
+
+def test_default_launcher_copies_runs_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The real launcher body, on any host: a stub "interpreter" is copied,
+    # appended to, spawned, and its temp directory is gone afterwards.
+    import tempfile
+
+    stub = tmp_path / "python-stub"
+    stub.write_bytes(b"MZ-stub")
+    seen: list[tuple[str, bytes]] = []
+
+    def _fake_run(argv: list[str], **_kw: object) -> None:
+        seen.append((argv[0], Path(argv[0]).read_bytes()))
+
+    setattr_in(monkeypatch, sac, "sys.executable", str(stub))
+    monkeypatch.setattr(sac, "run_bounded", _fake_run)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert sac.execution_blocked(platform="win32") is False
+    ((path, data),) = seen
+    assert data.startswith(b"MZ-stub") and len(data) == len(b"MZ-stub") + 8
+    assert not Path(path).exists()
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), TimeoutError("30s")])
+def test_probe_is_inconclusive_on_a_crash_or_timeout(exc: Exception) -> None:
+    # The dangerous direction: a crash must never count as "the binary ran".
+    def _launch() -> None:
+        raise exc
+
+    assert sac.execution_blocked(platform="win32", launch=_launch) is None
