@@ -860,11 +860,18 @@ def test_destroying_a_vm_stops_its_deadman(h: Harness) -> None:
     pidfile = h.base / "deadman" / f"{vm}.pid"
     pid = int(pidfile.read_text())
     assert _alive(pid)
+    kids = [int(k) for k in subprocess.run(["/usr/bin/pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()]
+    assert kids, "the deadman's sleep must exist for this test to prove anything"
     assert h.run_host("destroy", vm).returncode == 0
     deadline = time.monotonic() + 10
-    while _alive(pid) and time.monotonic() < deadline:
+    while (_alive(pid) or any(_alive(k) for k in kids)) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert not _alive(pid) and not pidfile.exists()
+    assert not any(_alive(k) for k in kids), "the deadman's sleep is killed too, not left orphaned"
+    time.sleep(0.5)
+    log = h.base / "logs" / f"{vm}.deadman.log"
+    # killing the sleep first woke the deadman, which logged a false cap line (nexus-knyvj)
+    assert "lifetime cap" not in (log.read_text() if log.exists() else "")
 
 
 # ---- the guest hop -----------------------------------------------------------------

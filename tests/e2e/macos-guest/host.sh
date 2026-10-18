@@ -296,15 +296,20 @@ vm_listed() {
 }
 
 stop_deadman() {
-    local pf="$BASE/deadman/$1.pid" pid cmdline
+    local pf="$BASE/deadman/$1.pid" pid cmdline kids
     [[ -f "$pf" ]] || return 0
     pid="$(cat "$pf" 2>/dev/null || true)"
     # Not from inside the deadman itself, and only a process that still is one of ours.
     cmdline=''
     [[ "$pid" =~ ^[0-9]+$ ]] && cmdline="$(ps -o command= -p "$pid" 2>/dev/null || true)"
     if [[ -z "${IN_DEADMAN:-}" && "$cmdline" == *host.sh* ]]; then
-        pkill -P "$pid" 2>/dev/null || true
+        # The deadman first, then the sleep it was waiting on: killing the sleep first woke the deadman,
+        # which logged "lifetime cap reached" and could start a destroy before its own kill landed
+        # (nexus-knyvj). Its children are read before it dies, while they are still its children.
+        kids="$(pgrep -P "$pid" 2>/dev/null || true)"
         kill "$pid" 2>/dev/null || true
+        # shellcheck disable=SC2086  # one pid per word
+        [[ -z "$kids" ]] || kill $kids 2>/dev/null || true
     fi
     rm -f "$pf"
 }
