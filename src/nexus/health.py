@@ -8423,18 +8423,19 @@ def _check_pending_rungs() -> list[HealthResult]:
 
 
 def _check_dimension_orphans() -> list[HealthResult]:
-    """Name T3 collections whose declared embedding dim no longer matches
-    the active serving embedder, and suggest the remedy (GH #1113 /
-    nexus-9tsdf AC2).
+    """Name T3 collections whose model the engine does not serve, and
+    suggest the remedy (GH #1113 / nexus-9tsdf AC2).
 
-    Such a collection (e.g. a minilm-l6-v2-384 leftover after the active
-    embedder moved to 1024d voyage) can never be searched — every
-    cross-corpus search skips it. Reuses the SAME finder ``nx collection
+    A collection is listed only when its model is in neither the engine's
+    ``embedding_models`` nor the Voyage model set (RDR-210 Technical Design
+    10), so a served collection is never named. Such a collection (e.g. a
+    minilm-l6-v2-384 leftover after the engine moved to bge-768) can never be
+    searched — every cross-corpus search skips it. Reuses the SAME finder ``nx collection
     prune`` lists from, so doctor and the remedy command can never
     disagree about what counts as an orphan. Degrades to a skip — never a
-    crash, and never a guess: an unresolved active-embedder probe reports
-    "skipped" rather than risk telling the operator to delete healthy
-    collections.
+    crash, and never a guess: an engine whose ``/version`` carries no
+    ``embedding_models`` reports "cannot verify" rather than risk telling the
+    operator to delete healthy collections.
     """
     label = "T3 dimension orphans"
     try:
@@ -8459,7 +8460,7 @@ def _check_dimension_orphans() -> list[HealthResult]:
         )]
 
     names = "; ".join(
-        f"{m['name']} ({m['declared_dim']}d vs active {m['active_dim']}d, "
+        f"{m['name']} ({m['declared_model']}, {m['declared_dim']}d, not served, "
         f"{m['count']} chunk(s))"
         for m in mismatches
     )
@@ -8468,8 +8469,8 @@ def _check_dimension_orphans() -> list[HealthResult]:
         ok=False,
         warn=True,
         detail=(
-            f"{len(mismatches)} collection(s) unsearchable under the active "
-            f"embedder ({active_label}): {names}"
+            f"{len(mismatches)} collection(s) unsearchable on the active "
+            f"engine ({active_label}): {names}"
         ),
         fix_suggestions=[
             "nx collection prune          (list them)",

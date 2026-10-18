@@ -468,10 +468,21 @@ def test_delete_says_nothing_about_quarantine_when_none_went(runner, env_creds, 
 _ORPHAN = "knowledge__shakedown-scratch__minilm-l6-v2-384__v1"
 _MATCHING_VOYAGE = "knowledge__research__voyage-context-3__v1"
 _LEGACY_NAME = "docs__myproj-cafef00d"
+_VOYAGE_MODELS = ["voyage-3", "voyage-code-3", "voyage-context-3"]
+
+
+def _serve_models(monkeypatch: pytest.MonkeyPatch, models: list[str]) -> None:
+    """RDR-210 P1.3 (nexus-11rjq): the engine's ``GET /version`` answers
+    ``embedding_models`` -- the served-model set the orphan finder reads.
+    The fake sits at the HTTP boundary; the finder itself is the real one."""
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get",
+        lambda path, *, tenant="default": {"embedding_models": models},
+    )
 
 
 def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
-    mock_db,
+    mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """nexus-ft04v.27 follow-up: ``_find_dimension_mismatched_collections``
     reads the ``__<model>__`` token via ``collection_model`` instead of a
@@ -486,6 +497,7 @@ def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
     from nexus.commands.collection import _find_dimension_mismatched_collections
 
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [
         {"name": _ORPHAN, "count": 1},
         {"name": _MATCHING_VOYAGE, "count": 50},
@@ -495,12 +507,12 @@ def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
 
     mismatches, skipped, active_label = _find_dimension_mismatched_collections(mock_db)
 
-    assert active_label == "voyage"
+    assert active_label.startswith("voyage")
     assert mismatches == [{
         "name": _ORPHAN,
         "declared_model": "minilm-l6-v2-384",
         "declared_dim": 384,
-        "active_dim": 1024,
+        "served_models": sorted(_VOYAGE_MODELS),
         "count": 1,
     }]
     # skipped: the legacy 2-segment name (not_conformant) + the
@@ -510,9 +522,10 @@ def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
 
 
 def test_prune_dry_run_default_lists_and_does_not_delete(
-    runner, env_creds, mock_db,
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [
         {"name": _ORPHAN, "count": 1},
         {"name": _MATCHING_VOYAGE, "count": 50},
@@ -526,10 +539,13 @@ def test_prune_dry_run_default_lists_and_does_not_delete(
     mock_db.delete_collection.assert_not_called()
 
 
-def test_prune_yes_deletes_via_cascade(runner, env_creds, mock_db) -> None:
+def test_prune_yes_deletes_via_cascade(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from nexus.db.collection_purge import CascadeCounts
 
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
 
     with patch(
@@ -543,9 +559,12 @@ def test_prune_yes_deletes_via_cascade(runner, env_creds, mock_db) -> None:
     mock_cascade.assert_called_once_with(mock_db, _ORPHAN)
 
 
-def test_prune_dry_run_flag_overrides_yes(runner, env_creds, mock_db) -> None:
+def test_prune_dry_run_flag_overrides_yes(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """--dry-run always wins, even alongside --yes: fail-safe on user data."""
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
 
     with patch(
@@ -558,8 +577,11 @@ def test_prune_dry_run_flag_overrides_yes(runner, env_creds, mock_db) -> None:
     mock_cascade.assert_not_called()
 
 
-def test_prune_no_mismatches_reports_clean(runner, env_creds, mock_db) -> None:
+def test_prune_no_mismatches_reports_clean(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _MATCHING_VOYAGE, "count": 50}]
     result = _invoke(runner, mock_db, ["prune"])
     assert result.exit_code == 0, result.output
@@ -567,8 +589,11 @@ def test_prune_no_mismatches_reports_clean(runner, env_creds, mock_db) -> None:
     assert "voyage" in result.output
 
 
-def test_prune_skips_non_conformant_names(runner, env_creds, mock_db) -> None:
+def test_prune_skips_non_conformant_names(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [
         {"name": _MATCHING_VOYAGE, "count": 50},
         {"name": _LEGACY_NAME, "count": 3},
@@ -579,7 +604,9 @@ def test_prune_skips_non_conformant_names(runner, env_creds, mock_db) -> None:
     assert "1 non-conformant collection name(s) skipped" in result.output
 
 
-def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> None:
+def test_prune_active_dim_unknown_lists_nothing(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A probe that cannot resolve the active embedder must never guess —
     guessing wrong would flag (and with --yes, delete) healthy collections.
 
@@ -588,6 +615,10 @@ def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> N
     dimension-mismatched collections found (active embedder: unknown)"
     read as verified-clean when nothing was actually checked."""
     mock_db.embedding_mode.return_value = None
+    # An engine older than the field: /version answers, embedding_models absent.
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", lambda path, *, tenant="default": {},
+    )
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     result = _invoke(runner, mock_db, ["prune", "--yes"])
     assert result.exit_code == 0, result.output
@@ -596,10 +627,13 @@ def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> N
     mock_db.delete_collection.assert_not_called()
 
 
-def test_prune_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
+def test_prune_surfaces_cascade_failures(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from nexus.db.collection_purge import CascadeCounts
 
     mock_db.embedding_mode.return_value = "voyage"
+    _serve_models(monkeypatch, _VOYAGE_MODELS)
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     fake = CascadeCounts(failures=["catalog cascade failed: boom"])
 
@@ -659,7 +693,7 @@ def test_prune_local_mode_active_dim_from_local_model_token(
     assert result.exit_code == 0, result.output
     assert _ORPHAN in result.output
     assert "384d" in result.output
-    assert "active=768d" in result.output
+    assert "not served" in result.output
 
 
 # ── verify ──────────────────────────────────────────────────────────────────
@@ -1688,24 +1722,22 @@ def test_reembed_skips_empty_documents(
     assert "skipped 1" in result.output
 
 
-def test_prune_service_mode_bge_config_without_fastembed_resolves_service_dim(
+def test_prune_service_mode_served_set_comes_from_the_engine_not_client_config(
     runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh-install MVV regression (6.17.0 prep): on a service-mode box the
-    persisted local.embed_model (the SERVICE's embedder, bge-768) is the
-    active dim — NOT local_model_token(), which resolves the client Python
-    EF and deliberately falls back to minilm-384 when the [local] extra is
-    absent (T3 embeds server-side; the client EF only serves T1). Using the
-    EF token flagged every healthy bge-768 collection as an orphan on a
-    virgin box."""
+    """Fresh-install MVV regression (6.17.0 prep), restated for the served-model
+    set (RDR-210 P1.3): the SERVICE embeds, so its ``/version``
+    ``embedding_models`` is the truth -- NOT ``local_model_token()``, which
+    resolves the client Python EF and deliberately falls back to minilm-384
+    when the [local] extra is absent. Using the EF token flagged every healthy
+    bge-768 collection as an orphan on a virgin box."""
     mock_db.embedding_mode.return_value = "onnx-local"
+    _serve_models(monkeypatch, ["bge-base-en-v15-768"])
     mock_db.list_collections.return_value = [
         {"name": "knowledge__knowledge__bge-base-en-v15-768__v1", "count": 1},
     ]
-    monkeypatch.setattr(
-        "nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5",
-    )
-    # The client-EF resolver reports minilm (no fastembed) — must NOT win.
+    # The client-side resolvers report minilm (no fastembed) -- must NOT win.
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
     monkeypatch.setattr(
         "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384",
     )
@@ -1715,22 +1747,15 @@ def test_prune_service_mode_bge_config_without_fastembed_resolves_service_dim(
     assert "bge-base-en-v15-768" in result.output
 
 
-def test_prune_no_recorded_choice_falls_back_to_ef_token(
+def test_prune_lists_minilm_when_the_engine_serves_only_bge(
     runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy box with no local.embed_model record: the EF auto-select is
-    the only signal and remains authoritative."""
     mock_db.embedding_mode.return_value = "onnx-local"
-    mock_db.list_collections.return_value = [
-        {"name": _ORPHAN, "count": 1},
-    ]
-    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
-    monkeypatch.setattr(
-        "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384",
-    )
+    _serve_models(monkeypatch, ["bge-base-en-v15-768"])
+    mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     result = _invoke(runner, mock_db, ["prune"])
     assert result.exit_code == 0, result.output
-    assert "No dimension-mismatched collections found" in result.output
+    assert _ORPHAN in result.output
 
 
 def test_reindex_refuses_code_collections_before_deleting(runner, env_creds, mock_db) -> None:

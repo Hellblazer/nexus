@@ -606,55 +606,74 @@ def _dim_for_model_token(token: str) -> int | None:
     return None
 
 
-def _active_embedding_dim(t3: Any) -> tuple[int | None, str]:
-    """Return ``(dim, label)`` for the CURRENTLY SERVING embedder.
+#: Every Voyage model a key would serve (RDR-210 Technical Design 10). A
+#: Voyage-named collection is never an orphan: on a keyless engine it is
+#: "needs the key", not "unsearchable", and deleting it would destroy data
+#: the install can serve the moment a key arrives.
+_VOYAGE_MODEL_TOKENS: frozenset[str] = frozenset({
+    "voyage-code-3", "voyage-context-3", "voyage-3",
+})
 
-    ``dim`` is ``None`` when it cannot be verified — an unreachable /
-    not-yet-resolved service probe must never be guessed at, since a wrong
-    guess here would flag healthy collections as orphans and delete real
-    data (fail-safe: "cannot verify" means "skip", not "assume").
+
+def _engine_embedding_models(t3: Any) -> frozenset[str] | None:
+    """The engine's ``GET /version`` ``embedding_models`` as a set, or
+    ``None`` when it cannot be read (probe failure, an engine older than the
+    field, or a malformed value). ``None`` means "cannot verify"; an empty
+    set is returned only when the engine really reported ``[]``.
+    """
+    try:
+        from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        info = _get("/version", tenant=getattr(t3, "_tenant", None) or _process_default_tenant())
+    except Exception as exc:  # noqa: BLE001 — probe is best-effort; absence falls back to "cannot verify"
+        _log.debug("served_models_probe_failed", error=str(exc))
+        return None
+    models = info.get("embedding_models") if isinstance(info, dict) else None
+    if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+        return None
+    return frozenset(models)
+
+
+def _served_embedding_models(t3: Any) -> tuple[frozenset[str] | None, str]:
+    """Return ``(models, label)``: the model tokens the ENGINE serves, and a
+    display label.
+
+    ``models`` is ``None`` (label ``"unknown"``) when they cannot be read —
+    never guessed, since a wrong guess would flag healthy collections as
+    orphans and ``prune --yes`` would delete real data.
 
     Two dispatch paths:
 
     * ``t3`` exposes ``embedding_mode()`` (the production
-      :class:`HttpVectorClient` handle, RDR-155 P4a.2 — this is what
-      ``make_t3()`` returns unconditionally today, in BOTH local and cloud
-      mode): trust its authoritative ``GET /version`` probe. ``"voyage"``
-      -> 1024d. ``"onnx-local"`` -> the dim of the SERVICE's provisioned
-      embedder. A failed/unresolved probe (``None``) returns
-      ``(None, "unknown")`` rather than guessing.
+      :class:`HttpVectorClient` handle): the engine's own ``/version``
+      ``embedding_models`` is the authority (RDR-210 Technical Design 10).
+      ``embedding_mode`` (``onnx-local`` / ``voyage`` / ``dual``, or a value
+      this client has never seen) is display only and decides nothing, so an
+      engine reporting a mode this client does not know cannot make it
+      delete anything it should not.
     * ``t3`` has no ``embedding_mode`` (a raw :class:`T3Database` — test /
       migration-ETL substitute): its own ``_local_mode`` flag is
-      authoritative and never ambiguous.
-
-    The onnx-local dim comes from the persisted ``local.embed_model``
-    choice (``local_embed_model_choice()``) — the model ``nx init``
-    provisioned the SERVICE with — falling back to the client-EF resolver
-    (``local_model_token()``) only when no choice was ever recorded
-    (legacy box). The client-EF resolver alone is WRONG here: without the
-    ``[local]`` extra it deliberately tier-0-falls-back to minilm-384
-    while T3 embeds bge-768 server-side (fresh-install MVV regression,
-    6.17.0 prep — every healthy 768d collection on a virgin box was
-    flagged as an orphan).
+      authoritative; local serves the persisted service token, cloud serves
+      Voyage only.
     """
     embedding_mode = getattr(t3, "embedding_mode", None)
     if callable(embedding_mode):
+        models = _engine_embedding_models(t3)
+        if models is None:
+            return None, "unknown"
         try:
-            family = embedding_mode()
-        except Exception:  # noqa: BLE001 — probe is best-effort; unknown falls back to "cannot verify"
-            family = None
-        if family == "voyage":
-            return 1024, "voyage"
-        if family == "onnx-local":
-            token = _service_local_token()
-            return _dim_for_model_token(token), token
-        return None, "unknown"
+            mode = embedding_mode()
+        except Exception:  # noqa: BLE001 — display only; the model set already decided
+            mode = None
+        listed = ", ".join(sorted(models)) or "no local models"
+        label = f"{mode} [{listed}]" if isinstance(mode, str) and mode else listed
+        return models, label
 
     local_mode = getattr(t3, "_local_mode", True)
     if local_mode:
         token = _service_local_token()
-        return _dim_for_model_token(token), token
-    return 1024, "voyage"
+        return frozenset({token}), token
+    return frozenset(), "voyage"
 
 
 def _service_local_token() -> str:
@@ -672,20 +691,25 @@ def _service_local_token() -> str:
 def _find_dimension_mismatched_collections(
     t3: Any,
 ) -> tuple[list[dict], int, str]:
-    """Collections whose ``__<model>__`` name segment declares a dim that no
-    longer matches the active serving embedder (orphans from a prior
-    embedder generation — GH #1113).
+    """Collections whose ``__<model>__`` name segment names a model this
+    install cannot serve (orphans from a prior embedder generation — GH #1113).
+
+    The rule (RDR-210 Technical Design 10): a collection is an orphan only
+    when its model is in NEITHER the engine's served ``embedding_models`` NOR
+    the Voyage model set. A served collection can never be listed.
 
     Returns ``(mismatches, skipped_non_conformant, active_label)``.
-    ``mismatches`` items: ``{name, declared_model, declared_dim, active_dim,
-    count}``. Bypass-schema (``taxonomy__*`` etc.) and non-conformant
-    (legacy 2-segment, no embedder-model token) collection names are
-    skipped, not flagged — there is no name-derived dim to compare against
-    for those, and guessing would risk a false-positive delete.
+    ``mismatches`` items: ``{name, declared_model, declared_dim, served_models,
+    count}``. When the served set cannot be read the label is ``"unknown"`` and
+    nothing is listed. Bypass-schema (``taxonomy__*`` etc.), non-conformant
+    (legacy 2-segment, no embedder-model token) and unrecognised-token
+    collection names are skipped, not flagged: a token this client has never
+    heard of may well be one a newer engine serves, and guessing would risk a
+    false-positive delete.
     """
     # RDR-204 Phase 3 (nexus-ft04v.26), class (d): deliberately NOT the
     # row-based collection_model. This diagnostic's whole point is
-    # comparing what the NAME CLAIMS against the active embedder -- a
+    # comparing what the NAME CLAIMS against what the engine serves -- a
     # mismatch between the row (authoritative) and reality should not
     # even be possible under Phase 1's constraints, which would make this
     # scan vacuous if repointed to the row. embedding_model_for_collection_name
@@ -694,11 +718,12 @@ def _find_dimension_mismatched_collections(
     from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    active_dim, active_label = _active_embedding_dim(t3)
+    engine_models, active_label = _served_embedding_models(t3)
     mismatches: list[dict] = []
     skipped = 0
-    if active_dim is None:
+    if engine_models is None:
         return mismatches, skipped, active_label
+    served = engine_models | _VOYAGE_MODEL_TOKENS
 
     for c in t3.list_collections():
         name = c["name"]
@@ -710,20 +735,21 @@ def _find_dimension_mismatched_collections(
         # name is already confirmed conformant above -- the regex read
         # never returns None here.
         token = embedding_model_for_collection_name(name) or ""
+        if token in served:
+            continue
         declared_dim = _dim_for_model_token(token)
         if declared_dim is None:
             skipped += 1
             continue
-        if declared_dim != active_dim:
-            mismatches.append({
-                "name": name,
-                "declared_model": token,
-                "declared_dim": declared_dim,
-                "active_dim": active_dim,
-                # RDR-192 Step 5 amendment: prune deletes every stored chunk,
-                # so the count shown before it is the stored count.
-                "count": c.get("stored_count", c.get("count", 0)),
-            })
+        mismatches.append({
+            "name": name,
+            "declared_model": token,
+            "declared_dim": declared_dim,
+            "served_models": sorted(engine_models),
+            # RDR-192 Step 5 amendment: prune deletes every stored chunk,
+            # so the count shown before it is the stored count.
+            "count": c.get("stored_count", c.get("count", 0)),
+        })
     return mismatches, skipped, active_label
 
 
@@ -758,8 +784,8 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
         # unknown)" read as verified-clean.
         click.echo(
             "Skipped (active embedder unresolved — cannot verify): the "
-            "service /version probe reported no embedding_mode, so orphan "
-            "detection has no dimension to compare against and never "
+            "service /version probe reported no embedding_models, so orphan "
+            "detection has no served-model set to compare against and never "
             "guesses. Nothing was checked or deleted."
         )
         return
@@ -782,7 +808,7 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
         click.echo(
             f"  {m['name']}"
             f"  (declared {m['declared_model']}={m['declared_dim']}d,"
-            f" active={m['active_dim']}d, {m['count']} chunk(s))"
+            f" not served by this engine, {m['count']} chunk(s))"
         )
     if skipped:
         click.echo(

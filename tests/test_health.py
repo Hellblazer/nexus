@@ -768,7 +768,7 @@ def test_check_dimension_orphans_names_collection_and_suggests_prune(
         monkeypatch,
         mismatches=[{
             "name": orphan, "declared_model": "minilm-l6-v2-384",
-            "declared_dim": 384, "active_dim": 1024, "count": 1,
+            "declared_dim": 384, "served_models": ["bge-base-en-v15-768"], "count": 1,
         }],
     )
     results = health._check_dimension_orphans()
@@ -776,7 +776,7 @@ def test_check_dimension_orphans_names_collection_and_suggests_prune(
     r = results[0]
     assert r.ok is False and r.warn is True, "orphans are a soft warn, never fatal"
     assert orphan in r.detail
-    assert "384" in r.detail and "1024" in r.detail
+    assert "384" in r.detail and "not served" in r.detail
     assert any("nx collection prune" in s for s in r.fix_suggestions)
 
 
