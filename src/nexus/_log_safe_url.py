@@ -63,10 +63,27 @@ def _secret_forms(url: str) -> tuple[set[str], set[str]]:
             urllib.parse.unquote(parts.username or ""), urllib.parse.unquote(parts.password or ""),
             parts.query, urllib.parse.unquote(parts.query),
         }
+        # A raw '#', '?' or '/' in the password ends urlsplit's netloc early
+        # ("https://user:pw#x@host" has netloc "user:pw" and no '@'), so the
+        # parsed userinfo is empty while http.client quotes "pw" as a port.
+        # Take the raw authority up to the LAST '@' as userinfo too, and when
+        # the netloc has a ':' but no '@' and no valid port, treat its
+        # non-host pieces as secret.
+        rest = url.split("://", 1)[1] if "://" in url else url
+        raw_userinfo = rest.rpartition("@")[0]
+        whole.update({raw_userinfo, urllib.parse.unquote(raw_userinfo)})
+        extra: list[str] = [raw_userinfo, urllib.parse.unquote(raw_userinfo)]
+        if ":" in parts.netloc and "@" not in parts.netloc:
+            try:
+                parts.port
+            except ValueError:
+                extra.extend(
+                    p for p in parts.netloc.split(":") if p != (parts.hostname or "")
+                )
         pieces: set[str] = set()
         for form in (userinfo, urllib.parse.unquote(userinfo), parts.password or "",
-                     urllib.parse.unquote(parts.password or "")):
-            pieces.update(re.split(r"[:@]", form))
+                     urllib.parse.unquote(parts.password or ""), *extra):
+            pieces.update(re.split(r"[:@/?#]", form))
     except Exception:  # noqa: BLE001 -- a scrubber must never raise
         return {url}, set()  # unparseable: the whole URL is the secret
     return {s for s in whole if s}, {p for p in pieces if p}

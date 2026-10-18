@@ -128,6 +128,11 @@ _SECRET_URLS = [
     pytest.param("https://user:p%3AwSECRET@127.0.0.1", id="percent-encoded-colon"),
     pytest.param(f"https://user:{PW}@127.0.0.1", id="plain"),
     pytest.param("https://user:p%40ssSECRET@127.0.0.1?token=SECRETQ", id="encoded-with-query"),
+    # A raw '#', '?' or '/' ends urlsplit's netloc before the '@', so the
+    # parsed userinfo is empty and http.client quotes the password head as a port.
+    pytest.param("https://user:SECRETHD#tail@127.0.0.1", id="raw-hash-in-password"),
+    pytest.param("https://user:SECRETHQ?tail@127.0.0.1", id="raw-question-in-password"),
+    pytest.param("https://user:SECRETHS/tail@127.0.0.1:8080", id="raw-slash-in-password-with-port"),
 ]
 
 
@@ -143,7 +148,9 @@ def test_the_real_poster_error_carries_no_form_of_the_secret_anywhere(tmp_path: 
     failed = [e for e in captured if e["event"] == "data_token_mint_failed"]
     assert len(failed) == 1
     assert failed[0]["error"].startswith("InvalidURL")  # the type survives, the text does not
-    assert failed[0]["endpoint"] == "127.0.0.1"
+    # A raw '#', '?' or '/' in the password leaves urlsplit no host it can
+    # trust, so the log-safe endpoint is the placeholder, never a password piece.
+    assert failed[0]["endpoint"] in ("127.0.0.1", "<unparseable-endpoint>")
     rendered = repr(captured) + str(err.value) + "".join(traceback.format_exception(err.value))
     for secret in ("SECRET", PW, "p@ss", "p%40ss", "p%3A", "a:b", "wSECRET", "user:"):
         assert secret not in rendered, f"{secret!r} reached the output"
