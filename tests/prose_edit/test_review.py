@@ -377,6 +377,7 @@ def test_an_html_copy_shows_entities_as_characters_but_marks_keep_the_source_tex
     assert plans[2]["span"] is not None  # matching is against the raw source, entity and all
     copy = mod.build_copy(HTML_ENTITIES, prop, label="web/e.html", genre="exploration-essay", rng=None,
                           html=True, stdin=False)
+    copy = re.sub(r'<a id="[^"]+" name="[^"]+"></a>', "", copy)  # the index anchors sit inside the marks; see test_review_index
     assert "Use <b> tags & say it <del>really is quite</del><ins>is</ins> simple<sup>1</sup>." in copy
     assert "Fish <del>&amp;</del><ins>and</ins> chips are good.<sup>2</sup>" in copy
     assert "&lt;" not in copy and "tags &amp;" not in copy
@@ -394,7 +395,7 @@ def test_an_html_copy_is_flat_excerpts_with_marks_and_notes_beside_their_section
     )
     copy = mod.build_copy(HTML, prop, label="web/page.html", genre="exploration-essay", rng=None, html=True, stdin=False)
     for markup in ("<style", "<script", "<head", "<!doctype", "goatcounter", "color: red", "<p>", "<h1>", "<body>",
-                   "href", "<a ", "example.com", "<title"):
+                   "href", "example.com", "<title"):
         assert markup not in copy, markup
     assert "It <del>really is quite</del><ins>is</ins> simple.<sup>1</sup>" in copy
     assert "<del>basically </del>nothing<sup>2</sup>" in copy
@@ -406,6 +407,7 @@ def test_an_html_copy_is_flat_excerpts_with_marks_and_notes_beside_their_section
     assert copy.index("Intro paragraph") < p < copy.index("Second paragraph links")
     assert copy.index("Fourth paragraph closes the page.") < q
     assert "<sup>1</sup> filler" in copy and "<sup>2</sup> filler" in copy and "Two paragraphs are padding." in copy
+    assert not re.findall(r"<a (?!id=)", copy)  # the only anchors left are the index's own `<a id>` ones
 
 
 def test_an_html_target_renders_a_flat_copy_and_applies_to_the_real_markup(prose: Prose, repo: Path) -> None:
