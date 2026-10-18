@@ -3885,6 +3885,20 @@ older engine, or one still starting). An object the row
 cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `off` and `standby`, warns and names what
 it got. It works in local and managed mode alike, over HTTP only.
 
+**Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
+threshold" row warns when a collection whose catalog content type is `docs`, `rdr` or `knowledge` holds `NX_SEARCH_EXACT_MAX_ROWS` rows or more
+(default 20,000, the engine's setting, read from `nx doctor`'s own environment, so a managed engine with a different
+value reads the default). From that size a collection is routed to its own HNSW index, and for prose that index's recall
+was measured at 0.9833 minimum on 10,308 and 14,300 rows, under the 0.99 target, and not at all above 20,000 rows. The
+warning names each such collection (largest first, five at most) with its physical row count (`stored_count`) and says
+to run the RDR-227 Gap 1 recall check on it: the recall of its index against an exact top-k at k 40, 60, 80, 100 and
+120, on query vectors written for the collection's own topics, 0.99 or better at every k. That check is a procedure
+(`nexus_rdr/227-research-12` in T2; RDR-227 Gap 1 and Phase 2b), not a packaged script. A `code` collection at any size
+does not warn (it measured recall 1.0 above the threshold), and a prose collection below it does not. A collection with
+no catalog content type is not classified; the row counts them in its detail, and is "not applicable" if none is classified. The `GET /v1/status`
+object carries counts only, so the row reads the collection listing. It is green and says "not applicable" when the
+listing is empty or cannot be read, as on a box with no engine.
+
 **Chunk tenant isolation (nexus-wbfpw.48).** `nx doctor`'s "Chunk tenant isolation" row reads
 `chunks_tenant_isolation_intact` from `GET /v1/status`: true when no permissive row-level-security
 policy on `nexus.chunks` other than `tenant_isolation` applies to the role the engine serves

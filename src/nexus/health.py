@@ -4664,6 +4664,119 @@ def _check_per_collection_indexes(
     return [HealthResult(label=label, ok=True, detail=f"{counts}; builder_state {state}, {ddl_note}{off_note}")]
 
 
+_PROSE_INDEX_LABEL = "Prose collections at the index threshold"
+
+#: The engine's ``NX_SEARCH_EXACT_MAX_ROWS`` default. The setting lives in the engine's environment and the status
+#: body does not carry it, so this is the one client-side mirror of ``PgSession.DEFAULT_SEARCH_EXACT_MAX_ROWS``;
+#: ``tests/test_doctor_prose_index_recall_row.py`` reads the Java source and fails if the two drift. It equals
+#: ``NX_SEARCH_PCI_BUILD_MIN_ROWS`` (B), the row count at which a collection gets its own HNSW index (RDR-227).
+DEFAULT_SEARCH_EXACT_MAX_ROWS = 20_000
+
+#: Content types whose chunks are prose, embedded with ``voyage-context-3`` (CLAUDE.md, collection prefix table):
+#: ``docs``, ``rdr`` and ``knowledge``. ``code`` embeds with ``voyage-code-3``, and RDR-227 measured code at or above
+#: B at recall 1.0 (``nexus_rdr/227-research-12``), so only prose is unmeasured. ``knowledge`` is included because
+#: it embeds with the same model as ``docs`` and ``rdr``.
+_PROSE_CONTENT_TYPES = frozenset({"docs", "rdr", "knowledge"})
+
+#: How many collections the warning names before it says "and N more".
+_PROSE_INDEX_NAMED_MAX = 5
+
+
+def _prose_index_threshold() -> int:
+    """The row count at or above which the engine gives a collection its own index: ``NX_SEARCH_EXACT_MAX_ROWS``
+    from this process's environment, else the engine default. Unset, blank, not an integer, out of the engine's
+    range (0..1000000), or ``0`` (the router is off, which says nothing about where the index starts) all read as
+    the default."""
+    raw = os.environ.get("NX_SEARCH_EXACT_MAX_ROWS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_SEARCH_EXACT_MAX_ROWS
+    return value if 0 < value <= 1_000_000 else DEFAULT_SEARCH_EXACT_MAX_ROWS
+
+
+def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-qqoak (RDR-227 residual): has a prose collection reached the per-collection index threshold?
+
+    A collection with at least ``NX_SEARCH_EXACT_MAX_ROWS`` rows (default 20,000) gets its own partial HNSW index
+    and is routed to it. For prose the index's recall was measured at 0.9833 minimum on 10,308 and 14,300 rows,
+    under the RDR's 0.99 target, and not measured at all at 20,000 rows or more (T2 ``nexus_rdr/227-research-12``;
+    RDR-227 § Phase 2b, "Prose"). Today no prose collection is that large, so they are scanned exactly and
+    nothing checks it. This row is that check: it warns, naming each such collection and its row count, and says
+    to run the RDR-227 Gap 1 recall check on it.
+
+    The ``GET /v1/status`` ``per_collection_indexes`` object carries counts only, no names, content types or row
+    counts, so the row reads the collection listing (``list_collections``, the one round trip ``nx doctor``'s
+    "T3 collections" row already makes). It compares the PHYSICAL row count (``stored_count``, else ``count``),
+    the number the engine's router and builder count.
+
+    Not applicable (ok, no warning) when the listing cannot be read or is empty: ``list_collections`` returns ``[]``
+    on a transport failure, and a box with no collections has nothing to measure. A prose collection below the
+    threshold, and a ``code__*`` collection at any size, pass.
+    """
+    label = _PROSE_INDEX_LABEL
+    rows: list | None
+    if collections is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+            rows = make_t3().list_collections()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_prose_index_recall_listing_failed", error=str(exc))
+            rows = None
+    else:
+        rows = collections if isinstance(collections, list) else None
+    if not rows:
+        return [HealthResult(label=label, ok=True, detail="not applicable: no collection listing to read")]
+
+    threshold = _prose_index_threshold()
+    over: list[tuple[str, int]] = []
+    unclassified = 0
+    for row in rows:
+        name = row.get("name") if isinstance(row, dict) else None
+        if not isinstance(name, str):
+            unclassified += 1
+            continue
+        # The catalog row's content type is the authority (RDR-204); the name is never parsed (the collection-name
+        # parse census counts every such site). A chunk-holding collection with no catalog row is counted and said.
+        kind = row.get("content_type")
+        if not isinstance(kind, str) or not kind:
+            unclassified += 1
+            continue
+        if kind not in _PROSE_CONTENT_TYPES:
+            continue
+        stored = row.get("stored_count")
+        n = _status_int(stored if isinstance(stored, int) and not isinstance(stored, bool) else row.get("count"))
+        if n >= threshold:
+            over.append((name, n))
+    skipped = (f"; {unclassified} of {len(rows)} collections have no catalog content type and were not checked"
+               if unclassified else "")
+    if unclassified == len(rows):
+        return [HealthResult(label=label, ok=True, detail="not applicable: the collection listing carries no "
+                             "content types (an older engine, or no catalog rows)")]
+    if not over:
+        return [HealthResult(label=label, ok=True,
+                             detail=f"no prose collection has {threshold:,} rows or more{skipped}")]
+    over.sort(key=lambda item: (-item[1], item[0]))
+    named = ", ".join(f"{name} ({n:,} rows)" for name, n in over[:_PROSE_INDEX_NAMED_MAX])
+    if len(over) > _PROSE_INDEX_NAMED_MAX:
+        named += f", and {len(over) - _PROSE_INDEX_NAMED_MAX} more"
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(f"{named}: at or above the per-collection index threshold of {threshold:,} rows, so searches use the "
+                "collection's own HNSW index, whose prose recall is unmeasured at this size (0.9833 minimum at "
+                f"10,308 and 14,300 rows, under the 0.99 target){skipped}"),
+        fix_suggestions=[
+            "Run the RDR-227 Gap 1 recall check on each named collection: recall of its pci_ index against an "
+            "exact top-k, at k 40, 60, 80, 100 and 120, on query vectors written for the collection's own topics; "
+            "the target is 0.99 or better at every k. It is a procedure, not a packaged script: the method and a "
+            "prose result are T2 nexus_rdr/227-research-12 and docs/rdr/"
+            "rdr-227-per-collection-hnsw-above-the-router-threshold.md (Gap 1, and Phase 2b, \"Prose\")",
+            "If the recall is under 0.99, raise NX_SEARCH_EXACT_MAX_ROWS (engine environment) above the "
+            "collection's row count to keep it on the exact scan (docs/configuration.md, NX_SEARCH_EXACT_MAX_ROWS)",
+        ],
+    )]
+
+
 def _check_t2_launchagent_stray() -> list[HealthResult]:
     """nexus-c0vby (GH #1405 defect 2): backstop for the automatic
     ``unload_stale_t2_launchagent`` finish-pass leg
@@ -10908,6 +11021,7 @@ def run_health_checks(
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
+    results.extend(_check_prose_index_recall())  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
