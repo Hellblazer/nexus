@@ -23,10 +23,14 @@
 #                  python=<archive name> (the Python archive uv downloads). The
 #                  guest is told where they are and checks each one itself
 #                  against the upstream's published sha256 before it uses it;
-#                  a missing or mismatching one is downloaded as before. When
-#                  uv's cache holds exactly this -Key (a published version, not
-#                  a candidate wheel), a marker file lets inst.ps1 install
-#                  conexus from that cache with uv --offline.
+#                  a missing or mismatching one is downloaded as before. The
+#                  Python archive has no upstream sha256 here, so harvest writes
+#                  <archive>.sha256 next to it and inst.ps1 hashes the archive
+#                  against that before the first uv call (a mismatch deletes it).
+#                  uv also verifies an archive against the sha256 in its own
+#                  download metadata (astral-sh/uv, crates/uv-python-managed/
+#                  src/downloads.rs, extract_reader; read 2026-10-17). conexus
+#                  is always installed from PyPI by uv, never --offline.
 #   -Mode harvest  after a successful install: copy that account's uv cache,
 #                  installed claude.exe and onnx_models back to the host when the
 #                  cache does not yet hold this install (keys.txt: conexus=<-Key>,
@@ -37,13 +41,15 @@
 #                  The payloads the install step recorded as downloaded or
 #                  mismatching (payloads\record.txt in the guest) are filled
 #                  the same way: PortableGit and the Python archive are copied
-#                  from the guest, uv's zip and the Git installer are downloaded
+#                  from the guest (the archive only when the install step reported
+#                  ok), uv's zip and the Git installer are downloaded
 #                  by the host, each checked against the sha256 the guest
 #                  recorded from the upstream; a version other than the new one
 #                  is removed from the cache.
 # Host writes stay under C:\build\guest\cache; files there are replaced or
-# removed by exact name only. In the guest: the account's uv cache folder,
-# nx-gate\claude-cache, and one archive file in nx-gate, removed after use.
+# removed by exact name only (a temp file of a run that died, a day old, too).
+# In the guest: the account's uv cache folder, nx-gate\claude-cache, and one
+# archive file in nx-gate, removed after use.
 param(
     [Parameter(Mandatory = $true)][string]$VMName,
     [Parameter(Mandatory = $true)][string]$GuestUser,
@@ -118,21 +124,27 @@ function PayRel($kind, $v) {
     }
 }
 function HostPay($kind, $v) { Join-Path $payloads (PayRel $kind $v) }
+# A temp name per call: two guests that harvest at once share this folder.
+function NewTmp { Join-Path $root ('payload-' + [guid]::NewGuid().ToString('N') + '.new') }
 function Sha($p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
 # True when keys.txt names this payload, its file is there, and (when a sha256 is given) the file has it.
 function HavePay($kind, $v, $sha) {
     $f = HostPay $kind $v
     ($have -contains "$kind=$v") -and (Test-Path -LiteralPath $f) -and (-not $sha -or (Sha $f) -eq $sha)
 }
-# Move a checked temp file into place as the one cached payload of its kind, and remove the other versions
-# of that kind by exact name (uv's version folder is removed only when it is empty).
-function PlacePay($kind, $v, $tmp) {
+# The Python archive counts as held only with its sidecar: without one inst.ps1 would delete it.
+function HavePy($name) { (HavePay 'python' $name '') -and (Test-Path -LiteralPath ((HostPay 'python' $name) + '.sha256')) }
+# Move a checked temp file into place as the one cached payload of its kind (with its sha256 sidecar when one is
+# given: the Python archive's), and remove the other versions of that kind by exact name (uv's version folder is removed only when it is empty).
+function PlacePay($kind, $v, $tmp, $sidecarSha) {
     $dst = HostPay $kind $v
     New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
     Move-Item -LiteralPath $tmp -Destination $dst -Force
+    if ($sidecarSha) { Set-Content -LiteralPath (Join-Path $payloads ((PayRel $kind $v) + '.sha256')) -Value $sidecarSha -Encoding ASCII }
     foreach ($o in @($script:keep | Where-Object { $_ -like "$kind=*" } | ForEach-Object { $_.Substring($kind.Length + 1) })) {
         if ($o -eq $v) { continue }
         Remove-Item -LiteralPath (HostPay $kind $o) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ((HostPay $kind $o) + '.sha256') -Force -ErrorAction SilentlyContinue
         if ($kind -eq 'uv') { Remove-Item -LiteralPath (Split-Path (HostPay $kind $o)) -ErrorAction SilentlyContinue }
     }
     $script:keep = @($script:keep | Where-Object { $_ -notlike "$kind=*" }) + "$kind=$v"
@@ -186,15 +198,12 @@ try {
             $rel = PayRel $kind $val
             if (-not (Test-Path -LiteralPath (HostPay $kind $val))) { "seeded payload ${k}: the file is missing on the host"; continue }
             Invoke-Command -Session $s -ArgumentList "$guestPay\$rel" { param($f) New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null }
+            if ($kind -eq 'python' -and -not (HavePy $val)) { "seeded payload ${k}: no sha256 sidecar on the host; not seeded"; continue }
             ToGuest (HostPay $kind $val) "$guestPay\$rel"
+            if ($kind -eq 'python') { ToGuest ((HostPay $kind $val) + '.sha256') "$guestPay\$rel.sha256" }
             $nPay++
         }
         "seeded payloads: $nPay"
-        # uv --offline is only right when uv's cache holds exactly this published version's install.
-        if ($Key -notlike 'w-*' -and $have -contains "conexus=$Key" -and (Test-Path $uvTar)) {
-            Invoke-Command -Session $s -ArgumentList "$guestPay\uv-offline.txt", "conexus=$Key" { param($f, $v) Set-Content -LiteralPath $f -Value $v -Encoding ASCII }
-            "seeded uv-offline marker: conexus=$Key"
-        } else { 'seeded uv-offline marker: none' }
         # The installing account writes its own uv cache (locks, new entries): make it the owner of what was copied in.
         Invoke-Command -Session $s -ArgumentList $Account, "$prof\AppData\Local\uv", $guestCc, "$prof\.cache", $guestPay {
             param($a, $u, $c, $m, $y)
@@ -246,53 +255,67 @@ try {
             }
         } else { "harvest: the models archive already holds models=$Key" }
         # Install payloads (nexus-bpzt7). Each is filled on its own and a failure only skips that one.
+        # A temp file left by a harvest that died is removed by exact name once it is a day old (a younger one may be
+        # another guest's harvest in flight).
+        foreach ($old in @(Get-ChildItem -LiteralPath $root -File -Filter 'payload-*.new' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) })) {
+            Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
+        }
         $gp = Invoke-Command -Session $s -ArgumentList $guestPay {
             param($d)
             @{
                 record = @(Get-Content "$d\record.txt" -ErrorAction SilentlyContinue)
-                python = @(Get-ChildItem "$d\python" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object Name)
+                python = @(Get-ChildItem "$d\python" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.sha256' } | Sort-Object LastWriteTime -Descending | ForEach-Object Name)
+                ok = [bool](Test-Path -LiteralPath "$d\install-ok.txt")
             }
         }
         $ProgressPreference = 'SilentlyContinue'
-        # the newest archive in the guest's folder that the host does not hold yet (uv put it there)
-        $pyName = @($gp.python | Where-Object { $_ -match '^[A-Za-z0-9._+-]+$' -and -not (HavePay 'python' $_ '') } | Select-Object -First 1)
-        if ($pyName.Count -eq 1) {
+        # the newest archive in the guest's folder that the host does not hold yet (uv put it there), and only when
+        # inst.ps1 reported ok: a failed install can leave a partial archive
+        $pyName = @($gp.python | Where-Object { $_ -match '^[A-Za-z0-9._+-]+$' -and -not (HavePy $_) } | Select-Object -First 1)
+        $tmp = $null
+        if ($pyName.Count -eq 1 -and -not $gp.ok) {
+            "harvest: not taking python archive $($pyName[0]); the install step did not report ok"
+        } elseif ($pyName.Count -eq 1) {
             try {
-                $tmp = Join-Path $root 'payload.new'
-                Copy-Item -FromSession $s -Path "$guestPay\python\$($pyName[0])" -Destination $tmp -Force -ErrorAction Stop
-                PlacePay 'python' $pyName[0] $tmp
-                "harvested python archive $($pyName[0])"
-            } catch { Remove-Item -LiteralPath (Join-Path $root 'payload.new') -Force -ErrorAction SilentlyContinue; "harvest python: $($_.Exception.Message)" }
+                $gsrc = "$guestPay\python\$($pyName[0])"
+                $gsha = Invoke-Command -Session $s -ArgumentList $gsrc { param($f) (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLowerInvariant() }
+                $tmp = NewTmp
+                Copy-Item -FromSession $s -Path $gsrc -Destination $tmp -Force -ErrorAction Stop
+                if ((Sha $tmp) -ne $gsha) { throw "the copied python archive $($pyName[0]) is not the sha256 the guest computed" }
+                PlacePay 'python' $pyName[0] $tmp $gsha
+                "harvested python archive $($pyName[0]) (sha256 $gsha)"
+            } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }; "harvest python: $($_.Exception.Message)" }
         } else { 'harvest: no new python archive in the guest' }
         foreach ($line in @($gp.record | Sort-Object -Unique)) {
             $rec = "$line"
+            $tmp = $null
             try {
                 if ($rec -match '^portablegit=([A-Za-z0-9._+-]+)\|([0-9a-f]{64})$') {
                     $ver = $Matches[1]; $sha = $Matches[2]
                     if (HavePay 'portablegit' $ver $sha) { "harvest: PortableGit $ver already cached"; continue }
-                    $tmp = Join-Path $root 'payload.new'
+                    $tmp = NewTmp
                     Copy-Item -FromSession $s -Path "$guestPay\$(PayRel 'portablegit' $ver)" -Destination $tmp -Force -ErrorAction Stop
-                    if ((Sha $tmp) -ne $sha) { Remove-Item -LiteralPath $tmp -Force; throw "the copied PortableGit $ver is not the sha256 the guest recorded" }
+                    if ((Sha $tmp) -ne $sha) { throw "the copied PortableGit $ver is not the sha256 the guest recorded" }
                     PlacePay 'portablegit' $ver $tmp
                     "harvested PortableGit $ver"
                 } elseif ($rec -match '^uv=([0-9]+\.[0-9]+\.[0-9]+)\|([0-9a-f]{64})$') {
                     $ver = $Matches[1]; $sha = $Matches[2]
                     if (HavePay 'uv' $ver $sha) { "harvest: uv $ver already cached"; continue }
-                    $tmp = Join-Path $root 'payload.new'
+                    $tmp = NewTmp
                     Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/astral-sh/uv/releases/download/$ver/uv-x86_64-pc-windows-msvc.zip" -OutFile $tmp -ErrorAction Stop
-                    if ((Sha $tmp) -ne $sha) { Remove-Item -LiteralPath $tmp -Force; throw "the downloaded uv $ver zip is not the published sha256" }
+                    if ((Sha $tmp) -ne $sha) { throw "the downloaded uv $ver zip is not the published sha256" }
                     PlacePay 'uv' $ver $tmp
                     "harvested uv $ver"
-                } elseif ($rec -match '^winget-git=([A-Za-z0-9._+-]+)\|(https://github\.com/git-for-windows/git/releases/download/[A-Za-z0-9._/+-]+)\|([0-9a-f]{64})$') {
+                } elseif ($rec -match '^winget-git=([A-Za-z0-9._+-]+)\|(https://github\.com/git-for-windows/git/releases/download/(?!.*\.\.)[A-Za-z0-9._/+-]+)\|([0-9a-f]{64})$') {
                     $ver = $Matches[1]; $url = $Matches[2]; $sha = $Matches[3]
                     if (HavePay 'winget-git' $ver $sha) { "harvest: Git installer $ver already cached"; continue }
-                    $tmp = Join-Path $root 'payload.new'
+                    $tmp = NewTmp
                     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp -ErrorAction Stop
-                    if ((Sha $tmp) -ne $sha) { Remove-Item -LiteralPath $tmp -Force; throw "the downloaded Git installer $ver is not the sha256 winget names" }
+                    if ((Sha $tmp) -ne $sha) { throw "the downloaded Git installer $ver is not the sha256 winget names" }
                     PlacePay 'winget-git' $ver $tmp
                     "harvested Git installer $ver"
                 }
-            } catch { Remove-Item -LiteralPath (Join-Path $root 'payload.new') -Force -ErrorAction SilentlyContinue; "harvest payload ($rec): $($_.Exception.Message)" }
+            } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }; "harvest payload ($rec): $($_.Exception.Message)" }
         }
         $keep | Sort-Object -Unique | Set-Content -Encoding UTF8 $keys
     }

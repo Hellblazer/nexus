@@ -259,7 +259,7 @@ def test_powershell_5_1_only_syntax() -> None:
 def test_installs_follow_the_passing_run() -> None:
     inst = _read("inst.ps1")
     assert "uv tool install --python 3.12" in inst
-    assert inst.count("--python 3.12") == 4  # wheel, PyPI offline (cache), PyPI, PyPI retry
+    assert inst.count("--python 3.12") == 4  # wheel, wheel retry (cleared Python cache), PyPI, PyPI retry
     assert '"conexus==$Version"' in inst
     assert "https://astral.sh/uv/install.ps1" in inst and "https://claude.ai/install.ps1" in inst
     assert "winget install --id Git.Git -e --source winget" in inst
@@ -1302,9 +1302,9 @@ def test_the_cache_script_writes_only_under_its_folder_and_removes_by_exact_name
     assert "$root = 'C:\\build\\guest\\cache'" in code
     for ln in (ln.strip() for ln in _code_lines(text) if "Remove-Item" in ln):
         assert "-LiteralPath" in ln and "-Recurse" not in ln and not re.search(r"Remove-Item[^\n]*[*?]", ln), ln
-    # host-side writes name a path built from $root (or the guest session, -ToSession/-FromSession)
+    # host-side writes name a path built from $root (or a guest-side one: Invoke-Command -Session $s only)
     for ln in (ln.strip() for ln in _code_lines(text) if re.search(r"Set-Content|Move-Item|New-Item -ItemType Directory -Force \$root", ln)):
-        assert "$root" in ln or "$keys" in ln or "$uvTar" in ln or "$tmp" in ln or "-Session $s" in ln, ln
+        assert "$root" in ln or "$keys" in ln or "$uvTar" in ln or "$tmp" in ln or "$payloads" in ln or "Invoke-Command -Session $s" in ln, ln
     assert "Checkpoint-VM" not in code and "Restore-VM" not in code
 
 
@@ -1356,7 +1356,8 @@ def _inst_parts() -> dict[str, str]:
         "wrapper": _between(inst, "$portableWrapper = @'", "\n'@\n"),
         "git_fn": _between(inst, "function CachedWingetGit", "Step 'git (winget)'"),
         "git_step": _between(inst, "Step 'git (winget)'", "Step 'plugin'"),
-        "conexus_step": _between(inst, 'Step "conexus $source"', "# run-gate.sh --cache on (nexus-bpzt7): when cache.ps1 left a binary"),
+        "conexus_step": _between(inst, 'Step "conexus $source"', "if ($cacheOn) { PyList 'after the conexus step' }"),
+        "py_fns": _between(inst, "function PyArchives", 'Step "conexus $source"'),
     }
 
 
@@ -1368,7 +1369,7 @@ def test_cache_off_runs_the_fresh_download_commands_and_reads_no_payload() -> No
     assert inst.index("$cacheOn = Test-Path") < inst.index("function CachedUv")
     # every fresh-download command is still there, character for character, reachable without the cache
     assert "    if (-not $used) { powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://astral.sh/uv/install.ps1 | iex' }" in p["uv_step"]
-    assert '            uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc (attempt 1)"' in p["conexus_step"]
+    assert '        uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc (attempt 1)"' in p["conexus_step"]
     assert "Start-Sleep 90; uv tool install --python 3.12 \"conexus==$Version\" 2>&1 | Select-Object -Last 6; \"uv exit=$LASTEXITCODE (attempt 2)\"" in p["conexus_step"]
     git = p["git_step"]
     cache_branch, stock_branch = git.split("        } else {\n            # stock: the guide's block, as written\n")
@@ -1385,7 +1386,14 @@ def test_cache_off_runs_the_fresh_download_commands_and_reads_no_payload() -> No
         outside = outside.replace(p[key], "")
     for ln in _code_lines(outside):
         if "$pay" in ln:
-            assert "$cacheOn" in ln or "portable-git-cache.ps1" in ln or ln.startswith(("$pay = ", "function Record")), ln
+            assert "$cacheOn" in ln or "portable-git-cache.ps1" in ln or ln.startswith(("$pay = ", "function Record", "function PyArchives", "function ClearPython")), ln
+    # the Python-cache helpers are called only behind $cacheOn (the folder does not exist with --cache off)
+    helpers = {"PyArchives", "ClearPython", "CheckPythonCache", "PyList"}
+    for ln in _code_lines(outside.replace(p["py_fns"], "")):
+        if any(re.search(rf"\b{h}\b", ln) for h in helpers):
+            assert "$cacheOn" in ln, ln
+    # (the helpers' own definitions and the gate line that calls them are pinned in the sidecar test)
+    assert p["py_fns"].count("if ($cacheOn)") == 1
     # nothing in the other scripts seeds the folder unless the cache step does
     for name in ALL_PS:
         if name != "cache.ps1":
@@ -1467,36 +1475,80 @@ def test_the_winget_git_installer_is_cached_by_winget_s_own_sha256_and_falls_bac
     assert re.match(r"^Git-(.+)-64-bit\.exe$", "Git-2.55.0.5-64-bit.exe").group(1) == "2.55.0.5"
 
 
-def test_conexus_installs_offline_only_from_a_cache_filled_for_that_published_version() -> None:
-    p = _inst_parts()
-    inst = p["inst"]
-    off = next(ln for ln in inst.splitlines() if ln.startswith("$offline = "))
-    # the marker names this version, a candidate wheel never qualifies, and the folder must be there at all
-    assert "$cacheOn" in off and "-not $Wheel" in off and '-eq "conexus=$Version"' in off and "uv-offline.txt" in off
-    step = p["conexus_step"]
-    assert step.count("uv tool install --offline") == 1 and step.count("--offline ") == 1
-    assert step.index("if ($offline) {") < step.index("uv tool install --offline --python 3.12") < step.index("if (-not $done) {")
-    # Python first (from the archive cache, or downloaded), so --offline is never short of an interpreter
-    assert step.index("uv python install 3.12") < step.index("uv tool install --offline")
-    # the offline result must report the version, or PyPI is asked as usual
-    assert "$done = ($rc -eq 0) -and" in step and "*version $Version*" in step
-    assert "resolving against PyPI as usual" in step
+def test_conexus_is_always_resolved_against_pypi_and_never_installed_offline() -> None:
+    inst = _read("inst.ps1")
+    # the install runs the published path: no --offline, no marker file, no separate Python install
+    code = "\n".join(_code_lines(inst))
+    for banned in ("--offline", "uv-offline", "uv python install", "$offline"):
+        assert banned not in code, banned
+    assert "uv-offline" not in "\n".join(_code_lines(_read("cache.ps1")))
+    assert "the install runs the published path" in re.sub(r"\n#\s*", " ", _sh())
     # the Python archive uv downloads is kept in the payload folder, only with the cache on
     py = next(ln for ln in inst.splitlines() if "UV_PYTHON_CACHE_DIR" in ln and not ln.startswith("#"))
     assert py.startswith("if ($cacheOn) {") and '$env:UV_PYTHON_CACHE_DIR = "$pay\\python"' in py
 
 
-def test_seed_copies_each_payload_the_keys_name_and_marks_uv_offline_only_for_a_matching_published_key() -> None:
+def test_the_python_archive_is_hashed_against_its_sidecar_before_uv_and_cleared_on_a_failed_install() -> None:
+    p = _inst_parts()
+    inst = p["inst"]
+    fns = p["py_fns"]
+    check = _between(fns, "function CheckPythonCache", "\n}\n")
+    # sidecar missing or different: log, delete the archive and the sidecar, uv downloads; a match is logged and kept
+    assert "has no usable sha256 sidecar; deleting it, uv downloads" in check
+    assert "is not its sidecar's" in check and "deleting it, uv downloads" in check
+    assert "matches its sidecar" in check and "continue" in check
+    assert check.index("Remove-Item -LiteralPath $f.FullName") < check.index("Remove-Item -LiteralPath $side")
+    assert "$f.FullName).sha256" in check and "-notmatch '^[0-9a-f]{64}$'" in check
+    # it runs before the first uv call of the conexus step, and only with the cache on
+    gate = next(ln for ln in inst.splitlines() if ln.startswith("if ($cacheOn) { Remove-Item") and "CheckPythonCache" in ln)
+    assert inst.index(gate) < inst.index('Step "conexus $source"')
+    assert gate.index("CheckPythonCache") < gate.index("PyList 'before the conexus step'")
+    # the folder is listed (name and size) before and after the step
+    assert "if ($cacheOn) { PyList 'after the conexus step' }" in inst
+    assert inst.index("PyList 'after the conexus step'") > inst.index('Step "conexus $source"')
+    assert "{1:N1} MiB" in fns and "'no archive'" in fns
+    # a failed conexus install with an archive in place clears the folder and retries once (wheel and PyPI)
+    step = p["conexus_step"]
+    assert step.count("ClearPython") == 2 and step.count("@(PyArchives).Count -gt 0") == 2
+    assert "clearing it and retrying once" in step and "(retry)" in step
+    pypi = step[step.index("# stock: resolve and download from PyPI"):]
+    assert pypi.index("(attempt 1)") < pypi.index("ClearPython") < pypi.index("Start-Sleep 90") < pypi.index("(attempt 2)")
+    # ClearPython deletes files by exact name
+    clear = _between(fns, "function ClearPython", "\n")
+    assert "-LiteralPath $f.FullName" in clear and "-Recurse" not in clear
+    # the sidecar is not an archive
+    assert "-notlike '*.sha256'" in fns
+
+
+def test_install_ok_marker_is_written_only_after_a_clean_result_and_removed_at_the_start() -> None:
+    inst = _read("inst.ps1")
+    assert 'Remove-Item -LiteralPath "$pay\\install-ok.txt"' in inst
+    ok = next(ln for ln in inst.splitlines() if 'install-ok.txt" -Value' in ln)
+    assert ok.startswith("if ($bad.Count -eq 0 -and $cacheOn)")
+    assert inst.index(ok) < inst.index("if ($bad.Count -gt 0) { 'NXG-RESULT: FAIL '")
+    assert inst.index("$bad = @()") < inst.index(ok)
+
+
+def test_the_portablegit_shim_logs_every_plain_miss() -> None:
+    w = _inst_parts()["wrapper"]
+    shim = _between(w, "function Invoke-WebRequest", '. "$PSScriptRoot')
+    assert 'portable-git cache: no cached $leaf; downloading' in shim
+    # logged before the real download, on the miss path only (after the hit branch returned)
+    assert shim.index("return") < shim.index("no cached $leaf; downloading") < shim.index("Microsoft.PowerShell.Utility\\Invoke-WebRequest")
+    assert "if ($Use -eq 'yes') { Write-Host" in shim
+
+
+def test_seed_copies_each_payload_the_keys_name_and_the_python_archive_only_with_its_sidecar() -> None:
     code = "\n".join(_code_lines(_read("cache.ps1")))
     seed = code[code.index("if ($Mode -eq 'seed')"):code.index("} else {\n        $claudeVer")]
     # the payload folder exists whether or not anything is cached: inst.ps1 reads its presence as "cache on"
     assert seed.index("New-Item -ItemType Directory -Force \"$d\\python\"") < seed.index("foreach ($k in")
     assert "'^(uv|portablegit|winget-git|python)='" in seed
     assert "Test-Path -LiteralPath (HostPay $kind $val)" in seed and "ToGuest (HostPay $kind $val) \"$guestPay\\$rel\"" in seed
-    # the marker: a published version (not w-<sha>), keys.txt holds that exact conexus key, the uv archive exists
-    marker = _between(seed, "if ($Key -notlike 'w-*'", "else { 'seeded uv-offline marker: none' }")
-    assert "$have -contains \"conexus=$Key\"" in marker and "(Test-Path $uvTar)" in marker
-    assert "Set-Content -LiteralPath $f -Value $v" in marker and "uv-offline.txt" in marker
+    # the Python archive is seeded only with its sidecar, and the sidecar goes with it; no offline marker any more
+    assert "if ($kind -eq 'python' -and -not (HavePy $val))" in seed and "not seeded" in seed
+    assert "ToGuest ((HostPay $kind $val) + '.sha256') \"$guestPay\\$rel.sha256\"" in seed
+    assert "uv-offline" not in seed and "marker" not in seed
     # the account that installs owns what was copied in
     assert "$guestCc, \"$prof\\.cache\", $guestPay" in seed and "foreach ($d in @($u, $c, $m, $y))" in seed
     # the host-side file for a kind is named by its own version
@@ -1521,7 +1573,18 @@ def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_on
         seg = harvest[harvest.index(f"$rec -match '^{kind}="):harvest.index(f"PlacePay '{kind}'")]
         assert seg.index(fetch) < seg.index("if ((Sha $tmp) -ne $sha)"), kind
     # a payload already held with that hash is not fetched again, and a failure skips only that payload
-    assert harvest.count("HavePay ") == 4 and harvest.count("catch {") == 2
+    assert harvest.count("HavePay ") == 3 and harvest.count("HavePy ") == 1 and harvest.count("catch {") == 2
+    # per-run temp names (two guests share the folder), never a fixed one; each catch removes its own
+    assert "payload.new" not in harvest and harvest.count("$tmp = NewTmp") == 4
+    assert re.search(r"^function NewTmp \{ Join-Path \$root \('payload-' \+ \[guid\]::NewGuid\(\)\.ToString\('N'\) \+ '\.new'\) \}$", code, re.M)
+    assert harvest.count("if ($tmp) { Remove-Item -LiteralPath $tmp") == 2
+    # the winget URL is a github.com Git for Windows release path with no ".." in it
+    rx = next(m for m in re.findall(r"-match '(\^winget-git=[^']+)'", harvest))
+    sha = "a" * 64
+    good = "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe"
+    assert re.match(rx, f"winget-git=2.55.0.5|{good}|{sha}")
+    for bad in ("https://github.com/git-for-windows/git/releases/download/../../../evil/x.exe", "https://github.com/git-for-windows/git/releases/download/v1/..x.exe", "https://github.com/git-for-windows/git/releases/download/v1/a/../b.exe"):
+        assert not re.match(rx, f"winget-git=2.55.0.5|{bad}|{sha}"), bad
     # PlacePay: move in, remove the other versions by exact name, then name the new key
     place = _between(code, "function PlacePay", "function ToGuest")
     assert place.index("Move-Item -LiteralPath $tmp -Destination $dst -Force") < place.index("Remove-Item -LiteralPath (HostPay $kind $o)") < place.index('"$kind=$v"')
@@ -1539,6 +1602,26 @@ def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_on
         rx = next(m for m in re.findall(r"-match '(\^[^']+)'", harvest) if re.match(pat, m))
         assert re.match(rx, line), (line, rx)
     assert not re.match(next(m for m in re.findall(r"-match '(\^uv=[^']+)'", harvest)), f"uv=latest|{sha}")
+
+
+def test_the_python_archive_is_harvested_only_after_ok_with_a_sidecar_and_a_guest_side_hash() -> None:
+    code = "\n".join(_code_lines(_read("cache.ps1")))
+    harvest = _between(code, "$gp = Invoke-Command", "$keep | Sort-Object -Unique | Set-Content")
+    # the guest says whether the install reported ok (inst.ps1's marker); without it nothing is copied and the line says why
+    assert 'ok = [bool](Test-Path -LiteralPath "$d\\install-ok.txt")' in harvest
+    skip = harvest.index("-not $gp.ok")
+    assert skip < harvest.index("Copy-Item -FromSession $s -Path $gsrc") and "did not report ok" in harvest[skip:skip + 200]
+    py = harvest[harvest.index("elseif ($pyName.Count -eq 1)"):harvest.index("harvest: no new python archive")]
+    # the guest hashes the archive, the host hashes its copy, a difference throws; then the sidecar is written with the placement
+    assert py.index("Get-FileHash") < py.index("Copy-Item -FromSession") < py.index("if ((Sha $tmp) -ne $gsha) { throw") < py.index("PlacePay 'python' $pyName[0] $tmp $gsha")
+    place = _between(code, "function PlacePay", "function ToGuest")
+    assert place.index("Move-Item") < place.index("if ($sidecarSha) { Set-Content -LiteralPath (Join-Path $payloads ((PayRel $kind $v) + '.sha256'))")
+    assert "if ($false)" not in place and "$sidecarSha" in place.split("{")[0]  # the parameter exists
+    assert "Remove-Item -LiteralPath ((HostPay $kind $o) + '.sha256')" in place
+    # an archive without a sidecar is not held: it is taken again
+    assert "function HavePy($name)" in code and "'.sha256')" in _between(code, "function HavePy", "function PlacePay")
+    # the sidecar is never taken for an archive
+    assert "-notlike '*.sha256'" in harvest
 
 
 def test_updates_go_off_inside_the_guest_at_first_contact_and_nothing_changes_on_the_host() -> None:

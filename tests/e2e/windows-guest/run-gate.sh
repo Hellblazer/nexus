@@ -74,10 +74,11 @@
 # installing account, and step 07 refills that cache after the run. The Claude
 # Code binary, uv's zip, PortableGit and the Git installer are used only when
 # their sha256 is the one the upstream publishes for that version, and anything
-# else is downloaded as before. conexus is installed from the seeded uv cache
-# with uv --offline only for a published version the cache was filled with
-# (never for a candidate wheel); the nexus engine and PostgreSQL bundle are
-# downloaded and checked by nx init as usual. Measured on Home: 2.46 GB per cycle before the
+# else is downloaded as before (the Python archive must match the sha256
+# sidecar written when it was harvested). uv still resolves conexus against
+# PyPI and only the files come from the cache, so the install runs the published
+# path; the nexus engine and PostgreSQL bundle are downloaded and checked by nx
+# init as usual. Measured on Home: 2.46 GB per cycle before the
 # cache (2026-10-15), 1.30 GB with it before the models were cached (2026-10-16,
 # at the host's Default Switch). --cache off downloads everything
 # and leaves Windows Update alone, for a run whose subject is the download path.
@@ -240,7 +241,7 @@ restore_cache=yes
 [[ "$cache" == on ]] || restore_cache=no
 cache_key="$version"
 cache_note="--cache off: everything downloaded fresh"
-[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, the uv package cache, Claude Code, uv itself, Git and Python from the host cache when it held them and their sha256 matched (01c-seed.txt, 02-install.txt), the nx init models from the host cache when it held them for this version, nexus engine and bundle downloaded"
+[[ "$cache" == off ]] || cache_note="--cache on: Windows Update off in the guest, the uv package cache, Claude Code, uv itself, PortableGit and Python from the host cache when it held them and their sha256 matched, and winget's Git replaced by a direct silent run of the cached Git installer when its sha256 matches winget's (01c-seed.txt, 02-install.txt), the nx init models from the host cache when it held them for this version, nexus engine and bundle downloaded"
 [[ -z "$wheel_sha" ]] || cache_key="w-${wheel_sha:0:16}"
 
 RUN="nxg-$(date -u +%Y%m%dT%H%M%SZ)-$$"

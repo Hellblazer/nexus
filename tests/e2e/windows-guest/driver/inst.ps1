@@ -15,8 +15,9 @@
 # run-gate.sh --cache on (nexus-bpzt7): cache.ps1 seeds nx-gate\payloads with what the host kept from earlier
 # runs, and this script uses each item only when its sha256 is the one the upstream publishes for that version
 # (uv's zip: the .sha256 next to the release; PortableGit: the digest the install guide's block already checks;
-# the Git installer: winget's own record of it), logs why when it does not, and then downloads as before. A
-# payload it had to download is recorded in payloads\record.txt for the harvest step. With --cache off nx-gate
+# the Git installer: winget's own record of it; the Python archive: the sha256 sidecar the host wrote at harvest), logs why when it does not, and then downloads as before. A
+# payload it had to download is recorded in payloads\record.txt for the harvest step, and conexus is always
+# resolved and downloaded from PyPI: the install runs the published path. With --cache off nx-gate
 # has no payloads folder and none of this runs: every command below the "stock" comments is the fresh-download
 # path, unchanged.
 param(
@@ -72,28 +73,44 @@ Step 'uv' {
 }
 $env:PATH = "$env:USERPROFILE\.local\bin;" + $env:PATH
 $source = if ($Wheel) { "candidate wheel $Wheel" } else { "conexus==$Version from PyPI" }
-# uv keeps the Python archive it downloads in UV_PYTHON_CACHE_DIR and installs from it when it is there.
+# uv keeps the Python archive it downloads in UV_PYTHON_CACHE_DIR (named <9 hex of its sha256>-<file name>) and
+# installs from it when it is there. uv itself also checks an archive it extracts against the sha256 in its
+# download metadata (uv-python-managed downloads.rs, extract_reader; 2026-10-17), but a corrupt cached file would
+# still cost a failed install, so each archive here must also match the sidecar cache.ps1 wrote at harvest.
 if ($cacheOn) { New-Item -ItemType Directory -Force "$pay\python" | Out-Null; $env:UV_PYTHON_CACHE_DIR = "$pay\python" }
-# cache.ps1 wrote this marker only when uv's seeded cache holds the install of exactly this published version
-# (never for a candidate wheel): then conexus is installed with uv --offline, so PyPI is not asked at all.
-$offline = $cacheOn -and -not $Wheel -and ((@(Get-Content -LiteralPath "$pay\uv-offline.txt" -ErrorAction SilentlyContinue) -join '') -eq "conexus=$Version")
+function PyArchives { @(Get-ChildItem -LiteralPath "$pay\python" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.sha256' }) }
+function PyList($when) {
+    $f = @(PyArchives)
+    "python-cache ${when}: " + $(if ($f.Count) { ($f | ForEach-Object { '{0} {1:N1} MiB' -f $_.Name, ($_.Length / 1MB) }) -join '; ' } else { 'no archive' })
+}
+# Delete every archive and sidecar in the folder, by exact name; uv then downloads.
+function ClearPython { foreach ($f in @(Get-ChildItem -LiteralPath "$pay\python" -File -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue } }
+# Hash each seeded archive against its sidecar before uv sees it. No usable sidecar or a different hash: say so,
+# delete the archive and its sidecar, and let uv download.
+function CheckPythonCache {
+    foreach ($f in @(PyArchives)) {
+        $side = "$($f.FullName).sha256"
+        $want = ("" + (@(Get-Content -LiteralPath $side -ErrorAction SilentlyContinue) -join '')).Trim().ToLowerInvariant()
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $f.FullName).Hash.ToLowerInvariant()
+        if ($want -notmatch '^[0-9a-f]{64}$') { "python-cache: $($f.Name) has no usable sha256 sidecar; deleting it, uv downloads" }
+        elseif ($got -ne $want) { "python-cache: $($f.Name) sha256 $got is not its sidecar's $want; deleting it, uv downloads" }
+        else { "python-cache: $($f.Name) sha256 matches its sidecar"; continue }
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $side -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($cacheOn) { Remove-Item -LiteralPath "$pay\install-ok.txt" -Force -ErrorAction SilentlyContinue; CheckPythonCache; PyList 'before the conexus step' }
 Step "conexus $source" {
     if ($Wheel) {
         "wheel sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath "$b\$Wheel").Hash.ToLowerInvariant()
         uv tool install --python 3.12 "$b\$Wheel" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc"
+        if ($rc -ne 0 -and $cacheOn -and @(PyArchives).Count -gt 0) { 'python-cache: the install failed with a cached Python archive in place; clearing it and retrying once'; ClearPython; uv tool install --python 3.12 "$b\$Wheel" 2>&1 | Select-Object -Last 3; "uv exit=$LASTEXITCODE (retry)" }
     } else {
-        $done = $false
-        if ($offline) {
-            "pypi-cache: the seeded uv cache holds conexus==$Version; installing with --offline"
-            uv python install 3.12 2>&1 | Select-Object -Last 2
-            uv tool install --offline --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc (offline)"
-            $done = ($rc -eq 0) -and ((@(nx --version 2>&1) -join ' ') -like "*version $Version*")
-            if (-not $done) { 'pypi-cache: the offline install did not give this version; resolving against PyPI as usual' }
-        }
         # stock: resolve and download from PyPI
-        if (-not $done) {
-            uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc (attempt 1)"
-            if ($rc -ne 0) { 'RETRY: waiting 90 s, then one more attempt at the same version'; Start-Sleep 90; uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 6; "uv exit=$LASTEXITCODE (attempt 2)" }
+        uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 3; $rc = $LASTEXITCODE; "uv exit=$rc (attempt 1)"
+        if ($rc -ne 0) {
+            if ($cacheOn -and @(PyArchives).Count -gt 0) { 'python-cache: attempt 1 failed with a cached Python archive in place; clearing it, so the retry downloads Python'; ClearPython }
+            'RETRY: waiting 90 s, then one more attempt at the same version'; Start-Sleep 90; uv tool install --python 3.12 "conexus==$Version" 2>&1 | Select-Object -Last 6; "uv exit=$LASTEXITCODE (attempt 2)"
         }
     }
     nx --version
@@ -111,6 +128,7 @@ Step "conexus $source" {
         } else { "informational: no installed pg_provision.py at $pp (nothing to probe)" }
     } catch { "informational: the pg_provision.py probe was skipped: $($_.Exception.Message)" }
 }
+if ($cacheOn) { PyList 'after the conexus step' }
 # run-gate.sh --cache on (nexus-bpzt7): when cache.ps1 left a binary in claude-cache, do what
 # https://claude.ai/install.ps1 does (latest version, its manifest's sha256, then `claude.exe install`) with that
 # file in place of the download, and only if its sha256 is the manifest's for the latest version. Anything else
@@ -158,7 +176,10 @@ function Invoke-WebRequest {
         "portable-git cache: using the cached $leaf (the block checks it against GitHub's digest)"
         return
     }
-    if ($leaf -match '^PortableGit-.*-64-bit\.7z\.exe$') { $script:fetched = $leaf }
+    if ($leaf -match '^PortableGit-.*-64-bit\.7z\.exe$') {
+        $script:fetched = $leaf
+        if ($Use -eq 'yes') { Write-Host "portable-git cache: no cached $leaf; downloading" } else { Write-Host "portable-git cache: downloading $leaf (the cached copy is not used on this pass)" }
+    }
     Microsoft.PowerShell.Utility\Invoke-WebRequest @PSBoundParameters
 }
 . "$PSScriptRoot\portable-git.ps1"
@@ -235,4 +256,6 @@ if (-not (Test-Path "$env:USERPROFILE\.local\bin\claude.exe")) { $bad += 'claude
 if (-not (GitDir)) { $bad += 'git.exe is missing' }
 $plugins = Get-Content -Raw "$env:USERPROFILE\.claude\plugins\installed_plugins.json" -ErrorAction SilentlyContinue
 if (-not $plugins -or $plugins -notlike '*conexus@nexus-plugins*') { $bad += 'conexus@nexus-plugins is not in installed_plugins.json' }
+# The harvest copies the Python archive back only when the install reported ok (a half-installed guest may hold a partial one).
+if ($bad.Count -eq 0 -and $cacheOn) { Set-Content -LiteralPath "$pay\install-ok.txt" -Value 'ok' -Encoding ASCII }
 if ($bad.Count -gt 0) { 'NXG-RESULT: FAIL ' + ($bad -join '; ') } else { 'NXG-RESULT: ok' }
