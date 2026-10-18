@@ -1334,10 +1334,19 @@ async def claude_dispatch(
     # ``current_session``, the file would point at no on-disk record (skip-
     # T1 wrote none), and the parent's shell-side ``nx scratch`` would fall
     # back to EphemeralClient for the rest of the parent conversation.
-    # ``read_claude_session_id`` reads the parent's UUID at dispatch time —
-    # the parent's SessionStart populated it before any operator runs.
+    # nexus-d8yul: the parent's UUID is the process's own NX_SESSION_ID, then
+    # CLAUDE_CODE_SESSION_ID (the real session; the flat file is whichever
+    # Claude session wrote it last, so concurrent windows would inject each
+    # other's id), then the file. The raw file read stays as the last tier on
+    # purpose and is NOT the gated ``resolve_active_session_id``: a non-Claude
+    # host that got ``None`` here would inject nothing, and the child's
+    # SessionStart hook would then overwrite ``current_session``.
     from nexus.session import read_claude_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
-    parent_session_id = read_claude_session_id()
+    parent_session_id = (
+        os.environ.get("NX_SESSION_ID", "").strip()
+        or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+        or read_claude_session_id()
+    )
     # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
     # three-mode helper. The operator-dispatch caller is the
     # canonical stateless one-shot, so default to ``ephemeral=True``.

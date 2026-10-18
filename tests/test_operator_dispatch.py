@@ -445,6 +445,59 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
+    async def test_claude_code_session_id_beats_the_flat_file(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-d8yul: the flat file is whichever Claude session wrote it
+        last. A parent that carries CLAUDE_CODE_SESSION_ID (its real session)
+        injects that into the child, not the file's value, so concurrent
+        Claude windows do not hand each other's id to their children."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-real-session")
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="other-window-in-file"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured[0]["env"].get("NX_SESSION_ID") == "parent-real-session"
+
+    @pytest.mark.asyncio
+    async def test_file_is_still_injected_when_no_session_env(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The raw file read is load-bearing (nexus-d8yul): with neither env
+        var, the file's id is still injected, so the child's SessionStart
+        hook sees a nested session and leaves ``current_session`` alone."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="file-uuid"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured[0]["env"].get("NX_SESSION_ID") == "file-uuid"
+
+    @pytest.mark.asyncio
     async def test_omits_nx_session_id_when_no_parent_session(self) -> None:
         """When there's no parent session (e.g. CLI usage outside Claude Code),
         claude_dispatch must not export an empty/None NX_SESSION_ID — the
