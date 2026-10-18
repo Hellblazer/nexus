@@ -280,13 +280,14 @@ echo "[gate] scratch config: $SCRATCH"
 # (nexus-pfuns) symlinked a hand-picked set (.cache/.local/.claude) and broke on
 # the SECOND thing it touched: the Maven jar rebuild died because
 # ~/.testcontainers.properties (``testcontainers.ryuk.disabled=true``) and
-# ~/.docker (the socket at ~/.docker/run/docker.sock) were absent. The remedy
+# ~/.docker (then the socket at ~/.docker/run/docker.sock) were absent. The remedy
 # then was to mirror everything and shadow a denylist, but a mirrored entry
 # fails SILENTLY and destructively (2026-09-12 a global identity file overwritten;
 # 2026-09-30 a live nexus-service unit replaced) while a missing one fails
 # loudly on the first run. So the fence is inverted: the home starts empty and
 # only the measured read-mostly toolchain caches in FENCE_MIRRORED_ENTRIES
-# (lib/fence_home.sh) are linked through. uv's roots, the ONNX model root, the
+# (lib/fence_home.sh: .m2/repository .m2/wrapper .testcontainers.properties,
+# nexus-u73rf) are linked through; .docker is not (DOCKER_HOST passes through). uv's roots, the ONNX model root, the
 # HuggingFace hub cache and the substrate cache are pinned by env (fence_uv_env,
 # fence_cache_env), not mirrored. A leg that
 # needs anything else is given it explicitly; the mirror is never widened.

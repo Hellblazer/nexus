@@ -21,16 +21,19 @@
 # or a fixture file), never by widening the mirror. No credential store is
 # mirrored BY NAME (.ssh .aws .gnupg .kube .netrc .npmrc .gitconfig .claude
 # .config/gh .config/op ... are never in the list). That is a claim about
-# top-level names, not content: .docker can hold config.json (registry auths) and
-# .m2 can hold settings.xml (server passwords), and both are linked whole. A JVM
-# reads them regardless, since the JDK's user.home ignores $HOME. Narrowing them
-# is Sam's call (nexus-u73rf).
+# top-level names, not content, so nexus-u73rf (DECIDED, Sam, 2026-10-17) narrowed
+# the two entries that could hold one: .m2 is linked as .m2/repository and
+# .m2/wrapper only (settings.xml holds server passwords), and .docker is not
+# linked at all (config.json holds registry auths; DOCKER_HOST and
+# TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE pass through). A JVM still reads the real
+# settings.xml through its own user.home, which ignores $HOME.
 
-# The only top-level entries of the real home linked into a fenced home. Twin of
+# The only paths of the real home linked into a fenced home (relative to it; a
+# nested entry gets a real parent directory holding just the link). Twin of
 # MIRRORED_ENTRIES in tests/_fence_home.py, kept in step by
 # tests/test_fence_home_twins_agree.py. An entry the real home lacks is skipped.
 FENCE_MIRRORED_ENTRIES=(
-    ".m2" ".docker" ".testcontainers.properties"
+    ".m2/repository" ".m2/wrapper" ".testcontainers.properties"
 )
 
 # fence_home <real_home> <gate_home>
@@ -43,6 +46,7 @@ fence_home() {
     mkdir -p "$gate_home"
     for name in "${FENCE_MIRRORED_ENTRIES[@]}"; do
         if [ -e "$real_home/$name" ] || [ -L "$real_home/$name" ]; then
+            mkdir -p "$(dirname "$gate_home/$name")"
             ln -sfn "$real_home/$name" "$gate_home/$name"
         fi
     done
@@ -133,12 +137,18 @@ fence_keep_home() {
 #
 # Remove the fenced home at the end of a run (nexus-7df8e). Returns 0 when it is
 # gone, 1 when it was kept or refused. Refuses unless <gate_home> is the
-# NX_FENCED_HOME this tree exported, so a wrong argument can never delete a
-# directory the fence did not make. The mirror links are removed as links first,
-# so nothing can follow one into the operator's real .m2 or .docker.
+# NX_FENCED_HOME this tree exported AND has the gate's own shape: an absolute
+# path ending in nx-local-service-gate.<x>/home, the scratch dir the gate makes
+# with mktemp. The env var alone is not enough (a caller controls it; the Python
+# twin's prefix check is the model). The mirror links are removed as links first,
+# so nothing can follow one into the operator's real .m2/repository.
 fence_remove_home() {
-    local gate_home="$1" status="${2:-0}" name
+    local gate_home="$1" status="${2:-0}" name scratch
     [ -n "$gate_home" ] && [ -d "$gate_home" ] && [ ! -L "$gate_home" ] || return 1
+    case "$gate_home" in /*) ;; *) return 1 ;; esac
+    [ "${gate_home##*/}" = "home" ] || return 1
+    scratch="${gate_home%/*}"
+    case "${scratch##*/}" in nx-local-service-gate.?*) ;; *) return 1 ;; esac
     [ "$gate_home" = "${NX_FENCED_HOME:-}" ] || return 1
     fence_keep_home "$status" && return 1
     for name in "${FENCE_MIRRORED_ENTRIES[@]}"; do

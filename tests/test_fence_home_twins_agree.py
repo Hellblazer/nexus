@@ -30,23 +30,41 @@ _SHELL_FENCE = Path(__file__).parent / "e2e" / "lib" / "fence_home.sh"
 
 def _seed(real: Path) -> None:
     """A home holding the allowlisted caches AND the things the fence must hide."""
-    for rel in (".docker/run", ".m2/repository", ".gradle/caches", ".cargo/registry", ".rustup/toolchains",
+    for rel in (".docker/run", ".m2/repository", ".m2/wrapper/dists", ".gradle/caches", ".cargo/registry", ".rustup/toolchains",
                 ".cache/uv", ".local/bin", ".local/state/nexus", ".claude/plugins", ".claude/agents",
                 ".config/nexus", ".config/gh", ".config/op", ".config/1Password", ".config/git",
                 ".config/systemd/user", "Library/LaunchAgents", "Library/Caches", "Library/Keychains",
                 ".ssh", ".aws", ".gnupg", ".kube", ".dolt", ".beads", "Documents"):
         (real / rel).mkdir(parents=True, exist_ok=True)
     (real / ".testcontainers.properties").write_text("testcontainers.ryuk.disabled=true\n")
+    (real / ".m2" / "settings.xml").write_text("<server><password>secret</password></server>\n")
+    (real / ".docker" / "config.json").write_text('{"auths": {"registry": {"auth": "secret"}}}\n')
     for rel in (".gitconfig", ".netrc", ".npmrc", ".claude.json"):
         (real / rel).write_text("secret\n")
     (real / ".config" / "nexus" / "last_seen_version").write_text("7.18.0\n")
 
 
 def _shape(home: Path) -> set[str]:
-    """Every top-level entry of the fenced home as ``name:link|dir|file``."""
+    """Every entry of the fenced home, at any depth but never THROUGH a link, as
+    ``relative/path:link|dir|file``."""
     out = set()
-    for p in sorted(home.iterdir()):
-        out.add(f"{p.name}:{'link' if p.is_symlink() else 'dir' if p.is_dir() else 'file'}")
+    for root, dirs, files in os.walk(home):
+        for name in (*dirs, *files):
+            p = Path(root) / name
+            kind = "link" if p.is_symlink() else "dir" if p.is_dir() else "file"
+            out.add(f"{p.relative_to(home)}:{kind}")
+    return out
+
+
+def _expected_shape() -> set[str]:
+    """What fencing the seeded home must produce: each allowlisted path as a link
+    and, for a nested one, a real parent directory."""
+    out = set()
+    for name in MIRRORED_ENTRIES:
+        out.add(f"{name}:link")
+        for parent in Path(name).parents:
+            if str(parent) != ".":
+                out.add(f"{parent}:dir")
     return out
 
 
@@ -77,7 +95,7 @@ def test_shell_and_python_fences_produce_identical_shapes(tmp_path: Path) -> Non
         f"  shell only:  {sorted(sh - py)}"
     )
     # the substance, so agreement on two empty homes cannot pass
-    assert py == {f"{n}:link" for n in MIRRORED_ENTRIES}
+    assert py == _expected_shape()
 
 
 def test_python_fence_mirrors_exactly_the_allowlist(tmp_path: Path) -> None:
@@ -86,16 +104,20 @@ def test_python_fence_mirrors_exactly_the_allowlist(tmp_path: Path) -> None:
 
     for entry in MIRRORED_ENTRIES:
         assert (home / entry).is_symlink() and (home / entry).exists(), f"{entry} was not mirrored"
-    assert sorted(p.name for p in home.iterdir()) == sorted(MIRRORED_ENTRIES)
+    assert _shape(home) == _expected_shape()
 
 
 def test_an_allowlist_entry_the_real_home_lacks_is_skipped(tmp_path: Path) -> None:
     real = tmp_path / "real"
-    (real / ".m2").mkdir(parents=True)
+    (real / ".m2" / "repository").mkdir(parents=True)  # no .m2/wrapper, no .testcontainers.properties
     py = fence_home(real, tmp_path / "py")
     r = _shell_fence(real, tmp_path / "sh")
     assert r.returncode == 0, r.stderr
-    assert _shape(py) == _shape(tmp_path / "sh") == {".m2:link"}
+    assert _shape(py) == _shape(tmp_path / "sh") == {".m2:dir", ".m2/repository:link"}
+    # and a home with NO .m2 at all gets no empty .m2 directory either
+    bare = tmp_path / "bare"; bare.mkdir()
+    assert _shape(fence_home(bare, tmp_path / "py2")) == set()
+    assert _shell_fence(bare, tmp_path / "sh2").returncode == 0 and _shape(tmp_path / "sh2") == set()
 
 
 def test_install_fence_is_idempotent_and_records_the_real_home(
@@ -144,8 +166,9 @@ def _shell_mirrored() -> list[str]:
 #: The allowlist as a LITERAL. Equality between the twins is not enough: an entry
 #: added to both stays green there. Widening the mirror means editing this set,
 #: in a diff a reviewer reads (nexus-ld3aa review). .gradle .cargo .rustup were
-#: dropped: no consumer in this repo.
-_EXPECTED_MIRROR = {".m2", ".docker", ".testcontainers.properties"}
+#: dropped: no consumer in this repo. nexus-u73rf (decided): .docker dropped and
+#: .m2 narrowed to its two cache directories.
+_EXPECTED_MIRROR = {".m2/repository", ".m2/wrapper", ".testcontainers.properties"}
 
 
 def test_the_two_allowlists_are_equal() -> None:
@@ -154,7 +177,7 @@ def test_the_two_allowlists_are_equal() -> None:
     assert sorted(shell) == sorted(MIRRORED_ENTRIES)
 
 
-def test_the_allowlist_is_exactly_the_three_measured_entries() -> None:
+def test_the_allowlist_is_exactly_the_three_measured_paths() -> None:
     assert set(MIRRORED_ENTRIES) == _EXPECTED_MIRROR and len(MIRRORED_ENTRIES) == 3
     assert set(_shell_mirrored()) == _EXPECTED_MIRROR
 
@@ -175,7 +198,8 @@ def test_no_credential_store_is_on_either_allowlist() -> None:
                        ".dolt", ".beads", "Library/Keychains"):
         assert credential in NEVER_MIRRORED, f"{credential} missing from NEVER_MIRRORED"
     for allowed in (*MIRRORED_ENTRIES, *_shell_mirrored()):
-        assert "/" not in allowed, f"{allowed!r}: the allowlist is top-level names only"
+        assert not allowed.startswith("/") and ".." not in Path(allowed).parts, f"{allowed!r}: not a home-relative path"
+        assert allowed not in (".m2", ".docker"), f"{allowed!r}: whole-directory mirror of a credential-bearing tree"
         for never in NEVER_MIRRORED:
             assert allowed != never and not allowed.startswith(never + "/") and not never.startswith(allowed + "/"), (
                 f"allowlist entry {allowed!r} is, or overlaps, never-mirrored {never!r}"
@@ -198,10 +222,30 @@ def test_a_seeded_credential_store_is_never_visible_in_either_fence(tmp_path: Pa
     r = _shell_fence(real, tmp_path / "sh")
     assert r.returncode == 0, r.stderr
     for home in (py, tmp_path / "sh"):
-        assert sorted(p.name for p in home.iterdir()) == sorted(MIRRORED_ENTRIES)
+        assert _shape(home) == _expected_shape()
         for never in NEVER_MIRRORED:
             assert not (home / never).exists() and not (home / never).is_symlink(), f"{home}: {never} visible"
         assert not any(home.rglob("secret")), f"{home}: a credential file is reachable"
+
+
+def test_a_maven_settings_file_and_a_docker_config_are_not_visible_through_either_twin(tmp_path: Path) -> None:
+    """nexus-u73rf, decided: ``.m2/settings.xml`` (server passwords) and
+    ``.docker/config.json`` (registry auths) exist in the stand-in real home next
+    to the mirrored ``.m2/repository``, and neither twin may expose them, by path
+    or through any mirror link."""
+    real = tmp_path / "real"; real.mkdir(); _seed(real)
+    (real / ".m2" / "repository" / "dep.jar").write_text("jar")
+    assert (real / ".m2" / "settings.xml").is_file() and (real / ".docker" / "config.json").is_file()
+    py = fence_home(real, tmp_path / "py")
+    assert _shell_fence(real, tmp_path / "sh").returncode == 0
+    for home in (py, tmp_path / "sh"):
+        assert (home / ".m2" / "repository" / "dep.jar").read_text() == "jar", "the cache itself must still be reachable"
+        assert not (home / ".m2" / "settings.xml").exists() and not (home / ".m2" / "settings.xml").is_symlink()
+        assert not (home / ".docker").exists() and not (home / ".docker").is_symlink()
+        assert not (home / ".docker" / "config.json").exists()
+        assert not any(".docker" in str(p) for p in home.rglob("*")), f"{home}: .docker is reachable"
+        # the .m2 in the fence is a real directory, not a link to the real one
+        assert (home / ".m2").is_dir() and not (home / ".m2").is_symlink()
 
 
 _CACHE_KEYS = (
@@ -379,7 +423,7 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
     import tests._fence_home as fh
 
     real = tmp_path / "real"
-    (real / ".m2").mkdir(parents=True)
+    (real / ".m2" / "repository").mkdir(parents=True)
     (real / ".testcontainers.properties").write_text("x")
     (real / "proj").mkdir()
     (real / ".gitconfig").write_text("x")
@@ -392,7 +436,7 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
     monkeypatch.setattr(fh, "_windows_link", lambda link, entry: linked.append((link.name, entry.name)))
     setattr_in(monkeypatch, fh, "sys.platform", "win32")
     fh.fence_home(real, tmp_path / "gate")
-    assert sorted(linked) == [(".m2", ".m2"), (".testcontainers.properties", ".testcontainers.properties")]
+    assert sorted(linked) == [(".testcontainers.properties", ".testcontainers.properties"), ("repository", "repository")]
 
     # Off Windows the same refusal is not swallowed.
     setattr_in(monkeypatch, fh, "sys.platform", "linux")
@@ -402,47 +446,104 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
 
 # ── nexus-7df8e: the fenced home is removed when the session ends ───────────
 
+def _record_install(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Make *home* the one this process "installed", as install_fence records it."""
+    import tests._fence_home as fh
+
+    monkeypatch.setattr(fh, "_installed_home", home)
+    monkeypatch.setenv(fh.FENCED_HOME_ENV, str(home))
+
+
 def test_remove_fenced_home_deletes_the_home_and_never_the_real_caches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests._fence_home import FENCED_HOME_ENV, remove_fenced_home
+    from tests._fence_home import remove_fenced_home
 
     real = tmp_path / "real"; real.mkdir(); _seed(real)
     (real / ".m2" / "repository" / "artifact.jar").write_text("x")
     home = fence_home(real, tmp_path / "nx-suite-home-abc")
     (home / "stray").mkdir(); (home / "stray" / "f").write_text("x")  # something the session wrote
-    monkeypatch.setenv(FENCED_HOME_ENV, str(home))
+    _record_install(monkeypatch, home)
     assert remove_fenced_home(0) is True
     assert not home.exists()
     assert (real / ".m2" / "repository" / "artifact.jar").read_text() == "x", "rmtree followed a mirror link"
     assert (real / ".docker" / "run").is_dir()
 
 
+def test_remove_fenced_home_deletes_only_the_home_this_process_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-ld3aa confirmation, the ship-blocker: NX_FENCED_HOME is inherited by
+    every child session, so it names the PARENT's home there. Only the path
+    install_fence recorded in THIS process may be deleted, whatever the env says."""
+    import tests._fence_home as fh
+
+    parent = tmp_path / "nx-suite-home-parent"; parent.mkdir(); (parent / "keep").write_text("x")
+    monkeypatch.setenv(fh.FENCED_HOME_ENV, str(parent))
+    monkeypatch.setattr(fh, "_installed_home", None)
+    assert fh.remove_fenced_home(0) is False, "nothing installed here: a no-op, whatever the env says"
+    assert (parent / "keep").exists()
+
+    mine = tmp_path / "nx-suite-home-mine"; mine.mkdir()
+    monkeypatch.setattr(fh, "_installed_home", mine)
+    assert fh.remove_fenced_home(0) is False, "the env names a different home than the recorded one"
+    assert (parent / "keep").exists() and mine.is_dir()
+    monkeypatch.setenv(fh.FENCED_HOME_ENV, str(mine))
+    assert fh.remove_fenced_home(0) is True and not mine.exists() and (parent / "keep").exists()
+
+
+def test_install_fence_records_the_home_it_made_and_a_second_call_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests._fence_home as fh
+
+    real = tmp_path / "real"; real.mkdir()
+    monkeypatch.setattr(fh, "_installed_home", None)
+    with patch.dict(os.environ, {"HOME": str(real)}):
+        os.environ.pop(fh.REAL_HOME_ENV, None)
+        first = tmp_path / "nx-suite-home-first"
+        assert fh.install_fence(first) == first
+        assert fh._installed_home == first
+        # already fenced: a child's install is a no-op and must not displace the record
+        assert fh.install_fence(tmp_path / "nx-suite-home-second") is None
+        assert fh._installed_home == first
+
+
 def test_remove_fenced_home_refuses_a_directory_it_did_not_make(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests._fence_home import FENCED_HOME_ENV, remove_fenced_home
+    from tests._fence_home import remove_fenced_home
 
     other = tmp_path / "somebodys-home"; other.mkdir(); (other / "keep").write_text("x")
-    monkeypatch.setenv(FENCED_HOME_ENV, str(other))
+    _record_install(monkeypatch, other)  # even a recorded path must carry the prefix
     assert remove_fenced_home(0) is False
     assert (other / "keep").exists()
-    monkeypatch.delenv(FENCED_HOME_ENV)
+
+
+def test_remove_fenced_home_requires_an_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests._fence_home import remove_fenced_home
+
+    rel = tmp_path / "nx-suite-home-rel"; rel.mkdir(); (rel / "keep").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    _record_install(monkeypatch, Path("nx-suite-home-rel"))
     assert remove_fenced_home(0) is False
+    assert (rel / "keep").exists(), "a relative name was resolved against the cwd and deleted"
 
 
 def test_remove_fenced_home_keeps_a_failed_session_only_when_asked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests._fence_home import FENCED_HOME_ENV, KEEP_FENCED_HOME_ENV, remove_fenced_home
+    from tests._fence_home import KEEP_FENCED_HOME_ENV, remove_fenced_home
 
     real = tmp_path / "real"; real.mkdir()
     home = fence_home(real, tmp_path / "nx-suite-home-keep")
-    monkeypatch.setenv(FENCED_HOME_ENV, str(home))
+    _record_install(monkeypatch, home)
     monkeypatch.setenv(KEEP_FENCED_HOME_ENV, "1")
     assert remove_fenced_home(0) is True and not home.exists(), "a PASSING session is never kept"
     home = fence_home(real, tmp_path / "nx-suite-home-keep2")
-    monkeypatch.setenv(FENCED_HOME_ENV, str(home))
+    _record_install(monkeypatch, home)
     assert remove_fenced_home(1) is False and home.is_dir(), "kept on failure with the opt-in"
     monkeypatch.delenv(KEEP_FENCED_HOME_ENV)
     assert remove_fenced_home(1) is True and not home.exists(), "failure without the opt-in still removes"
@@ -460,17 +561,22 @@ def _shell_remove(gate: Path, status: int, *, fenced: str | None, keep: bool) ->
     )
 
 
+def _gate_home(tmp_path: Path, name: str) -> Path:
+    """The gate's own shape: <TMPDIR>/nx-local-service-gate.XXXXXX/home."""
+    return tmp_path / f"nx-local-service-gate.{name}" / "home"
+
+
 def test_the_shell_twin_removes_the_home_with_the_same_keep_rule(tmp_path: Path) -> None:
     real = tmp_path / "real"; real.mkdir(); _seed(real)
     (real / ".m2" / "repository" / "artifact.jar").write_text("x")
 
-    gate = tmp_path / "gate1"
+    gate = _gate_home(tmp_path, "one")
     assert _shell_fence(real, gate).returncode == 0
     assert _shell_remove(gate, 0, fenced=str(gate), keep=True).returncode == 0
     assert not gate.exists()
     assert (real / ".m2" / "repository" / "artifact.jar").read_text() == "x", "removal followed a mirror link"
 
-    gate = tmp_path / "gate2"
+    gate = _gate_home(tmp_path, "two")
     assert _shell_fence(real, gate).returncode == 0
     assert _shell_remove(gate, 1, fenced=str(gate), keep=True).returncode == 1 and gate.is_dir()
     assert _shell_remove(gate, 1, fenced=str(gate), keep=False).returncode == 0 and not gate.exists()
@@ -479,6 +585,40 @@ def test_the_shell_twin_removes_the_home_with_the_same_keep_rule(tmp_path: Path)
     assert _shell_remove(other, 0, fenced=str(tmp_path / "elsewhere"), keep=False).returncode == 1
     assert _shell_remove(other, 0, fenced=None, keep=False).returncode == 1
     assert other.is_dir()
+
+
+def test_the_shell_twin_refuses_a_home_that_is_not_the_gates_scratch_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-7df8e bead 1: the only check used to be gate_home == NX_FENCED_HOME,
+    which the caller controls. A stand-in real home named as BOTH must survive,
+    with its .m2 link intact, and so must every near miss of the gate's shape."""
+    real = tmp_path / "standin-real-home"; real.mkdir(); _seed(real)
+    (real / ".m2" / "repository" / "artifact.jar").write_text("x")
+    link_into_real = tmp_path / "scratch-link"
+    link_into_real.symlink_to(real)
+    monkeypatch.chdir(tmp_path)  # the shell inherits the cwd: the relative case below really exists
+    (tmp_path / "nx-local-service-gate.rel" / "home").mkdir(parents=True)
+    near_misses = [
+        real,                                                      # the stand-in real home itself
+        tmp_path / "home",                                         # right basename, no gate scratch parent
+        tmp_path / "nx-local-service-gate.x" / "not-home",         # right parent, wrong basename
+        tmp_path / "other.x" / "home",                             # wrong parent prefix
+        link_into_real,                                            # a symlink to the real home
+        Path("nx-local-service-gate.rel") / "home",                # right shape, but relative
+    ]
+    (tmp_path / "other.x" / "home").mkdir(parents=True)
+    (tmp_path / "nx-local-service-gate.x" / "not-home").mkdir(parents=True)
+    (tmp_path / "home").mkdir()
+    for home in near_misses:
+        proc = _shell_remove(home, 0, fenced=str(home), keep=False)
+        assert proc.returncode == 1, f"{home}: {proc.stdout}{proc.stderr}"
+    assert (real / ".m2" / "repository" / "artifact.jar").read_text() == "x"
+    assert (real / ".m2").is_dir(), "the stand-in's .m2 was touched"
+    assert link_into_real.is_symlink()
+    for d in (tmp_path / "other.x" / "home", tmp_path / "nx-local-service-gate.x" / "not-home", tmp_path / "home",
+              tmp_path / "nx-local-service-gate.rel" / "home"):
+        assert d.is_dir()
 
 
 def _suite_session(tmp_path: Path, *, fail: bool, keep: bool) -> tuple[subprocess.CompletedProcess, list[Path]]:
@@ -533,6 +673,45 @@ def test_a_real_session_leaves_no_fenced_home_behind(tmp_path: Path) -> None:
     kept, left = _suite_session(tmp_path / "kept", fail=True, keep=True)
     assert kept.returncode == 1 and "1 failed" in kept.stdout, kept.stdout + kept.stderr
     assert len(left) == 1, f"a failed session with NX_KEEP_FENCED_HOME must keep its home: {left}"
+
+
+def test_a_nested_session_leaves_the_parents_fenced_home_alone(tmp_path: Path) -> None:
+    """nexus-ld3aa confirmation, the ship-blocker. Many tests spawn a child pytest
+    session with os.environ, so the child inherits NX_FENCED_HOME and NX_REAL_HOME
+    from the parent. install_fence no-ops there, but the child's sessionfinish used
+    to delete the parent's home by the env var, and its conftest left an empty
+    nx-suite-home-* of its own. test_a_real_session_leaves_no_fenced_home_behind
+    cannot see this: it drops both keys."""
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    parent = tmpdir / "nx-suite-home-parent"
+    parent.mkdir()
+    (parent / "keep").write_text("x")
+    (parent / "nx-tools").mkdir()
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / ".m2").mkdir()
+    (real / ".m2" / "a.jar").write_text("x")
+    (parent / ".m2").symlink_to(real / ".m2")
+    drop = {"NX_NO_HOME_FENCE", "NX_KEEP_FENCED_HOME", "NX_SUITE_LEASE_HELD_BY", "NX_SUITE_LEASE_WAIT",
+            "NX_SUITE_LEASE_UNGUARDED", "NEXUS_PG_BIN", "PYTEST_ADDOPTS"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(
+        HOME=str(parent), NX_REAL_HOME=str(parent), NX_FENCED_HOME=str(parent),
+        TMPDIR=str(tmpdir), PYTEST_ADDOPTS="", NX_TEST_T2_SUBSTRATE="none",
+        NX_BUILD_LEASE_ROOT=str(tmp_path / "leases"),
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
+         f"{Path(__file__)}::test_an_allowlist_entry_the_real_home_lacks_is_skipped"],
+        cwd=_REPO, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert "1 passed" in proc.stdout, proc.stdout + proc.stderr
+    assert (parent / "keep").read_text() == "x" and (parent / "nx-tools").is_dir(), \
+        "the child session deleted the PARENT session's fenced home"
+    assert (real / ".m2" / "a.jar").read_text() == "x"
+    assert sorted(p.name for p in tmpdir.glob("nx-suite-home-*")) == ["nx-suite-home-parent"], \
+        "the child session left an nx-suite-home-* of its own"
 
 
 def test_both_twins_pass_the_container_runtime_env_through(tmp_path: Path) -> None:

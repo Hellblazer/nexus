@@ -57,6 +57,7 @@ def mirrored(tmp_path: Path):
     ):
         (real / rel).mkdir(parents=True, exist_ok=True)
     (real / ".testcontainers.properties").write_text("testcontainers.ryuk.disabled=true\n")
+    (real / ".m2" / "settings.xml").write_text("<settings/>\n")
     (real / ".config" / "nexus" / "last_seen_version").write_text("7.17.0\n")
     (real / ".config" / "xtool" / "hosts.yml").write_text("github.com: {}\n")
 
@@ -118,16 +119,16 @@ def test_the_config_dir_is_absent_from_the_fenced_home_not_the_real_one(mirrored
 @pytest.mark.parametrize(
     ("entry", "why"),
     [
-        (".docker", "holds the daemon socket at ~/.docker/run/docker.sock"),
         (".testcontainers.properties", "carries testcontainers.ryuk.disabled=true"),
-        (".m2", "the Maven repository the jar rebuild resolves from"),
+        (".m2/repository", "the Maven repository the jar rebuild resolves from"),
     ],
 )
 def test_the_allowlisted_caches_pass_through(mirrored, entry: str, why: str) -> None:
     """The first allowlist (nexus-pfuns) broke the Maven rebuild on absent
     .testcontainers.properties and .docker. The inverted fence (nexus-ld3aa)
-    names exactly these; they are the proof the allowlist covers what the jar
-    rebuild measured it needs."""
+    names these; nexus-u73rf dropped .docker (DOCKER_HOST passes through) and
+    narrowed .m2 to its repository. They are the proof the allowlist covers what
+    the jar rebuild measured it needs."""
     _real, gate = mirrored
     target = gate / entry
     assert target.exists(), f"{entry} did not survive the mirror — {why}"
@@ -135,7 +136,7 @@ def test_the_allowlisted_caches_pass_through(mirrored, entry: str, why: str) -> 
 
 @pytest.mark.parametrize(
     "entry",
-    [".cache", ".local", ".claude", ".config", ".config/xtool", "Documents"],
+    [".cache", ".local", ".claude", ".config", ".config/xtool", "Documents", ".docker", ".m2/settings.xml"],
 )
 def test_everything_off_the_allowlist_is_shadowed(mirrored, entry: str) -> None:
     """Positive control on the POLICY. The old fence mirrored all of these. A

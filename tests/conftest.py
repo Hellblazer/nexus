@@ -554,9 +554,13 @@ def pytest_sessionstart(session):
     if _is_controller_or_serial and not os.environ.get("NX_NO_HOME_FENCE"):
         import tempfile  # noqa: PLC0415 — session-start only
 
-        from tests._fence_home import install_fence  # noqa: PLC0415 — test-only helper
+        from tests._fence_home import REAL_HOME_ENV, install_fence  # noqa: PLC0415 — test-only helper
 
-        install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
+        # Only the session that fences makes a home. A CHILD session inherits
+        # NX_REAL_HOME, install_fence no-ops, and a mkdtemp here would leave an
+        # empty nx-suite-home-* behind every child (nexus-ld3aa confirmation).
+        if not os.environ.get(REAL_HOME_ENV):
+            install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
     _capture_session_homes()
 
     # A test that moves HOME again (tests/test_scratch.py's t1 fixture sets HOME
@@ -3175,7 +3179,7 @@ def _fence_beads_prime_user_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     only ``.config/nexus`` and symlinked every OTHER top-level HOME entry
     (``Library`` on macOS, every other ``.config/<x>`` on Linux) straight
     through to the REAL filesystem. The fence is now inverted: the test home
-    starts empty and links through only ``.m2 .docker
+    starts empty and links through only ``.m2/repository .m2/wrapper
     .testcontainers.properties``, so the locations below are absent under it
     and this fixture is the second layer, kept because it also covers a run
     under ``NX_NO_HOME_FENCE``.

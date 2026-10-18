@@ -24,14 +24,17 @@ only entries linked through, each a read-mostly toolchain cache measured as
 needed. Anything else a test needs it is given explicitly (a fixture-provided
 file, an env pin such as ``UV_CACHE_DIR``), never by widening the mirror.
 
-NO CREDENTIAL STORE IS MIRRORED BY NAME (:data:`NEVER_MIRRORED`), and the empty
-default means none is. That is a claim about top-level NAMES, not about content:
-``.docker`` can hold ``config.json`` (registry auths) and ``.m2`` can hold
-``settings.xml`` (server passwords), and both are linked through whole. A JVM
-reads them regardless, since the JDK's ``user.home`` ignores ``$HOME`` (measured
-on macOS JDK 25), so narrowing the mirror hides them from ``$HOME`` readers only.
-Whether to narrow ``.docker`` and ``.m2`` further is Sam's call (nexus-u73rf).
-``tests/test_fence_home_twins_agree.py`` pins the names and the literal list.
+NO CREDENTIAL FILE IS REACHABLE THROUGH THE MIRROR (:data:`NEVER_MIRRORED`), and
+the empty default means none is. nexus-u73rf is DECIDED (Sam, 2026-10-17): the
+entries are the two NESTED cache directories ``.m2/repository`` and
+``.m2/wrapper``, never ``.m2`` whole (``.m2/settings.xml`` holds server
+passwords), and ``.docker`` is not mirrored at all (``.docker/config.json`` holds
+registry auths; the daemon is reached through ``DOCKER_HOST`` and
+``TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE``, which pass through unchanged). A JVM
+still reads the real ``settings.xml`` through its own ``user.home``, which
+ignores ``$HOME`` (measured on macOS JDK 25), so the narrowing hides it from
+``$HOME`` readers only; that residue is not closable from the fence.
+``tests/test_fence_home_twins_agree.py`` pins the entries and the literal list.
 
 TWO IMPLEMENTATIONS, ONE CONTRACT. This module and ``fence_home.sh`` must
 produce the same shape; ``tests/test_fence_home_twins_agree.py`` is what says
@@ -59,22 +62,33 @@ REAL_HOME_ENV = "NX_REAL_HOME"
 #: patches Path.home (6 guard tests, measured).
 FENCED_HOME_ENV = "NX_FENCED_HOME"
 
+#: The home THIS process created, set only on :func:`install_fence`'s installing
+#: path. :func:`remove_fenced_home` deletes this and nothing else. The env var
+#: cannot be the authority: every child session inherits ``NX_FENCED_HOME`` from
+#: its parent, so there it names the PARENT's home (nexus-ld3aa confirmation:
+#: a nested pytest deleted the running suite's fence mid-run).
+_installed_home: Path | None = None
 
-#: The ONLY entries of the real home a fenced home links through (top-level
-#: names). Each is a read-mostly toolchain cache or daemon-socket directory that
-#: a build or a Testcontainers run needs and that cannot be handed over another
-#: way: ``.m2`` (the dependency cache the jar rebuild resolves from, and the
-#: Maven wrapper's dists), ``.docker`` (the daemon socket at ``run/docker.sock``)
-#: and ``.testcontainers.properties`` (``testcontainers.ryuk.disabled``). Gradle
-#: and Rust caches are NOT here: no consumer exists in this repo (nexus-ld3aa
-#: review). uv is NOT here: its cache and managed Pythons are pinned by env
+
+#: The ONLY paths of the real home a fenced home links through, relative to it.
+#: Each is a read-mostly toolchain cache that a build or a Testcontainers run
+#: needs and that cannot be handed over another way: ``.m2/repository`` (the
+#: dependency cache the jar rebuild resolves from), ``.m2/wrapper`` (the Maven
+#: wrapper's dists) and ``.testcontainers.properties``
+#: (``testcontainers.ryuk.disabled``). An entry may be NESTED: the fenced home
+#: gets a real ``.m2`` directory holding just those links, so ``.m2/settings.xml``
+#: is not reachable (nexus-u73rf, decided). ``.docker`` is NOT here: nothing the
+#: fence runs needs ``~/.docker/run/docker.sock`` once ``DOCKER_HOST`` passes
+#: through (the laptop runs colima), and ``.docker/config.json`` holds registry
+#: auths. Gradle and Rust caches are NOT here: no consumer exists in this repo
+#: (nexus-ld3aa review). uv is NOT here: its cache and managed Pythons are pinned by env
 #: (:func:`fence_uv_env`), as are the ONNX model root, the HuggingFace hub cache
 #: and the engine-substrate cache (:func:`fence_cache_env`). Both twins carry
 #: this list (``FENCE_MIRRORED_ENTRIES`` in ``fence_home.sh``) and
 #: ``test_fence_home_twins_agree`` pins the two together AND pins the literal
 #: set, so a fourth entry added to both twins goes red. An entry the real home
 #: does not have is skipped.
-MIRRORED_ENTRIES: tuple[str, ...] = (".m2", ".docker", ".testcontainers.properties")
+MIRRORED_ENTRIES: tuple[str, ...] = (".m2/repository", ".m2/wrapper", ".testcontainers.properties")
 
 #: Never mirrored, whatever else changes: credential stores, the operator's
 #: identity and tool config, and the autostart-unit and state trees whose
@@ -116,11 +130,12 @@ def _link_through(link: Path, entry: Path) -> None:
 
 def fence_home(real_home: Path, gate_home: Path) -> Path:
     """Create *gate_home* empty and link each :data:`MIRRORED_ENTRIES` entry that
-    exists in *real_home* into it. On Windows without the symlink privilege an
+    exists in *real_home* into it; the parent of a nested entry is a real
+    directory made empty-but-for-the-link. On Windows without the symlink privilege an
     entry is linked through by :func:`_windows_link` instead. Returns *gate_home*.
 
     Nothing else of the real home is visible from the result: not
-    ``.config/nexus``, the autostart unit dirs, ``.local/state``, nor any
+    ``.m2/settings.xml``, ``.docker``, ``.config/nexus``, the autostart unit dirs, ``.local/state``, nor any
     credential store.
     """
     gate_home.mkdir(parents=True, exist_ok=True)
@@ -128,6 +143,7 @@ def fence_home(real_home: Path, gate_home: Path) -> Path:
         entry = real_home / name
         link = gate_home / name
         if (entry.exists() or entry.is_symlink()) and not (link.exists() or link.is_symlink()):
+            link.parent.mkdir(parents=True, exist_ok=True)
             _link_through(link, entry)
     return gate_home
 
@@ -172,12 +188,14 @@ def install_fence(gate_home: Path) -> Path | None:
     Records the ORIGINAL home in :data:`REAL_HOME_ENV` first -- that value is
     what the real-config-dir guards must keep watching.
     """
+    global _installed_home
     if os.environ.get(REAL_HOME_ENV):
         return None
     real_home = Path(os.path.expanduser("~")).resolve()
     fence_home(real_home, gate_home)
     os.environ[REAL_HOME_ENV] = str(real_home)
     os.environ[FENCED_HOME_ENV] = str(gate_home)
+    _installed_home = gate_home
     os.environ["HOME"] = str(gate_home)
     fence_manager_env(gate_home)
     # THE INSTALL LAYOUT IS FENCED SEPARATELY. The suite's contract is that
@@ -284,16 +302,20 @@ def remove_fenced_home(exitstatus: int) -> bool:
     last from the controller's ``pytest_sessionfinish``. Kept only when the
     session failed AND :data:`KEEP_FENCED_HOME_ENV` is set.
 
-    Safe by construction: it deletes only ``$NX_FENCED_HOME`` and only when its
-    name carries :data:`FENCED_HOME_PREFIX`; the :data:`MIRRORED_ENTRIES` links
-    are removed as links first, so ``rmtree`` can never follow one into the
-    operator's real ``.m2`` or ``.docker``.
+    Safe by construction: it deletes only the path :func:`install_fence` recorded
+    in THIS process (:data:`_installed_home`), never one named by the environment
+    (a child session inherits its parent's ``NX_FENCED_HOME``). With nothing
+    recorded it is a no-op. The recorded path must also be absolute, equal to
+    ``$NX_FENCED_HOME`` and carry :data:`FENCED_HOME_PREFIX`; the
+    :data:`MIRRORED_ENTRIES` links are removed as links first, so ``rmtree`` can
+    never follow one into the operator's real ``.m2/repository``.
     """
-    raw = os.environ.get(FENCED_HOME_ENV, "")
-    if not raw:
+    global _installed_home
+    home = _installed_home
+    if home is None or os.environ.get(FENCED_HOME_ENV, "") != str(home):
         return False
-    home = Path(raw)
-    if not home.name.startswith(FENCED_HOME_PREFIX) or not home.is_dir() or home.is_symlink():
+    if (not home.is_absolute() or not home.name.startswith(FENCED_HOME_PREFIX)
+            or not home.is_dir() or home.is_symlink()):
         return False
     if exitstatus != 0 and os.environ.get(KEEP_FENCED_HOME_ENV):
         return False
@@ -307,4 +329,7 @@ def remove_fenced_home(exitstatus: int) -> bool:
         except OSError:
             return False  # cannot prove the link is gone: delete nothing
     shutil.rmtree(home, ignore_errors=True)
-    return not home.exists()
+    gone = not home.exists()
+    if gone:
+        _installed_home = None
+    return gone
