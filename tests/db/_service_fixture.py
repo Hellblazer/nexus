@@ -796,6 +796,31 @@ def with_error_file(cmd: list[str]) -> list[str]:
     return [*cmd[:i], jvm_error_file_arg(), *cmd[i:]]
 
 
+#: Heap and CPU budget for every test-launched engine JVM (nexus-0yym1). Without
+#: them a JVM sizes its heap to a quarter of the memory it can see and its thread
+#: pools to the CPUs it can see; inside a lab-run grant that is the grant's (a
+#: lab-l grant: 48 GiB, 16 CPUs), so each engine could claim ~12 GiB. Passed on
+#: the command line, never via JAVA_TOOL_OPTIONS, whose "Picked up" stderr line
+#: would reach tests that read engine stderr.
+SUBSTRATE_ENGINE_HEAP: str = "2g"
+SUBSTRATE_ENGINE_CPUS: int = 2
+
+
+def with_substrate_sizing(cmd: list[str]) -> list[str]:
+    """Insert ``-Xmx`` and ``-XX:ActiveProcessorCount`` just before ``-jar`` when
+    *cmd* is a JVM launch that does not set them. A caller's own value wins; a
+    command without ``-jar`` (a native binary) comes back unchanged."""
+    if "-jar" not in cmd:
+        return list(cmd)
+    flags = []
+    if not any(str(a).startswith("-Xmx") for a in cmd):
+        flags.append(f"-Xmx{SUBSTRATE_ENGINE_HEAP}")
+    if not any(str(a).startswith("-XX:ActiveProcessorCount=") for a in cmd):
+        flags.append(f"-XX:ActiveProcessorCount={SUBSTRATE_ENGINE_CPUS}")
+    i = cmd.index("-jar")
+    return [*cmd[:i], *flags, *cmd[i:]]
+
+
 def spawn_service(
     cmd: list[str],
     env: dict[str, str],
@@ -825,9 +850,10 @@ def spawn_service(
     the PIPE form threw away.
 
     A JVM launch (``-jar`` in *cmd*) gets ``-XX:ErrorFile=`` injected by
-    :func:`with_error_file`, so no caller can drop hs_err into the cwd.
+    :func:`with_error_file`, so no caller can drop hs_err into the cwd, and its
+    heap and CPU budget by :func:`with_substrate_sizing`.
     """
-    cmd = with_error_file(cmd)
+    cmd = with_substrate_sizing(with_error_file(cmd))
     d = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="nexus-svc-log-"))
     d.mkdir(parents=True, exist_ok=True)
     log_path = d / "engine.log"

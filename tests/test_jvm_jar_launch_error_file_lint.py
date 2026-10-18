@@ -383,6 +383,8 @@ def test_spawn_service_hands_popen_the_injected_argv(
     setattr_in(monkeypatch, "tests.db._service_fixture", "subprocess.Popen", _Popen)
     _proc, log = fx.spawn_service(["/usr/bin/java", "-jar", "a.jar"], {}, log_dir=tmp_path / "l")
     assert seen["argv"] == [
-        "/usr/bin/java", f"-XX:ErrorFile={tmp_path}/hs_err_%p.log", "-jar", "a.jar",
+        "/usr/bin/java", f"-XX:ErrorFile={tmp_path}/hs_err_%p.log",
+        f"-Xmx{fx.SUBSTRATE_ENGINE_HEAP}",
+        f"-XX:ActiveProcessorCount={fx.SUBSTRATE_ENGINE_CPUS}", "-jar", "a.jar",
     ]
     assert log.parent == tmp_path / "l"

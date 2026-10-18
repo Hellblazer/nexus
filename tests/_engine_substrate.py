@@ -106,6 +106,7 @@ from tests.db._service_fixture import (
     jar_freshness_skip_reason,
     jvm_error_file_arg,
     pg_bin_dir,
+    with_substrate_sizing,
     build_in_progress_reason,
     build_lease_wait_seconds,
     wait_for_build_lease,
@@ -126,9 +127,12 @@ _DBNAME = "nexus_t2_substrate"
 
 
 def engine_argv(java: str) -> list[str]:
-    """The substrate engine's argv. One owner, so the hs_err redirect cannot be
-    dropped from the launch without a test noticing."""
-    return [java, "-Duser.timezone=UTC", jvm_error_file_arg(), "-jar", str(_JAR)]
+    """The substrate engine's argv. One owner, so the hs_err redirect and the
+    heap/CPU budget (nexus-0yym1) cannot be dropped from the launch without a test
+    noticing."""
+    return with_substrate_sizing(
+        [java, "-Duser.timezone=UTC", jvm_error_file_arg(), "-jar", str(_JAR)]
+    )
 
 
 _lock = threading.Lock()
