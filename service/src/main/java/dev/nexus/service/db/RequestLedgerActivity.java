@@ -27,19 +27,19 @@ public final class RequestLedgerActivity {
     public record Snapshot(long replays, long inFlight, long keyReused, long takeovers) {
     }
 
-    static void recordReplay() {
+    public static void recordReplay() {
         REPLAYS.incrementAndGet();
     }
 
-    static void recordInFlight() {
+    public static void recordInFlight() {
         IN_FLIGHT.incrementAndGet();
     }
 
-    static void recordKeyReused() {
+    public static void recordKeyReused() {
         KEY_REUSED.incrementAndGet();
     }
 
-    static void recordTakeover() {
+    public static void recordTakeover() {
         TAKEOVERS.incrementAndGet();
     }
 

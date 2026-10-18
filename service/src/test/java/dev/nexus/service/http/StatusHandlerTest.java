@@ -191,6 +191,41 @@ class StatusHandlerTest {
     }
 
     @Test
+    void requestLedgerCounters_fourTopLevelFieldsReflectTheGlobalCounterDeltas_andNoRowCount() throws Exception {
+        // RDR-222 Phase 1 (bead nexus-yye8l.4), [additive]: the four RequestLedger events, same
+        // delta discipline as raced_embeds_total. No ledger row count: /v1/status is
+        // unauthenticated and the ledger is FORCE RLS.
+        start(new StatusHandler(null));
+        JsonNode before = get();
+
+        dev.nexus.service.db.RequestLedgerActivity.recordReplay();
+        dev.nexus.service.db.RequestLedgerActivity.recordInFlight();
+        dev.nexus.service.db.RequestLedgerActivity.recordInFlight();
+        dev.nexus.service.db.RequestLedgerActivity.recordKeyReused();
+        dev.nexus.service.db.RequestLedgerActivity.recordKeyReused();
+        dev.nexus.service.db.RequestLedgerActivity.recordKeyReused();
+        dev.nexus.service.db.RequestLedgerActivity.recordTakeover();
+
+        JsonNode after = get();
+        assertThat(after.path("request_ledger_replays_total").asLong(-1)
+            - before.path("request_ledger_replays_total").asLong(-1)).isEqualTo(1L);
+        assertThat(after.path("request_ledger_in_flight_total").asLong(-1)
+            - before.path("request_ledger_in_flight_total").asLong(-1)).isEqualTo(2L);
+        assertThat(after.path("request_ledger_key_reused_total").asLong(-1)
+            - before.path("request_ledger_key_reused_total").asLong(-1)).isEqualTo(3L);
+        assertThat(after.path("request_ledger_takeovers_total").asLong(-1)
+            - before.path("request_ledger_takeovers_total").asLong(-1)).isEqualTo(1L);
+
+        java.util.List<String> ledgerFields = new java.util.ArrayList<>();
+        after.fieldNames().forEachRemaining(f -> {
+            if (f.startsWith("request_ledger")) ledgerFields.add(f);
+        });
+        assertThat(ledgerFields).as("the four counters and nothing else, no row count")
+            .containsExactlyInAnyOrder("request_ledger_replays_total", "request_ledger_in_flight_total",
+                "request_ledger_key_reused_total", "request_ledger_takeovers_total");
+    }
+
+    @Test
     void suppliedVectorMismatchesTotal_topLevelFieldReflectsTheGlobalCounterDelta() throws Exception {
         // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same delta discipline as
         // raced_embeds_total above.

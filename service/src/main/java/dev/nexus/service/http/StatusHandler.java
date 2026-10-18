@@ -370,6 +370,15 @@ public final class StatusHandler implements HttpHandler {
         // raced-embed counter above.
         body.append(",\"supplied_vector_mismatches_total\":").append(SuppliedVectorMismatchActivity.total());
 
+        // RDR-222 Phase 1 (bead nexus-yye8l.4), [additive]: the four RequestLedger claim
+        // outcomes since boot, same shape as the raced-embed counter. No ledger row count: this
+        // route is unauthenticated and the ledger is FORCE RLS.
+        var ledger = dev.nexus.service.db.RequestLedgerActivity.snapshot();
+        body.append(",\"request_ledger_replays_total\":").append(ledger.replays());
+        body.append(",\"request_ledger_in_flight_total\":").append(ledger.inFlight());
+        body.append(",\"request_ledger_key_reused_total\":").append(ledger.keyReused());
+        body.append(",\"request_ledger_takeovers_total\":").append(ledger.takeovers());
+
         // RDR-223 Phase 3 Step 2 (bead nexus-z0o2p.24), [additive]: requests the ownerless-write
         // check refused (enforce) or let through and counted (log-only), since boot, plus the mode
         // this process runs. A log-only run's reader asks "did anything write ownerless?" here.

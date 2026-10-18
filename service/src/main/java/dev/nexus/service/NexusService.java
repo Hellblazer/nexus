@@ -531,6 +531,13 @@ public final class NexusService {
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
 
+        // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
+        // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
+        var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
+        var requestsCtx = server.createContext("/v1/requests",
+                new dev.nexus.service.http.RequestHandler(requestLedger));
+        requestsCtx.getFilters().addAll(authFilter);
+
         // /v1/memory/* — memory endpoints
         var memCtx = server.createContext("/v1/memory", new MemoryHandler(memoryRepo));
         memCtx.getFilters().addAll(authFilter);
