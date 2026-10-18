@@ -1849,6 +1849,10 @@ _SHARED_CONFIG_WRITES = [
     "git config --worktree -- --global user.name x",
     "git config --worktree -- --unset user.name",
     "git config -- user.name x",
+    # A trailing `--` is the VALUE: git writes `--` into the key (core.hooksPath
+    # becomes `--`), so a key before it is a write, not a read.
+    "git config user.name --",
+    "git config core.hooksPath --",
     # nexus-13wz1 round 2: `\_` is a blank to `env -S`; a doubled backslash in a
     # double-quoted string for a shell runner is one to the far shell.
     "env -S'git" + BS + "_config" + BS + "_--global" + BS + "_user.name" + BS + "_x'",
@@ -2258,6 +2262,26 @@ def _env_s_window_cmd(between: int) -> str:
     pairs, then one assignment when odd) stand between `env` and `-S`."""
     words = ["-u", "V"] * (between // 2) + (["X=1"] if between % 2 else [])
     return "env " + " ".join(words) + " -S'git config' user.name x"
+
+
+def _env_chdir_window_cmd(between: int, primary: pathlib.Path) -> str:
+    """`env <between words> -C '<primary>' git config --worktree user.name x`."""
+    words = ["-u", "V"] * (between // 2) + (["X=1"] if between % 2 else [])
+    return "env " + " ".join(words) + f" -C '{primary}' git config --worktree user.name x"
+
+
+def test_the_twelve_word_window_of_env_chdir_is_a_pinned_limit(shared_repo, linked_worktree):
+    """nexus-13wz1 confirmation, a LIMIT: `env -C DIR` / `--chdir` withdraws the
+    linked-worktree `--worktree` exemption only within twelve words after `env`
+    (`_ENV_CHDIR_RE`), the same bound as the `env -S` reach. Twelve deny,
+    thirteen pass; moving the bound breaks here and the PENDING_RELEASE limit
+    moves with it."""
+    inside = [_env_chdir_window_cmd(12, shared_repo)]
+    outside = [_env_chdir_window_cmd(13, shared_repo)]
+    assert _not_denied(inside, linked_worktree) == [], "a write inside the window must deny"
+    assert _denied_among(outside, linked_worktree) == [], (
+        "the window grew or moved; update the limit in PENDING_RELEASE.md with it"
+    )
 
 
 def test_the_twelve_word_window_of_the_dashed_runner_and_env_s_reads_is_a_pinned_limit(
