@@ -210,6 +210,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -281,6 +282,28 @@ _LEASE_FORMAT_VERSION: int = 1
 #: lease itself -- the lock guards only the miss-then-mint critical section,
 #: never a read.
 _MINT_LOCK_PREFIX: str = "data_token_mint_lock."
+
+#: Exact shape of a mint-lock file name: the prefix plus the FULL 64-hex
+#: sha256 :func:`_lease_key` produces. The reaper (nexus-ndfc1) touches a
+#: directory entry only on a full match, so a stray backup suffix, a short
+#: hash or the sibling ``data_token_lease.*`` family can never be removed
+#: by it.
+_MINT_LOCK_NAME_RE: re.Pattern[str] = re.compile(re.escape(_MINT_LOCK_PREFIX) + r"[0-9a-f]{64}")
+
+#: A mint lock unused for this long is reap-eligible (nexus-ndfc1). One lock
+#: file exists per (host:port, tenant) ever minted against, and a local
+#: engine takes a random port per boot, so they otherwise accumulate for
+#: ever (82 on one laptop). Seven days: far longer than any mint's retry
+#: wall or an engine's life between mints, short enough to bound the
+#: directory. "Unused" is the file's mtime, which :func:`_open_mint_lock`
+#: refreshes on every mint that reaches the lock (flock itself never
+#: changes it).
+_MINT_LOCK_STALE_AFTER_S: float = 7 * 24 * 3600.0
+
+#: Most files one mint may remove (nexus-ndfc1): the reap runs inline on
+#: the mint path, so its cost is capped. A backlog drains over several
+#: mints. At most ``4 * K`` held-or-failing candidates are tried per call.
+_MINT_LOCK_REAP_MAX_PER_MINT: int = 8
 
 #: Poll interval while a non-blocking flock acquire attempt is retried
 #: (nexus-nnr26) -- mirrors nexus.db.t1._lock_guarded_mint_or_borrow's
@@ -378,6 +401,159 @@ class DataTokenMintError(RuntimeError):
     using a stale/static token — a half-provisioned install (bad or revoked
     credential, unreachable endpoint, cross-tenant 403) has to surface.
     """
+
+
+def _open_mint_lock(lock_path: Path) -> tuple[int, bool]:
+    """Open (creating if absent) the mint lock file and mark it used.
+
+    Returns ``(fd, created)``; ``created`` is True only for the call that
+    brought the file into being (``O_EXCL``), which is the one moment worth
+    attributing (nexus-28bzt). The mtime is refreshed on a REUSE so
+    :func:`_reap_stale_mint_locks` measures time since last use, not since
+    first creation; that touch is best-effort and never fails the mint.
+    """
+    flags = os.O_WRONLY | os.O_CREAT
+    mode = 0o600
+    try:
+        return os.open(str(lock_path), flags | os.O_EXCL, mode), True
+    except FileExistsError:
+        fd = os.open(str(lock_path), flags, mode)
+    try:
+        os.utime(str(lock_path))
+    except OSError:
+        pass
+    return fd, False
+
+
+def _home_matches_pwd_home() -> bool | None:
+    """Whether ``$HOME`` is the account's real home (pwd database), or None
+    when that cannot be asked (Windows, or a lookup failure)."""
+    try:
+        import pwd  # its ImportError arm IS the non-POSIX branch
+
+        real = pwd.getpwuid(os.getuid()).pw_dir
+        home = os.environ.get("HOME")
+        if not home:
+            return False
+        return os.path.realpath(home) == os.path.realpath(real)
+    except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+        return None
+
+
+def _parent_process_name() -> str | None:
+    try:
+        from nexus.session import _command_name_of
+
+        return _command_name_of(os.getppid()) or None
+    except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+        return None
+
+
+def _log_mint_lock_created(base_url: str, lock_path: Path, config_dir: Path) -> None:
+    """One info event when a mint lock file is first created (nexus-28bzt).
+
+    Lets the next stray ``data_token_mint_lock.*`` in a directory that
+    should not hold one be traced to a process. Never carries a token or
+    a credential: endpoint is ``host[:port]`` only.
+    """
+    try:
+        _log.info(
+            "data_token_mint_lock_created",
+            pid=os.getpid(),
+            ppid=os.getppid(),
+            parent_name=_parent_process_name(),
+            nexus_config_dir=os.environ.get("NEXUS_CONFIG_DIR"),
+            config_dir=str(config_dir),
+            home_matches_pwd_home=_home_matches_pwd_home(),
+            endpoint=_host(base_url),
+            lock_file=lock_path.name,
+        )
+    except Exception:  # noqa: BLE001 -- attribution must never fail a mint
+        pass
+
+
+def _reap_stale_mint_locks(
+    config_dir: Path,
+    *,
+    keep: Path | None = None,
+    now: float | None = None,
+    max_removals: int = _MINT_LOCK_REAP_MAX_PER_MINT,
+) -> int:
+    """Remove mint-lock files unused for :data:`_MINT_LOCK_STALE_AFTER_S`
+    and not currently held (nexus-ndfc1). Returns the number removed.
+
+    Called inline at mint time, never from a background thread. Never
+    raises: every failure is a ``debug`` log and the file is left alone.
+
+    A file is touched only when its name matches
+    :data:`_MINT_LOCK_NAME_RE` exactly and it is a regular file, never
+    ``keep`` (the caller's own lock). "Not held" is established with the
+    module's own lock primitive: open without creating, take a
+    NON-BLOCKING exclusive lock, and skip the file on contention. The
+    mtime is re-read from the locked descriptor and the unlink happens
+    while the lock is still held. On Windows the open handle makes the
+    unlink fail, so nothing is reaped there (logged, harmless).
+
+    Residual race: a process that opened the file just before the unlink
+    and locks it after sees an unlinked inode, so it and a later creator
+    could both mint once. That is the pre-nnr26 behaviour (a duplicate
+    mint, absorbed by the rate limiter's burst), not a correctness loss,
+    and the window is the gap between a mint's open and its mtime touch.
+
+    The sibling ``data_token_lease.*`` family is deliberately not reaped
+    here: it carries tokens, has no lock to probe, and its own expiry
+    check is the reader's job.
+    """
+    removed = 0
+    try:
+        cutoff = (time.time() if now is None else now) - _MINT_LOCK_STALE_AFTER_S
+        candidates: list[Path] = []
+        with os.scandir(config_dir) as it:
+            for entry in it:
+                if not _MINT_LOCK_NAME_RE.fullmatch(entry.name):
+                    continue
+                if keep is not None and entry.name == keep.name:
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                        continue
+                except OSError:
+                    continue
+                candidates.append(Path(entry.path))
+    except Exception as exc:  # noqa: BLE001 -- the reap must never reach the mint
+        _log.debug("data_token_mint_lock_reap_scan_failed", error=str(exc))
+        return 0
+
+    for path in candidates[: max_removals * 4]:
+        if removed >= max_removals:
+            break
+        fd: int | None = None
+        try:
+            fd = os.open(str(path), os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: non-blocking held-probe for the stale mint-lock reaper (nexus-ndfc1), not a lifecycle election
+            except BlockingIOError:
+                continue  # held by a live process: never reaped
+            try:
+                if os.fstat(fd).st_mtime >= cutoff:
+                    continue  # touched since the scan
+                os.unlink(str(path))
+                removed += 1
+            finally:
+                _locking.unlock_fd(fd)  # lifecycle-gate-allow: release the reaper's held-probe lock (nexus-ndfc1)
+        except Exception as exc:  # noqa: BLE001 -- one bad file must not stop the rest or the mint
+            _log.debug("data_token_mint_lock_reap_failed", file=path.name, error=str(exc))
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    if removed:
+        _log.debug("data_token_mint_lock_reaped", removed=removed)
+    return removed
 
 
 def _host(url: str) -> str:
@@ -1061,7 +1237,7 @@ class DataTokenManager:
         try:
             make_user_dir(config_dir)
             lock_path = _data_token_mint_lock_path(base_url, tenant, config_dir)
-            lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+            lock_fd, lock_created = _open_mint_lock(lock_path)
         except OSError as exc:
             _log.warning(
                 "data_token_mint_lock_unavailable", tenant=tenant, endpoint=_host(base_url), error=str(exc),
@@ -1072,6 +1248,12 @@ class DataTokenManager:
                 "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
             )
             return fresh
+
+        if lock_created:
+            _log_mint_lock_created(base_url, lock_path, config_dir)
+        # nexus-ndfc1: opportunistic, bounded, inline, never raises. Our own
+        # lock was just opened and touched, so it is never a candidate.
+        _reap_stale_mint_locks(config_dir, keep=lock_path)
 
         deadline = time.monotonic() + self._lock_wait_ceiling_seconds
         try:

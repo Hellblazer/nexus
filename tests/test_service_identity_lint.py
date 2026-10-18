@@ -46,6 +46,8 @@ EXEMPT: dict[tuple[str, str], int] = {
     ("src/nexus/daemon/installer.py", "_launchd_loaded_now"): 1,
     # pwd.getpwuid(os.getuid()): behind `import pwd`, whose ImportError arm IS the non-POSIX branch.
     ("src/nexus/db/onnx_model_root.py", "_home_base"): 1,
+    # Same shape, for the mint-lock creation log (nexus-28bzt): does $HOME match the account's pwd home.
+    ("src/nexus/db/data_token.py", "_home_matches_pwd_home"): 1,
 }
 
 #: Non-vacuity floor: files the sweep must read (the wheel alone has several hundred).

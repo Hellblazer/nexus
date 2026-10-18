@@ -45,7 +45,7 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("src/nexus/config.py", "_config_write_lock"): 1,
     ("src/nexus/daemon/service_registry.py", "_open"): 1,  # the election flock
     ("src/nexus/daemon/storage_service_daemon.py", "start"): 1,
-    ("src/nexus/db/data_token.py", "_mint_guarded"): 1,
+    ("src/nexus/db/data_token.py", "_open_mint_lock"): 2,  # O_EXCL create, then reuse open
     ("src/nexus/db/t1.py", "_lock_guarded_mint_or_borrow"): 1,
     ("src/nexus/db/t1.py", "clear_t1_session_lease_if_matches"): 1,
     ("src/nexus/upgrade_ladder/rungs/rdr192_manifest_backfill.py", "_cross_process_lock"): 1,
