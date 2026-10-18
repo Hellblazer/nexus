@@ -3,7 +3,7 @@
 
 The engine reports the state of its per-collection partial HNSW indexes under ``per_collection_indexes`` in
 ``GET /v1/status`` (nexus-43ulx.23): the read half's global counts (``valid``, ``invalid``, ``unparsed``,
-``last_read_at``) and, in ``this_engine``, what THIS engine's builder is doing (``builder_state``, ``building``,
+``reindex_leftover`` (nexus-rn1yd), ``last_read_at``) and, in ``this_engine``, what THIS engine's builder is doing (``builder_state``, ``building``,
 ``failing``, ``last_ddl_pass_at``). A downstream rotation check reads ``builder_state`` and ``last_ddl_pass_at`` by
 name, so the cases build the body with exactly those names.
 
@@ -31,7 +31,7 @@ def _iso(delta: timedelta) -> str:
     return (NOW - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: int = 0,
+def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: int = 0, leftover: int = 0,
             building: int | None = 0, failing: int | None = 0,
             last_ddl: timedelta | None = timedelta(minutes=5), expired: bool = False,
             pass_in_progress: bool = False, pass_age: timedelta = timedelta(minutes=2),
@@ -41,7 +41,7 @@ def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: in
     # implies pass_in_progress and a pass_started_at here too.
     in_pass = pass_in_progress or building == 1
     body = {"embedding_mode": "onnx-local", "per_collection_indexes": {
-        "valid": valid, "invalid": invalid, "unparsed": unparsed,
+        "valid": valid, "invalid": invalid, "unparsed": unparsed, "reindex_leftover": leftover,
         "last_read_at": None if last_read is None else _iso(last_read),
         "expired": expired,
         "this_engine": {"builder_state": state, "building": building, "failing": failing,
@@ -138,6 +138,36 @@ def test_failing_null_on_a_non_holder_is_read_as_zero() -> None:
 def test_unparsed_indexes_are_counted_in_the_detail_but_never_warn() -> None:
     r = _row(_status(unparsed=2))
     assert r.ok is True and not r.warn and "2 unparsed" in r.detail
+
+
+def test_a_reindex_leftover_is_counted_in_the_detail_and_does_not_warn_while_a_builder_can_drop_it() -> None:
+    # `ok`: the next pass drops it. `standby`: the peer that holds the builder lock does.
+    for state, extra in (("ok", {}), ("standby", {"building": None, "failing": None, "last_ddl": None})):
+        r = _row(_status(state=state, leftover=2, **extra))
+        assert r.ok is True and not r.warn, state
+        assert "2 reindex leftover" in r.detail, state
+
+
+def test_no_reindex_leftover_adds_nothing_to_the_detail_and_an_older_engine_without_the_key_reads_zero() -> None:
+    assert "reindex leftover" not in _row(_status()).detail
+    body = _status(leftover=0)
+    del body["per_collection_indexes"]["reindex_leftover"]
+    r = _row(body)
+    assert r.ok is True and not r.warn and "reindex leftover" not in r.detail
+
+
+def test_a_reindex_leftover_warns_when_the_builder_is_off_because_nothing_will_drop_it() -> None:
+    r = _row(_status(state="off", leftover=1, building=None, failing=None, last_ddl=None))
+    assert r.ok is False and r.warn is True and not r.fatal
+    assert "1 reindex leftover" in r.detail and "NX_SEARCH_PCI=0" in r.detail
+    assert "NX_SEARCH_PCI=1" in " ".join(r.fix_suggestions)
+
+
+def test_a_dead_builder_still_fails_and_carries_the_reindex_leftover_count() -> None:
+    for state in ("auth_failed", "no_privilege"):
+        r = _row(_status(state=state, leftover=3))
+        assert r.ok is False and not r.warn, state
+        assert "3 reindex leftover" in r.detail, state
 
 
 def test_a_disabled_builder_passes_with_a_note_naming_the_switch() -> None:

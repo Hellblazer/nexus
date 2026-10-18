@@ -4513,7 +4513,8 @@ def _check_per_collection_indexes(
     """nexus-43ulx.24 (RDR-227 Day 2): are the per-collection partial HNSW indexes being built and usable?
 
     Reads the ``per_collection_indexes`` object of ``GET /v1/status`` (nexus-43ulx.23): the read half's global
-    ``valid`` / ``invalid`` / ``unparsed`` counts, and in ``this_engine`` what this engine's builder is doing
+    ``valid`` / ``invalid`` / ``unparsed`` / ``reindex_leftover`` counts, and in ``this_engine`` what this engine's
+    builder is doing
     (``builder_state``, ``failing``, ``last_ddl_pass_at``). The same status body serves the Engine reaper row, so a
     local and a managed engine are judged the same way (HTTP only).
 
@@ -4534,6 +4535,10 @@ def _check_per_collection_indexes(
       completes no pass and would otherwise read green). The period is the engine's ``sweep_seconds`` (600 when an
       older engine does not report it). A holder that has never completed a pass warns on the same threshold, read
       from the engine's ``process_start_time``.
+    * warn, too: ``reindex_leftover`` > 0 (nexus-rn1yd: an invalid ``_ccnew``/``_ccold`` index a failed REINDEX
+      CONCURRENTLY left behind) while ``builder_state`` is ``off``, because nothing will drop it. ``auth_failed`` and
+      ``no_privilege`` already fail and carry the count. On ``ok`` the next pass drops it and on ``standby`` a peer
+      does, so the count is shown and never a warning there.
     * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with none of those; ``off`` passes with a note that
       builds are disabled by ``NX_SEARCH_PCI=0``.
 
@@ -4586,10 +4591,12 @@ def _check_per_collection_indexes(
     now = now or datetime.now(UTC)
     valid, invalid = _status_int(pci.get("valid")), _status_int(pci.get("invalid"))
     unparsed, failing = _status_int(pci.get("unparsed")), _status_int(this_engine.get("failing"))
+    leftover = _status_int(pci.get("reindex_leftover"))
     last_ddl = _instant(this_engine.get("last_ddl_pass_at"))
     ddl_note = ("no DDL pass yet" if last_ddl is None
                 else f"last DDL pass {_span(max(0.0, (now - last_ddl).total_seconds()))} ago")
-    counts = f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+    counts = (f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+              + (f", {leftover} reindex leftover" if leftover else ""))
     expired = pci.get("expired") is True
     building_now = _status_int(this_engine.get("building")) == 1
     pass_in_flight = this_engine.get("pass_in_progress") is True
@@ -4641,10 +4648,16 @@ def _check_per_collection_indexes(
             stalled = uptime is not None and uptime > stall_seconds
             stall_note = ("no DDL pass has completed" if uptime is None
                           else f"no DDL pass has completed in the {_span(uptime)} since the engine started")
-    if expired or warn_invalid or failing or stuck or stalled:
+    # A leftover only matters here when nothing will drop it: the builder is off (auth_failed/no_privilege returned
+    # above with the count in `counts`; ok and standby drop it on a later pass).
+    warn_leftover = leftover if state == "off" else 0
+    if expired or warn_invalid or failing or stuck or stalled or warn_leftover:
         parts = ["router index set expired (no successful catalog read for three sweep periods; every statement "
                  "walks at the serving ef_search until a read succeeds)"] if expired else []
         parts += [f"{n} {what}" for n, what in ((warn_invalid, "invalid"), (failing, "failing")) if n]
+        if warn_leftover:
+            parts.append(f"{warn_leftover} reindex leftover (an invalid _ccnew/_ccold index a failed REINDEX "
+                         "CONCURRENTLY left behind; the builder is off, so nothing drops it)")
         if stuck:
             parts.append(f"a DDL pass has been in flight for {_span(pass_age)}, more than "
                          f"{_span(_PCI_PASS_STUCK_SECONDS)} (hung, or a very long first pass)")
@@ -4660,6 +4673,9 @@ def _check_per_collection_indexes(
                 "event=pci_sweep_set_expired marks a frozen set) and the builder's own lines for the collection "
                 "that fails; event=pci_reconcile_pass shows whether passes complete (ran_to_end, skipped_leaves, "
                 "max_count_ms against the 30 s count timeout)",
+                *(["A reindex leftover is dropped by the builder on its next pass: set NX_SEARCH_PCI=1, or "
+                   "DROP INDEX CONCURRENTLY it by hand (it is the invalid pci_<hash>_ccnew/_ccold index)"]
+                  if warn_leftover else []),
                 "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
             ],
         )]
