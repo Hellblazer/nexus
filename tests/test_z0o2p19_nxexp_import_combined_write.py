@@ -45,7 +45,6 @@ from nexus.errors import BatchWriteFailedError, NexusError
 from nexus.exporter import (
     _document_completion_hash,
     _file_sha256,
-    _prepass_groups,
     export_collection,
     import_collection,
 )
@@ -1179,39 +1178,29 @@ def _pdf_bundle(path: Path, collection: str, docs: list[tuple[str, str | None]])
     _write_nxexp(path, collection, records)
 
 
-def test_the_completion_hash_is_the_documents_one_source_hash_else_unique_to_it() -> None:
-    assert _document_completion_hash("F" * 64, "1.1.1", {"aa"}) == "aa"
-    none = _document_completion_hash("F" * 64, "1.1.1", set())
-    two = _document_completion_hash("F" * 64, "1.1.1", {"aa", "bb"})
-    assert none == two and len(none) == 64 and none != "F" * 64
-    assert _document_completion_hash("F" * 64, "1.1.2", set()) != none
-    assert _document_completion_hash("E" * 64, "1.1.1", set()) != none
+def test_the_completion_hash_is_unique_to_the_file_and_the_document() -> None:
+    h = _document_completion_hash("F" * 64, "1.1.1")
+    assert len(h) == 64 and h != "F" * 64
+    assert _document_completion_hash("F" * 64, "1.1.1") == h            # a re-import stamps the same
+    assert _document_completion_hash("F" * 64, "1.1.2") != h
+    assert _document_completion_hash("E" * 64, "1.1.1") != h
 
 
-def test_the_prepass_keeps_each_groups_source_hashes(tmp_path: Path) -> None:
-    f = tmp_path / "pre.nxexp"
-    coll = "docs__z0o2p19-pre__bge-base-en-v15-768__v1"
-    _pdf_bundle(f, coll, [("a", "hash-a"), ("b", None)])
-    groups = _prepass_groups(f, fallback_source_uri="", fallback_title="", fallback_content_type="pdf",
-                             target_collection=coll)
-    by_title = {g["title"]: g.get("content_hashes", []) for g in groups.values()}
-    assert by_title == {"a": ["hash-a"], "b": []}
-
-
-def test_an_imported_bundles_pdfs_keep_their_own_hashes_and_are_not_joined_as_same_as(
+def test_an_imported_bundles_pdfs_get_keys_of_their_own_and_are_not_joined_as_same_as(
     t2_service_env, tmp_path,
 ) -> None:
     """The bundle's sha256 was stamped as every document's index_content_hash, so after nexus-utkop
-    (same-as keyed on it) every pdf of one bundle would join. Two distinct PDFs and one with no
-    source hash come out with three different keys, none the bundle's, and the linker joins none."""
+    (same-as keyed on it) every pdf of one bundle would join. Three PDFs, two of them carrying the
+    SAME chunk content_hash (which the import must not trust as a document key), come out with three
+    different keys, none the bundle's and none a chunk's, and the linker joins none."""
     from nexus.catalog.link_generator import generate_pdf_corpus_links  # noqa: PLC0415 — this test only
 
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
     dst = "docs__z0o2p19-8hhbk__bge-base-en-v15-768__v1"
     f = tmp_path / "pdfs.nxexp"
-    ha, hb = _chash("8hhbk file a"), _chash("8hhbk file b")
-    _pdf_bundle(f, dst, [("a", ha), ("b", hb), ("c", None)])
+    ha = _chash("8hhbk file a")
+    _pdf_bundle(f, dst, [("a", ha), ("b", ha), ("c", None)])
 
     result = import_collection(db=client, input_path=f, target_collection=dst)
     assert result["imported_count"] == 3, result
@@ -1219,8 +1208,8 @@ def test_an_imported_bundles_pdfs_keep_their_own_hashes_and_are_not_joined_as_sa
     entries = {n: reader.by_source_uri(f"file:///8hhbk/{dst}/{n}.pdf") for n in "abc"}
     assert all(e is not None and e.index_state == "complete" for e in entries.values()), entries
     keys = {n: e.index_content_hash for n, e in entries.items()}
-    assert keys["a"] == ha and keys["b"] == hb, keys
-    assert keys["c"] not in (ha, hb, _file_sha256(f)) and len(keys["c"]) == 64, keys
+    assert len(set(keys.values())) == 3, keys
+    assert not set(keys.values()) & {ha, _file_sha256(f)}, keys
     tumblers = {str(e.tumbler) for e in entries.values()}
     writer = make_catalog_writer()
     try:

@@ -166,8 +166,10 @@ class _Doc:
 class MultiDocumentImportWriter:
     """Write several documents page by page. See the module docstring.
 
-    *cat* is a catalog writer. *content_hash* stamps the fence and the completion (any stable,
-    non-empty identity of this run's source; the import uses a hash of the file). *embedding_model*
+    *cat* is a catalog writer. *content_hash* stamps the fence, and the completion of any document
+    registered without its own ``completion_hash`` (any stable, non-empty identity of this run's
+    source; the import uses a hash of the file for the fence and each document's own hash for its
+    completion, nexus-8hhbk). *embedding_model*
     is required as soon as any chunk carries an ``embedding``. With *defer_completion* the writer never
     stamps a document with a data request: the caller does, with :meth:`complete_documents`, after its
     post-store hooks. *force_re_embed* makes every payload

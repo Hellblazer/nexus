@@ -670,6 +670,18 @@ def test_a_deferred_completion_stamps_each_documents_own_hash():
     assert {d: h for d, (h, _n) in final.items()} == {"1.1.1": "own-1", "1.1.2": _H}
 
 
+def test_the_stamp_that_rides_the_last_trailing_sweep_carries_the_documents_own_hash():
+    """The sweep-rest path (a drop list over the cap) stamps on its last trailing sweep."""
+    dropped = [_c(1000 + i) for i in range(650)]
+    cat = FakeCat(prior={"1.1.1": dropped})
+    w = _writer(cat)
+    w.register_document("1.1.1", total_rows=2, max_position=1, completion_hash="own-1")
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2)))}, {_c(2): _chunk(_c(2))})
+    appends = [c for op, c in cat.calls if op == "append_many"]
+    assert [a["complete"] for a in appends] == [None, None, {"1.1.1": ("own-1", 2)}]
+
+
 def test_registering_again_with_another_completion_hash_is_refused():
     w = _writer(FakeCat())
     w.register_document("1.1.1", total_rows=1, max_position=0, completion_hash="own-1")
