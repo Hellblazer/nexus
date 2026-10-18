@@ -85,10 +85,10 @@ collection onto a new model without re-indexing it from source.
 
 #### Gap 1: One engine holds one embedder family per boot
 
-`Main.java:238` reads the key once. When it is set, `Main.java:251-273` builds
-Voyage-only routers (`:258-259`) and the Voyage reranker (`:267-271`); otherwise
-`Main.java:274-331` builds bge-only routers (`:286`, `:310-315`) and the
-cross-encoder reranker (`:323-324`). The Voyage router's dispatch table has no bge
+`Main.java:243` reads the key once. When it is set, `Main.java:256-278` builds
+Voyage-only routers (`:263-264`) and the Voyage reranker (`:273-276`); otherwise
+`Main.java:279-342` builds bge-only routers (`:297`, `:321-326`) and the
+cross-encoder reranker (`:334-335`). The Voyage router's dispatch table has no bge
 entry (`EmbedderRouter.java:149-159`) and the keyless table has no Voyage entry
 (`EmbedderRouter.java:87-101`). `resolveEmbedderStrict`
 (`EmbedderRouter.java:543-559`) looks up the collection's catalog row by its
@@ -103,9 +103,9 @@ return the other family's hits.
 
 #### Gap 2: The key does not reach the engine by default
 
-The supervisor (`storage_service_daemon.py:1544-1590`) passes a configured key
+The supervisor (`storage_service_daemon.py:1538-1595`) passes a configured key
 only when `local.embed_model` names a Voyage model or records no choice at all
-(the guard is `:1565`, the credential lookup `:1573`). That guard (nexus-r5f3c)
+(the guard is `:1575`, the credential lookup `:1583`). That guard (nexus-r5f3c)
 exists because of Gap 1: a key flipped the engine Voyage-only and broke the
 user's bge collections.
 
@@ -120,7 +120,7 @@ half (the r5f3c guard) is.
 #### Gap 3: The profile has no input for choosing between two available models
 
 The engine seeds the embedding profile from its posture on every boot
-(`Main.java:333-350`, calling `seedEmbeddingProfile` at
+(`Main.java:345-361`, calling `seedEmbeddingProfile` at
 `EmbedderRouter.java:264-272`, which reads `contentTypeModelTokens` at
 `EmbedderRouter.java:227-238` and upserts with ON CONFLICT DO UPDATE at
 `:356-378`). A keyed boot names the Voyage models, a keyless boot names bge-768.
@@ -169,7 +169,7 @@ outbound paths in the engine:
 - **Path 1.** `HttpsSchemeHandler` (`HttpsSchemeHandler.java:45-48`, redirects followed),
    registered unconditionally for `POST /v1/vectors/resolve`
    (`NexusService.java:648`, `:654`): fetches any caller-supplied `https` URI.
-   Sam ruled it removed in every mode (nexus-3t0jv, landing ahead of this RDR).
+   Sam ruled it removed in every mode (nexus-3t0jv, c143a27ab, on develop).
 - **Paths 2 to 4.** `VoyageEmbedder` (`:309`), `CceEmbedder` (`:359`) and `VoyageReranker`
    (`:152`), each to `api.voyageai.com` (URL constants `VoyageEmbedder.java:101`,
    `CceEmbedder.java:115`, `VoyageReranker.java:63`), built only when keyed.
@@ -179,7 +179,7 @@ outbound paths in the engine:
    `CrossEncoderReranker`, `OnnxEmbedder`): a call to the cloud instance-metadata
    address at every tokenizer build, and a native-library download on GPU hosts.
    Library code, not visible to a main-source scan (210-research-10; not re-read
-   here). Both are closed by nexus-17jvq (2416ce891), which is not on develop.
+   here). Both are closed by nexus-17jvq (2416ce891, on develop).
 - **Path 8.** JDBC to `NX_DB_URL`: the pool, `PciBuilderSession.java:243`,
    `BackendReaper.java:122`, `PoolerModeCheck.java:131`.
 
@@ -230,7 +230,7 @@ groups that decide something, by consequence:
   `_find_dimension_mismatched_collections` (`:664`) lists every collection whose
   name declares another dimension, `nx collection prune --yes` (`prune_cmd`,
   `:725`) deletes them, and the doctor's dimension-orphan row reuses the finder
-  and recommends that prune (`health.py:8224-8275`). Under `voyage`, every served
+  and recommends that prune (`health.py:8259-8311`). Under `voyage`, every served
   bge collection would be listed and deleted. It is already wrong today in one
   case: a keyless engine lists every Voyage collection as an orphan, although a
   key would serve it.
@@ -248,11 +248,11 @@ groups that decide something, by consequence:
 - **Remedy and display text.** `errors.py:258-261`, `search_engine.py:1972-1974`,
   `mcp/core.py:3928`, `http_vector_client.py:1592`,
   `db/http_engine_status.py:134`, `commands/doctor.py:3745-3800`,
-  `health.py:8371`.
+  `health.py:8406`.
 - **Gates.** `tests/e2e/cloud-client-path-gate.sh:705` asserts the mode is one
   of the two values.
 - **Engine.** `modeName`, the refusal text (`EmbedderRouter.java:507-590`), and
-  `local_embed_activity`, wired only in the keyless branch (`Main.java:309`).
+  `local_embed_activity`, wired only in the keyless branch (`Main.java:320`).
 
 A pattern that already works for two families exists:
 `verify_voyage_capability` (`upgrade_ladder/provisioning.py:171-218`) reads
@@ -280,7 +280,7 @@ client although the engine would accept it.
 | RDR-157 | Origin | States the local-engine topology invariant. The nexus-umm29 carve-out amends it (landed f7cae33ec); this RDR adds the guard that keeps the carve-out bounded (Gap 5). |
 | RDR-188 | Precedent | Moved all Voyage traffic, embed and rerank, into the engine and made the key engine-bootstrap material only. This RDR keeps that: the client still never calls Voyage. |
 | RDR-109 | Origin | Honest local-mode naming introduced the single-name collection resolution that Gap 4 changes. |
-| RDR-223 | Precedent and constraint | Its ownership guard, enforced on local engines (`storage_service_daemon.py:1489`), refuses any chunk write whose chash has no live manifest row in the target. It deleted staging. Its combined write (`CombinedWriteService`, `CatalogRepository.writeManifestMany`) writes a document's chunks and manifest rows in one transaction; the re-embed (Phase 6) moves documents through that primitive and needs no exception to the guard. |
+| RDR-223 | Precedent and constraint | Its ownership guard, enforced on local engines (`storage_service_daemon.py:1494`), refuses any chunk write whose chash has no live manifest row in the target. It deleted staging. Its combined write (`CombinedWriteService`, `CatalogRepository.writeManifestMany`) writes a document's chunks and manifest rows in one transaction; the re-embed (Phase 6) moves documents through that primitive and needs no exception to the guard. |
 | RDR-225 | Constraint | Chunks are partitioned by model, and every seeded model has a partition (vectors-030 `:703-713`). The manifest-to-chunk foreign key includes the model (vectors-030 `:1017-1021`). It states (rdr-225:554): "Cross-model migration registers a new collection under the target model. There is no in-place re-embed, and none is added." The re-embed here copies into a new sibling and so agrees. |
 | RDR-192 | Constraint | live(c) decides when moved chunks become visible, and the reaper's grace and floor decide what happens to the source's chunks after the move (Technical Design, re-embed section). |
 | RDR-227 | Adjacent (closed) | Its reconciler builds a per-collection index for any live, unsuperseded collection above its row threshold and drops it when `superseded_by` is set (rdr-227:366-370, :418-428). A re-embed target therefore gets its index while the job runs, and the source's index goes at supersede. No change needed. |
@@ -313,14 +313,14 @@ init keep-voyage fix goes ahead, alone.
   Latest engine tag at this revision: `engine-service-v0.1.160` (2026-10-11).
 - bge-768: `Bge768Embedder`, ONNX runtime, admission-controlled by one
   process-wide `LocalOnnxAdmission` shared by the document and query routers and
-  the cross-encoder reranker (`Main.java:303-324`). Its constructor checks the
+  the cross-encoder reranker (`Main.java:314-335`). Its constructor checks the
   model and tokenizer files and a size floor, and throws `IllegalStateException`
   before touching ONNX runtime (`Bge768Embedder.java:226-255`).
 - Voyage: `VoyageEmbedder`, `CceEmbedder`, `VoyageReranker`. Batches up to 1,000
   inputs per request under a token budget (`VoyageEmbedder.java:124`).
 - The cloud engine has no ONNX model on disk. Constructing an ONNX session on a
   missing file segfaults rather than throws (conexus-qcn, comment at
-  `Main.java:252-257`), so the cloud path must never construct one.
+  `Main.java:257-262`), so the cloud path must never construct one.
 - Wire changes: a change visible on the wire records an entry in
   `docs/wire-contract-pending.md`, checked by `scripts/check_wire_contract_pairing.py`.
 
@@ -351,8 +351,8 @@ A second pass settled the questions the first left open:
 
 The spikes ran on local branches (`spike/nexus_911-rdr210-copy-cutover` and
 `spike/nexus_911-rdr210-dual-native`), not on develop.
-Every cited line was re-read against the code of 42382fa3d (Provenance names the
-three passes); where a record and the code disagree,
+The cited lines were re-read at the Phase 1 Step 1 base (develop 0b2ec059b, after the
+rebase that moved them; Provenance names the earlier passes); where a record and the code disagree,
 the code is cited and the disagreement is noted.
 
 #### Dependency Source Verification
@@ -533,7 +533,7 @@ the code is cited and the disagreement is noted.
   1901 MB after one 64-chunk embed and one 60-candidate rerank, within
   run-to-run noise (bge-only range 1688 to 1867). A keyed boot with no bge files
   skips bge, never loads ONNX runtime, and boots at 161 MB native.
-- **Documented**: posture is chosen once, from key presence (`Main.java:238, 251`).
+- **Documented**: posture is chosen once, from key presence (`Main.java:243, 256`).
 - **Documented**: the profile is rewritten on every boot from the posture
   (`EmbedderRouter.java:264-272`, `:356-378`).
 - **Documented**: a request that names collections of two models is refused by
@@ -686,7 +686,7 @@ use, carrying the document's aspects and highlights with it.
    `binary_lifecycle.py:86-89`, "Reads the sidecar written by ``install_binary``
    (version, tag, sha256"; the tag is written at `binary_install.py:870`), which
    the supervisor does not read today. Below that tag, or with no receipt, the
-   nexus-r5f3c rule (`storage_service_daemon.py:1544-1572`) stands, because
+   nexus-r5f3c rule (`storage_service_daemon.py:1554-1582`) stands, because
    against an older engine the key still flips it Voyage-only (author's
    decision; inferred, not read: a `NEXUS_SERVICE_JAR` launch has no receipt).
    The pin alone does not hold this: raising `REQUIRED_ENGINE_VERSION`
@@ -697,7 +697,7 @@ use, carrying the document's aspects and highlights with it.
    the supervisor may spawn an older binary. The change still lands in the client
    release that raises `REQUIRED_ENGINE_VERSION` to the Phase 2 engine tag, never
    before; the local supervisor runs "the engine this client was built and gated
-   with" (`storage_service_daemon.py:1483`). That constant is also the managed
+   with" (`storage_service_daemon.py:1488`). That constant is also the managed
    floor ("Only the managed-cloud handshake ... still reads this as a floor
    (``deployed >= this``)", `engine_version.py:57-59`; a lower deployed version
    raises `ManagedServiceIncompatible`, `managed_endpoint.py:244`), so the dual
@@ -713,8 +713,8 @@ use, carrying the document's aspects and highlights with it.
    `VoyageReranker`, and only when keyed, optionally through the operator's proxy
    (`EgressProxy`); and to its database at `NX_DB_URL` over JDBC. Nothing else.*
    That covers census paths 2 to 5 and 8 (Gap 5). Path 1 is removed in every mode
-   (Sam, 2026-10-17; nexus-3t0jv, landing ahead). Paths 6 and 7 are closed by
-   nexus-17jvq, which must land before the guard. Two tests hold it:
+   (Sam, 2026-10-17; nexus-3t0jv, on develop). Paths 6 and 7 are closed by
+   nexus-17jvq (on develop). Two tests hold it:
    - **Source census.** A main-source scan, shaped like
      `OwnershipGuardCoverageScan`: strip comments, then every outbound construct
      (`HttpClient.newBuilder`, `HttpClient.newHttpClient`, `openConnection(`,
@@ -724,15 +724,15 @@ use, carrying the document's aspects and highlights with it.
      asserts it found at least as many sites as the allowlist names
      (non-vacuity), and that each Voyage class's URL constant names
      `api.voyageai.com`. It also reads `service/pom.xml` and fails on a Liquibase
-     version of 4.30 or later unless its analytics are configured off. If
-     nexus-17jvq's own scan lands first, this extends it.
+     version of 4.30 or later unless its analytics are configured off. This
+     extends nexus-17jvq's own scan, which is on develop.
    - **Runtime witness.** A child JVM that installs a `URLStreamHandlerFactory`
      refusing any non-`file`/`jar` stream, then builds the bge embedder and the
      cross-encoder (the tokenizer builds) and runs one embed and one rerank. It
      catches library code the source scan cannot see (paths 6 and 7). It does not
      see `java.net.http`, which is why the source census covers `HttpClient`.
 8. **Java comments.** The stale router comments are corrected here, since they
-   describe the router this RDR changes: `Main.java:35-38` (says an ONNX fallback
+   describe the router this RDR changes: `Main.java:37-41` (says an ONNX fallback
    exists when keyed), the class javadoc at `EmbedderRouter.java:33-47`, and the
    rest of T2 [25872] items 1-13 and 22. The non-engine sweep landed in f7cae33ec.
 9. **Re-embed to the profile default.** See the next section.
@@ -1089,7 +1089,7 @@ carries what every new tenant table does, although only a local engine runs the
 job: ENABLE and FORCE row level security with the tenant isolation policy (the
 shape of `tuples-001-baseline.xml:102`, "ALTER TABLE nexus.tuples FORCE ROW
 LEVEL SECURITY;"); entries in the doctor's RLS canary (`_RLS_TENANT_TABLES`,
-`health.py:3664`) and its fixture ("Must be kept in sync with
+`health.py:3699`) and its fixture ("Must be kept in sync with
 _RLS_TENANT_TABLES in health.py", `tests/test_health_service_checks.py:1062`);
 the native-image jOOQ record count (`EXPECTED_RECORD_TYPES = 113`,
 `JooqRecordReflectionFeatureTest.java:270`); the changelog family's Liquibase
@@ -1105,7 +1105,7 @@ that no backfill is wanted).
 The job is local only (Sam, 2026-10-17, gate round 1). The runner starts and the
 job routes accept requests only when the supervisor marks the engine local at
 spawn, with a variable it sets the way it sets `NX_SERVICE_PARENT_DEATH_EXIT`
-(`storage_service_daemon.py:1479`, read at `Main.java:423`); otherwise the routes
+(`storage_service_daemon.py:1484`, read at `Main.java:434`); otherwise the routes
 refuse, naming local mode. The verb refuses unless `is_local_mode()`
 (`config.py:939`). Inferred, not read: that no managed deployment sets that
 variable; Phase 6 Step 2 names it and checks.
@@ -1201,7 +1201,7 @@ the verb reports as that job; pause, resume and abort set a state, and their
 self-transitions are idempotent (state table), so a resend converges.
 
 **Monitored.** `GET /v1/vectors/reembed/status` returns every job row for the
-tenant. `nx doctor` extends the existing off-profile row (`health.py:8436-8458`,
+tenant. `nx doctor` extends the existing off-profile row (`health.py:8471-8493`,
 which today suggests `nx collection reindex`) to suggest `re-embed --all`, and
 adds one row for running or failed jobs, not-applicable when the table is empty.
 
@@ -1243,7 +1243,7 @@ takes the same flag to raise it (author's decision).
 | Client reference cascade | `remap_collection_references` (`collection_rename.py:174`) | Delete: no production caller, and it would violate `topic_assignments_chunk_fk` (210-research-14) |
 | Re-embed verb | `nx collection re-embed` (`commands/collection.py:1659`) | Extend: `--all`, cross-model `--to` starts the job, job controls |
 | Job table and runner | none; scheduler at `NexusService.java:686-729` | New Liquibase changeset for the tenant tables `reembed_jobs` and `reembed_job_moves`, with the new-tenant-table obligations (Managed); runner on the existing scheduler |
-| Doctor rows | off-profile row (`health.py:8436-8458`) | Extend; one new job row |
+| Doctor rows | off-profile row (`health.py:8471-8493`) | Extend; one new job row |
 | Keyed gate | none (`rdr195-voyage-mvv.sh` deleted) | New script, a fourth battery leg |
 
 ### Decision Rationale
@@ -1408,11 +1408,11 @@ calibrated order and warns (Technical Design 12).
 - [x] The init keep-voyage fix landed on develop (nexus-ddmfg,
   c03352a2a..6cd90aab5).
 - [x] Open Questions 1-3 decided (Sam, 2026-10-17).
-- [ ] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv,
-  claimed by another session) before Phase 2 Step 6.
-- [ ] The DJL instance-metadata and native-download paths closed (nexus-17jvq,
-  2416ce891, not on develop) before Phase 2 Step 6, whose runtime witness would
-  otherwise fail on them.
+- [x] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv,
+  c143a27ab, on develop; the bead stays open until the next engine tag).
+- [x] The DJL instance-metadata and native-download paths closed (nexus-17jvq,
+  2416ce891, on develop; the bead stays open until the next engine tag), so
+  Phase 2 Step 6's runtime witness does not fail on them.
 
 ### Minimum Viable Validation
 
@@ -1455,12 +1455,20 @@ sends the RDR back to planning.
   byte budget a pre-`dual` client would use (Technical Design 10). **Pass**: the
   same bound as the concurrent-load check. **Fail**: the wire ledger entry for
   `dual` carries a minimum client version instead.
-- **Native-library extraction (nexus-8ool4).** If nexus-8ool4 (7467e0b74,
-  `OrtNativeDir.applyAtBoot` on every boot) has landed by then, a keyed boot with
-  no model files. **Pass**: boot memory within 10% of the spike's 161 MB, and
-  either nothing extracted or the extraction recorded as accepted in the bead.
-  Not applicable while nexus-8ool4 is off develop (no `OrtNativeDir` in main at
-  42382fa3d).
+- **Native-library extraction (nexus-8ool4).** nexus-8ool4 (962a687bd, 7467e0b74)
+  is on develop. `OrtNativeDir.applyAtBoot` (`Main.java:294`) extracts about 16 MB
+  of ONNX runtime libraries under the cache tree and sets `onnxruntime.native.path`,
+  but it runs only in the keyless branch. A keyed bge-profile engine builds the
+  cross-encoder (Technical Design 3) with no such call, so its first rerank would
+  unpack ORT into a random `/tmp` directory. Placement rule, checked here and
+  built in Phase 2 Steps 1 and 4: `applyAtBoot` runs once, before bge or the
+  cross-encoder can touch ORT, in every boot that can build either, and never on
+  the cloud shape (key, no model files). **Pass**: a keyed boot with no model
+  files has boot memory within 10% of the spike's 161 MB and extracts nothing; a
+  keyed boot with the bge files extracts once under the cache tree, a second boot
+  reuses it, and a bge-profile rerank leaves no `onnxruntime-java*` directory in
+  `/tmp`. **Fail**: any extraction on the cloud shape, or an ORT load outside the
+  cache tree.
 
 #### Step 2: Mode string and per-collection decisions
 
@@ -1469,10 +1477,10 @@ and byte budget by collection model, the memo and the gate accept `dual`, remedy
 text by collection family, `embedding_models` as the authority, and the write
 model read from `local_embed_profile()` (Technical Design 2), added here;
 `local_embed_model_is_voyage()` and its callers outside the write model
-(`init.py:100`, `storage_service_daemon.py:1565`) are unchanged. The new
+(`init.py:100`, `storage_service_daemon.py:1575`) are unchanged. The new
 function is safe against today's engines: with no choice recorded and a
 persisted key, today's supervisor already passes the key
-(`storage_service_daemon.py:1565` skips it only when a non-Voyage choice is
+(`storage_service_daemon.py:1575` skips it only when a non-Voyage choice is
 recorded, and `get_credential` falls back to `config.yml`, `config.py:1336-1339`),
 so the engine is Voyage-only and Voyage names are what it serves. With an
 env-only key and no choice it answers `bge`, which is what today's write model
@@ -1559,7 +1567,7 @@ collections serve and the other family's get 422 naming it.
 One reranker, chosen by the profile (Technical Design 3); the search route's
 rerank stage dispatches to it for every group. The banner names both families,
 the profile and the reranker; `local_embed_activity` is reported whenever bge is
-built, not only in the keyless branch (`Main.java:309`). **Test**:
+built, not only in the keyless branch (`Main.java:320`). **Test**:
 `StatusHandler` and `VersionHandler` tests for the dual shape; a test that a
 bge-profile engine with a key reranks with the cross-encoder and makes no Voyage
 rerank call; for the degraded boots, that a `voyage` profile with no key reranks
@@ -1577,7 +1585,7 @@ rewritten test itself.
 
 #### Step 6: Egress guard
 
-After nexus-3t0jv and nexus-17jvq are on develop. Add both tests of Technical
+nexus-3t0jv and nexus-17jvq are on develop. Add both tests of Technical
 Design 7: the source census (allowlist with a reason per entry, non-vacuity
 count, Voyage host pin, Liquibase version check) and the child-JVM runtime
 witness. Amend the carve-out wording in RDR-157, RDR-160 and the privacy policy
@@ -1619,7 +1627,7 @@ the first dual tag, or none, withholds the key as r5f3c does today; a test that
 the profile the supervisor passes and the write model the client mints agree
 for all five; a test that fails while
 `REQUIRED_ENGINE_VERSION` is below a named constant for the first dual tag, the
-shape `health.py:6833` already uses for a route floor
+shape `health.py:6868` already uses for a route floor
 (`REQUIRED_ENGINE_VERSION < _TUPLE_ROUTE_FIRST_ENGINE_VERSION`), so the guard's
 relaxation cannot merge ahead of the pin; a doctor test for the degraded-boot row
 against a fake `/version` whose `embedding_models` lacks the profile's family.
@@ -1976,7 +1984,7 @@ The MVV is in scope and executed: its first half is the body of
 `tests/e2e/dual-embedder-gate.sh` (Phase 5 Step 1), a release battery leg; its
 second half is the Phase 6 Step 5 scenarios added to the same script. The init
 keep-voyage fix is out of scope and already on develop (nexus-ddmfg), the https
-fetcher's removal is out of scope and lands ahead (nexus-3t0jv), and so is any
+fetcher's removal is out of scope and already on develop (nexus-3t0jv), and so is any
 change to the managed engine's posture: the cloud boots Voyage-only exactly as
 today. Re-embed on the managed engine is out of scope (Sam, 2026-10-17, gate
 round 1).
@@ -2054,7 +2062,7 @@ and the per-table dispositions.
   `nexus_rdr/210-ca2-spikes-rerank-and-bge-calibration-2026-10-17` (raw spike data)
 - Beads nexus-ddmfg, nexus-umm29, nexus-r5f3c, nexus-35ok4, nexus-vply6,
   nexus-3t0jv, nexus-17jvq, nexus-8ool4
-- `service/src/main/java/dev/nexus/service/Main.java:232-350`
+- `service/src/main/java/dev/nexus/service/Main.java:237-361`
 - `service/src/main/java/dev/nexus/service/vectors/EmbedderRouter.java`
 - `service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java:597-935`
 - `service/src/main/java/dev/nexus/service/db/CatalogRepository.java:5182-5260, 6372-6414, 7873-7990, 8280-8468, 8492, 8804-8823, 9018-9168`
@@ -2064,7 +2072,7 @@ and the per-table dispositions.
 - `service/src/test/java/dev/nexus/service/OwnershipGuardCoverageScan.java`
 - `service/src/main/resources/db/changelog/aspects-001-baseline.xml`, `fk-001-catalog-cross-store.xml`, `taxonomy-014-topics-tenant-unique.xml`, `vectors-030-model-tenant-partition-functions.xml`
 - `tests/catalog/test_collection_scoped_tables_schema_parity.py`
-- `src/nexus/daemon/storage_service_daemon.py:1479-1590`
+- `src/nexus/daemon/storage_service_daemon.py:1484-1595`
 - `src/nexus/commands/init.py:54-118, 759-787`
 - `src/nexus/corpus.py:1213-1500, 2085-2135, 2372-2452`
 - `src/nexus/commands/collection.py:601-760, 1436-1745`
