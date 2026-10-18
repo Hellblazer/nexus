@@ -74,7 +74,7 @@ cc_wait_session_reply "PARENT-NO-STUB" 20 > /dev/null || true
 REPLIES11="$(cc_session_replies || true)"
 grep -q "PARENT-NO-STUB" <<<"$REPLIES11" && parent_denied=1
 
-claude_prompt "Use the Task tool to dispatch the scoped-tool-agent. Description='scope test'. Prompt: 'Run your instructions exactly.'"
+claude_prompt "Use the Agent tool (older builds call it Task; if it is not directly callable, first load it with ToolSearch, query select:Agent) to dispatch the scoped-tool-agent. Description='scope test'. Prompt: 'Run your instructions exactly.'"
 claude_wait 90
 
 # The agent's actual use is the deterministic precondition (STUB_LOG, not self-report).

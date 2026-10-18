@@ -32,7 +32,7 @@ CC_DEBUG_FILE="$TEST_HOME/cc-debug-02.log"; rm -f "$CC_DEBUG_FILE"
 claude_start
 # nexus-qsmc5: reply tokens in pieces, the marker's code absent from the prompt,
 # and the verdict read from the SUBAGENT's own transcript (see scenario 01).
-claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='subagent JSON inject probe'. Prompt for the subagent: 'Do not use any tools. Examine your context, apart from this message. Is the text SUB-JSON-MARKER- immediately followed by a four-character code (no space) anywhere in it? If yes, reply with the word FOUND immediately followed by -02S (no space), then a space, then that whole text including its code. If no, reply with the word NONE immediately followed by -02S (no space).'"
+claude_prompt "Use the Agent tool (older builds call it Task; if it is not directly callable, first load it with ToolSearch, query select:Agent) to dispatch the general-purpose agent, and do not answer the question yourself. Description='subagent JSON inject probe'. Prompt for the subagent: 'Do not use any tools. Examine your context, apart from this message. Is the text SUB-JSON-MARKER- immediately followed by a four-character code (no space) anywhere in it? If yes, reply with the word FOUND immediately followed by -02S (no space), then a space, then that whole text including its code. If no, reply with the word NONE immediately followed by -02S (no space).'"
 cc_wait_subagent_reply "FOUND-02S|NONE-02S" 180 || true
 REPLIES02="$(cc_subagent_replies || true)"
 
