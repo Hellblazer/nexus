@@ -878,6 +878,30 @@ def test_destroying_a_vm_stops_its_deadman(h: Harness) -> None:
     assert "lifetime cap" not in (log.read_text() if log.exists() else "")
 
 
+@_POSIX_ONLY
+def test_stopping_a_deadman_never_wakes_it_even_when_its_sleep_dies_first(h: Harness) -> None:
+    # nexus-knyvj, deterministic: a pkill that lingers after killing gives a sleep-first stop a full second
+    # in which the woken deadman logs its cap line. The fixed stop kills the deadman first and never calls pkill.
+    _exe(h.bin / "pkill", '#!/bin/bash\n/usr/bin/pkill "$@"; rc=$?; sleep 1; exit $rc\n')
+    vm = "nx-mac-run-t9d"
+    assert h.run_host("start", vm).returncode == 0
+    pid = int((h.base / "deadman" / f"{vm}.pid").read_text())
+    assert h.run_host("destroy", vm).returncode == 0
+    deadline = time.monotonic() + 10
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _alive(pid)
+    log = h.base / "logs" / f"{vm}.deadman.log"
+    assert "lifetime cap" not in (log.read_text() if log.exists() else "")
+
+
+@_POSIX_ONLY
+def test_the_launcher_never_shares_an_ssh_control_master() -> None:
+    body = _read(LAUNCH_SH)
+    opts = next(ln for ln in body.splitlines() if ln.startswith("SSH_OPTS=("))
+    assert "-o ControlPath=none" in opts
+
+
 # ---- the guest hop -----------------------------------------------------------------
 
 

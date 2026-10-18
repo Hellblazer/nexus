@@ -104,7 +104,9 @@ out="${out:-${TMPDIR:-/tmp}/$RUN}"
 mkdir -p "$out" || { echo "launch.sh: cannot create $out" >&2; exit 2; }
 [[ -z "$(ls -A "$out")" ]] || { echo "launch.sh: $out is not empty" >&2; exit 2; }
 
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+# ControlPath=none: a ControlPersist master forked by a user's ssh config would inherit fd 8, the hold
+# pipe, and keep it open, so the hold never saw EOF and end_hold waited out its 90 s cap.
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ControlPath=none)
 say() { echo "launch.sh: $(date -u +%H:%M:%S) $*" | tee -a "$out/launch.log"; }
 quiet() { grep -v -i -E 'post-quantum|store now, decrypt later|pq\.html' || true; }
 h() { ssh "${SSH_OPTS[@]}" "$HOST" "$RD/host.sh $*" </dev/null 2>&1 | quiet; return "${PIPESTATUS[0]}"; }
