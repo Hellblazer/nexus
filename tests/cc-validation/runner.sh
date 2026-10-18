@@ -912,6 +912,42 @@ cc_wait_subagent_reply() {
     return 1
 }
 
+# cc_wait_stub_log <fixed-string> [timeout-seconds]: poll $STUB_LOG until a stub call carrying
+# <fixed-string> lands; 0 when it does, 1 at the timeout. A fixed sleep read the log before a slow
+# agent's call arrived (nexus-8t9wu).
+cc_wait_stub_log() {
+    local needle="$1" timeout="${2:-180}" i
+    for i in $(seq 1 $((timeout / 2))); do
+        [[ -s "${STUB_LOG:-}" ]] && grep -qF "$needle" "$STUB_LOG" && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# cc_inline_mcp_verdict <agent_called> <parent_called> <parent_denied> <inventory-file>: scenario
+# 11's reading, one line "PASS <why>" or "FAIL <why>". The inventory the agent wrote tells a
+# server that never loaded (no mcp__stub__ tool in it: the precondition failed) from a model
+# that had the tool and skipped the call (inconclusive), and an agent that never ran at all
+# (no inventory) from both (nexus-8t9wu).
+cc_inline_mcp_verdict() {
+    local agent_called="$1" parent_called="$2" parent_denied="$3" inventory="$4"
+    if [[ "$agent_called" -eq 0 ]]; then
+        if [[ ! -s "$inventory" ]]; then
+            echo "FAIL the dispatched agent never ran its instructions (no tool inventory written): no reading this run"
+        elif ! grep -q '^mcp__stub__' "$inventory"; then
+            echo "FAIL inline mcpServers did not load for the subagent: its inventory has no mcp__stub__ tool (precondition failed)"
+        else
+            echo "FAIL inconclusive — the agent's inventory lists the stub tools but it never called mcp__stub__record: the server loaded and the model skipped the call; no reading this run"
+        fi
+    elif [[ "$parent_called" -eq 1 ]]; then
+        echo "FAIL inline mcpServers LEAKED to parent — parent called the stub too (contradicts documented per-agent scoping; investigate)"
+    elif [[ "$parent_denied" -eq 1 ]]; then
+        echo "PASS inline mcpServers SCOPED to subagent (documented behavior) — agent used the stub, parent explicitly reported PARENT-NO-STUB"
+    else
+        echo "FAIL inconclusive — parent did not call the stub but also did not report PARENT-NO-STUB (model may have ignored the probe); cannot certify scoping this run"
+    fi
+}
+
 # cc_wait_session_reply <ere> [timeout-seconds]: the same for the main session.
 cc_wait_session_reply() {
     local pat="$1" timeout="${2:-180}" i

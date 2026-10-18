@@ -587,7 +587,8 @@ def _helpers() -> str:
              "cc_session_user_text", "cc_nested_dispatch_facts", "cc_reset_transcripts", "cc_save_pane",
              "cc_cmd_hook_finished", "cc_event_context_chars", "cc_injection_reading",
              "cc_expanded_command_has", "cc_wait_user_text", "cc_command_render_check",
-             "cc_claude_version", "cc_note", "_cc_pass", "_cc_fail", "cc_version_check"]
+             "cc_claude_version", "cc_note", "_cc_pass", "_cc_fail", "cc_version_check",
+             "cc_wait_stub_log", "cc_inline_mcp_verdict"]
     return "\n".join(_bash_function(RUNNER, n) for n in names)
 
 
@@ -1110,7 +1111,7 @@ BODY_SCANNED = {"17", "21", "24", "25"}
 SIDE_EFFECT_TOKENS = {"11": {"PARENT-CALL-PROBE"}}
 _PROMPT = re.compile(r'claude_prompt\s+"((?:[^"\\]|\\.)*)"')
 _BODY = re.compile(r"write_(?:skill|command) \"[^\"]+\" /dev/stdin <<'EOF'\n(.*?)\nEOF", re.S)
-_PATTERN_ARG = re.compile(r'(?:poll_for|grep\s+-[A-Za-z]*|cc_wait_(?:subagent|session)_reply)\s+"([^"]+)"')
+_PATTERN_ARG = re.compile(r'(?:poll_for|grep\s+-[A-Za-z]*|cc_wait_(?:subagent_reply|session_reply|stub_log))\s+"([^"]+)"')
 
 
 def _scenario(num: str) -> pathlib.Path:
@@ -1686,6 +1687,47 @@ def test_scenario_11_reads_the_parents_own_text_for_its_denial_token() -> None:
     code = _code(CCV / "scenarios" / "11_agent_inline_mcpservers.sh")
     assert 'capture -60 | grep -q "PARENT-NO-STUB"' not in code
     assert "cc_session_replies" in code and "PARENT immediately followed by -NO-STUB" in code
+
+
+@pytest.mark.parametrize(
+    ("agent_called", "parent_called", "parent_denied", "inventory", "expect"),
+    [
+        (1, 0, 1, "Write\nmcp__stub__record\n", "PASS inline mcpServers SCOPED"),
+        (1, 1, 1, "mcp__stub__record\n", "FAIL inline mcpServers LEAKED"),
+        (1, 0, 0, "mcp__stub__record\n", "FAIL inconclusive — parent did not call"),
+        (0, 0, 1, None, "FAIL the dispatched agent never ran its instructions"),
+        (0, 0, 1, "Write\n", "FAIL inline mcpServers did not load for the subagent: its inventory"),
+        (0, 0, 1, "Write\nmcp__stub__ping\nmcp__stub__record\n", "FAIL inconclusive — the agent's inventory lists the stub"),
+    ],
+)
+def test_scenario_11_verdict_tells_a_skipped_call_from_an_unloaded_server(
+    tmp_path: pathlib.Path, agent_called: int, parent_called: int, parent_denied: int,
+    inventory: str | None, expect: str,
+) -> None:
+    """nexus-8t9wu: live run cc-val-evidence-20261018T214357Z failed 'inline mcpServers did not
+    load' although the agent's inventory listed mcp__stub__*: the server loaded and the model
+    skipped the call. Only an inventory without the stub tools is the precondition failure."""
+    inv = tmp_path / "agent_tools.txt"
+    if inventory is not None:
+        inv.write_text(inventory)
+    r = _run(tmp_path, f'cc_inline_mcp_verdict {agent_called} {parent_called} {parent_denied} "{inv}"')
+    assert r.stdout.strip().startswith(expect), r.stdout + r.stderr
+
+
+def test_scenario_11_waits_for_the_proof_instead_of_a_fixed_sleep() -> None:
+    code = _code(CCV / "scenarios" / "11_agent_inline_mcpservers.sh")
+    assert "cc_inline_mcp_verdict" in code
+    assert "cc_wait_stub_log" in code and "agent-scoped-XYZ-PROOF" in code
+
+
+def test_cc_wait_stub_log_returns_when_the_payload_lands(tmp_path: pathlib.Path) -> None:
+    log = tmp_path / "stub.log"
+    log.write_text("process_launched\nrecord agent-scoped-XYZ-PROOF\n")
+    r = _run(tmp_path, f'STUB_LOG="{log}"; cc_wait_stub_log agent-scoped-XYZ-PROOF 4; echo "rc=$?"')
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    log.write_text("process_launched\n")
+    r = _run(tmp_path, f'STUB_LOG="{log}"; cc_wait_stub_log agent-scoped-XYZ-PROOF 4; echo "rc=$?"')
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
 
 
 def test_cc_subagent_tool_uses_lists_only_subagent_tool_calls(tmp_path: pathlib.Path) -> None:
