@@ -482,7 +482,7 @@ def _home_matches_pwd_home() -> bool | None:
     """Whether ``$HOME`` is the account's real home (pwd database), or None
     when that cannot be asked (Windows, or a lookup failure)."""
     try:
-        import pwd  # its ImportError arm IS the non-POSIX branch
+        import pwd  # noqa: PLC0415 -- POSIX-only; its ImportError arm IS the non-POSIX branch
 
         real = pwd.getpwuid(os.getuid()).pw_dir
         home = os.environ.get("HOME")
@@ -495,7 +495,7 @@ def _home_matches_pwd_home() -> bool | None:
 
 def _parent_process_name() -> str | None:
     try:
-        from nexus.session import _command_name_of
+        from nexus.session import _command_name_of  # noqa: PLC0415 -- paid only on a first lock creation
 
         return _command_name_of(os.getppid()) or None
     except Exception:  # noqa: BLE001 -- attribution must never fail a mint
