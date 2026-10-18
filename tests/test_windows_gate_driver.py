@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._child_process import kill_group, popen_in_group, sigint_default, signal_group
+from tests._child_process import kill_group, popen_in_group, terminal_signals_default, signal_group
 
 REPO: Path = Path(__file__).resolve().parent.parent
 GUEST_DIR: Path = REPO / "tests" / "e2e" / "windows-guest"
@@ -614,13 +614,13 @@ class Harness:
     ) -> subprocess.Popen[str]:
         """The script in a session of its own, so a signal to its process group is a terminal Ctrl-C or hangup.
 
-        SIGINT is reset to the default for the spawn: a suite started with '&' from a
-        non-interactive shell (nohup, a pool launcher) inherits SIGINT=SIG_IGN, the child
-        inherits it across exec, and bash cannot trap a signal ignored on entry. The INT
-        cases then waited out the 60 s fake sleep (nexus-frfeh), which a real terminal's
-        Ctrl-C never meets.
+        SIGINT and SIGHUP are reset to the default for the spawn: a suite started with '&'
+        from a non-interactive shell inherits SIGINT=SIG_IGN, one started under nohup
+        inherits SIGHUP=SIG_IGN, the child inherits both across exec, and bash cannot trap
+        a signal ignored on entry. The INT cases (nexus-frfeh) and then the HUP cases
+        (nexus-ys8a4) waited out the 60 s fake sleep, which a real terminal never meets.
         """
-        with sigint_default():
+        with terminal_signals_default():
             return popen_in_group(
                 [_bash(), str(self.script), *args], env=self._env(verdict, fail_step, env),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,

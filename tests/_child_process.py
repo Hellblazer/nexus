@@ -58,26 +58,33 @@ def group_popen_kwargs() -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def sigint_default() -> Iterator[None]:
-    """Run the body with SIGINT at its default disposition, then put back the prior one.
+def terminal_signals_default() -> Iterator[None]:
+    """Run the body with SIGINT and SIGHUP at their default dispositions, then put back the prior ones.
 
-    A suite started with ``&`` from a non-interactive shell (nohup, a pool launcher) inherits
-    SIGINT=SIG_IGN, and a child inherits it across exec, where bash cannot trap a signal that
-    was ignored on entry (nexus-frfeh). A test that sends the child a SIGINT, or asserts on the
-    disposition, wraps its spawn in this. ``signal.getsignal`` returns ``None`` for a handler
-    not installed from Python and ``signal.signal`` raises ``ValueError`` off the main thread;
-    in either case there is nothing to change or restore and the body runs as it is.
+    A suite started with ``&`` from a non-interactive shell (a pool launcher) inherits
+    SIGINT=SIG_IGN, and one started under ``nohup`` inherits SIGHUP=SIG_IGN. A child inherits
+    both across exec, where bash cannot trap a signal that was ignored on entry (nexus-frfeh
+    for INT, nexus-ys8a4 for HUP). A test that sends the child either signal, or asserts on
+    the disposition, wraps its spawn in this. ``signal.getsignal`` returns ``None`` for a
+    handler not installed from Python and ``signal.signal`` raises ``ValueError`` off the main
+    thread; in either case that signal is left as it is. Windows has no SIGHUP.
     """
-    before = signal.getsignal(signal.SIGINT)
+    restore: list[tuple[signal.Signals, Any]] = []
     try:
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-    except ValueError:
-        before = None
-    try:
+        for sig in (signal.SIGINT, getattr(signal, "SIGHUP", None)):
+            if sig is None:
+                continue
+            before = signal.getsignal(sig)
+            try:
+                signal.signal(sig, signal.SIG_DFL)
+            except ValueError:
+                continue
+            if before is not None:
+                restore.append((sig, before))
         yield
     finally:
-        if before is not None:
-            signal.signal(signal.SIGINT, before)
+        for sig, before in restore:
+            signal.signal(sig, before)
 
 
 def popen_in_group(
