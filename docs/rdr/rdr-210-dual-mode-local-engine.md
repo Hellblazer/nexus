@@ -730,7 +730,14 @@ use, carrying the document's aspects and highlights with it.
      refusing any non-`file`/`jar` stream, then builds the bge embedder and the
      cross-encoder (the tokenizer builds) and runs one embed and one rerank. It
      catches library code the source scan cannot see (paths 6 and 7). It does not
-     see `java.net.http`, which is why the source census covers `HttpClient`.
+     see `java.net.http`, which is why the source census covers `HttpClient`, and
+     the census scans only `service/src/main/java`, so `java.net.http`, raw
+     sockets, DNS or JNI inside a dependency are covered by neither test. The
+     witness runs on a JVM, while the engine ships as a GraalVM native image; the
+     DJL tokenizers library does its own network I/O in native code that a URL
+     factory cannot see. The guard is therefore a source-level check plus a
+     tokenizer-build check, and the documents that cite it say that and no more.
+     The follow-up gaps are bead nexus-3va7p.
 8. **Java comments.** The stale router comments are corrected here, since they
    describe the router this RDR changes: `Main.java:37-41` (says an ONNX fallback
    exists when keyed), the class javadoc at `EmbedderRouter.java:33-47`, and the
