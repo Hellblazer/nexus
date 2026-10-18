@@ -1433,6 +1433,36 @@ class TestCollectionMetadata:
         with pytest.raises(KeyError):
             HttpVectorClient().collection_metadata(self._CONFORMANT)
 
+    @pytest.mark.parametrize("reason, message", [
+        ("unregistered_collection", "collection 'gone__x__y__v1' is not registered in this tenant"),
+        (None, "collection 'gone__x__y__v1' is not registered in this tenant"),  # an engine that predates reason
+    ])
+    def test_an_unregistered_collection_422_raises_keyerror(self, monkeypatch, reason, message):
+        """The engine answers /count for a name with no catalog row with a typed 422, not a 404. It is
+        the same "absent" as a 404, so the KeyError contract holds for it too (the RDR hook's t3-exists
+        probe logged it as a resolution failure every few seconds for a never-indexed repo)."""
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError(message, code=422, reason=reason)
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_metadata("gone__x__y__v1")
+        with pytest.raises(KeyError):
+            HttpVectorClient().collection_info("gone__x__y__v1")
+
+    def test_a_422_with_another_reason_reraises(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        def fake_count(self, c):
+            raise VectorServiceError("collection is not registered (worded alike)", code=422,
+                                     reason="model_unavailable")
+
+        monkeypatch.setattr(HttpVectorClient, "count", fake_count)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().collection_info(self._CONFORMANT)
+
     def test_non_404_error_reraises(self, monkeypatch):
         from nexus.db.http_vector_client import VectorServiceError
 

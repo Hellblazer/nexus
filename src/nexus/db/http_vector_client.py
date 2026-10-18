@@ -5621,7 +5621,14 @@ class HttpVectorClient:
         try:
             n = self.count(name)
         except VectorServiceError as exc:
-            if exc.code == 404:
+            # A name with no catalog row gets the engine's typed 422, which is the same
+            # "absent" as a 404. Keyed on the reason; only an engine that sends none is
+            # matched by its wording (as _unregistered_collection_message does).
+            unregistered = exc.code == 422 and (
+                exc.reason == UNREGISTERED_COLLECTION_REASON
+                or (exc.reason is None and "is not registered" in str(exc))
+            )
+            if exc.code == 404 or unregistered:
                 raise KeyError(f"Collection not found: {name!r}") from exc
             raise
         if n == 0:
