@@ -85,12 +85,8 @@ final class KeyedSweep {
         RequestLedger.Claim claim = ledger.claim(tenant, requestId, route, sha256(raw), attemptBound);
         ex.getResponseHeaders().set(KEY_HEADER, keyHeader);
         switch (claim) {
-            case RequestLedger.KeyReused ignored ->
-                HttpUtil.send(ex, 422, "{\"error\":\"idempotency_key_reused\"}");
-            case RequestLedger.Replay replay -> {
-                ex.getResponseHeaders().set(REPLAYED_HEADER, "true");
-                HttpUtil.send(ex, replay.status(), replay.responseJson() == null ? "{}" : replay.responseJson());
-            }
+            case RequestLedger.KeyReused ignored -> sendKeyReused(ex);
+            case RequestLedger.Replay replay -> sendReplay(ex, replay);
             case RequestLedger.InFlight inFlight -> {
                 ex.getResponseHeaders().set("Retry-After", Long.toString(retryAfterSeconds(inFlight.leaseUntil())));
                 var body = new LinkedHashMap<String, Object>();
@@ -103,6 +99,36 @@ final class KeyedSweep {
             }
             case RequestLedger.Claimed claimed -> runClaimed(ex, tenant, claimed, route, gateBusy, sweep, bodyOf);
         }
+    }
+
+    /**
+     * For a keyed request that cannot run because its collection is not registered: answer from the ledger if the
+     * key already COMMITTED (the stored response, or 422 {@code idempotency_key_reused} for another body), exactly
+     * as {@link #run} would have. Returns false, having written nothing, when the key has no committed row; the
+     * caller then gives today's error, and no ledger row is created for a key that never ran.
+     */
+    boolean answerCommitted(HttpExchange ex, String tenant, UUID requestId, String keyHeader, String route,
+                            byte[] raw) throws IOException {
+        RequestLedger.Claim claim = ledger.peekCommitted(tenant, requestId, route, sha256(raw));
+        if (claim == null) {
+            return false;
+        }
+        ex.getResponseHeaders().set(KEY_HEADER, keyHeader);
+        if (claim instanceof RequestLedger.Replay replay) {
+            sendReplay(ex, replay);
+        } else {
+            sendKeyReused(ex);
+        }
+        return true;
+    }
+
+    private static void sendKeyReused(HttpExchange ex) throws IOException {
+        HttpUtil.send(ex, 422, "{\"error\":\"idempotency_key_reused\"}");
+    }
+
+    private static void sendReplay(HttpExchange ex, RequestLedger.Replay replay) throws IOException {
+        ex.getResponseHeaders().set(REPLAYED_HEADER, "true");
+        HttpUtil.send(ex, replay.status(), replay.responseJson() == null ? "{}" : replay.responseJson());
     }
 
     private <O> void runClaimed(HttpExchange ex, String tenant, RequestLedger.Claimed claimed, String route,
@@ -129,12 +155,12 @@ final class KeyedSweep {
             // row carries a different nonce.
             //
             // The status the marker records is the one the handler's exception ladder sends, read at the
-            // moment HttpUtil.send puts it on the wire (HttpUtil.BEFORE_SEND_ATTRIBUTE), so there is no second
+            // moment HttpUtil.send puts it on the wire (HttpUtil.armBeforeSend, per exchange), so there is no second
             // hand-kept copy of the ladder to drift from it. The marker still runs before the response is
             // written, so a client that retries at once finds the row failed, not in flight.
             boolean busy = gateBusy && isSweepGateBusy(e);
-            ex.setAttribute(HttpUtil.BEFORE_SEND_ATTRIBUTE,
-                (java.util.function.IntConsumer) status -> ledger.failMarker(tenant, requestId, claimed.nonce(), status));
+            HttpUtil.armBeforeSend(ex,
+                status -> ledger.failMarker(tenant, requestId, claimed.nonce(), status));
             if (!busy) {
                 throw e;
             }

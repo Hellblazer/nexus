@@ -210,6 +210,16 @@ public final class VectorHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
+        try {
+            dispatch(exchange);
+        } finally {
+            // A keyed sweep arms a before-send hook that HttpUtil.send fires; if the handler returned without
+            // sending (it always sends today), drop it rather than let it sit in the registry.
+            HttpUtil.discardBeforeSend(exchange);
+        }
+    }
+
+    private void dispatch(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
         // Strip prefix /v1/vectors → /upsert-chunks, /search, etc.
         String op = path.replaceFirst("^/v1/vectors", "");
@@ -1383,7 +1393,7 @@ public final class VectorHandler implements HttpHandler {
                 // The keyed floored form is the bounded one (222-research-14): a floor with no row_limit is not.
                 if (rowLimit <= 0) { refuseKey(ex, "idempotency_key_unsupported"); }
                 final int limit = rowLimit;
-                final int dim = repo.dimForCollection(tenant, collection);   // before the claim (nexus-yye8l.5)
+                final int dim = keyedDim(ex, keyed, repo, tenant, collection, QUARANTINE_ROUTE, raw);
                 this.<PgVectorRepository.QuarantineFlooredOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
@@ -1400,7 +1410,7 @@ public final class VectorHandler implements HttpHandler {
         if (rowLimit > 0) {
             if (keyed != null) {
                 final int limit = rowLimit;
-                final int dim = repo.dimForCollection(tenant, collection);   // before the claim (nexus-yye8l.5)
+                final int dim = keyedDim(ex, keyed, repo, tenant, collection, QUARANTINE_ROUTE, raw);
                 this.<PgVectorRepository.QuarantineBoundedOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.quarantineOrphansBounded(
@@ -1468,6 +1478,23 @@ public final class VectorHandler implements HttpHandler {
     // The keyed forms resolve their collection's dimension BEFORE keyedSweep.run claims a ledger row: an unknown
     // collection then fails exactly as the unkeyed call does (422 unregistered_collection, no row), and a cold
     // CollectionRegistry cache is not a second withTenant inside the 95 s lease the claim sized for one.
+
+    /**
+     * The collection's dimension for a keyed form, resolved before the claim. When the collection is not registered
+     * the request cannot run; if its key already COMMITTED (the collection was removed since), the stored response
+     * is replayed as a claim would have, otherwise the error propagates to the ladder as it does unkeyed.
+     */
+    private int keyedDim(HttpExchange ex, KeyedRequest keyed, PgVectorRepository repo, String tenant,
+                         String collection, String route, byte[] raw) throws IOException {
+        try {
+            return repo.dimForCollection(tenant, collection);
+        } catch (dev.nexus.service.db.UnregisteredCollectionException e) {
+            if (keyedSweep.answerCommitted(ex, tenant, keyed.id(), keyed.header(), route, raw)) {
+                throw new SkipHandlerException();
+            }
+            throw e;
+        }
+    }
 
     /** A keyed request: its header value as sent and the UUID it parsed to. */
     private record KeyedRequest(String header, java.util.UUID id) {}
@@ -1652,7 +1679,7 @@ public final class VectorHandler implements HttpHandler {
             if (keyed != null) {
                 // Restore never takes the RDR-191 sweep gate, so it has no sweep_gate_busy path.
                 final int limit = rowLimit;
-                final int dim = repo.dimForCollection(tenant, originCollection);   // before the claim (nexus-yye8l.5)
+                final int dim = keyedDim(ex, keyed, repo, tenant, originCollection, RESTORE_ROUTE, raw);
                 this.<PgVectorRepository.RestoreBoundedOutcome>runKeyed(ex, keyed, tenant, RESTORE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
                     marker -> repo.restoreRereferencedBounded(

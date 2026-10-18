@@ -217,6 +217,29 @@ public final class RequestLedger {
     }
 
     /**
+     * What {@link #claim} would answer for a key whose row is already {@code committed}, without claiming
+     * anything: {@link Replay} when the route and body match, {@link KeyReused} when they do not. Null when there
+     * is no row or it is not committed. Writes nothing, so a request that cannot run (its collection is gone) can
+     * still be answered from the ledger without leaving a row behind for a key that never ran.
+     */
+    public Claim peekCommitted(String tenant, UUID requestId, String route, byte[] bodySha256) {
+        LedgerRow row = read(tenant, requestId);
+        if (row == null || !COMMITTED.equals(row.state())) {
+            return null;
+        }
+        if (!row.route().equals(route) || !Arrays.equals(row.bodySha256(), bodySha256)) {
+            RequestLedgerActivity.recordKeyReused();
+            log.info("event=request_ledger_key_reused tenant={} request_id={} route={} stored_route={}",
+                tenant, requestId, route, row.route());
+            return new KeyReused(requestId, row.route());
+        }
+        RequestLedgerActivity.recordReplay();
+        log.info("event=request_ledger_replay tenant={} request_id={} route={} status={}",
+            tenant, requestId, route, row.responseStatus());
+        return new Replay(requestId, row.responseStatus() == null ? 200 : row.responseStatus(), row.responseJson());
+    }
+
+    /**
      * Mark the attempt committed, inside the mutation's own transaction ({@code dsl}), after the
      * mutation's SQL. Throws {@link LedgerMarkerLost} when the attempt no longer holds a live lease
      * on the row, so the mutation rolls back with it.

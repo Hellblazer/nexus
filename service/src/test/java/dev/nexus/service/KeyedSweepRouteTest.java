@@ -138,6 +138,7 @@ class KeyedSweepRouteTest {
     @AfterEach
     void clearHook() {
         repo.setAfterSweepSqlHookForTests(null);
+        dev.nexus.service.http.HttpUtil.setSendObserverForTests(null);
     }
 
     // ── http ────────────────────────────────────────────────────────────────
@@ -713,6 +714,159 @@ class KeyedSweepRouteTest {
         assertThat(r.body()).isEqualTo(expected);
         assertThat(header(r, "Idempotency-Key")).isNull();
         assertThat(header(r, "Idempotency-Replayed")).isNull();
+    }
+
+    // ── a pad that fits compact but not as Postgres renders it ───────────────
+
+    @Test
+    void aBodyThatFitsCompactButNotAsPostgresRendersItIsStillTruncated() throws Exception {
+        Fx f = seedOrphans(Form.BOUNDED, ROWS_FIT_COMPACT_NOT_JSONB, "p".repeat(PAD_FIT_COMPACT_NOT_JSONB));
+        String key = newKey();
+        var req = body(f, ROWS_FIT_COMPACT_NOT_JSONB);
+        req.put("sample_limit", ROWS_FIT_COMPACT_NOT_JSONB);
+
+        HttpResponse<String> first = post(f.form().path, req, key);
+        JsonNode live = json(first, 200);
+        int compact = first.body().getBytes(StandardCharsets.UTF_8).length;
+        int rendered = pgJsonbBytes(first.body());
+        assertThat(live.get("sample")).hasSize(ROWS_FIT_COMPACT_NOT_JSONB);
+        assertThat(compact).as("guard: the compact body fits the cap (compact=%d, as PG renders it=%d)", compact, rendered)
+            .isLessThanOrEqualTo(65_536);
+        assertThat(rendered).as("guard: and its jsonb rendering does not (compact=%d)", compact)
+            .isGreaterThan(65_536);
+
+        HttpResponse<String> replay = post(f.form().path, req, key);
+        JsonNode stored = json(replay, 200);
+        assertThat(stored.has("sample_truncated") && stored.get("sample_truncated").asBoolean())
+            .as("the cap is on the rendered text, so the stored copy was cut though the compact body fit").isTrue();
+        assertThat(stored.get("sample").size()).isLessThan(ROWS_FIT_COMPACT_NOT_JSONB);
+        assertThat(replay.body().getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(65_536);
+    }
+
+    private static final int ROWS_FIT_COMPACT_NOT_JSONB = 585;
+    private static final int PAD_FIT_COMPACT_NOT_JSONB = 20;
+
+    // ── per-exchange failure hook: concurrent failures and unkeyed neighbours ─
+
+    /** A keyed failing sweep held after it armed its failure marker and before its response is written. */
+    private record Held(CompletableFuture<HttpResponse<String>> call, CountDownLatch release) {
+    }
+
+    /**
+     * Start {@code key}'s sweep so that its SQL raises {@code IllegalArgumentException} (400 from the ladder), and
+     * hold it at the top of {@code HttpUtil.send}: the failure marker is armed, nothing is written yet. Any later
+     * sweep SQL call raises an opaque {@code RuntimeException} (500).
+     */
+    private Held holdFailingSweepAtSend(Fx f, String key) throws Exception {
+        var armed = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var calls = new AtomicInteger();
+        repo.setAfterSweepSqlHookForTests(() -> {
+            if (calls.incrementAndGet() == 1) throw new IllegalArgumentException("injected for the held request");
+            throw new RuntimeException("injected for the second request");
+        });
+        dev.nexus.service.http.HttpUtil.setSendObserverForTests(ex -> {
+            if (key.equals(ex.getRequestHeaders().getFirst("Idempotency-Key"))) {
+                armed.countDown();
+                try {
+                    if (!release.await(60, TimeUnit.SECONDS)) throw new IllegalStateException("never released");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        var call = CompletableFuture.supplyAsync(() -> {
+            try {
+                return sweep(f, 2, key);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertThat(armed.await(60, TimeUnit.SECONDS)).as("the failing sweep reached its send").isTrue();
+        return new Held(call, release);
+    }
+
+    @Test
+    void twoFailingKeyedSweepsAtOnceEachRecordTheirOwnStatus() throws Exception {
+        Fx a = fixture(Form.BOUNDED, 3);
+        Fx b = fixture(Form.RESTORE, 3);
+        String keyA = newKey();
+        String keyB = newKey();
+        Held held = holdFailingSweepAtSend(a, keyA);
+        try {
+            HttpResponse<String> second = sweep(b, 2, keyB);
+
+            assertThat(second.statusCode()).as(second.body()).isEqualTo(500);
+            assertThat(ledgerStatus(keyB)).as("the second request marks its own row with its own status").isEqualTo(500);
+            assertThat(status(keyB).get("state").asText()).isEqualTo("rolled_back");
+            assertThat(ledgerStatus(keyA)).as("the held request's marker has not fired: it is still waiting to send")
+                .isNull();
+        } finally {
+            held.release().countDown();
+        }
+        HttpResponse<String> first = held.call().get(60, TimeUnit.SECONDS);
+        assertThat(first.statusCode()).as(first.body()).isEqualTo(400);
+        assertThat(ledgerStatus(keyA)).as("the held request marks its own row, once, with its own status")
+            .isEqualTo(400);
+        assertThat(status(keyA).get("state").asText()).as("not left in_flight to its lease").isEqualTo("rolled_back");
+        assertThat(ledgerStatus(keyB)).as("and did not touch the other's").isEqualTo(500);
+    }
+
+    @Test
+    void anUnkeyedVectorsCallWhileAKeyedFailureIsPendingTriggersNoMarker() throws Exception {
+        Fx a = fixture(Form.BOUNDED, 3);
+        String keyA = newKey();
+        Held held = holdFailingSweepAtSend(a, keyA);
+        try {
+            HttpResponse<String> neighbour = get("/v1/vectors/count?collection=" + a.origin(), null);
+
+            assertThat(neighbour.statusCode()).as(neighbour.body()).isEqualTo(200);
+            assertThat(ledgerStatus(keyA)).as("another /v1/vectors response must not fire the held request's marker")
+                .isNull();
+        } finally {
+            held.release().countDown();
+        }
+        HttpResponse<String> first = held.call().get(60, TimeUnit.SECONDS);
+        assertThat(first.statusCode()).isEqualTo(400);
+        assertThat(ledgerStatus(keyA)).as("its own send marks it with its own status").isEqualTo(400);
+        assertThat(status(keyA).get("state").asText()).isEqualTo("rolled_back");
+    }
+
+    // ── a committed key replays even when its collection has gone ────────────
+
+    @ParameterizedTest
+    @EnumSource(Form.class)
+    void aCommittedKeyReplaysAfterItsCollectionIsRemoved_otherKeysGetTodays422(Form form) throws Exception {
+        Fx f = fixture(form, 4);
+        String key = newKey();
+        JsonNode firstBody = json(sweep(f, 2, key), 200);
+        su(ctx -> {
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(f.origin()))).execute();
+            ctx.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(f.origin()))).execute();
+            ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+               .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(f.origin()))).execute();
+        });
+        dev.nexus.service.db.CollectionRegistry.evict(TENANT, f.origin());
+        var before = RequestLedgerActivity.snapshot();
+
+        HttpResponse<String> replay = sweep(f, 2, key);
+
+        assertThat(json(replay, 200)).as("the stored response, though the collection is gone").isEqualTo(firstBody);
+        assertThat(header(replay, "Idempotency-Replayed")).isEqualTo("true");
+        assertThat(header(replay, "Idempotency-Key")).isEqualTo(key);
+        assertThat(RequestLedgerActivity.snapshot().replays() - before.replays()).isEqualTo(1);
+
+        HttpResponse<String> otherBody = sweep(f, 3, key);
+        assertThat(json(otherBody, 422).get("error").asText()).as("a committed key with another body: reused")
+            .isEqualTo("idempotency_key_reused");
+
+        String fresh = newKey();
+        HttpResponse<String> unknown = sweep(f, 2, fresh);
+        assertThat(json(unknown, 422).get("reason").asText()).as("a key never seen: today's error")
+            .isEqualTo("unregistered_collection");
+        assertThat(ledgerRows(fresh)).as("and no ledger row").isZero();
     }
 
     // ── the commit marker rolls the sweep back when the lease is gone ────────
