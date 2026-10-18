@@ -2505,7 +2505,9 @@ _SUB = "{subrepo}"  # placeholder: the submodule's own repository
 #: *setup* runs first, outside the hook. *kinds* is the set of state names the run
 #: must change at least one of: config, refs, index, tree, gitmodules. *shared_only*
 #: marks the commands that deny in the shared tree but pass in a linked worktree
-#: (a worktree agent's own branches: the verb scan never covered them there).
+#: with no other repository named: a worktree agent's own branches (the verb scan
+#: never covered them there), and `push|fetch|pull -u|--set-upstream`, which write
+#: only `branch.<b>.remote|merge`.
 _SIDEFX_REAL: list[tuple[str, str, frozenset[str], bool]] = [
     # remote: every shape rewrites remote.<name>.*, shared by all worktrees
     ("git remote add up2 /tmp/zz", "", frozenset({"config"}), False),
@@ -2541,11 +2543,11 @@ _SIDEFX_REAL: list[tuple[str, str, frozenset[str], bool]] = [
     ("git branch --move tracked t3", "", frozenset({"config"}), True),
     ("git branch --delete tracked", "", frozenset({"config"}), True),
     # push, fetch and pull set an upstream
-    ("git push -u origin HEAD:newb", "", frozenset({"config"}), False),
-    ("git push --set-upstream origin HEAD:newb2", "", frozenset({"config"}), False),
-    ("git push -fu origin HEAD:newb3", "", frozenset({"config"}), False),
-    ("git fetch --set-upstream origin feat", "", frozenset({"config"}), False),
-    ("git pull --set-upstream origin feat", "", frozenset({"config"}), False),
+    ("git push -u origin HEAD:newb", "", frozenset({"config"}), True),
+    ("git push --set-upstream origin HEAD:newb2", "", frozenset({"config"}), True),
+    ("git push -fu origin HEAD:newb3", "", frozenset({"config"}), True),
+    ("git fetch --set-upstream origin feat", "", frozenset({"config"}), True),
+    ("git pull --set-upstream origin feat", "", frozenset({"config"}), True),
     # checkout and switch with --track (denied by the verb scan in the shared tree;
     # pinned there, and denied by this rule in a linked worktree)
     ("git checkout -t origin/feat", "", frozenset({"config"}), False),
@@ -2772,10 +2774,27 @@ _SIDEFX_INNER = [
     "git branch -u origin/main",
     "git branch --track nb origin/main",
     "git submodule init",
+]
+#: Upstream-setting push, fetch and pull: denied in the shared tree like the rest,
+#: but they pass in a linked worktree with no other repository named
+#: (`_SIDEFX_WT_UPSTREAM_PASS`), so the worktree-deny table leaves them out.
+_SIDEFX_UPSTREAM_INNER = [
     "git push -u origin main",
     "git fetch --set-upstream origin main",
 ]
-_SIDEFX_WRAPPERS = [
+_SIDEFX_UPSTREAM_SPELLINGS = [
+    "git push -u origin main",
+    "git push --set-upstream origin main",
+    "git push --set-up origin main",
+    "git push -fu origin main",
+    "git push origin main -u",
+    "git push origin main --set-upstream",
+    "git fetch --set-upstream origin main",
+    "git fetch origin --set-upstream",
+    "git pull --set-upstream origin main",
+]
+#: Wrappers that run the command in the tool call's own tree.
+_SIDEFX_PLAIN_WRAPPERS = [
     "{c}",
     "cd /tmp && {c}",
     "true; {c}",
@@ -2788,17 +2807,23 @@ _SIDEFX_WRAPPERS = [
     "time {c}",
     "xargs {c}",
     "echo x | xargs {c}",
+    "echo 'x' && {c} # c",
+    # a shell string runs in this tree too
     "sh -c '{c}'",
     'bash -c "{c}"',
     "eval '{c}'",
+]
+#: Wrappers that hand the command to something that runs it as a string, maybe
+#: elsewhere (`ssh`), so a worktree's exemption does not follow it there.
+_SIDEFX_DATA_WRAPPERS = [
     "ssh h '{c}'",
     'ssh h "{c}"',
     "git submodule foreach '{c}'",
     "git rebase -x '{c}' HEAD~1",
     "tmux send-keys '{c}' Enter",
     "env -S'{c}'",
-    "echo 'x' && {c} # c",
 ]
+_SIDEFX_WRAPPERS = _SIDEFX_PLAIN_WRAPPERS + _SIDEFX_DATA_WRAPPERS
 _SIDEFX_SPELLINGS = [
     "/usr/bin/git remote set-url origin x",
     "git -C . remote set-url origin x",
@@ -2860,15 +2885,6 @@ _SIDEFX_SPELLINGS = [
     "git remote $A o u",
     "git branch $(git rev-parse HEAD) -u origin/x",
     "git branch ${B:-b} --set-upstream-to=origin/x",
-    "git push -u origin main",
-    "git push --set-upstream origin main",
-    "git push --set-up origin main",
-    "git push -fu origin main",
-    "git push origin main -u",
-    "git push origin main --set-upstream",
-    "git fetch --set-upstream origin main",
-    "git fetch origin --set-upstream",
-    "git pull --set-upstream origin main",
     "git checkout -t origin/x",
     "git checkout --track origin/x",
     "git checkout --tra origin/x",
@@ -2936,12 +2952,22 @@ _SIDEFX_SPELLINGS = [
 ]
 
 
-def _sidefx_cmds() -> list[str]:
+def _sidefx_cmds(*, worktree: bool = False) -> list[str]:
+    """The deny table. With *worktree*, the commands that still deny from a linked
+    worktree: the upstream push, fetch and pull forms are out, except inside a
+    wrapper that runs them as a string (`_SIDEFX_DATA_WRAPPERS`)."""
     out = []
     for w in _SIDEFX_WRAPPERS:
-        for c in _SIDEFX_INNER:
+        inner = list(_SIDEFX_INNER)
+        if not worktree or w in _SIDEFX_DATA_WRAPPERS:
+            inner += _SIDEFX_UPSTREAM_INNER
+        for c in inner:
             out.append(w.replace("{c}", c))
-    return out + _SIDEFX_SPELLINGS + [c for c, _, _, _ in _SIDEFX_REAL if not c.startswith("AC=")]
+    spellings = list(_SIDEFX_SPELLINGS)
+    real = [c for c, _, _, shared_only in _SIDEFX_REAL if not (worktree and shared_only)]
+    if not worktree:
+        spellings += _SIDEFX_UPSTREAM_SPELLINGS
+    return out + spellings + [c for c in real if not c.startswith("AC=")]
 
 
 def test_the_sidefx_deny_shapes_are_denied_in_the_shared_tree(shared_repo):
@@ -3125,6 +3151,132 @@ def test_branch_ref_and_config_writers_of_the_agents_own_branches_pass_in_a_work
     assert _denied_among(_SIDEFX_SHARED_ONLY, linked_worktree) == []
 
 
+#: `git push -u origin <branch>` is the documented flow for a worktree's branch and
+#: writes only `branch.<b>.remote|merge`, keys that run no code, so it passes from a
+#: provable linked worktree that names no other repository. The shared tree denies it.
+_SIDEFX_WT_UPSTREAM_PASS = [
+    "git push -u origin feature/x",
+    "git push --set-upstream origin HEAD",
+    "git push --set-up origin HEAD",
+    "git push -u origin HEAD:newb",
+    "git push -fu origin x",
+    "git push origin x -u",
+    "git push -u -o ci.skip origin x",
+    "git push -u --force-with-lease origin x",
+    "git -c core.pager=cat push -u origin x",
+    "git fetch --set-upstream origin main",
+    "git fetch origin --set-upstream",
+    "git pull --set-upstream origin main",
+    "git push -u origin x && git status",
+    "true; git push -u origin x",
+    "(git push -u origin x)",
+]
+
+
+def test_a_worktree_push_dash_u_passes_and_the_shared_tree_denies_it(
+    shared_repo, linked_worktree,
+):
+    assert _not_denied(_SIDEFX_WT_UPSTREAM_PASS, shared_repo) == []
+    assert _denied_among(_SIDEFX_WT_UPSTREAM_PASS, linked_worktree) == []
+
+
+def test_a_worktree_upstream_form_passes_in_every_plain_wrapper_and_denies_in_a_string_runner(
+    linked_worktree,
+):
+    plain = [w.replace("{c}", c) for w in _SIDEFX_PLAIN_WRAPPERS for c in _SIDEFX_UPSTREAM_INNER]
+    assert len(plain) >= 20, f"the table shrank to {len(plain)}"
+    assert _denied_among(plain, linked_worktree) == []
+    # a string a consumer runs may run in another tree (`ssh h '...'`), so the
+    # exemption does not follow it
+    data = [w.replace("{c}", c) for w in _SIDEFX_DATA_WRAPPERS for c in _SIDEFX_UPSTREAM_INNER]
+    assert len(data) >= 10, f"the table shrank to {len(data)}"
+    assert _not_denied(data, linked_worktree) == []
+
+
+def _other_repo_upstream_cmds(primary: pathlib.Path) -> list[str]:
+    """A worktree push, fetch or pull that sets an upstream while the command names
+    the primary (or any other repository) by option, variable, `cd` or `env -C`."""
+    p = str(primary)
+    return [
+        f"git -C {p} push -u origin x",
+        f"git -C{p} push -u origin x",
+        f"git -c user.name=x -C {p} push -u origin x",
+        f"git -C . push -u origin x",
+        f"git --git-dir={p}/.git push -u origin x",
+        f"git --git-dir {p}/.git push -u origin x",
+        f"git --work-tree={p} push -u origin x",
+        f"git --work-tree {p} push --set-upstream origin x",
+        f"git -C {p} fetch --set-upstream origin x",
+        f"git -C {p} pull --set-upstream origin x",
+        f"GIT_DIR={p}/.git git push -u origin x",
+        f"GIT_COMMON_DIR={p}/.git git push -u origin x",
+        f"GIT_WORK_TREE={p} git push -u origin x",
+        f"env GIT_DIR={p}/.git git push -u origin x",
+        f"export GIT_DIR={p}/.git; git push -u origin x",
+        f"GIT_DIR={p}/.git; export GIT_DIR; git fetch --set-upstream origin x",
+        f"env GIT_DIR'='{p}/.git git push -u origin x",
+        f"cd '{p}' && git push -u origin x",
+        f'cd "{p}" && git push --set-upstream origin x',
+        f"env -C {p} git push -u origin x",
+        f"env --chdir={p} git push -u origin x",
+        "git $G push -u origin x",
+        'git "$G" push -u origin x',
+        "git ${G} push -u origin x",
+        "git $(echo -C /p) push -u origin x",
+        f"git --exec-path={p} push -u origin x",
+        f"sh -c 'git -C {p} push -u origin x'",
+        f"sh -c 'GIT_DIR={p}/.git git push -u origin x'",
+        # a clean push in the same command does not excuse the other-repository one
+        f"git push -u origin x; git -C {p} push -u origin y",
+    ]
+
+
+def test_a_worktree_upstream_form_that_names_another_repository_still_denies(
+    shared_repo, linked_worktree,
+):
+    cmds = _other_repo_upstream_cmds(shared_repo)
+    assert len(cmds) >= 25, f"the table shrank to {len(cmds)}"
+    leaked = _not_denied(cmds, linked_worktree)
+    assert not leaked, f"{len(leaked)} command(s) were NOT denied from a linked worktree: {leaked!r}"
+
+
+def _config_keys(cfg: pathlib.Path, env: dict[str, str]) -> dict[str, str]:
+    out = subprocess.run(
+        ["git", "config", "--file", str(cfg), "--list"], env=env, check=True,
+        capture_output=True, text=True,
+    ).stdout
+    return dict(line.partition("=")[::2] for line in out.splitlines())
+
+
+@pytest.mark.parametrize("cmd,setup", [
+    ("git push -u bare wtb", ""),
+    ("git push --set-upstream bare wtb", ""),
+    ("git fetch --set-upstream bare wtb", "git push -q bare wtb"),
+])
+def test_a_worktree_upstream_form_really_writes_only_branch_keys_in_the_common_config_and_passes(
+    cmd, setup, tmp_path,
+):
+    """From a linked worktree, against a local bare remote: the hook allows the
+    command, and the run changes the common config by `branch.wtb.remote` and
+    `branch.wtb.merge` only, nothing the primary would run or follow elsewhere."""
+    env, main, cwd = _sidefx_box(tmp_path / "box", "wt")
+    bare = tmp_path / "box" / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], env=env, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "bare", str(bare)], cwd=main, env=env, check=True)
+    if setup:
+        subprocess.run(["bash", "-c", setup], cwd=cwd, env=env, check=True, capture_output=True)
+    common = main / ".git" / "config"
+    before = _config_keys(common, env)
+    assert not _denied(cmd, cwd), f"{cmd!r} was denied from a linked worktree"
+    subprocess.run(["bash", "-c", cmd], cwd=cwd, env=env, check=True, capture_output=True, timeout=60)
+    after = _config_keys(common, env)
+    changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+    assert changed == {"branch.wtb.remote", "branch.wtb.merge"}, sorted(changed)
+    assert after["branch.wtb.remote"] == "bare", after.get("branch.wtb.remote")
+    for extra in sorted((main / ".git" / "worktrees").glob("*/config.worktree")):
+        assert extra.read_text() == "", f"{extra} was written"
+
+
 def test_sparse_checkout_is_left_out_and_still_denied_in_the_shared_tree_by_the_verb_scan(
     shared_repo, linked_worktree,
 ):
@@ -3168,18 +3320,22 @@ def test_a_verb_word_after_stash_lfs_subtree_or_notes_is_that_commands_own(linke
     assert _denied_among(cmds, linked_worktree) == []
     # ... and the real thing right after one still denies
     assert _not_denied([
+        "git stash push -u -m wip; git branch -u origin/x",
+        "git stash list && git remote set-url origin x",
+        "git stash push -u && git branch -u origin/x",
+    ], linked_worktree) == []
+    # ... and a push -u after one passes, as it does alone
+    assert _denied_among([
         "git stash push -u -m wip; git push -u origin x",
         "git stash list && git push -u origin x",
-        "git stash push -u && git branch -u origin/x",
     ], linked_worktree) == []
 
 
 def test_the_sidefx_deny_shapes_deny_in_a_linked_worktree_except_the_agents_own_branches(
     linked_worktree,
 ):
-    own = {c for c, _, _, shared_only in _SIDEFX_REAL if shared_only}
     cmds = [
-        c.replace(_BOX, "/tmp/box").replace(_SUB, "/tmp/sub") for c in _sidefx_cmds() if c not in own
+        c.replace(_BOX, "/tmp/box").replace(_SUB, "/tmp/sub") for c in _sidefx_cmds(worktree=True)
     ]
     assert len(cmds) >= 200, f"the table shrank to {len(cmds)}"
     leaked = _not_denied(cmds, linked_worktree)
