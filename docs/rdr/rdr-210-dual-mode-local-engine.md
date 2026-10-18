@@ -51,9 +51,12 @@ Terms used throughout:
 - **Embedding profile**: the engine-written table (RDR-204) that names the model
   each content type's NEW collections get. An existing collection keeps the
   model recorded in its own catalog row.
-- **Sibling**: two collections that differ only in the model segment of their
-  name, for example `code__1-1__bge-base-en-v15-768__v1` and
-  `code__1-1__voyage-code-3__v1`.
+- **Sibling**: two collections whose registry rows carry the same
+  `(content_type, owner_id)` and differ in `embedding_model`, for example
+  `code__1-1__bge-base-en-v15-768__v1` and `code__1-1__voyage-code-3__v1`. The
+  names are examples only. Siblings are found by the row tuple, never by
+  rendering or matching a name (Sam, 2026-10-18, RDR-229 Q6): RDR-229 gives a new
+  collection an opaque generated id, so a name match would not find a new sibling.
 - **chash**: the SHA-256 of a chunk's text, which is the chunk's identity in its
   collection.
 - **Manifest**: the catalog table `catalog_document_chunks`, one row per
@@ -141,6 +144,14 @@ result by model (`search_engine.py:595-625`), and each group goes to the engine
 as its own request. What still reads one sibling is every path that goes through
 the single-name resolver: an owner-scoped corpus, `--collection`, and the store
 and get paths.
+
+The fix finds siblings by the row tuple. `GET /v1/catalog/collections/list`
+filters on `content_type` and `lifecycle_state` today
+(`CatalogHandler.java:2103-2130`, no `owner_id` filter), so the resolver asks for
+`content_type=<ct>&lifecycle_state=live` and keeps the rows whose `owner_id`
+equals the owner's; whether the engine route gains an `owner_id` filter instead
+is decided at implementation (Phase 4 Step 1). It never splits, renders or
+prefix-matches a collection name.
 
 #### Gap 5: The engine's outbound calls have no guard, and one of them is not Voyage
 
@@ -274,6 +285,7 @@ client although the engine would accept it.
 | RDR-192 | Constraint | live(c) decides when moved chunks become visible, and the reaper's grace and floor decide what happens to the source's chunks after the move (Technical Design, re-embed section). |
 | RDR-227 | Adjacent (closed) | Its reconciler builds a per-collection index for any live, unsuperseded collection above its row threshold and drops it when `superseded_by` is set (rdr-227:366-370, :418-428). A re-embed target therefore gets its index while the job runs, and the source's index goes at supersede. No change needed. |
 | RDR-224 | Adjacent (closed) | Native Windows runs bge on the Windows ONNX runtime (rdr-224:289, :322), with the ORT init gate and temp sweep at boot (`Main.java:67`, `:71`). The dual boot must hold on Windows; the coexistence spike (Phase 1 Step 1) includes the win-x64 image. |
+| RDR-229 | Constraint (draft) | Collections become opaque ids with the attributes in the row (Sam, 2026-10-18, Q2, Q3, Q6). This RDR finds siblings and the re-embed target by the row tuple `(content_type, owner_id)`, never by a name, so it stands whichever name shape ships. |
 | RDR-228 | Adjacent (closed) | Plugin setup runs `nx init --yes` unattended when no service is provisioned, and reruns an unfinished one (rdr-228:677-683, :1600-1601). The init keep-voyage fix, now on develop, covers that caller too; nothing here changes it. |
 
 Searched `docs/rdr/README.md` and the RDR collection for "dual", "local voyage",
@@ -692,7 +704,8 @@ use, carrying the document's aspects and highlights with it.
    tag is deployed to the cloud engine before that client release ships.
 5. **init and the ladder.** Landed on develop (nexus-ddmfg, Gap 2); not scope here.
 6. **Client reads.** The single-name resolver returns every live sibling of the
-   owner's corpus, not one; callers that need one name for a write keep the write
+   owner's corpus, not one, found by the row tuple `(content_type, owner_id)`
+   through the catalog list route's filters (Gap 4), never by a name; callers that need one name for a write keep the write
    resolver. Searches already split per model and merge client-side.
 7. **Egress allowlist and guard (nexus-umm29).** The carve-out is stated as an
    allowlist: *the local engine connects only to the Voyage API
@@ -829,8 +842,11 @@ not read: the cost of that catalog read at start, and where in
 `run_storage_supervisor` the engine is known to be up.
 
 **The move is per document, into the model sibling.** The target is the sibling
-named for the profile's model (`code__1-1__voyage-code-3__v1` beside
-`code__1-1__bge-base-en-v15-768__v1`), registered live if absent; the profile is
+whose row carries the profile's model for the source's `(content_type, owner_id)`,
+looked up by that tuple (`GET /v1/catalog/collections/for_tuple`,
+`CatalogHandler.java:234`), never by rendering a name; it is registered live if
+absent, through the registration path that mints the name (an opaque generated
+id once RDR-229 lands, the conformant name before); the profile is
 what lets that registration through (`CatalogRepository.java:7944-7960`), so the
 target model is always the profile's. The job walks the source's live documents
 in tumbler order. For each batch it reads, per document, the manifest rows and
@@ -1619,7 +1635,9 @@ a single-family engine a read that also names the unserved sibling raises the
 named error although the served one answered ("fires even when every OTHER
 targeted collection searched fine", `search_engine.py:1951-1952`).
 **Test**: replace the pin at `tests/test_rdr_109_phase2_dispatch.py:258` with one
-asserting both siblings are read once a Voyage sibling exists.
+asserting both siblings are read once a Voyage sibling exists, and a second test
+that registers the Voyage sibling under a name that is not the four-segment shape
+and asserts it is still found, so a name match cannot pass.
 
 #### Step 2: Single-name reads merge by the same rules
 
@@ -2097,3 +2115,4 @@ and the per-table dispositions.
   Finalization Gate answered against this content.
 - 2026-10-17: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `c62709e9e`; critique `nexus_rdr/210-gate-critique-2026-10-17-r1`.
 - 2026-10-18: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `90a51e69d`; critique `nexus_rdr/210-gate-critique-2026-10-18-r2`.
+- 2026-10-18: Sam's ruling on RDR-229 Q6 (recorded on nexus-j4gl6): the row rule is adopted now. Sibling, Gap 4, Technical Design 6, the re-embed target and Phase 4 Step 1 find siblings by the row tuple through the catalog routes, never by rendering or matching a name; the sibling test registers a non-conformant name. The list route has no `owner_id` filter today, noted in Gap 4.
