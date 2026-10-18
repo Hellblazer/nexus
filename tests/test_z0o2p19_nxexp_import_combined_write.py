@@ -1294,12 +1294,14 @@ def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_tru
             generate_pdf_corpus_links(reader, writer=writer)
         finally:
             writer.close()
-        ends = {str(by_title["a"].tumbler), native_copy}
-        joined = {
-            (str(lnk.from_tumbler), str(lnk.to_tumbler))
-            for t in ends for lnk in reader.link_query(from_t=t, link_type="same-as")
+        # same-as links every member of a key group to its lowest tumbler (the source a here), so the
+        # imported copy and the native copy are joined through that anchor: one component.
+        imported_a = str(by_title["a"].tumbler)
+        anchor_of = {
+            t: {str(lnk.to_tumbler) for lnk in reader.link_query(from_t=t, link_type="same-as")}
+            for t in (imported_a, native_copy)
         }
-        assert any(set(pair) == ends for pair in joined), joined
+        assert anchor_of[imported_a] and anchor_of[imported_a] == anchor_of[native_copy] == {a}, anchor_of
         b_links = reader.link_query(from_t=str(by_title["b"].tumbler), link_type="same-as")
         assert b_links == [], b_links
     finally:
