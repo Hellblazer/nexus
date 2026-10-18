@@ -1383,10 +1383,11 @@ public final class VectorHandler implements HttpHandler {
                 // The keyed floored form is the bounded one (222-research-14): a floor with no row_limit is not.
                 if (rowLimit <= 0) { refuseKey(ex, "idempotency_key_unsupported"); }
                 final int limit = rowLimit;
+                final int dim = repo.dimForCollection(tenant, collection);   // before the claim (nexus-yye8l.5)
                 this.<PgVectorRepository.QuarantineFlooredOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
-                        sampleLimit, limit, floor.fraction(), floor.minChunks(), floor.force(), marker),
+                        sampleLimit, limit, floor.fraction(), floor.minChunks(), floor.force(), dim, marker),
                     out -> flooredQuarantineBody(out, limit, floor));
                 return;
             }
@@ -1399,10 +1400,11 @@ public final class VectorHandler implements HttpHandler {
         if (rowLimit > 0) {
             if (keyed != null) {
                 final int limit = rowLimit;
+                final int dim = repo.dimForCollection(tenant, collection);   // before the claim (nexus-yye8l.5)
                 this.<PgVectorRepository.QuarantineBoundedOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.quarantineOrphansBounded(
-                        tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, limit, marker),
+                        tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, limit, dim, marker),
                     out -> boundedQuarantineBody(out, limit, floor));
                 return;
             }
@@ -1462,6 +1464,10 @@ public final class VectorHandler implements HttpHandler {
             "remaining", bounded.remaining(),
             "row_limit", rowLimit);
     }
+
+    // The keyed forms resolve their collection's dimension BEFORE keyedSweep.run claims a ledger row: an unknown
+    // collection then fails exactly as the unkeyed call does (422 unregistered_collection, no row), and a cold
+    // CollectionRegistry cache is not a second withTenant inside the 95 s lease the claim sized for one.
 
     /** A keyed request: its header value as sent and the UUID it parsed to. */
     private record KeyedRequest(String header, java.util.UUID id) {}
@@ -1646,10 +1652,11 @@ public final class VectorHandler implements HttpHandler {
             if (keyed != null) {
                 // Restore never takes the RDR-191 sweep gate, so it has no sweep_gate_busy path.
                 final int limit = rowLimit;
+                final int dim = repo.dimForCollection(tenant, originCollection);   // before the claim (nexus-yye8l.5)
                 this.<PgVectorRepository.RestoreBoundedOutcome>runKeyed(ex, keyed, tenant, RESTORE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
                     marker -> repo.restoreRereferencedBounded(
-                        tenant, quarantineCollection, originCollection, limit, marker),
+                        tenant, quarantineCollection, originCollection, limit, dim, marker),
                     out -> boundedRestoreBody(out, limit));
                 return;
             }

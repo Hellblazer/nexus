@@ -119,10 +119,22 @@ final class KeyedSweep {
         } catch (RuntimeException e) {
             // Only a failure before the sweep transaction committed lands here: the exception left the
             // repository call, so the transaction rolled back. A failure after it (writing the response below)
-            // never reaches the ledger row. The marker matches this attempt's nonce, so it cannot touch a
-            // committed row or a newer holder's.
+            // never reaches the ledger row.
+            //
+            // The failure marker is safe against an ambiguous commit (the server committed, the ack was lost,
+            // and the driver threw) by its SQL guard, not by this code's shape: it updates only a row whose
+            // holder is this attempt's nonce AND whose state is still in_flight. The commit marker, in the
+            // sweep transaction, set state = committed and cleared the holder, so if that transaction did
+            // commit the failure marker matches nothing and the committed row stands; and a newer holder's
+            // row carries a different nonce.
+            //
+            // The status the marker records is the one the handler's exception ladder sends, read at the
+            // moment HttpUtil.send puts it on the wire (HttpUtil.BEFORE_SEND_ATTRIBUTE), so there is no second
+            // hand-kept copy of the ladder to drift from it. The marker still runs before the response is
+            // written, so a client that retries at once finds the row failed, not in flight.
             boolean busy = gateBusy && isSweepGateBusy(e);
-            ledger.failMarker(tenant, requestId, claimed.nonce(), busy ? 503 : failureStatus(e));
+            ex.setAttribute(HttpUtil.BEFORE_SEND_ATTRIBUTE,
+                (java.util.function.IntConsumer) status -> ledger.failMarker(tenant, requestId, claimed.nonce(), status));
             if (!busy) {
                 throw e;
             }
@@ -135,13 +147,17 @@ final class KeyedSweep {
     }
 
     /**
-     * The copy kept in the ledger: the live body, or, when it serializes to more than
-     * {@link #STORED_RESPONSE_CAP_BYTES}, the body with its {@code sample} cut to the longest prefix that fits
-     * and {@code "sample_truncated": true} added. The live response to the first caller is never cut, and the
-     * stored copy names no audit id: the full list stays in {@code gc_audit}.
+     * The copy kept in the ledger: the live body, or, when it is larger than {@link #STORED_RESPONSE_CAP_BYTES},
+     * the body with its {@code sample} cut to the longest prefix that fits and {@code "sample_truncated": true}
+     * added. The live response to the first caller is never cut, and the stored copy names no audit id: the full
+     * list stays in {@code gc_audit}.
+     *
+     * <p>The cap is on the bytes a replay or the status route returns, and that is the text Postgres renders
+     * from the jsonb column, not the compact text stored: Postgres writes a space after every {@code ':'} and
+     * {@code ','}, which adds several KB to a body near the cap. So the size is taken with {@link #pgJsonbBytes}.
      */
     String storedResponse(Map<String, Object> body, String liveJson) {
-        if (utf8Length(liveJson) <= STORED_RESPONSE_CAP_BYTES) {
+        if (pgJsonbBytes(body) <= STORED_RESPONSE_CAP_BYTES) {
             return liveJson;
         }
         List<?> sample = body.get("sample") instanceof List<?> l ? l : List.of();
@@ -149,20 +165,61 @@ final class KeyedSweep {
         int hi = sample.size();
         while (lo < hi) {
             int mid = (lo + hi + 1) >>> 1;
-            if (utf8Length(truncatedJson(body, sample, mid)) <= STORED_RESPONSE_CAP_BYTES) {
+            if (pgJsonbBytes(truncated(body, sample, mid)) <= STORED_RESPONSE_CAP_BYTES) {
                 lo = mid;
             } else {
                 hi = mid - 1;
             }
         }
-        return truncatedJson(body, sample, lo);
+        return toJson(truncated(body, sample, lo));
     }
 
-    private static String truncatedJson(Map<String, Object> body, List<?> sample, int keep) {
+    private static Map<String, Object> truncated(Map<String, Object> body, List<?> sample, int keep) {
         var copy = new LinkedHashMap<String, Object>(body);
         copy.put("sample", sample.subList(0, keep));
         copy.put("sample_truncated", true);
-        return toJson(copy);
+        return copy;
+    }
+
+    /** UTF-8 length of {@code value} as Postgres renders it back from a jsonb column. */
+    static int pgJsonbBytes(Object value) {
+        var sb = new StringBuilder();
+        renderLikePostgres(VectorHandler.MAPPER.valueToTree(value), sb);
+        return utf8Length(sb.toString());
+    }
+
+    /**
+     * Postgres's jsonb text form: {@code ": "} after a key, {@code ", "} between members and elements, no other
+     * whitespace, {@code {}} and {@code []} when empty. Strings and keys are escaped alike by Jackson and
+     * Postgres (and non-ASCII stays literal in both); a number prints as the plain decimal Postgres keeps (a
+     * {@code numeric}), so {@code 1.0E-4} is {@code 0.00010}.
+     */
+    private static void renderLikePostgres(com.fasterxml.jackson.databind.JsonNode node, StringBuilder out) {
+        if (node.isObject()) {
+            out.append('{');
+            boolean first = true;
+            for (var it = node.fields(); it.hasNext(); ) {
+                var field = it.next();
+                if (!first) out.append(", ");
+                first = false;
+                out.append(toJson(field.getKey())).append(": ");
+                renderLikePostgres(field.getValue(), out);
+            }
+            out.append('}');
+        } else if (node.isArray()) {
+            out.append('[');
+            boolean first = true;
+            for (var element : node) {
+                if (!first) out.append(", ");
+                first = false;
+                renderLikePostgres(element, out);
+            }
+            out.append(']');
+        } else if (node.isNumber()) {
+            out.append(node.decimalValue().toPlainString());
+        } else {
+            out.append(node.toString());
+        }
     }
 
     private static String toJson(Object value) {
@@ -186,13 +243,6 @@ final class KeyedSweep {
             }
         }
         return false;
-    }
-
-    /** The status the failure marker records: what the handler's ladder will answer, as far as it is knowable. */
-    private static int failureStatus(RuntimeException e) {
-        if (e instanceof IllegalArgumentException) return 400;
-        if (e instanceof IllegalStateException) return 422;
-        return 500;
     }
 
     /** Whole seconds until the lease ends, never below 1. */

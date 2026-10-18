@@ -20,8 +20,11 @@ import java.util.Set;
  */
 public final class IdempotencyKeyGuard extends Filter {
 
-    /** The routes whose handlers judge a key themselves. */
-    static final Set<String> KEYED_ROUTES = Set.of(VectorHandler.QUARANTINE_ROUTE, VectorHandler.RESTORE_ROUTE);
+    /**
+     * The routes whose handlers judge a key themselves. Public so the census test can walk it: every route here
+     * must reach {@code VectorHandler.keyedRequest}, or its keys would be passed by this filter and then ignored.
+     */
+    public static final Set<String> KEYED_ROUTES = Set.of(VectorHandler.QUARANTINE_ROUTE, VectorHandler.RESTORE_ROUTE);
 
     @Override
     public String description() {

@@ -180,6 +180,12 @@ class KeyedSweepRouteTest {
         return UUID.randomUUID().toString();
     }
 
+    /** Whole seconds from {@code from} to {@code to}, rounded up. */
+    private static long ceilSeconds(OffsetDateTime from, OffsetDateTime to) {
+        long millis = java.time.Duration.between(from, to).toMillis();
+        return Math.floorDiv(millis + 999L, 1000L);
+    }
+
     // ── fixtures (substrate SQL) ─────────────────────────────────────────────
 
     /** A fixture: the collection a sweep reads from ({@code source}) and the one it moves rows into ({@code target}). */
@@ -266,6 +272,15 @@ class KeyedSweepRouteTest {
         return n[0];
     }
 
+    /** The {@code response_status} column of the ledger row, null when the row has none. */
+    private Integer ledgerStatus(String key) throws Exception {
+        Integer[] st = new Integer[1];
+        su(ctx -> st[0] = ctx.select(REQUEST_LEDGER.RESPONSE_STATUS).from(REQUEST_LEDGER)
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(UUID.fromString(key))))
+            .fetchOne(REQUEST_LEDGER.RESPONSE_STATUS));
+        return st[0];
+    }
+
     private static Map<String, Object> body(Fx f, int rowLimit) {
         var m = new LinkedHashMap<String, Object>();
         if (f.form() == Form.RESTORE) {
@@ -332,15 +347,26 @@ class KeyedSweepRouteTest {
         });
         assertThat(entered.await(60, TimeUnit.SECONDS)).as("the first sweep is held after its SQL").isTrue();
 
+        OffsetDateTime beforeSecond = OffsetDateTime.now();
         HttpResponse<String> second = sweep(f, 2, key);
+        OffsetDateTime afterSecond = OffsetDateTime.now();
         JsonNode busy = json(second, 409);
         assertThat(busy.get("error").asText()).isEqualTo("request_in_flight");
         assertThat(busy.get("request_id").asText()).isEqualTo(key);
         assertThat(busy.get("route").asText()).isEqualTo(form.path);
         OffsetDateTime leaseUntil = OffsetDateTime.parse(busy.get("lease_until").asText());
         assertThat(OffsetDateTime.parse(busy.get("started_at").asText())).isBefore(leaseUntil);
-        assertThat(Long.parseLong(header(second, "Retry-After")))
-            .as("whole seconds until the lease ends, never below 1").isGreaterThanOrEqualTo(1);
+        // Retry-After is ceil((lease_until - now) / 1 s) at the server's `now`, which lies between the two stamps
+        // taken here on the same JVM clock, floored at 1. The lease on the default pool is 25 s + 2 x 30 s + 10 s.
+        long retryAfter = Long.parseLong(header(second, "Retry-After"));
+        assertThat(retryAfter).as("never below 1").isGreaterThanOrEqualTo(1);
+        assertThat(retryAfter).as("no later than the lease length (95 s on the default pool)")
+            .isLessThanOrEqualTo(95);
+        assertThat(retryAfter).as("no later than the time left at the instant the request was sent, rounded up, "
+                + "plus one")
+            .isLessThanOrEqualTo(ceilSeconds(beforeSecond, leaseUntil) + 1);
+        assertThat(retryAfter).as("and not less than the time left when the reply came back, rounded up")
+            .isGreaterThanOrEqualTo(Math.max(1, ceilSeconds(afterSecond, leaseUntil)));
         assertThat(header(second, "Idempotency-Key")).as("a recorded request echoes its key").isEqualTo(key);
         assertThat(RequestLedgerActivity.snapshot().inFlight() - before.inFlight()).isEqualTo(1);
 
@@ -420,10 +446,16 @@ class KeyedSweepRouteTest {
         assertThat(RequestLedgerActivity.snapshot().replays() - before.replays()).isEqualTo(1);
     }
 
-    @Test
-    void aSweepBodyOver64KbIsStoredWithATruncatedSample_theLiveResponseIsUntouched() throws Exception {
+    /**
+     * The cap is on what the ledger hands back, and Postgres renders a jsonb with a space after every ':' and ','
+     * (several KB more than the compact text the engine sends). So this reads the replay's raw bytes, not a
+     * re-serialisation, and asks Postgres itself what the next-longer sample would have rendered to.
+     */
+    @ParameterizedTest
+    @EnumSource(value = Form.class, names = {"BOUNDED", "FLOORED"})
+    void aSweepBodyOver64KbIsStoredWithATruncatedSample_theLiveResponseIsUntouched(Form form) throws Exception {
         String pad = "x".repeat(400);
-        Fx f = seedOrphans(Form.BOUNDED, 300, pad);
+        Fx f = seedOrphans(form, 300, pad);
         String key = newKey();
         var req = body(f, 300);
         req.put("sample_limit", 300);
@@ -439,13 +471,41 @@ class KeyedSweepRouteTest {
         HttpResponse<String> replay = post(f.form().path, req, key);
         JsonNode stored = json(replay, 200);
         assertThat(header(replay, "Idempotency-Replayed")).isEqualTo("true");
+        assertThat(replay.body().getBytes(StandardCharsets.UTF_8).length)
+            .as("the replay's raw body, as Postgres renders the stored copy").isLessThanOrEqualTo(65_536);
         assertThat(stored.get("sample_truncated").asBoolean()).isTrue();
-        assertThat(stored.get("sample").size()).isBetween(1, 299);
+        int kept = stored.get("sample").size();
+        assertThat(kept).isBetween(1, 299);
+        for (int i = 0; i < kept; i++) {
+            assertThat(stored.get("sample").get(i)).as("sample[%d] is the live sample's prefix", i)
+                .isEqualTo(live.get("sample").get(i));
+        }
+        // Longest prefix that fits: one more element and the stored copy would be over the cap.
+        var longer = (com.fasterxml.jackson.databind.node.ObjectNode) live.deepCopy();
+        var longerSample = MAPPER.createArrayNode();
+        for (int i = 0; i <= kept; i++) longerSample.add(live.get("sample").get(i));
+        longer.set("sample", longerSample);
+        longer.put("sample_truncated", true);
+        assertThat(pgJsonbBytes(longer.toString()))
+            .as("the stored sample is the longest prefix that fits: %d elements kept, %d would not", kept, kept + 1)
+            .isGreaterThan(65_536);
         assertThat(stored.get("moved").asInt()).as("only the sample is cut").isEqualTo(300);
         assertThat(stored.get("remaining").asInt()).isZero();
         assertThat(stored.get("row_limit").asInt()).isEqualTo(300);
-        assertThat(MAPPER.writeValueAsBytes(stored).length).isLessThanOrEqualTo(65_536);
+        if (form == Form.FLOORED) {
+            assertThat(stored.get("floor")).isEqualTo(live.get("floor"));
+            assertThat(stored.get("refused").asBoolean()).isFalse();
+        }
         assertThat(status(key).get("response")).as("the status route reads the same stored copy").isEqualTo(stored);
+    }
+
+    /** The UTF-8 length of {@code json} as Postgres renders it back from a jsonb column. */
+    private int pgJsonbBytes(String json) throws Exception {
+        int[] n = new int[1];
+        su(ctx -> n[0] = ctx.select(DSL.function("octet_length", Integer.class,
+                DSL.val(json).cast(org.jooq.impl.SQLDataType.JSONB).cast(org.jooq.impl.SQLDataType.CLOB)))
+            .fetchOne(0, Integer.class));
+        return n[0];
     }
 
     // ── sweep_gate_busy: the two quarantine forms ────────────────────────────
@@ -472,7 +532,7 @@ class KeyedSweepRouteTest {
             HttpResponse<String> busy = sweep(f, 2, key);
             JsonNode b = json(busy, 503);
             assertThat(b.get("error").asText()).isEqualTo("sweep_gate_busy");
-            assertThat(Long.parseLong(header(busy, "Retry-After"))).isGreaterThanOrEqualTo(1);
+            assertThat(header(busy, "Retry-After")).as("the sweep gate wait is 2 s: ask again in 5").isEqualTo("5");
             assertThat(header(busy, "Idempotency-Key")).isEqualTo(key);
             assertThat(status(key).get("state").asText()).as("its own row, marked failed").isEqualTo("rolled_back");
             assertThat(count(f.source())).as("nothing moved").isEqualTo(3);
@@ -508,7 +568,12 @@ class KeyedSweepRouteTest {
             assertThat(keyed.statusCode()).as("same status as the keyless call: %s", unkeyed.body())
                 .isEqualTo(unkeyed.statusCode());
             assertThat(keyed.body()).isEqualTo(unkeyed.body());
-            assertThat(keyed.statusCode()).isNotEqualTo(200);
+            // Today's ladder has no arm for a row-lock 55P03 (the sweep gate's 55P03 is told apart by its
+            // message): it is the opaque 500, and the keyed call must say exactly that, not some other failure.
+            assertThat(keyed.statusCode()).as(keyed.body()).isEqualTo(500);
+            assertThat(keyed.body()).isEqualTo("{\"error\":\"internal server error\"}");
+            assertThat(header(keyed, "Idempotency-Key")).isEqualTo(key);
+            assertThat(ledgerStatus(key)).as("the failed row records what the ladder sent").isEqualTo(500);
             assertThat(status(key).get("state").asText()).as("the failure marker ran").isEqualTo("rolled_back");
         } finally {
             holder.rollback();
@@ -675,9 +740,117 @@ class KeyedSweepRouteTest {
         release.countDown();
 
         HttpResponse<String> r = call.get(60, TimeUnit.SECONDS);
-        assertThat(r.statusCode()).as("the sweep did not commit: %s", r.body()).isGreaterThanOrEqualTo(500);
+        // LedgerMarkerLost is no typed arm of the ladder: the opaque 500, with the generic body and no detail.
+        assertThat(r.statusCode()).as("the sweep did not commit: %s", r.body()).isEqualTo(500);
+        assertThat(r.body()).isEqualTo("{\"error\":\"internal server error\"}");
+        assertThat(header(r, "Idempotency-Key")).as("a 500 after the claim still echoes the key").isEqualTo(key);
         assertThat(count(f.source())).as("the mutation rolled back with the marker").isEqualTo(3);
         assertThat(movedRows(f)).isZero();
         assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+        assertThat(ledgerStatus(key)).isEqualTo(500);
+    }
+
+    // ── the failure status the ledger records is the one the ladder sent ─────
+
+    /** An exception a sweep can raise after its SQL, with the status today's handler ladder answers for it. */
+    enum Failure {
+        ILLEGAL_ARGUMENT(400, () -> new IllegalArgumentException("injected bad argument")),
+        ILLEGAL_STATE(422, () -> new IllegalStateException("injected refused state")),
+        UNREGISTERED_COLLECTION(422,
+            () -> new dev.nexus.service.db.UnregisteredCollectionException(TENANT, "injected-collection")),
+        POOL_EXHAUSTED(503, () -> new RuntimeException("injected",
+            new java.sql.SQLTransientConnectionException("HikariPool - Connection is not available"))),
+        RESTORE_BUSY(503, () -> new PgVectorRepository.QuarantineRestoreBusyException("injected lock bound", null)),
+        CLASS_23(409, () -> new RuntimeException("injected", new java.sql.SQLException("duplicate", "23505"))),
+        OPAQUE(500, () -> new RuntimeException("injected opaque failure"));
+
+        final int status;
+        final java.util.function.Supplier<RuntimeException> make;
+
+        Failure(int status, java.util.function.Supplier<RuntimeException> make) {
+            this.status = status;
+            this.make = make;
+        }
+    }
+
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> failures() {
+        var out = new ArrayList<org.junit.jupiter.params.provider.Arguments>();
+        for (Failure fl : Failure.values()) {
+            for (Form form : Form.values()) {
+                out.add(org.junit.jupiter.params.provider.Arguments.of(fl, form));
+            }
+        }
+        return out.stream();
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("failures")
+    void aFailedKeyedSweepRecordsTheStatusTheLadderSent_andEchoesTheKey(Failure failure, Form form) throws Exception {
+        Fx f = fixture(form, 3);
+        String key = newKey();
+        repo.setAfterSweepSqlHookForTests(() -> { throw failure.make.get(); });
+
+        HttpResponse<String> r = sweep(f, 2, key);
+
+        assertThat(r.statusCode()).as("%s: %s", failure, r.body()).isEqualTo(failure.status);
+        assertThat(header(r, "Idempotency-Key")).as("the echo on a failure after the claim").isEqualTo(key);
+        assertThat(ledgerStatus(key)).as("%s: the failed row records the status the client was sent", failure)
+            .isEqualTo(failure.status);
+        assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+        assertThat(count(f.source())).as("the sweep rolled back").isEqualTo(3);
+    }
+
+    // ── a collection the sweep cannot resolve fails before the claim ─────────
+
+    @ParameterizedTest
+    @EnumSource(Form.class)
+    void anUnknownCollectionWithAKeyGivesTodaysError_andNoLedgerRow(Form form) throws Exception {
+        Fx f = fixture(form, 2);
+        var req = body(f, 2);
+        String missing = (form.quarantine() ? "knowledge__nosuch" : "code__nosuch") + seq.incrementAndGet()
+            + "__minilm-l6-v2-384__v1";
+        req.put(form.quarantine() ? "collection" : "origin_collection", missing);
+        String key = newKey();
+        var before = RequestLedgerActivity.snapshot();
+
+        HttpResponse<String> unkeyed = post(form.path, req, null);
+        HttpResponse<String> keyed = post(form.path, req, key);
+
+        assertThat(unkeyed.statusCode()).as(unkeyed.body()).isEqualTo(422);
+        assertThat(unkeyed.body()).contains("unregistered_collection").contains(missing);
+        assertThat(keyed.statusCode()).isEqualTo(unkeyed.statusCode());
+        assertThat(keyed.body()).isEqualTo(unkeyed.body());
+        assertThat(ledgerRows(key)).as("the collection is resolved before the claim: no row").isZero();
+        assertThat(status(key).get("state").asText()).isEqualTo("unknown");
+        assertThat(RequestLedgerActivity.snapshot().inFlight() - before.inFlight()).isZero();
+        assertThat(count(f.source())).as("nothing moved").isEqualTo(2);
+    }
+
+    // ── census: every route the guard lets a key through is wired to the keyed path ──
+
+    @Test
+    void everyRouteTheGuardPassesAKeyOnIsServedByAKeyedHandler() throws Exception {
+        // The keyable request per route. A route added to KEYED_ROUTES with no entry here fails the first
+        // assertion, so the author must say how to key it; one whose handler never reaches the ledger fails the
+        // second (the guard would pass its key and the handler would drop it).
+        Map<String, Fx> keyable = new LinkedHashMap<>();
+        keyable.put(QUARANTINE_PATH, seedOrphans(Form.BOUNDED, 2, "t"));
+        keyable.put(RESTORE_PATH, seedRestore(Form.RESTORE, 2));
+
+        var routes = dev.nexus.service.http.IdempotencyKeyGuard.KEYED_ROUTES;
+        assertThat(routes).as("the census must see the guard's routes").isNotEmpty();
+        assertThat(keyable.keySet()).as("a keyable request is defined for every route in KEYED_ROUTES")
+            .containsAll(routes);
+        for (String route : routes) {
+            Fx f = keyable.get(route);
+            String key = newKey();
+            HttpResponse<String> r = sweep(f, 1, key);
+            assertThat(r.statusCode()).as("%s: %s", route, r.body()).isEqualTo(200);
+            assertThat(header(r, "Idempotency-Key")).as(route).isEqualTo(key);
+            assertThat(ledgerRows(key)).as("%s is served by a keyed handler: its key left a ledger row", route)
+                .isEqualTo(1);
+            assertThat(status(key).get("state").asText()).as(route).isEqualTo("committed");
+            assertThat(status(key).get("response")).as(route).isEqualTo(MAPPER.readTree(r.body()));
+        }
     }
 }

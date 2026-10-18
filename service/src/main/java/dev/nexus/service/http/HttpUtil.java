@@ -125,7 +125,19 @@ public final class HttpUtil {
         }
     }
 
+    /**
+     * Exchange attribute holding an {@link java.util.function.IntConsumer} that {@link #send} runs once, with the
+     * status it is about to write, before it writes anything. A keyed sweep (RDR-222 Phase 1) sets it on failure so
+     * its ledger row records the status the handler's exception ladder really sent, instead of a second copy of
+     * the ladder that could drift from it. Every response of {@code VectorHandler}'s ladder goes through {@code send}.
+     */
+    static final String BEFORE_SEND_ATTRIBUTE = "nexus.before-send";
+
     public static void send(HttpExchange exchange, int status, String body) throws IOException {
+        if (exchange.getAttribute(BEFORE_SEND_ATTRIBUTE) instanceof java.util.function.IntConsumer beforeSend) {
+            exchange.setAttribute(BEFORE_SEND_ATTRIBUTE, null);
+            beforeSend.accept(status);
+        }
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         if (bytes.length >= GZIP_MIN_BYTES) {
