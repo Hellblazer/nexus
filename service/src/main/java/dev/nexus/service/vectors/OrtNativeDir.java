@@ -15,6 +15,7 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -32,6 +33,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -240,6 +242,16 @@ public final class OrtNativeDir {
      * the root and version directory must be owned by (POSIX only; null skips the owner check).
      */
     static Result ensure(Path root, String osName, String osArchName, Resources resources, String user) {
+        return ensure(root, osName, osArchName, resources, user, d -> { });
+    }
+
+    /**
+     * {@link #ensure(Path, String, String, Resources, String)} with a test seam: {@code afterSeen} runs
+     * with the version directory right after each existence check that found it (in {@code ensure}
+     * and again in {@code recover}), so a test can make a sibling's rename-aside land exactly there.
+     */
+    static Result ensure(Path root, String osName, String osArchName, Resources resources, String user,
+                         Consumer<Path> afterSeen) {
         String platform = osArch(osName, osArchName);
         if (platform == null) {
             return new Result(null, Outcome.UNAVAILABLE);
@@ -253,7 +265,9 @@ public final class OrtNativeDir {
             // Before the reuse return: a stage left by a killed starter is removed by ANY later start.
             sweepStale(root, Instant.now());
             if (Files.exists(finalDir)) {
+                afterSeen.accept(finalDir);
                 // A writable version dir is not tightened and reused: it goes through recover() below.
+                // ABSENT (a sibling renamed it aside after the check above) falls through to extraction.
                 Trust t = versionDirTrust(finalDir, user, true);
                 if (t == Trust.UNTRUSTED) {
                     return new Result(null, Outcome.UNAVAILABLE);
@@ -277,7 +291,7 @@ public final class OrtNativeDir {
                 if (reusable(finalDir, user)) {
                     return new Result(finalDir, Outcome.REUSED);
                 }
-                return recover(root, stage, finalDir, user, failure);
+                return recover(root, stage, finalDir, user, failure, afterSeen);
             } finally {
                 deleteTree(stage);
             }
@@ -293,8 +307,8 @@ public final class OrtNativeDir {
      * a file lock; the check is repeated inside the lock, and a broken directory is renamed aside, not
      * deleted in place.
      */
-    private static Result recover(Path root, Path stage, Path finalDir, String user, IOException lastFailure)
-            throws IOException {
+    private static Result recover(Path root, Path stage, Path finalDir, String user, IOException lastFailure,
+                                  Consumer<Path> afterSeen) throws IOException {
         synchronized (RECOVERY) {
             try (FileChannel ch = FileChannel.open(root.resolve(LOCK_FILE),
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
@@ -305,17 +319,21 @@ public final class OrtNativeDir {
                         return new Result(finalDir, Outcome.REUSED);
                     }
                     if (Files.exists(finalDir, LinkOption.NOFOLLOW_LINKS)) {
-                        if (versionDirTrust(finalDir, user, true) == Trust.UNTRUSTED) {
+                        afterSeen.accept(finalDir);
+                        Trust t = versionDirTrust(finalDir, user, true);
+                        if (t == Trust.UNTRUSTED) {
                             return new Result(null, Outcome.UNAVAILABLE);
                         }
-                        Path aside = root.resolve(BROKEN_PREFIX + UUID.randomUUID().toString().substring(0, 8));
-                        try {
-                            Files.move(finalDir, aside, StandardCopyOption.ATOMIC_MOVE);
-                        } catch (IOException e) {
-                            lastFailure = e;
-                            continue;
+                        if (t != Trust.ABSENT) {
+                            Path aside = root.resolve(BROKEN_PREFIX + UUID.randomUUID().toString().substring(0, 8));
+                            try {
+                                Files.move(finalDir, aside, StandardCopyOption.ATOMIC_MOVE);
+                            } catch (IOException e) {
+                                lastFailure = e;
+                                continue;
+                            }
+                            deleteTree(aside);
                         }
-                        deleteTree(aside);
                     }
                     IOException failure = publish(stage, finalDir);
                     if (failure == null) {
@@ -477,14 +495,15 @@ public final class OrtNativeDir {
     }
 
     /** What the version directory is, for {@link #versionDirTrust}. */
-    private enum Trust { TRUSTED, WRITABLE_OWNED, UNTRUSTED }
+    private enum Trust { TRUSTED, WRITABLE_OWNED, UNTRUSTED, ABSENT }
 
     /**
      * Trust for the VERSION directory, which is never tightened: another user may already have written
      * into a group- or world-writable one. {@code TRUSTED} (owned by {@code user}, not writable by
      * group or others, or a non-POSIX platform); {@code WRITABLE_OWNED} (the current user owns it but
      * group or others can write: untrusted content, to be renamed aside and extracted afresh; warns);
-     * {@code UNTRUSTED} (foreign owner, unknown user, symbolic link: refused, warns).
+     * {@code UNTRUSTED} (foreign owner, unknown user, symbolic link: refused, warns); {@code ABSENT} (gone
+     * by the time its attributes were read, which a concurrent starter's rename-aside causes: not a refusal).
      */
     private static Trust versionDirTrust(Path dir, String user, boolean announce) {
         PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
@@ -516,6 +535,14 @@ public final class OrtNativeDir {
                             + "tightened; it is replaced by a fresh extraction\"",
                     dir, owner, mode);
             return Trust.WRITABLE_OWNED;
+        } catch (NoSuchFileException e) {
+            // Vanished since the caller saw it (a sibling renamed it aside): absent, to be re-evaluated, not
+            // unreadable. A dangling symbolic link is still there, and stays untrusted.
+            if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+                return Trust.ABSENT;
+            }
+            if (announce) log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable error=\"{}\"", dir, e.toString());
+            return Trust.UNTRUSTED;
         } catch (IOException e) {
             if (announce) log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable error=\"{}\"", dir, e.toString());
             return Trust.UNTRUSTED;

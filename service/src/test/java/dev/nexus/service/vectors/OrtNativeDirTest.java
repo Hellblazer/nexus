@@ -235,6 +235,55 @@ class OrtNativeDirTest {
         }
     }
 
+    /** A sibling's rename-aside of the version directory: the directory is gone when the caller reads it. */
+    private static void renameAside(Path root, Path dir) {
+        try {
+            Files.move(dir, root.resolve(".gone-" + System.nanoTime()), java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    @Test
+    void aVersionDirectoryThatVanishesAfterTheExistenceCheckIsAbsentNotUnavailable(@TempDir Path root)
+            throws Exception {
+        Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+        java.util.concurrent.atomic.AtomicInteger seen = new java.util.concurrent.atomic.AtomicInteger();
+
+        // The sibling renames the directory aside between ensure()'s exists() and its attribute read.
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small(), System.getProperty("user.name"),
+                d -> {
+                    seen.incrementAndGet();
+                    renameAside(root, d);
+                });
+
+        assertThat(seen).as("the seam fired").hasValue(1);
+        assertThat(r.outcome()).as("absent means extract, never UNAVAILABLE")
+                .isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+        assertThat(r.dir()).isEqualTo(dir);
+        assertThat(lib(dir, "onnxruntime4j_jni")).isRegularFile();
+    }
+
+    @Test
+    void aVersionDirectoryThatVanishesInsideRecoveryIsAbsentNotUnavailable(@TempDir Path root) throws Exception {
+        Path dir = OrtNativeDir.ensure(root, OS, ARCH, small()).dir();
+        Files.delete(lib(dir, "onnxruntime4j_jni"));
+        java.util.concurrent.atomic.AtomicInteger seen = new java.util.concurrent.atomic.AtomicInteger();
+
+        // Broken: ensure() sees it (call 1, left alone), publish loses, recover() sees it (call 2, vanishes).
+        OrtNativeDir.Result r = OrtNativeDir.ensure(root, OS, ARCH, small(), System.getProperty("user.name"),
+                d -> {
+                    if (seen.incrementAndGet() == 2) {
+                        renameAside(root, d);
+                    }
+                });
+
+        assertThat(seen).as("both seams fired").hasValue(2);
+        assertThat(r.outcome()).isEqualTo(OrtNativeDir.Outcome.EXTRACTED);
+        assertThat(r.dir()).isEqualTo(dir);
+        assertThat(lib(dir, "onnxruntime4j_jni")).isRegularFile();
+    }
+
     private static void assumePosix(Path p) {
         Assumptions.assumeTrue(p.getFileSystem().supportedFileAttributeViews().contains("posix"),
                 "POSIX ownership and modes only");
