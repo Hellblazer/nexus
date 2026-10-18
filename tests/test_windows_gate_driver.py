@@ -1578,6 +1578,10 @@ def test_harvest_fills_each_payload_under_its_own_version_checks_it_and_keeps_on
     assert "payload.new" not in harvest and harvest.count("$tmp = NewTmp") == 4
     assert re.search(r"^function NewTmp \{ Join-Path \$root \('payload-' \+ \[guid\]::NewGuid\(\)\.ToString\('N'\) \+ '\.new'\) \}$", code, re.M)
     assert harvest.count("if ($tmp) { Remove-Item -LiteralPath $tmp") == 2
+    # the uv-cache and models archives take per-run temp names too, swept by the same day-old cleanup (nexus-okbiz)
+    assert ".tar.new" not in code
+    archives = _between(code, "$keep = @($have)", "$gp = Invoke-Command")
+    assert archives.count("$tmp = NewTmp") == 2
     # the winget URL is a github.com Git for Windows release path with no ".." in it
     rx = next(m for m in re.findall(r"-match '(\^winget-git=[^']+)'", harvest))
     sha = "a" * 64

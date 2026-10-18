@@ -221,7 +221,7 @@ try {
                 tar.exe -cf $t -C "$p\AppData\Local\uv" cache; "pack exit=$LASTEXITCODE"
             }
             $n
-            $tmp = Join-Path $root 'uv-cache.tar.new'
+            $tmp = NewTmp
             Copy-Item -FromSession $s -Path $guestTar -Destination $tmp -Force
             Invoke-Command -Session $s -ArgumentList $guestTar { param($t) Remove-Item -LiteralPath $t -Force }
             Move-Item -LiteralPath $tmp -Destination $uvTar -Force
@@ -246,7 +246,7 @@ try {
             }
             $found
             if ($found -like 'pack exit=0') {
-                $tmp = Join-Path $root 'models.tar.new'
+                $tmp = NewTmp
                 Copy-Item -FromSession $s -Path $guestMt -Destination $tmp -Force
                 Invoke-Command -Session $s -ArgumentList $guestMt { param($t) Remove-Item -LiteralPath $t -Force }
                 Move-Item -LiteralPath $tmp -Destination $modelsTar -Force
