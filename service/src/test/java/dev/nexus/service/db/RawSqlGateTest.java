@@ -1125,7 +1125,10 @@ class RawSqlGateTest {
         // rows, mirroring nexus-r7xao's own seedTupleBodySizeLimitRows already counted here).
         // nexus-cbo4a pre-walk bootstrap fold: 111 -> 97 (bootstrapVectorExtensionsForFreshWalk and
         // dbaBootstrap's role block are PgContainerHelper.bootstrapNonSuperuserOwner now).
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 97),
+        // nexus-cbo4a 2026-10-18 upgrade-walk: SchemaUpgradeRehearsalIntegrationTest.java 97 -> 0, entry removed
+        // outright (the count(Connection, String) wrapper is deleted and its 63 call sites are fetchCount on the
+        // generated tables; the old-leg seeds, the ms57z constraint drop and the databasechangelog probes are typed
+        // inserts / alterTable / selects on named handles; the three pre-relocation vector seeds bind a real[]).
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 3),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 1),
@@ -1200,9 +1203,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 7 -> 4
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 3),
         // nexus-cbo4a pre-walk bootstrap fold: 66 -> 52, 15 -> 1, 27 -> 13 for the three Vectors*
-        // entries below (each file's bootstrapVectorExtensionsForFreshWalk and newRig role block are
+        // files (each file's bootstrapVectorExtensionsForFreshWalk and newRig role block are
         // PgContainerHelper.bootstrapNonSuperuserOwner now).
-        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 52),
+        // nexus-cbo4a 2026-10-18 upgrade-walk: VectorsRepointFunctionsIntegrationTest.java 52 -> 0, entry removed
+        // outright (every call runs against the HEAD schema: seeds on the generated tables, the combined-query,
+        // gc_*, manifest and views through the generated functions, the one FK bypass through the typed
+        // alterTable plus nexus_test.add_fk_not_valid_composite3).
         Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 1),
         Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 13),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
@@ -1707,7 +1713,10 @@ class RawSqlGateTest {
     // because catalog-031 precedes hygiene-001). Its three catalog_collections seeds stay raw: that table is
     // outside the seven this batch converted. The same fold-in swapped the non-literal DSL.inline arguments the
     // batch had added for typed DSL.val binds.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 650;
+    // nexus-cbo4a 2026-10-18 upgrade-walk: 650 -> 501 (-149: VectorsRepointFunctionsIntegrationTest.java 52 -> 0 and
+    // SchemaUpgradeRehearsalIntegrationTest.java 97 -> 0, both entries removed outright with no exemption; 100 -> 98
+    // files). Nothing is kept raw in either file.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 501;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

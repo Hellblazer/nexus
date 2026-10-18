@@ -25,12 +25,28 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
@@ -199,8 +215,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
                 // ── DIVERGENCE: the verbatim ms57z shape (GH #1390). ─────────────
                 try (Connection conn = adminDs.getConnection()) {
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT IF EXISTS chunks_384_chash_len_check");
+                    dsl(conn).alterTable(DSL.table(DSL.name("nexus", "chunks_384")))
+                        .dropConstraintIfExists(DSL.name("chunks_384_chash_len_check"))
+                        .execute();
                 }
 
                 // ── HEAD LEG: the REAL production entry point, resolving the
@@ -723,33 +740,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     //   NULL all the way to hygiene-001-1).
                     //   UPDATE arm: doc_id already set (bypasses aspects-004-1
                     //   entirely, its predicate is doc_id IS NULL), source_uri NULL.
-                    try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.document_aspects "
-                        + "(tenant_id, collection, source_path, proposed_method, extracted_at, "
-                        + "model_version, extractor_name, source_uri, doc_id) "
-                        + "VALUES ('t1', 'code__x', 'seed/hygiene1-orphan.md', 'rehearsal-seeded', "
-                        + "now(), 'rehearsal-model', 'rehearsal-extractor', "
-                        + "'file:///seed/hygiene1-unconvertable.md', NULL)")) {
-                        ps.executeUpdate();
-                    }
-                    try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.document_aspects "
-                        + "(tenant_id, collection, source_path, proposed_method, extracted_at, "
-                        + "model_version, extractor_name, source_uri, doc_id) "
-                        + "VALUES ('t1', 'code__x', 'seed/hygiene1-legit.md', 'rehearsal-seeded', "
-                        + "now(), 'rehearsal-model', 'rehearsal-extractor', NULL, '1.1.100')")) {
-                        ps.executeUpdate();
-                    }
+                    seedAspect(su, "t1", "code__x", "seed/hygiene1-orphan.md", "rehearsal-seeded",
+                        "file:///seed/hygiene1-unconvertable.md", null);
+                    seedAspect(su, "t1", "code__x", "seed/hygiene1-legit.md", "rehearsal-seeded",
+                        null, "1.1.100");
 
                     // hygiene-001-2 (aspect_extraction_queue.doc_id NOT NULL):
                     // reverses fk-001-4's nullable conversion (already applied at
                     // OLD_TAG) -- doc_id NULL is representable at this seed point.
-                    try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.aspect_extraction_queue "
-                        + "(tenant_id, collection, source_path, doc_id, enqueued_at) "
-                        + "VALUES ('t1', 'code__x', 'seed/hygiene2-orphan.md', NULL, now())")) {
-                        ps.executeUpdate();
-                    }
+                    dsl(su).insertInto(ASPECT_EXTRACTION_QUEUE)
+                        .set(ASPECT_EXTRACTION_QUEUE.TENANT_ID, "t1")
+                        .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, "code__x")
+                        .set(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, "seed/hygiene2-orphan.md")
+                        .set(ASPECT_EXTRACTION_QUEUE.DOC_ID, (String) null)
+                        .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, DSL.currentOffsetDateTime())
+                        .execute();
 
                     // hygiene-001-3 (document_highlights.source_uri/collection NOT
                     // NULL): source_uri/collection are nullable at baseline (no
@@ -758,12 +763,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // point in the changelog -- reuse the already-registered
                     // 1.1.101 document (no OTHER document_highlights row claims it)
                     // rather than a fabricated identity.
-                    try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.document_highlights "
-                        + "(tenant_id, doc_id, source_uri, collection, ingested_at) "
-                        + "VALUES ('t1', '1.1.101', NULL, NULL, now())")) {
-                        ps.executeUpdate();
-                    }
+                    dsl(su).insertInto(DOCUMENT_HIGHLIGHTS)
+                        .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, "t1")
+                        .set(DOCUMENT_HIGHLIGHTS.DOC_ID, "1.1.101")
+                        .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, (String) null)
+                        .set(DOCUMENT_HIGHLIGHTS.COLLECTION, (String) null)
+                        .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, DSL.currentOffsetDateTime())
+                        .execute();
 
                     // hygiene-001-9b (taxonomy_centroids.label NOT NULL): a dedicated
                     // collection/topic_id, distinct from taxonomy-007-1's own
@@ -789,20 +795,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     //   -11 row: verb NULL, ttl NULL (permanent -- dodges -10's
                     //   `ttl_days IS NOT NULL` predicate entirely), so only
                     //   hygiene-001-11's verb-IS-NULL delete can remove it.
-                    try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.plans "
-                        + "(tenant_id, project, query, plan_json, created_at, ttl, verb) "
-                        + "VALUES ('t1', 'p6a-proj', 'hygiene10 expired query', '{}'::jsonb, "
-                        + "now() - interval '10 days', 1, 'research')")) {
-                        ps.executeUpdate();
-                    }
-                    try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.plans "
-                        + "(tenant_id, project, query, plan_json, created_at, ttl, verb) "
-                        + "VALUES ('t1', 'p6a-proj', 'hygiene11 verbless query', '{}'::jsonb, "
-                        + "now(), NULL, NULL)")) {
-                        ps.executeUpdate();
-                    }
+                    seedPlan(su, "t1", "p6a-proj", "hygiene10 expired query", 1, "research",
+                        DSL.val(java.time.OffsetDateTime.now().minusDays(10)));
+                    seedPlan(su, "t1", "p6a-proj", "hygiene11 verbless query", null, null,
+                        DSL.currentOffsetDateTime());
 
                     // hygiene-002-1 (nexus-ft04v.4, RDR-204 Phase 1 item 1, seed-coverage
                     // lint follow-up): the one-time catalog_collections attribute
@@ -917,10 +913,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     registerCollection(su, "t1", "knowledge__h044subject__bge-base-en-v15-768__v1");
                     seedDocument(su, "t1", "1.1.302", "knowledge keep doc", "knowledge__h044subject__bge-base-en-v15-768__v1");
 
-                    assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
+                    assertThat(dsl(su).fetchCount(CHASH_INDEX_RETIRED))
                         .as("superuser ground truth after seeding").isEqualTo(5);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_document_chunks WHERE collection IS NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull()))
                         .as("superuser ground truth after seeding — 2 content-backed "
                             + "(1.1.100) + 1 deliberately content-less (1.1.101, the "
                             + "dangling-row DELETE proof)")
@@ -932,42 +928,42 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 // If this ever starts seeing rows, the data leg has silently
                 // stopped testing what it exists to test. ────────────────────────
                 try (Connection admin = adminDs.getConnection()) {
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.chash_index"))
+                    assertThat(dsl(admin).fetchCount(CHASH_INDEX_RETIRED))
                         .as("FORCE RLS must hide all chash_index rows from the non-BYPASSRLS owner")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_document_chunks"))
+                    assertThat(dsl(admin).fetchCount(CATALOG_DOCUMENT_CHUNKS))
                         .as("FORCE RLS must hide all manifest rows from the non-BYPASSRLS owner")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_documents"))
+                    assertThat(dsl(admin).fetchCount(CATALOG_DOCUMENTS))
                         .as("FORCE RLS must hide the seeded document from the non-BYPASSRLS owner "
                             + "— the join side of catalog-014-0's stamp, the both-tables lesson")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_links"))
+                    assertThat(dsl(admin).fetchCount(CATALOG_LINKS))
                         .as("FORCE RLS must hide both seeded catalog_links rows from the "
                             + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.frecency"))
+                    assertThat(dsl(admin).fetchCount(FRECENCY))
                         .as("FORCE RLS must hide all four seeded frecency rows from the "
                             + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target "
                             + "(2 rows) plus telemetry-006-1's own toggle-wrap target (2 more)")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.relevance_log"))
+                    assertThat(dsl(admin).fetchCount(RELEVANCE_LOG))
                         .as("FORCE RLS must hide both seeded relevance_log rows from the "
                             + "non-BYPASSRLS owner — legacy-001-2's own toggle-wrap target")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.topic_assignments"))
+                    assertThat(dsl(admin).fetchCount(TOPIC_ASSIGNMENTS))
                         .as("FORCE RLS must hide all five seeded topic_assignments rows from "
                             + "the non-BYPASSRLS owner — taxonomy-010-1's own toggle-wrap target")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.memory"))
+                    assertThat(dsl(admin).fetchCount(MEMORY))
                         .as("FORCE RLS must hide both seeded memory rows from the "
                             + "non-BYPASSRLS owner — memory-003-1's own toggle-wrap target")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.plans"))
+                    assertThat(dsl(admin).fetchCount(PLANS))
                         .as("FORCE RLS must hide both seeded plans rows from the "
                             + "non-BYPASSRLS owner — plans-003-1's own toggle-wrap target")
                         .isEqualTo(0);
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.document_aspects"))
+                    assertThat(dsl(admin).fetchCount(DOCUMENT_ASPECTS))
                         .as("FORCE RLS must hide the seeded document_aspects row from the "
                             + "non-BYPASSRLS owner — aspects-004-1's own toggle-wrap target")
                         .isEqualTo(0);
@@ -993,7 +989,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         tuplesLegacyClaimId);
                 }
                 try (Connection admin = adminDs.getConnection()) {
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.tuples"))
+                    assertThat(dsl(admin).fetchCount(TUPLES))
                         .as("FORCE RLS must hide both seeded nexus.tuples rows from the "
                             + "non-BYPASSRLS owner -- tuples-003-2's own toggle-wrap target")
                         .isEqualTo(0);
@@ -1020,7 +1016,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedTupleConsumedBodyCleanupRows(su, tuplesTenant, tuplesConsumedId, tuplesUnconsumedId);
                 }
                 try (Connection admin = adminDs.getConnection()) {
-                    assertThat(count(admin, "SELECT count(*) FROM nexus.tuples"))
+                    assertThat(dsl(admin).fetchCount(TUPLES))
                         .as("FORCE RLS must hide every seeded nexus.tuples row from the "
                             + "non-BYPASSRLS owner -- tuples-004-1's own toggle-wrap target")
                         .isEqualTo(0);
@@ -1259,17 +1255,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // remains directly observable at the intermediate checkpoint
                     // this comment describes (proven by the two isEqualTo(0)
                     // assertions below, which are the fact that survives to HEAD).
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_document_chunks "
-                        + "WHERE collection = 'code__x'"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq("code__x")))
                         .as("both 1.1.100 manifest rows are un-rekeyed legacy-width "
                             + "(16-byte) chash -- hygiene-001-5's FK-safety cleanup "
                             + "removes them (ahead of the chunks parent DELETE) by the "
                             + "time this full hop reaches HEAD")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_document_chunks "
-                        + "WHERE collection IS NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull()))
                         .as("no manifest row may remain un-stamped after catalog-014-0")
                         .isEqualTo(0);
 
@@ -1285,9 +1279,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // would fail if catalog-025-0's DELETE silently no-op'd under
                     // FORCE-RLS (the exact failure class nexus-1wjmq/nexus-php10 exist
                     // to catch) while the KEEP-arm assertions above stayed green.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_document_chunks "
-                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.101'"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq("t1")
+                                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("1.1.101"))))
                         .as("catalog-025-0's dangling-row DELETE must actually remove a "
                             + "correctly-stamped-but-content-less row under FORCE-RLS, "
                             + "proving the DELETE arm fires, not just the KEEP arm")
@@ -1297,21 +1291,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // through its FORCE-RLS toggle and tombstoned the loser —
                     // exactly one LIVE row per (tenant, source_uri) survives,
                     // and it is the most-chunk-bearing winner.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_documents "
-                        + "WHERE source_uri = 'file:///seed/dup.md' AND deleted_at IS NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.SOURCE_URI.eq("file:///seed/dup.md")
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
                         .as("catalog-016-0 must tombstone the duplicate-uri loser "
                             + "(an RLS-blind no-op would leave 2 live rows and fail "
                             + "016-1's unique-index creation)")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_documents "
-                        + "WHERE tumbler = '1.1.202' AND deleted_at IS NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TUMBLER.eq("1.1.202")
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
                         .as("the most-chunk-bearing row must be the surviving winner")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_documents "
-                        + "WHERE tumbler = '1.1.201' AND deleted_at IS NOT NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TUMBLER.eq("1.1.201")
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())))
                         .as("the loser must be TOMBSTONED, never hard-deleted")
                         .isEqualTo(1);
                     assertThat((PgCatalogProbes.indexExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "ux_catalog_documents_live_source_uri") ? 1 : 0))
@@ -1326,15 +1320,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // and owns both FORCE-RLS tables; no nexus.tenant GUC is
                     // set at migration time, so an untoggled UPDATE would
                     // match zero rows for every tenant, silently).
-                    try (var ars = su.createStatement().executeQuery(
-                        "SELECT doc_id FROM nexus.document_aspects "
-                        + "WHERE tenant_id = 't1' AND source_path = 'seed/ubnwk-aspect.md'")) {
-                        assertThat(ars.next()).isTrue();
-                        assertThat(ars.getString("doc_id"))
-                            .as("aspects-004-1 must stamp doc_id = the matching catalog "
-                                + "document's tumbler under FORCE-RLS, not silently no-op")
-                            .isEqualTo("1.1.204");
-                    }
+                    List<String> ubnwkDocIds = dsl(su).select(DOCUMENT_ASPECTS.DOC_ID).from(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.TENANT_ID.eq("t1")
+                            .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("seed/ubnwk-aspect.md")))
+                        .fetch(DOCUMENT_ASPECTS.DOC_ID);
+                    assertThat(ubnwkDocIds).isNotEmpty();
+                    assertThat(ubnwkDocIds.get(0))
+                        .as("aspects-004-1 must stamp doc_id = the matching catalog "
+                            + "document's tumbler under FORCE-RLS, not silently no-op")
+                        .isEqualTo("1.1.204");
                     assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.document_aspects", "nexus.catalog_documents"))
                         .as("aspects-004-1 must RESTORE FORCE ROW LEVEL SECURITY on both "
                             + "toggled tables within its own changeset")
@@ -1370,24 +1364,30 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // left it, just not independently observable from a single
                     // full-hop migrate() call once a later, unrelated cleanup
                     // also touches the same rows.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't1' "
-                        + "AND collection = 'code__x' AND embedding_384 IS NOT NULL "
-                        + "AND embedding_768 IS NULL AND embedding_1024 IS NULL"))
+                    assertThat(dsl(su).fetchCount(CHUNKS,
+                            CHUNKS.TENANT_ID.eq("t1")
+                                .and(CHUNKS.COLLECTION.eq("code__x"))
+                                .and(CHUNKS.EMBEDDING_384.isNotNull())
+                                .and(CHUNKS.EMBEDDING_768.isNull())
+                                .and(CHUNKS.EMBEDDING_1024.isNull())))
                         .as("the two j862l chunks_384 rows are legacy-width chash -- "
                             + "hygiene-001-5 deletes them by HEAD")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't1' "
-                        + "AND collection = 'code__y' AND embedding_768 IS NOT NULL "
-                        + "AND embedding_384 IS NULL AND embedding_1024 IS NULL"))
+                    assertThat(dsl(su).fetchCount(CHUNKS,
+                            CHUNKS.TENANT_ID.eq("t1")
+                                .and(CHUNKS.COLLECTION.eq("code__y"))
+                                .and(CHUNKS.EMBEDDING_768.isNotNull())
+                                .and(CHUNKS.EMBEDDING_384.isNull())
+                                .and(CHUNKS.EMBEDDING_1024.isNull())))
                         .as("the seeded chunks_768 row is legacy-width chash -- "
                             + "hygiene-001-5 deletes it by HEAD")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't2' "
-                        + "AND collection = 'code__z' AND embedding_1024 IS NOT NULL "
-                        + "AND embedding_384 IS NULL AND embedding_768 IS NULL"))
+                    assertThat(dsl(su).fetchCount(CHUNKS,
+                            CHUNKS.TENANT_ID.eq("t2")
+                                .and(CHUNKS.COLLECTION.eq("code__z"))
+                                .and(CHUNKS.EMBEDDING_1024.isNotNull())
+                                .and(CHUNKS.EMBEDDING_384.isNull())
+                                .and(CHUNKS.EMBEDDING_768.isNull())))
                         .as("the seeded chunks_1024 row is legacy-width chash -- "
                             + "hygiene-001-5 deletes it by HEAD")
                         .isEqualTo(0);
@@ -1400,22 +1400,28 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // taxonomy-007-1 leg (nexus-jv3ue): the analogous straddle
                     // for nexus.taxonomy_centroids, all three dims fresh-seeded
                     // above (no chunks-style j862l reuse available here).
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't1' "
-                        + "AND collection = 'code__cx__minilm-l6-v2-384__v1' AND embedding_384 IS NOT NULL "
-                        + "AND embedding_768 IS NULL AND embedding_1024 IS NULL"))
+                    assertThat(dsl(su).fetchCount(TAXONOMY_CENTROIDS,
+                            TAXONOMY_CENTROIDS.TENANT_ID.eq("t1")
+                                .and(TAXONOMY_CENTROIDS.COLLECTION.eq("code__cx__minilm-l6-v2-384__v1"))
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_384.isNotNull())
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_768.isNull())
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_1024.isNull())))
                         .as("the seeded taxonomy_centroids_384 row landed under embedding_384 only")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't1' "
-                        + "AND collection = 'code__y' AND embedding_768 IS NOT NULL "
-                        + "AND embedding_384 IS NULL AND embedding_1024 IS NULL"))
+                    assertThat(dsl(su).fetchCount(TAXONOMY_CENTROIDS,
+                            TAXONOMY_CENTROIDS.TENANT_ID.eq("t1")
+                                .and(TAXONOMY_CENTROIDS.COLLECTION.eq("code__y"))
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_768.isNotNull())
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_384.isNull())
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_1024.isNull())))
                         .as("the seeded taxonomy_centroids_768 row landed under embedding_768 only")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't2' "
-                        + "AND collection = 'code__cz__voyage-code-3__v1' AND embedding_1024 IS NOT NULL "
-                        + "AND embedding_384 IS NULL AND embedding_768 IS NULL"))
+                    assertThat(dsl(su).fetchCount(TAXONOMY_CENTROIDS,
+                            TAXONOMY_CENTROIDS.TENANT_ID.eq("t2")
+                                .and(TAXONOMY_CENTROIDS.COLLECTION.eq("code__cz__voyage-code-3__v1"))
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_1024.isNotNull())
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_384.isNull())
+                                .and(TAXONOMY_CENTROIDS.EMBEDDING_768.isNull())))
                         .as("the seeded taxonomy_centroids_1024 row landed under embedding_1024 only")
                         .isEqualTo(1);
                     for (String t : new String[] {
@@ -1476,9 +1482,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "VALIDATE only succeeds if catalog-029-1's anti-join DELETE actually "
                             + "ran (toggle correctly off) and left no dangling row behind")
                         .isTrue();
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_document_chunks "
-                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.100'"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq("t1")
+                                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("1.1.100"))))
                         .as("the two 1.1.100 manifest rows are legacy-width chash -- "
                             + "hygiene-001-5 deletes them by HEAD regardless of "
                             + "catalog-029-1's own (separately covered) toggle outcome")
@@ -1488,33 +1494,34 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // aspects-004-1) row must be gone; the UPDATE-arm row's
                     // pre-existing doc_id must be untouched and its NULL source_uri
                     // backfilled to ''.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.document_aspects "
-                        + "WHERE tenant_id = 't1' AND source_path = 'seed/hygiene1-orphan.md'"))
+                    assertThat(dsl(su).fetchCount(DOCUMENT_ASPECTS,
+                            DOCUMENT_ASPECTS.TENANT_ID.eq("t1")
+                                .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("seed/hygiene1-orphan.md"))))
                         .as("hygiene-001-1's DELETE WHERE doc_id IS NULL must remove the "
                             + "unconvertible orphan row")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.document_aspects "
-                        + "WHERE tenant_id = 't1' AND source_path = 'seed/hygiene1-legit.md' "
-                        + "AND doc_id = '1.1.100' AND source_uri = ''"))
+                    assertThat(dsl(su).fetchCount(DOCUMENT_ASPECTS,
+                            DOCUMENT_ASPECTS.TENANT_ID.eq("t1")
+                                .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("seed/hygiene1-legit.md"))
+                                .and(DOCUMENT_ASPECTS.DOC_ID.eq("1.1.100"))
+                                .and(DOCUMENT_ASPECTS.SOURCE_URI.eq(""))))
                         .as("hygiene-001-1's UPDATE must backfill the legit row's NULL "
                             + "source_uri to '', leaving its pre-existing doc_id untouched")
                         .isEqualTo(1);
 
                     // hygiene-001-2: the doc_id-NULL queue row must be gone.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.aspect_extraction_queue "
-                        + "WHERE tenant_id = 't1' AND source_path = 'seed/hygiene2-orphan.md'"))
+                    assertThat(dsl(su).fetchCount(ASPECT_EXTRACTION_QUEUE,
+                            ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq("t1")
+                                .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("seed/hygiene2-orphan.md"))))
                         .as("hygiene-001-2's DELETE WHERE doc_id IS NULL must remove the "
                             + "orphan queue row")
                         .isEqualTo(0);
 
                     // hygiene-001-3: the source_uri-and-collection-NULL highlight row
                     // must be gone.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.document_highlights "
-                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.101'"))
+                    assertThat(dsl(su).fetchCount(DOCUMENT_HIGHLIGHTS,
+                            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq("t1")
+                                .and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq("1.1.101"))))
                         .as("hygiene-001-3's DELETE WHERE source_uri IS NULL OR collection "
                             + "IS NULL must remove the row")
                         .isEqualTo(0);
@@ -1522,11 +1529,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // hygiene-001-4: the 1.1.100 catalog_documents row (seeded above
                     // with only tenant_id/tumbler/title/physical_collection) must have
                     // its other four columns backfilled to their DEFAULT ''/0.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_documents "
-                        + "WHERE tenant_id = 't1' AND tumbler = '1.1.100' "
-                        + "AND content_type = '' AND corpus = '' AND file_path = '' "
-                        + "AND chunk_count = 0"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID.eq("t1")
+                                .and(CATALOG_DOCUMENTS.TUMBLER.eq("1.1.100"))
+                                .and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(""))
+                                .and(CATALOG_DOCUMENTS.CORPUS.eq(""))
+                                .and(CATALOG_DOCUMENTS.FILE_PATH.eq(""))
+                                .and(CATALOG_DOCUMENTS.CHUNK_COUNT.eq(0))))
                         .as("hygiene-001-4 must backfill catalog_documents' NULL "
                             + "content_type/corpus/file_path/chunk_count to ''/0")
                         .isEqualTo(1);
@@ -1534,19 +1543,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // hygiene-001-6: the code__x catalog_collections row (registered
                     // above via registerCollection, which never sets created_at) must
                     // end up with a non-null created_at.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_collections "
-                        + "WHERE tenant_id = 't1' AND name = 'code__x' AND created_at IS NOT NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_COLLECTIONS,
+                            CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                                .and(CATALOG_COLLECTIONS.NAME.eq("code__x"))
+                                .and(CATALOG_COLLECTIONS.CREATED_AT.isNotNull())))
                         .as("hygiene-001-6 must backfill catalog_collections.created_at, "
                             + "never leave it NULL")
                         .isEqualTo(1);
 
                     // hygiene-001-7: the 1.1.100->1.1.101 catalog_links row (seeded via
                     // seedLink, which never sets created_at) must end up non-null.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_links "
-                        + "WHERE tenant_id = 't1' AND from_tumbler = '1.1.100' "
-                        + "AND to_tumbler = '1.1.101' AND created_at IS NOT NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_LINKS,
+                            CATALOG_LINKS.TENANT_ID.eq("t1")
+                                .and(CATALOG_LINKS.FROM_TUMBLER.eq("1.1.100"))
+                                .and(CATALOG_LINKS.TO_TUMBLER.eq("1.1.101"))
+                                .and(CATALOG_LINKS.CREATED_AT.isNotNull())))
                         .as("hygiene-001-7 must backfill catalog_links.created_at to "
                             + "now(), never leave it NULL")
                         .isEqualTo(1);
@@ -1554,10 +1565,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // hygiene-001-9: the canonical-width ("f"x64) relevance_log row
                     // (legacy-001-2's own KEEP-arm seed, collection never set) must end
                     // up with collection = ''.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.relevance_log "
-                        + "WHERE tenant_id = 't1' AND chunk_id = '" + "f".repeat(64) + "' "
-                        + "AND collection = ''"))
+                    assertThat(dsl(su).fetchCount(RELEVANCE_LOG,
+                            RELEVANCE_LOG.TENANT_ID.eq("t1")
+                                .and(RELEVANCE_LOG.CHUNK_ID.eq("f".repeat(64)))
+                                .and(RELEVANCE_LOG.COLLECTION.eq(""))))
                         .as("hygiene-001-9 must backfill relevance_log.collection to '', "
                             + "never leave it NULL")
                         .isEqualTo(1);
@@ -1566,10 +1577,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // (label=null at seed time) must end up with label = ''.
                     // RDR-225: code__hyg9b has no registry row, so the walk does not copy its centroid (derived
                     // data, taxonomy rebuilds it); it stays in the retired table, which still proves the backfill.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.taxonomy_centroids_retired_225 "
-                        + "WHERE tenant_id = 't1' AND collection = 'code__hyg9b' "
-                        + "AND topic_id = 999 AND label = ''"))
+                    assertThat(dsl(su).fetchCount(CENTROIDS_RETIRED_225,
+                            RETIRED_TENANT_ID.eq("t1").and(RETIRED_COLLECTION.eq("code__hyg9b"))
+                                .and(RETIRED_TOPIC_ID.eq(999L)).and(RETIRED_LABEL.eq(""))))
                         .as("hygiene-001-9b must backfill taxonomy_centroids.label to "
                             + "'', never leave it NULL")
                         .isEqualTo(1);
@@ -1578,15 +1588,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // -10's expired-but-non-null-verb row via the TTL catch-up sweep,
                     // -11's permanent-but-verb-null row via the verb backstop -- each
                     // independent of the other changeset's own predicate.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.plans "
-                        + "WHERE tenant_id = 't1' AND query = 'hygiene10 expired query'"))
+                    assertThat(dsl(su).fetchCount(PLANS,
+                            PLANS.TENANT_ID.eq("t1")
+                                .and(PLANS.QUERY.eq("hygiene10 expired query"))))
                         .as("hygiene-001-10's TTL catch-up sweep must remove the expired, "
                             + "non-null-verb plan row")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.plans "
-                        + "WHERE tenant_id = 't1' AND query = 'hygiene11 verbless query'"))
+                    assertThat(dsl(su).fetchCount(PLANS,
+                            PLANS.TENANT_ID.eq("t1")
+                                .and(PLANS.QUERY.eq("hygiene11 verbless query"))))
                         .as("hygiene-001-11's verb backstop must remove the permanent, "
                             + "verb-null plan row")
                         .isEqualTo(0);
@@ -1660,16 +1670,17 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // see zero nexus.catalog_documents rows and WRONGLY delete BOTH seeded
                     // links as false-dangling — either failure mode is caught below,
                     // mirroring the catalog-029-1 leg's KEEP/DELETE dual-arm shape.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_links "
-                        + "WHERE tenant_id = 't1' AND to_tumbler = '1.1.999-ghost'"))
+                    assertThat(dsl(su).fetchCount(CATALOG_LINKS,
+                            CATALOG_LINKS.TENANT_ID.eq("t1")
+                                .and(CATALOG_LINKS.TO_TUMBLER.eq("1.1.999-ghost"))))
                         .as("catalog-032-1's anti-join DELETE must actually remove the "
                             + "never-registered-endpoint link under FORCE-RLS, proving the "
                             + "DELETE arm fires, not just the KEEP arm")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_links "
-                        + "WHERE tenant_id = 't1' AND from_tumbler = '1.1.100' AND to_tumbler = '1.1.101'"))
+                    assertThat(dsl(su).fetchCount(CATALOG_LINKS,
+                            CATALOG_LINKS.TENANT_ID.eq("t1")
+                                .and(CATALOG_LINKS.FROM_TUMBLER.eq("1.1.100"))
+                                .and(CATALOG_LINKS.TO_TUMBLER.eq("1.1.101"))))
                         .as("the real edge between two live documents must survive catalog-032-1's "
                             + "remediation — a broken toggle would wrongly delete this too")
                         .isEqualTo(1);
@@ -1704,30 +1715,30 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // constraint-existence assertion is needed the way catalog-032's
                     // FK VALIDATEs required one — the row-level effect below is the
                     // whole proof.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' AND chunk_id = '"
-                        + "e".repeat(32) + "'"))
+                    assertThat(dsl(su).fetchCount(FRECENCY,
+                            FRECENCY.TENANT_ID.eq("t1")
+                                .and(FRECENCY.CHUNK_ID.eq("e".repeat(32)))))
                         .as("legacy-001-1's shape-agnostic DELETE must actually remove the "
                             + "legacy-width frecency row under FORCE-RLS, proving the DELETE "
                             + "arm fires, not just the KEEP arm")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' AND chunk_id = '"
-                        + "d".repeat(64) + "'"))
+                    assertThat(dsl(su).fetchCount(FRECENCY,
+                            FRECENCY.TENANT_ID.eq("t1")
+                                .and(FRECENCY.CHUNK_ID.eq("d".repeat(64)))))
                         .as("the canonical-width frecency row must survive legacy-001-1's "
                             + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
                             + "remove this too")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.relevance_log WHERE tenant_id = 't1' AND chunk_id = '"
-                        + "9".repeat(32) + "'"))
+                    assertThat(dsl(su).fetchCount(RELEVANCE_LOG,
+                            RELEVANCE_LOG.TENANT_ID.eq("t1")
+                                .and(RELEVANCE_LOG.CHUNK_ID.eq("9".repeat(32)))))
                         .as("legacy-001-2's shape-agnostic DELETE must actually remove the "
                             + "legacy-width relevance_log row under FORCE-RLS, proving the "
                             + "DELETE arm fires, not just the KEEP arm")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.relevance_log WHERE tenant_id = 't1' AND chunk_id = '"
-                        + "f".repeat(64) + "'"))
+                    assertThat(dsl(su).fetchCount(RELEVANCE_LOG,
+                            RELEVANCE_LOG.TENANT_ID.eq("t1")
+                                .and(RELEVANCE_LOG.CHUNK_ID.eq("f".repeat(64)))))
                         .as("the canonical-width relevance_log row must survive legacy-001-2's "
                             + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
                             + "remove this too")
@@ -1753,9 +1764,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // Taxonomy010BackfillDirectIntegrationTest -- see the SEED
                     // block's own comment for why this old-tag-hop fixture
                     // structurally cannot construct that arm.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND source_collection IS NULL"))
+                    assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")
+                                .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNull())))
                         .as("no source_collection-NULL row may survive taxonomy-010-1 -- SET NOT "
                             + "NULL would otherwise have failed the whole migration walk")
                         .isEqualTo(0);
@@ -1771,30 +1782,30 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // DELETE had a bug and left the row behind. encode(doc_id,'hex')
                     // keeps the comparison on the TEXT side, so it fails loud if a row
                     // this arm was supposed to delete unexpectedly survives.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "b".repeat(32) + "'"))
+                    assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")
+                                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex("b".repeat(32))))))
                         .as("the ambiguous arm's row must be DELETED by taxonomy-010-1 -- its chash "
                             + "resolves to two distinct collections and cannot be attributed")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "c".repeat(64) + "'"))
+                    assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")
+                                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex("c".repeat(64))))))
                         .as("the unresolvable (anti-join) arm's row must be DELETED -- its doc_id is "
                             + "canonical 64-hex SHAPE but no nexus.chunks row matches it at all, "
                             + "proving the anti-join arm fires independently of the shape predicate")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "1".repeat(32) + "'"))
+                    assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")
+                                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex("1".repeat(32))))))
                         .as("the legacy-shape-coincidental-match arm's row must be DELETED despite "
                             + "a real chunk existing at the same text-matched chash -- the "
                             + "doc_id !~ '^[0-9a-f]{64}$' shape predicate must win over a coincidental "
                             + "anti-join match, the exact cc4/HAL no-wedge proof")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "8".repeat(32) + "'"))
+                    assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")
+                                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex("8".repeat(32))))))
                         .as("RDR-194 critical fix round (nexus-i3k3e, 2026-08-17): the "
                             + "non-NULL-source_collection shape-invalid row (the cc4 census's "
                             + "1,262-row wedge class) must be DELETED DESPITE its already-set "
@@ -1872,8 +1883,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // still (independently) zero, the FK it makes possible to VALIDATE
                     // exists and IS validated at HEAD, and FORCE ROW LEVEL SECURITY is
                     // restored on both tables its own toggle-wrap covers.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = 't1'"))
+                    assertThat(dsl(su).fetchCount(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID.eq("t1")))
                         .as("taxonomy-012-2's own anti-join population is empty -- every row "
                             + "this fixture seeded was already removed by taxonomy-010-1's three "
                             + "DELETE arms above, so taxonomy-012-2 by construction deletes nothing "
@@ -1911,10 +1922,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // each new composite FK exists and is VALIDATED at HEAD, and FORCE ROW
                     // LEVEL SECURITY is restored on every table each leg's own toggle-wrap
                     // covers.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topics t WHERE t.parent_id IS NOT NULL "
-                        + "AND NOT EXISTS (SELECT 1 FROM nexus.topics p WHERE p.id = t.parent_id "
-                        + "AND p.tenant_id = t.tenant_id)"))
+                    assertThat(topicsWithMissingParent(su))
                         .as("taxonomy-014-2's own anti-join population is empty -- the sole "
                             + "nexus.topics row this hop seeds carries a NULL parent_id, so the "
                             + "self-referential anti-join by construction finds nothing")
@@ -1929,10 +1937,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "taxonomy-014-2's own toggle-wrap")
                         .isEqualTo(1);
 
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_assignments a WHERE NOT EXISTS "
-                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = a.topic_id "
-                        + "AND t.tenant_id = a.tenant_id)"))
+                    assertThat(assignmentsWithMissingTopic(su))
                         .as("taxonomy-014-3's own anti-join population is empty -- "
                             + "nexus.topic_assignments for tenant t1 was already drained to zero "
                             + "by taxonomy-010-1's three DELETE arms above")
@@ -1945,10 +1950,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "toggle-wrap covers")
                         .isEqualTo(2);
 
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_links l WHERE NOT EXISTS "
-                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = l.from_topic_id "
-                        + "AND t.tenant_id = l.tenant_id)"))
+                    assertThat(topicLinksWithMissingTopic(su, true))
                         .as("taxonomy-014-4's own anti-join population is empty -- "
                             + "nexus.topic_links is never seeded anywhere in this hop")
                         .isEqualTo(0);
@@ -1960,10 +1962,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "toggle-wrap covers")
                         .isEqualTo(2);
 
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.topic_links l WHERE NOT EXISTS "
-                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = l.to_topic_id "
-                        + "AND t.tenant_id = l.tenant_id)"))
+                    assertThat(topicLinksWithMissingTopic(su, false))
                         .as("taxonomy-014-5's own anti-join population is empty -- "
                             + "nexus.topic_links is never seeded anywhere in this hop")
                         .isEqualTo(0);
@@ -1987,16 +1986,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // the NULL-ttl KEEP arm must survive untouched (selective, not a
                     // blanket wipe), the column must be renamed ttl -> ttl_days, and the
                     // CHECK must exist at HEAD.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.memory WHERE tenant_id = 't1' "
-                        + "AND project = 'p6a-proj' AND title = 'p6a-zero'"))
+                    assertThat(dsl(su).fetchCount(MEMORY,
+                            MEMORY.TENANT_ID.eq("t1")
+                                .and(MEMORY.PROJECT.eq("p6a-proj"))
+                                .and(MEMORY.TITLE.eq("p6a-zero"))))
                         .as("memory-003-1's counted DELETE must actually remove the seeded "
                             + "ttl=0 row -- the DELETE arm")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.memory WHERE tenant_id = 't1' "
-                        + "AND project = 'p6a-proj' AND title = 'p6a-permanent' "
-                        + "AND ttl_days IS NULL"))
+                    assertThat(dsl(su).fetchCount(MEMORY,
+                            MEMORY.TENANT_ID.eq("t1")
+                                .and(MEMORY.PROJECT.eq("p6a-proj"))
+                                .and(MEMORY.TITLE.eq("p6a-permanent"))
+                                .and(MEMORY.TTL_DAYS.isNull())))
                         .as("the NULL-ttl (permanent) decoy row must survive memory-003-1's "
                             + "DELETE untouched -- the KEEP arm, proving the DELETE is "
                             + "selective on ttl=0 and not a blanket wipe")
@@ -2012,16 +2013,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "memory-003-1's own toggle-wrap")
                         .isEqualTo(1);
 
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.plans WHERE tenant_id = 't1' "
-                        + "AND project = 'p6a-proj' AND query = 'p6a zero query'"))
+                    assertThat(dsl(su).fetchCount(PLANS,
+                            PLANS.TENANT_ID.eq("t1")
+                                .and(PLANS.PROJECT.eq("p6a-proj"))
+                                .and(PLANS.QUERY.eq("p6a zero query"))))
                         .as("plans-003-1's counted DELETE must actually remove the seeded "
                             + "ttl=0 row -- the DELETE arm")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.plans WHERE tenant_id = 't1' "
-                        + "AND project = 'p6a-proj' AND query = 'p6a permanent query' "
-                        + "AND ttl_days IS NULL"))
+                    assertThat(dsl(su).fetchCount(PLANS,
+                            PLANS.TENANT_ID.eq("t1")
+                                .and(PLANS.PROJECT.eq("p6a-proj"))
+                                .and(PLANS.QUERY.eq("p6a permanent query"))
+                                .and(PLANS.TTL_DAYS.isNull())))
                         .as("the NULL-ttl (permanent) decoy row must survive plans-003-1's "
                             + "DELETE untouched -- the KEEP arm")
                         .isEqualTo(1);
@@ -2046,23 +2049,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // never set it explicitly) -- it too gets converted here, proving
                     // the UPDATE reaches every ttl_days=0 row in this hop, not merely
                     // the dedicated fixture.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
-                        + "AND chunk_id = '" + "6".repeat(64) + "' AND ttl_days IS NULL"))
+                    assertThat(dsl(su).fetchCount(FRECENCY,
+                            FRECENCY.TENANT_ID.eq("t1")
+                                .and(FRECENCY.CHUNK_ID.eq("6".repeat(64)))
+                                .and(FRECENCY.TTL_DAYS.isNull())))
                         .as("telemetry-006-1's counted UPDATE must convert the seeded "
                             + "ttl_days=0 row to NULL -- the CONVERSION arm (not deleted, "
                             + "unlike memory-003-1/plans-003-1's DELETE arms)")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
-                        + "AND chunk_id = '" + "7".repeat(64) + "' AND ttl_days = 45"))
+                    assertThat(dsl(su).fetchCount(FRECENCY,
+                            FRECENCY.TENANT_ID.eq("t1")
+                                .and(FRECENCY.CHUNK_ID.eq("7".repeat(64)))
+                                .and(FRECENCY.TTL_DAYS.eq(45))))
                         .as("the positive-ttl_days decoy row must survive telemetry-006-1's "
                             + "UPDATE unchanged -- the KEEP arm, proving the UPDATE's "
                             + "WHERE ttl_days = 0 predicate is selective")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
-                        + "AND chunk_id = '" + "d".repeat(64) + "' AND ttl_days IS NULL"))
+                    assertThat(dsl(su).fetchCount(FRECENCY,
+                            FRECENCY.TENANT_ID.eq("t1")
+                                .and(FRECENCY.CHUNK_ID.eq("d".repeat(64)))
+                                .and(FRECENCY.TTL_DAYS.isNull())))
                         .as("legacy-001-1's own canonical-width KEEP-arm row (DEFAULT "
                             + "ttl_days=0) must ALSO be converted to NULL by "
                             + "telemetry-006-1 -- the UPDATE is unconditional across every "
@@ -2102,17 +2108,17 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // LEVEL SECURITY and the Liquibase role is not BYPASSRLS). The
                     // conforming 3-segment control row must survive UNTOUCHED,
                     // proving the predicate is selective, not a blanket tombstone.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_documents "
-                        + "WHERE tenant_id = 't1' AND tumbler = '1.5' "
-                        + "AND deleted_at IS NOT NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID.eq("t1")
+                                .and(CATALOG_DOCUMENTS.TUMBLER.eq("1.5"))
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())))
                         .as("catalog-034-0 must tombstone the seeded 2-segment ghost "
                             + "tumbler under FORCE-RLS, not silently no-op")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.catalog_documents "
-                        + "WHERE tenant_id = 't1' AND tumbler = '1.1.205' "
-                        + "AND deleted_at IS NULL"))
+                    assertThat(dsl(su).fetchCount(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID.eq("t1")
+                                .and(CATALOG_DOCUMENTS.TUMBLER.eq("1.1.205"))
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
                         .as("the conforming 3-segment control row must survive "
                             + "catalog-034-0 untouched -- the KEEP arm")
                         .isEqualTo(1);
@@ -2130,9 +2136,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // SECURITY and the Liquibase role is not BYPASSRLS -- an
                     // untoggled UPDATE would leave every row exactly as blank as
                     // it was seeded).
-                    // Typed jOOQ DSL, not the raw-count() helper used above (nexus-cbo4a/
-                    // nexus-zrcj7 RawSqlGateTest reduce-only ratchet -- CATALOG_COLLECTIONS
-                    // is already imported for registerCollection()'s own seeding above).
+                    // Typed jOOQ DSL on CATALOG_COLLECTIONS (nexus-cbo4a/nexus-zrcj7 RawSqlGateTest
+                    // reduce-only ratchet), like every other count in this method.
                     org.jooq.DSLContext h002Dsl = DSL.using(su, SQLDialect.POSTGRES);
                     assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
                         CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
@@ -2468,45 +2473,40 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static void seedTupleBodySizeLimitRows(Connection su, String tenant, byte[] oversizedId,
                                                     byte[] atCapId, String legacyClaimId) throws Exception {
         java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
-                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
-            ps.setBytes(1, oversizedId);
-            ps.setString(2, tenant);
-            ps.setString(3, "mailbox/rehearsal-oversized");
-            ps.setString(4, "mailbox/<address>");
-            ps.setString(5, "x".repeat(5000));
-            ps.setObject(6, now.plusDays(7));
-            ps.setObject(7, now);
-            ps.executeUpdate();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
-                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
-            ps.setBytes(1, atCapId);
-            ps.setString(2, tenant);
-            ps.setString(3, "mailbox/rehearsal-at-cap");
-            ps.setString(4, "mailbox/<address>");
-            ps.setString(5, "x".repeat(4096));
-            ps.setObject(6, now.plusDays(7));
-            ps.setObject(7, now);
-            ps.executeUpdate();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.tuple_claim_log "
-                + "(tenant_id, subspace, template, tuple_id, claim_id, claimant, transition, at, expires_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, "mailbox/rehearsal-oversized");
-            ps.setString(3, "mailbox/<address>");
-            ps.setBytes(4, oversizedId);
-            ps.setString(5, legacyClaimId);
-            ps.setString(6, "rehearsal-claimant");
-            ps.setString(7, "claim");
-            ps.setObject(8, now);
-            ps.setObject(9, now.plusDays(180));
-            ps.executeUpdate();
-        }
+        var ctx = dsl(su);
+        insertTuple(ctx, oversizedId, tenant, "mailbox/rehearsal-oversized", "x".repeat(5000), now);
+        insertTuple(ctx, atCapId, tenant, "mailbox/rehearsal-at-cap", "x".repeat(4096), now);
+        ctx.insertInto(TUPLE_CLAIM_LOG)
+            .set(TUPLE_CLAIM_LOG.TENANT_ID, tenant)
+            .set(TUPLE_CLAIM_LOG.SUBSPACE, "mailbox/rehearsal-oversized")
+            .set(TUPLE_CLAIM_LOG.TEMPLATE, "mailbox/<address>")
+            .set(TUPLE_CLAIM_LOG.TUPLE_ID, oversizedId)
+            .set(TUPLE_CLAIM_LOG.CLAIM_ID, legacyClaimId)
+            .set(TUPLE_CLAIM_LOG.CLAIMANT, "rehearsal-claimant")
+            .set(TUPLE_CLAIM_LOG.TRANSITION, "claim")
+            .set(TUPLE_CLAIM_LOG.AT, now)
+            .set(TUPLE_CLAIM_LOG.EXPIRES_AT, now.plusDays(180))
+            .execute();
+    }
+
+    /** One {@code nexus.tuples} row with an empty keys object, created {@code now}, expiring in a week. */
+    private static org.jooq.InsertSetMoreStep<dev.nexus.service.jooq.nexus.tables.records.TuplesRecord>
+            tupleInsert(org.jooq.DSLContext ctx, byte[] id, String tenant, String subspace, String body,
+                        java.time.OffsetDateTime now) {
+        return ctx.insertInto(TUPLES)
+            .set(TUPLES.ID, id)
+            .set(TUPLES.TENANT_ID, tenant)
+            .set(TUPLES.SUBSPACE, subspace)
+            .set(TUPLES.TEMPLATE, "mailbox/<address>")
+            .set(TUPLES.KEYS, org.jooq.JSONB.jsonb("{}"))
+            .set(TUPLES.BODY, body)
+            .set(TUPLES.EXPIRES_AT, now.plusDays(7))
+            .set(TUPLES.CREATED_AT, now);
+    }
+
+    private static void insertTuple(org.jooq.DSLContext ctx, byte[] id, String tenant, String subspace,
+                                    String body, java.time.OffsetDateTime now) {
+        tupleInsert(ctx, id, tenant, subspace, body, now).execute();
     }
 
     /**
@@ -2569,33 +2569,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static void seedTupleConsumedBodyCleanupRows(Connection su, String tenant, byte[] consumedId,
                                                           byte[] unconsumedId) throws Exception {
         java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, "
-                + "consumed_at, consumed_by, expires_at, created_at) "
-                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?, ?, ?)")) {
-            ps.setBytes(1, consumedId);
-            ps.setString(2, tenant);
-            ps.setString(3, "mailbox/rehearsal-consumed");
-            ps.setString(4, "mailbox/<address>");
-            ps.setString(5, "already-consumed");
-            ps.setObject(6, now);
-            ps.setString(7, "rehearsal-claimant");
-            ps.setObject(8, now.plusDays(7));
-            ps.setObject(9, now);
-            ps.executeUpdate();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
-                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
-            ps.setBytes(1, unconsumedId);
-            ps.setString(2, tenant);
-            ps.setString(3, "mailbox/rehearsal-unconsumed");
-            ps.setString(4, "mailbox/<address>");
-            ps.setString(5, "still-here");
-            ps.setObject(6, now.plusDays(7));
-            ps.setObject(7, now);
-            ps.executeUpdate();
-        }
+        var ctx = dsl(su);
+        tupleInsert(ctx, consumedId, tenant, "mailbox/rehearsal-consumed", "already-consumed", now)
+            .set(TUPLES.CONSUMED_AT, now)
+            .set(TUPLES.CONSUMED_BY, "rehearsal-claimant")
+            .execute();
+        insertTuple(ctx, unconsumedId, tenant, "mailbox/rehearsal-unconsumed", "still-here", now);
     }
 
     // ── Helpers: git plumbing ────────────────────────────────────────────────
@@ -2705,14 +2684,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
     private static void seedChashRow(Connection c, String tenant, String chash,
                                      String collection) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-            + "VALUES (?, ?, ?, now())")) {
-            ps.setString(1, tenant);
-            ps.setString(2, chash);
-            ps.setString(3, collection);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(CHASH_INDEX_RETIRED)
+            .set(DSL.field(DSL.name("tenant_id"), String.class), tenant)
+            .set(DSL.field(DSL.name("chash"), String.class), chash)
+            .set(DSL.field(DSL.name("physical_collection"), String.class), collection)
+            .set(DSL.field(DSL.name("created_at"), java.time.OffsetDateTime.class), DSL.currentOffsetDateTime())
+            .execute();
     }
 
     /**
@@ -2741,33 +2718,24 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedChunk384LegacyContent(Connection c, String tenant, String collection,
                                                    String chash, String text) throws Exception {
-        try (var ps = c.prepareStatement(
-            // hygiene-001-5 (nexus-tk070.p6a follow-on): metadata is included
-            // (non-NULL) -- these rows carry the DELIBERATE 16-byte legacy
-            // chash shape rdr180-001's own header documents as
-            // un-rekeyed-and-tolerated (its octet CHECK stays NOT VALID for
-            // exactly such rows). Review round (critic census finding):
-            // hygiene-001-5's DELETE now keys DIRECTLY on
-            // octet_length(chash) <> 32, not on a metadata-NULL proxy, so
-            // this row IS deleted by hygiene-001-5 by the time a full hop
-            // reaches HEAD regardless of its metadata -- non-NULL metadata
-            // here no longer means "survives", it only means "this row was
-            // never a candidate for the metadata BACKFILL half of that
-            // changeset" (a real, distinct fact this test also exercises).
-            // The DELETE path itself is covered both here (see
-            // SchemaUpgradeRehearsalIntegrationTest's own isEqualTo(0)
-            // assertions against this exact seed) and by
-            // Hygiene001NotNullMigrationRlsTest's dedicated per-tenant
-            // legacy-width deletion coverage.
-            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata) "
-            + "VALUES (?, ?, ?, ?, ?::vector, '{}'::jsonb) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setString(3, chash);
-            ps.setString(4, text);
-            ps.setString(5, "[" + "0,".repeat(383) + "0]");
-            ps.executeUpdate();
-        }
+        // hygiene-001-5 (nexus-tk070.p6a follow-on): metadata is included
+        // (non-NULL) -- these rows carry the DELIBERATE 16-byte legacy
+        // chash shape rdr180-001's own header documents as
+        // un-rekeyed-and-tolerated (its octet CHECK stays NOT VALID for
+        // exactly such rows). Review round (critic census finding):
+        // hygiene-001-5's DELETE now keys DIRECTLY on
+        // octet_length(chash) <> 32, not on a metadata-NULL proxy, so
+        // this row IS deleted by hygiene-001-5 by the time a full hop
+        // reaches HEAD regardless of its metadata -- non-NULL metadata
+        // here no longer means "survives", it only means "this row was
+        // never a candidate for the metadata BACKFILL half of that
+        // changeset" (a real, distinct fact this test also exercises).
+        // The DELETE path itself is covered both here (see
+        // SchemaUpgradeRehearsalIntegrationTest's own isEqualTo(0)
+        // assertions against this exact seed) and by
+        // Hygiene001NotNullMigrationRlsTest's dedicated per-tenant
+        // legacy-width deletion coverage.
+        insertLegacyChunk(c, 384, tenant, collection, chash, text);
     }
 
     /**
@@ -2784,21 +2752,33 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedChunkDimLegacyContent(Connection c, int dim, String tenant, String collection,
                                                    String chash, String text) throws Exception {
-        try (var ps = c.prepareStatement(
-            // hygiene-001-5: metadata included non-NULL -- see
-            // seedChunk384LegacyContent's identical, fuller comment. This
-            // row IS deleted by hygiene-001-5's chash-width DELETE by HEAD
-            // regardless of its metadata (review round correction).
-            "INSERT INTO nexus.chunks_" + dim
-            + " (tenant_id, collection, chash, chunk_text, embedding, metadata) "
-            + "VALUES (?, ?, ?, ?, ?::vector, '{}'::jsonb) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setString(3, chash);
-            ps.setString(4, text);
-            ps.setString(5, "[" + "0,".repeat(dim - 1) + "0]");
-            ps.executeUpdate();
-        }
+        // hygiene-001-5: metadata included non-NULL -- see
+        // seedChunk384LegacyContent's identical, fuller comment. This
+        // row IS deleted by hygiene-001-5's chash-width DELETE by HEAD
+        // regardless of its metadata (review round correction).
+        insertLegacyChunk(c, dim, tenant, collection, chash, text);
+    }
+
+    /**
+     * One row of the OLD per-dim {@code nexus.chunks_<dim>} table (TEXT chash, {@code embedding vector(<dim>)},
+     * non-NULL {@code metadata}), the dim's components all zero, {@code ON CONFLICT DO NOTHING} on the natural key.
+     * The vector goes in as a {@code real[]} bind (see {@link #legacyEmbedding}).
+     */
+    private static void insertLegacyChunk(Connection c, int dim, String tenant, String collection,
+                                          String chash, String text) {
+        var tenantId = DSL.field(DSL.name("tenant_id"), String.class);
+        var coll = DSL.field(DSL.name("collection"), String.class);
+        var chashCol = DSL.field(DSL.name("chash"), String.class);
+        dsl(c).insertInto(DSL.table(DSL.name("nexus", "chunks_" + dim)))
+            .set(tenantId, tenant)
+            .set(coll, collection)
+            .set(chashCol, chash)
+            .set(DSL.field(DSL.name("chunk_text"), String.class), text)
+            .set(LEGACY_EMBEDDING, legacyEmbedding(dim, 0f))
+            .set(DSL.field(DSL.name("metadata"), org.jooq.JSONB.class), org.jooq.JSONB.jsonb("{}"))
+            .onConflict(tenantId, coll, chashCol)
+            .doNothing()
+            .execute();
     }
 
     /**
@@ -2814,49 +2794,56 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static void seedTaxonomyCentroidLegacyContent(Connection c, int dim, String tenant,
                                                            String collection, long topicId, String label)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.taxonomy_centroids_" + dim
-            + " (tenant_id, collection, topic_id, embedding, label, doc_count) "
-            + "VALUES (?, ?, ?, ?::vector, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setLong(3, topicId);
-            ps.setString(4, "[" + "0.01,".repeat(dim - 1) + "0.01]");
-            ps.setString(5, label);
-            ps.setInt(6, 3);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(DSL.table(DSL.name("nexus", "taxonomy_centroids_" + dim)))
+            .set(DSL.field(DSL.name("tenant_id"), String.class), tenant)
+            .set(DSL.field(DSL.name("collection"), String.class), collection)
+            .set(DSL.field(DSL.name("topic_id"), Long.class), topicId)
+            .set(LEGACY_EMBEDDING, legacyEmbedding(dim, 0.01f))
+            .set(DSL.field(DSL.name("label"), String.class), label)
+            .set(DSL.field(DSL.name("doc_count"), Integer.class), 3)
+            .execute();
+    }
+
+    /**
+     * The embedding column of the OLD per-dim tables ({@code chunks_<dim>}, {@code taxonomy_centroids_<dim>}),
+     * bound as a {@code real[]}. At seed time the pgvector extension is still in {@code public} (the relocation
+     * into {@code nexus} happens later in the HEAD leg), so the generated {@code Vector} binding, which renders
+     * {@code ::nexus.vector}, does not resolve. pgvector's {@code real[]} to {@code vector} cast is an
+     * ASSIGNMENT cast ({@code CREATE CAST (real[] AS vector) WITH FUNCTION array_to_vector(real[], integer, boolean)
+     * AS ASSIGNMENT}), looked up by type oid rather than by name, so the INSERT converts the bind in whichever
+     * schema the extension sits.
+     */
+    private static final org.jooq.Field<Float[]> LEGACY_EMBEDDING =
+        DSL.field(DSL.name("embedding"), org.jooq.impl.SQLDataType.REAL.array());
+
+    private static Float[] legacyEmbedding(int dim, float fill) {
+        Float[] v = new Float[dim];
+        java.util.Arrays.fill(v, fill);
+        return v;
     }
 
     private static void seedDocument(Connection c, String tenant, String tumbler,
                                      String title, String physicalCollection) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-            + "VALUES (?, ?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tumbler);
-            ps.setString(3, title);
-            ps.setString(4, physicalCollection);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
+            .execute();
     }
 
     /** Document row WITH a source_uri + chunk_count (catalog-016-0's dedup input shape). */
     private static void seedDocumentWithUri(Connection c, String tenant, String tumbler,
                                             String title, String physicalCollection,
                                             String sourceUri, int chunkCount) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_documents "
-            + "(tenant_id, tumbler, title, physical_collection, source_uri, chunk_count) "
-            + "VALUES (?, ?, ?, ?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tumbler);
-            ps.setString(3, title);
-            ps.setString(4, physicalCollection);
-            ps.setString(5, sourceUri);
-            ps.setInt(6, chunkCount);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
+            .set(CATALOG_DOCUMENTS.SOURCE_URI, sourceUri)
+            .set(CATALOG_DOCUMENTS.CHUNK_COUNT, chunkCount)
+            .execute();
     }
 
     /**
@@ -2868,18 +2855,23 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedAspectRow(Connection c, String tenant, String collection,
                                       String sourcePath, String sourceUri) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.document_aspects "
-            + "(tenant_id, collection, source_path, proposed_method, extracted_at, "
-            + "model_version, extractor_name, source_uri, doc_id) "
-            + "VALUES (?, ?, ?, 'rehearsal-seeded extraction', now(), "
-            + "'rehearsal-model', 'rehearsal-extractor', ?, NULL)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setString(3, sourcePath);
-            ps.setString(4, sourceUri);
-            ps.executeUpdate();
-        }
+        seedAspect(c, tenant, collection, sourcePath, "rehearsal-seeded extraction", sourceUri, null);
+    }
+
+    /** A {@code nexus.document_aspects} row; {@code sourceUri} and {@code docId} may be NULL (the legacy shapes). */
+    private static void seedAspect(Connection c, String tenant, String collection, String sourcePath,
+                                   String proposedMethod, String sourceUri, String docId) {
+        dsl(c).insertInto(DOCUMENT_ASPECTS)
+            .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
+            .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+            .set(DOCUMENT_ASPECTS.SOURCE_PATH, sourcePath)
+            .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, proposedMethod)
+            .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
+            .set(DOCUMENT_ASPECTS.MODEL_VERSION, "rehearsal-model")
+            .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "rehearsal-extractor")
+            .set(DOCUMENT_ASPECTS.SOURCE_URI, sourceUri)
+            .set(DOCUMENT_ASPECTS.DOC_ID, docId)
+            .execute();
     }
 
     /**
@@ -2904,16 +2896,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedManifestRow(Connection c, String tenant, String docId,
                                         int position, String chash) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, chunk_index) "
-            + "VALUES (?, ?, ?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setInt(3, position);
-            ps.setString(4, chash);
-            ps.setInt(5, position);
-            ps.executeUpdate();
-        }
+        // chash is TEXT on the old leg (generated field: bytea), so it goes in through a named column.
+        dsl(c).insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(DSL.field(DSL.name("chash"), String.class), chash)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, position)
+            .execute();
     }
 
     /**
@@ -2924,15 +2914,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedLink(Connection c, String tenant, String fromTumbler,
                                  String toTumbler, String linkType) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-            + "VALUES (?, ?, ?, ?, 'rehearsal-seed')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, fromTumbler);
-            ps.setString(3, toTumbler);
-            ps.setString(4, linkType);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(CATALOG_LINKS)
+            .set(CATALOG_LINKS.TENANT_ID, tenant)
+            .set(CATALOG_LINKS.FROM_TUMBLER, fromTumbler)
+            .set(CATALOG_LINKS.TO_TUMBLER, toTumbler)
+            .set(CATALOG_LINKS.LINK_TYPE, linkType)
+            .set(CATALOG_LINKS.CREATED_BY, "rehearsal-seed")
+            .execute();
     }
 
     /**
@@ -2942,12 +2930,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * either the DELETE or the KEEP arm of legacy-001-1's anti-shape DELETE.
      */
     private static void seedFrecencyRow(Connection c, String tenant, String chunkId) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.frecency (tenant_id, chunk_id) VALUES (?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, chunkId);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(FRECENCY)
+            .set(FRECENCY.TENANT_ID, tenant)
+            .set(FRECENCY.CHUNK_ID, chunkId)
+            .execute();
     }
 
     /**
@@ -2962,17 +2948,11 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedFrecencyTtlRow(Connection c, String tenant, String chunkId, Integer ttlDays)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, chunkId);
-            if (ttlDays == null) {
-                ps.setNull(3, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(3, ttlDays);
-            }
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(FRECENCY)
+            .set(FRECENCY.TENANT_ID, tenant)
+            .set(FRECENCY.CHUNK_ID, chunkId)
+            .set(FRECENCY.TTL_DAYS, ttlDays)
+            .execute();
     }
 
     /**
@@ -2982,15 +2962,17 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedRelevanceLogRow(Connection c, String tenant, String chunkId, String query)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
-            + "VALUES (?, ?, ?, 'view', now())")) {
-            ps.setString(1, tenant);
-            ps.setString(2, query);
-            ps.setString(3, chunkId);
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(RELEVANCE_LOG)
+            .set(RELEVANCE_LOG.TENANT_ID, tenant)
+            .set(RELEVANCE_LOG.QUERY, query)
+            .set(RELEVANCE_LOG.CHUNK_ID, chunkId)
+            .set(RELEVANCE_LOG.ACTION, "view")
+            .set(RELEVANCE_LOG.TIMESTAMP, DSL.currentOffsetDateTime())
+            .execute();
     }
+
+    /** {@code ttl} on {@code nexus.memory} / {@code nexus.plans}: the OLD column, renamed {@code ttl_days} by -003-1. */
+    private static final org.jooq.Field<Integer> LEGACY_TTL = DSL.field(DSL.name("ttl"), Integer.class);
 
     /**
      * A {@code nexus.memory} row (nexus-tk070.p6a, memory-003-1). {@code ttl}
@@ -2999,19 +2981,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedMemoryRow(Connection c, String tenant, String project,
                                        String title, Integer ttl) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp, ttl) "
-            + "VALUES (?, ?, ?, 'content', now(), ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, title);
-            if (ttl == null) {
-                ps.setNull(4, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(4, ttl);
-            }
-            ps.executeUpdate();
-        }
+        dsl(c).insertInto(MEMORY)
+            .set(MEMORY.TENANT_ID, tenant)
+            .set(MEMORY.PROJECT, project)
+            .set(MEMORY.TITLE, title)
+            .set(MEMORY.CONTENT, "content")
+            .set(MEMORY.TIMESTAMP, DSL.currentOffsetDateTime())
+            .set(LEGACY_TTL, ttl)
+            .execute();
     }
 
     /**
@@ -3026,19 +3003,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
         // ttl=0 DELETE this helper's two callers exist to probe. A real verb
         // keeps both rows out of hygiene-001-11's WHERE clause so this
         // helper continues to isolate plans-003-1's ttl selectivity alone.
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl, verb) "
-            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?, 'research')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, query);
-            if (ttl == null) {
-                ps.setNull(4, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(4, ttl);
-            }
-            ps.executeUpdate();
-        }
+        seedPlan(c, tenant, project, query, ttl, "research", DSL.currentOffsetDateTime());
+    }
+
+    /** A {@code nexus.plans} row at the OLD shape ({@code ttl}, not {@code ttl_days}). */
+    private static void seedPlan(Connection c, String tenant, String project, String query, Integer ttl,
+                                 String verb, org.jooq.Field<java.time.OffsetDateTime> createdAt) {
+        dsl(c).insertInto(PLANS)
+            .set(PLANS.TENANT_ID, tenant)
+            .set(PLANS.PROJECT, project)
+            .set(PLANS.QUERY, query)
+            .set(PLANS.PLAN_JSON, org.jooq.JSONB.jsonb("{}"))
+            .set(PLANS.CREATED_AT, createdAt)
+            .set(LEGACY_TTL, ttl)
+            .set(PLANS.VERB, verb)
+            .execute();
     }
 
     /**
@@ -3049,17 +3028,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static long seedTopic(Connection c, String tenant, String collection, String label)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-            + "VALUES (?, ?, ?, now()) RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, label);
-            ps.setString(3, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
-        }
+        return dsl(c).insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, tenant)
+            .set(TOPICS.LABEL, label)
+            .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returning(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
     }
 
     /**
@@ -3070,14 +3045,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
-            + "VALUES (?, ?, ?, 'rehearsal-seed')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setLong(3, topicId);
-            ps.executeUpdate();
-        }
+        seedTopicAssignment(c, tenant, docId, topicId, null);
     }
 
     /**
@@ -3090,44 +3058,38 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static void seedTopicAssignment(
             Connection c, String tenant, String docId, long topicId, String sourceCollection)
             throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments "
-            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
-            + "VALUES (?, ?, ?, 'rehearsal-seed', ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setLong(3, topicId);
-            ps.setString(4, sourceCollection);
-            ps.executeUpdate();
+        // doc_id is TEXT on the old leg (generated field: bytea), so it goes in through a named column.
+        var ins = dsl(c).insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
+            .set(DSL.field(DSL.name("doc_id"), String.class), docId)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "rehearsal-seed");
+        if (sourceCollection != null) {
+            ins = ins.set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection);
         }
+        ins.execute();
     }
 
     // ── Helpers: schema assertions ───────────────────────────────────────────
 
+    /** Liquibase's own bookkeeping table, schema-qualified (not left to search_path); no generated form. */
+    private static final org.jooq.Table<?> DATABASECHANGELOG = DSL.table(DSL.name("public", "databasechangelog"));
+    private static final org.jooq.Field<String> DBCL_ID = DSL.field(DSL.name("id"), String.class);
+    private static final org.jooq.Field<String> DBCL_AUTHOR = DSL.field(DSL.name("author"), String.class);
+    private static final org.jooq.Field<String> DBCL_EXECTYPE = DSL.field(DSL.name("exectype"), String.class);
+
     private static int changelogRowCount(Connection conn) throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM public.\"databasechangelog\"");
-        rs.next();
-        return rs.getInt(1);
+        return dsl(conn).fetchCount(DATABASECHANGELOG);
     }
 
     private static boolean changesetApplied(Connection conn, String id, String author) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT 1 FROM databasechangelog WHERE id = ? AND author = ?")) {
-            ps.setString(1, id);
-            ps.setString(2, author);
-            return ps.executeQuery().next();
-        }
+        return dsl(conn).fetchExists(DATABASECHANGELOG, DBCL_ID.eq(id).and(DBCL_AUTHOR.eq(author)));
     }
 
     private static String changesetExecType(Connection conn, String id, String author) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT exectype FROM databasechangelog WHERE id = ? AND author = ?")) {
-            ps.setString(1, id);
-            ps.setString(2, author);
-            ResultSet rs = ps.executeQuery();
-            return rs.next() ? rs.getString("exectype") : null;
-        }
+        return dsl(conn).select(DBCL_EXECTYPE).from(DATABASECHANGELOG)
+            .where(DBCL_ID.eq(id).and(DBCL_AUTHOR.eq(author)))
+            .fetchOne(DBCL_EXECTYPE);
     }
 
     private static boolean constraintExists(Connection conn, String conname) throws Exception {
@@ -3146,11 +3108,44 @@ class SchemaUpgradeRehearsalIntegrationTest {
         return predicate.test(PgCatalogProbes.columnInfo(ctx, schema, table, column)) ? 1 : 0;
     }
 
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
+    private static org.jooq.DSLContext dsl(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES);
+    }
+
+    /** nexus.chash_index: present on the old leg, dropped at HEAD (rdr187-2), so no generated table. */
+    private static final org.jooq.Table<?> CHASH_INDEX_RETIRED = DSL.table(DSL.name("nexus", "chash_index"));
+
+    /** nexus.taxonomy_centroids_retired_225 is excluded from codegen (pom.xml), so it is a plain-SQL handle. */
+    private static final org.jooq.Table<?> CENTROIDS_RETIRED_225 =
+        DSL.table(DSL.name("nexus", "taxonomy_centroids_retired_225"));
+    private static final org.jooq.Field<String> RETIRED_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final org.jooq.Field<String> RETIRED_COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final org.jooq.Field<Long> RETIRED_TOPIC_ID = DSL.field(DSL.name("topic_id"), Long.class);
+    private static final org.jooq.Field<String> RETIRED_LABEL = DSL.field(DSL.name("label"), String.class);
+
+    /** taxonomy-014-2's anti-join: topics whose parent_id names no topic of the same tenant. */
+    private static int topicsWithMissingParent(Connection c) {
+        var t = TOPICS.as("t");
+        var p = TOPICS.as("p");
+        return dsl(c).fetchCount(t, t.PARENT_ID.isNotNull().and(DSL.notExists(
+            DSL.selectOne().from(p).where(p.ID.eq(t.PARENT_ID)).and(p.TENANT_ID.eq(t.TENANT_ID)))));
+    }
+
+    /** taxonomy-014-3's anti-join: assignments whose topic_id names no topic of the same tenant. */
+    private static int assignmentsWithMissingTopic(Connection c) {
+        var a = TOPIC_ASSIGNMENTS.as("a");
+        var t = TOPICS.as("t");
+        return dsl(c).fetchCount(a, DSL.notExists(
+            DSL.selectOne().from(t).where(t.ID.eq(a.TOPIC_ID)).and(t.TENANT_ID.eq(a.TENANT_ID))));
+    }
+
+    /** taxonomy-014-4/-5's anti-join: topic_links whose from (or to) topic names no topic of the same tenant. */
+    private static int topicLinksWithMissingTopic(Connection c, boolean fromSide) {
+        var l = TOPIC_LINKS.as("l");
+        var t = TOPICS.as("t");
+        var endpoint = fromSide ? l.FROM_TOPIC_ID : l.TO_TOPIC_ID;
+        return dsl(c).fetchCount(l, DSL.notExists(
+            DSL.selectOne().from(t).where(t.ID.eq(endpoint)).and(t.TENANT_ID.eq(l.TENANT_ID))));
     }
 
     private static Set<String> tablesInSchema(Connection conn, String schema) throws Exception {
