@@ -79,14 +79,15 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * against the classpath (HEAD) master changelog — to complete the upgrade.
  *
  * <p><strong>{@link #OLD_TAG} choice.</strong> {@code engine-service-v0.1.17} is
- * the long-running cloud-deployed reference (T2 {@code deployed-engine-version})
+ * the pinned old reference tag (see the field javadoc on {@link #OLD_TAG})
  * and its changelog tree predates {@code catalog-013-chash-checks-validate.xml}
  * entirely (first appears at v0.1.33+, introduced by commit {@code e1cd25f1}) —
  * confirmed by {@code git ls-tree engine-service-v0.1.17 -- .../db/changelog},
  * which lists only up to {@code catalog-011-collection-health-stale-age.xml}.
  * {@code catalog-002-hygiene.xml} (which unconditionally ADDs the five
  * chash-length CHECK constraints, the root of the ms57z divergence per
- * nexus-4m6i0.1's analysis) is byte-identical between v0.1.17 and HEAD, so the
+ * nexus-4m6i0.1's analysis) is identical between v0.1.17 and HEAD apart from a
+ * checksum-neutral DATA EFFECT comment (commit {@code 729c61d5c}), so the
  * old leg reaches the same constraint-bearing state the real fleet did. For the
  * data leg, the v0.1.17-to-HEAD hop keeps growing (originally six changelog
  * files — catalog-012/-013/-014, migration-001, service-tokens-003/-004 —
@@ -173,18 +174,19 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static final Logger log = LoggerFactory.getLogger(SchemaUpgradeRehearsalIntegrationTest.class);
 
     /**
-     * Old reference tag: long-running cloud-deployed reference (T2
-     * {@code deployed-engine-version}), predates {@code catalog-013-chash-checks-validate.xml}
+     * Old reference tag: predates {@code catalog-013-chash-checks-validate.xml}
      * (first shipped v0.1.33+, commit e1cd25f1) AND {@code catalog-014-manifest-collection-stamp.xml}
-     * so the divergence-injection point (catalog-002-hygiene.xml, byte-identical
-     * old vs HEAD) is reached the same way a real aged fleet box reached it, and
-     * the hop's row-DML changesets genuinely run.
+     * so the divergence-injection point (catalog-002-hygiene.xml, identical old
+     * vs HEAD apart from a checksum-neutral comment) is reached the same way a
+     * real aged fleet box reached it, and the hop's row-DML changesets genuinely run.
      *
      * <p><strong>PINNED, never rotated (Sam 2026-10-17, nexus-dodjd).</strong>
-     * This tag is kept on purpose. The rehearsal's value is the longest real
-     * upgrade path a dormant install can take: a box last upgraded at
-     * v0.1.17 walks every changeset shipped since, so this hop exercises all
-     * of them against an old-shaped database. The former nexus-7z6s7 rotation
+     * Sam's decision: keep this tag as a long real upgrade path for a dormant
+     * install. A box last upgraded at v0.1.17 walks every changeset shipped
+     * since, so this hop exercises all of them against an old-shaped database.
+     * (Older tags exist: v0.1.10 through v0.1.17 share one changelog tree, and
+     * tags before v0.1.10 have fewer changelog files. Moving earlier is a new
+     * decision, not a rotation.) The former nexus-7z6s7 rotation
      * policy (advance to the previously-deployed tag at each deploy) is
      * retired for this test. It could never fire anyway: every tag from
      * {@code engine-service-v0.1.33} onward contains {@code
