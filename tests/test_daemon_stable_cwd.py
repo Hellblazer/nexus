@@ -56,12 +56,17 @@ try:
     report["abspath"] = os.path.abspath("relative-thing")
 except Exception as exc:
     report["abspath_error"] = type(exc).__name__
-with open(out, "w") as fh:
+with open(out + ".tmp", "w") as fh:
     json.dump(report, fh)
+os.replace(out + ".tmp", out)
 """
 
 
 def _wait_for(path: Path, timeout: float = 30.0) -> None:
+    # The probes write a temp file and os.replace it into place, so the path
+    # appears only when the JSON is complete: an existence poll on a file
+    # opened with 'w' could read it empty (nexus-ys8a4, CI shard 3/6 on
+    # 2ad1f90c9).
     deadline = time.monotonic() + timeout
     while not path.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -459,7 +464,9 @@ def test_the_session_end_grandchild_leaves_the_launch_directory(tmp_path: Path) 
         "from nexus import _session_end_launcher as m\n"
         f"out = {str(out)!r}\n"
         "def record():\n"
-        "    json.dump({'cwd': os.getcwd(), 'root': os.environ.get('NEXUS_REPO_ROOT')}, open(out, 'w'))\n"
+        "    with open(out + '.tmp', 'w') as fh:\n"
+        "        json.dump({'cwd': os.getcwd(), 'root': os.environ.get('NEXUS_REPO_ROOT')}, fh)\n"
+        "    os.replace(out + '.tmp', out)\n"
         "m._run_session_end_synchronously = record\n"
         "m._daemonize_and_run()\n"
         "time.sleep(5)  # the original process returns at once; give the grandchild its moment\n"
@@ -487,7 +494,9 @@ def test_the_hook_verbs_session_end_grandchild_leaves_the_launch_directory(tmp_p
         "from nexus.commands import hook as m\n"
         f"out = {str(out)!r}\n"
         "def record(*a, **k):\n"
-        "    json.dump({'cwd': os.getcwd(), 'root': os.environ.get('NEXUS_REPO_ROOT')}, open(out, 'w'))\n"
+        "    with open(out + '.tmp', 'w') as fh:\n"
+        "        json.dump({'cwd': os.getcwd(), 'root': os.environ.get('NEXUS_REPO_ROOT')}, fh)\n"
+        "    os.replace(out + '.tmp', out)\n"
         "m.hooks.session_end = record\n"
         "m.session_end_detach_cmd.callback()\n"
     )
