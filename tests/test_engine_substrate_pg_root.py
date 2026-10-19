@@ -9,6 +9,7 @@ tables and free-space readings, so no outcome depends on the box running them.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -159,9 +160,10 @@ class TestPgClusterParent:
 
 
 class TestSweepRoots:
-    def test_default_is_the_tempdir_only(self, tmp_path) -> None:
+    def test_default_is_the_tempdir_when_no_tmpfs_root_exists(self, tmp_path) -> None:
         assert sub.substrate_pg_roots(
             env={"NX_TEST_PG_ROOT": "default"}, system="Linux", tempdir=tmp_path,
+            shm_dir=tmp_path / "shm",
         ) == [tmp_path]
 
     def test_an_existing_tmpfs_root_is_swept_too(self, tmp_path) -> None:
@@ -172,6 +174,34 @@ class TestSweepRoots:
             env={}, system="Linux", uid=1000, tempdir=tmp_path / "tmp", shm_dir=shm,
         )
         assert roots == [cand, tmp_path / "tmp"]
+
+    def test_default_never_hides_an_existing_tmpfs_root_from_the_sweep(
+        self, tmp_path,
+    ) -> None:
+        """=default changes where NEW clusters go, never what the sweep looks at:
+        a cluster stranded in tmpfs is RAM until reaped."""
+        shm = tmp_path / "shm"
+        cand = shm / "nexus-test-pg-1000"
+        cand.mkdir(parents=True)
+        roots = sub.substrate_pg_roots(
+            env={"NX_TEST_PG_ROOT": "default"}, system="Linux", uid=1000,
+            tempdir=tmp_path / "tmp", shm_dir=shm,
+        )
+        assert roots == [cand, tmp_path / "tmp"]
+
+    def test_an_override_never_hides_an_existing_tmpfs_root_either(
+        self, tmp_path,
+    ) -> None:
+        shm = tmp_path / "shm"
+        cand = shm / "nexus-test-pg-1000"
+        cand.mkdir(parents=True)
+        override = tmp_path / "o"
+        override.mkdir()
+        roots = sub.substrate_pg_roots(
+            env={"NX_TEST_PG_ROOT": str(override)}, system="Linux", uid=1000,
+            tempdir=tmp_path / "tmp", shm_dir=shm,
+        )
+        assert roots == [override, cand, tmp_path / "tmp"]
 
     def test_an_absent_tmpfs_root_is_not_listed(self, tmp_path) -> None:
         roots = sub.substrate_pg_roots(
@@ -191,12 +221,77 @@ class TestSweepRoots:
         override.mkdir()
         assert sub.substrate_pg_roots(
             env={"NX_TEST_PG_ROOT": str(override)}, system="Linux", tempdir=tmp_path / "t",
+            shm_dir=tmp_path / "shm",
         ) == [override, tmp_path / "t"]
 
     def test_duplicate_roots_collapse(self, tmp_path) -> None:
         assert sub.substrate_pg_roots(
             env={"NX_TEST_PG_ROOT": str(tmp_path)}, system="Linux", tempdir=tmp_path,
+            shm_dir=tmp_path / "shm",
         ) == [tmp_path]
+
+    def test_the_shm_dir_seam_env_redirects_the_default_lookup(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The sweep script's tests need a hermetic /dev/shm stand-in."""
+        shm = tmp_path / "shm"
+        cand = shm / f"nexus-test-pg-{sub._current_uid()}"
+        cand.mkdir(parents=True)
+        monkeypatch.setenv("NX_TEST_PG_SHM_DIR", str(shm))
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        roots = sub.substrate_pg_roots(system="Linux", tempdir=tmp_path / "tmp")
+        assert roots == [cand, tmp_path / "tmp"]
+
+
+class TestRelativeOverride:
+    def test_a_relative_override_is_made_absolute(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 10_000)
+        got = _choose(env={"NX_TEST_PG_ROOT": "rel/root"})
+        assert got is not None and got.is_absolute()
+        assert got == Path(os.path.abspath(tmp_path / "rel" / "root"))
+
+    def test_the_length_check_sees_the_absolute_path(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        absolute = os.path.abspath(tmp_path / "r")
+        edge = len(absolute) + sub._SOCKET_SUFFIX_RESERVE
+        monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", edge)
+        assert _choose(env={"NX_TEST_PG_ROOT": "r"}) == Path(absolute)
+        monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", edge - 1)
+        with pytest.raises(ValueError, match="sun_path"):
+            _choose(env={"NX_TEST_PG_ROOT": "r"})
+
+    def test_the_sweep_roots_are_absolute_too(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        roots = sub.substrate_pg_roots(
+            env={"NX_TEST_PG_ROOT": "rel"}, system="Linux", tempdir=tmp_path / "t",
+            shm_dir=tmp_path / "shm",
+        )
+        assert roots[0] == Path(os.path.abspath(tmp_path / "rel"))
+
+
+class TestTmpfsRootIsAPrivateRealDirectory:
+    def test_a_symlink_in_place_of_the_root_is_refused(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        link = tmp_path / "nexus-test-pg-me"
+        link.symlink_to(target)
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "choose_pg_root", lambda **_k: link)
+        with pytest.warns(UserWarning, match="falling back"):
+            assert sub.pg_cluster_parent() is None
+
+    def test_a_plain_file_in_place_of_the_root_is_refused(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        f = tmp_path / "nexus-test-pg-me"
+        f.write_text("x")
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "choose_pg_root", lambda **_k: f)
+        with pytest.warns(UserWarning, match="falling back"):
+            assert sub.pg_cluster_parent() is None
 
 
 def _dead_pid() -> int:
@@ -314,3 +409,10 @@ class TestDynamicSharedMemory:
         src = Path(sub.__file__).read_text()
         assert "f.write(dsm_conf(cluster_parent))" in src
         assert src.index("f.write(WAL_CAP_CONF)") < src.index("f.write(dsm_conf(cluster_parent))")
+
+
+def test_the_split_shard_probe_keeps_its_clusters_in_its_private_tmpdir() -> None:
+    """The probe globs its own TMPDIR for clusters; on Linux without
+    NX_TEST_PG_ROOT=default they would land in /dev/shm, unseen and stranded."""
+    probe = Path(__file__).with_name("test_mode_declarations_are_explicit.py").read_text()
+    assert '"NX_TEST_PG_ROOT": "default"' in probe

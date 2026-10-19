@@ -85,6 +85,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -150,9 +151,14 @@ _STRAY_GLOB = "nexus_t2_substrate_pg_*"
 #: a reboot. On Linux the clusters therefore go on tmpfs (``/dev/shm``) when it is
 #: tmpfs, writable and has room; everywhere else they stay under the process
 #: tempdir. ``NX_TEST_PG_ROOT=<dir>`` picks a root outright and
-#: ``NX_TEST_PG_ROOT=default`` forces the old tempdir root (and, for the sweep,
-#: leaves the tmpfs root alone).
+#: ``NX_TEST_PG_ROOT=default`` forces the old tempdir root for new clusters (the
+#: sweep still looks in an existing tmpfs root).
 _PG_ROOT_ENV = "NX_TEST_PG_ROOT"
+
+#: Test seam for the SWEEP only: a directory standing in for ``/dev/shm`` so the
+#: sweep script's tests do not read the box's real tmpfs root (where a peer's live
+#: clusters would show up in their counts). Creation never reads it.
+_SHM_DIR_SEAM_ENV = "NX_TEST_PG_SHM_DIR"
 _SHM_DIR = Path("/dev/shm")
 _TMPFS_DIR_PREFIX = "nexus-test-pg"
 
@@ -161,7 +167,8 @@ _TMPFS_DIR_PREFIX = "nexus-test-pg"
 #: (nexus-me3gm); 32 chas workers at the 64 MB WAL cap fit inside it.
 _TMPFS_MIN_FREE_BYTES = 3 * 1024**3
 
-#: ``sun_path`` holds 107 bytes plus the NUL on Linux. A cluster dir is
+#: ``sun_path`` is 108 bytes on Linux including the NUL, so a socket path may use
+#: 107. A cluster dir is
 #: ``<root>/nexus_t2_substrate_pg_<8 random>`` and the socket ``/.s.PGSQL.<port>``
 #: inside it, so the root may use ``107 - this`` bytes.
 _SOCKET_PATH_MAX = 107
@@ -187,6 +194,12 @@ def _current_uid() -> str:
     from nexus.daemon.service_registry import service_identity  # noqa: PLC0415 — deferred: keep this module's import light
 
     return service_identity()
+
+
+def _abs(path: str) -> Path:
+    """``~`` expanded and made absolute (no symlink resolution), so a relative
+    ``NX_TEST_PG_ROOT`` is length-checked and swept as the path it really is."""
+    return Path(os.path.abspath(Path(path).expanduser()))
 
 
 def _tmpfs_candidate(uid: int | str, shm_dir: Path = _SHM_DIR) -> Path:
@@ -236,7 +249,7 @@ def choose_pg_root(
     if override == "default":
         return None
     if override:
-        root = Path(override).expanduser()
+        root = _abs(override)
         if not _socket_path_fits(root):
             raise ValueError(
                 f"{_PG_ROOT_ENV}={root} is too long: a substrate cluster's unix "
@@ -309,7 +322,9 @@ def pg_cluster_parent() -> str | None:
         if not explicit:
             # /dev/shm is world-writable: refuse a dir someone else pre-created
             # under our predictable name.
-            st = root.stat()
+            st = root.lstat()
+            if not stat.S_ISDIR(st.st_mode):
+                raise PermissionError(f"{root} is not a real directory")
             if st.st_uid != int(_current_uid()):
                 raise PermissionError(f"{root} is owned by uid {st.st_uid}")
             if st.st_mode & 0o077:
@@ -333,23 +348,23 @@ def substrate_pg_roots(
     system: str | None = None,
     uid: int | str | None = None,
     tempdir: Path | None = None,
-    shm_dir: Path = _SHM_DIR,
+    shm_dir: Path | None = None,
 ) -> list[Path]:
     """Every root the stray-cluster sweep must look in: the tempdir (where the
-    older clusters live) plus wherever :func:`choose_pg_root` may have put them.
-    A tmpfs root is included whenever its directory EXISTS, even if today's choice
-    would not use it (a crashed run's cluster is RAM until reaped).
-    ``NX_TEST_PG_ROOT=default`` opts out of the tmpfs root.
+    older clusters live), ``NX_TEST_PG_ROOT`` when set, and the tmpfs root
+    whenever its directory EXISTS on Linux. The override never hides the tmpfs
+    root: ``=default`` and ``=<dir>`` change where NEW clusters go, never what the
+    sweep looks at, because a cluster stranded in tmpfs is RAM until reaped.
     """
     env = os.environ if env is None else env
     base = Path(tempfile.gettempdir()) if tempdir is None else tempdir
+    if shm_dir is None:
+        shm_dir = Path(env.get(_SHM_DIR_SEAM_ENV) or _SHM_DIR)
     override = (env.get(_PG_ROOT_ENV) or "").strip()
     roots: list[Path] = []
-    if override == "default":
-        pass
-    elif override:
-        roots.append(Path(override).expanduser())
-    elif (platform.system() if system is None else system) == "Linux":
+    if override and override != "default":
+        roots.append(_abs(override))
+    if (platform.system() if system is None else system) == "Linux":
         cand = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
         if cand.is_dir():
             roots.append(cand)

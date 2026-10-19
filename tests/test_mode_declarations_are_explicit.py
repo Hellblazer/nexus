@@ -1349,9 +1349,10 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
         # failed that way on 2026-09-12 naming four directories, all of them
         # this run's own sibling workers, while stating confidently that the
         # subprocess had booted an engine despite NX_TEST_T2_SUBSTRATE=none.
-        # ``mkdtemp`` honours TMPDIR, and the substrate creates every cluster
-        # through it (tests/_engine_substrate.py), so a cluster booted by the
-        # nested run can only land here.
+        # ``mkdtemp`` honours TMPDIR, and with NX_TEST_PG_ROOT=default (set in the
+        # nested env below) the substrate creates every cluster through it
+        # (tests/_engine_substrate.py), so a cluster booted by the nested run can
+        # only land here.
         probe_tmp = pathlib.Path(
             tempfile.mkdtemp(prefix="mode-census-probe-"),
         )
@@ -1383,6 +1384,10 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
                     **os.environ,
                     "NX_TEST_T2_SUBSTRATE": "none",
                     "TMPDIR": str(probe_tmp),
+                    # Without this a Linux nested run puts its clusters on
+                    # /dev/shm, the glob below can never see them, and one that
+                    # booted strands in RAM (nexus-me3gm).
+                    "NX_TEST_PG_ROOT": "default",
                 },
                 capture_output=True,
                 text=True,

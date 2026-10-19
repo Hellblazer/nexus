@@ -45,10 +45,17 @@ def _write_sidecar(cluster_dir: Path, **fields) -> None:
 def _run_script(
     fake_tmpdir: Path, pg_root: str = "default",
 ) -> subprocess.CompletedProcess:
-    # NX_TEST_PG_ROOT=default keeps the sweep off the box's real /dev/shm root
+    # NX_TEST_PG_SHM_DIR keeps the sweep off the box's real /dev/shm root
     # (nexus-me3gm), where a concurrent session's live clusters would otherwise
     # show up in this test's counts.
-    env = {**os.environ, "TMPDIR": str(fake_tmpdir), "NX_TEST_PG_ROOT": pg_root}
+    env = {
+        **os.environ,
+        "TMPDIR": str(fake_tmpdir),
+        "NX_TEST_PG_ROOT": pg_root,
+        # The sweep also reads the tmpfs root regardless of NX_TEST_PG_ROOT;
+        # point that at a directory that does not exist.
+        "NX_TEST_PG_SHM_DIR": str(fake_tmpdir / "no-shm"),
+    }
     return subprocess.run(
         [str(SCRIPT)], cwd=REPO_ROOT, env=env,
         capture_output=True, text=True, timeout=60,
