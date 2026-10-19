@@ -31,7 +31,7 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_voyage_choice_gives_voyage(cfg_dir: Path) -> None:
-    _write(cfg_dir, {"local": {"embed_model": "voyage-context-3"}})
+    _write(cfg_dir, {"local": {"embed_model": "voyage-model-x"}})
     assert config.local_embed_profile() == "voyage"
 
 

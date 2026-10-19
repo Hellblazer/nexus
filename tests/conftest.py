@@ -3851,6 +3851,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_legacy_two_segment_target_exempt_from_dims_check",
     "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_assume_model_still_enforces_model_mismatch_gate",
     "tests/test_exporter.py::TestImportFlagsCLI::test_assume_model_flag_wired_through",
+    # Reason class "real-value interlock" (RDR-210 P1.5, nexus-hf29s): these two
+    # tests assert the scoring table's REAL entries for the real model tokens
+    # (voyage-code-3 at 1.0, voyage-context-3 at 0.45/0.65, and that a listed model
+    # never logs as unlisted). A neutral token is by definition an unlisted model,
+    # so swapping the literal would make the test assert the opposite thing.
+    "tests/test_hf29s_cross_family_ranking.py::test_bge_factor_is_the_measured_ratio_within_1e_6",
+    "tests/test_hf29s_cross_family_ranking.py::test_a_listed_model_does_not_log_as_unlisted",
 })
 
 

@@ -810,7 +810,7 @@ class TestRegistrationSeamExistingRowSkipsProfileComparison:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         self._local_bge_intent(monkeypatch)
-        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
         name = f"docs__seam-existing-row__{self._BGE}__v1"
         writer = self._writer_with_row(
             {"name": name, "embedding_model": self._BGE, "superseded_by": ""},
@@ -830,7 +830,7 @@ class TestRegistrationSeamExistingRowSkipsProfileComparison:
         from nexus.corpus import EmbeddingProfileMismatchError
 
         self._local_bge_intent(monkeypatch)
-        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
         name = f"docs__seam-new-name__{self._BGE}__v1"
         writer = self._writer_with_row(None)
 
@@ -849,7 +849,7 @@ class TestRegistrationSeamExistingRowSkipsProfileComparison:
         from nexus.corpus import EmbeddingProfileMismatchError
 
         self._local_bge_intent(monkeypatch)
-        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
         name = f"docs__seam-other-model__{self._BGE}__v1"
         writer = self._writer_with_row(
             {"name": name, "embedding_model": "minilm-l6-v2-384", "superseded_by": ""},
@@ -868,7 +868,7 @@ class TestRegistrationSeamExistingRowSkipsProfileComparison:
         from nexus.corpus import EmbeddingProfileMismatchError
 
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
         name = f"docs__seam-explicit__{self._BGE}__v1"
         override = {
             "content_type": "docs", "owner_id": "seam-explicit",
@@ -894,14 +894,14 @@ class TestRegistrationSeamExistingRowSkipsProfileComparison:
         from nexus.corpus import SupersededCollectionWriteError
 
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        _stub_profile_reader(monkeypatch, {"docs": "voyage-context-3"})
+        _stub_profile_reader(monkeypatch, {"docs": "model-ctx"})
         name = f"docs__seam-superseded__{self._BGE}__v1"
         override = {
             "content_type": "docs", "owner_id": "seam-superseded",
             "embedding_model": self._BGE, "model_version": "v1",
         }
         retired = self._writer_with_row(
-            {"name": name, "embedding_model": self._BGE, "superseded_by": "docs__seam-superseded__voyage-context-3__v1"},
+            {"name": name, "embedding_model": self._BGE, "superseded_by": "docs__seam-superseded__model-ctx__v1"},
         )
 
         with pytest.raises(SupersededCollectionWriteError):

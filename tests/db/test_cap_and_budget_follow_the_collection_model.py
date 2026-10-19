@@ -84,7 +84,7 @@ def test_the_cap_and_the_budget_each_read_the_catalog_row_once(monkeypatch: pyte
 
     def resolver(name: str) -> dict:
         calls.append(name)
-        return {"embedding_model": "voyage-code-3", "content_type": "code"}
+        return {"embedding_model": "model-code", "content_type": "code"}
 
     hvc.per_collection_chunk_cap("legacy-name", row_resolver=resolver)
     assert calls == ["legacy-name"]

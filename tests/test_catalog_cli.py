@@ -3301,6 +3301,11 @@ class TestWhh61MigrationCarve:
                     "dimension": 768,
                 }]
 
+            def get_collection(self, name: str) -> None:
+                # RDR-210 P1.4: on a profile disagreement the registration seam reads the
+                # collection's row; a target that was never registered has none.
+                return None
+
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch("nexus.commands.catalog._get_catalog_writer", return_value=writer), \
                 patch.object(factory_mod, "make_catalog_reader", lambda: _BgeOnlyProfile()):
