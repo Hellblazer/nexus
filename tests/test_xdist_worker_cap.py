@@ -222,3 +222,122 @@ class TestDegradesRatherThanCrashes:
         cfg = Cfg()
         _clamp_xdist_workers(cfg)  # must not raise
         assert cfg.option.numprocesses == 16  # and must not have changed anything
+
+
+class TestMemoryCap:
+    """nexus-vo9qn. The run's tmpfs decision is final, so the worker count must
+    keep the grant from filling: grant memory / a measured per-worker budget."""
+
+    GIB = 1024**3
+
+    def test_the_budget_covers_the_measured_per_worker_peak(self) -> None:
+        from tests._xdist_cap import BYTES_PER_WORKER
+
+        # lab-l, 48 GB, 16 workers peaked 39.4 GB anon incl. shmem (labrun sampler)
+        assert BYTES_PER_WORKER >= 39.4e9 / 16
+        # lab-m, 16 GB, -n 8 peaked 14.5 GB: the budget must not exceed what fits
+        assert BYTES_PER_WORKER >= 14.5e9 / 8
+
+    @pytest.mark.parametrize(
+        "cls,grant_gib,workers",
+        [("lab-s", 4, 1), ("lab-m", 16, 6), ("lab-6c18g", 18, 7), ("lab-l", 48, 19), ("lab-xl", 96, 38)],
+    )
+    def test_cap_per_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert cap_from_memory(grant_bytes=grant_gib * self.GIB) == workers
+
+    def test_lab_l_keeps_its_sixteen_workers_and_lab_m_loses_two(self) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[1] is None
+        assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 6
+
+    def test_never_below_one(self) -> None:
+        from tests._xdist_cap import cap_from_memory
+
+        assert cap_from_memory(grant_bytes=1) == 1
+
+    def test_grant_is_the_smaller_of_lab_mem_and_the_cgroup(self) -> None:
+        from tests._xdist_cap import grant_memory_bytes
+
+        env = {"LAB_MEM_MB": "16384"}
+        assert grant_memory_bytes(env=env, cgroup_limit=None) == 16 * self.GIB
+        assert grant_memory_bytes(env=env, cgroup_limit=8 * self.GIB) == 8 * self.GIB
+        assert grant_memory_bytes(env={}, cgroup_limit=12 * self.GIB) == 12 * self.GIB
+        assert grant_memory_bytes(env={}, cgroup_limit=None) is None
+
+    @pytest.mark.parametrize("raw", ["", "abc", "0", "-5"])
+    def test_a_garbled_lab_mem_is_ignored(self, raw: str) -> None:
+        from tests._xdist_cap import grant_memory_bytes
+
+        assert grant_memory_bytes(env={"LAB_MEM_MB": raw}, cgroup_limit=None) is None
+
+    def test_no_limit_visible_means_no_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tests._engine_substrate as sub
+        import tests._xdist_cap as mod
+
+        monkeypatch.delenv("LAB_MEM_MB", raising=False)
+        monkeypatch.setattr(sub, "cgroup_memory_limit", lambda: None)
+        assert mod.effective_memory_cap() is None
+
+    def test_a_visible_grant_caps_and_the_opt_out_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tests._engine_substrate as sub
+        import tests._xdist_cap as mod
+
+        monkeypatch.setenv("LAB_MEM_MB", str(16 * 1024))
+        monkeypatch.setattr(sub, "cgroup_memory_limit", lambda: None)
+        assert mod.effective_memory_cap() == 6
+        monkeypatch.setenv(mod.NO_CAP_ENV, "1")
+        assert mod.effective_memory_cap() is None
+
+    def test_a_broken_probe_yields_no_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tests._engine_substrate as sub
+        import tests._xdist_cap as mod
+
+        def boom():
+            raise OSError("no cgroup")
+
+        monkeypatch.setattr(sub, "cgroup_memory_limit", boom)
+        monkeypatch.delenv(mod.NO_CAP_ENV, raising=False)
+        assert mod.effective_memory_cap() is None
+
+    def test_conftest_clamps_to_the_memory_cap_and_says_why(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import tests._xdist_cap as mod
+        from tests.conftest import _clamp_xdist_workers
+
+        monkeypatch.setattr(mod, "effective_cap", lambda: None)
+        monkeypatch.setattr(mod, "effective_memory_cap", lambda: 6)
+
+        class Opt:
+            numprocesses = 8
+
+        class Cfg:
+            option = Opt()
+
+        cfg = Cfg()
+        _clamp_xdist_workers(cfg)
+        assert cfg.option.numprocesses == 6
+        out = capsys.readouterr().out
+        assert "8 -> 6" in out and "NX_XDIST_NO_CAP" in out and "tmpfs" in out
+
+    def test_conftest_leaves_a_request_within_the_memory_cap(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import tests._xdist_cap as mod
+        from tests.conftest import _clamp_xdist_workers
+
+        monkeypatch.setattr(mod, "effective_cap", lambda: None)
+        monkeypatch.setattr(mod, "effective_memory_cap", lambda: 16)
+
+        class Opt:
+            numprocesses = 16
+
+        class Cfg:
+            option = Opt()
+
+        cfg = Cfg()
+        _clamp_xdist_workers(cfg)
+        assert cfg.option.numprocesses == 16

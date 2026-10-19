@@ -55,6 +55,13 @@ differ from a GitHub-hosted runner:
   `lab-run -c <class> -- <command>`: it queues behind CI, then runs the
   command in place with the class's cores and memory cap, and `-n auto`
   resolves to the grant.
+  The suite also caps its own workers to the grant's memory (grant / 2.5 GiB
+  each, nexus-vo9qn): `-n auto` stays 16 on `lab-l` and drops to 6 on `lab-m`.
+  Substrate clusters go on `/dev/shm` for the whole run (decided once, at the
+  start) rather than on the NVMe, and the pytest summary says
+  `clusters on tmpfs N, on disk M`; a start that cannot fit fails loud instead of
+  writing to disk. `NX_XDIST_NO_CAP=1` and `NX_TEST_PG_ROOT=default` are the
+  escapes (`tests/AGENTS.md`).
   An engine build inverts the order: `scripts/mvnw-leased.sh --lab-run <class>
   ...` takes the build lease first and then the grant, so waiting for another
   build holds no cores (nexus-iqmih). Run inside a grant instead, `mvnw-leased.sh`

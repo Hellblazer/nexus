@@ -254,23 +254,58 @@ def _socket_path_fits(root: Path) -> bool:
     return len(str(root)) + _SOCKET_SUFFIX_RESERVE <= _SOCKET_PATH_MAX
 
 
-def _cgroup_headroom(
-    *, proc_cgroup: str | None = None, cgroup_root: Path = Path("/sys/fs/cgroup"),
-) -> int | None:
-    """Bytes of memory headroom under the tightest cgroup-v2 limit on this
-    process's cgroup path (its own and every ancestor's), or None when there is no
-    limit or the files are unreadable (cgroup v1, macOS)."""
+def _cgroup_dirs(
+    *, proc_cgroup: str | None, cgroup_root: Path,
+) -> list[Path]:
+    """The cgroup-v2 directories on this process's path, deepest first and the
+    root last; ``[]`` where there is no v2 path (cgroup v1, macOS)."""
     try:
         text = Path("/proc/self/cgroup").read_text() if proc_cgroup is None else proc_cgroup
     except OSError:
-        return None
+        return []
     rel = next((ln[3:] for ln in text.splitlines() if ln.startswith("0::")), None)
     if rel is None:
-        return None
+        return []
     parts = [p for p in rel.strip().split("/") if p]
+    return [cgroup_root.joinpath(*parts[:d]) for d in range(len(parts), -1, -1)]
+
+
+def _reclaimable_file_bytes(d: Path) -> int:
+    """Page cache the kernel can drop under pressure: ``active_file`` plus
+    ``inactive_file`` of ``memory.stat`` (tmpfs pages are NOT in these; they are
+    shmem). 0 when the file is unreadable."""
+    try:
+        text = (d / "memory.stat").read_text()
+    except OSError:
+        return 0
+    total = 0
+    for line in text.splitlines():
+        key, _, val = line.partition(" ")
+        if key in ("active_file", "inactive_file"):
+            try:
+                total += int(val)
+            except ValueError:
+                pass
+    return total
+
+
+def _cgroup_headroom(
+    *,
+    proc_cgroup: str | None = None,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    credit_reclaimable: bool = False,
+) -> int | None:
+    """Bytes of memory headroom under the tightest cgroup-v2 limit on this
+    process's cgroup path (its own and every ancestor's), or None when there is no
+    limit or the files are unreadable (cgroup v1, macOS).
+
+    ``credit_reclaimable`` adds the level's droppable page cache to its room. A
+    long run fills ``memory.current`` with file cache up to the limit and the
+    kernel reclaims it on demand, so the raw figure reads near zero on a healthy
+    run; the mid-run exhaustion check (nexus-vo9qn) needs the credited one. The
+    decision at session start keeps the raw figure."""
     best: int | None = None
-    for depth in range(len(parts), -1, -1):
-        d = cgroup_root.joinpath(*parts[:depth])
+    for d in _cgroup_dirs(proc_cgroup=proc_cgroup, cgroup_root=cgroup_root):
         try:
             mx = (d / "memory.max").read_text().strip()
             cur = int((d / "memory.current").read_text().strip())
@@ -282,7 +317,25 @@ def _cgroup_headroom(
             room = int(mx) - cur
         except ValueError:
             continue
+        if credit_reclaimable:
+            room += _reclaimable_file_bytes(d)
         best = room if best is None else min(best, room)
+    return best
+
+
+def cgroup_memory_limit(
+    *, proc_cgroup: str | None = None, cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> int | None:
+    """The tightest ``memory.max`` on this process's cgroup path, in bytes, or
+    None when nothing on the path is limited (or there is no cgroup v2)."""
+    best: int | None = None
+    for d in _cgroup_dirs(proc_cgroup=proc_cgroup, cgroup_root=cgroup_root):
+        try:
+            mx = (d / "memory.max").read_text().strip()
+            limit = int(mx)
+        except (OSError, ValueError):
+            continue
+        best = limit if best is None else min(best, limit)
     return best
 
 
@@ -297,7 +350,7 @@ def _tmpfs_refused(reason: str) -> None:
     )
 
 
-def choose_pg_root(
+def decide_pg_root(
     *,
     env: Mapping[str, str] | None = None,
     system: str | None = None,
@@ -307,17 +360,17 @@ def choose_pg_root(
     cgroup_headroom: Callable[[], int | None] | None = None,
     uid: int | str | None = None,
     shm_dir: Path = _SHM_DIR,
-) -> Path | None:
-    """The directory substrate clusters are created under, or ``None`` for the
-    process tempdir. Pure decision: it creates nothing. Every input is injectable
-    so the outcomes (override, forced default, tmpfs, no tmpfs, too small) are
-    unit tests, not machine state. A Linux fallback with no override is warned
-    about by name (:func:`_tmpfs_refused`).
+) -> tuple[Path | None, str | None]:
+    """``(root, refusal)``: the directory substrate clusters are created under, or
+    ``None`` for the process tempdir, and, when a Linux box with no override could
+    not use tmpfs, the reason (else ``None``). Pure decision: it creates and warns
+    about nothing. Every input is injectable so the outcomes (override, forced
+    default, tmpfs, no tmpfs, too small) are unit tests, not machine state.
     """
     env = os.environ if env is None else env
     override = (env.get(_PG_ROOT_ENV) or "").strip()
     if override == "default":
-        return None
+        return None, None
     if override:
         root = _abs(override)
         if not _socket_path_fits(root):
@@ -327,45 +380,206 @@ def choose_pg_root(
                 f"sun_path limit (root may use at most "
                 f"{_SOCKET_PATH_MAX - _SOCKET_SUFFIX_RESERVE} bytes)"
             )
-        return root
+        return root, None
     if (platform.system() if system is None else system) != "Linux":
-        return None
+        return None, None
     if mounts_text is None:
         mounts_text = _read_mounts()
         if mounts_text is None:
-            _tmpfs_refused("cannot read /proc/mounts")
-            return None
+            return None, "cannot read /proc/mounts"
     fstype = _mount_fstype(mounts_text, str(shm_dir))
     if fstype != "tmpfs":
-        _tmpfs_refused(f"{shm_dir} is not tmpfs ({fstype or 'no mount entry'})")
-        return None
+        return None, f"{shm_dir} is not tmpfs ({fstype or 'no mount entry'})"
     can_write = writable or (lambda p: os.access(p, os.W_OK | os.X_OK))
     if not can_write(shm_dir):
-        _tmpfs_refused(f"{shm_dir} is not writable by this user")
-        return None
+        return None, f"{shm_dir} is not writable by this user"
     try:
         free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(shm_dir)
     except OSError as exc:
-        _tmpfs_refused(f"cannot read free space of {shm_dir} ({exc})")
-        return None
+        return None, f"cannot read free space of {shm_dir} ({exc})"
     if free < _TMPFS_MIN_FREE_BYTES:
-        _tmpfs_refused(
+        return None, (
             f"{shm_dir} has {free // 1024**2} MiB free, below the "
             f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor"
         )
-        return None
     headroom = (cgroup_headroom or _cgroup_headroom)()
     if headroom is not None and headroom < _TMPFS_MIN_FREE_BYTES:
-        _tmpfs_refused(
+        return None, (
             f"the cgroup memory headroom is {headroom // 1024**2} MiB, below the "
             f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor (tmpfs pages are charged to it)"
         )
-        return None
     root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
     if not _socket_path_fits(root):
-        _tmpfs_refused(f"a unix socket path under {root} would pass the sun_path limit")
-        return None
+        return None, f"a unix socket path under {root} would pass the sun_path limit"
+    return root, None
+
+
+def choose_pg_root(**kw) -> Path | None:
+    """:func:`decide_pg_root` for its root alone; a Linux fallback with no override
+    is warned about by name (:func:`_tmpfs_refused`). Takes the same injectable
+    inputs. Production code goes through :func:`session_pg_root`, which makes this
+    decision once per run."""
+    root, refusal = decide_pg_root(**kw)
+    if refusal is not None:
+        _tmpfs_refused(refusal)
     return root
+
+
+# nexus-vo9qn: the tmpfs-vs-disk decision is made ONCE per run. choose_pg_root used
+# to run per worker at every cluster start and refuse tmpfs when the cgroup's
+# headroom was under 3 GiB; tmpfs pages are charged to the grant, so as workers
+# filled memory the later clusters went to ext4 (lab-l, -n auto: 3.9 GB written in
+# 4 min). The first decision is persisted in the process environment, which xdist
+# workers inherit, so every cluster in the run uses it.
+_PG_ROOT_SESSION_ENV = "NX_TEST_PG_ROOT_SESSION"
+#: Run-scoped file (path in the env) each cluster start appends one line to; the
+#: controller's terminal summary counts it. Only the pytest controller creates it.
+_PG_ROOT_LOG_ENV = "NX_TEST_PG_ROOT_LOG"
+
+#: What a mid-run cluster start needs from a session that chose tmpfs. One cluster
+#: measured 108 MB at 24 s (nexus-me3gm); 512 MiB is that with margin. Below it the
+#: start fails loud instead of falling back to disk: that fallback is the NVMe wear
+#: this bead exists to stop.
+_TMPFS_HARD_FLOOR_BYTES = 512 * 1024**2
+
+
+class SubstrateRootExhausted(RuntimeError):
+    """The run chose tmpfs for its clusters and a later cluster cannot fit. Never
+    answered by a silent fall back to disk (nexus-vo9qn)."""
+
+
+def _encode_session_root(root: Path | None, refusal: str | None) -> str:
+    return f"tmpfs={root}" if root is not None else f"disk={refusal or ''}"
+
+
+def _decode_session_root(raw: str | None) -> tuple[bool, Path | None, str | None]:
+    """``(valid, root, refusal)`` for a :data:`_PG_ROOT_SESSION_ENV` value; an
+    absent or unrecognised value is not valid and is decided afresh."""
+    if raw and raw.startswith("tmpfs=") and len(raw) > len("tmpfs="):
+        return True, Path(raw[len("tmpfs="):]), None
+    if raw is not None and raw.startswith("disk="):
+        return True, None, raw[len("disk="):] or None
+    return False, None, None
+
+
+def session_pg_root(
+    *, env: dict[str, str] | None = None, **decide_kw,
+) -> tuple[Path | None, str | None, bool]:
+    """``(root, refusal, explicit)`` for this run's clusters. An explicit
+    ``NX_TEST_PG_ROOT`` is a standing instruction and is read every time; the
+    automatic choice is made on the first call and persisted in *env* (default
+    ``os.environ``) for every later cluster, in this process and in the xdist
+    workers it spawns. A Linux refusal is warned about once, by the process that
+    decided."""
+    env = os.environ if env is None else env
+    override = (env.get(_PG_ROOT_ENV) or "").strip()
+    if override:
+        root, refusal = decide_pg_root(env=env, **decide_kw)
+        return root, refusal, override != "default"
+    valid, root, refusal = _decode_session_root(env.get(_PG_ROOT_SESSION_ENV))
+    if valid:
+        return root, refusal, False
+    root, refusal = decide_pg_root(env=env, **decide_kw)
+    if refusal is not None:
+        _tmpfs_refused(refusal)
+    env[_PG_ROOT_SESSION_ENV] = _encode_session_root(root, refusal)
+    return root, refusal, False
+
+
+_OWNED_LOGS: set[str] = set()
+#: This process's own cluster starts: the summary source of a serial run, which
+#: needs no cross-process log.
+_LOCAL_ROWS: list[dict] = []
+
+
+def begin_pg_root_session() -> None:
+    """Called by the pytest xdist controller before it spawns workers: take the
+    session decision now, so no worker decides on its own, and open the run's
+    cluster log for the workers to append to. A nested pytest inherits both and
+    leaves them alone."""
+    session_pg_root()
+    if not os.environ.get(_PG_ROOT_LOG_ENV):
+        fd, path = tempfile.mkstemp(prefix="nexus-pg-roots-", suffix=".log")
+        os.close(fd)
+        os.environ[_PG_ROOT_LOG_ENV] = path
+        _OWNED_LOGS.add(path)
+
+
+def _record_cluster_root(kind: str, root: str | None, reason: str | None) -> None:
+    row = {"kind": kind, "root": root, "reason": reason, "pid": os.getpid()}
+    _LOCAL_ROWS.append(row)
+    path = os.environ.get(_PG_ROOT_LOG_ENV)
+    if path:
+        with contextlib.suppress(OSError):
+            with open(path, "a") as f:  # one short O_APPEND write: atomic across workers
+                f.write(json.dumps(row) + "\n")
+
+
+def pg_root_run_summary(*, finish: bool = False) -> str | None:
+    """The one-line "where did the clusters go" answer for this run, or None when
+    no cluster started. An xdist run reads every worker's rows from the cluster
+    log; a serial run reads its own. With ``finish`` the controller also removes
+    the log it created."""
+    path = os.environ.get(_PG_ROOT_LOG_ENV)
+    rows = list(_LOCAL_ROWS)
+    if path:
+        try:
+            rows = [json.loads(ln) for ln in Path(path).read_text().splitlines() if ln.strip()]
+        except (OSError, ValueError):
+            pass
+        if finish and path in _OWNED_LOGS:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+            _OWNED_LOGS.discard(path)
+            os.environ.pop(_PG_ROOT_LOG_ENV, None)
+    if not rows:
+        return None
+    tmpfs = [r for r in rows if r["kind"] == "tmpfs"]
+    disk = [r for r in rows if r["kind"] != "tmpfs"]
+    line = f"nexus test substrate: clusters on tmpfs {len(tmpfs)}, on disk {len(disk)}"
+    why = sorted({r["reason"] for r in disk if r.get("reason")})
+    if why:
+        line += " (disk because: " + "; ".join(why) + ")"
+    roots = sorted({r["root"] for r in rows if r.get("root")})
+    if roots:
+        line += " [root " + ", ".join(roots) + "]"
+    return line
+
+
+def _check_tmpfs_has_room(
+    root: Path,
+    *,
+    free_bytes: Callable[[Path], int] | None = None,
+    cgroup_headroom: Callable[[], int | None] | None = None,
+) -> None:
+    """Fail loud when a run that chose tmpfs cannot fit one more cluster."""
+    try:
+        free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(
+            root if root.exists() else root.parent
+        )
+    except OSError:
+        free = None
+    headroom = (
+        cgroup_headroom or (lambda: _cgroup_headroom(credit_reclaimable=True))
+    )()
+    cause = None
+    if free is not None and free < _TMPFS_HARD_FLOOR_BYTES:
+        cause = f"{root} has {free // 1024**2} MiB free"
+    elif headroom is not None and headroom < _TMPFS_HARD_FLOOR_BYTES:
+        cause = (
+            f"the cgroup has {headroom // 1024**2} MiB of memory headroom left "
+            f"(tmpfs pages are charged to it)"
+        )
+    if cause is None:
+        return
+    raise SubstrateRootExhausted(
+        f"nexus test substrate: no room for another cluster on tmpfs: {cause}, "
+        f"below the {_TMPFS_HARD_FLOOR_BYTES // 1024**2} MiB a cluster start needs. "
+        f"This run chose tmpfs at its start and will not fall back to disk mid-run "
+        f"(that wrote 3.9 GB to the NVMe in 4 minutes, nexus-vo9qn). Run fewer "
+        f"workers (-n N), a larger lab-run class, or set {_PG_ROOT_ENV}=<dir> or "
+        f"{_PG_ROOT_ENV}=default for the whole run."
+    )
 
 
 def _on_tmpfs_root(
@@ -424,14 +638,19 @@ def dsm_conf(
 
 
 def pg_cluster_parent() -> str | None:
-    """:func:`choose_pg_root` plus creating the directory (0700, owned by us).
-    ``None`` means "use the tempdir". A tmpfs root that cannot be made private
-    falls back to the tempdir with a warning; an explicit ``NX_TEST_PG_ROOT``
-    that cannot be made fails loud."""
-    root = choose_pg_root()
+    """The session's cluster root (:func:`session_pg_root`) plus creating the
+    directory (0700, owned by us). ``None`` means "use the tempdir". A tmpfs root
+    that cannot be made private falls back to the tempdir with a warning (a
+    permissions fact, the same for every cluster); an explicit ``NX_TEST_PG_ROOT``
+    that cannot be made fails loud, and so does a tmpfs session with no room
+    left. Every start logs where the cluster went and why, and is counted for
+    the run's summary line (nexus-vo9qn)."""
+    root, refusal, explicit = session_pg_root()
     if root is None:
+        _log_cluster_root(None, refusal)
         return None
-    explicit = bool((os.environ.get(_PG_ROOT_ENV) or "").strip())
+    if not explicit:
+        _check_tmpfs_has_room(root)
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not explicit:
@@ -452,9 +671,23 @@ def pg_cluster_parent() -> str | None:
             f"falling back to the tempdir",
             stacklevel=2,
         )
+        _log_cluster_root(None, f"cannot use {root} ({exc})")
         return None
-    _log.info("nexus_t2_substrate.cluster_root", root=str(root), explicit=explicit)
+    _log_cluster_root(root, None)
     return str(root)
+
+
+def _log_cluster_root(root: Path | None, reason: str | None) -> None:
+    """One structured line per cluster start and one row in the run's cluster
+    log. A disk start with a reason is a warning (visible at the default log
+    level); the rest are info."""
+    kind = "tmpfs" if root is not None and _on_tmpfs_root(str(root), mounts_text=None) else "disk"
+    fields = {"root": str(root) if root else "tempdir", "on": kind, "reason": reason}
+    if reason:
+        _log.warning("nexus_t2_substrate.cluster_root", bead="nexus-vo9qn", **fields)
+    else:
+        _log.info("nexus_t2_substrate.cluster_root", bead="nexus-vo9qn", **fields)
+    _record_cluster_root(kind, str(root) if root else None, reason)
 
 
 def substrate_pg_roots(

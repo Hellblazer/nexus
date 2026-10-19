@@ -105,6 +105,7 @@ def pytest_configure(config):
         uv run pytest --log-level=DEBUG        # full debug output
     """
     _clamp_xdist_workers(config)
+    _begin_pg_root_session(config)
 
     try:
         level_str = (config.getoption("log_level") or "WARNING").upper()
@@ -505,7 +506,8 @@ _is_controller_or_serial: bool = False
 
 
 def _clamp_xdist_workers(config) -> None:
-    """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)."""
+    """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)
+    and inside the run's memory grant (nexus-vo9qn)."""
     try:
         requested = getattr(config.option, "numprocesses", None)
     except Exception:  # noqa: BLE001 — never let the cap break collection
@@ -514,19 +516,59 @@ def _clamp_xdist_workers(config) -> None:
         # "auto"/"logical" unresolved (xdist absent), or no -n at all.
         return
     try:
-        from tests._xdist_cap import clamp_numprocesses, effective_cap
+        from tests._xdist_cap import (
+            clamp_numprocesses,
+            effective_cap,
+            effective_memory_cap,
+            memory_clamp_note,
+        )
 
         cap = effective_cap()
-        if cap is None:
-            return
-        value, note = clamp_numprocesses(requested=requested, cap=cap)
-        if note is not None:
-            config.option.numprocesses = value
-            # Printed, not logged: the operator needs to see this before a
-            # 15-minute run, and log level here is not yet configured.
-            print(f"\n[nexus] {note}\n")
+        if cap is not None:
+            value, note = clamp_numprocesses(requested=requested, cap=cap)
+            if note is not None:
+                config.option.numprocesses = requested = value
+                # Printed, not logged: the operator needs to see this before a
+                # 15-minute run, and log level here is not yet configured.
+                print(f"\n[nexus] {note}\n")
+        mem_cap = effective_memory_cap()
+        if mem_cap is not None and requested > mem_cap:
+            config.option.numprocesses = mem_cap
+            print(f"\n[nexus] {memory_clamp_note(requested=requested, cap=mem_cap)}\n")
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         return
+
+
+def _begin_pg_root_session(config) -> None:
+    """The xdist CONTROLLER takes the tmpfs-vs-disk decision for every cluster in
+    the run before it spawns workers, so no worker decides on its own as memory
+    fills (nexus-vo9qn). A serial run decides lazily at its first cluster."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        if (getattr(config.option, "numprocesses", None) or 0) <= 0:
+            return
+        from tests._engine_substrate import begin_pg_root_session
+
+        begin_pg_root_session()
+    except ValueError:
+        raise  # an over-long NX_TEST_PG_ROOT is a loud, pre-run failure
+    except Exception:  # noqa: BLE001 — a missing decision is made lazily instead
+        return
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """One line answering "where did this run's clusters go" (nexus-vo9qn)."""
+    if hasattr(config, "workerinput"):
+        return
+    try:
+        from tests._engine_substrate import pg_root_run_summary
+
+        line = pg_root_run_summary(finish=True)
+    except Exception:  # noqa: BLE001 — a summary line never fails a run
+        return
+    if line:
+        terminalreporter.write_line(line)
 
 
 def pytest_sessionstart(session):

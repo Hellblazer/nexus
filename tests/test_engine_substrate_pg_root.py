@@ -46,6 +46,16 @@ def long_paths_ok(monkeypatch):
     monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 10_000)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_session_decision(monkeypatch):
+    """The conftest controller persists the run's root decision in the env and
+    counts cluster starts; these tests drive the decision themselves, so they
+    start with neither and leave neither behind (nexus-vo9qn)."""
+    monkeypatch.setenv(sub._PG_ROOT_SESSION_ENV, "")
+    monkeypatch.delenv(sub._PG_ROOT_LOG_ENV, raising=False)
+    monkeypatch.setattr(sub, "_LOCAL_ROWS", [])
+
+
 def _choose(**kw) -> Path | None:
     base = dict(
         env={}, system="Linux", mounts_text=_TMPFS_MOUNTS,
@@ -146,7 +156,7 @@ class TestPgClusterParent:
         root.mkdir()
         owner = root.stat().st_uid
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
-        monkeypatch.setattr(sub, "choose_pg_root", lambda **_k: root)
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (root, None))
         monkeypatch.setattr(sub, "_current_uid", lambda: str(owner + 1))
         with pytest.warns(UserWarning, match="falling back"):
             assert sub.pg_cluster_parent() is None
@@ -156,7 +166,7 @@ class TestPgClusterParent:
         root.mkdir()
         root.chmod(0o755)
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
-        monkeypatch.setattr(sub, "choose_pg_root", lambda **_k: root)
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (root, None))
         assert sub.pg_cluster_parent() == str(root)
         assert root.stat().st_mode & 0o777 == 0o700
 
@@ -281,7 +291,7 @@ class TestTmpfsRootIsAPrivateRealDirectory:
         link = tmp_path / "nexus-test-pg-me"
         link.symlink_to(target)
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
-        monkeypatch.setattr(sub, "choose_pg_root", lambda **_k: link)
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (link, None))
         with pytest.warns(UserWarning, match="falling back"):
             assert sub.pg_cluster_parent() is None
 
@@ -291,7 +301,7 @@ class TestTmpfsRootIsAPrivateRealDirectory:
         f = tmp_path / "nexus-test-pg-me"
         f.write_text("x")
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
-        monkeypatch.setattr(sub, "choose_pg_root", lambda **_k: f)
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (f, None))
         with pytest.warns(UserWarning, match="falling back"):
             assert sub.pg_cluster_parent() is None
 
@@ -599,3 +609,255 @@ class TestSidecarlessTmpfsClusterIsReaped:
             result = sub.sweep_stale_substrate_clusters(tmp_root=disk)
         assert result.reaped == []
         assert d.exists()
+
+
+class TestRootIsDecidedOncePerRun:
+    """nexus-vo9qn. choose_pg_root used to run per worker at every cluster start;
+    once the grant's memory filled, later clusters went to ext4 (lab-l, -n auto:
+    3.9 GB written in 4 minutes). The decision is now taken once and inherited."""
+
+    def _decide(self, env: dict, **kw):
+        base = dict(
+            system="Linux", mounts_text=_TMPFS_MOUNTS, free_bytes=_roomy,
+            writable=_writable, uid=1000, cgroup_headroom=lambda: None,
+        )
+        return sub.session_pg_root(env=env, **{**base, **kw})
+
+    def test_a_later_squeeze_does_not_move_the_run_to_disk(self) -> None:
+        env: dict[str, str] = {}
+        first = self._decide(env)
+        squeezed = self._decide(env, cgroup_headroom=lambda: 1 * 1024**3)
+        assert first[0] == Path("/dev/shm/nexus-test-pg-1000")
+        assert squeezed == first
+
+    def test_a_refusal_is_just_as_sticky(self) -> None:
+        env: dict[str, str] = {}
+        with pytest.warns(UserWarning, match="tmpfs"):
+            first = self._decide(env, free_bytes=_tight)
+        again = self._decide(env)  # roomy now: the run stays where it started
+        assert first[0] is None and "free" in (first[1] or "")
+        assert again == first
+
+    def test_the_decision_travels_in_the_env_workers_inherit(self) -> None:
+        env: dict[str, str] = {}
+        self._decide(env)
+        worker_env = dict(env)  # what an xdist worker process starts with
+        assert self._decide(worker_env, free_bytes=_tight)[0] == Path(
+            "/dev/shm/nexus-test-pg-1000"
+        )
+
+    def test_an_explicit_root_is_a_standing_instruction_not_memoised(
+        self, tmp_path, long_paths_ok,
+    ) -> None:
+        env = {"NX_TEST_PG_ROOT": str(tmp_path / "a")}
+        assert self._decide(env)[0] == tmp_path / "a"
+        env["NX_TEST_PG_ROOT"] = str(tmp_path / "b")
+        assert self._decide(env)[0] == tmp_path / "b"
+        assert self._decide(env)[2] is True  # explicit
+        assert sub._PG_ROOT_SESSION_ENV not in env
+
+    def test_garbage_in_the_env_is_decided_afresh(self) -> None:
+        env = {sub._PG_ROOT_SESSION_ENV: "wat"}
+        assert self._decide(env)[0] == Path("/dev/shm/nexus-test-pg-1000")
+
+    def test_the_controller_decides_before_workers_exist(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        calls: list[int] = []
+
+        def _decide(**_k):
+            calls.append(1)
+            return Path("/dev/shm/nexus-test-pg-9"), None
+
+        monkeypatch.setattr(sub, "decide_pg_root", _decide)
+        monkeypatch.setattr(sub, "_OWNED_LOGS", set())
+        sub.begin_pg_root_session()
+        try:
+            assert os.environ[sub._PG_ROOT_SESSION_ENV] == "tmpfs=/dev/shm/nexus-test-pg-9"
+            assert Path(os.environ[sub._PG_ROOT_LOG_ENV]).is_file()
+            sub.session_pg_root()  # a "worker" reading the same env
+            assert calls == [1]
+        finally:
+            sub.pg_root_run_summary(finish=True)
+
+    def test_conftest_takes_the_decision_for_an_xdist_controller_only(
+        self, monkeypatch,
+    ) -> None:
+        from tests import conftest as ct
+
+        started: list[int] = []
+        monkeypatch.setattr(sub, "begin_pg_root_session", lambda: started.append(1))
+
+        class Opt:
+            numprocesses = 4
+
+        class Cfg:
+            option = Opt()
+
+        ct._begin_pg_root_session(Cfg())
+        assert started == [1]
+
+        class Worker(Cfg):
+            workerinput = {"workerid": "gw0"}
+
+        ct._begin_pg_root_session(Worker())
+        Opt.numprocesses = 0  # serial: decided lazily at its first cluster
+        ct._begin_pg_root_session(Cfg())
+        assert started == [1]
+
+    def test_pytest_configure_calls_the_controller_hook(self) -> None:
+        src = Path(__file__).with_name("conftest.py").read_text()
+        body = src[src.index("def pytest_configure(config):"):]
+        body = body[: body.index("\ndef ", 10)]
+        assert "_begin_pg_root_session(config)" in body
+
+
+class TestNoMidRunFallbackToDisk:
+    def _tmpfs_session(self, monkeypatch, tmp_path):
+        root = tmp_path / "nexus-test-pg-me"
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(sub, "_cgroup_headroom", lambda **_k: None)
+        return root
+
+    def test_cluster_after_a_squeeze_stays_on_the_chosen_tmpfs(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        root = self._tmpfs_session(monkeypatch, tmp_path)
+        answers = iter([(root, None)])  # a second per-cluster decision would StopIteration
+        calls: list[int] = []
+
+        def _decide(**_k):
+            calls.append(1)
+            return next(answers, (None, "the cgroup memory headroom is 1024 MiB"))
+
+        monkeypatch.setattr(sub, "decide_pg_root", _decide)
+        # 1 GiB left: under the 3 GiB START floor, over the 512 MiB hard floor.
+        monkeypatch.setattr(sub, "_cgroup_headroom", lambda **_k: 1 * 1024**3)
+        first = sub.pg_cluster_parent()
+        second = sub.pg_cluster_parent()
+        assert first == second == str(root)
+        assert calls == [1]
+
+    def test_a_cluster_that_cannot_fit_fails_loud_naming_cause_and_remedy(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        root = self._tmpfs_session(monkeypatch, tmp_path)
+        monkeypatch.setattr(sub, "decide_pg_root", lambda **_k: (root, None))
+        assert sub.pg_cluster_parent() == str(root)
+        monkeypatch.setattr(sub, "_cgroup_headroom", lambda **_k: 100 * 1024**2)
+        with pytest.raises(sub.SubstrateRootExhausted) as ei:
+            sub.pg_cluster_parent()
+        msg = str(ei.value)
+        assert "cgroup" in msg and "100 MiB" in msg
+        assert "will not fall back to disk" in msg
+        assert "-n N" in msg and "NX_TEST_PG_ROOT" in msg and "lab-run class" in msg
+
+    def test_a_full_tmpfs_fails_loud_too(self, tmp_path) -> None:
+        with pytest.raises(sub.SubstrateRootExhausted, match="MiB free"):
+            sub._check_tmpfs_has_room(
+                tmp_path, free_bytes=lambda _p: 10 * 1024**2,
+                cgroup_headroom=lambda: None,
+            )
+
+    def test_room_above_the_hard_floor_passes(self, tmp_path) -> None:
+        sub._check_tmpfs_has_room(
+            tmp_path, free_bytes=lambda _p: sub._TMPFS_HARD_FLOOR_BYTES,
+            cgroup_headroom=lambda: sub._TMPFS_HARD_FLOOR_BYTES,
+        )
+
+    def test_the_hard_floor_is_below_the_start_floor(self) -> None:
+        # a run whose headroom shrank from 3 GiB toward 512 MiB keeps going
+        assert sub._TMPFS_HARD_FLOOR_BYTES < sub._TMPFS_MIN_FREE_BYTES
+        assert sub._TMPFS_HARD_FLOOR_BYTES >= 4 * 108 * 1024**2  # one cluster, measured
+
+    def test_droppable_page_cache_counts_as_room_for_the_mid_run_check(
+        self, tmp_path,
+    ) -> None:
+        d = tmp_path / "cg" / "g"
+        d.mkdir(parents=True)
+        (d / "memory.max").write_text("1000\n")
+        (d / "memory.current").write_text("990\n")
+        (d / "memory.stat").write_text("anon 100\nshmem 50\nactive_file 300\ninactive_file 400\n")
+        kw = dict(proc_cgroup="0::/g\n", cgroup_root=tmp_path / "cg")
+        assert sub._cgroup_headroom(**kw) == 10
+        assert sub._cgroup_headroom(credit_reclaimable=True, **kw) == 710
+
+    def test_cgroup_memory_limit_is_the_tightest_max(self, tmp_path) -> None:
+        for rel, mx in {"": "max", "a": "5000", "a/b": "3000"}.items():
+            d = tmp_path / "cg" / rel if rel else tmp_path / "cg"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "memory.max").write_text(f"{mx}\n")
+        assert sub.cgroup_memory_limit(
+            proc_cgroup="0::/a/b\n", cgroup_root=tmp_path / "cg",
+        ) == 3000
+        assert sub.cgroup_memory_limit(
+            proc_cgroup="0::/\n", cgroup_root=tmp_path / "cg",
+        ) is None
+
+
+class TestEveryClusterStartSaysWhereItWent:
+    def test_a_disk_start_with_a_reason_is_a_warning_naming_it(self, monkeypatch) -> None:
+        import structlog.testing
+
+        monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
+        monkeypatch.setattr(
+            sub, "decide_pg_root",
+            lambda **_k: (None, "the cgroup memory headroom is 1 MiB"),
+        )
+        with structlog.testing.capture_logs() as logs, pytest.warns(UserWarning):
+            assert sub.pg_cluster_parent() is None
+        row = next(e for e in logs if e["event"] == "nexus_t2_substrate.cluster_root")
+        assert row["log_level"] == "warning"
+        assert row["on"] == "disk" and "cgroup" in row["reason"]
+
+    def test_the_run_summary_counts_tmpfs_and_disk_across_workers(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        log = tmp_path / "roots.log"
+        log.write_text("")
+        monkeypatch.setenv(sub._PG_ROOT_LOG_ENV, str(log))
+        sub._record_cluster_root("tmpfs", "/dev/shm/nexus-test-pg-1", None)
+        sub._record_cluster_root("tmpfs", "/dev/shm/nexus-test-pg-1", None)
+        sub._record_cluster_root("disk", None, "the cgroup memory headroom is 1 MiB")
+        line = sub.pg_root_run_summary()
+        assert line is not None
+        assert "clusters on tmpfs 2, on disk 1" in line
+        assert "cgroup memory headroom" in line
+        assert len(log.read_text().splitlines()) == 3  # workers append to the shared log
+
+    def test_a_serial_run_summarises_its_own_starts(self) -> None:
+        assert sub.pg_root_run_summary() is None  # nothing started: no line
+        sub._record_cluster_root("disk", None, None)
+        assert "clusters on tmpfs 0, on disk 1" in (sub.pg_root_run_summary() or "")
+
+    def test_the_session_summary_line_is_printed_by_the_controller_only(
+        self, monkeypatch,
+    ) -> None:
+        from tests import conftest as ct
+
+        sub._record_cluster_root("tmpfs", "/dev/shm/x", None)
+
+        class Reporter:
+            lines: list[str] = []
+
+            def write_line(self, line: str) -> None:
+                self.lines.append(line)
+
+        class Cfg:
+            pass
+
+        rep = Reporter()
+        ct.pytest_terminal_summary(rep, 0, Cfg())
+        assert rep.lines and "clusters on tmpfs 1, on disk 0" in rep.lines[0]
+
+        class WorkerCfg:
+            workerinput = {}
+
+        rep2 = Reporter()
+        rep2.lines = []
+        ct.pytest_terminal_summary(rep2, 0, WorkerCfg())
+        assert rep2.lines == []
+
+    def test_a_real_cluster_start_is_recorded(self, monkeypatch, tmp_path, long_paths_ok) -> None:
+        monkeypatch.setenv("NX_TEST_PG_ROOT", str(tmp_path / "r"))
+        assert sub.pg_cluster_parent() == str(tmp_path / "r")
+        assert sub._LOCAL_ROWS and sub._LOCAL_ROWS[-1]["root"] == str(tmp_path / "r")

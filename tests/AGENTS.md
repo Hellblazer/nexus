@@ -20,16 +20,37 @@ of 32 and passes, so the cap does nothing on a quiet machine and binds only
 when something else has already taken the budget. `NX_XDIST_NO_CAP=1` opts
 out. Diagnose with `ipcs -m` before suspecting the code.
 
-**Where substrate clusters live** (nexus-me3gm): on Linux with `/dev/shm` mounted
-tmpfs, writable and with 3 GiB free (and 3 GiB of cgroup memory headroom), each
-worker's Postgres cluster is created under `/dev/shm/nexus-test-pg-<uid>` with
-`pg_wal` capped at 64 MB and dynamic shared memory kept inside the cluster dir;
-otherwise (macOS, no tmpfs, low room) it stays under the tempdir, and a Linux
-fallback warns with its reason. `NX_TEST_PG_ROOT=<dir>` picks a root,
+**`-n` is also capped to the run's memory grant** (nexus-vo9qn,
+`tests/_xdist_cap.py`): workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 2.5
+GiB. The 2.5 GiB is the measured per-worker peak (engine JVM + Postgres cluster
++ the cluster's tmpfs pages, charged to the grant): lab-l, 48 GB, 16 workers
+peaked 39.4 GB; lab-m, 16 GB, `-n 8` peaked 14.5 GB. So `-n auto` keeps 16 on
+lab-l and runs 6 on lab-m; the clamp prints its reason. Nothing applies without a
+visible limit (a laptop). `NX_XDIST_NO_CAP=1` opts out of both caps.
+
+**Where substrate clusters live** (nexus-me3gm, nexus-vo9qn): on Linux with
+`/dev/shm` mounted tmpfs, writable and with 3 GiB free (and 3 GiB of cgroup memory
+headroom), each worker's Postgres cluster is created under
+`/dev/shm/nexus-test-pg-<uid>` with `pg_wal` capped at 64 MB and dynamic shared
+memory kept inside the cluster dir; otherwise (macOS, no tmpfs, low room) it stays
+under the tempdir, and a Linux fallback warns with its reason. **The choice is made
+once per run, never per cluster**: the xdist controller takes it before it spawns
+workers (a serial run, at its first cluster) and persists it in
+`NX_TEST_PG_ROOT_SESSION`, which every worker inherits. A run that chose tmpfs
+therefore never drifts to ext4 as the grant's memory fills (tmpfs pages are charged
+to it; that drift wrote 3.9 GB to the NVMe in 4 minutes on lab-l). A cluster start
+that finds under 512 MiB of tmpfs space or cgroup headroom (droppable page cache
+counted as room) raises `SubstrateRootExhausted`, naming the cause and the remedy:
+fewer workers, a larger `lab-run` class, or `NX_TEST_PG_ROOT`. Every cluster start
+logs `nexus_t2_substrate.cluster_root` (root, `on=tmpfs|disk`, and the refusal reason;
+a disk start with a reason is a warning), and the pytest summary ends with
+`clusters on tmpfs N, on disk M`. `NX_TEST_PG_ROOT=<dir>` picks a root,
 `NX_TEST_PG_ROOT=default` forces the tempdir for new clusters. The stray-cluster
 sweep and `scripts/sweep-test-substrates.sh` always look in the tmpfs root too,
 so a crash-orphaned cluster in RAM is reaped. A nested pytest whose test globs
-its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`.
+its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`. A test that
+drives the decision itself starts from a cleared `NX_TEST_PG_ROOT_SESSION`
+(`tests/test_engine_substrate_pg_root.py` has the fixture).
 
 The `-m integration` fixtures that boot their own cluster (nexus-942h9) use the
 same root and conf: `pg_data_tempdir(prefix)` creates the dir through the root
