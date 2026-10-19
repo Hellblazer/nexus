@@ -294,15 +294,17 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
                 int owned = 0;
                 for (int v : doc) if (v >= 0) owned++;
                 int written = 0;
+                // embedding_model is NOT NULL on the manifest; it is the collection's own model.
+                String model = PgContainerHelper.collectionModel(ctx, TENANT, collections.get(c));
                 for (int i = 0; i < doc.length; i++) {
                     if (doc[i] < 0) continue;
                     written++;
                     pending.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                         .values(TENANT, docIds.get(c).get(doc[i]), nextPosition[doc[i]]++,
-                            HexFormat.of().parseHex(chashHex.get(c).get(i)), collections.get(c)));
+                            HexFormat.of().parseHex(chashHex.get(c).get(i)), collections.get(c), model));
                     if (pending.size() == manifestBatch || written == owned) {
                         ctx.batch(pending).execute();
                         su.commit();
