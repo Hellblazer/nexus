@@ -266,6 +266,49 @@ class SharedClusterEmptyDatabaseTest {
         }
     }
 
+    /**
+     * nexus-sz651: a database made from {@code template0} has no event trigger of its own, so the DDL a
+     * function runs through {@code EXECUTE} would go uncounted there. {@code acquireEmptyDatabase} installs the
+     * probe, and the install itself must add nothing to the count.
+     */
+    @Test
+    void theEmptyDatabaseCountsNestedDdlAndTheProbeInstallCountsNothing() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        String name = pg.getDatabaseName();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("pg_event_trigger")),
+                DSL.field(DSL.name("evtname"), String.class).eq("nx_ddl_probe")))
+                .as("the probe's event trigger is installed in the empty database").isEqualTo(1);
+            assertThat(ddlEntriesOf(name, false)).as("installing the probe is neither a logged statement nor an event")
+                .isEmpty();
+
+            PgContainerHelper.runSuperuserDdl(su,
+                "DO $$ BEGIN EXECUTE 'CREATE TABLE nx_sz651_nested_probe (i int)'; END $$");
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("pg_tables")),
+                DSL.field(DSL.name("tablename"), String.class).eq("nx_sz651_nested_probe")))
+                .as("non-vacuity: the nested DDL ran").isEqualTo(1);
+            assertThat(ddlEntriesOf(name, true))
+                .as("the CREATE TABLE a DO block ran through EXECUTE is counted, as a nested command")
+                .anyMatch(e -> e.nested() && e.tag().equals("CREATE TABLE"));
+        } finally {
+            pg.stop();
+        }
+    }
+
+    /** The commands the shared cluster's log attributes to {@code db}; with {@code expectSome}, read until the server flushed them. */
+    private static List<DdlLogParser.Entry> ddlEntriesOf(String db, boolean expectSome) throws Exception {
+        List<DdlLogParser.Entry> mine = List.of();
+        for (int attempt = 0; attempt < 20; attempt++) {
+            mine = DdlLogParser.parse(clusterOf().getLogs()).entries().stream()
+                .filter(e -> e.db().equals(db)).toList();
+            if (!expectSome || mine.stream().anyMatch(DdlLogParser.Entry::nested)) {
+                return mine;
+            }
+            Thread.sleep(100);
+        }
+        return mine;
+    }
+
     /** The shared cluster's container, reached through a throwaway handle (only its host and port are used). */
     private static PostgreSQLContainer<?> clusterOf() throws Exception {
         return SharedCluster.container();

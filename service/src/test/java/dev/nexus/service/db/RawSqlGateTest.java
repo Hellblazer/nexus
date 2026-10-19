@@ -1121,7 +1121,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 1),
         Map.entry("dev/nexus/service/ServiceTokenScopeBackfillTest.java", 3),
-        Map.entry("dev/nexus/service/SharedCluster.java", 3),
+        Map.entry("dev/nexus/service/SharedCluster.java", 4),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 1),
         // nexus-7xfh7: +1, the DO block that revokes what an exclusive role granted and drops it at stop (DROP ROLE and
         // REVOKE ... GRANTED BY have no typed jOOQ form; the other statement is the DROP DATABASE).
@@ -1726,7 +1726,10 @@ class RawSqlGateTest {
     // the USING cast jOOQ cannot express; its topic_assignments seeds and Hygiene001's bare catalog_collections
     // seeds are jOOQ inserts. Review fold-in, 188 -> 187: Rdr71gw2CollectionNotNullTest's DROP NOT NULL onto
     // jOOQ; readdChashOctetChecksNotValid checks both CHECKs are present and NOT VALID after its run.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 187;
+    // nexus-sz651 2026-10-19: +1 (187 -> 188) for SharedCluster's install of the DDL probe (an event trigger plus two
+    // functions, one DO block) into each empty database made from template0, which has none; jOOQ has no
+    // typed form for CREATE EVENT TRIGGER or a DO block. The SQL is the probe file's, not a literal.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 188;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -259,6 +259,12 @@ is every tenant mint and drop) and the counting rule. The Java twin is
 live in `tests/ddl_ceiling.toml`; `scripts/ddl_ratchet.py check --suite <name> --report <path>`
 compares a run with its ceiling. Clusters other than the substrate's are not counted.
 
+The Java report has four buckets: `shared_migration` (the per-fork template), `shared_tests`
+(clones and the tests' own DDL), `shared_empty` (everything logged against a database from
+`startEmptyDatabase`, the migration-process classes' own walks; nexus-7xfh7) and `dedicated`
+(a container of its own). A `template0` database has no event trigger, so `acquireEmptyDatabase`
+installs the probe into each one inside a `DO` block, which the count does not see.
+
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
 The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and

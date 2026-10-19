@@ -101,7 +101,7 @@ class DdlLogParserTest {
     @Test
     void folding_logs_sums_into_buckets_and_attributes_databases_to_classes() throws IOException {
         DdlCounts.Totals totals = new DdlCounts.Totals(); // not the fork's: the real file must stay real
-        totals.noteDatabase("nexus_test_1", "SomeIntegrationTest");
+        totals.noteDatabase("nexus_test_1", "SomeIntegrationTest", false);
         totals.fold(resource("golden-pg-log.txt"), true, "unused");
         totals.fold(resource("golden-pg-log.txt"), false, "GoldenDedicatedTest");
         JsonNode out = asJson(totals.snapshot());
@@ -115,5 +115,29 @@ class DdlLogParserTest {
         assertThat(out.at("/per_class/SomeIntegrationTest/databases").asLong()).isEqualTo(1);
         // the four commands the log runs in nexus_test_1 (a GRANT, a DROP, two CREATE INDEX)
         assertThat(out.at("/per_class/SomeIntegrationTest/ddl").asLong()).isEqualTo(4);
+    }
+
+    @Test
+    void an_empty_database_s_commands_are_their_own_bucket_and_still_attributed_to_its_class() throws IOException {
+        DdlCounts.Totals totals = new DdlCounts.Totals();
+        totals.noteDatabase("nexus_test_1", "SomeMigrationTest", true);
+        totals.fold(resource("golden-pg-log.txt"), true, "unused");
+        JsonNode out = asJson(totals.snapshot());
+        assertThat(out.at("/buckets/shared_migration/total").asLong()).isEqualTo(9);
+        assertThat(out.at("/buckets/shared_empty/total").asLong()).as("the four commands run in nexus_test_1").isEqualTo(4);
+        assertThat(out.at("/buckets/shared_tests/total").asLong()).as("the rest of the tests' time").isEqualTo(4);
+        assertThat(out.at("/buckets/dedicated/total").asLong()).isZero();
+        assertThat(out.at("/per_class/SomeMigrationTest/databases").asLong()).isEqualTo(1);
+        assertThat(out.at("/per_class/SomeMigrationTest/ddl").asLong()).isEqualTo(4);
+    }
+
+    @Test
+    void the_probe_install_block_is_the_probe_file_after_its_connect_line_and_has_no_psql_syntax() {
+        String block = DdlCounts.probeInstallBlock();
+        assertThat(block).startsWith("DO $nxdo$ BEGIN EXECUTE $nxq$").endsWith("$nxq$; END $nxdo$");
+        assertThat(block).contains("CREATE EVENT TRIGGER nx_ddl_probe", "nx_ddl_probe.fire()", "nx_ddl_probe.mark(");
+        assertThat(block).doesNotContain("\\connect").doesNotContain("\\set").doesNotContain("\\gset");
+        // The probe is installed once only: the template1 half of the file is not in the block.
+        assertThat(block.split("CREATE EVENT TRIGGER", -1)).hasSize(2);
     }
 }

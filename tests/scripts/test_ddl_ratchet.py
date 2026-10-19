@@ -108,6 +108,20 @@ def test_java_forks_are_summed_and_a_forkless_fork_is_not_a_fork(tmp_path) -> No
     assert "dedicated=8000" in message
 
 
+def test_the_shared_empty_bucket_counts_toward_the_java_total(tmp_path) -> None:
+    # nexus-sz651 + nexus-7xfh7: migration-process classes walk the changelog in an empty database on the
+    # shared cluster; leaving that bucket out of the sum would hide the cost the dedicated bucket used to carry.
+    d = tmp_path / "ddl-counts"
+    _java_fork(d, "ddl-1-1.json", buckets=(("shared_migration", 2000), ("shared_tests", 500),
+                                           ("shared_empty", 1200), ("dedicated", 4000)))
+    code, message = ratchet.check("java_main", d, _ceilings(tmp_path, "java_main", 7700, 1))
+    assert code == ratchet.EXIT_OK, message
+    assert "total=7700" in message
+    assert "shared_empty=1200" in message
+    code, _ = ratchet.check("java_main", d, _ceilings(tmp_path, "java_main", 7699, 1))
+    assert code == ratchet.EXIT_OVER
+
+
 def test_a_java_run_over_the_ceiling_fails(tmp_path) -> None:
     d = tmp_path / "ddl-counts"
     _java_fork(d, "ddl-1-1.json")

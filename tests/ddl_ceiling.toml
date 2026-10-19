@@ -3,7 +3,7 @@
 # Reduce-only: scripts/ddl_ratchet.py fails a run whose measured count is above `ceiling`.
 # Lower a ceiling in the commit that lowers the count; raising one needs a reviewed reason in
 # that commit's message. The count is the sum of every bucket the suite's reports carry
-# (python: migration + tests; java: shared_migration + shared_tests + dedicated), measured as
+# (python: migration + tests; java: shared_migration + shared_tests + shared_empty + dedicated), measured as
 # tests/_ddl_counter.py and service/src/test/java/dev/nexus/service/DdlLogParser.java define it.
 #
 # `basis` is the parallelism the ceiling was measured at: pytest-xdist workers for python_unit
