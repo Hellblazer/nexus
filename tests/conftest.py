@@ -14,6 +14,8 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
+from tests import _storage_touch_guard
+
 # nexus-pfuns round 2: enables the `pytester` fixture (pytest's own
 # built-in sandbox-subprocess testing plugin) for
 # tests/test_real_config_dir_guard_wiring.py, which drives a genuinely
@@ -248,9 +250,16 @@ _RETIRED_T2_SUBSTRATES: dict[str, str] = {
 
 
 def _selected_t2_substrate_boots_engine() -> bool:
-    """True when the session's ``NX_TEST_T2_SUBSTRATE`` leads
-    ``_pin_t2_substrate`` to provision the engine: anything except ``none``
-    (provision nothing) and a retired value (refused by name)."""
+    """True when the session's ``NX_TEST_T2_SUBSTRATE`` can lead to the engine
+    being provisioned: anything except ``none`` (provision nothing) and a
+    retired value (refused by name).
+
+    ``optin`` (nexus-j23ni) is deliberately true: only tests that ask for the
+    ``t2_tenant`` tenant boot the engine, but which ones is not known until
+    they run, and a session that boots even once spends the machine-wide
+    shared-memory budget the suite lease and the preflight protect. So the
+    lease is taken and the preflight runs exactly as for the default mode.
+    """
     selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
     return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
 
@@ -2636,9 +2645,21 @@ def _isolate_t1_sessions(
     the test body — the same "later ``monkeypatch`` call on the same
     fixture instance wins" contract documented on ``_isolate_config_dir``.
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
+    selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
+    if selected == "none":
         return
+    if selected == "optin":
+        # nexus-j23ni: the T1 session rides the tenant, so it is minted by the
+        # ``t2_tenant`` fixture, for the tests that ask for one.
+        return
+    _mint_t1_session_env(monkeypatch)
 
+
+def _mint_t1_session_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mint this test's PG-backed T1 session and inject it as
+    ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID``. Needs a tenant already bound to
+    the env: ``_isolate_t1_sessions`` calls it under the default substrate,
+    ``t2_tenant`` under ``optin``."""
     from uuid import uuid4
 
     from nexus.db.t1 import mint_t1_session_token
@@ -2680,6 +2701,64 @@ def t2_service_env(request: pytest.FixtureRequest,
     The suite default: ``_pin_t2_substrate`` pulls this fixture in for every
     test. Still requestable directly by tests that want the tenant name.
     """
+    with _engine_tenant_env(monkeypatch, pin_local=True) as tenant:
+        yield tenant
+
+
+@pytest.fixture
+def t2_tenant(request: pytest.FixtureRequest,
+              monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """The opt-in tenant (nexus-j23ni): what a test that touches storage asks
+    for, by parameter or by ``pytest.mark.t2_tenant`` (module ``pytestmark``
+    or per test). Yields the tenant name.
+
+    Under ``NX_TEST_T2_SUBSTRATE=optin`` it is a thin wrapper over the same
+    machinery as ``t2_service_env``: the minted tenant, plus this test's T1
+    session, and not ``NX_LOCAL`` (``_pin_local_posture_optin`` owns that).
+    In every other mode ``_pin_t2_substrate`` already provisions every test,
+    so this just hands back that tenant.
+    """
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") != "optin":
+        yield request.getfixturevalue("t2_service_env")
+        return
+    with _engine_tenant_env(monkeypatch, pin_local=False) as tenant:
+        _mint_t1_session_env(monkeypatch)
+        yield tenant
+
+
+@pytest.fixture(autouse=True)
+def _pin_local_posture_optin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under ``NX_TEST_T2_SUBSTRATE=optin``, hold the suite's local posture for
+    EVERY test, not just the ones with a tenant (nexus-j23ni).
+
+    ``t2_service_env`` pins ``NX_LOCAL=1`` because ``NX_SERVICE_URL`` flips
+    ``config.is_local_mode()`` to cloud (nexus-aqbrk, below). With the tenant
+    opt-in, a fake-server test that sets ``NX_SERVICE_URL`` itself would flip
+    to cloud posture because no tenant fixture ran to pin it. ``cloud_mode`` is
+    not autouse, so its ``NX_LOCAL=0`` still lands later and wins. Also drops an
+    ambient ``NX_STORAGE_BACKEND``, which the tenant fixture otherwise
+    overrides. Nothing under any other mode.
+    """
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") != "optin":
+        return
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+
+
+@contextlib.contextmanager
+def _engine_tenant_env(
+    monkeypatch: pytest.MonkeyPatch, *, pin_local: bool,
+) -> Iterator[str]:
+    """Point this test's env at the session engine with a freshly minted
+    tenant; yields the tenant name. The body of ``t2_service_env`` and, under
+    ``NX_TEST_T2_SUBSTRATE=optin``, of ``t2_tenant``.
+
+    ``pin_local`` sets ``NX_LOCAL=1`` (the ORTHOGONALITY PIN below). ``optin``
+    sets it for every test from the autouse ``_pin_local_posture_optin``
+    instead, so a tenant fixture requested after ``cloud_mode`` cannot
+    overwrite that fixture's ``NX_LOCAL=0``. The enclosed span is the guard's
+    "tenant active" window (``tests/_storage_touch_guard.py``).
+    """
     from tests._engine_substrate import ensure_engine, minted_test_tenant
     from tests.db._service_fixture import jar_freshness_skip_reason
 
@@ -2698,7 +2777,7 @@ def t2_service_env(request: pytest.FixtureRequest,
                     "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
 
     state = ensure_engine()
-    with minted_test_tenant(state) as (tenant, token):
+    with minted_test_tenant(state) as (tenant, token), _storage_touch_guard.tenant_active():
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
         monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -2725,7 +2804,8 @@ def t2_service_env(request: pytest.FixtureRequest,
         # still wins: non-autouse fixtures resolve AFTER autouse ones, so its
         # setenv lands later on the same monkeypatch — the same ordering contract
         # documented on ``_isolate_service_endpoint_env`` below.
-        monkeypatch.setenv("NX_LOCAL", "1")
+        if pin_local:
+            monkeypatch.setenv("NX_LOCAL", "1")
         yield tenant
 
 
@@ -2959,6 +3039,14 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
         return
     if selected in _RETIRED_T2_SUBSTRATES:
         raise RuntimeError(_RETIRED_T2_SUBSTRATES[selected])
+    if selected == "optin":
+        # nexus-j23ni: mint only for a test that carries the marker (module
+        # ``pytestmark`` included); one that requests ``t2_tenant`` by
+        # parameter gets it from that request. The storage-touch guard names
+        # a test that reaches storage with neither.
+        if request.node.get_closest_marker("t2_tenant") is not None:
+            request.getfixturevalue("t2_tenant")
+        return
     request.getfixturevalue("t2_service_env")
 
 

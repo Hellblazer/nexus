@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Probe cases for tests/test_optin_tenant_end_to_end.py (nexus-j23ni).
+
+Not collected by the suite (the file name matches no ``python_files`` pattern):
+the end-to-end test passes this path to a child pytest that runs under
+``NX_TEST_T2_SUBSTRATE=optin`` with THIS repo's real ``tests/conftest.py``, so
+the cases assert the opt-in fixtures' real behaviour. Under any other mode the
+"unprovisioned" cases would fail by design: every test has a tenant there.
+"""
+import os
+
+import pytest
+
+
+@pytest.mark.t2_tenant
+def test_marker_provisions_tenant_t1_and_local_posture():
+    from nexus.db.http_vector_client import _resolve_endpoint
+
+    assert os.environ["NX_SERVICE_URL"] and os.environ["NX_SERVICE_TOKEN"]
+    assert os.environ["NX_LOCAL"] == "1" and os.environ["NX_T1_SESSION"]
+    _resolve_endpoint()
+
+
+def test_parameter_provisions_tenant(t2_tenant):
+    assert t2_tenant and os.environ["NX_T1_SESSION"]
+
+
+def test_an_untouched_test_gets_no_tenant_and_the_local_posture():
+    assert "NX_SERVICE_URL" not in os.environ and "NX_T1_SESSION" not in os.environ
+    assert os.environ["NX_LOCAL"] == "1"
+
+
+def test_an_unprovisioned_storage_touch_is_recorded():
+    from nexus.db.http_vector_client import _resolve_endpoint
+
+    with pytest.raises(RuntimeError):
+        _resolve_endpoint()
+
+
+def test_cloud_mode_still_wins_over_the_posture_pin(cloud_mode, t2_tenant):
+    from nexus.config import is_local_mode
+
+    assert not is_local_mode()
