@@ -50,7 +50,8 @@ def touch_t1_and_swallow():
 
 
 def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
-         *, mode: str = "fail", optin: bool = True, args: tuple[str, ...] = ()):
+         *, mode: str = "fail", optin: bool = True, args: tuple[str, ...] = (),
+         extra: dict[str, str] | None = None):
     if optin:
         monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
     else:
@@ -59,6 +60,8 @@ def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
     pytester.makeconftest(_CONFTEST)
     pytester.makepyfile(helpers=_TOUCH)
     pytester.makepyfile(test_inner=body)
+    if extra:
+        pytester.makepyfile(**extra)
     return pytester.runpytest_inprocess(
         "-p", "tests._storage_touch_guard", "-p", "no:cacheprovider", "-q", *args,
     )
@@ -197,14 +200,38 @@ def test_swallows():
 
 
 def test_the_class_patch_is_removed_when_the_session_ends(pytester, monkeypatch) -> None:
-    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
-    from nexus.db.t1 import T1ServerNotFoundError
+    """Non-vacuous under any outer mode: the nested session must be SEEN holding
+    the patch (reference count one above the outer's, constructor marked), and
+    the outer's state must be exactly restored after it. Under an outer optin
+    run the classes are already patched, so comparing ``__init__`` before and
+    after proves nothing on its own."""
+    from tests import _storage_touch_guard as g
 
-    before = (ServiceEndpointUnresolvableError.__init__, T1ServerNotFoundError.__init__)
-    own = tuple("__init__" in c.__dict__ for c in (ServiceEndpointUnresolvableError, T1ServerNotFoundError))
-    _run(pytester, monkeypatch, "def test_nothing():\n    pass\n")
-    assert (ServiceEndpointUnresolvableError.__init__, T1ServerNotFoundError.__init__) == before
-    assert own == tuple("__init__" in c.__dict__ for c in (ServiceEndpointUnresolvableError, T1ServerNotFoundError))
+    classes = g._guarded_classes()
+    assert len(classes) == len(g.GUARDED), "every GUARDED entry resolves to a class"
+    before = tuple(c.__init__ for c in classes)
+    own = tuple("__init__" in c.__dict__ for c in classes)
+    refs = g._patch_refs
+    outer_patched = refs > 0
+    monkeypatch.setenv("EXPECT_REFS", str(refs + 1))
+    monkeypatch.setenv("EXPECT_NAMES", ",".join(c.__name__ for c in classes))
+    result = _run(pytester, monkeypatch, """
+import os
+from tests import _storage_touch_guard as g
+
+def test_the_patch_is_live_in_here():
+    assert g._patch_refs == int(os.environ["EXPECT_REFS"])
+    for cls in g._guarded_classes():
+        assert getattr(cls.__init__, "_nx_storage_touch_patched", False), cls
+    assert os.environ["EXPECT_NAMES"].split(",") == [c.__name__ for c in g._guarded_classes()]
+""", mode="report")
+    result.assert_outcomes(passed=1)
+    assert g._patch_refs == refs
+    assert tuple(c.__init__ for c in classes) == before
+    assert own == tuple("__init__" in c.__dict__ for c in classes)
+    assert all(
+        getattr(c.__init__, "_nx_storage_touch_patched", False) is outer_patched for c in classes
+    )
 
 
 def test_the_vector_lease_cache_does_not_outlive_its_test(pytester, monkeypatch) -> None:

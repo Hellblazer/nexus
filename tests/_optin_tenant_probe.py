@@ -27,6 +27,12 @@ def test_parameter_provisions_tenant(t2_tenant):
     assert os.environ.get("NX_STORAGE_BACKEND") == "service"
 
 
+def test_t2_service_env_is_the_same_tenant_with_a_t1_session(t2_service_env):
+    # 137 test files request this fixture directly; under optin it aliases t2_tenant
+    assert t2_service_env and os.environ["NX_T1_SESSION"] and os.environ["NX_T1_SESSION_ID"]
+    assert os.environ["NX_LOCAL"] == "1" and os.environ.get("NX_STORAGE_BACKEND") == "service"
+
+
 def test_an_untouched_test_gets_no_tenant_and_the_local_posture():
     assert "NX_SERVICE_URL" not in os.environ and "NX_T1_SESSION" not in os.environ
     assert os.environ["NX_LOCAL"] == "1"

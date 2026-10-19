@@ -2700,7 +2700,15 @@ def t2_service_env(request: pytest.FixtureRequest,
 
     The suite default: ``_pin_t2_substrate`` pulls this fixture in for every
     test. Still requestable directly by tests that want the tenant name.
+
+    Under ``NX_TEST_T2_SUBSTRATE=optin`` (nexus-j23ni) it is an alias for
+    ``t2_tenant``: the tenant, the test's T1 session and the shared posture
+    pin, so a test that asks for ``t2_service_env`` directly (137 files do)
+    gets the same environment as one that asks for ``t2_tenant``, T1 included.
     """
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "optin":
+        yield request.getfixturevalue("t2_tenant")
+        return
     with _engine_tenant_env(monkeypatch, pin_local=True) as tenant:
         yield tenant
 

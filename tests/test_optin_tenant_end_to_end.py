@@ -57,15 +57,18 @@ def test_the_real_conftest_provisions_by_marker_and_by_parameter_only(tmp_path: 
     )
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out[-4000:]
-    assert re.search(r"\b5 passed\b", out), out[-4000:]
+    assert re.search(r"\b6 passed\b", out), out[-4000:]
 
     m = re.search(r"storage-touch report: (\S+)", out)
     assert m, out[-4000:]
     report = json.loads(Path(m.group(1)).read_text())
     c = report["counts"]
-    # marker, parameter and cloud_mode+parameter get a tenant; exactly one test
+    # marker, parameter, t2_service_env and cloud_mode+parameter get a tenant; exactly one test
     # touches storage without one; exactly one touches nothing.
-    assert (c["tests"], c["provisioned"], c["touched_unprovisioned"], c["clean_unprovisioned"]) == (5, 3, 1, 1), c
+    assert (c["tests"], c["provisioned"], c["touched_unprovisioned"], c["clean_unprovisioned"]) == (6, 4, 1, 1), c
     assert [f["nodeid"].split("::")[-1] for f in report["findings"]] == [
         "test_an_unprovisioned_storage_touch_is_recorded"
     ]
+    # the report is annotatable: per-module rollup, and the origin names the probe's own frame
+    assert report["modules"][_PROBE]["tests"] == 6 and report["modules"][_PROBE]["touched"] == 1
+    assert report["findings"][0]["origin"].startswith(f"{_PROBE}:"), report["findings"][0]["origin"]
