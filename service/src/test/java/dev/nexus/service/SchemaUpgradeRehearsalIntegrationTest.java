@@ -2822,13 +2822,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * AS ASSIGNMENT}), looked up by type oid rather than by name, so the INSERT converts the bind in whichever
      * schema the extension sits.
      */
-    private static final org.jooq.Field<Float[]> LEGACY_EMBEDDING =
-        DSL.field(DSL.name("embedding"), org.jooq.impl.SQLDataType.REAL.array());
+    private static final org.jooq.Field<Float[]> LEGACY_EMBEDDING = VectorSeeds.LEGACY_EMBEDDING;
 
     private static Float[] legacyEmbedding(int dim, float fill) {
-        Float[] v = new Float[dim];
-        java.util.Arrays.fill(v, fill);
-        return v;
+        return VectorSeeds.legacyEmbedding(dim, fill);
     }
 
     private static void seedDocument(Connection c, String tenant, String tumbler,

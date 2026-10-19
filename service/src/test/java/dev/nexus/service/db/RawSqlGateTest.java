@@ -1144,11 +1144,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 17), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 19 -> 18; vector seeds 18 -> 17
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 11 -> 8; vector seeds 8 -> 7
-        // nexus-f3yxx: seedFixtures' raw chunk/centroid INSERTs (2), plan-shape's
-        // raw hnsw-off session-var SETs for the second role bootstrap (2), the
-        // recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
-        // and role-bootstrap statements (5) -- same idiom as
-        // TaxonomyCentroidAnnPlanShapeTest's own REALCALL-role bootstrap.
+        // nexus-f3yxx (as first written): seedFixtures' raw chunk/centroid INSERTs (2),
+        // plan-shape's raw hnsw-off session-var SETs for the second role bootstrap (2),
+        // the recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
+        // and role-bootstrap statements (5). The chunk INSERT and vectorLiteral are gone
+        // since the 2026-10-18 vector-seed batch; the count below is current.
         // nexus-swam7: +1 (10) -- the realistic-scale plan-shape rework's
         // EXPLAIN-the-exact-statement-text raw ctx.resultQuery(...).fetch()
         // call, replacing the prior proxy-function ctx.explain(...) call

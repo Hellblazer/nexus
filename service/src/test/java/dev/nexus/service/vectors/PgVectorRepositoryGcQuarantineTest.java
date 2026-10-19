@@ -454,8 +454,13 @@ class PgVectorRepositoryGcQuarantineTest {
                     .set(CHUNKS.EMBEDDING_1024, VectorSeeds.vec(1024, 0f))
                     .execute();
             }
-        }).isInstanceOfSatisfying(DataAccessException.class, ex ->
-            assertThat(ex.sqlState()).as("not_null_violation on chash").isEqualTo("23502"));
+        }).isInstanceOfSatisfying(DataAccessException.class, ex -> {
+            assertThat(ex.sqlState()).as("not_null_violation").isEqualTo("23502");
+            // 23502 fires for ANY NOT NULL column; the server text names the column. (The word
+            // "chash" alone would be vacuous: jOOQ's message also carries the rendered INSERT.)
+            assertThat(ex.getMessage()).as("the violated column is chash")
+                .contains("null value in column \"chash\"");
+        });
     }
 
     // ── PK COLLISION on re-quarantine: upsert (last-write-wins), never an error ─

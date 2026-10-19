@@ -381,7 +381,7 @@ class Hygiene001NotNullMigrationRlsTest {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         // The 16 ASCII characters become 16 raw bytes, the same value the bytea
         // escape-format literal produced.
-        int chunkLanded = ctx.insertInto(CHUNKS)
+        ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
             .set(CHUNKS.CHASH, legacyChash.getBytes(StandardCharsets.US_ASCII))
@@ -389,8 +389,11 @@ class Hygiene001NotNullMigrationRlsTest {
             .set(DSL.field(DSL.name("embedding_384"), SQLDataType.REAL.array()), VectorSeeds.legacyEmbedding(384, 0f))
             .execute();
         // Positive control: the "chunk is gone" assertions after the walk are vacuous unless this
-        // legacy-width row actually landed.
-        assertThat(chunkLanded).as("legacy-width chunks seed for tenant %s must land", tenant).isEqualTo(1);
+        // legacy-width row is actually present (read back, not the insert's own return value).
+        assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant)
+                .and(CHUNKS.COLLECTION.eq(collection))
+                .and(CHUNKS.CHASH.eq(legacyChash.getBytes(StandardCharsets.US_ASCII)))))
+            .as("legacy-width chunks seed for tenant %s must be present", tenant).isEqualTo(1);
         // chunk_index stays unset: a typed insert emits only the columns set.
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
