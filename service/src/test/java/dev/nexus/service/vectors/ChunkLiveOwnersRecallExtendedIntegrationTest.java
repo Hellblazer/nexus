@@ -191,7 +191,10 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // 76k rows at 384 dims, an HNSW build and a REINDEX at maintenance_work_mem=1GB do not
+        // fit the default 1 GB tmpfs and 1.5 GiB limit (nexus-xynce), so this opt-in run takes
+        // its own larger container instead of the shared cluster.
+        pg = PgContainerHelper.startDedicated("4g", 6L * 1024 * 1024 * 1024);
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }

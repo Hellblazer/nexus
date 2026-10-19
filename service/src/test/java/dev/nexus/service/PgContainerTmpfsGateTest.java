@@ -34,12 +34,29 @@ import java.util.stream.Stream;
  */
 class PgContainerTmpfsGateTest {
 
-    /** Files allowed to construct a PostgreSQLContainer: the factory and its subclass. */
-    private static final List<String> ALLOWED = List.of(
-        "PgContainerHelper.java", "FailFastPostgreSQLContainer.java");
+    private static final Path PKG = Path.of("src", "test", "java", "dev", "nexus", "service");
 
-    private static final Pattern CONSTRUCTION = Pattern.compile(
-        "new\\s+(FailFast)?PostgreSQLContainer\\s*(<[^>]*>)?\\s*\\(");
+    /** The factory, the only file that may construct a container or name a Postgres image. */
+    private static final Path FACTORY = PKG.resolve("PgContainerHelper.java");
+
+    /** The two subclasses; SharedDatabaseHandle never starts a container of its own. */
+    private static final List<Path> SUBCLASSES = List.of(
+        PKG.resolve("FailFastPostgreSQLContainer.java"), PKG.resolve("SharedDatabaseHandle.java"));
+
+    /** Ways to get a Postgres container without the factory. */
+    private static final List<Pattern> BYPASSES = List.of(
+        // new PostgreSQLContainer<>(...), qualified or not, and any subclass named *PostgreSQLContainer
+        Pattern.compile("new\\s+([\\w.]+\\.)?\\w*PostgreSQLContainer\\b"),
+        Pattern.compile("PostgreSQLContainer\\s*::\\s*new"),
+        // a GenericContainer or ImageFromDockerfile on a Postgres image, or a jdbc:tc: URL
+        Pattern.compile("\"(pgvector/pgvector[^\"]*|postgres:[^\"]+)\""),
+        Pattern.compile("jdbc:tc:"));
+
+    private static final Pattern SUBCLASSING = Pattern.compile(
+        "extends\\s+([\\w.]+\\.)?PostgreSQLContainer\\b");
+
+    /** Line and block comments, so prose that names a pattern does not trip the scan. */
+    private static final Pattern COMMENTS = Pattern.compile("//[^\\n]*|/\\*.*?\\*/", Pattern.DOTALL);
 
     @Test
     void only_the_factory_constructs_a_postgres_container() throws IOException {
@@ -48,26 +65,41 @@ class PgContainerTmpfsGateTest {
         try (Stream<Path> s = Files.walk(root)) {
             files = s.filter(p -> p.toString().endsWith(".java")).toList();
         }
-        // Non-vacuity: the scan sees the test tree and the factory itself.
+        // Non-vacuity: the scan sees the test tree, and the factory trips its own patterns.
         assertThat(files.size()).isGreaterThan(300);
+        assertThat(files).contains(FACTORY);
+        String factory = COMMENTS.matcher(Files.readString(FACTORY)).replaceAll("");
+        assertThat(BYPASSES.stream().filter(b -> b.matcher(factory).find()).count())
+            .as("the factory's own construction and image literal").isGreaterThanOrEqualTo(2);
         List<String> offenders = new ArrayList<>();
-        int factorySites = 0;
         for (Path p : files) {
-            String src = Files.readString(p);
-            if (!CONSTRUCTION.matcher(src).find()) {
+            if (p.equals(FACTORY) || p.getFileName().toString().equals("PgContainerTmpfsGateTest.java")) {
                 continue;
             }
-            if (ALLOWED.contains(p.getFileName().toString())) {
-                factorySites++;
-            } else {
-                offenders.add(p.toString());
+            String src = COMMENTS.matcher(Files.readString(p)).replaceAll("");
+            for (Pattern b : BYPASSES) {
+                if (b.matcher(src).find()) {
+                    offenders.add(p + ": " + b.pattern());
+                }
+            }
+            if (SUBCLASSING.matcher(src).find() && !SUBCLASSES.contains(p)) {
+                offenders.add(p + ": extends PostgreSQLContainer");
             }
         }
-        assertThat(factorySites).as("the factory's own construction site").isGreaterThanOrEqualTo(1);
         assertThat(offenders)
             .as("build test Postgres containers through PgContainerHelper.newContainer(), "
                 + "which puts PGDATA on tmpfs under a memory limit (nexus-xynce)")
             .isEmpty();
+    }
+
+    @Test
+    void a_sized_container_must_leave_room_above_its_tmpfs() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> PgContainerHelper.newContainer(
+                org.testcontainers.utility.DockerImageName.parse(PgContainerHelper.IMAGE), "2g", 2L * 1024 * 1024 * 1024))
+            .isInstanceOf(IllegalArgumentException.class);
+        PostgreSQLContainer<?> big = PgContainerHelper.newContainer(
+            org.testcontainers.utility.DockerImageName.parse(PgContainerHelper.IMAGE), "4g", 6L * 1024 * 1024 * 1024);
+        assertThat(big.getTmpFsMapping()).containsEntry(PgContainerHelper.PGDATA, "rw,size=4g");
     }
 
     @Test
@@ -77,7 +109,7 @@ class PgContainerTmpfsGateTest {
             .containsEntry(PgContainerHelper.PGDATA, "rw,size=" + PgContainerHelper.TMPFS_SIZE);
         assertThat(String.join(" ", c.getCommandParts()))
             .contains("fsync=off", "synchronous_commit=off", "full_page_writes=off",
-                "max_wal_size=64MB", "min_wal_size=32MB");
+                "max_wal_size=64MB", "min_wal_size=32MB", "wal_keep_size=0");
         assertThat(PgContainerHelper.MEMORY_LIMIT_BYTES)
             .as("memory limit sits above the tmpfs cap, since tmpfs pages are charged to the container")
             .isGreaterThan(PgContainerHelper.tmpfsSizeBytes());
@@ -100,10 +132,16 @@ class PgContainerTmpfsGateTest {
                 assertThat(show(st, "synchronous_commit")).isEqualTo("off");
                 assertThat(show(st, "full_page_writes")).isEqualTo("off");
                 assertThat(show(st, "max_wal_size")).isEqualTo("64MB");
+                assertThat(show(st, "min_wal_size")).isEqualTo("32MB");
+                assertThat(show(st, "wal_keep_size")).isEqualTo("0");
             }
-            long memory = c.getDockerClient().inspectContainerCmd(c.getContainerId()).exec()
-                .getHostConfig().getMemory();
-            assertThat(memory).isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
+            var inspect = c.getDockerClient().inspectContainerCmd(c.getContainerId()).exec();
+            assertThat(inspect.getHostConfig().getMemory()).isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
+            assertThat(inspect.getHostConfig().getMemorySwap())
+                .as("swap capped too, so the limit is not doubled by swap")
+                .isEqualTo(PgContainerHelper.MEMORY_LIMIT_BYTES);
+            assertThat(inspect.getConfig().getLabels())
+                .containsEntry("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""));
         }
     }
 

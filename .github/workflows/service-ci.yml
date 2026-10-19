@@ -176,6 +176,9 @@ jobs:
       # during session creation (nexus-y6aj0, PR #1600 run on ed01cd01c).
       # Unset on a hosted runner, where ORT's default matches the VM.
       NX_ONNX_INTRA_OP_THREADS: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '' || '4' }}
+      # Every test Postgres container carries dev.nexus.test.run=<this> (nexus-xynce),
+      # so the pool host can count one job's containers among everyone else's.
+      NX_TEST_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-java
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5

@@ -74,7 +74,7 @@ public final class PgContainerHelper {
 
     /**
      * tmpfs cap for {@link #PGDATA}. Measured live containers on chas held 19 to 171 MB
-     * (most of it WAL before the 64 MB cap below); a cluster that outgrows this fails
+     * (most of it WAL before the max_wal_size=64MB setting below, a soft target); a cluster that outgrows this fails
      * with "No space left on device" instead of eating host memory.
      */
     public static final String TMPFS_SIZE = "1g";
@@ -89,7 +89,15 @@ public final class PgContainerHelper {
     public static final long MEMORY_LIMIT_BYTES = 1536L * 1024 * 1024;
 
     static long tmpfsSizeBytes() {
-        return Long.parseLong(TMPFS_SIZE.substring(0, TMPFS_SIZE.length() - 1)) * 1024 * 1024 * 1024;
+        return gibibytes(TMPFS_SIZE);
+    }
+
+    /** {@code "<n>g"} in bytes; the only form these sizes are written in. */
+    static long gibibytes(String size) {
+        if (!size.matches("[1-9][0-9]*g")) {
+            throw new IllegalArgumentException("tmpfs size must be <n>g, got " + size);
+        }
+        return Long.parseLong(size.substring(0, size.length() - 1)) * 1024 * 1024 * 1024;
     }
 
     /**
@@ -146,6 +154,18 @@ public final class PgContainerHelper {
      * ({@code PgContainerTmpfsGateTest} forbids constructing one anywhere else).
      */
     public static PostgreSQLContainer<?> newContainer(DockerImageName image) {
+        return newContainer(image, TMPFS_SIZE, MEMORY_LIMIT_BYTES);
+    }
+
+    /**
+     * {@link #newContainer(DockerImageName)} with a larger tmpfs and memory limit, for a
+     * test that loads more than the default 1 GB holds (the opt-in recall run). The
+     * limit must exceed the tmpfs size, because tmpfs pages are charged to the container.
+     */
+    public static PostgreSQLContainer<?> newContainer(DockerImageName image, String tmpfsSize, long memoryBytes) {
+        if (memoryBytes <= gibibytes(tmpfsSize)) {
+            throw new IllegalArgumentException("memory limit " + memoryBytes + " must exceed tmpfs " + tmpfsSize);
+        }
         return new FailFastPostgreSQLContainer(image.asCompatibleSubstituteFor("postgres"))
             .withDatabaseName(DATABASE)
             .withUsername(USERNAME)
@@ -153,18 +173,22 @@ public final class PgContainerHelper {
             .withUrlParam("sslmode", "disable")
             .withStartupAttempts(3)
             // nexus-xynce: PGDATA on a capped tmpfs, nothing a throwaway cluster
-            // needs to survive a crash written durably, pg_wal bounded to ~64 MB.
-            .withTmpFs(Map.of(PGDATA, "rw,size=" + TMPFS_SIZE))
+            // needs to survive a crash written durably, pg_wal held near 64 MB
+            // (max_wal_size is a soft target; the tmpfs size is the hard bound).
+            .withTmpFs(Map.of(PGDATA, "rw,size=" + tmpfsSize))
             .withCommand("postgres",
                 "-c", "fsync=off",
                 "-c", "synchronous_commit=off",
                 "-c", "full_page_writes=off",
                 "-c", "max_wal_size=64MB",
                 "-c", "min_wal_size=32MB",
-                "-c", "wal_keep_size=0")
+                "-c", "wal_keep_size=0",
+                // The smaller max_wal_size checkpoints every ~25 MB of WAL; do not log each one.
+                "-c", "log_checkpoints=off",
+                "-c", "checkpoint_warning=0")
             .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
-                .withMemory(MEMORY_LIMIT_BYTES)
-                .withMemorySwap(MEMORY_LIMIT_BYTES))
+                .withMemory(memoryBytes)
+                .withMemorySwap(memoryBytes))
             // Lets a host count one run's containers among everyone else's:
             // docker ps --filter label=dev.nexus.test.run=<id>.
             .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""));
@@ -250,6 +274,14 @@ public final class PgContainerHelper {
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDedicated() {
         PostgreSQLContainer<?> c = newContainer();
+        c.start();
+        return c;
+    }
+
+    /** {@link #startDedicated()} with a larger tmpfs and memory limit (see the sized {@link #newContainer}). */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDedicated(String tmpfsSize, long memoryBytes) {
+        PostgreSQLContainer<?> c = newContainer(DockerImageName.parse(IMAGE), tmpfsSize, memoryBytes);
         c.start();
         return c;
     }

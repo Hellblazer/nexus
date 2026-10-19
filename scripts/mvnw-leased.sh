@@ -88,6 +88,11 @@ fi
 
 build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" ./mvnw "$@"
 
+# Test Postgres containers are labelled dev.nexus.test.run=$NX_TEST_RUN_ID
+# (nexus-xynce) so a host can count one build's containers; name this build
+# unless the caller already did.
+export NX_TEST_RUN_ID="${NX_TEST_RUN_ID:-mvnw-$(id -un 2>/dev/null || echo u)-$$-$(date +%s)}"
+
 # Initialized before any trap is installed, so a trap can always reference
 # it safely under `set -u` even if a signal lands in the brief window
 # before the real build is launched below.
