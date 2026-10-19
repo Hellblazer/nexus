@@ -515,6 +515,17 @@ def test_advisory_exits_zero_on_a_report_of_the_wrong_shape(tmp_path, capsys, sh
     assert "ADVISORY" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("shape", ["[]", "null", '"text"', '{"containers": [1]}', "{not json"])
+def test_fan_in_advisory_exits_zero_on_a_report_of_the_wrong_shape(tmp_path, capsys, shape) -> None:
+    """The pytest-gate fan-in runs --advisory too: a wrong-shape or malformed shard report must not red it (nexus-ekp7w)."""
+    report = tmp_path / "nx-ddl-report.json"
+    report.write_text(shape)
+    args = ["fan-in", "--suite", "python_unit", "--report", str(report), "--shards", "1",
+            "--ceilings", str(_py_ceilings(tmp_path)), "--advisory"]
+    assert ratchet.main(args) == ratchet.EXIT_OK
+    assert "ADVISORY" in capsys.readouterr().out
+
+
 def test_advisory_covers_a_ceiling_still_set_to_measure_and_a_report_that_proves_nothing(tmp_path, capsys) -> None:
     """The Java steps run --advisory while their ceilings are 'measure' (exit 11) and the run must not be red for it."""
     d = tmp_path / "ddl-counts"
