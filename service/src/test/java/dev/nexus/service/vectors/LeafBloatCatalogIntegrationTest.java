@@ -245,6 +245,7 @@ class LeafBloatCatalogIntegrationTest {
         assertThat(l.liveRows()).isZero();
         assertThat(l.deadRows()).isZero();
         assertThat(l.deadFraction()).isZero();
+        assertThat(l.plannerRows()).as("reltuples is -1 on a leaf never analyzed; it reads as 0").isZero();
         assertThat(l.overdue()).isFalse();
     }
 
@@ -325,30 +326,45 @@ class LeafBloatCatalogIntegrationTest {
         assertThat(others).as("other leaves flagged").isZero();
     }
 
+    /**
+     * The reviewer's measured case (nexus-dxsjc): a statistics reset (or an unclean shutdown, a restore) zeroes
+     * {@code n_live_tup} and it stays 0 until a vacuum or analyze, while autovacuum keeps scaling by
+     * {@code pg_class.reltuples}. 1200 deletes on a 5000-row leaf are over the old {@code live + dead} line (1000 + 0.10 x
+     * 1200 = 1120) and under autovacuum's real trigger (1000 + 0.05 x 5000 = 1250), so autovacuum is correctly idle and
+     * the leaf must not read overdue.
+     */
     @Test
-    void pciIndexesReportBytes_andPlainIndexesAreNotListed() throws Exception {
-        String tenant = newTenant("pci");
-        String collection = collectionName("pci");
-        rows(tenant, collection, 60);
+    void aStatisticsResetLeafWithAFewDeletes_isNotOverdue_becauseTheRowEstimateSurvivesTheReset() throws Exception {
+        String tenant = newTenant("reset");
+        String collection = collectionName("reset");
+        List<String> hex = rows(tenant, collection, 5000);
         String leaf = leafName(tenant);
-        String index = PciCatalog.indexName(M384, tenant, collection);
-        suDdl("CREATE INDEX " + index + " ON nexus." + leaf + " USING hnsw (embedding_384 nexus.vector_cosine_ops) "
-            + "WHERE collection = '" + collection + "'");
-        awaitStats(leaf, 60, 0);
+        // Autovacuum off so nothing races the numbers; the trigger it would use is checked arithmetically below.
+        suDdl("ALTER TABLE nexus." + leaf + " SET (autovacuum_enabled = false)");
+        vacuum(leaf);
+        awaitStats(leaf, 5000, 0);
+        assertThat(leaf(leaf).plannerRows()).as("a vacuum set reltuples").isEqualTo(5000);
 
+        int resets = asSuperuser(su -> su.select(DSL.function(DSL.name("pg_catalog",
+                    "pg_stat_reset_single_table_counters"), SQLDataType.OTHER, DSL.field(DSL.name("c", "oid"))))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .where(DSL.field(DSL.name("c", "relname"), String.class).eq(leaf)).fetch().size());
+        assertThat(resets).as("the reset ran for exactly the one leaf (non-vacuity)").isEqualTo(1);
+        awaitStats(leaf, 0, 0);
+        assertThat(leaf(leaf).plannerRows()).as("reltuples survives the reset of the counters").isEqualTo(5000);
+
+        deleteRows(tenant, collection, hex.subList(0, 1200));
+        awaitStats(leaf, 0, 1200);
         LeafBloatCatalog.Leaf l = leaf(leaf);
-        assertThat(l.pciIndexes()).as("only the pci_ index; the primary key is not listed").hasSize(1);
-        LeafBloatCatalog.PciIndex got = l.pciIndexes().get(0);
-        assertThat(got.name()).isEqualTo(index);
-        assertThat(got.valid()).isTrue();
-        long direct = asSuperuser(su -> su.select(DSL.function(DSL.name("pg_catalog", "pg_relation_size"),
-                SQLDataType.BIGINT, DSL.field(DSL.name("c", "oid"))))
-            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
-            .where(DSL.field(DSL.name("c", "relname"), String.class).eq(index))
-            .fetchOne(0, Long.class));
-        assertThat(got.bytes()).as("bytes").isPositive();
-        assertThat(got.bytes()).as("matches pg_relation_size of the index").isEqualTo(direct);
-        assertThat(l.liveRows()).as("the leaf's live rows sit beside the index").isEqualTo(60);
+        assertThat(l.liveRows()).as("n_live_tup is still 0 after the reset").isZero();
+        assertThat(l.deadRows()).isEqualTo(1200);
+        assertThat(l.deadRows()).as("over the old live + dead line, which is what made this read overdue")
+            .isGreaterThan((long) (LeafBloatCatalog.OVERDUE_BASE_ROWS
+                + LeafBloatCatalog.OVERDUE_SCALE_FACTOR * (l.liveRows() + l.deadRows())));
+        assertThat(l.deadRows()).as("under autovacuum's real trigger, 1000 + 0.05 x reltuples")
+            .isLessThan((long) (1000 + 0.05 * l.plannerRows()));
+        assertThat(l.overdue()).as("autovacuum is correctly idle, so not overdue").isFalse();
+        assertThat(l.vacuumCount()).as("the reset cleared the counts and nothing has vacuumed since").isZero();
     }
 
     // -- the cache, not the catalog ----------------------------------------------------------------------

@@ -3895,7 +3895,8 @@ it got. It works in local and managed mode alike, over HTTP only.
 unauthenticated (Sam's ruling, 2026-10-19): counts over every leaf of `nexus.chunks` (`leaves_total`, `policy_unset`,
 `autovacuum_disabled`, `overdue`, `pinned`, `starved`), `max_overdue_for_seconds`, and the sweep-health fields. It names no leaf. A leaf is
 overdue when its dead rows pass `overdue_base_rows` (1000) plus `overdue_scale_factor` (10%) of its rows, so a small leaf at a high dead
-fraction, which autovacuum leaves alone, is not overdue. The row warns, stating how many leaves are `pinned` (a vacuum finished and the dead
+fraction, which autovacuum leaves alone, is not overdue. Rows is the larger of the statistics' live plus dead tuples and the planner's row
+estimate (`pg_class.reltuples`, the figure autovacuum scales by), so a leaf whose counters a crash or restore zeroed is judged on the estimate. The row warns, stating how many leaves are `pinned` (a vacuum finished and the dead
 rows remain) or `starved` (overdue for `overdue_warn_after_seconds` with no vacuum finished), how many lack any of the four autovacuum
 settings, and how many have `autovacuum_enabled` off; a `waiting` leaf passes with a note. The warning says the leaf names are in the
 engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. It also warns when the

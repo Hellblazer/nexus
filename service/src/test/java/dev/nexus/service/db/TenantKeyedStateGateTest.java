@@ -641,10 +641,9 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, TEST_HOOK);
             }
-            // RESULT (71)
+            // RESULT (70)
             for (String f : List.of(
                 "ChunksLeafAutovacuumCheck.LeafRel.options",
-                "LeafBloatCatalog.Leaf.pciIndexes",
                 "LeafBloatCatalog.Snapshot.leaves",
                 "LeafBloatSweep.Status.leaves",
                 "CatalogRepository.AppendOutcome.sweep",

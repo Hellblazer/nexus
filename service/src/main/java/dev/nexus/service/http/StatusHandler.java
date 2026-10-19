@@ -375,8 +375,8 @@ public final class StatusHandler implements HttpHandler {
      * authenticated admin read.
      *
      * <p><b>Overdue, not a fraction.</b> A leaf is overdue when {@code dead_rows > overdue_base_rows +
-     * overdue_scale_factor x (live_rows + dead_rows)}: autovacuum's own trigger (1000 + 0.05 x rows, vectors-034) with
-     * the scale doubled. An overdue leaf is {@code waiting} (no vacuum finished since, for less than
+     * overdue_scale_factor x rows}, rows being the larger of {@code live + dead} and {@code pg_class.reltuples}:
+     * autovacuum's own trigger (1000 + 0.05 x rows, vectors-034) with the scale doubled. An overdue leaf is {@code waiting} (no vacuum finished since, for less than
      * {@code overdue_warn_after_seconds}), {@code pinned} (a vacuum finished since the leaf became overdue and the
      * dead rows remain) or {@code starved} (overdue that long with no vacuum finished). {@code overdue} counts the
      * leaves in any of the three states.
@@ -561,7 +561,7 @@ public final class StatusHandler implements HttpHandler {
             }
         }
 
-        // nexus-dxsjc (nexus-4lnn1 R4), [additive]: per-leaf bloat of nexus.chunks and each pci_ index's size, from
+        // nexus-dxsjc (nexus-4lnn1 R4), [additive]: aggregate bloat of nexus.chunks leaves, from
         // the sweep's cache. Absent = an engine that predates it, or a sweep not built yet.
         if (chunksLeafBloat != null) {
             ChunksLeafBloat b = chunksLeafBloat.get();

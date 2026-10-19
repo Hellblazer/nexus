@@ -270,9 +270,10 @@ public final class LeafBloatSweep {
             String name = l.leaf().name();
             String problem = problems.get(name);
             if (problem != null && !problem.equals(loggedProblems.get(name))) {
-                log.warn("event=chunks_leaf_bloat_leaf leaf={} problem={} dead_rows={} live_rows={} dead_fraction={} "
+                log.warn("event=chunks_leaf_bloat_leaf leaf={} problem={} dead_rows={} live_rows={} planner_rows={} dead_fraction={} "
                         + "vacuum_count={} overdue_for_seconds={} vacuums_since_overdue={}", name, problem,
-                    l.leaf().deadRows(), l.leaf().liveRows(), l.leaf().deadFraction(), l.leaf().vacuumCount(),
+                    l.leaf().deadRows(), l.leaf().liveRows(), l.leaf().plannerRows(), l.leaf().deadFraction(),
+                    l.leaf().vacuumCount(),
                     l.overdueForSeconds(), l.vacuumsSinceOverdue());
             }
         }

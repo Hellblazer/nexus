@@ -45,7 +45,12 @@ class LeafBloatSweepTest {
     }
 
     static LeafBloatCatalog.Leaf leaf(String name, long live, long dead, long vacuums) {
-        return new LeafBloatCatalog.Leaf(name, live, dead, null, vacuums, true, true, List.of());
+        return new LeafBloatCatalog.Leaf(name, live, dead, 0, null, vacuums, true, true);
+    }
+
+    /** A leaf with the planner's row estimate ({@code pg_class.reltuples}) given, as the catalog reads it (never negative). */
+    static LeafBloatCatalog.Leaf leafWithEstimate(String name, long live, long dead, long plannerRows) {
+        return new LeafBloatCatalog.Leaf(name, live, dead, plannerRows, null, 0, true, true);
     }
 
     /** A reader that returns the scripted answers in order: a Snapshot, or a RuntimeException to throw. */
@@ -94,6 +99,40 @@ class LeafBloatSweepTest {
         assertThat(leaf("edge", 8_000, 2_001).overdue()).isTrue();
         assertThat(LeafBloatCatalog.OVERDUE_BASE_ROWS).isEqualTo(1000);
         assertThat(LeafBloatCatalog.OVERDUE_SCALE_FACTOR).isEqualTo(0.10);
+    }
+
+    // -- rows: the larger of the statistics' counters and the planner's estimate ------------------------------
+
+    /**
+     * After a crash, a restore or a statistics reset {@code n_live_tup} is 0 until a vacuum or analyze runs, while
+     * {@code pg_class.reltuples} (autovacuum's own base) still says 100,000. 1,500 deletes on that leaf are under
+     * autovacuum's trigger (1000 + 0.05 x 100,000 = 6,000) and must not read overdue.
+     */
+    @Test
+    void aStatisticsResetLeaf_isJudgedOnThePlannersRowEstimate_notOnZeroLiveRows() {
+        var reset = leafWithEstimate("reset", 0, 1_500, 100_000);
+        assertThat(reset.rows()).isEqualTo(100_000);
+        assertThat(reset.overdue()).as("1500 dead of ~100,000 rows: under 1000 + 0.10 x 100,000").isFalse();
+        assertThat(leafWithEstimate("reset", 0, 11_000, 100_000).overdue()).as("the line is 11,000, equal is not over")
+            .isFalse();
+        assertThat(leafWithEstimate("reset", 0, 11_001, 100_000).overdue()).as("past the line on the estimate").isTrue();
+        assertThat(leafWithEstimate("no-estimate", 0, 1_500, 0).overdue())
+            .as("the same counters with no estimate: live + dead alone, 1500 > 1000 + 150").isTrue();
+    }
+
+    @Test
+    void aNeverAnalyzedOrSmallLeaf_isJudgedOnLiveAndDeadAsBefore() {
+        // reltuples is -1 on a leaf never analyzed; the catalog reads it as 0, and a stray negative still clamps to 0.
+        assertThat(leafWithEstimate("new", 88_000, 12_000, 0).overdue()).isTrue();
+        assertThat(leafWithEstimate("new", 88_000, 12_000, -1).overdue()).isTrue();
+        assertThat(leafWithEstimate("new", 70, 30, 0).overdue()).isFalse();
+        assertThat(leafWithEstimate("new", 70, 30, -1).rows()).isEqualTo(100);
+        // An estimate below the counters never lowers the row count.
+        assertThat(leafWithEstimate("stale-estimate", 88_000, 12_000, 1_000).rows()).isEqualTo(100_000);
+        assertThat(leafWithEstimate("stale-estimate", 88_000, 12_000, 1_000).overdue()).isTrue();
+        // A negative counter clamps to 0 rather than shrinking the row count.
+        assertThat(leafWithEstimate("negative", -5, 1_500, 0).rows()).isEqualTo(1_500);
+        assertThat(leafWithEstimate("negative", -5, 1_500, 0).overdue()).isTrue();
     }
 
     // -- the sweep's per-leaf record --------------------------------------------------------------------

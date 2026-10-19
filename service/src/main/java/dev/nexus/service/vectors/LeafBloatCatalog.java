@@ -27,7 +27,7 @@ import java.util.Objects;
  * nexus-dxsjc (HNSW maintenance policy nexus-4lnn1, R4): the per-leaf bloat view of {@code nexus.chunks}. One read
  * says, for every ordinary leaf, how many live and dead tuples the statistics hold, when autovacuum last finished on
  * it, whether it still carries the four autovacuum storage parameters of {@code vectors-034} and whether
- * {@code autovacuum_enabled} was switched off; and, for every {@code pci_} index on the leaf, its size in bytes.
+ * {@code autovacuum_enabled} was switched off.
  *
  * <p><b>Leaves, never the parent.</b> The partitioned parent and the model partitions hold no tuples and autovacuum
  * never visits them, so their {@code pg_stat_user_tables} rows are empty; reading {@code relname = 'chunks'} reports
@@ -40,6 +40,13 @@ import java.util.Objects;
  * autovacuum correctly leaves it alone. {@link Leaf#overdue()} therefore asks for the base plus twice the scale
  * (0.10): the leaf is past the point where autovacuum should already have fired. The dead fraction stays in the view as
  * information.
+ *
+ * <p><b>"Rows" is the larger of two counts.</b> Autovacuum scales its trigger by {@code pg_class.reltuples}, the planner's
+ * row estimate, which survives a restart. {@code n_live_tup} does not: an unclean shutdown, {@code pg_stat_reset}, a
+ * restore or a major upgrade zero it, and it stays 0 until a vacuum or analyze runs, which a quiet leaf may never get.
+ * Reading {@code n_live_tup + n_dead_tup} alone would then call a 100,000-row leaf with 1,500 deletes overdue while
+ * autovacuum, correctly, stays idle. So rows is {@code max(live + dead, reltuples)}, {@code reltuples} read as 0 when
+ * the leaf has never been analyzed ({@code -1}).
  *
  * <p><b>The counts are an estimate.</b> {@code n_dead_tup} is the statistics system's count, not a scan, and a leaf in
  * the middle of a cost-throttled vacuum shows its dead tuples until the vacuum ends. {@link LeafBloatSweep} therefore
@@ -65,31 +72,28 @@ public final class LeafBloatCatalog {
     public static final Duration DEFAULT_READ_BOUND = SweepBounds.STATEMENT_TIMEOUT;
 
     /**
-     * One {@code pci_} index on a leaf.
-     *
-     * @param name  the index name
-     * @param valid {@code pg_index.indisvalid}
-     * @param bytes {@code pg_relation_size} of the index when the read ran
-     */
-    public record PciIndex(String name, boolean valid, long bytes) { }
-
-    /**
      * One leaf of {@code nexus.chunks}.
      *
      * @param name               the leaf's relation name
      * @param liveRows           {@code n_live_tup}; 0 for a leaf the statistics have no row for yet
      * @param deadRows           {@code n_dead_tup}; 0 likewise
+     * @param plannerRows        {@code pg_class.reltuples}; 0 for a leaf never analyzed ({@code -1})
      * @param lastAutovacuum     when autovacuum last finished on the leaf, or {@code null} when it has not
      * @param vacuumCount        {@code vacuum_count + autovacuum_count}: vacuums that have finished on the leaf since
      *                           the statistics began (a reset of the statistics sets it back to 0)
      * @param policySet          all four {@code vectors-034} autovacuum parameters are present
      * @param autovacuumEnabled  false only when {@code autovacuum_enabled} is set to a false spelling
-     * @param pciIndexes         its {@code pci_} indexes in name order; empty when it has none
      */
-    public record Leaf(String name, long liveRows, long deadRows, Instant lastAutovacuum, long vacuumCount,
-                       boolean policySet, boolean autovacuumEnabled, List<PciIndex> pciIndexes) {
-        public Leaf {
-            pciIndexes = List.copyOf(pciIndexes);
+    public record Leaf(String name, long liveRows, long deadRows, long plannerRows, Instant lastAutovacuum,
+                       long vacuumCount, boolean policySet, boolean autovacuumEnabled) {
+
+        /**
+         * The row count the overdue line scales by: the larger of the statistics' {@code live + dead} and the planner's
+         * estimate, each clamped at 0, so a leaf whose counters were reset is judged on the estimate autovacuum itself
+         * uses.
+         */
+        public long rows() {
+            return Math.max(Math.max(0L, liveRows) + Math.max(0L, deadRows), Math.max(0L, plannerRows));
         }
 
         /** {@code dead / (live + dead)}, 0 when the leaf holds neither. */
@@ -100,11 +104,11 @@ public final class LeafBloatCatalog {
 
         /**
          * True when autovacuum is overdue on this leaf: {@code dead > OVERDUE_BASE_ROWS + OVERDUE_SCALE_FACTOR x
-         * (live + dead)}. A small leaf at a high dead fraction is not overdue (autovacuum has no reason to run); a
-         * 100,000-row leaf at 12 percent is.
+         * rows()}. A small leaf at a high dead fraction is not overdue (autovacuum has no reason to run); a
+         * 100,000-row leaf at 12 percent is; a 100,000-row leaf whose counters were reset and holds 1,500 dead is not.
          */
         public boolean overdue() {
-            return deadRows > OVERDUE_BASE_ROWS + OVERDUE_SCALE_FACTOR * (double) (liveRows + deadRows);
+            return Math.max(0L, deadRows) > OVERDUE_BASE_ROWS + OVERDUE_SCALE_FACTOR * (double) rows();
         }
     }
 
@@ -114,8 +118,6 @@ public final class LeafBloatCatalog {
             leaves = List.copyOf(leaves);
         }
     }
-
-    private static final String PCI_PREFIX = PciCatalog.PREFIX;
 
     private final DataSource dataSource;
     private final Duration readBound;
@@ -195,29 +197,24 @@ public final class LeafBloatCatalog {
             }
         }
 
-        // The pci_ indexes, keyed by the leaf they sit on.
-        Field<Long> indRelid = DSL.field(DSL.name("i", "indrelid")).cast(SQLDataType.BIGINT);
-        Field<String> indName = DSL.field(DSL.name("ix", "relname"), SQLDataType.VARCHAR);
-        Field<Boolean> indValid = DSL.field(DSL.name("i", "indisvalid"), SQLDataType.BOOLEAN);
-        Field<Long> indBytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
-            DSL.field(DSL.name("ix", "oid")));
-        Map<Long, List<PciIndex>> indexes = new HashMap<>();
-        for (var row : ctx.select(indRelid, indName, indValid, indBytes)
-                .from(DSL.table(DSL.name("pg_catalog", "pg_index")).as("i"))
-                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("ix"))
-                .on(DSL.field(DSL.name("ix", "oid")).eq(DSL.field(DSL.name("i", "indexrelid"))))
-                .where(DSL.left(indName, PCI_PREFIX.length()).eq(PCI_PREFIX))
-                .orderBy(indName)
+        // pg_class.reltuples, keyed by oid: the row estimate autovacuum scales its trigger by. It survives a restart
+        // and a statistics reset, which n_live_tup does not; -1 (never analyzed) reads as 0.
+        Field<Long> classOid = DSL.field(DSL.name("c", "oid")).cast(SQLDataType.BIGINT);
+        Field<Double> reltuples = DSL.field(DSL.name("c", "reltuples")).cast(SQLDataType.DOUBLE);
+        Map<Long, Long> estimates = new HashMap<>();
+        for (var row : ctx.select(classOid, reltuples)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .where(classOid.in(rels.stream().map(ChunksLeafAutovacuumCheck.LeafRel::oid).toList()))
                 .fetch()) {
-            indexes.computeIfAbsent(row.value1(), k -> new ArrayList<>())
-                .add(new PciIndex(row.value2(), Boolean.TRUE.equals(row.value3()), nz(row.value4())));
+            Double est = row.value2();
+            estimates.put(row.value1(), est == null || est < 0 ? 0L : Math.round(est));
         }
 
         List<Leaf> leaves = new ArrayList<>(rels.size());
         for (ChunksLeafAutovacuumCheck.LeafRel rel : rels) {
             long[] c = counts.getOrDefault(rel.oid(), new long[] {0, 0, 0});
-            leaves.add(new Leaf(rel.name(), c[0], c[1], vacuumed.get(rel.oid()), c[2], rel.policySet(),
-                !rel.autovacuumDisabled(), indexes.getOrDefault(rel.oid(), List.of())));
+            leaves.add(new Leaf(rel.name(), c[0], c[1], estimates.getOrDefault(rel.oid(), 0L),
+                vacuumed.get(rel.oid()), c[2], rel.policySet(), !rel.autovacuumDisabled()));
         }
         leaves.sort(Comparator.comparing(Leaf::name));
         return new Snapshot(leaves);

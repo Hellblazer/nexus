@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.vectors.LeafBloatCatalog.Leaf;
-import dev.nexus.service.vectors.LeafBloatCatalog.PciIndex;
 import dev.nexus.service.vectors.LeafBloatSweep.LeafStatus;
 import dev.nexus.service.vectors.LeafBloatSweep.Status;
 import org.junit.jupiter.api.AfterEach;
@@ -61,13 +60,13 @@ class StatusHandlerChunksLeafBloatTest {
     }
 
     private static Leaf leaf(String name, long live, long dead, Instant vacuumed, boolean policySet,
-                             boolean enabled, PciIndex... indexes) {
-        return leaf(name, live, dead, vacuumed, 0, policySet, enabled, indexes);
+                             boolean enabled) {
+        return leaf(name, live, dead, vacuumed, 0, policySet, enabled);
     }
 
     private static Leaf leaf(String name, long live, long dead, Instant vacuumed, long vacuums, boolean policySet,
-                             boolean enabled, PciIndex... indexes) {
-        return new Leaf(name, live, dead, vacuumed, vacuums, policySet, enabled, List.of(indexes));
+                             boolean enabled) {
+        return new Leaf(name, live, dead, 0, vacuumed, vacuums, policySet, enabled);
     }
 
     /** Not overdue. */
@@ -121,8 +120,7 @@ class StatusHandlerChunksLeafBloatTest {
 
     @Test
     void hasExactlyTheDocumentedKeysInOrder() throws Exception {
-        start(() -> bloat(status(false, clean(leaf("chunks_a", 100, 5, VACUUMED, 3, true, true,
-            new PciIndex("pci_aaaaaaaaaaaaaaaaaaaaaaaa", true, 4096))))));
+        start(() -> bloat(status(false, clean(leaf("chunks_a", 100, 5, VACUUMED, 3, true, true)))));
 
         JsonNode o = get().get("chunks_leaf_bloat");
         assertThat(names(o)).containsExactly("last_read_at", "expired", "sweep_seconds", "ever_read",
@@ -184,12 +182,11 @@ class StatusHandlerChunksLeafBloatTest {
      */
     @Test
     void noBodyNamesALeafOrCarriesAPerLeafDatum() throws Exception {
-        var index = new PciIndex("pci_0123456789abcdef01234567", true, 8_192_000);
         var cases = new ArrayList<StatusHandler.ChunksLeafBloat>();
         cases.add(bloat(status(false,
-            clean(leaf("chunks_minilm_aaaa", 1000, 20, VACUUMED, 7, true, true, index)),
-            overdue(leaf("chunks_minilm_bbbb", 88_000, 12_000, VACUUMED, 4, true, true, index), 60),
-            pinned(leaf("chunks_minilm_cccc", 80_000, 20_000, VACUUMED, 12, true, true, index), 600, 1),
+            clean(leaf("chunks_minilm_aaaa", 1000, 20, VACUUMED, 7, true, true)),
+            overdue(leaf("chunks_minilm_bbbb", 88_000, 12_000, VACUUMED, 4, true, true), 60),
+            pinned(leaf("chunks_minilm_cccc", 80_000, 20_000, VACUUMED, 12, true, true), 600, 1),
             overdue(leaf("chunks_minilm_dddd", 80_000, 20_000, null, 0, true, true), 3600),
             clean(leaf("chunks_minilm_eeee", 10, 0, null, false, true)),
             clean(leaf("chunks_minilm_ffff", 10, 0, null, true, false)))));
@@ -244,9 +241,8 @@ class StatusHandlerChunksLeafBloatTest {
         JsonNode golden = MAPPER.readTree(java.nio.file.Files.readString(
             java.nio.file.Path.of("..", "tests", "fixtures", "leaf_bloat_status_bodies.json"))).get("cases");
         var cases = new LinkedHashMap<String, StatusHandler.ChunksLeafBloat>();
-        var index = new PciIndex("pci_0123456789abcdef01234567", true, 8_192_000);
         cases.put("healthy", bloat(status(false,
-            clean(leaf("chunks_minilm_aaaa", 1000, 20, VACUUMED, 7, true, true, index)),
+            clean(leaf("chunks_minilm_aaaa", 1000, 20, VACUUMED, 7, true, true)),
             clean(leaf("chunks_minilm_bbbb", 0, 0, null, true, true)))));
         cases.put("small_leaf_thirty_percent_dead", bloat(status(false,
             clean(leaf("chunks_minilm_iiii", 70, 30, null, true, true)))));

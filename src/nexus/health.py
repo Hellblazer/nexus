@@ -4715,7 +4715,8 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
     every leaf and names none. The row therefore says how many leaves are in trouble and where the names are: the
     engine log, ``event=chunks_leaf_bloat_leaf``.
 
-    A leaf is OVERDUE when its dead rows pass ``overdue_base_rows`` + ``overdue_scale_factor`` of its rows (1000 + 10%):
+    A leaf is OVERDUE when its dead rows pass ``overdue_base_rows`` + ``overdue_scale_factor`` of its rows (1000 + 10%; rows is the larger of
+    the statistics' live + dead and the planner's ``reltuples``, the figure autovacuum scales by):
     autovacuum's own trigger (1000 + 5%, vectors-034) with the scale doubled, so a small leaf at a high dead fraction,
     which autovacuum correctly leaves alone, is not overdue. The engine classifies each overdue leaf from the clock and
     the leaf's vacuum count; this row reads the counts, it does not redo the arithmetic.

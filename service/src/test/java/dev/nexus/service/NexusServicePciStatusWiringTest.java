@@ -110,8 +110,8 @@ class NexusServicePciStatusWiringTest {
     void chunksLeafBloatIsOmittedUntilBound_thenServedFromTheBoundSupplierOnEveryRequest() throws Exception {
         assertThat(status().has("chunks_leaf_bloat")).as("unbound: cannot tell, not no leaves").isFalse();
 
-        var leaf = new dev.nexus.service.vectors.LeafBloatCatalog.Leaf("chunks_wiring_aaaa", 100, 0, null, 0, true,
-            true, java.util.List.of());
+        var leaf = new dev.nexus.service.vectors.LeafBloatCatalog.Leaf("chunks_wiring_aaaa", 100, 0, 0, null, 0,
+            true, true);
         var view = new java.util.concurrent.atomic.AtomicReference<>(new dev.nexus.service.vectors.LeafBloatSweep.Status(
             true, Instant.parse("2026-10-10T08:00:00Z"), null, 0, false,
             java.util.List.of(dev.nexus.service.vectors.LeafBloatSweep.LeafStatus.clean(leaf))));
@@ -123,8 +123,8 @@ class NexusServicePciStatusWiringTest {
         assertThat(first.has("leaves")).as("aggregates only: the route is unauthenticated").isFalse();
         assertThat(first.get("pinned").asInt()).isZero();
 
-        var bloated = new dev.nexus.service.vectors.LeafBloatCatalog.Leaf("chunks_wiring_aaaa", 80_000, 20_000, null,
-            3, true, true, java.util.List.of());
+        var bloated = new dev.nexus.service.vectors.LeafBloatCatalog.Leaf("chunks_wiring_aaaa", 80_000, 20_000, 0,
+            null, 3, true, true);
         view.set(new dev.nexus.service.vectors.LeafBloatSweep.Status(true, Instant.parse("2026-10-10T08:10:00Z"), null,
             0, false, java.util.List.of(new dev.nexus.service.vectors.LeafBloatSweep.LeafStatus(
                 bloated, Instant.parse("2026-10-10T08:00:00Z"), 2, 600))));
