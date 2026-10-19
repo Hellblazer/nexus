@@ -371,6 +371,34 @@ deselects them, so no census has said which of them touch storage.
   and lists failures that left no storage trace (a test reading `NX_SERVICE_TOKEN` straight from the
   environment fails with a `KeyError` the guard cannot see).
 
+## The per-worker tenant pool (nexus-fpwj1, `NX_TEST_TENANT_POOL`, default OFF)
+
+`NX_TEST_TENANT_POOL=1` makes `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdist worker
+(`tests/_tenant_pool.py`) instead of minting and dropping one per test. Measured on 13 storage-touching files at `-n 4`
+(767 tests): DDL 41,968 -> 576, WAL 268 MB -> 15 MB, 373 leases on 4 mints, 0 retired. The flag is exactly `1`; unset
+and `0` are off, and with it off nothing about the tenant fixtures changes.
+
+A lease ends with four steps, in this order: (1) one psql transaction deletes the tenant's rows from every tenant-keyed
+relation (derived from the catalog at call time; token rows included; DML only, no DDL, no `TRUNCATE`); (2) `POST
+/v1/_test/tenant-reset` evicts every JVM cache keyed by the tenant (nexus-0bl77; the substrate engine runs with
+`NX_TEST_TENANT_RESET_ROUTE=1` and `NX_SEARCH_PCI=0`, because the route answers 503 while per-collection index builds,
+which are DDL, are on, and the engine's default for an unset `NX_SEARCH_PCI` is on); (3) a census proves zero rows in at
+least 40 relations including a required set, and zero `pci_` indexes; (4) `POST /v1/tenants/create` for the same name
+re-issues a bearer, so the old one answers 401 and the Python `(url, token)`-keyed slots rebuild by construction. A step
+that fails ERRORS the test that leaked, naming the relations, and retires the tenant (counted). Python caches keyed by
+collection name (`search_engine._poisoned_collections`, `aspect_extractor._ENGINE_ASPECTS_ENABLED_CACHE`, the vector
+client singleton and lease cache) are cleared on every lease.
+
+- **Opt out with `@pytest.mark.fresh_tenant`** a test that mints or drops tenants, rotates or revokes the tenant's own
+  token, or needs a tenant whose partition leaves have never held data. The tenant it gets is the old per-test mint.
+- A test that leaks rows after its last assertion (a background thread, a daemon) shows up as the next lease's census
+  error or the end-of-session census; fix the writer, never the census.
+- The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W`; a pool tenant that is not
+  empty at the end, or tenant tests that took no lease, fail the run. `tests/test_tenant_pool.py` drives each behaviour
+  against the real engine, each with a control that skips the eviction and must show the stale state;
+  `tests/test_tenant_pool_end_to_end.py` runs the real conftest on and off.
+- Flipping the default is nexus-7zloy (the A/B full run on chas), not part of the pool.
+
 ## Bytes written and DDL per run (nexus-sz651)
 
 The primary gated signal is the **DDL count per test** (exact, the same on every host, and the lever that
