@@ -383,7 +383,7 @@ public final class PgVectorRepository {
 
     /**
      * Simple constructor: no collection-aware routing (single fixed embedder - test
-     * fixtures and single-model local mode).
+     * fixtures and a single-model engine).
      *
      * @param tenantScope   the ONLY DSLContext factory - every operation runs inside
      *                      {@code withTenant(tenant, ...)}
@@ -482,7 +482,7 @@ public final class PgVectorRepository {
                                EmbedderRouter queryRouter, int getAllMetadataMaxRows, PciIndexSet pciIndexes,
                                PciPlanCheck planCheck) {
         this.tenantScope   = tenantScope;
-        this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (ONNX fallback)
+        this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (default embed: its local member)
         this.queryEmbedder = queryRouter;
         this.docRouter     = docRouter;
         this.queryRouter   = queryRouter;

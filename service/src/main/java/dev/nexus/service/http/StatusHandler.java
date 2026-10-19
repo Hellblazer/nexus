@@ -89,18 +89,18 @@ import java.util.function.Supplier;
  * to know which posture it is reading.
  *
  * <p>{@code local_embed_activity} is the ORIGINAL (deliverable 2) field:
- * {@code null} in cloud/voyage mode or when no local admission-gate-wired
+ * {@code null} when bge is not built (Voyage-only) or when no local admission-gate-wired
  * embedder is supplied — never a fabricated value. Kept unchanged for any
  * caller already reading it.
  *
  * <p>{@code embedder_activity} (bead nexus-s71lr pass 3, ADDITIVE — see the
  * updated docs/wire-contract-pending.md entry) is a map keyed by each
  * embedder's own {@link dev.nexus.service.vectors.Embedder#modelToken()},
- * covering EVERY embedder {@code embedderRouter} dispatches to — local mode's
- * bge768 (redundant with {@code local_embed_activity} but included for
- * uniformity) AND, the majority posture this pass closes, cloud mode's
- * voyage-code-3 / voyage-context-3 / voyage-3. An embedder that does not
- * track activity (the MiniLM ONNX fallback, test fakes) is simply absent
+ * covering EVERY embedder {@code embedderRouter} dispatches to — bge768 when
+ * built (redundant with {@code local_embed_activity} but included for
+ * uniformity) AND, the majority posture this pass closes, the Voyage family's
+ * voyage-code-3 / voyage-context-3 / voyage-3 when a key is present. An embedder that does not
+ * track activity (the MiniLM parity-test embedder, test fakes) is simply absent
  * from the map, never reported with a fabricated value. Empty {@code {}}
  * when {@code embedderRouter} is null or reports nothing.
  *
@@ -159,9 +159,9 @@ public final class StatusHandler implements HttpHandler {
      *                                    Null -> "unknown" mode, empty activity map.
      * @param localEmbedActivitySupplier reads the live snapshot from the
      *                                    process's {@code Bge768Embedder}
-     *                                    (local mode only) for the ORIGINAL
+     *                                    (only when bge is built) for the ORIGINAL
      *                                    {@code local_embed_activity} field.
-     *                                    Null in cloud/voyage mode, where there
+     *                                    Null on the Voyage-only shape, where there
      *                                    is no local embedder to read from ->
      *                                    {@code local_embed_activity} is
      *                                    omitted as JSON {@code null}, never

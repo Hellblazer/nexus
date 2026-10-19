@@ -28,7 +28,7 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
  *       {@code voyageai.Client.contextualized_embed} (model {@code voyage-context-3})</li>
  *   <li>{@code code__} → standard embed via {@code voyageai.Client.embed}
  *       (model {@code voyage-code-3})</li>
- *   <li>local mode → the local ONNX-runtime embedder (RDR-160: bge-base-en-v1.5, 768d)</li>
+ *   <li>a bge collection → the local ONNX-runtime embedder (RDR-160: bge-base-en-v1.5, 768d)</li>
  * </ul>
  *
  * <p>The Java service holds whatever PRESENT SET of embedder families its boot could
@@ -40,8 +40,8 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
  *   <li><strong>{@code voyage}</strong> — Voyage only
  *       ({@link #EmbedderRouter(String, String)}; the production CLOUD shape,
  *       nexus-0n7uc): {@code localEmbedder == null}, NO local ONNX; a bge or
- *       {@code minilm-l6-v2-384} collection is REFUSED (422), symmetric with local mode
- *       refusing Voyage.</li>
+ *       {@code minilm-l6-v2-384} collection is REFUSED (422), symmetric with the
+ *       {@code onnx-local} shape refusing Voyage.</li>
  *   <li><strong>{@code dual}</strong> — both
  *       ({@link #EmbedderRouter(Embedder, String, String)} with a local embedder AND a
  *       key): a row routes to whichever family serves its model. Tests and the parity
@@ -87,7 +87,7 @@ public final class EmbedderRouter implements Embedder {
     private final Map<String, Embedder> modelEmbedders;
 
     /**
-     * Local-mode constructor: all collections embedded via the injected local
+     * Local-only constructor (the {@code onnx-local} shape): all collections embedded via the injected local
      * embedder. RDR-160 wires a {@link Bge768Embedder} here; the dispatch table
      * is self-keyed by {@link Embedder#modelToken()}, so a collection whose model
      * segment is not this embedder's token is REFUSED (no silent fallback).
@@ -115,8 +115,8 @@ public final class EmbedderRouter implements Embedder {
      * {@code OrtEnvironment.createSession(path)} — which onnxruntime SEGFAULTS (does
      * not throw) on a missing file, crashing the engine at boot (conexus STEP-5,
      * conexus-qcn). A bge or {@code minilm-l6-v2-384} row is REFUSED ({@link
-     * EmbeddingModelUnavailableException} → 422), symmetric with how local mode
-     * refuses Voyage rows.
+     * EmbeddingModelUnavailableException} → 422), symmetric with how the local-only
+     * shape refuses Voyage rows.
      *
      * @param voyageApiKey Voyage AI API key
      * @param inputType    {@code "document"} or {@code "query"}
@@ -213,11 +213,11 @@ public final class EmbedderRouter implements Embedder {
      * /v1/status}, keyed by each embedder's own {@link Embedder#modelToken()}
      * (the SAME self-keying {@link #modelEmbedders} already uses, so a key can
      * never drift from the identity actually dispatched). Iterates {@link
-     * #modelEmbedders} generically — works unchanged for local mode (one
-     * entry, the admission-wrapped bge768) and cloud mode (voyage-code-3 /
-     * voyage-context-3 / voyage-3), because {@link Embedder#activitySnapshot()}
+     * #modelEmbedders} generically — works unchanged for the local-only shape (one
+     * entry, the admission-wrapped bge768), the Voyage-only shape (voyage-code-3 /
+     * voyage-context-3 / voyage-3) and the dual shape (all of them), because {@link Embedder#activitySnapshot()}
      * is a default interface method: an embedder that does not track activity
-     * (the MiniLM {@code OnnxEmbedder} fallback, test fakes) is simply absent
+     * (the MiniLM {@code OnnxEmbedder} of the parity tests, test fakes) is simply absent
      * from the returned map rather than reported with a fabricated value.
      */
     public Map<String, EmbedActivitySnapshot> embedActivitySnapshots() {
@@ -432,7 +432,8 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
-     * Default {@link Embedder#embed} — uses ONNX (local mode default).
+     * Default {@link Embedder#embed} — uses the local embedder (present in the local-only and
+     * dual shapes; the Voyage-only shape has none and throws).
      * Prefer {@link #embedForCollection} when a collection name is available.
      */
     @Override
@@ -539,7 +540,7 @@ public final class EmbedderRouter implements Embedder {
      * row whose model has no embedder in this mode is REFUSED loudly instead of
      * silently embedded with the wrong model (no-silent-fallbacks-for-correctness):
      * <ul>
-     *   <li>onnx-local mode + a {@code voyage-*} row → refuse (no credentials)
+     *   <li>onnx-local mode (no key) + a {@code voyage-*} row → refuse (no credentials)
      *   <li>any mode + a row with no embedder wired in this mode → refuse
      *       (e.g. {@code minilm-l6-v2-384} on the RDR-160 bge-768 local service,
      *       or {@code bge-base-en-v15-768} in a MiniLM-wired test router)

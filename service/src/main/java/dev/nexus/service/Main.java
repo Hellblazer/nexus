@@ -35,10 +35,13 @@ import org.slf4j.LoggerFactory;
  * <p>Vector backend (RDR-155 P4a.2, bead nexus-1k8s1 — pgvector serves every vector
  * route; the Chroma serving backend and its {@code NX_CHROMA_*} wiring are retired):
  * <ul>
- *   <li>{@code NX_VOYAGE_API_KEY} — optional Voyage AI API key. Present: embedders
- *       route by collection prefix to Voyage (CCE for {@code knowledge__}/{@code docs__}/
- *       {@code rdr__}, voyage-code-3 for {@code code__}), ONNX fallback for
- *       unrecognised prefixes. Absent: ONNX-only (local mode).</li>
+ *   <li>{@code NX_VOYAGE_API_KEY} — optional Voyage AI API key. It makes the Voyage
+ *       family (CCE voyage-context-3, voyage-code-3) available; it does not by itself
+ *       choose a family. The embedder families the boot builds are the PRESENT SET: Voyage
+ *       when the key is set, bge-768 when its model files are on disk, both when both
+ *       ({@code dual}). A collection is embedded by the family its registered
+ *       {@code embedding_model} names, and one whose family is not built is refused with a
+ *       422; there is no fallback between families. With neither present the boot fails.</li>
  *   <li>{@code NX_EMBED_PROFILE} — optional, {@code voyage} or {@code bge} (RDR-210): the
  *       family new collections get. Seeds {@code nexus.embedding_profile}; unset keeps
  *       keyed-means-Voyage, keyless-means-bge; any other value fails the boot. A choice
@@ -135,7 +138,7 @@ public final class Main {
         // initializers, so the FIRST PgSession static call anywhere in the process runs the parse, and a malformed
         // value there arrives as ExceptionInInitializerError. This block is that first call on purpose: it needs
         // only the pool, and it runs before anything else that touches PgSession (LocalOnnxAdmission.fromEnv in
-        // the local-mode branch below, then the embedding-profile seed through TenantScope), so the one catch
+        // the local-model setup below, then the embedding-profile seed through TenantScope), so the one catch
         // below reports the failure as event=pg_session_env_invalid and exits 1 instead of letting a stack trace
         // escape main. MainPciWiringTest pins this order; nexus-43ulx.12 fix round (review I3).
         // nexus-4ktfm review fold: force NX_HNSW_EF_SEARCH validation NOW —
@@ -249,12 +252,13 @@ public final class Main {
 
         // Vector backend (RDR-155 P4a.2, bead nexus-1k8s1): pgvector serves every
         // vector route against the SAME Postgres the service already requires — no
-        // separate vector store process. Embedders route by collection prefix
-        // (Voyage when NX_VOYAGE_API_KEY is present, ONNX otherwise/fallback).
+        // separate vector store process. Embedders route by the collection's registered
+        // embedding_model: the Voyage family when NX_VOYAGE_API_KEY is present, the bge
+        // family when its files are on disk, both when both (no fallback between them).
         // PRODUCTION WIRING INVARIANT (P2.2 contract, recorded on nexus-1k8s1):
-        // PgVectorRepository takes the ROUTER constructor — EmbedderRouter through the
-        // plain-Embedder constructor would fall back to ONNX for ALL collections and
-        // break cloud-mode routing (caught only at the first upsert's dim check).
+        // PgVectorRepository takes the ROUTER constructor — wiring a single plain Embedder
+        // instead would embed ALL collections with that one model and break
+        // Voyage routing (caught only at the first upsert's dim check).
         String voyageKey = System.getenv("NX_VOYAGE_API_KEY");
         EmbedderRouter docEmbedRouter;
         EmbedderRouter qryEmbedRouter;

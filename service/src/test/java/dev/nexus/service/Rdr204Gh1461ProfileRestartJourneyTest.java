@@ -39,11 +39,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * RDR-204 Phase 1 (bead nexus-ft04v.9) — the GH #1461 profile-change journey,
  * end to end on the engine substrate, as ONE test that crosses a real
- * service restart: boot in ONNX mode, register + write real chunks to a
+ * service restart: boot with the bge model only (no key), register + write real chunks to a
  * {@code code} (bge-768) collection, then simulate the restart (RDR-204
  * Technical Design 1a: {@code nx config set} writes nothing — the restart
  * IS the profile write, modelled here exactly as {@code Main.java} performs
- * it, by constructing a NEW voyage-mode {@link EmbedderRouter} and calling
+ * it, by constructing a NEW {@code dual} {@link EmbedderRouter} and calling
  * {@link EmbedderRouter#seedEmbeddingProfile}) with a Voyage key, and proves:
  *
  * <ol>
@@ -54,15 +54,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       Technical Design 1a: "a profile change never touches an existing
  *       collection's row";</li>
  *   <li>the bge collection is STILL SEARCHABLE — a real vector search
- *       against it, using an embedder compatible with the row's OWN model
- *       (bge-768), returns the chunk written in step 1. {@code
- *       resolveEmbedderStrict} is not yet repointed at the catalog registry
- *       (that is Phase 2 item 2 — see the Phase 1 critique, T2
- *       nexus/critique-rdr-204-phase1-2b18f802f..be19f58b7), so this proves
- *       the DATA and the "route by the row's own model" CONTRACT (Technical
+ *       against it returns the chunk written in step 1. {@code
+ *       resolveEmbedderStrict} dispatches by the catalog row's OWN model
+ *       (bge-768), the "route by the row's own model" contract (Technical
  *       Design 1a: "reads... continue to route by the row's own model and
- *       are never refused") rather than an automatic dispatch this phase
- *       has not built yet;</li>
+ *       are never refused");</li>
  *   <li>a new write for the SAME content type and owner mints a SIBLING
  *       collection carrying the Voyage model — a real chunk lands there too
  *       (a hermetic stand-in embedder self-keyed to the {@code

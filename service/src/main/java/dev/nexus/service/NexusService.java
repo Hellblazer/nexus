@@ -450,8 +450,8 @@ public final class NexusService {
      * nexus-s71lr, deliverable 2).
      *
      * @param localEmbedActivitySupplier reads the live {@code
-     *        Bge768Embedder.activitySnapshot()} for the local-mode branch
-     *        (see {@code Main.java}); {@code null} in cloud/voyage mode or any
+     *        Bge768Embedder.activitySnapshot()} when bge is built
+     *        (see {@code Main.java}); {@code null} when bge is not built (Voyage-only) or any
      *        caller that has no local embedder to report on — {@code
      *        StatusHandler} reports {@code local_embed_activity: null} rather
      *        than fabricating a value.

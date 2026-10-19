@@ -141,7 +141,7 @@ public final class VersionHandler implements HttpHandler {
      * @param embedderRouter the doc-side router; supplies the
      *        nexus-pebfx.5 embedding-mode handshake fields
      *        ({@code embedding_mode}, {@code embedding_models}) so
-     *        {@code nx daemon service status} can show voyage|onnx-local
+     *        {@code nx daemon service status} can show voyage|onnx-local|dual
      *        without parsing DEVNULLed JAR logs. Null → "unknown".
      */
     public VersionHandler(DataSource dataSource, EmbedderRouter embedderRouter) {

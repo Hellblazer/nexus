@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * RDR-160 (bead nexus-1chpa) — LOCAL bge-768 ONNX embedder for the Java service.
  *
- * <p>The service's local-mode T3 embedder. Loads {@code BAAI/bge-base-en-v1.5}
+ * <p>The service's local T3 embedder (the {@code bge} family; in the {@code onnx-local} and {@code dual} shapes). Loads {@code BAAI/bge-base-en-v1.5}
  * (768-dim) via onnxruntime-java + DJL HuggingFace tokenizer and reproduces the
  * Python <b>fastembed</b> {@code TextEmbedding.embed()} output within tolerance
  * (parity gate {@link dev.nexus.service.Bge768ParityTest}, min cosine ≥ 0.9999).
@@ -202,7 +202,7 @@ public final class Bge768Embedder implements Embedder {
      * Wire the process-wide admission gate this embedder is served through, so
      * the progress log line and {@link #activitySnapshot()} can report REAL
      * queue-depth/thread-width instead of omitting them. Called exactly once,
-     * from {@code Main.java}'s local-mode branch, immediately after both this
+     * from {@code Main.java}'s local-model setup, immediately after both this
      * embedder and the {@link LocalOnnxAdmission} it will be wrapped by are
      * constructed — composition-root wiring, not a service locator (this class
      * never looks the gate up itself).
