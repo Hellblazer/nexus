@@ -21,6 +21,13 @@ This file keeps that wiring from rotting:
 * the stamp is written in a phase AFTER the generation it vouches for;
 * ``-Pprebuilt-jooq`` unbinds the stamp steps along with the codegen it replaces;
 * ``-Dnexus.jooq.regenerate=true`` is a real override of the skip.
+* the safety core is pinned piece by piece (the stamp-vs-hash comparison, the regenerate
+  guard, the loadfile path equal to the stamp-write path, the names file with the tool
+  versions in the checksum union, the delete-on-regenerate step, the hand-set-skip failure);
+* every changelog ``include``/``includeAll``/``sqlFile`` path resolves under ``db/``, the only
+  tree the hash covers.
+
+``tests/test_service_jooq_codegen_skip_behaviour.py`` runs the Ant logic itself.
 """
 
 from __future__ import annotations
@@ -74,11 +81,16 @@ def _phase(execution: ET.Element) -> str:
 
 
 def _target_text(execution: ET.Element) -> str:
-    target = execution.find("m:configuration/m:target", _NS)
-    assert target is not None, f"execution {execution.findtext('m:id', namespaces=_NS)} has no <target>"
-    text = ET.tostring(target, encoding="unicode")
-    # ElementTree re-serialises the pom's default namespace as ns0: prefixes.
-    return re.sub(r"(</?)ns\d+:", r"\1", re.sub(r'\sxmlns:ns\d+="[^"]*"', "", text))
+    """The execution's ``<target>`` as written in the pom (raw text: ElementTree would
+    rename the ``ant:unless`` namespace prefix this wiring uses)."""
+    exec_id = execution.findtext("m:id", namespaces=_NS)
+    for m in re.finditer(
+        r"<execution>\s*<id>" + re.escape(exec_id) + r"</id>.*?</execution>", _POM.read_text(encoding="utf-8"), re.DOTALL
+    ):
+        t = re.search(r"<target[^>]*>.*?</target>", m.group(), re.DOTALL)
+        if t:
+            return t.group()
+    raise AssertionError(f"execution {exec_id} has no <target>")
 
 
 def _wired(root: ET.Element) -> dict[str, ET.Element]:
@@ -191,3 +203,141 @@ def test_prebuilt_profile_unbinds_the_antrun_steps_with_the_codegen_it_replaces(
     wired = set(_wired(root))
     assert len(wired) == 3, f"expected hash + two stamp executions, found {sorted(wired)}"
     assert wired <= unbound
+
+
+# --- the safety core: the pieces whose loss turns the skip into a stale-tree generator ----------
+
+KINDS = ["main", "test"]
+EXEC_OF = {"main": MAIN, "test": TEST}
+
+
+def _condition(text: str, kind: str) -> str:
+    m = re.search(rf'<condition property="nexus\.jooq\.{kind}\.skip".*?</condition>', text, re.DOTALL)
+    assert m, f"no skip <condition> for {kind}"
+    return m.group()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_skip_decision_compares_the_stamp_with_the_hash_and_honours_the_override(kind: str) -> None:
+    cond = _condition(_target_text(_hash_execution(_pom())), kind)
+    assert 'value="true" else="false"' in cond
+    assert re.search(
+        rf'<equals arg1="\$\{{nexus\.jooq\.{kind}\.stamp\}}" arg2="\$\{{nexus\.jooq\.{kind}\.hash\}}"\s*/>', cond
+    ), f"{kind}: the decision no longer compares the loaded stamp with the hash"
+    assert '<not><istrue value="${nexus.jooq.regenerate}"/></not>' in cond, (
+        f"{kind}: -Dnexus.jooq.regenerate=true is not a guard")
+    assert "<and>" in cond, f"{kind}: the conditions must be conjoined"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_stamp_is_read_from_the_path_the_stamp_step_writes(kind: str) -> None:
+    root = _pom()
+    text = _target_text(_hash_execution(root))
+    stamp_dir = re.search(r'<property name="nexus\.jooq\.stamp\.dir" value="([^"]+)"', text).group(1)
+    load = re.search(rf'<loadfile property="nexus\.jooq\.{kind}\.stamp"\s+srcFile="([^"]+)"', text)
+    assert load, f"{kind}: the stamp is no longer loaded into nexus.jooq.{kind}.stamp"
+    read_path = load.group(1).replace("${nexus.jooq.stamp.dir}", stamp_dir)
+    write = re.search(r'<echo file="([^"]+)" message="([^"]+)"', _target_text(_stamp_execution(root, EXEC_OF[kind])))
+    assert write, f"{kind}: the stamp step no longer echoes a file"
+    assert read_path == write.group(1), f"{kind}: read {read_path} but the stamp step writes {write.group(1)}"
+    assert write.group(2) == "${" + HASH_PROP[EXEC_OF[kind]] + "}", "the stamp must be the hash"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_hash_covers_the_names_file_which_carries_the_versions(kind: str) -> None:
+    """The names file puts added/removed files and the -D-overridable versions into the digest."""
+    text = _target_text(_hash_execution(_pom()))
+    names = f"${{nexus.jooq.stamp.dir}}/{kind}.names"
+    union = re.search(rf'<checksum[^>]*totalproperty="nexus\.jooq\.{kind}\.hash".*?</checksum>', text, re.DOTALL)
+    assert union and f'<file file="{names}"/>' in union.group(), f"{kind}: the names file left the checksum union"
+    echo = re.search(rf'<echo file="{re.escape(names)}"\s+message="([^"]+)"', text)
+    assert echo, f"{kind}: nothing writes the names file"
+    for needed in ("${nexus.jooq.%s.names}" % kind, "${jooq.version}", "${postgresql.version}",
+                   "${testcontainers.version}"):
+        assert needed in echo.group(1), f"{kind}: {needed} is not in the hashed names file"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_regenerate_decision_deletes_the_stamp_before_the_plugin_runs(kind: str) -> None:
+    """THE INVARIANT: a stamp exists only while the tree matches it. Dropping this step brings
+    back the first-round ship-blocker (revert the inputs after a generate-sources-only run)."""
+    root = _pom()
+    execution = _hash_execution(root)
+    text = _target_text(execution)
+    assert 'xmlns:unless="ant:unless"' in text.split(">")[0], "the target lost the ant:unless namespace"
+    delete = re.search(
+        rf'<delete file="\$\{{nexus\.jooq\.stamp\.dir\}}/{kind}\.sha256"[^>]*'
+        rf'unless:true="\$\{{nexus\.jooq\.{kind}\.skip\}}"', text)
+    assert delete, f"{kind}: no delete of the stamp when the decision is not-skip"
+    assert delete.start() > text.index(f'<condition property="nexus.jooq.{kind}.skip"'), "delete before the decision"
+    assert LIFECYCLE.index(_phase(execution)) < LIFECYCLE.index(_phase(_codegen_config(root)[EXEC_OF[kind]]))
+
+
+def test_a_hand_set_skip_property_fails_the_build() -> None:
+    text = _target_text(_hash_execution(_pom()))
+    fail = re.search(r"<fail .*?</fail>", text, re.DOTALL)
+    assert fail, "a -Dnexus.jooq.<x>.skip would beat the hash decision (immutable Ant properties) unchallenged"
+    assert '<isset property="nexus.jooq.main.skip"/>' in fail.group()
+    assert '<isset property="nexus.jooq.test.skip"/>' in fail.group()
+    assert text.index("<fail ") < text.index("<condition property="), "the guard must run before the decisions"
+
+
+# --- every changelog reference resolves under the hashed db/ tree --------------------------------
+
+_SRC = _POM.parent / "src"
+_RESOURCE_ROOTS = (_SRC / "main" / "resources", _SRC / "test" / "resources")
+_CHANGELOG_REFERENCES = {
+    "include": "file", "includeAll": "path", "sqlFile": "path", "loadData": "file", "loadUpdateData": "file",
+}
+
+
+def _changelog_references() -> list[tuple[Path, str, str, bool]]:
+    """(changelog file, element, referenced path, relativeToChangelogFile) for every reference."""
+    found = []
+    for res in _RESOURCE_ROOTS:
+        for changelog in sorted((res / "db").rglob("*.xml")):
+            for el in ET.parse(changelog).getroot().iter():
+                tag = el.tag.rsplit("}", 1)[-1]
+                attr = _CHANGELOG_REFERENCES.get(tag)
+                if attr and el.get(attr):
+                    found.append((changelog, tag, el.get(attr), el.get("relativeToChangelogFile") == "true"))
+    return found
+
+
+def _resolves_under_db(changelog: Path, ref: str, relative: bool) -> bool:
+    if ref.startswith(("/", "classpath:", "file:", "http")) or ".." in Path(ref).parts:
+        return False
+    if relative:
+        hits = [(changelog.parent / ref).resolve()]
+    else:
+        if not ref.startswith("db/"):
+            return False
+        hits = [(r / ref).resolve() for r in _RESOURCE_ROOTS if (r / ref).exists()]
+    db_roots = [(r / "db").resolve() for r in _RESOURCE_ROOTS]
+    return bool(hits) and all(h.exists() and any(h.is_relative_to(d) for d in db_roots) for h in hits)
+
+
+def test_every_changelog_reference_resolves_under_db() -> None:
+    """The skip hashes src/{main,test}/resources/db/** only. A changelog reference that leaves db/
+    (another resources/ directory, classpath:, an absolute path, ..) would be edited without moving
+    the hash, and the generated sources would go stale silently."""
+    refs = _changelog_references()
+    assert len(refs) > 100, f"only {len(refs)} changelog references found: the scan is not looking at the changelogs"
+    bad = [f"{c.relative_to(_SRC)}: <{tag} {ref}>" for c, tag, ref, rel in refs if not _resolves_under_db(c, ref, rel)]
+    assert not bad, "changelog references outside the hashed db/ tree (or unresolvable):\n  " + "\n  ".join(bad)
+
+
+def test_the_reference_scan_rejects_a_reference_that_leaves_db(tmp_path: Path) -> None:
+    """Positive control: the rule is not a tautology."""
+    probe = _RESOURCE_ROOTS[0] / "db" / "changelog" / "db.changelog-master.xml"
+    assert _resolves_under_db(probe, "db/changelog/memory-001-baseline.xml", False)
+    assert not _resolves_under_db(probe, "db/changelog/no-such-file.xml", False)
+    assert not _resolves_under_db(probe, "sql/other.sql", False)
+    assert not _resolves_under_db(probe, "classpath:db/changelog/memory-001-baseline.xml", False)
+    assert not _resolves_under_db(probe, "../../../pom.xml", True)
+
+
+def test_the_codegen_master_changelogs_live_under_db() -> None:
+    for execution in _codegen_config(_pom()).values():
+        path = execution.findtext("m:configuration/m:liquibase/m:changeLogPath", namespaces=_NS)
+        assert path and path.startswith("db/"), f"codegen master changelog {path!r} is outside the hashed db/ tree"

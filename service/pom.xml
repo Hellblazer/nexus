@@ -657,28 +657,56 @@
                          published) boots pgvector/pgvector:pg17 per execution and exposes no tmpfs,
                          memory or command setting, so PGDATA sits on Docker's overlay (the host disk)
                          with no memory cap, twice per Maven invocation, outside PgContainerHelper.
+
                          This step hashes what the generation reads (this pom, which holds the jOOQ
-                         config, plus the changelog tree each execution applies) and compares it with
-                         the stamp the jooq-stamp-* steps write after a successful generation. A
-                         match with the generated .java files still on disk sets the plugin's skip.
+                         config; the changelog tree each execution applies; the jOOQ, PostgreSQL and
+                         Testcontainers versions, which a -D can change without touching the pom) and
+                         compares it with the stamp the jooq-stamp-* steps write. A match with the
+                         generated .java files still on disk sets the plugin's skip.
+
+                         THE INVARIANT: a stamp exists only while the generated tree matches it.
+                         When this step decides to regenerate it DELETES that stamp, before the plugin
+                         runs. The stamp is written only by the jooq-stamp-* steps, in phases after the
+                         generation. A regeneration that never reaches its stamp phase (generate-sources
+                         alone, Ctrl-C, a failed codegen, a -Dnexus.jooq.regenerate=true run killed
+                         mid-write) therefore leaves NO stamp, and the next build regenerates. Without
+                         the delete, putting the inputs back to the stamped state would skip over a tree
+                         generated from other inputs. A build that skips leaves its stamp alone, so
+                         `mvn compile` does not cost the following `mvn test` a regeneration.
+
                          `mvn clean`, any changelog or pom edit, or -Dnexus.jooq.regenerate=true
-                         regenerates; CI starts from a clean checkout, so it always does. The
-                         hash cannot see the floating pg17 image tag; -Dnexus.jooq.regenerate=true
-                         is the answer to that. tests/test_service_jooq_codegen_skip_lint.py pins
-                         the wiring. -Pprebuilt-jooq unbinds all three steps. -->
+                         regenerates; CI starts from a clean checkout, so it always does. The hash
+                         cannot see the floating pg17 image tag; -Dnexus.jooq.regenerate=true is the
+                         answer to that. nexus.jooq.main.skip and nexus.jooq.test.skip are this step's
+                         OUTPUT: setting one by hand would beat the decision (Ant properties are
+                         immutable) and the stamp step would then vouch for a tree nobody generated, so
+                         the step fails the build when either is set. To skip codegen on purpose use
+                         -Pprebuilt-jooq. The changelog hash covers src/{main,test}/resources/db/** only;
+                         tests/test_service_jooq_codegen_skip_lint.py pins that every changelog
+                         reference resolves under db/, and the wiring. The Ant logic itself is run by
+                         tests/test_service_jooq_codegen_skip_behaviour.py. -Pprebuilt-jooq unbinds all
+                         three steps. -->
                     <execution>
                         <id>jooq-inputs</id>
                         <phase>initialize</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
-                            <target>
+                            <target xmlns:unless="ant:unless">
+                                <fail message="nexus.jooq.main.skip and nexus.jooq.test.skip are computed by the jooq-inputs step from the input hash; do not set them. -Dnexus.jooq.regenerate=true forces a regeneration; -Pprebuilt-jooq skips codegen on purpose.">
+                                    <condition>
+                                        <or>
+                                            <isset property="nexus.jooq.main.skip"/>
+                                            <isset property="nexus.jooq.test.skip"/>
+                                        </or>
+                                    </condition>
+                                </fail>
                                 <property name="nexus.jooq.stamp.dir" value="${project.build.directory}/jooq-stamps"/>
                                 <mkdir dir="${nexus.jooq.stamp.dir}"/>
 
-                                <!-- main: hash, then decide. -->
+                                <!-- main: hash, decide, and drop the stamp when regenerating. -->
                                 <fileset id="nexus.jooq.main.inputs" dir="${project.basedir}">
                                     <include name="pom.xml"/>
-                                        <include name="src/main/resources/db/**"/>
+                                    <include name="src/main/resources/db/**"/>
                                 </fileset>
                                 <pathconvert property="nexus.jooq.main.names" pathsep="&#10;" dirsep="/">
                                     <sort>
@@ -687,7 +715,8 @@
                                     </sort>
                                     <map from="${project.basedir}/" to=""/>
                                 </pathconvert>
-                                <echo file="${nexus.jooq.stamp.dir}/main.names" message="${nexus.jooq.main.names}"/>
+                                <echo file="${nexus.jooq.stamp.dir}/main.names"
+                                      message="${nexus.jooq.main.names}&#10;jooq.version=${jooq.version}&#10;postgresql.version=${postgresql.version}&#10;testcontainers.version=${testcontainers.version}"/>
                                 <checksum algorithm="SHA-256" totalproperty="nexus.jooq.main.hash"
                                           forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/main-sums">
                                     <union>
@@ -712,12 +741,14 @@
                                         </resourcecount>
                                     </and>
                                 </condition>
+                                <delete file="${nexus.jooq.stamp.dir}/main.sha256" quiet="true"
+                                        unless:true="${nexus.jooq.main.skip}"/>
 
-                                <!-- test: hash, then decide. -->
+                                <!-- test: hash, decide, and drop the stamp when regenerating. -->
                                 <fileset id="nexus.jooq.test.inputs" dir="${project.basedir}">
                                     <include name="pom.xml"/>
-                                        <include name="src/main/resources/db/**"/>
-                                        <include name="src/test/resources/db/**"/>
+                                    <include name="src/main/resources/db/**"/>
+                                    <include name="src/test/resources/db/**"/>
                                 </fileset>
                                 <pathconvert property="nexus.jooq.test.names" pathsep="&#10;" dirsep="/">
                                     <sort>
@@ -726,7 +757,8 @@
                                     </sort>
                                     <map from="${project.basedir}/" to=""/>
                                 </pathconvert>
-                                <echo file="${nexus.jooq.stamp.dir}/test.names" message="${nexus.jooq.test.names}"/>
+                                <echo file="${nexus.jooq.stamp.dir}/test.names"
+                                      message="${nexus.jooq.test.names}&#10;jooq.version=${jooq.version}&#10;postgresql.version=${postgresql.version}&#10;testcontainers.version=${testcontainers.version}"/>
                                 <checksum algorithm="SHA-256" totalproperty="nexus.jooq.test.hash"
                                           forceoverwrite="yes" todir="${nexus.jooq.stamp.dir}/test-sums">
                                     <union>
@@ -751,6 +783,8 @@
                                         </resourcecount>
                                     </and>
                                 </condition>
+                                <delete file="${nexus.jooq.stamp.dir}/test.sha256" quiet="true"
+                                        unless:true="${nexus.jooq.test.skip}"/>
                             </target>
                         </configuration>
                     </execution>
