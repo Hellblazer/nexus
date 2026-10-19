@@ -7,6 +7,8 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,7 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -135,11 +138,11 @@ class PgVectorRepositoryDeleteAntiJoinTest {
     }
 
     private String chunkText(String collection, String chash) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES)
+                .select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(collection).and(CHUNKS.CHASH.eq(Chash.fromHex(chash).toBytes())))
+                .fetchAny(CHUNKS.CHUNK_TEXT);
         }
     }
 
@@ -152,12 +155,12 @@ class PgVectorRepositoryDeleteAntiJoinTest {
      * (collection, chash) under more than one tenant.
      */
     private String chunkTextForTenant(String tenant, String collection, String chash) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = '" + tenant
-                + "' AND collection = '" + collection
-                + "' AND chash = decode('" + chash + "', 'hex')");
-            return rs.next() ? rs.getString(1) : null;
+        try (var conn = pg.createConnection("")) {
+            return DSL.using(conn, SQLDialect.POSTGRES)
+                .select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                    .and(CHUNKS.CHASH.eq(Chash.fromHex(chash).toBytes())))
+                .fetchAny(CHUNKS.CHUNK_TEXT);
         }
     }
 

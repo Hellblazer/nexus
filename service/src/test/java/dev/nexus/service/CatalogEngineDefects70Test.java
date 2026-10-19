@@ -666,27 +666,24 @@ class CatalogEngineDefects70Test {
      * Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi).
      *
      * <p>nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
-     * — a bare {@code getString()} on a timestamptz column returns the JDBC driver's own
-     * default rendering (space-separated, offset without a colon), not the ISO string
-     * this test wrote. Render explicitly via the SAME fixed-width-micros to_char shape
-     * catalog-031's rollback USING clause uses, so this raw-SQL probe stays byte-exact
-     * against the ISO strings this file writes through updateDocument.
+     * — read back as an {@link java.time.OffsetDateTime} and rendered here in the
+     * fixed-width-micros UTC shape ({@code 2020-01-01T00:00:00.000000+00:00}) the ISO
+     * strings this file writes through updateDocument use, so the probe stays byte-exact
+     * against them.
      */
     private String rawIndexedAt(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "SELECT to_char(indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"') "
-                + "FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, tumbler);
-                try (var rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        throw new IllegalStateException("rawIndexedAt found no row for " + tumbler);
-                    }
-                    return rs.getString(1);
-                }
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.INDEXED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .fetch();
+            if (rows.isEmpty()) {
+                throw new IllegalStateException("rawIndexedAt found no row for " + tumbler);
             }
+            var indexedAt = rows.get(0).get(CATALOG_DOCUMENTS.INDEXED_AT);
+            return indexedAt == null ? null : indexedAt.withOffsetSameInstant(java.time.ZoneOffset.UTC)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'+00:00'"));
         }
     }
 
@@ -1333,17 +1330,14 @@ class CatalogEngineDefects70Test {
     private void forceStaleChunkCount(String tumbler, int staleCount) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "UPDATE nexus.catalog_documents SET chunk_count = ? "
-                + "WHERE tenant_id = ? AND tumbler = ?")) {
-                ps.setInt(1, staleCount);
-                ps.setString(2, TENANT);
-                ps.setString(3, tumbler);
-                int n = ps.executeUpdate();
-                if (n != 1) {
-                    throw new IllegalStateException(
-                        "forceStaleChunkCount seeded " + n + " rows for " + tumbler + ", expected 1");
-                }
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+                .update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, staleCount)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .execute();
+            if (n != 1) {
+                throw new IllegalStateException(
+                    "forceStaleChunkCount seeded " + n + " rows for " + tumbler + ", expected 1");
             }
         }
     }

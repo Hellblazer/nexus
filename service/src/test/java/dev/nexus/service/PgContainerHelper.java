@@ -1727,6 +1727,27 @@ public final class PgContainerHelper {
     }
 
     /**
+     * {@code LOCK TABLE table IN mode MODE} (nexus-cbo4a batch 6) through
+     * {@code nexus_test.lock_table(text, text)} (db.changelog-test-objects.xml), the same server-side wrapper idiom
+     * as {@link #setForceRls}: jOOQ has no LOCK clause. The lock is taken in the connection's open transaction and
+     * held until it ends, so {@code conn} must have {@code autoCommit=false} for the lock to outlive the call.
+     * {@code table} is a generated jOOQ {@link Table}, rendered through {@code ctx.render(...)} and cast to
+     * {@code regclass} inside the function; {@code mode} is checked there against the eight PostgreSQL lock modes.
+     * Called as a plain function ({@code DSL.function}), not through the generated {@code Routines}, so a stale
+     * generated-test-sources tree does not stop this from compiling.
+     *
+     * @param conn  the connection whose transaction takes the lock
+     * @param table the generated jOOQ table to lock (e.g. {@code Tables.SERVICE_TOKENS})
+     * @param mode  a PostgreSQL table lock mode, e.g. {@code "SHARE"} or {@code "ACCESS EXCLUSIVE"}
+     */
+    public static void lockTable(Connection conn, Table<?> table, String mode) {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function(DSL.name("nexus_test", "lock_table"), SQLDataType.BOOLEAN,
+                DSL.val(ctx.render(table)), DSL.val(mode)))
+            .fetch();
+    }
+
+    /**
      * {@code ALTER TABLE .. DROP CONSTRAINT IF EXISTS ..} (nexus-cbo4a batch 11) --
      * a genuinely dangling manifest row can only be seeded by momentarily dropping its
      * FK, inserting the dangling row, then re-adding the constraint NOT VALID (see

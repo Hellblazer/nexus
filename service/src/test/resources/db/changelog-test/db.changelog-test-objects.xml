@@ -496,4 +496,29 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.lateral_cross_rows_1024(text, text)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-lock-table" author="nexus-cbo4a">
+        <comment>nexus_test.lock_table(text, text): plpgsql wrapper for LOCK TABLE (nexus-cbo4a batch 6) for
+        PgContainerHelper#lockTable. jOOQ has no LOCK clause. p_table is text cast to regclass inside the body, so
+        PostgreSQL resolves the identity and there is no string to validate; p_mode is checked against the eight
+        PostgreSQL lock modes before it reaches format(). The lock is taken inside the caller's transaction and
+        lives until it ends, which is the point: a caller holds it open on a connection of its own. Returns true so
+        the call is an ordinary one-column select. SECURITY INVOKER so the caller's own privilege authorizes the LOCK.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.lock_table(p_table text, p_mode text) RETURNS boolean
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    IF p_mode NOT IN ('ACCESS SHARE', 'ROW SHARE', 'ROW EXCLUSIVE', 'SHARE UPDATE EXCLUSIVE',
+                      'SHARE', 'SHARE ROW EXCLUSIVE', 'EXCLUSIVE', 'ACCESS EXCLUSIVE') THEN
+        RAISE EXCEPTION 'nexus_test.lock_table: not a lock mode: %', p_mode;
+    END IF;
+    EXECUTE format('LOCK TABLE %s IN %s MODE', p_table::regclass, p_mode);
+    RETURN true;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.lock_table(text, text)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

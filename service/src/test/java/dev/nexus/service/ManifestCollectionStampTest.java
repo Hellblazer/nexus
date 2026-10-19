@@ -13,7 +13,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 
@@ -609,8 +608,8 @@ class ManifestCollectionStampTest {
         // constraint is independent of the RLS mechanism this changeset used
         // to rely on to reach the row at all.
         String chNull = "d".repeat(64);
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, false);
             try {
                 var ex = org.junit.jupiter.api.Assertions.assertThrows(
                     DataAccessException.class, () ->
@@ -626,7 +625,7 @@ class ManifestCollectionStampTest {
                     .as("NOT NULL is a column constraint -- FORCE RLS being off must not exempt it")
                     .isEqualTo("23502");
             } finally {
-                st.execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
+                PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, true);
             }
         }
     }

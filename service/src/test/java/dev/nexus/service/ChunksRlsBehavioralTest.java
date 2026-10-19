@@ -5,7 +5,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -391,8 +390,10 @@ class ChunksRlsBehavioralTest {
         // No embedding_<dim> guard needed: chash is dim-suffixed, so the PK already
         // scopes this DELETE to exactly one row.
         int deleted = tenantScope.withTenant(TENANT_B, ctx ->
-            ctx.execute("DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash = decode(?, 'hex') AND collection = ?",
-                        padChash("chash-del-own-" + dim), col));
+            ctx.deleteFrom(CHUNKS)
+                .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(padChash("chash-del-own-" + dim))))
+                .and(CHUNKS.COLLECTION.eq(col))
+                .execute());
         assertThat(deleted)
             .as("cross-tenant DELETE must affect exactly 0 rows (RLS makes the row invisible)")
             .isEqualTo(0);
@@ -404,8 +405,10 @@ class ChunksRlsBehavioralTest {
 
         // The owner can delete its own row: exactly 1 affected.
         int ownDelete = tenantScope.withTenant(TENANT_A, ctx ->
-            ctx.execute("DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash = decode(?, 'hex') AND collection = ?",
-                        padChash("chash-del-own-" + dim), col));
+            ctx.deleteFrom(CHUNKS)
+                .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(padChash("chash-del-own-" + dim))))
+                .and(CHUNKS.COLLECTION.eq(col))
+                .execute());
         assertThat(ownDelete)
             .as("owner DELETE must affect exactly 1 row")
             .isEqualTo(1);

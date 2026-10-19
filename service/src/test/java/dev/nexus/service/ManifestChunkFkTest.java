@@ -24,6 +24,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -279,10 +280,10 @@ class ManifestChunkFkTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertThatThrownBy(() -> su.createStatement().executeUpdate(
-                    "DELETE FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' "
-                    + "AND collection = '" + COLLECTION + "' "
-                    + "AND chash = decode('" + chash + "', 'hex')"))
+            assertThatThrownBy(() -> DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.COLLECTION.eq(COLLECTION),
+                        CHUNKS.CHASH.eq(Chash.fromHex(chash).toBytes()))
+                    .execute())
                 .as("an undeferred DELETE of a chunk still referenced by a manifest row "
                     + "must be rejected by " + FK_NAME + " at statement time")
                 .satisfies(t -> assertThat(rootOfViolatedForeignKey(t.getMessage()))
@@ -332,9 +333,10 @@ class ManifestChunkFkTest {
         assertThat(catalogRepo.deleteDocument(TENANT, doc)).isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + doc + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now().minusDays(60))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc)))
+                .execute();
         }
 
         try (Connection su = pg.createConnection("")) {

@@ -5,6 +5,7 @@ import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.jooq.exception.DataAccessException;
@@ -18,6 +19,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.data.Offset.offset;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -746,12 +748,14 @@ class TaxonomyRepositoryTest {
         repo.upsertTopicLink(TENANT_A, t1, t2, 1, "[\"zeta\",\"alpha\"]");
 
         try (java.sql.Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT link_types::text AS lt FROM nexus.topic_links "
-                + "WHERE tenant_id = '" + TENANT_A + "' "
-                + "AND from_topic_id = " + t1 + " AND to_topic_id = " + t2);
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("lt"))
+            String lt = DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPIC_LINKS.LINK_TYPES.cast(SQLDataType.CLOB))
+                .from(TOPIC_LINKS)
+                .where(TOPIC_LINKS.TENANT_ID.eq(TENANT_A)
+                    .and(TOPIC_LINKS.FROM_TOPIC_ID.eq(t1)).and(TOPIC_LINKS.TO_TOPIC_ID.eq(t2)))
+                .fetchOne(0, String.class);
+            assertThat(lt).isNotNull();
+            assertThat(lt)
                 .as("jsonb array canonical text inserts a space after each comma but "
                     + "preserves element order — zeta stays before alpha")
                 .isEqualTo("[\"zeta\", \"alpha\"]");
@@ -785,12 +789,14 @@ class TaxonomyRepositoryTest {
         repo.refreshProjectionLinks(TENANT_A);
 
         try (java.sql.Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT link_types::text AS lt FROM nexus.topic_links "
-                + "WHERE tenant_id = '" + TENANT_A + "' "
-                + "AND from_topic_id = " + Math.min(t1, t2) + " AND to_topic_id = " + Math.max(t1, t2));
-            assertThat(rs.next()).isTrue();
-            String lt = rs.getString("lt");
+            String lt = DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPIC_LINKS.LINK_TYPES.cast(SQLDataType.CLOB))
+                .from(TOPIC_LINKS)
+                .where(TOPIC_LINKS.TENANT_ID.eq(TENANT_A)
+                    .and(TOPIC_LINKS.FROM_TOPIC_ID.eq(Math.min(t1, t2)))
+                    .and(TOPIC_LINKS.TO_TOPIC_ID.eq(Math.max(t1, t2))))
+                .fetchOne(0, String.class);
+            assertThat(lt).isNotNull();
             assertThat(lt).as("original cooccurrence type must survive the merge").contains("cooccurrence");
             assertThat(lt).as("projection type must be spliced in by the merge").contains("projection");
         }
@@ -1113,9 +1119,8 @@ class TaxonomyRepositoryTest {
         com.zaxxer.hikari.HikariDataSource rawDs = new com.zaxxer.hikari.HikariDataSource(rawConfig);
         try (Connection c = rawDs.getConnection()) {
             c.setAutoCommit(true);
-            var rs = c.createStatement().executeQuery(
-                "SELECT id FROM nexus.topics WHERE label = 'fail-closed-check'");
-            assertThat(rs.next()).as("unset GUC must return 0 rows (fail-closed)").isFalse();
+            assertThat(DSL.using(c, SQLDialect.POSTGRES).fetchExists(TOPICS, TOPICS.LABEL.eq("fail-closed-check")))
+                .as("unset GUC must return 0 rows (fail-closed)").isFalse();
         } finally {
             rawDs.close();
         }

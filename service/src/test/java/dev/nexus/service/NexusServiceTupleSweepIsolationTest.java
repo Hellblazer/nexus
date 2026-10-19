@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.UUID;
 
 import static dev.nexus.service.NexusService.TupleSweepIncompleteCause.TENANT_ERROR;
@@ -209,10 +210,11 @@ class NexusServiceTupleSweepIsolationTest {
         // not isolate the two arms.
         try (Connection admin = pg.createConnection("")) {
             admin.setAutoCommit(true);
-            admin.createStatement().execute("REVOKE SELECT ON nexus.tuples FROM " + SVC_ROLE);
-            admin.createStatement().execute("GRANT SELECT (id, tenant_id, subspace, template, keys, dims, "
-                    + "claim_state, claimant, claim_id, lease_until, attempts, consumed_at, consumed_by, "
-                    + "expires_at, created_at) ON nexus.tuples TO " + SVC_ROLE);
+            DSL.using(admin, SQLDialect.POSTGRES)
+                .revoke(DSL.privilege("SELECT")).on(TUPLES).from(DSL.role(SVC_ROLE)).execute();
+            PgContainerHelper.runSuperuserTestChangelog(admin,
+                "db/changelog-test/db.changelog-test-tuples-column-select.xml",
+                "databasechangelog_test_tuples_column_select", Map.of("role", SVC_ROLE));
         }
         try {
             NexusService.TupleSweepRunResult result = service.runScheduledTupleSweep(
@@ -235,7 +237,8 @@ class NexusServiceTupleSweepIsolationTest {
         } finally {
             try (Connection admin = pg.createConnection("")) {
                 admin.setAutoCommit(true);
-                admin.createStatement().execute("GRANT SELECT ON nexus.tuples TO " + SVC_ROLE);
+                DSL.using(admin, SQLDialect.POSTGRES)
+                    .grant(DSL.privilege("SELECT")).on(TUPLES).to(DSL.role(SVC_ROLE)).execute();
             }
         }
 

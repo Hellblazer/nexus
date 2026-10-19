@@ -3,10 +3,11 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
-import dev.nexus.service.vectors.DimTables;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -17,9 +18,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -267,19 +268,24 @@ class RemapHandlerTest {
             ]}""".formatted(src, chash("h5v2"), tgt));
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT new_chash, provenance, COUNT(*) OVER () AS total " +
-                "FROM nexus.chash_remap WHERE tenant_id = '" + TENANT + "' " +
-                "AND source_collection = '" + src + "' AND old_id = 'legacy-1'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("total"))
+            Field<Integer> total = DSL.count().over().as("total");
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CHASH_REMAP.NEW_CHASH, CHASH_REMAP.PROVENANCE, total)
+                .from(CHASH_REMAP)
+                .where(CHASH_REMAP.TENANT_ID.eq(TENANT)
+                    .and(CHASH_REMAP.SOURCE_COLLECTION.eq(src))
+                    .and(CHASH_REMAP.OLD_ID.eq("legacy-1")))
+                .fetch();
+            assertThat(rows).isNotEmpty();
+            var row = rows.get(0);
+            assertThat(row.get(total))
                 .as("upsert on the natural key — one row, not two")
                 .isEqualTo(1);
-            assertThat(rs.getBytes("new_chash"))
+            assertThat(row.get(CHASH_REMAP.NEW_CHASH))
                 .as("re-recording replaces the fact (deterministic resume) — new_chash is "
                     + "bytea now (RDR-194 D3), so this compares the decoded storage form")
                 .isEqualTo(dev.nexus.service.db.Chash.fromHex(chash("h5v2")).toBytes());
-            assertThat(rs.getString("provenance")).isEqualTo("resume");
+            assertThat(row.get(CHASH_REMAP.PROVENANCE)).isEqualTo("resume");
         }
     }
 
@@ -305,11 +311,13 @@ class RemapHandlerTest {
         assertThat(resp.statusCode()).isEqualTo(200);
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT new_chash FROM nexus.chash_remap WHERE tenant_id = '" + TENANT + "' " +
-                "AND source_collection = '" + src + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getBytes("new_chash"))
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CHASH_REMAP.NEW_CHASH)
+                .from(CHASH_REMAP)
+                .where(CHASH_REMAP.TENANT_ID.eq(TENANT).and(CHASH_REMAP.SOURCE_COLLECTION.eq(src)))
+                .fetch();
+            assertThat(rows).isNotEmpty();
+            assertThat(rows.get(0).get(CHASH_REMAP.NEW_CHASH))
                 .as("RDR-180: the full 64-hex digest is the canonical chash — no [:32] "
                     + "truncation; new_chash is bytea now (RDR-194 D3), so this compares "
                     + "the decoded storage form")
@@ -561,24 +569,21 @@ class RemapHandlerTest {
     private Map<String, Object> membership(String token, String tenant,
                                            String src, String tgt) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*)::bigint AS mapped_total, "
-                + "count(*) FILTER (WHERE EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
-                + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = r.new_chash))::bigint AS present_count "
-                + "FROM nexus.chash_remap r "
-                + "WHERE r.tenant_id = ? AND r.source_collection = ? AND r.target_collection = ?");
-            ps.setString(1, tenant);
-            ps.setString(2, tgt);
-            ps.setString(3, tenant);
-            ps.setString(4, src);
-            ps.setString(5, tgt);
-            var rs = ps.executeQuery();
-            assertThat(rs.next()).isTrue();
-            // int, not long: matches what the deleted HTTP endpoint's Jackson
-            // deserialization produced (small counts decode as Integer), which
-            // every call site below asserts against with bare int literals.
-            return Map.of("mapped_total", (int) rs.getLong("mapped_total"),
-                          "present_count", (int) rs.getLong("present_count"));
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var r = CHASH_REMAP.as("r");
+            var c = CHUNKS.as("c");
+            Field<Long> mappedTotal = DSL.count().cast(SQLDataType.BIGINT).as("mapped_total");
+            Field<Long> presentCount = DSL.count()
+                .filterWhere(DSL.exists(ctx.selectOne().from(c)
+                    .where(c.TENANT_ID.eq(tenant).and(c.COLLECTION.eq(tgt)).and(c.CHASH.eq(r.NEW_CHASH)))))
+                .cast(SQLDataType.BIGINT).as("present_count");
+            var rec = ctx.select(mappedTotal, presentCount)
+                .from(r)
+                .where(r.TENANT_ID.eq(tenant).and(r.SOURCE_COLLECTION.eq(src)).and(r.TARGET_COLLECTION.eq(tgt)))
+                .fetchOne();
+            assertThat(rec).isNotNull();
+            return Map.of("mapped_total", (int) (long) rec.get(mappedTotal),
+                          "present_count", (int) (long) rec.get(presentCount));
         }
     }
 

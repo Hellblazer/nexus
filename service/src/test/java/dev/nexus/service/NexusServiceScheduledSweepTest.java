@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Timeout;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -218,11 +217,7 @@ class NexusServiceScheduledSweepTest {
         // tenant-enumeration SELECT, so this isolates the per-arm bound.
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            try (Statement st = blocker.createStatement()) {
-                // KEPT RAW: no typed jOOQ LOCK clause exists (every LOCK TABLE site in
-                // the tree is raw too, per nexus-cbo4a batch 13 group B's grep).
-                st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
-            }
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, "SHARE");
 
             long startedAt = System.nanoTime();
             NexusService.SweepCounts counts =
@@ -299,11 +294,7 @@ class NexusServiceScheduledSweepTest {
 
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            try (Statement st = blocker.createStatement()) {
-                // KEPT RAW: no typed jOOQ LOCK clause exists (every LOCK TABLE site in
-                // the tree is raw too, per nexus-cbo4a batch 13 group B's grep).
-                st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
-            }
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, "SHARE");
 
             for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
                 service.runScheduledSweep(now, Duration.ofMillis(500));
@@ -347,10 +338,7 @@ class NexusServiceScheduledSweepTest {
 
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
-            try (Statement st = blocker.createStatement()) {
-                // KEPT RAW: no typed jOOQ LOCK clause exists (see the SHARE MODE sites above).
-                st.execute("LOCK TABLE nexus.service_tokens IN ACCESS EXCLUSIVE MODE");
-            }
+            PgContainerHelper.lockTable(blocker, SERVICE_TOKENS, "ACCESS EXCLUSIVE");
 
             long startedAt = System.nanoTime();
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->

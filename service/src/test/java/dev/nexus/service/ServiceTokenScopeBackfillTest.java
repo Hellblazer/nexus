@@ -9,6 +9,7 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -51,26 +52,29 @@ class ServiceTokenScopeBackfillTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Pre-003 shape, verbatim from service-tokens-001 + 002.
-            su.createStatement().execute("CREATE SCHEMA IF NOT EXISTS nexus");
-            su.createStatement().execute(
-                "CREATE TABLE nexus.service_tokens ("
-                + "  token_hash  TEXT        NOT NULL,"
-                + "  tenant_id   TEXT        NOT NULL,"
-                + "  label       TEXT,"
-                + "  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),"
-                + "  expires_at  TIMESTAMPTZ,"
-                + "  revoked_at  TIMESTAMPTZ,"
-                + "  CONSTRAINT service_tokens_pk PRIMARY KEY (token_hash))");
-            su.createStatement().execute(
-                "CREATE UNIQUE INDEX idx_service_tokens_single_root "
-                + "ON nexus.service_tokens (label) WHERE label = 'bootstrap-legacy-token'");
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            var tokens = DSL.table(DSL.name("nexus", "service_tokens"));
+            var label = DSL.field(DSL.name("label"), SQLDataType.CLOB);
+            dsl.createSchemaIfNotExists(DSL.name("nexus")).execute();
+            dsl.createTable(tokens)
+                .column("token_hash", SQLDataType.CLOB.nullable(false))
+                .column("tenant_id", SQLDataType.CLOB.nullable(false))
+                .column("label", SQLDataType.CLOB)
+                .column("created_at", SQLDataType.TIMESTAMPWITHTIMEZONE.nullable(false).defaultValue(DSL.currentOffsetDateTime()))
+                .column("expires_at", SQLDataType.TIMESTAMPWITHTIMEZONE)
+                .column("revoked_at", SQLDataType.TIMESTAMPWITHTIMEZONE)
+                .constraint(DSL.constraint("service_tokens_pk").primaryKey("token_hash"))
+                .execute();
+            dsl.createUniqueIndex("idx_service_tokens_single_root")
+                .on(tokens, label)
+                .where(label.eq("bootstrap-legacy-token"))
+                .execute();
             // A live cluster's rows: the operator credential + an ordinary tenant token.
             // Literal (fake) hashes, not a real token's sha256 -- this test asserts on
             // the exact hash string, so it inserts via the typed jOOQ DSL directly
             // rather than PgContainerHelper.seedServiceToken (which always hashes its
             // token argument). Only the three PRE-003 columns are referenced; the table
             // built above genuinely has no scope column yet at this point in the test.
-            var dsl = DSL.using(su, SQLDialect.POSTGRES);
             dsl.insertInto(SERVICE_TOKENS)
                 .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
                 .values("upgrade-root-hash", "default", "bootstrap-legacy-token")

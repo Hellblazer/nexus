@@ -204,9 +204,12 @@ class CatalogPurgeTrashTest {
         // FRESH's tombstone stays at "just now".
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + DOC_AGED_TOMB + "'");
+            // A Java-clock value, as in the cross-collection fixture below; the 60-day margin against the
+            // 30-day older_than threshold leaves no room for JVM/Postgres clock drift to matter.
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(DOC_AGED_TOMB)))
+                .execute();
         }
     }
 
@@ -310,6 +313,14 @@ class CatalogPurgeTrashTest {
             return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CATALOG_LINKS,
                 CATALOG_LINKS.TENANT_ID.eq(TENANT), CATALOG_LINKS.TO_TUMBLER.eq(toTumbler));
         }
+    }
+
+    /** Sets one tombstone's {@code deleted_at} to {@code deletedAt}. */
+    private static void backdate(DSLContext dsl, String tumbler, OffsetDateTime deletedAt) {
+        dsl.update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.DELETED_AT, deletedAt)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .execute();
     }
 
     /** Server-captured {@code NOW()} (nexus-ff85q precedent: pin against a SQL-side
@@ -501,18 +512,10 @@ class CatalogPurgeTrashTest {
         java.time.OffsetDateTime tRef = capturedNow();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "UPDATE nexus.catalog_documents SET deleted_at = ? WHERE tenant_id = ? AND tumbler = ?");
-            ps.setObject(1, tRef.minusDays(olderThanDays));
-            ps.setString(2, TENANT);
-            ps.setString(3, DOC_BOUNDARY_AT);
-            ps.executeUpdate();
-            ps.setObject(1, tRef.minusDays(olderThanDays).plusSeconds(30));
-            ps.setString(3, DOC_BOUNDARY_INSIDE);
-            ps.executeUpdate();
-            ps.setObject(1, tRef.minusDays(olderThanDays).minusSeconds(30));
-            ps.setString(3, DOC_BOUNDARY_OUTSIDE);
-            ps.executeUpdate();
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            backdate(dsl, DOC_BOUNDARY_AT, tRef.minusDays(olderThanDays));
+            backdate(dsl, DOC_BOUNDARY_INSIDE, tRef.minusDays(olderThanDays).plusSeconds(30));
+            backdate(dsl, DOC_BOUNDARY_OUTSIDE, tRef.minusDays(olderThanDays).minusSeconds(30));
         }
 
         // nexus-erwvd parity setup: preview immediately before execute, on this exact
