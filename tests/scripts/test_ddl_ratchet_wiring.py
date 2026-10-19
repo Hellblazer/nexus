@@ -7,8 +7,12 @@ goes missing, loses the flag that makes it correct, or drifts from the shard mat
 prove each is caught, not merely that today's files are consistent.
 
 * ``ci.yml``: the ``test`` shards write their report to a per-job directory, run ``check --advisory``
-  and upload it; ``pytest-gate`` downloads every shard's report and runs ``fan-in`` (never advisory) with
-  ``--shards`` equal to the matrix length. A shard's mix is not the run's, so only the fan-in gates.
+  and upload it; ``pytest-gate`` downloads every shard's report and runs ``fan-in`` with ``--shards``
+  equal to the matrix length, after the verdict step. A shard's mix is not the run's, so only the fan-in
+  gates, and it gates only once armed: the fan-in is ``--advisory`` (and its checkout, download and run
+  steps ``continue-on-error``) exactly while ``[python_unit] measured_on`` is absent from
+  ``tests/ddl_ceiling.toml``, the same rule as the Java steps below. Until real Linux ceilings exist the
+  gate must not be able to turn develop red.
 * ``service-ci.yml``: each Java step names its run (``-Dnexus.ddl.run=<id>-<suite>``) and its ratchet
   step reads exactly that run, so a persistent pool workspace cannot mix runs. A Java step is advisory
   exactly while its ceilings in ``tests/ddl_ceiling.toml`` are still ``"measure"``: it must not stay
@@ -42,8 +46,14 @@ def _run_steps(doc: dict, job: str, needle: str) -> list[dict]:
     return [s for s in _steps(doc, job) if needle in str(s.get("run", ""))]
 
 
-def python_wiring_problems(ci_text: str) -> list[str]:
+def _armed(ceilings_text: str) -> bool:
+    marker = tomllib.loads(ceilings_text).get("python_unit", {}).get("measured_on")
+    return isinstance(marker, str) and bool(marker.strip())
+
+
+def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
     doc = yaml.safe_load(ci_text)
+    armed = _armed(ceilings_text)
     problems: list[str] = []
     n = len(doc["jobs"]["test"]["strategy"]["matrix"]["shard"])
 
@@ -58,6 +68,8 @@ def python_wiring_problems(ci_text: str) -> list[str]:
         problems.append("test: the per-shard check is not --advisory; a shard's mix flaps its own ceiling (nexus-2rhif)")
     elif "nx-ddl-report.json" not in shard[0]["run"]:
         problems.append("test: the per-shard check does not read nx-ddl-report.json")
+    if shard and "3.12" not in str(shard[0].get("if", "")):
+        problems.append("test: the per-shard check is not limited to the 3.12 leg (the report it reads is the 3.12 leg's)")
     uploads = [s for s in _steps(doc, "test") if str(s.get("uses", "")).startswith("actions/upload-artifact@")
                and str(s.get("with", {}).get("name", "")).startswith("ddl-report-shard-")]
     if len(uploads) != 1:
@@ -77,21 +89,46 @@ def python_wiring_problems(ci_text: str) -> list[str]:
     else:
         step = gate[0]
         run = step["run"]
-        if "--advisory" in run or step.get("continue-on-error"):
-            problems.append("pytest-gate: the fan-in is the gate and cannot be advisory or continue-on-error")
+        advisory = "--advisory" in run
+        if armed and advisory:
+            problems.append("pytest-gate: the ceilings are measured (measured_on is set) but the fan-in is still --advisory: the gate is switched off")
+        if not armed and not advisory:
+            problems.append("pytest-gate: the fan-in is enforced but [python_unit] measured_on is absent: the ceilings were not measured on CI, "
+                            "so it could turn develop red on an estimate (add --advisory, or measure and arm in one commit)")
         m = re.search(r"--shards\s+(\d+)", run)
         if not m or int(m.group(1)) != n:
             problems.append(f"pytest-gate: fan-in --shards is {m.group(1) if m else 'missing'} but the matrix has {n} shards")
         if "--suite python_unit" not in run or "ddl-reports/*/nx-ddl-report.json" not in run:
             problems.append("pytest-gate: the fan-in does not read every downloaded shard report")
-        if "code == 'true'" not in str(step.get("if", "")):
-            problems.append("pytest-gate: the fan-in is not limited to runs whose shards ran (code == 'true')")
+        verdict = [i for i, s in enumerate(_steps(doc, "pytest-gate")) if 'echo "pytest-gate: PASS"' in str(s.get("run", ""))]
+        position = _steps(doc, "pytest-gate").index(step)
+        if len(verdict) != 1:
+            problems.append(f"pytest-gate: expected one verdict step (it echoes pytest-gate: PASS), found {len(verdict)}")
+        elif position < verdict[0]:
+            problems.append("pytest-gate: the fan-in runs before the verdict step, so it would judge a matrix that has not passed")
+        for s_ in (step, *_gate_inputs(doc)):
+            cond = str(s_.get("if", ""))
+            where = s_.get("name", "?")
+            if "code == 'true'" not in cond:
+                problems.append(f"pytest-gate: {where!r} is not limited to runs whose shards ran (code == 'true')")
+            if re.search(r"\b(always|failure|cancelled)\(\)", cond):
+                problems.append(f"pytest-gate: {where!r} can run after a failed verdict ({cond!r}); it must keep the implicit success()")
+            if armed and s_.get("continue-on-error"):
+                problems.append(f"pytest-gate: {where!r} is continue-on-error but the gate is armed: its failure would pass")
+            if not armed and not s_.get("continue-on-error"):
+                problems.append(f"pytest-gate: {where!r} is not continue-on-error while the gate is advisory: a wiring slip would red the job")
     downloads = [s for s in _steps(doc, "pytest-gate") if str(s.get("uses", "")).startswith("actions/download-artifact@")]
     if len(downloads) != 1 or downloads[0].get("with", {}).get("pattern") != "ddl-report-shard-*":
         problems.append("pytest-gate: it does not download ddl-report-shard-*")
     if not any(str(s.get("uses", "")).startswith("actions/checkout@") for s in _steps(doc, "pytest-gate")):
         problems.append("pytest-gate: no checkout, so the ratchet script and its ceilings are not there")
     return problems
+
+
+def _gate_inputs(doc: dict) -> list[dict]:
+    """The checkout and the download that feed the fan-in in pytest-gate."""
+    return [s for s in _steps(doc, "pytest-gate")
+            if str(s.get("uses", "")).startswith(("actions/checkout@", "actions/download-artifact@"))]
 
 
 def java_wiring_problems(service_ci_text: str, ceilings_text: str, pom_text: str) -> list[str]:
@@ -134,7 +171,7 @@ def java_wiring_problems(service_ci_text: str, ceilings_text: str, pom_text: str
 
 
 def test_ci_yml_wires_the_python_ratchet() -> None:
-    assert python_wiring_problems(CI_YML.read_text()) == []
+    assert python_wiring_problems(CI_YML.read_text(), CEILINGS.read_text()) == []
 
 
 def test_service_ci_yml_wires_the_java_ratchet() -> None:
@@ -149,24 +186,79 @@ def _mutate(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
+_CHECK_IF = "if: success() && matrix.python-version == '3.12'\n        run: python3 scripts/ddl_ratchet.py check"
+_UPLOAD_IF = ("- name: Upload this shard's DDL report (read by the fan-in in pytest-gate)\n"
+              "        if: success() && matrix.python-version == '3.12'")
+_FAN_IN_IF = "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: needs.changes.outputs.code == 'true'"
+_DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.changes.outputs.code == 'true'"
+
+
 @pytest.mark.parametrize(
     ("old", "new", "expect"),
     [
         ("python3 scripts/ddl_ratchet.py fan-in", "python3 scripts/ddl_ratchet.py frobnicate", "expected one fan-in step"),
         ("--suite python_unit --shards 6 ", "--suite python_unit --shards 5 ", "--shards is 5 but the matrix has 6"),
-        ("--suite python_unit --shards 6 ", "--suite python_unit --shards 6 --advisory ", "cannot be advisory"),
         ('--report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json" --advisory', '--report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json"', "is not --advisory"),
         ('export NX_DDL_REPORT_DIR="$RUNNER_TEMP/ddl-report"', 'echo no-report-dir', "does not export NX_DDL_REPORT_DIR"),
         ("name: ddl-report-shard-${{ matrix.shard }}", "name: ddl-report", "expected one ddl-report-shard-* upload"),
         ("          if-no-files-found: error\n          # A re-run", "          if-no-files-found: warn\n          # A re-run", "must fail its upload"),
         ("pattern: ddl-report-shard-*", "pattern: something-else", "does not download ddl-report-shard-*"),
+        (_CHECK_IF, "if: success()\n        run: python3 scripts/ddl_ratchet.py check", "per-shard check is not limited to the 3.12 leg"),
+        (_UPLOAD_IF, "- name: Upload this shard's DDL report (read by the fan-in in pytest-gate)\n        if: success()",
+         "upload is not limited to the 3.12 leg"),
+        (_FAN_IN_IF, "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: success()", "is not limited to runs whose shards ran"),
+        (_DOWNLOAD_IF, "- name: Fetch every shard's DDL report\n        if: success()", "is not limited to runs whose shards ran"),
+        (_FAN_IN_IF, "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: always() && needs.changes.outputs.code == 'true'",
+         "can run after a failed verdict"),
+        (_FAN_IN_IF + "\n        continue-on-error: true", _FAN_IN_IF, "is not continue-on-error while the gate is advisory"),
+        (_DOWNLOAD_IF + "\n        continue-on-error: true", _DOWNLOAD_IF, "is not continue-on-error while the gate is advisory"),
     ],
-    ids=["fan-in gone", "shards drift", "fan-in advisory", "shard check enforced", "no report dir", "artifact not a shard report",
-         "missing report passes", "download pattern"],
+    ids=["fan-in gone", "shards drift", "shard check enforced", "no report dir", "artifact not a shard report",
+         "missing report passes", "download pattern", "shard check on the 3.13 leg", "upload on the 3.13 leg",
+         "fan-in runs on a skipped matrix", "download runs on a skipped matrix", "fan-in runs after a red verdict",
+         "advisory fan-in can red the job", "advisory download can red the job"],
 )
 def test_the_python_wiring_lint_catches_each_rot(old: str, new: str, expect: str) -> None:
-    problems = python_wiring_problems(_mutate(CI_YML.read_text(), old, new))
+    problems = python_wiring_problems(_mutate(CI_YML.read_text(), old, new), CEILINGS.read_text())
     assert any(expect in p for p in problems), problems
+
+
+def _move_fan_in_before_the_verdict(text: str) -> str:
+    """The fan-in block (comment, checkout, download, run) lifted above the verdict step."""
+    block_start = text.index("      # nexus-ekp7w / nexus-2rhif: THE DDL AND BYTES-WRITTEN GATE")
+    block_end = text.index("\n  ca3-pgvector-bundle:")
+    block = text[block_start:block_end]
+    text = text[:block_start] + text[block_end:]
+    anchor = "      - name: Verify the pytest suite or its legitimate skip"
+    assert text.count(anchor) == 1
+    return text.replace(anchor, block.rstrip("\n") + "\n\n" + anchor, 1)
+
+
+def test_the_fan_in_must_follow_the_verdict_step() -> None:
+    problems = python_wiring_problems(_move_fan_in_before_the_verdict(CI_YML.read_text()), CEILINGS.read_text())
+    assert any("fan-in runs before the verdict step" in p for p in problems), problems
+
+
+def _armed_ceilings() -> str:
+    return CEILINGS.read_text().replace("[python_unit]\n", '[python_unit]\nmeasured_on = "https://example.invalid/run/1"\n', 1)
+
+
+def test_the_python_fan_in_is_advisory_exactly_while_the_ceilings_are_unmeasured_on_ci() -> None:
+    """The blocker of the first review: enforced on estimated ceilings, the fan-in could turn develop red."""
+    text, ceilings = CI_YML.read_text(), CEILINGS.read_text()
+    assert not _armed(ceilings), "arming is a deliberate commit with a Linux measurement; this test pins today's unarmed state"
+    assert python_wiring_problems(text, ceilings) == []
+    enforced = _mutate(_mutate(text, "--shards 6 --advisory ", "--shards 6 "), _FAN_IN_IF + "\n        continue-on-error: true", _FAN_IN_IF)
+    assert any("could turn develop red on an estimate" in p for p in python_wiring_problems(enforced, ceilings))
+    # armed: the same advisory wiring is a switched-off gate, and continue-on-error would swallow a red
+    problems = python_wiring_problems(text, _armed_ceilings())
+    assert any("the gate is switched off" in p for p in problems), problems
+    assert any("is continue-on-error but the gate is armed" in p for p in problems), problems
+    armed_ok = text.replace("--shards 6 --advisory ", "--shards 6 ")
+    for step in ("- name: Check out the ratchet and its ceilings", _DOWNLOAD_IF.split("\n")[0], _FAN_IN_IF.split("\n")[0]):
+        armed_ok = _mutate(armed_ok, step + "\n        if: needs.changes.outputs.code == 'true'\n        continue-on-error: true\n",
+                           step + "\n        if: needs.changes.outputs.code == 'true'\n")
+    assert python_wiring_problems(armed_ok, _armed_ceilings()) == []
 
 
 @pytest.mark.parametrize(

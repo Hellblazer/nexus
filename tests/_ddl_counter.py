@@ -2,7 +2,9 @@
 """Bytes-written and DDL-per-run counter for the engine test substrate (nexus-sz651).
 
 The test suites rebuild schema over and over (epic nexus-aca0q), and what that costs is disk
-thrashing, so the TARGET is bytes written. This module counts two things per run, each split
+thrashing. The primary gated signal is the DDL count (exact, host-independent); the WAL bytes are a
+churn proxy that lands on tmpfs and does not reach the NVMe, and the NVMe itself is metered by labrun's
+sampler and the device delta (``cgroup_io``). This module counts two things per run, each split
 into the migration the substrate boots with and what the tests themselves cause:
 
 * WAL bytes the substrate cluster generated: the probe's ``mark()`` logs

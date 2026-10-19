@@ -5,21 +5,25 @@
     ddl_ratchet.py check  --suite python_unit      --report <dir>/nx-ddl-report.json --advisory
     ddl_ratchet.py check  --suite java_main        --report service/target/ddl-counts [--run <id>] [--advisory]
     ddl_ratchet.py check  --suite java_integration --report service/target/ddl-counts [--run <id>] [--advisory]
-    ddl_ratchet.py fan-in --suite python_unit      --report shard1.json shard2.json ... --shards N  (the Python gate)
+    ddl_ratchet.py fan-in --suite python_unit      --report shard1.json shard2.json ... --shards N [--advisory]
+                                                   (the Python gate; enforced only once ``measured_on`` is set)
 
-THE TARGET IS BYTES WRITTEN (disk thrashing); the DDL count is the secondary diagnostic that
-explains where the bytes come from. Both are ratcheted. Bytes are WAL bytes the test clusters
-generated (``pg_current_wal_insert_lsn`` between the probe's marks). WAL is a RELATIVE, LOWER-BOUND
-churn proxy, not what a disk-backed cluster would write: the clusters run ``fsync = off`` and
-``full_page_writes = off``, the Python substrate also ``wal_level = minimal``, so Python and Java
-WAL are not comparable with each other and neither sees full-page images or WAL-skipped bulk
-operations. NOT MEASURED: the job workspace and checkout, ``target/``, ``.venv``, jar builds,
-journald, anything before pytest starts, and the docker-run and e2e shell clusters. The labrun NVMe
-sampler is the source of truth for bytes written to disk. WAL varies a little from run to run
-(autovacuum, hint bits), so every bytes ceiling carries a tolerance band (``bytes_tolerance``, a
-fraction); DDL carries ``ddl_tolerance`` (default 0). A metric may override its band with its own
+THE PRIMARY GATED SIGNAL IS DDL PER TEST: an exact count (31881 DDL statements on macOS and on Linux
+for the same tests), the same on every host, and the lever that explains the writes. The ``*wal_bytes*``
+metrics are WAL bytes the test clusters generated (``pg_current_wal_insert_lsn`` between the probe's
+marks). WAL is a CHURN PROXY, not a disk meter: the clusters sit on tmpfs on Linux with headroom, so
+that WAL goes to memory and does NOT reach the NVMe. It is also relative and a lower bound (``fsync =
+off``, ``full_page_writes = off``, the Python substrate ``wal_level = minimal``), host-dependent (the same
+tests wrote 1.8x more WAL on Linux than on macOS) and not comparable between Python and Java. NOT
+MEASURED: the job workspace and checkout, ``target/``, ``.venv``, jar builds, journald, anything before
+pytest starts, and the docker-run and e2e shell clusters. The labrun NVMe sampler is the source of
+truth for bytes written to disk, with the device delta (``cgroup_io`` ``wbytes``, summed and printed by
+``fan-in``, informational and never gated). WAL varies a little from run to run (autovacuum, hint bits), so every bytes ceiling
+carries a tolerance band (``bytes_tolerance``, a fraction); DDL carries ``ddl_tolerance`` (default 0). A
+metric may override its band with its own
 ``<metric>_tolerance`` (the migration's DDL per worker is exactly the changelog's, so it keeps 0 beside
-a DDL-per-test ratio that moves a little with the test set).
+a DDL-per-test ratio that moves a little with the test set; a commit that adds a Liquibase changeset
+bumps it in the same commit, once the ratchet is armed).
 
 A shard is not the run. CI splits the Python suite into shards of differing width and test count, so
 a single shard's bytes per test and DDL per test flap with its composition (a 15% heavier mix moved one
@@ -31,7 +35,13 @@ the four moves with how the work was split, how many xdist workers each shard ra
 ``-n 4``, a hosted one runs serially) or which workers never booted a substrate (it boots lazily), and a
 test added at the suite's average cost leaves them where they were. The raw totals are printed beside
 them. ``check`` on one shard report judges the same four against the same ceilings but is ADVISORY
-(``--advisory``: it prints what it found and exits 0), because a shard's mix is not the run's. Java is not
+(``--advisory``: it prints what it found and exits 0), because a shard's mix is not the run's.
+
+``fan-in`` is ADVISORY too until the python ceilings have been measured on the platform that enforces them
+(CI, Linux): ``[python_unit] measured_on`` in the ceiling file is the marker, and the wiring lint
+(tests/scripts/test_ddl_ratchet_wiring.py) keeps ``--advisory`` on the CI fan-in exactly while the marker is
+absent. To arm it: paste the first Linux fan-in line into nexus-ekp7w, set the four ceilings from it, add
+``measured_on = "<ci run url or sha>"`` and drop ``--advisory`` from ci.yml, all in one commit. Java is not
 sharded: its totals are near width-invariant but the migration is paid once per fork, so its metrics are
 per fork and the rest (``other_*``: every clone, every dedicated container, the tests' own work) is a
 total.
@@ -150,8 +160,13 @@ def _python_extra(data: dict) -> str:
     if data.get("uncounted_cluster_start_sites") is not None:
         extra += f" uncounted_cluster_start_sites={data['uncounted_cluster_start_sites']} (static tree census)"
     io = data.get("cgroup_io")
-    if io and io.get("wbytes_delta") is not None:
-        extra += f" cgroup_io_wbytes={io['wbytes_delta']} (the job's block-device writes; informational)"
+    if io is not None:
+        if io.get("wbytes_delta") is None:
+            extra += " cgroup_io_wbytes=unavailable (no shard could read cgroup v2 io.stat; informational)"
+        else:
+            of = f" summed over {io['shards_reporting']} shard(s)" if "shards_reporting" in io else ""
+            extra += (f" cgroup_io_wbytes={io['wbytes_delta']}{of} (block-device writes over the pytest window; "
+                      "informational, never gated; the labrun NVMe sampler is the source of truth for disk writes)")
     return extra
 
 
@@ -239,7 +254,8 @@ def measure_java(directory: Path, suite: str, run: str | None = None) -> Measure
 def combine_shards(datas: list[dict]) -> dict:
     """The run as one python report: the shard reports' counts added. ``wal`` is the sum of the
     shards' phases, None as soon as a shard that booted a worker lacks one (``python_problems`` has
-    already said so for that shard)."""
+    already said so for that shard). ``cgroup_io`` is the sum of the shards' device writes, an
+    informational figure that no ceiling reads."""
     def wal_sum(key: str) -> int | None:
         total = 0
         for d in datas:
@@ -254,7 +270,10 @@ def combine_shards(datas: list[dict]) -> dict:
     def bucket_sum(name: str) -> dict:
         return {"total": sum(d.get("buckets", {}).get(name, {}).get("total", 0) for d in datas)}
 
+    io_deltas = [d["cgroup_io"]["wbytes_delta"] for d in datas
+                 if (d.get("cgroup_io") or {}).get("wbytes_delta") is not None]
     return {
+        "cgroup_io": {"wbytes_delta": sum(io_deltas) if io_deltas else None, "shards_reporting": len(io_deltas)},
         "workers_booted": sum(int(d.get("workers_booted", 0)) for d in datas),
         "workers_ready_mark_seen": sum(int(d.get("workers_ready_mark_seen", 0)) for d in datas),
         "workers_lost": sum(int(d.get("workers_lost", 0)) for d in datas),
@@ -346,9 +365,12 @@ def compare(label: str, measured: Measurement, entry: dict, metric_names: tuple[
         elif value < entry[name] * (1 - tol):
             notes.append(f"{name} {_fmt(value)} is below {_fmt(entry[name])}: lower the ceiling in the commit that lowered it")
     if over:
-        return EXIT_OVER, head + "\n  ABOVE: " + "; ".join(over) + (
-            ". A change added writes or schema work to every run; remove it, or cut the same amount elsewhere."
-        )
+        hint = ". A change added writes or schema work to every run; remove it, or cut the same amount elsewhere."
+        if any(o.startswith(("migration_ddl_per_worker ", "migration_ddl_per_fork ")) for o in over):
+            hint += (" The migration's DDL count is the changelog's: a commit that adds a Liquibase changeset "
+                     f"bumps the migration_ddl_* ceiling in {ceilings_name} in the same commit (raising a ceiling "
+                     "needs the reason in that commit's message).")
+        return EXIT_OVER, head + "\n  ABOVE: " + "; ".join(over) + hint
     if unset:
         snippet = "\n".join(f"  {n} = {_fmt(measured.metrics[n])}" for n in unset)
         return EXIT_UNSET, head + (
@@ -385,6 +407,26 @@ def check_fan_in(suite: str, reports: list[Path], shards: int, ceilings_path: Pa
     return compare(f"{suite} fan-in", measured, entry, PYTHON_METRICS, ceilings_path.name, suite)
 
 
+def measured_on(suite: str, path: Path = DEFAULT_CEILINGS) -> str | None:
+    """The ``measured_on`` marker of a ceiling section (a CI run url or a sha: where the ceilings were
+    measured on the enforcing platform), or None when absent, blank or unreadable."""
+    try:
+        value = load_ceilings(path).get(suite, {}).get("measured_on")
+    except (OSError, ValueError):
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _fan_in_advisory_note(code: int, suite: str, ceilings_path: Path) -> str:
+    marker = measured_on(suite, ceilings_path)
+    note = f"\n  ADVISORY: this would exit {code}; not enforced here." if code != EXIT_OK else ""
+    if marker is None:
+        note += (f"\n  {suite}.measured_on is absent in {ceilings_path.name}: the ceilings are not yet measured on the enforcing "
+                 "platform. To arm the gate, paste this line into nexus-ekp7w, set the four ceilings from it, add "
+                 "measured_on = \"<ci run url or sha>\" and drop --advisory from ci.yml in the same commit.")
+    return note
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -401,6 +443,9 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--report", required=True, type=Path, nargs="+")
     f.add_argument("--shards", required=True, type=int, help="how many shard reports the run has")
     f.add_argument("--ceilings", type=Path, default=DEFAULT_CEILINGS)
+    f.add_argument("--advisory", action="store_true",
+                   help="print the whole comparison and exit 0 whatever it is: the python ceilings are not yet "
+                        "measured on the platform that enforces them (no [python_unit] measured_on)")
     args = parser.parse_args(argv)
     if args.command == "check":
         code, message = check(args.suite, args.report, args.ceilings, args.run)
@@ -409,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
             code = EXIT_OK
     else:
         code, message = check_fan_in(args.suite, args.report, args.shards, args.ceilings)
+        if args.advisory:
+            message += _fan_in_advisory_note(code, args.suite, args.ceilings)
+            code = EXIT_OK
     print(message)
     return code
 

@@ -373,8 +373,8 @@ deselects them, so no census has said which of them touch storage.
 
 ## Bytes written and DDL per run (nexus-sz651)
 
-The target is **bytes written** (disk thrashing); the DDL count is the secondary diagnostic that
-explains them. Every run with the engine substrate prints
+The primary gated signal is the **DDL count per test** (exact, the same on every host, and the lever that
+explains the writes); the WAL bytes are a churn proxy for disk thrashing, not a disk meter. Every run with the engine substrate prints
 `ddl: migration=<n> tests=<n> per_test=<x> wal: migration=<size> tests=<size> per_test=<size>
 [io_wbytes=<size>] | <n> uncounted cluster start sites (static tree census)` in the terminal summary and writes `nx-ddl-report.json`
 (under `NX_DDL_REPORT_DIR`, else the controller's basetemp; a worker's own file is under
@@ -382,12 +382,12 @@ explains them. Every run with the engine substrate prints
 `start`, `ready` and `end` marks (insert, not the write pointer `pg_current_wal_lsn()`, which lags
 by megabytes under `synchronous_commit=off`), so `migration` is the engine's boot and `tests` is
 everything the tests caused. **WAL is a relative, lower-bound churn proxy, not what a disk-backed
-cluster would write**: the clusters run `fsync=off` and `full_page_writes=off` (no full-page images),
+cluster would write, and on Linux it lands on tmpfs and never reaches the NVMe**: the clusters run `fsync=off` and `full_page_writes=off` (no full-page images),
 the Python substrate also `wal_level=minimal` (WAL-skipped bulk operations log nothing), so Python
 and Java WAL are not comparable with each other. Clusters sit on tmpfs on Linux with headroom, else
 the tempdir. `io_wbytes` is the job cgroup's `io.stat` `wbytes` over the pytest window where
-readable (Linux, cgroup v2); it is informational, not ratcheted, and means something only when the
-run owns its cgroup. **Not measured**: the job workspace and checkout, `target/`, `.venv`, jar
+readable (Linux, cgroup v2); it is informational, not ratcheted (the fan-in sums it over the shards and
+prints it), and means something only when the run owns its cgroup. **Not measured**: the job workspace and checkout, `target/`, `.venv`, jar
 builds, journald, anything before pytest starts, and the docker-run and e2e shell clusters. The
 labrun NVMe sampler is the source of truth for bytes written to disk. There is no per-test WAL figure
 in Python (an LSN read at every test boundary is a round trip per test); the per-test number is the
@@ -409,17 +409,30 @@ The ceilings are in `tests/ddl_ceiling.toml` and are INTENSIVE numbers, so how t
 not move them: bytes and DDL per test and the migration's bytes and DDL per booted worker (Python); the
 migration's bytes and DDL per fork plus the totals of everything else (Java).
 **The Python gate is the fan-in over the whole run** (nexus-ekp7w, nexus-2rhif):
-`scripts/ddl_ratchet.py fan-in --suite python_unit --shards N --report <every shard's report>` sums the
+`scripts/ddl_ratchet.py fan-in --suite python_unit --shards N [--advisory] --report <every shard's report>` sums the
 shards and judges those four numbers over the sum, so it does not flap with which tests the split gave a
 shard, with `-n` (a pool shard runs 4 workers, a hosted one 1) or with a shard whose workers never booted
 the substrate (it boots lazily; such a shard still writes its report, with `workers_booted: 0`).
 `check --suite python_unit --report <one shard's report> --advisory` prints the same comparison for one
 shard and always exits 0. In `ci.yml` each 3.12 `test` shard exports `NX_DDL_REPORT_DIR`, runs the advisory
-check and uploads the report; `pytest-gate` downloads all of them and runs the fan-in. The Java steps of
+check and uploads the report (kept 7 days); `pytest-gate` downloads all of them and runs the fan-in after
+its verdict step. The Java steps of
 `service-ci.yml` pass `-Dnexus.ddl.run=<run id>-<suite>` to mvn and the same id to `check --run`, so the
 persistent pool workspace's older `service/target/ddl-counts` files are never read; they are `--advisory`
 exactly while their ceilings are still `"measure"` (pending nexus-0ty8z's DDL cut), and
 `tests/scripts/test_ddl_ratchet_wiring.py` fails the commit that sets them and leaves the flag on.
+**The Python fan-in is `--advisory` too until it is armed** (the first review's blocker): the python ceilings
+were estimated or measured off CI (`wal_bytes_per_test` is a cross-OS estimate; the same tests wrote 1.8x
+more WAL on chas than on the laptop), so an enforced fan-in could turn develop red on a number nobody
+measured there, after the whole shard matrix, with no way to re-run it green. `[python_unit] measured_on`
+in `tests/ddl_ceiling.toml` is the marker; the wiring lint keeps `--advisory` (and `continue-on-error` on
+the fan-in's checkout, download and run) exactly while it is absent. **To arm it, in one commit:** paste the
+first Linux fan-in line (the `pytest-gate` log of a develop run) into nexus-ekp7w, set the four ceilings from
+it, add `measured_on = "<ci run url or sha>"`, and drop `--advisory` and the three `continue-on-error`
+lines from the fan-in steps in `ci.yml`. The fan-in prints the whole comparison either way.
+**Once armed, a commit that adds a Liquibase changeset bumps `migration_ddl_per_worker` in the same commit**
+(its tolerance is 0, because the migration's DDL count is the changelog's own; the failure message says
+the same). Raising any ceiling needs the reason in that commit's message.
 Bytes carry a tolerance band (`bytes_tolerance`), WAL varying a little; a `"measure"` ceiling makes the check
 exit 11 and print the numbers to commit. Java runs are told apart by `-Dnexus.ddl.suite=main|integration`
 (the pom sets it; CI passes it) and the run id (`-Dnexus.ddl.run`, default the Maven build timestamp).

@@ -1,18 +1,23 @@
 # What one test run may write, in bytes and in DDL statements (nexus-sz651, epic nexus-aca0q).
 #
-# THE TARGET IS BYTES WRITTEN (disk thrashing). The metrics named `*wal_bytes*` are WAL bytes the
-# test clusters generated between the probe's marks (tests/_ddl_counter.py, DdlCounts.java). WAL is
-# a RELATIVE, LOWER-BOUND churn proxy, not what a disk-backed cluster would write: fsync and
-# full_page_writes are off, the Python substrate also runs wal_level=minimal, so Python and Java WAL
-# are not comparable. NOT MEASURED: the job workspace/checkout, target/, .venv, jar builds, journald,
-# anything before pytest starts, and the docker-run and e2e shell clusters. The labrun NVMe sampler
-# is the source of truth for disk writes. The `*ddl*` metrics are the DDL statement counts that
-# explain the WAL. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are reduce-only:
-# lower one in the commit that lowers the number, raising one needs a reviewed reason in that
-# commit's message. A set ceiling is the WORST value measured.
+# THE PRIMARY GATED SIGNAL IS DDL PER TEST: an exact count, identical on macOS and Linux for the same tests
+# (31881 on both), and the lever that explains the writes. The metrics named `*wal_bytes*` are WAL bytes the
+# test clusters generated between the probe's marks (tests/_ddl_counter.py, DdlCounts.java). WAL is a CHURN
+# PROXY, not a disk meter: the clusters sit on tmpfs on Linux with headroom, so that WAL lands in memory and
+# does NOT reach the NVMe. It is also relative and a lower bound (fsync and full_page_writes are off, the
+# Python substrate runs wal_level=minimal), host-dependent (the same tests wrote about 1.8x more on Linux
+# than on the laptop) and not comparable between Python and Java. NOT MEASURED: the job workspace/checkout,
+# target/, .venv, jar builds, journald, anything before pytest starts, and the docker-run and e2e shell
+# clusters. The labrun NVMe sampler is the source of truth
+# for bytes written to disk, with the device delta (`cgroup_io` wbytes, which `ddl_ratchet.py fan-in` sums and
+# prints; informational, never gated). The `*ddl*` metrics are the DDL
+# statement counts that explain the WAL. scripts/ddl_ratchet.py fails a run above a ceiling; ceilings are
+# reduce-only: lower one in the commit that lowers the number, raising one needs a reviewed reason in that
+# commit's message. A ceiling is only as good as its measurement: see "HOW THE PYTHON NUMBERS WERE
+# MEASURED" below for which of them are measurements and which are estimates.
 #
 # Every metric is INTENSIVE, so it does not move with how the work is split across shards or forks:
-#   python_unit    the GATE is `ddl_ratchet.py fan-in`, which sums every shard's report and judges the whole
+#   python_unit    the gate (once armed, see below) is `ddl_ratchet.py fan-in`, which sums every shard's report and judges the whole
 #                  run: bytes and DDL per test over all tests, and the migration's bytes and DDL per booted
 #                  xdist worker (each worker boots and migrates its own cluster). None of the four moves with
 #                  the shard split, with -n, or with a worker that never booted a substrate. One shard's
@@ -24,23 +29,34 @@
 # Tolerance bands: a bytes metric passes up to ceiling * (1 + bytes_tolerance), a DDL metric up to
 # ceiling * (1 + ddl_tolerance), and `<metric>_tolerance` overrides either for one metric.
 #
-# HOW THE PYTHON NUMBERS WERE MEASURED (2026-10-19, nexus-ekp7w), and what they are not:
-#   * DDL is deterministic. Three repeat runs of tests/db (2283 tests, -n 4, macOS laptop) gave 31881 test
-#     DDL and 8404 migration DDL every time (spread 0.000%), and 31881 again at -n 8 and on chas at
-#     -n auto; the migration is 2101 DDL per worker on both hosts. So the migration keeps tolerance 0.
-#   * ddl_per_test and wal_bytes_per_test are over the WHOLE suite, which is denser than tests/db: one
-#     full run on the laptop (tests/ -n 4, 30235 tests) gave 19.0132 DDL and 130065 WAL bytes per test
-#     against tests/db's 13.9645 and 90826. ddl_tolerance 0.05 is the allowance for a ratio that moves a
-#     little with the test set (Linux runs a few tests macOS skips), not a measured variance.
-#   * WAL is NOT comparable between hosts: the same tests/db run wrote 90.8 KB a test on the laptop and
-#     163 KiB on chas (Linux), and the migration 6.83 MB against 11.0 MB per worker. Repeat variance on one
-#     host is small (tests-phase WAL spread 0.50% over three runs, 0.8% between -n 4 and -n 8; migration
-#     0.001%). CI is Linux, so the two bytes ceilings are the chas figures: the migration per worker is
-#     chas's measured 168 MiB over its 16 workers (33616 migration DDL / 2101); wal_bytes_per_test is chas's tests/db figure times the
-#     laptop's full-run to tests/db ratio (1.43), which is an ESTIMATE of Linux full-run bytes, rounded up.
-#     bytes_tolerance 0.10 is the margin for that estimate (not repeat variance). Replace both bytes
-#     ceilings with the first Linux fan-in's measurement (it prints them); lowering a ceiling needs no
-#     reason, raising one does.
+# THE PYTHON GATE IS ADVISORY UNTIL IT IS ARMED. `[python_unit] measured_on` is the marker: while it is
+# absent, the CI fan-in runs `--advisory` (prints the whole comparison, exits 0), because the ceilings below
+# were not measured on the platform that enforces them. A false red there lands after the whole shard
+# matrix, on develop and on the release PR, and cannot be re-run green. tests/scripts/test_ddl_ratchet_wiring.py
+# keeps the flag on exactly while the marker is absent. To ARM it, in ONE commit:
+#   1. paste the first Linux fan-in line (CI run on develop, pytest-gate log) into nexus-ekp7w;
+#   2. set the four python ceilings from that line (DDL and migration are exact; WAL gets its band);
+#   3. add `measured_on = "<ci run url or sha>"` under [python_unit];
+#   4. drop `--advisory` from the fan-in step in .github/workflows/ci.yml.
+# Once armed, a commit that adds a Liquibase changeset bumps migration_ddl_per_worker (tolerance 0) in the
+# same commit (tests/AGENTS.md says how; the failure message repeats it).
+#
+# HOW THE PYTHON NUMBERS WERE OBTAINED (2026-10-19, nexus-ekp7w), and what they are not. None of them was
+# measured on CI, and two are estimates:
+#   * ddl_per_test (19.02): ONE full macOS run (tests/ -n 4, 30235 tests) gave 19.0132. Measured, n=1, on a
+#     host that skips some tests Linux runs. DDL is deterministic (tests/db, 2283 tests, gave 31881 test DDL
+#     and 8404 migration DDL on three repeat runs at -n 4, again at -n 8, and on chas at -n auto: spread
+#     0.000%), so the ratio moves only with the test set; ddl_tolerance 0.05 is the allowance for that, not a
+#     measured variance.
+#   * migration_ddl_per_worker (2101): measured, the same on macOS and chas, so tolerance 0. It is the
+#     changelog's own count.
+#   * migration_wal_bytes_per_worker (11010048): measured on chas (Linux), 168 MiB over its 16 workers. A
+#     measurement on a different host than CI, not on CI.
+#   * wal_bytes_per_test (240000): an ESTIMATE. chas's tests/db figure (166912) times the laptop's full-run to
+#     tests/db ratio (1.43), rounded up. The host factor is not constant (about 1.8x per test, 1.61x on the
+#     migration), so the spread is of the order of bytes_tolerance (0.10), which is the margin for this
+#     estimate, not repeat variance (tests-phase WAL spread on one host: 0.50% over three runs).
+#   Replace the estimates and the chas figure with the first Linux fan-in's measurement (it prints them).
 #
 # "measure" means no measurement exists yet. The check then prints the numbers it just measured and exits
 # 11 (not 0), and a ceiling nobody set must not pass a run. The Java sections are still "measure": their

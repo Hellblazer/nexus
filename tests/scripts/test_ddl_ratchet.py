@@ -29,10 +29,11 @@ def _tally(total: int) -> dict:
 
 def _py_report(tmp_path: Path, *, name="nx-ddl-report.json", migration_ddl=2000, tests_ddl=3000, workers=2,
                tests_run=40, wal_migration=200_000, wal_tests=400_000, ready=None, wal_complete=True, lost=0,
-               booted=None) -> Path:
+               booted=None, io_wbytes=None) -> Path:
     path = tmp_path / name
     booted = workers if booted is None else booted
-    path.write_text(json.dumps({
+    io = {} if io_wbytes is None else {"cgroup_io": {"cgroup": "/x", "wbytes": io_wbytes, "wbytes_delta": io_wbytes, "per_device_delta": {}}}
+    path.write_text(json.dumps({**io,
         "workers": workers, "workers_booted": booted, "tests_run": tests_run, "workers_lost": lost,
         "workers_ready_mark_seen": booted if ready is None else ready,
         "buckets": {"boot": _tally(6), "migration": _tally(migration_ddl), "tests": _tally(tests_ddl)},
@@ -105,14 +106,38 @@ def test_the_committed_ceiling_file_names_every_suite_and_metric() -> None:
     }
     for section, entry in committed.items():
         own = {f"{name}_tolerance" for name in shape[section]}
+        marker = {"measured_on"} if section == "python_unit" else set()
         assert {"bytes_tolerance", "ddl_tolerance", *shape[section]} <= set(entry) <= {
-            "bytes_tolerance", "ddl_tolerance", *shape[section], *own}, section
+            "bytes_tolerance", "ddl_tolerance", *shape[section], *own, *marker}, section
         assert all(isinstance(v, (int, float)) and v >= 0 for k, v in entry.items() if k.endswith("_tolerance")), section
         # "measure" until a full run supplies the number, then a positive number; a Java section may still be
         # "measure" (see the test below), so committing its measured ceilings is not a test change.
         for name in shape[section]:
             value = entry[name]
             assert value == ratchet.MEASURE or (isinstance(value, (int, float)) and value > 0), (section, name, value)
+
+
+def test_the_committed_header_does_not_overclaim_what_the_ceilings_are() -> None:
+    """The review's wording blocker: a set ceiling was called "the WORST value measured" where it was an estimate,
+    and WAL was presented as the disk target when it lands on tmpfs and never reaches the NVMe."""
+    toml_text = (_REPO / "tests" / "ddl_ceiling.toml").read_text()
+    script_text = (_REPO / "scripts" / "ddl_ratchet.py").read_text()
+    assert "WORST value measured" not in toml_text
+    assert "THE TARGET IS BYTES WRITTEN" not in toml_text and "THE TARGET IS BYTES WRITTEN" not in script_text
+    for text in (toml_text, script_text):
+        flat = " ".join(text.replace("#", " ").split())
+        assert "churn proxy" in flat.lower(), "WAL must be called a churn proxy"
+        assert "NVMe" in flat and "tmpfs" in flat
+        assert "labrun" in flat
+        assert "DDL PER TEST" in flat.upper()
+
+
+def test_the_committed_python_ceilings_are_unarmed_until_a_linux_measurement_sets_the_marker() -> None:
+    py = tomllib.loads((_REPO / "tests" / "ddl_ceiling.toml").read_text())["python_unit"]
+    marker = py.get("measured_on")
+    assert marker is None or (isinstance(marker, str) and marker.strip()), marker
+    # the marker is the one non-metric, non-tolerance key a section may carry
+    assert ratchet.measured_on("python_unit", _REPO / "tests" / "ddl_ceiling.toml") == (marker.strip() if marker else None)
 
 
 def test_the_python_gate_has_real_ceilings_and_a_ceiling_never_sits_on_a_zero() -> None:
@@ -496,11 +521,65 @@ def test_the_cli_fan_in(tmp_path, capsys) -> None:
     assert "python_unit fan-in" in capsys.readouterr().out
 
 
-def test_fan_in_has_no_advisory_switch() -> None:
-    """The gate cannot be turned into a printout from the command line."""
-    with pytest.raises(SystemExit) as exc:
-        ratchet.main(["fan-in", "--suite", "python_unit", "--report", "x", "--shards", "1", "--advisory"])
-    assert exc.value.code == 2
+def test_fan_in_advisory_prints_the_whole_comparison_and_exits_zero(tmp_path, capsys) -> None:
+    """The python ceilings are not measured on CI yet, so the fan-in must not be able to turn develop red, and
+    must still print everything the first Linux run needs to set them."""
+    reports = [str(p) for p in _shards(tmp_path)]
+    over = _py_ceilings(tmp_path, ddl_per_test=1)
+    base = ["fan-in", "--suite", "python_unit", "--report", *reports, "--shards", "3", "--ceilings", str(over)]
+    assert ratchet.main(base) == ratchet.EXIT_OVER
+    capsys.readouterr()
+    assert ratchet.main([*base, "--advisory"]) == ratchet.EXIT_OK
+    out = capsys.readouterr().out
+    for shown in ("ddl_per_test=75", "wal_bytes_per_test=10000", "migration_ddl_per_worker=1000", "total_ddl=15000", "shards=3",
+                  "ABOVE", "ADVISORY: this would exit 10", "measured_on", "nexus-ekp7w"):
+        assert shown in out, shown
+    # a missing shard is exit 12 enforced and still exit 0 advisory: unmeasured is never a red on develop
+    short = ["fan-in", "--suite", "python_unit", "--report", *reports[:2], "--shards", "3", "--ceilings", str(_py_ceilings(tmp_path))]
+    assert ratchet.main(short) == ratchet.EXIT_NOT_COMPARABLE
+    capsys.readouterr()
+    assert ratchet.main([*short, "--advisory"]) == ratchet.EXIT_OK
+    assert "ADVISORY: this would exit 12" in capsys.readouterr().out
+
+
+def test_fan_in_advisory_stops_telling_you_to_arm_once_the_marker_is_set(tmp_path, capsys) -> None:
+    armed = _py_ceilings(tmp_path)
+    armed.write_text(armed.read_text().replace("[python_unit]\n", '[python_unit]\nmeasured_on = "https://example.invalid/run/1"\n'))
+    reports = [str(p) for p in _shards(tmp_path)]
+    status = ratchet.main(["fan-in", "--suite", "python_unit", "--report", *reports, "--shards", "3", "--ceilings", str(armed), "--advisory"])
+    assert status == ratchet.EXIT_OK
+    assert "measured_on is absent" not in capsys.readouterr().out
+    assert ratchet.measured_on("python_unit", armed) == "https://example.invalid/run/1"
+    for blank in ('measured_on = ""\n', "measured_on = 7\n"):
+        armed.write_text(f"[python_unit]\n{blank}")
+        assert ratchet.measured_on("python_unit", armed) is None, blank
+
+
+def test_fan_in_sums_and_prints_the_cgroup_device_writes_but_never_gates_on_them(tmp_path) -> None:
+    shards = [_py_report(tmp_path, name=f"s{i}.json", io_wbytes=1_000_000 * (i + 1)) for i in range(2)]
+    shards.append(_py_report(tmp_path, name="s2.json"))  # a shard that could not read io.stat
+    code, message = ratchet.check_fan_in("python_unit", shards, 3, _py_ceilings(tmp_path))
+    assert code == ratchet.EXIT_OK, message
+    assert "cgroup_io_wbytes=3000000 summed over 2 shard(s)" in message and "never gated" in message
+    # no ceiling reads it: an enormous device figure still passes, and the metrics stay the four
+    huge = [_py_report(tmp_path, name=f"h{i}.json", io_wbytes=10**15) for i in range(3)]
+    assert ratchet.check_fan_in("python_unit", huge, 3, _py_ceilings(tmp_path))[0] == ratchet.EXIT_OK
+    assert set(ratchet.PYTHON_METRICS) == {"wal_bytes_per_test", "ddl_per_test", "migration_wal_bytes_per_worker", "migration_ddl_per_worker"}
+    # none readable: said, not omitted
+    _, none_message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _py_ceilings(tmp_path))
+    assert "cgroup_io_wbytes=unavailable" in none_message
+
+
+def test_a_migration_ddl_failure_names_the_changeset_procedure(tmp_path) -> None:
+    """migration_ddl_per_worker has tolerance 0: once armed, a commit that adds a Liquibase changeset reds the gate
+    unless it bumps the ceiling in the same commit, and the failure says so."""
+    heavy = _shards(tmp_path, migration_ddl=2001)
+    code, message = ratchet.check_fan_in("python_unit", heavy, 3, _py_ceilings(tmp_path))
+    assert code == ratchet.EXIT_OVER and "migration_ddl_per_worker" in message
+    assert "Liquibase changeset" in message and "same commit" in message
+    # an unrelated overage does not nag about changesets
+    code, message = ratchet.check_fan_in("python_unit", _shards(tmp_path), 3, _py_ceilings(tmp_path, ddl_per_test=74))
+    assert code == ratchet.EXIT_OVER and "Liquibase" not in message
 
 
 def test_a_java_check_reports_the_uncounted_cluster_start_sites_next_to_its_ceilings(tmp_path) -> None:
