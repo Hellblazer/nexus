@@ -31,6 +31,10 @@ def test_the_real_conftest_provisions_by_marker_and_by_parameter_only(tmp_path: 
         pytest.skip("outer run provisions no engine (NX_TEST_T2_SUBSTRATE=none); the child needs one")
     reason = jar_freshness_skip_reason()
     if reason is not None:
+        # The same fail-loud arm as the engine substrate: once a run says the jar is
+        # provisioned, an absent one is a failure, not a skip.
+        if os.environ.get("NX_T2_SUBSTRATE_EXPECTED"):
+            pytest.fail(f"NX_T2_SUBSTRATE_EXPECTED is set but the child cannot boot an engine: {reason}")
         pytest.skip(f"the child boots an engine: {reason}")
 
     # The outer test has its own tenant in os.environ (service endpoint, T1

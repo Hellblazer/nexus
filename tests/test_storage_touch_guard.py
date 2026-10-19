@@ -179,6 +179,8 @@ def test_swallows():
     assert "touched_unprovisioned=1" in result.stdout.str()
 
 
+# It constructs the error itself; under an optin outer run that outer guard sees it.
+@pytest.mark.expects_unresolvable_endpoint
 def test_the_guard_is_inert_outside_optin(pytester, monkeypatch) -> None:
     from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
 

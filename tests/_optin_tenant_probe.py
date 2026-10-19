@@ -18,11 +18,13 @@ def test_marker_provisions_tenant_t1_and_local_posture():
 
     assert os.environ["NX_SERVICE_URL"] and os.environ["NX_SERVICE_TOKEN"]
     assert os.environ["NX_LOCAL"] == "1" and os.environ["NX_T1_SESSION"]
+    assert os.environ.get("NX_STORAGE_BACKEND") == "service"
     _resolve_endpoint()
 
 
 def test_parameter_provisions_tenant(t2_tenant):
     assert t2_tenant and os.environ["NX_T1_SESSION"]
+    assert os.environ.get("NX_STORAGE_BACKEND") == "service"
 
 
 def test_an_untouched_test_gets_no_tenant_and_the_local_posture():

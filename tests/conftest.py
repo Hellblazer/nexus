@@ -2737,7 +2737,9 @@ def _pin_local_posture_optin(monkeypatch: pytest.MonkeyPatch) -> None:
     to cloud posture because no tenant fixture ran to pin it. ``cloud_mode`` is
     not autouse, so its ``NX_LOCAL=0`` still lands later and wins. Also drops an
     ambient ``NX_STORAGE_BACKEND``, which the tenant fixture otherwise
-    overrides. Nothing under any other mode.
+    overrides; ``_pin_t2_substrate`` depends on this fixture so the drop runs
+    BEFORE a marker-requested tenant sets ``service``, not after. Nothing under
+    any other mode.
     """
     if os.environ.get("NX_TEST_T2_SUBSTRATE") != "optin":
         return
@@ -2976,7 +2978,7 @@ def _exempt_pytest_from_production_write_guard() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
+def _pin_t2_substrate(request: pytest.FixtureRequest, _pin_local_posture_optin: None) -> None:
     """Route every test to the session's T2 substrate — the ENGINE.
 
     Every test gets the session PG+JAR with a freshly minted tenant, exactly
