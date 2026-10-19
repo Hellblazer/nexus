@@ -448,7 +448,6 @@ build_lease_acquire_wait() {
     done
 }
 
-# build_lease_release <name>
 # build_lease_hand_run_in_grant — true for a hand run inside a lab-run grant:
 # LAB_CPUS is set (every grant exports it) and this is not a GitHub Actions job.
 # A CI job on the pool also has LAB_CPUS, and waiting its turn there is how the
@@ -471,13 +470,16 @@ build_lease_caller_wait() {
     fi
 }
 
-# build_lease_grant_refusal_hint <script> — one stderr line saying why a hand run
-# inside a grant refused instead of waiting, and what to run instead.
+# build_lease_grant_refusal_hint <script> [<what to run instead>] — one stderr
+# line saying why a hand run inside a grant refused instead of waiting, and what
+# to run instead (default: run it again outside lab-run once the holder is done).
 build_lease_grant_refusal_hint() {
     build_lease_hand_run_in_grant || return 0
-    echo "$1: refusing to wait for the build lease inside a lab-run grant: waiting would hold the grant's cores while another build runs (nexus-dfg0q). Take the lease before the grant: scripts/mvnw-leased.sh --lab-run <class> ..., or run this outside lab-run once the holder is done." >&2
+    local instead="${2:-run $1 again outside lab-run once the holder is done}"
+    echo "$1: refusing to wait for the build lease inside a lab-run grant: waiting would hold the grant's cores while another build runs (nexus-dfg0q). Instead: $instead." >&2
 }
 
+# build_lease_release <name>
 build_lease_release() {
     local name="${1:?build_lease_release: usage: build_lease_release <name>}"
     local dir

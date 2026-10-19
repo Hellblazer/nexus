@@ -17,7 +17,9 @@
 # instead of running beside it. NX_BUILD_LEASE_WAIT=<seconds> bounds the
 # wait (default 3600); 0 restores the old refuse-immediately behaviour.
 # Exits 75 (EX_TEMPFAIL) without running mvnw at all only once that bound
-# is exhausted — the refusal message names the holder.
+# is exhausted — the refusal message names the holder. Inside a lab-run grant
+# (LAB_CPUS set, not GitHub Actions) a held lease refuses at once with 75,
+# whatever NX_BUILD_LEASE_WAIT says (nexus-dfg0q).
 #
 # SIGNAL HANDLING (review finding round 3, nexus-c00dw). A plain
 # `trap '...release...' EXIT` is UNSAFE here. Under `set -m` the
@@ -83,7 +85,7 @@ fi
 # (build_lease_caller_wait, nexus-dfg0q).
 build_lease_acquire_wait service "$(build_lease_caller_wait)" ./mvnw "$@" || {
     rc=$?
-    build_lease_grant_refusal_hint mvnw-leased.sh
+    [[ $rc -ne 75 ]] || build_lease_grant_refusal_hint mvnw-leased.sh "take the lease before the grant: scripts/mvnw-leased.sh --lab-run <class> ... outside lab-run"
     exit "$rc"
 }
 

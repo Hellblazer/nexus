@@ -45,7 +45,9 @@
 # incident this bead records) can never write service/target at the same
 # time. The lease is shared by every worktree of the repo and a live holder
 # is waited for, bounded by NX_BUILD_LEASE_WAIT (nexus-g6xpa); rc 75 names
-# the holder only once that bound is exhausted. See scripts/lib/build-lease.sh.
+# the holder only once that bound is exhausted. Inside a lab-run grant (LAB_CPUS
+# set, not GitHub Actions) a held lease refuses at once with 75 instead
+# (nexus-dfg0q). See scripts/lib/build-lease.sh.
 #
 # STAMP GUARDED + HELD FOR ITS WHOLE LIFETIME (nexus-iexvl): once the lease
 # above is held, release.properties is checked against git HEAD before this
@@ -90,7 +92,7 @@ source "$repo_root/scripts/lib/gate-jar-cache.sh"
 # (build_lease_caller_wait, nexus-dfg0q).
 build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh "$@" || {
     rc=$?
-    build_lease_grant_refusal_hint build-gate-jar.sh
+    [[ $rc -ne 75 ]] || build_lease_grant_refusal_hint build-gate-jar.sh
     exit "$rc"
 }
 # Release on every exit path from here on; the props-restore trap below

@@ -57,7 +57,9 @@ differ from a GitHub-hosted runner:
   resolves to the grant.
   An engine build inverts the order: `scripts/mvnw-leased.sh --lab-run <class>
   ...` takes the build lease first and then the grant, so waiting for another
-  build holds no cores (nexus-iqmih).
+  build holds no cores (nexus-iqmih). Run inside a grant instead, `mvnw-leased.sh`
+  and `build-gate-jar.sh` refuse at once with exit 75 when another build holds the
+  lease (nexus-dfg0q); CI jobs keep waiting.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two persistent self-hosted registrations, `hellmini`
