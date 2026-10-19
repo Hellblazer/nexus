@@ -42,4 +42,18 @@ class MainEmbedProfileWiringTest {
         assertThat(src).as("the degraded decision is the pure function's")
             .contains("embedProfile.degradation(presence)");
     }
+
+    @Test
+    void anInvalidProfileClosesTheDatasourceLogsAndExitsNonZeroBeforeAnythingElse() throws Exception {
+        String src = main();
+        int catchAt = src.indexOf("} catch (IllegalArgumentException e) {\n            ds.close();");
+        assertThat(catchAt).as("the IllegalArgumentException handler closes the datasource first").isPositive();
+        String handler = src.substring(catchAt, src.indexOf("return;", catchAt) + "return;".length());
+        assertThat(handler).contains("log.error(\"event=embed_profile_invalid");
+        // The exit must be a non-zero System.exit followed by a return: a bare return would leave
+        // the service booting with an unset profile (review of the P2.3 commit, 2026-10-19).
+        assertThat(handler).contains("System.exit(1);");
+        assertThat(handler.indexOf("System.exit(1);")).isLessThan(handler.indexOf("return;"));
+        assertThat(handler.indexOf("ds.close();")).isLessThan(handler.indexOf("System.exit(1);"));
+    }
 }
