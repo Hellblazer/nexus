@@ -434,9 +434,22 @@ def _wait_for(path: Path, seconds: float = 30.0) -> None:
 
 @pytest.fixture()
 def h(tmp_path: Path):
-    harness = Harness(tmp_path)
-    yield harness
-    harness.cleanup()
+    # host.sh's check_chain refuses any group- or other-writable path, as it must
+    # on the real host. A umask 0002 box (chas: pam_umask with private groups)
+    # makes every file the harness creates group-writable, and copy2 carries the
+    # checkout's own 0775 modes across, so the preflight fired on the fixture
+    # itself. Build the tree as a umask 022 user would get it; tests that want a
+    # loose mode still set one explicitly.
+    old_umask = os.umask(0o022)
+    try:
+        harness = Harness(tmp_path)
+        for p in [harness.tmp, *harness.tmp.rglob("*")]:
+            if not p.is_symlink() and (mode := p.stat().st_mode) & 0o022:
+                p.chmod(stat.S_IMODE(mode) & ~0o022)
+        yield harness
+        harness.cleanup()
+    finally:
+        os.umask(old_umask)
 
 
 def _alive(pid: int) -> bool:
