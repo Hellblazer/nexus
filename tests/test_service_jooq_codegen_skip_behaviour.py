@@ -583,6 +583,25 @@ def test_an_entry_without_its_marker_or_sources_is_regenerated_and_repaired(cach
         assert (entry / "complete").is_file() and _sources(entry / "generated") == _sources(fresh.gen_dir[kind]) != {}
 
 
+@pytest.mark.parametrize("kind", ["main", "test"])
+def test_an_entry_whose_marker_is_empty_is_not_usable_and_is_repaired(cached: Project, kind: str) -> None:
+    """An empty ``complete`` (a copy that created the file and died before writing the digest) is never
+    restored (no digest to check the copy against). It must also not count as a usable entry when
+    publishing: otherwise the stamp step leaves it alone and every later build regenerates (nexus-k6zxp)."""
+    a = cached.build()
+    marker = _entry(cached, kind, a.hash[kind]) / "complete"
+    assert marker.stat().st_size > 0
+    marker.write_text("", encoding="utf-8")
+    fresh = _other_worktree(cached)
+    d = fresh.build()
+    assert d.restored[kind] is False and kind in fresh.generations, "an entry with an empty marker must not be restored"
+    assert marker.read_text(encoding="utf-8").strip() != "", "the stamp step must repair an empty marker"
+    healed = _other_worktree(cached, "wt-c")
+    h = healed.build()
+    assert h.restored[kind] is True and healed.generations == [], "after the repair the entry restores"
+    assert _sources(_entry(cached, kind, a.hash[kind]) / "generated") == _sources(fresh.gen_dir[kind])
+
+
 def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Path) -> None:
     """Publication is a rename from a staging dir: a reader that sees <kind>-<hash> sees all of it."""
     a = cached.build()

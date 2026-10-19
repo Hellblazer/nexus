@@ -1085,6 +1085,7 @@
                                     <and>
                                         <istrue value="${nexus.jooq.main.cache.on}"/>
                                         <available file="${nexus.jooq.main.entry}/complete"/>
+                                        <length file="${nexus.jooq.main.entry}/complete" when="greater" length="0"/>
                                         <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
                                         <resourcecount when="greater" count="0">
                                             <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
@@ -1180,6 +1181,7 @@
                                             <not>
                                                 <and>
                                                     <available file="${nexus.jooq.main.entry}/complete"/>
+                                                    <length file="${nexus.jooq.main.entry}/complete" when="greater" length="0"/>
                                                     <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
                                                     <resourcecount when="greater" count="0">
                                                         <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
@@ -1248,6 +1250,7 @@
                                     <and>
                                         <istrue value="${nexus.jooq.test.cache.on}"/>
                                         <available file="${nexus.jooq.test.entry}/complete"/>
+                                        <length file="${nexus.jooq.test.entry}/complete" when="greater" length="0"/>
                                         <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
                                         <resourcecount when="greater" count="0">
                                             <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
@@ -1343,6 +1346,7 @@
                                             <not>
                                                 <and>
                                                     <available file="${nexus.jooq.test.entry}/complete"/>
+                                                    <length file="${nexus.jooq.test.entry}/complete" when="greater" length="0"/>
                                                     <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
                                                     <resourcecount when="greater" count="0">
                                                         <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
