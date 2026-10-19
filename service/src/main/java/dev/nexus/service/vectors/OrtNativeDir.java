@@ -839,6 +839,46 @@ public final class OrtNativeDir {
      * by the time its attributes were read, which a concurrent starter's rename-aside causes: not a refusal).
      */
     static Trust versionDirTrust(Path dir, Identity who, boolean announce) {
+        return versionDirTrust(dir, who, announce, d -> { });
+    }
+
+    /** Reads of a version directory that keeps being replaced under us before it counts as absent. */
+    private static final int TRUST_READS = 3;
+
+    /**
+     * {@link #versionDirTrust(Path, Identity, boolean)} with a test seam: {@code afterVanished} runs with
+     * the directory each time its attribute read found nothing, before the read is classified, so a test
+     * can make a sibling's publish land exactly there.
+     *
+     * <p>A read that finds nothing is classified by an {@code lstat}: nothing there is {@code ABSENT}; a
+     * symbolic link (dangling) is {@code UNTRUSTED}; a real entry means the directory was renamed aside and
+     * a sibling published a new one between the two calls (nexus-1g32a: this was refused as unreadable,
+     * so a starter returned UNAVAILABLE), and it is read again. A directory still churning after
+     * {@value #TRUST_READS} reads is {@code ABSENT}: the caller re-evaluates it as it does a vanished one.
+     */
+    static Trust versionDirTrust(Path dir, Identity who, boolean announce, Consumer<Path> afterVanished) {
+        for (int read = 1; ; read++) {
+            Trust t = readVersionDirTrust(dir, who, announce);
+            if (t != null) {
+                return t;
+            }
+            afterVanished.accept(dir);
+            if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+                return Trust.ABSENT;
+            }
+            if (Files.isSymbolicLink(dir)) {
+                if (announce) log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable "
+                        + "error=\"dangling symbolic link\"", dir);
+                return Trust.UNTRUSTED;
+            }
+            if (read >= TRUST_READS) {
+                return Trust.ABSENT;
+            }
+        }
+    }
+
+    /** One attribute read of the version directory; null when it was not there to read. */
+    private static Trust readVersionDirTrust(Path dir, Identity who, boolean announce) {
         PosixFileAttributeView view = Files.getFileAttributeView(dir, PosixFileAttributeView.class);
         if (view == null) {
             return Trust.TRUSTED;
@@ -870,13 +910,9 @@ public final class OrtNativeDir {
                     dir, owner, mode);
             return Trust.WRITABLE_OWNED;
         } catch (NoSuchFileException e) {
-            // Vanished since the caller saw it (a sibling renamed it aside): absent, to be re-evaluated, not
-            // unreadable. A dangling symbolic link is still there, and stays untrusted.
-            if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
-                return Trust.ABSENT;
-            }
-            if (announce) log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable error=\"{}\"", dir, e.toString());
-            return Trust.UNTRUSTED;
+            // Vanished since the caller saw it (a sibling renamed it aside), or a dangling link: the
+            // caller tells which, and whether a sibling has published a new one since.
+            return null;
         } catch (IOException e) {
             if (announce) log.warn("event=ort_native_dir_untrusted dir=\"{}\" reason=unreadable error=\"{}\"", dir, e.toString());
             return Trust.UNTRUSTED;

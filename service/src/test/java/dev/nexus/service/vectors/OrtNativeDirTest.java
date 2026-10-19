@@ -284,6 +284,47 @@ class OrtNativeDirTest {
         assertThat(lib(dir, "onnxruntime4j_jni")).isRegularFile();
     }
 
+    @Test
+    void aVersionDirectoryRepublishedBetweenTheFailedReadAndTheRecheckIsReadAgainNotRefused(@TempDir Path root)
+            throws Exception {
+        assumePosix(root);
+        Path dir = root.resolve("1.20.0-x");
+        java.util.concurrent.atomic.AtomicInteger seen = new java.util.concurrent.atomic.AtomicInteger();
+        var trust = new java.util.concurrent.atomic.AtomicReference<OrtNativeDir.Trust>();
+
+        // nexus-1g32a (chas, 1 in ~20 runs of concurrentStarters*): a starter's read finds nothing because a
+        // sibling renamed the broken directory aside, and another sibling publishes a whole one before the
+        // read is classified. That was refused as unreadable, so ensure() returned UNAVAILABLE.
+        List<String> warnings = warnings(() -> trust.set(OrtNativeDir.versionDirTrust(dir,
+                OrtNativeDir.Identity.current(), true, d -> {
+                    if (seen.incrementAndGet() == 1) {
+                        try {
+                            Files.createDirectory(d);
+                            Files.setPosixFilePermissions(d, PosixFilePermissions.fromString("rwx------"));
+                        } catch (IOException e) {
+                            throw new AssertionError(e);
+                        }
+                    }
+                })));
+
+        assertThat(seen).as("the seam fired once, then the republished directory was read").hasValue(1);
+        assertThat(trust.get()).isEqualTo(OrtNativeDir.Trust.TRUSTED);
+        assertThat(warnings).noneSatisfy(w -> assertThat(w).contains("ort_native_dir_untrusted"));
+    }
+
+    @Test
+    void aVersionDirectoryThatIsADanglingSymlinkStaysUntrusted(@TempDir Path root) throws Exception {
+        assumePosix(root);
+        Path dir = Files.createSymbolicLink(root.resolve("1.20.0-x"), root.resolve("missing"));
+        var trust = new java.util.concurrent.atomic.AtomicReference<OrtNativeDir.Trust>();
+
+        List<String> warnings = warnings(() -> trust.set(
+                OrtNativeDir.versionDirTrust(dir, OrtNativeDir.Identity.current(), true)));
+
+        assertThat(trust.get()).isEqualTo(OrtNativeDir.Trust.UNTRUSTED);
+        assertThat(warnings).anySatisfy(w -> assertThat(w).contains("reason=unreadable").contains(dir.toString()));
+    }
+
     private static void assumePosix(Path p) {
         Assumptions.assumeTrue(p.getFileSystem().supportedFileAttributeViews().contains("posix"),
                 "POSIX ownership and modes only");
