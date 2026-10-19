@@ -58,7 +58,7 @@ from tests._engine_substrate import (
 )
 
 # Every root a cluster may live under: the tempdir plus the tmpfs root
-# (nexus-me3gm; NX_TEST_PG_ROOT=default drops the tmpfs root).
+# (nexus-me3gm; an existing tmpfs root is swept even under NX_TEST_PG_ROOT).
 for root in substrate_pg_roots():
     print(f"root: {root}")
 print(f"pattern: {_STRAY_GLOB}")
