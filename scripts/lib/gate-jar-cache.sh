@@ -33,7 +33,15 @@
 # on the codegen input hash, by service/pom.xml (jooq-inputs step,
 # nexus-fkhd3): a gate-jar MISS caused by a src/main edit that leaves the
 # changelog alone restores them instead of booting the codegen container.
-# gate_jar_cache_prune_jooq below trims that cache; the pom writes it.
+# gate_jar_cache_prune_jooq below trims that cache; the pom writes it. Only
+# build-gate-jar.sh calls either prune, after a build that missed, so a
+# mvnw-leased.sh-only workflow adds entries and never trims them.
+#
+# BEST-EFFORT. Both caches are an optimisation and never fail the build: a root
+# that cannot be created or written is warned about and skipped (store returns
+# 0), an entry that cannot be read whole is a miss (and is discarded), and a
+# prune renames an entry aside before it deletes it so a reader that is copying
+# it sees it vanish whole.
 #
 # LOCATION. $NX_GATE_JAR_CACHE if set to a directory; "off" disables both
 # lookup and store; else <git common dir>/nexus-gate-jar-cache (shared by

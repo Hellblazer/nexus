@@ -66,40 +66,68 @@ nexus-aca0q). Measured 2026-10-19: once the test phase stopped writing, what a
 verification run still paid per run was setup: a fresh worktree, `uv sync` into
 a new `.venv`, and a gate-jar build whose jOOQ codegen boots Postgres and
 replays the whole Liquibase changelog (~1000 changesets, ~350-410 MB written).
-So a session mints ONE worktree and reuses it:
+So a session mints ONE worktree and reuses it. The jar is built first and outside
+the grant, the suite runs inside it:
 
 ```bash
 # once per session, as nxtest on chas, from the clone that holds the other worktrees
 git -C ~/src/nexus worktree add --detach ~/src/nexus-wt/<session> <sha>
-# every later run: move the SAME worktree to the commit under test
-git -C ~/src/nexus-wt/<session> fetch origin
-git -C ~/src/nexus-wt/<session> checkout --detach <sha>
-# sync, build and run inside ONE grant; uv sync against the kept .venv is incremental
+
+# every run: announce it to labrun first (see below), then move the SAME worktree to the commit under test
 cd ~/src/nexus-wt/<session>
-lab-run -c lab-l -- bash -c 'uv sync && scripts/build-gate-jar.sh && uv run pytest -n auto <selection>'
+git fetch origin
+git checkout --detach <sha>
+test -z "$(git status --porcelain)" || { echo "dirty tree: a stray edit or stamp keys a different jar"; exit 1; }
+
+# (a) the jar, no grant: a HIT copies the cached jar and runs no Maven, so it needs none
+scripts/build-gate-jar.sh
+
+# (b) the suite, inside the grant, under the stall watchdog
+lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stall 180 --status ~/pytest-<session>.json -- uv run pytest -n auto <selection>'
 ```
 
+- **The jar is never built inside `lab-run`.** An engine build takes the build
+  lease before the grant, so a build waiting its turn holds no cores
+  (`.claude/rules/ci-and-runners.md`, nexus-iqmih). `scripts/build-gate-jar.sh`
+  takes that lease first and waits for it (`NX_BUILD_LEASE_WAIT`). On a `HIT` it
+  stops there. A `MISS` (the `gate jar cache MISS` line) runs Maven, and until
+  nexus-t6t9f adds `build-gate-jar.sh --lab-run <class>` that build is not under
+  a grant: say so in the announcement rather than wrapping the script in
+  `lab-run`, which would hold the grant while it waits for the lease.
+- **The suite goes through `scripts/watched_pytest.py`**, never a bare pytest, and
+  you read its status file instead of sleeping and guessing. `uv sync` sits inside
+  the grant because it is incremental against the kept `.venv`.
 - **Keep the `.venv`.** Never `rm -rf .venv` between runs: `uv sync` against the
   existing one installs only what the lockfile changed. A new worktree is the
   only reason to pay a full sync.
-- **Every build runs inside the grant.** `scripts/build-gate-jar.sh` (and any
-  `scripts/mvnw-leased.sh`) is a heavy command; run bare on chas it is invisible
-  to the scheduler. Inside the grant it refuses at once with exit 75 when another
-  build holds the lease, so the caller retries rather than the grant idling.
 - **Why the build is now cheap, and what to check.** The gate-jar cache is keyed
   on `service/pom.xml`, `service/src/main/**`, `service/mvnw` and `service/.mvn/**`
   only, so a commit that touches `service/src/test` or docs prints `gate jar cache
-  HIT` and runs no Maven. On a real MISS the jOOQ generated sources come from
-  `<git common dir>/nexus-jooq-cache/` when the changelog, pom and jOOQ/PostgreSQL
-  versions are unchanged since any worktree of this clone generated them, so no
-  codegen container starts; only a changelog or pom edit regenerates. Both caches
-  live in the common dir, so the standing worktrees must be worktrees of ONE
-  clone, not separate clones. `NX_GATE_JAR_CACHE=off` and `NX_JOOQ_CACHE=off`
-  force a rebuild; `-Dnexus.jooq.regenerate=true` forces a regeneration (the
-  floating `pgvector:pg17` image tag is the one input the hash cannot see).
-- **Announce each run to the lab owner session first** (peer-messaging bus):
-  class, selection, and the sha. The pool is shared with CI and with other
-  sessions' runs, and the owner is the one place that sees all of them.
+  HIT` and runs no Maven. On a real MISS the jOOQ generated sources come from the
+  jOOQ cache when the changelog, pom and jOOQ/PostgreSQL versions are unchanged
+  since any worktree of this clone generated them, so no codegen container starts;
+  only a changelog or pom edit regenerates. `NX_GATE_JAR_CACHE=off` and
+  `NX_JOOQ_CACHE=off` force a rebuild; `-Dnexus.jooq.regenerate=true` forces a
+  regeneration (the floating `pgvector:pg17` image tag is the one input the hash
+  cannot see). Both caches are best-effort: one that cannot be written or read
+  whole costs a warning and a rebuild, never a failed build.
+- **Where the caches are, how big, who prunes.** Both live in the clone's git
+  common dir, so the standing worktrees must be worktrees of ONE clone, not
+  separate clones: `.git/nexus-gate-jar-cache/` (one directory per key holding the
+  stamped jar, ~131 MB each, newest 5 kept, `GATE_JAR_CACHE_KEEP`) and
+  `.git/nexus-jooq-cache/` (`main-<hash>-<producer>/` and `test-<hash>-<producer>/`,
+  ~4.4 MB each, newest 6 of each kind kept, `JOOQ_CACHE_KEEP`). So the budget is
+  about 0.7 GB for the jars plus about 55 MB for the trees. Pruning is owned by
+  `scripts/build-gate-jar.sh`, after a build that missed; nothing else prunes, so a
+  `mvnw-leased.sh`-only workflow adds jOOQ entries and never trims them. An entry is
+  taken out of service by rename before it is deleted, so a prune never empties an
+  entry a restore is copying. To empty a cache by hand, `rm -rf` the directory with
+  no run in flight.
+- **Announce each run to the lab owner session first.** That session is `labrun`
+  (peer-messaging bus): send it the class, the selection, the sha, and whether the
+  jar will MISS. The pool is shared with CI and with other sessions' runs, labrun is
+  the one place that sees all of them, and a change to shared state (a runner, a
+  class, a cache or worktree you do not own) is claimed through it, not made.
 - **Prune the others.** A worktree no session owns is dead weight (23 sat in
   `~nxtest/src/nexus-wt` at 13 GB on 2026-10-19): `git worktree remove` it, then
   `git worktree prune`.

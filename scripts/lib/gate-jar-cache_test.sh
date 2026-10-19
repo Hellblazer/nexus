@@ -216,14 +216,16 @@ proot="$WORKDIR/prune-root"; mkdir -p "$proot"
 for i in 1 2 3 4; do mkdir -p "$proot/k$i"; echo x > "$proot/k$i/f"; touch -t "20260101010$i" "$proot/k$i"; done
 GATE_JAR_CACHE_KEEP=2 _gate_jar_cache_prune "$proot"
 [[ -d "$proot/k4" && -d "$proot/k3" && ! -e "$proot/k1" && ! -e "$proot/k2" ]] && ok "gate-jar prune kept the newest 2" || bad "gate-jar prune result: $(ls "$proot")"
-if grep -E "/k[0-9]+$" "$rm_log" >/dev/null; then bad "gate-jar prune deleted an entry in place: $(grep -E '/k[0-9]+$' "$rm_log" | head -2)"; else ok "gate-jar prune never rm'd an entry under its own name"; fi
+in_place="$(grep -E "/k[0-9]+$" "$rm_log" || true)"
+if [[ -n "$in_place" ]]; then bad "gate-jar prune deleted an entry in place: $in_place"; else ok "gate-jar prune never rm'd an entry under its own name"; fi
 [[ -z "$(ls -A "$proot" | grep -E '\.old')" ]] && ok "no .old leftovers after the prune" || bad "leftovers: $(ls -A "$proot")"
 : > "$rm_log"
 jr2="$WORKDIR/jooq-prune"; mkdir -p "$jr2"
 for i in 1 2 3; do mkdir -p "$jr2/main-h$i/generated"; touch -t "20260101010$i" "$jr2/main-h$i"; done
 NX_JOOQ_CACHE="$jr2" JOOQ_CACHE_KEEP=1 gate_jar_cache_prune_jooq "$repo"
 [[ -d "$jr2/main-h3" && ! -e "$jr2/main-h1" && ! -e "$jr2/main-h2" ]] && ok "jooq prune kept the newest 1" || bad "jooq prune result: $(ls "$jr2")"
-if grep -E "/main-h[0-9]+$" "$rm_log" >/dev/null; then bad "jooq prune deleted an entry in place"; else ok "jooq prune never rm'd an entry under its own name"; fi
+in_place="$(grep -E "/main-h[0-9]+$" "$rm_log" || true)"
+if [[ -n "$in_place" ]]; then bad "jooq prune deleted an entry in place: $in_place"; else ok "jooq prune never rm'd an entry under its own name"; fi
 unset -f rm
 
 echo
