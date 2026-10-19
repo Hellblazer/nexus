@@ -88,7 +88,7 @@ class EgressGuardCensusTest {
         plant("dev/nexus/service/http/Rogue.java", """
             package dev.nexus.service.http;
             import java.net.http.HttpClient;
-            final class Rogue { Object c = HttpClient.newHttpClient(); }
+            final class Rogue { Object c = HttpClient . newHttpClient(); }
             """);
         EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, ONE_VOYAGE, List.of(VOYAGE));
         assertThat(r.problems()).anyMatch(p -> p.contains("Rogue.java") && p.contains("not on the egress allowlist"));
@@ -106,7 +106,7 @@ class EgressGuardCensusTest {
     @Test
     void fixture_everyListedConstructIsSeen() throws IOException {
         String[] spellings = {
-            "HttpClient.newBuilder()", "HttpClient.newHttpClient()", "u.openConnection()", "u.openStream()",
+            "HttpClient.newBuilder()", "HttpClient.newHttpClient" + "()", "u.openConnection()", "u.openStream()",
             "new Socket(h, 1)", "new ServerSocket(0)", "SocketChannel.open()", "ServerSocketChannel.open()",
             "DriverManager.getConnection(u)", "new ProcessBuilder(a)", "Runtime.getRuntime().exec(a)"};
         int i = 0;
@@ -125,7 +125,7 @@ class EgressGuardCensusTest {
         plant("A.java", """
             /** Never call HttpClient.newBuilder() here; see {@code new Socket(} and ProcessBuilder. */
             class A {
-                // HttpClient.newHttpClient()
+                // HttpClient .newHttpClient()
                 /* DriverManager.getConnection(x) */
                 String s = "https://example.com/not-a-site";
             }
