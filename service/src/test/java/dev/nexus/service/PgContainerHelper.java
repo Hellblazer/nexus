@@ -191,7 +191,22 @@ public final class PgContainerHelper {
                 .withMemorySwap(memoryBytes))
             // Lets a host count one run's containers among everyone else's:
             // docker ps --filter label=dev.nexus.test.run=<id>.
-            .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""));
+            .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""))
+            // nexus-7xfh7: which test class asked for this boot, so `docker events` can rank call sites:
+            // docker events --filter label=dev.nexus.test.run=<id> --format '{{index .Actor.Attributes "dev.nexus.test.caller"}}'
+            .withLabel("dev.nexus.test.caller", callerClass());
+    }
+
+    /** First stack frame outside the container plumbing: the test class that caused a boot. */
+    private static String callerClass() {
+        Set<String> plumbing = Set.of(
+            PgContainerHelper.class.getName(), SharedCluster.class.getName(),
+            SharedDatabaseHandle.class.getName(), FailFastPostgreSQLContainer.class.getName());
+        return StackWalker.getInstance().walk(frames -> frames
+            .map(StackWalker.StackFrame::getClassName)
+            .filter(n -> !plumbing.contains(n))
+            .findFirst().orElse("unknown"))
+            .replaceFirst("^dev\\.nexus\\.service\\.", "");
     }
 
     /**
