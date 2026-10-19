@@ -117,7 +117,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
 
     @Test
     void nexusDiagCanSelectTheDiagViewAndEveryUnderlyingTable() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 
@@ -166,7 +166,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             .as("NEXUS_DIAG_READABLE_TABLES must be non-empty or this test guards nothing")
             .isNotEmpty();
 
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 
@@ -205,7 +205,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
      */
     @Test
     void nexusDiagCanSelectTupleTables() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 
@@ -243,7 +243,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             .as("request_ledger is deliberately not diag-readable (nexus-yye8l.1)")
             .doesNotContain("request_ledger");
 
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
 

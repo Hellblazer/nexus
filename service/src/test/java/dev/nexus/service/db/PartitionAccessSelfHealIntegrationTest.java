@@ -53,7 +53,7 @@ class PartitionAccessSelfHealIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASS);
         }

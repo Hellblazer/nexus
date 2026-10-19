@@ -121,7 +121,7 @@ class SchemaMigratorIntegrationTest {
     @BeforeAll
     void bootstrap() throws Exception {
         // Start a completely schema-less embedded Postgres.
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
 
         // ── Phase A: provisioning (done by DBA / Phase-5 nx step, NOT by Liquibase) ──
         // Using the embedded postgres superuser to simulate the DBA bootstrap:
@@ -424,7 +424,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(5)
     void agedBoxWithMissingChashConstraint_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_aged_test";
             final String pass = "nexus_admin_aged_test_pass";
@@ -605,7 +605,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(6)
     void agedBoxWithMissingChashIndexConstraint_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_aged_ci_test";
             final String pass = "nexus_admin_aged_ci_test_pass";
@@ -812,7 +812,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(8)
     void agedBoxWithMissingFk002CollectionFk_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_aged_fk002_test";
             final String pass = "nexus_admin_aged_fk002_test_pass";
@@ -1023,7 +1023,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(10)
     void presentButViolatingChashIndexConstraint_migrationFailsCleanNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_aged_viol_test";
             final String pass = "nexus_admin_aged_viol_test_pass";
@@ -1295,7 +1295,7 @@ class SchemaMigratorIntegrationTest {
     @Order(13)
     void lateUpgradingDeployment_withPreExistingDanglingManifestPopulation_bootsSuccessfully_andRemediates()
             throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_o8dil29_test";
             final String pass = "nexus_admin_o8dil29_test_pass";
@@ -1465,7 +1465,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(14)
     void bareValidateWithoutRemediation_againstDanglingPopulation_throws() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_o8dil29_neg_test";
             final String pass = "nexus_admin_o8dil29_neg_test_pass";
@@ -1624,7 +1624,7 @@ class SchemaMigratorIntegrationTest {
     @Order(16)
     void chunksCollectionFk_bareValidateWithoutReconcile_againstUnregisteredCollection_throws()
             throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_o8dil49_neg_test";
             final String pass = "nexus_admin_o8dil49_neg_test_pass";
@@ -1773,7 +1773,7 @@ class SchemaMigratorIntegrationTest {
             throws Exception {
         final String pass = role + "_q81g7_pass";
 
-        PostgreSQLContainer<?> roleNamedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> roleNamedPg = PgContainerHelper.startEmptyDatabase(role);
         try {
             // Phase A: the minimal DBA-equivalent bootstrap, for a role whose NAME is
             // the variable under test.
@@ -1855,7 +1855,7 @@ class SchemaMigratorIntegrationTest {
     }
 
     private PostgreSQLContainer<?> startRoleContainer(String role, String pass) throws Exception {
-        PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c = PgContainerHelper.startEmptyDatabase(role);
         try {
             bootstrapRole(c, role, pass);
         } catch (Exception e) {
@@ -2031,7 +2031,7 @@ class SchemaMigratorIntegrationTest {
         final int diag2ExtraCopies = 7;
         final int duplicatedIdentities = 2;
 
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_jl08t_test";
             final String pass = "nexus_admin_jl08t_test_pass";
@@ -2330,7 +2330,7 @@ class SchemaMigratorIntegrationTest {
     // role/schema bootstrap (CREATE ROLE / GRANT ON DATABASE|SCHEMA / GRANT
     // pg_monitor -- the same class tests 5/6/18 each already pay once, with
     // no jOOQ typed-DSL form), which this design avoids entirely. `pg` is
-    // itself a real Testcontainers Postgres (PgContainerHelper.startDedicated(),
+    // itself a real Testcontainers Postgres (PgContainerHelper.startEmptyDatabase(),
     // same helper the dedicated-container tests use), so "against the real
     // Testcontainers Postgres" still holds.
 

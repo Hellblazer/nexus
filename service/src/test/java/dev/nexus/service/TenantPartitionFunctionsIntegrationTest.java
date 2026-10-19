@@ -67,7 +67,7 @@ class TenantPartitionFunctionsIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
         }

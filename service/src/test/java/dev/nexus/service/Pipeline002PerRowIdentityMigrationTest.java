@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * backfill re-keys a POPULATED pre-002 buffer correctly, as the production
  * migration role would run it.
  *
- * <p>Uses a DEDICATED container ({@link PgContainerHelper#startDedicated()})
+ * <p>Uses an EMPTY database on the shared cluster ({@link PgContainerHelper#startEmptyDatabase()})
  * and the changeset-count-limited {@code update(int, ...)} idiom
  * ({@code AspectDocIdBackfillTest} / {@code Hygiene001NotNullMigrationRlsTest})
  * to migrate up to, but NOT including, {@code pipeline-002-1}, seed the
@@ -69,7 +69,7 @@ class Pipeline002PerRowIdentityMigrationTest {
 
     @Test
     void backfill_attachesEveryWalRowToItsOwnTenantsRun_andDropsOrphans() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_pipeline002_test";
             final String pass = "nexus_admin_pipeline002_test_pass";

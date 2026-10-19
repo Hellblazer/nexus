@@ -77,10 +77,10 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        // Dedicated, not shared: this test DROPs a CHECK constraint and
-        // restores NOT NULL DEFAULT 0, a global schema mutation that must
-        // not leak into any other test class's shared-cluster assumptions.
-        pg = PgContainerHelper.startDedicated();
+        // Its own database (a template clone): this test DROPs a CHECK constraint and
+        // restores NOT NULL DEFAULT 0. The mutation is database-local, so no
+        // other class sees it (nexus-7xfh7).
+        pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             // applyProductSchema also installs nexus_test.* (dropConstraint below)
             // through the same superuser connection that runs the product changelog.

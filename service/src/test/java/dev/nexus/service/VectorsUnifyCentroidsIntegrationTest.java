@@ -78,7 +78,7 @@ class VectorsUnifyCentroidsIntegrationTest {
     }
 
     private static Rig newRig(String label) throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         String role = "nexus_admin_" + label;
         String pass = role + "_pass";
         // Phase A: the DBA-equivalent bootstrap (migrating role, nexus_svc, CREATE grants,

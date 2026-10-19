@@ -50,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * real NOSUPERUSER/NOBYPASSRLS role for the ENTIRE migration, exactly like
  * {@link SchemaMigratorIntegrationTest} and {@link AspectDocIdBackfillTest}.
  *
- * <p>Uses a DEDICATED container ({@link PgContainerHelper#startDedicated()})
+ * <p>Uses an EMPTY database on the shared cluster ({@link PgContainerHelper#startEmptyDatabase()})
  * and Liquibase's changeset-count-limited {@code update(int, ...)}
  * ({@link #migrateUpTo}, the exact idiom {@code AspectDocIdBackfillTest}
  * already established) to migrate up to — but NOT including —
@@ -78,7 +78,7 @@ class Hygiene001NotNullMigrationRlsTest {
     @Test
     void hygieneChangeset_deletesOrphansAndBackfillsAcrossTwoTenants_andNotNullTakesEffect()
             throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene001_test";
             final String pass = "nexus_admin_hygiene001_test_pass";

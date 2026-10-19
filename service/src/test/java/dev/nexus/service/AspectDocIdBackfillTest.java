@@ -38,8 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * every tenant if the changeset had not toggled {@code NO FORCE} for its
  * duration).
  *
- * <p>Uses a DEDICATED container (never the shared nexus-yhmav template,
- * {@link PgContainerHelper#startDedicated()}) and Liquibase's
+ * <p>Uses an EMPTY database (never a clone of the shared nexus-yhmav template,
+ * {@link PgContainerHelper#startEmptyDatabase()}) and Liquibase's
  * changeset-count-limited {@code update(int, ...)} (the exact mechanism
  * {@code SchemaMigratorIntegrationTest}'s "aged box" tests use to inject a
  * divergence before a specific changeset runs) to migrate up to — but NOT
@@ -65,7 +65,7 @@ class AspectDocIdBackfillTest {
 
     @Test
     void backfill_neverOverwritesAnAlreadyStampedDocId() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_aspect_backfill_test2";
             final String pass = "nexus_admin_aspect_backfill_test2_pass";

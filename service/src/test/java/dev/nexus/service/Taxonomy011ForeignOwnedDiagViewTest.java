@@ -49,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * precedent, {@code SchemaRollbackRoundTripIntegrationTest#reapplyForward},
  * ever actually uses).
  *
- * <p>Each {@code @Test} gets its OWN dedicated container and runs the full
+ * <p>Each {@code @Test} gets its OWN empty database (it declares the replay role exclusive: a bare CREATE ROLE on the shared cluster) and runs the full
  * migration independently (mirroring {@code GrantsSvcForeignOwnedRelationTest}
  * / {@code Catalog013RlsReplayTest}'s own per-test-container shape) —
  * deliberately NOT a shared {@code @BeforeAll}: an earlier revision of this
@@ -96,7 +96,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
 
     @Test
     void foreignOwnedView_failsLoudlyWithNamedRemedy_notSilently() throws Exception {
-        try (var pg = PgContainerHelper.startDedicated();
+        try (var pg = PgContainerHelper.startEmptyDatabase(ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             fullMigrationThenOwnershipReassign(pg, su);
@@ -129,7 +129,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
 
     @Test
     void foreignOwnedViewDropped_beforeRetry_letsTheConversionApply() throws Exception {
-        try (var pg = PgContainerHelper.startDedicated();
+        try (var pg = PgContainerHelper.startEmptyDatabase(ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             fullMigrationThenOwnershipReassign(pg, su);
@@ -229,7 +229,7 @@ class Taxonomy011ForeignOwnedDiagViewTest {
         // scenario this class exists to prove -- same test-only-relaxation
         // shape as the view drop directly above, and the identical fix
         // Taxonomy010BackfillDirectIntegrationTest applies for the same
-        // reason: this dedicated, throwaway container never re-adds the
+        // reason: this throwaway database never re-adds the
         // constraint.
         su.createStatement().execute(
             "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");

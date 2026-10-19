@@ -81,7 +81,7 @@ class Hygiene005GcRegistrationFromOriginRowDataCorrectionTest {
 
     @Test
     void correctsMislabelledQuarantineSiblingsAndPromotesDormantOnes() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene005_test";
             final String pass = "nexus_admin_hygiene005_test_pass";

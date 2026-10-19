@@ -47,7 +47,7 @@ class VersionHandlerSchemaChangesetCountTest {
 
     @BeforeAll
     static void startContainer() {
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
     }
 
     @AfterAll

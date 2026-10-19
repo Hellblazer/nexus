@@ -192,7 +192,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
     void oldEngineChangelogTree_upgradesToHead_afterInjectedDivergence() throws Exception {
         Path oldChangelogRoot = ensureOldTreeMaterialized(repoRoot());
 
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -345,7 +345,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
     void oldEngineChangelogTree_withLegacySeededRows_dataChangesetsActuallyExecute() throws Exception {
         Path oldChangelogRoot = ensureOldTreeMaterialized(repoRoot());
 
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);

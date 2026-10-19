@@ -47,7 +47,7 @@ class ServiceTokenScopeBackfillTest {
         // -- a shared, already-fully-migrated-to-HEAD cluster is incompatible with
         // that premise by construction (the bare CREATE TABLE below would collide
         // with the template's already-migrated nexus.service_tokens).
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Pre-003 shape, verbatim from service-tokens-001 + 002.

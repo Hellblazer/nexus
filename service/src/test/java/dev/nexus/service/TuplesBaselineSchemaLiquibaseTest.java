@@ -50,12 +50,14 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  *
  * <p>{@link #changesetsRollBackAndReapply_restoreTheWholeChainFaithfully()}
  * and {@link #tenantIsolation_secondTenantSeesNoneOfFirstTenantsRows()} use a
- * DEDICATED container ({@link PgContainerHelper#startDedicated()}) — the
- * former to roll back exactly this bead's three changesets and prove the
- * re-apply restores tables, RLS, indexes, and the FK; the latter to exercise
- * RLS enforcement through a real NOBYPASSRLS service role (the shared
- * cluster's raw superuser connection would silently bypass RLS and prove
- * nothing about isolation).
+ * database of its own — the former an EMPTY one ({@link PgContainerHelper#startEmptyDatabase()})
+ * to roll back exactly this bead's three changesets and prove the
+ * re-apply restores tables, RLS, indexes, and the FK; the latter a second
+ * template clone ({@link PgContainerHelper#start()}) to exercise
+ * RLS enforcement through a real NOBYPASSRLS service role (a
+ * raw superuser connection would silently bypass RLS and prove
+ * nothing about isolation). The other migration-process tests below
+ * (tests 11 onward) take empty databases too (nexus-7xfh7).
  *
  * <p>Every data-manipulation call site here goes through typed jOOQ DSL
  * (generated {@code Tables.TUPLES}/{@code TUPLE_CLAIM_LOG}/{@code
@@ -287,7 +289,7 @@ class TuplesBaselineSchemaLiquibaseTest {
      */
     @Test
     void changesetsRollBackAndReapply_restoreTheWholeChainFaithfully() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = dedicated.createConnection("")) {
                 migrateUpTo(su, LAST_CHANGESET_ID, true);
@@ -382,7 +384,7 @@ class TuplesBaselineSchemaLiquibaseTest {
 
     @Test
     void changesetsWalkFromEmpty_andReapplyIsNoOp() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = dedicated.createConnection("")) {
                 applyFullChangelog(su);
@@ -407,7 +409,7 @@ class TuplesBaselineSchemaLiquibaseTest {
      */
     @Test
     void tenantIsolation_secondTenantSeesNoneOfFirstTenantsRows() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.start();
         com.zaxxer.hikari.HikariDataSource svcDs = null;
         try {
             try (Connection su = dedicated.createConnection("")) {
@@ -537,7 +539,7 @@ class TuplesBaselineSchemaLiquibaseTest {
      */
     @Test
     void tuplesSweepIndexesChangesets_rollBackAndReapply_restoreAllFourIndexes() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             // Migrate up to (and including) tuples-002-4 ONLY -- not the full
             // changelog -- so tuples-002's own 4 changesets land at the walk's
@@ -653,7 +655,7 @@ class TuplesBaselineSchemaLiquibaseTest {
      */
     @Test
     void tuplesXapt8Indexes_rollBackAndReapply_restoreTheNewShape() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = dedicated.createConnection("")) {
                 migrateUpTo(su, "tuples-005-3", true);
@@ -804,7 +806,7 @@ class TuplesBaselineSchemaLiquibaseTest {
      */
     @Test
     void tuplesBodySizeCheckCleanup_deletesLegacyOversizedRows_keepsAtCapRow_thenValidates() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = dedicated.createConnection("")) {
                 migrateUpTo(su, "tuples-002-4", true);
@@ -907,7 +909,7 @@ class TuplesBaselineSchemaLiquibaseTest {
      */
     @Test
     void tuplesConsumedBodyCleanup_nullsConsumedRowBody_keepsUnconsumedRowBodyUntouched() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = dedicated.createConnection("")) {
                 migrateUpTo(su, "tuples-003-4", true);

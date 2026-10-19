@@ -286,7 +286,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void runAlwaysChangesetsFloatToTheExecutionTail() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -427,7 +427,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("nexus_diag");
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -594,7 +594,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void fullChangelog_rollsBackCompletely_andReappliesToTheSameSchema() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -743,7 +743,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void textGateProbeRollback_restoresInvokerProbes_dropsThePolicy_andRevokesTheServiceGrant() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -871,7 +871,7 @@ class SchemaRollbackRoundTripIntegrationTest {
     // reads the RIGHT column through the RIGHT cast.
     @Test
     void typeHygieneRollback_restoresExactDataAndRoundTripsForward() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);

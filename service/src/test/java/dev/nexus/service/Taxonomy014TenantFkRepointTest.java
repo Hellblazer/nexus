@@ -104,15 +104,15 @@ class Taxonomy014TenantFkRepointTest {
     @Test
     void crossTenantParentReference_acceptedPreRepoint_rejectedPostRepoint() throws Exception {
         Path preRepointRoot = buildPreRepointChangelogRoot();
-        // startDedicated(), not start(): this test asserts on the migration PROCESS
+        // startEmptyDatabase(), not start(): this test asserts on the migration PROCESS
         // itself (a specific fresh single-pass apply history distinguishing pre- vs
         // post-repoint schema state) -- PgContainerHelper.start()'s default shared-
         // cluster handle (nexus-yhmav) hands back an ALREADY-fully-migrated database
         // (built from the real classpath master, taxonomy-014 included), which would
         // make every assertion below vacuous regardless of preRepointRoot's content.
-        // See PgContainerHelper.startDedicated()'s own javadoc roster of tests with
-        // this identical requirement.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        // An empty database on the same cluster (nexus-7xfh7) is virgin without a
+        // container boot.
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -179,8 +179,8 @@ class Taxonomy014TenantFkRepointTest {
     @Test
     void crossTenantParentReference_presentBeforeRepoint_failsLoudNotSilently() throws Exception {
         Path preRepointRoot = buildPreRepointChangelogRoot();
-        // startDedicated(): see the sibling test's identical rationale above.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        // startEmptyDatabase(): see the sibling test's identical rationale above.
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -253,8 +253,8 @@ class Taxonomy014TenantFkRepointTest {
         // are all tenant-blind), so the trigger's own predicate is what is being
         // proven, not the FK.
         Path preRepointRoot = buildPreRepointChangelogRoot();
-        // startDedicated(): see the sibling tests' identical rationale above.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        // startEmptyDatabase(): see the sibling tests' identical rationale above.
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);

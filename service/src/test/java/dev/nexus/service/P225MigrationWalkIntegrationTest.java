@@ -134,7 +134,7 @@ class P225MigrationWalkIntegrationTest {
 
     @BeforeAll
     void walkSeededStore() throws Exception {
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
         adminDs = pool(pg, 4);
         migrateUpTo(adminDs, WALK);
@@ -571,7 +571,7 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     void anInjectedFailureLateInTheSwapLeavesEveryTableUnchanged_andTheWalkSucceedsOnceTheBlockerIsGone() throws Exception {
-        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(c2, 3)) {
@@ -607,7 +607,7 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     void aVectorWhoseDimensionDisagreesWithItsCollectionsModelFailsTheWalk_andLeavesEveryTableUnchanged() throws Exception {
-        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(c2, 3)) {
@@ -638,7 +638,7 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     void aSuperuserOwnedDiagView_isDroppedAndRecreatedOverTheNewTable_ownedByTheMigratingRole() throws Exception {
-        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(c2, 3)) {
@@ -668,7 +668,7 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     void aFreshInstallHasTheDefaultTenantsLeaves_andTheTriggerAndMaintainOnEveryLeaf() throws Exception {
-        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(c2, 3)) {
@@ -701,7 +701,7 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     void aSecondBootReRunsTheRunAlwaysChangesets_andLeavesGrantsPoliciesViewAndATriggerMadeLeafIntact() throws Exception {
-        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(c2, 3)) {
@@ -749,7 +749,7 @@ class P225MigrationWalkIntegrationTest {
         // The rollback exists to keep the rollback test chain executable. It restores table shape only: the step 7.8
         // function bodies stay in their post-walk form and every row written since the walk is discarded, which
         // oldLayoutShape (no function bodies, no post-walk rows) cannot see. It is not a recovery path; PITR is.
-        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(c2, 3)) {

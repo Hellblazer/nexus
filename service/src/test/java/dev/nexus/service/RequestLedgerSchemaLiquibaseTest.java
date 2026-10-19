@@ -29,8 +29,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * enforced, and tenant isolation through a non-superuser service role.
  *
  * <p>Tests 1-3 read the shared, already-migrated cluster ({@link PgContainerHelper#start()}).
- * Test 4 uses a dedicated container: it creates a role, which is cluster-global state,
- * and a superuser connection would bypass RLS and prove nothing (the
+ * Test 4 gets its own database (a second {@link PgContainerHelper#start()}) so the schema it
+ * hands a service role stays its own, and uses a non-superuser role because a superuser
+ * connection would bypass RLS and prove nothing (the
  * {@link TuplesBaselineSchemaLiquibaseTest} Test 12 idiom). Grants are pinned in
  * {@link GrantsNexusDiagViewAccessIntegrationTest}, whose walk runs as the production-shaped
  * non-superuser admin role.
@@ -163,7 +164,7 @@ class RequestLedgerSchemaLiquibaseTest {
 
     @Test
     void tenantIsolation_secondTenantSeesNoneOfFirstTenantsRows_andCannotWriteThem() throws Exception {
-        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.start();
         com.zaxxer.hikari.HikariDataSource svcDs = null;
         try {
             try (Connection su = dedicated.createConnection("")) {

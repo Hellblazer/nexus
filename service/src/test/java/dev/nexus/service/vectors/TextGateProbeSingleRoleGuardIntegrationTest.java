@@ -62,7 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * through the probe, and nothing of another tenant). The two-role posture, where the policy must exist and
  * name the owner alone, is {@link Rdr192LiveCExplainEvidenceIntegrationTest}.
  *
- * <p>The membership shapes (second review round) each get a dedicated container migrated as
+ * <p>The membership shapes (second review round) each get an empty database (exclusive roles) migrated as
  * {@code nexus_admin}: {@code nexus_svc} a member WITH INHERIT TRUE (the changeset must be skipped) and WITH
  * INHERIT FALSE (it must run, since the role does not have the owner's privileges), another login role that
  * inherits (skipped), a BYPASSRLS one (not skipped: the policy gives it nothing), a post-condition forced by
@@ -219,8 +219,10 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------------------------------
-    // Two-role posture, membership shapes (nexus-wbfpw.48, second review round). Each test owns a dedicated
-    // container migrated as nexus_admin, because role membership and schema ownership are global state.
+    // Two-role posture, membership shapes (nexus-wbfpw.48, second review round). Each test owns an empty database
+    // migrated as nexus_admin. Role membership is cluster-global, so every role a scenario creates is declared
+    // exclusive (SCENARIO_ROLES): dropped at stop, which takes the memberships it gave nexus_svc with it.
+    // The single-role posture above makes nexus_svc itself the owner, so it keeps a container of its own.
     // ---------------------------------------------------------------------------------------------------
 
     private static final String ADMIN = "nexus_admin";
@@ -243,9 +245,15 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         return new HikariDataSource(cfg);
     }
 
-    /** A dedicated container: owner bootstrapped, {@code pre} run, walked AS nexus_admin, both tenants seeded. */
+    /** Every cluster-global role a scenario below creates, plus the migrator: declared exclusive, so the holder
+     *  drops them (and with them any membership they gave nexus_svc) when it stops, and finds none at acquire. */
+    private static final String[] SCENARIO_ROLES =
+        {ADMIN, EXTRA, "guard_other_owner", "nexus_super_nobypass", "nexus_bypass_login"};
+
+    /** An empty database on the shared cluster (nexus-7xfh7): owner bootstrapped, {@code pre} run, walked AS
+     *  nexus_admin, both tenants seeded. */
     private PostgreSQLContainer<?> migratedAsAdmin(PreMigrate pre) throws Exception {
-        PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> c = PgContainerHelper.startEmptyDatabase(SCENARIO_ROLES);
         try {
             try (Connection su = c.createConnection("")) {
                 PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASS);

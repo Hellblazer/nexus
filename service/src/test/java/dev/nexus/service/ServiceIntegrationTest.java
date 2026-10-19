@@ -55,10 +55,11 @@ class ServiceIntegrationTest {
     @BeforeAll
     void startAll() throws Exception {
         // Start embedded postgres on a free port.
-        // nexus-yhmav opt-out: this "skeleton" harness deliberately does NOT run the
-        // master changelog (see bootstrapTestSchema below) -- a shared, already-fully-
-        // migrated-to-HEAD cluster would silently contradict that hermeticity premise.
-        pg = PgContainerHelper.startDedicated();
+        // nexus-yhmav / nexus-7xfh7: this "skeleton" harness deliberately does NOT run the
+        // master changelog (see bootstrapTestSchema below), so it takes an EMPTY database, not a
+        // clone of the migrated template that would silently contradict that hermeticity premise.
+        // Its one role (svc_test) is created IF NOT EXISTS under a name only this class uses.
+        pg = PgContainerHelper.startEmptyDatabase();
 
         // Bootstrap: create service role and RLS schema for test 4. The superuser pool is
         // transient (setup only); close it so it does not leak (review nexus-22man).

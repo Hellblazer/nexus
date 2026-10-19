@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * constraints it adds in the SAME changeset (bead nexus-ft04v.5) genuinely
  * reject bad data afterward.
  *
- * <p>Uses a DEDICATED container ({@link PgContainerHelper#startDedicated()})
+ * <p>Uses an EMPTY database on the shared cluster ({@link PgContainerHelper#startEmptyDatabase()})
  * and the same changeset-count-limited {@code migrateUpTo} idiom {@link
  * Hygiene001NotNullMigrationRlsTest}/{@code Catalog036EmbeddingProfileSchemaLiquibaseTest}
  * already establish: migrate up to (NOT including) {@code hygiene-002-1} as
@@ -111,7 +111,7 @@ class Hygiene002CollectionAttributesWalkTest {
 
     @Test
     void walkPopulatesEveryBranchAcrossTwoTenants_constraintsReject_reapplyIsNoOp() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene002_test";
             final String pass = "nexus_admin_hygiene002_test_pass";

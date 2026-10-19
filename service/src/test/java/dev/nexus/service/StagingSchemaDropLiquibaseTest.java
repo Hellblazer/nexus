@@ -65,7 +65,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       MARK_RAN branch.</li>
  * </ol>
  *
- * <p>Hermetic: Testcontainers pgvector, requires Docker. Dedicated clusters:
+ * <p>Hermetic: Testcontainers pgvector, requires Docker. Each test takes an empty database on the shared
+ * cluster (nexus-7xfh7), and declares the cluster-global roles it creates ({@code nexus_diag}, {@code ops_dba},
+ * {@code staging_nonowner}) exclusive, so the holder drops them at stop. Formerly dedicated clusters:
  * {@code nexus_diag} is a cluster-global role.
  */
 class StagingSchemaDropLiquibaseTest {
@@ -164,7 +166,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void agedStore_withRows_nexusDiagAndItsStagingGrants_isDropped() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("nexus_diag")) {
             // nexus_diag exists BEFORE the pre-drop walk, as it does on every production
             // cluster (created by pg_provision/the DBA, never by the changelog). jOOQ's
             // open-source DSL has no CREATE ROLE, so this is one raw statement.
@@ -225,7 +227,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void foreignObjectInTheSchema_isLeftAlone_andTheWalkDoesNotAbort() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             Table<?> foreign = DSL.table(DSL.name("staging", "ops_note"));
@@ -252,7 +254,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void namedTableWithADependentViewOutsideTheSchema_isLeftAlone_andTheWalkDoesNotAbort() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             // An ops-created view over a table the changeset DOES name: DROP TABLE of it
@@ -284,7 +286,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void namedTableReferencedByAForeignKeyFromOutside_isLeftAlone_andTheWalkDoesNotAbort() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             // A DBA table in public with a foreign key INTO staging.frecency's primary key.
@@ -321,7 +323,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void nosuperuserOwnerRole_dropsEverythingItOwns_andTheSchema() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             provisionOwnerRole(pg);
             try (Connection owner = ownerConnection(pg)) {
                 walkUpToDropChangeset(owner);
@@ -355,7 +357,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void nosuperuserOwnerRole_withForeignOwnedObjects_dropsWhatItNames_andLeavesWhatItDoesNot() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("ops_dba")) {
             provisionOwnerRole(pg);
             try (Connection owner = ownerConnection(pg)) {
                 walkUpToDropChangeset(owner);
@@ -401,7 +403,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void nonOwnerRole_everyDropRaisesInsufficientPrivilege_andNothingIsDropped() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase("staging_nonowner")) {
             migrateUpToDropChangeset(pg);
 
             String body = extractChangesetBody(DROP_CHANGESET);
@@ -451,7 +453,7 @@ class StagingSchemaDropLiquibaseTest {
      */
     @Test
     void rollback_isIdempotent_overAPartiallyDroppedSchema() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -488,7 +490,7 @@ class StagingSchemaDropLiquibaseTest {
 
     @Test
     void missingSchema_marksTheChangesetRan() throws Exception {
-        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase()) {
             migrateUpToDropChangeset(pg);
 
             try (Connection su = pg.createConnection("")) {

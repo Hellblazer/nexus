@@ -45,7 +45,7 @@ class SchemaMigratorStaleChangelogLockIntegrationTest {
 
     @BeforeAll
     void bootstrap() throws Exception {
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(pg.getUsername());

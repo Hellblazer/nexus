@@ -61,7 +61,7 @@ class Hygiene007DocCountRecountTest {
 
     @Test
     void recountsDriftedTopics_leavesCorrectTopicsAlone() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             final String role = "nexus_admin_hygiene007_test";
             final String pass = "nexus_admin_hygiene007_test_pass";

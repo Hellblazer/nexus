@@ -54,7 +54,7 @@ class P225DiskPreflightIntegrationTest {
 
     @Test
     void lowFreeSpaceRefusesToStart_namesRequiredFreeAndShortfall_andLeavesTheStoreUnwalked() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(pg)) {
@@ -78,7 +78,7 @@ class P225DiskPreflightIntegrationTest {
 
     @Test
     void exactlyEnoughFreeSpaceLetsTheWalkRun_andOnceApplied_theCheckDoesNotRunAgain() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(pg)) {
@@ -113,7 +113,7 @@ class P225DiskPreflightIntegrationTest {
         // The managed/remote branch: the source reports "no local data directory" (the production source does
         // so when NX_PG_DATA_DIR is unset or names nothing the engine can see). A 1-byte-of-everything store
         // would refuse if a number were available; an empty answer must skip, not refuse.
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(pg)) {
@@ -133,7 +133,7 @@ class P225DiskPreflightIntegrationTest {
 
     @Test
     void aFreshInstallHasNothingToCopy_soTheFreeSpaceSourceIsNeverRead() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
             try (HikariDataSource ds = pool(pg)) {
@@ -163,7 +163,7 @@ class P225DiskPreflightIntegrationTest {
      */
     @Test
     void migrateDataSource_readsTheFreeSpaceOfNxPgDataDir() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         Path dataDir = Files.createTempDirectory("p225-disk-wiring");
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);

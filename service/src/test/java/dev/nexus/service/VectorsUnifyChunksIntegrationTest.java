@@ -119,7 +119,7 @@ class VectorsUnifyChunksIntegrationTest {
 
     // ── Shared aged-box scaffold ─────────────────────────────────────────────
 
-    /** One dedicated container + admin pool, bootstrapped like production. */
+    /** One empty database + admin pool, bootstrapped like production. */
     private record Rig(PostgreSQLContainer<?> pg, com.zaxxer.hikari.HikariDataSource adminDs) {
         void close() {
             adminDs.close();
@@ -128,7 +128,7 @@ class VectorsUnifyChunksIntegrationTest {
     }
 
     private static Rig newRig(String label) throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         String role = "nexus_admin_" + label;
         String pass = role + "_pass";
         // Phase A: the DBA-equivalent bootstrap (migrating role, nexus_svc, CREATE grants,

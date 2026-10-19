@@ -90,7 +90,7 @@ class Rdr71gw2CollectionNotNullTest {
         // vectors-004-1 is never in ITS unrun list (migrateUpTo fails with
         // idx=-1) and the per-dim tables are already gone. Partial-migrate
         // harnesses need their own container by construction.
-        pg = PgContainerHelper.startDedicated();
+        pg = PgContainerHelper.startEmptyDatabase();
         try (Connection su = pg.createConnection("")) {
             // Step G (RDR-191 repoint batch cluster A): stop BEFORE
             // vectors-004-1 (now real head, Step B registration) rather than

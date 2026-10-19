@@ -99,12 +99,11 @@ class Taxonomy010BackfillDirectIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        // Dedicated, not shared: this test DROPs then re-applies a NOT NULL
-        // constraint on nexus.topic_assignments.source_collection, a global
-        // schema mutation that must not leak into any other test class's
-        // shared-cluster assumptions (PgContainerHelper.start()'s own
-        // javadoc names exactly this class of test as required to opt out).
-        pg = PgContainerHelper.startDedicated();
+        // Its own database (a template clone): this test DROPs then re-applies a NOT NULL
+        // constraint on nexus.topic_assignments.source_collection. The mutation is
+        // database-local, so no other class sees it (nexus-7xfh7: this used to boot a
+        // container of its own on the strength of a rule the per-class clone made stale).
+        pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
@@ -136,7 +135,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // and would fail to typecheck against bytea (`~` is not defined for
             // bytea; the TEXT/bytea equality would not typecheck either). Same
             // test-only relaxation technique as source_collection above: revert
-            // doc_id to TEXT for the scope of this dedicated, throwaway container
+            // doc_id to TEXT for the scope of this throwaway database
             // so the changeset's own SQL runs exactly as authored.
             //
             // RDR-194 critical fix round (2026-08-17, nexus-i3k3e/Sig-2):
@@ -157,7 +156,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // hit "foreign key constraint ... cannot be implemented" (a bytea-vs-
             // TEXT type mismatch on the referencing column) the moment doc_id
             // stops being bytea -- same test-only-relaxation shape as the view
-            // drop directly above: this dedicated, throwaway container never
+            // drop directly above: this throwaway database never
             // re-adds the constraint, because this test replays taxonomy-010-1
             // alone (never touches taxonomy-011/012's own logic) and the whole
             // container is stopped in @AfterAll.
