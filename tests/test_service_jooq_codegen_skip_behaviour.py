@@ -602,17 +602,34 @@ def test_an_entry_whose_marker_is_empty_is_not_usable_and_is_repaired(cached: Pr
     assert _sources(_entry(cached, kind, a.hash[kind]) / "generated") == _sources(fresh.gen_dir[kind])
 
 
+#: peers racing to publish one absent entry in the test below
+_RACING_PEERS = 4
+
+
 def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Path) -> None:
     """Publication is a rename from a staging dir: a reader that sees <kind>-<hash> sees all of it."""
     a = cached.build()
     entry = _entry(cached, "main", a.hash["main"])
     want = _sources(entry / "generated")
     shutil.rmtree(entry)
-    # Several worktrees with identical inputs and a populated tree publish at the same moment.
+    # Several worktrees with identical inputs and a populated tree publish at the same moment. "The same moment"
+    # is made exact by a barrier in the harness's build.xml (never in the pom): each peer stages its whole copy,
+    # marker last, then waits for `go`, so every peer has decided to publish and all of them reach the placement
+    # together. Left to JVM start-up skew the peers mostly serialise, and the race was met only under machine load
+    # (nexus-mjudo: red twice in full lint runs, green alone).
+    go = tmp_path / "go"
     peers = []
-    for i in range(4):
+    for i in range(_RACING_PEERS):
         peer = _other_worktree(cached, f"peer-{i}")
         shutil.copytree(cached.target, peer.target)
+        build = peer.root / "build.xml"
+        text = build.read_text(encoding="utf-8")
+        staged = re.findall(r'<copy file="[^"]*/main\.cache-complete"[^>]*/>', text)
+        assert len(staged) == 1, "the marker's staging copy was not found in stamp-main: the barrier would be vacuous"
+        build.write_text(text.replace(staged[0], (
+            f'{staged[0]}<touch file="{peer.root / "ready"}"/>'
+            '<waitfor maxwait="120" maxwaitunit="second" checkevery="1" checkeveryunit="millisecond">'
+            f'<available file="{go}"/></waitfor>')), encoding="utf-8")
         peers.append(peer)
     seen_partial: list[str] = []
     stop = threading.Event()
@@ -631,21 +648,38 @@ def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Pat
 
     t = threading.Thread(target=reader)
     t.start()
+    procs: list[subprocess.Popen[str]] = []
     try:
         procs = [subprocess.Popen(  # the stamp step of each peer: its stamp matches, the entry is absent
-            ["java", "-cp", peer.ant_cp, "org.apache.tools.ant.launch.Launcher", "-q", "-f", str(peer.root / "build.xml"),
+            ["java", "-cp", peer.ant_cp, "org.apache.tools.ant.launch.Launcher", "-f", str(peer.root / "build.xml"),
              f"-Dproject.basedir={peer.root}", f"-Dproject.build.directory={peer.target}",
              f"-Djooq.generated.dir={peer.gen_dir['main']}", f"-Djooq.generated.test.dir={peer.gen_dir['test']}",
              f"-Dnexus.jooq.cache.dir={peer.cache}", f"-Dnexus.jooq.main.hash={a.hash['main']}",
              f"-Dnexus.jooq.producer={_PRODUCER}",
              "-Dnexus.jooq.main.skip=true", "-Djooq.version=3.20.11", "stamp-main"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=peer.root.parent) for peer in peers]
+        deadline = time.monotonic() + 120
+        while not all((peer.root / "ready").is_file() for peer in peers):
+            assert time.monotonic() < deadline and all(pr.poll() is None for pr in procs), \
+                "a peer never reached the barrier"
+            time.sleep(0.01)
+        go.touch()
         outs = [pr.communicate(timeout=120)[0] for pr in procs]
-        assert [pr.returncode for pr in procs] == [0] * 4, outs
+        assert [pr.returncode for pr in procs] == [0] * len(procs), outs
     finally:
+        for pr in procs:  # a peer left waiting at the barrier must not outlive the test
+            if pr.poll() is None:
+                pr.kill()
+                pr.wait()
         stop.set()
         t.join()
     assert seen_partial == [], f"a reader saw a half-published entry: {seen_partial[:3]}"
+    # The placement is exclusive: every peer staged a whole copy before any placed one, so exactly one places
+    # the entry and the others are refused and say so. A second publisher is what rewrote the live entry under
+    # the reader: Ant's <move> merged into it file by file, or moved the usable entry aside for its own copy.
+    placed = [o for o in outs if "jOOQ cache: published the main tree" in o]
+    assert len(placed) == 1, f"{len(placed)} of {len(peers)} peers published the same absent entry:\n" + "\n".join(outs)
+    assert sum("the main tree was not published" in o for o in outs) == len(peers) - 1, outs
     assert (entry / "complete").is_file() and _sources(entry / "generated") == want
     assert [c.name for c in Path(cached.cache).iterdir() if c.name.startswith(".")] == [], "staging dirs left behind"
 

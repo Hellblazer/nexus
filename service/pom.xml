@@ -1073,10 +1073,10 @@
                                      and costs only a warning, every copy tolerates its own failure, and the staged tree
                                      is digested against the live tree before it is renamed in, so a copy that ran out
                                      of space is not published. The tree is copied into a staging dir beside the entry and
-                                     renamed into place, so a reader sees the whole entry or none of it; the `complete`
-                                     marker, which carries the tree digest, is staged last. A peer that publishes the same
-                                     key while this copy runs wins: the swap is skipped if the entry became usable
-                                     meanwhile, and the staging dir is deleted either way. The entry key carries the
+                                     renamed into place by a rename that fails when the entry exists, so a reader sees the
+                                     whole entry or none of it; the `complete` marker, which carries the tree digest, is
+                                     staged last. Of peers publishing one key at once, the first rename wins and the others
+                                     leave the entry alone (nexus-mjudo), and the staging dir is deleted either way. The entry key carries the
                                      producer (nexus.jooq.producer, named by the jooq-inputs step), so a tree made by a
                                      different generator, a generation against the nexus-v0ts5 template for one, is neither
                                      served as nor replaced by this one. -->
@@ -1188,36 +1188,75 @@
                                       failonerror="false" if:true="${nexus.jooq.main.stage.whole}"/>
                                 <copy file="${nexus.jooq.stamp.dir}/main.cache-complete" tofile="${nexus.jooq.main.stage}/complete"
                                       failonerror="false" if:true="${nexus.jooq.main.stage.whole}"/>
-                                <!-- The staging copy took time: a peer may have published the entry meanwhile. Swap only if the
-                                     entry is still unusable, or this run deliberately replaces it. -->
-                                <condition property="nexus.jooq.main.swap" value="true" else="false">
+                                <!-- nexus-mjudo: the entry is placed by an atomic rename that FAILS when the entry exists (rename(2) onto a
+                                     non-empty directory; MoveFileEx on Windows), so of peers that stage one key at the same moment exactly one
+                                     places it and the rest leave it untouched. Ant's <move> cannot do this: a directory moved onto an existing
+                                     one is merged into it file by file, each file deleted and then renamed over, so a peer that lost the race
+                                     rewrote the live entry in place and a reader saw it without its marker or half its sources. The rename runs
+                                     as a single-file Java program in a forked JVM (about a third of a second, paid only by a publication). -->
+                                <condition property="nexus.jooq.main.ready" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.main.stage.whole}"/>
                                         <available file="${nexus.jooq.main.stage}/complete"/>
                                         <available file="${nexus.jooq.main.stage}/meta.properties"/>
-                                        <or>
-                                            <istrue value="${nexus.jooq.main.fresh}"/>
-                                            <not>
-                                                <and>
-                                                    <available file="${nexus.jooq.main.entry}/complete"/>
-                                                    <length file="${nexus.jooq.main.entry}/complete" when="greater" length="0"/>
-                                                    <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
-                                                    <resourcecount when="greater" count="0">
-                                                        <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
-                                                                 erroronmissingdir="false"/>
-                                                    </resourcecount>
-                                                </and>
-                                            </not>
-                                        </or>
                                     </and>
                                 </condition>
-                                <available property="nexus.jooq.main.entry.exists" file="${nexus.jooq.main.entry}" type="dir"/>
-                                <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.stage}.old" failonerror="false"
-                                      if:true="${nexus.jooq.main.swap}" if:set="nexus.jooq.main.entry.exists"/>
-                                <move file="${nexus.jooq.main.stage}" tofile="${nexus.jooq.main.entry}" failonerror="false"
-                                      if:true="${nexus.jooq.main.swap}"/>
+                                <echo file="${nexus.jooq.stamp.dir}/JooqCacheRename.java" if:true="${nexus.jooq.main.ready}"
+                                      message="public class JooqCacheRename { public static void main(String[] a) { boolean placed; try { java.nio.file.Files.move(java.nio.file.Path.of(a[0]), java.nio.file.Path.of(a[1]), java.nio.file.StandardCopyOption.ATOMIC_MOVE); placed = true; } catch (Exception e) { placed = false; } System.out.print(placed); } }"/>
+                                <!-- A -Dnexus.jooq.regenerate=true run replaces the entry on purpose: what is there goes aside first (a rename to a
+                                     name nobody else uses, so Ant's <move> is a plain rename here). -->
+                                <condition property="nexus.jooq.main.clear" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.ready}"/>
+                                        <istrue value="${nexus.jooq.main.fresh}"/>
+                                        <available file="${nexus.jooq.main.entry}"/>
+                                    </and>
+                                </condition>
+                                <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.stage}.old" failonerror="false" quiet="true"
+                                      if:true="${nexus.jooq.main.clear}"/>
+                                <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
+                                      outputproperty="nexus.jooq.main.placed" if:true="${nexus.jooq.main.ready}">
+                                    <arg file="${nexus.jooq.main.stage}"/>
+                                    <arg file="${nexus.jooq.main.entry}"/>
+                                </java>
+                                <!-- Refused: the entry exists. A usable one is a peer's publication and stays as it is. An unusable one (torn, an
+                                     empty marker, no sources) goes aside and the placement is tried once more. Two runs repairing one unusable
+                                     entry at the same moment can still move each other's placement aside: a reader then finds no entry for an
+                                     instant, never a partial one, since nothing here writes inside a live entry. -->
+                                <condition property="nexus.jooq.main.repair" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.ready}"/>
+                                        <not><equals arg1="${nexus.jooq.main.placed}" arg2="true"/></not>
+                                        <not>
+                                            <and>
+                                                <available file="${nexus.jooq.main.entry}/complete"/>
+                                                <length file="${nexus.jooq.main.entry}/complete" when="greater" length="0"/>
+                                                <isfileselected file="${nexus.jooq.main.entry}/generated"><readable/></isfileselected>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${nexus.jooq.main.entry}/generated" includes="**/*.java"
+                                                             erroronmissingdir="false"/>
+                                                </resourcecount>
+                                            </and>
+                                        </not>
+                                    </and>
+                                </condition>
+                                <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.stage}.torn" failonerror="false" quiet="true"
+                                      if:true="${nexus.jooq.main.repair}"/>
+                                <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
+                                      outputproperty="nexus.jooq.main.replaced" if:true="${nexus.jooq.main.repair}">
+                                    <arg file="${nexus.jooq.main.stage}"/>
+                                    <arg file="${nexus.jooq.main.entry}"/>
+                                </java>
+                                <condition property="nexus.jooq.main.swap" value="true" else="false">
+                                    <or>
+                                        <equals arg1="${nexus.jooq.main.placed}" arg2="true"/>
+                                        <equals arg1="${nexus.jooq.main.replaced}" arg2="true"/>
+                                    </or>
+                                </condition>
                                 <delete dir="${nexus.jooq.main.stage}" quiet="true" if:true="${nexus.jooq.main.publish}"/>
                                 <delete dir="${nexus.jooq.main.stage}.old" quiet="true" if:true="${nexus.jooq.main.publish}"/>
+                                <delete dir="${nexus.jooq.main.stage}.torn" quiet="true" if:true="${nexus.jooq.main.publish}"/>
+                                <echo level="info" if:true="${nexus.jooq.main.swap}" message="jOOQ cache: published the main tree as ${nexus.jooq.main.entry}"/>
                                 <echo level="warning" if:true="${nexus.jooq.main.publish}" unless:true="${nexus.jooq.main.swap}"
                                       message="jOOQ cache: the main tree was not published (the entry is usable already, or the staged copy was incomplete)"/>
                             </target>
@@ -1238,10 +1277,10 @@
                                      and costs only a warning, every copy tolerates its own failure, and the staged tree
                                      is digested against the live tree before it is renamed in, so a copy that ran out
                                      of space is not published. The tree is copied into a staging dir beside the entry and
-                                     renamed into place, so a reader sees the whole entry or none of it; the `complete`
-                                     marker, which carries the tree digest, is staged last. A peer that publishes the same
-                                     key while this copy runs wins: the swap is skipped if the entry became usable
-                                     meanwhile, and the staging dir is deleted either way. The entry key carries the
+                                     renamed into place by a rename that fails when the entry exists, so a reader sees the
+                                     whole entry or none of it; the `complete` marker, which carries the tree digest, is
+                                     staged last. Of peers publishing one key at once, the first rename wins and the others
+                                     leave the entry alone (nexus-mjudo), and the staging dir is deleted either way. The entry key carries the
                                      producer (nexus.jooq.producer, named by the jooq-inputs step), so a tree made by a
                                      different generator, a generation against the nexus-v0ts5 template for one, is neither
                                      served as nor replaced by this one. -->
@@ -1353,36 +1392,75 @@
                                       failonerror="false" if:true="${nexus.jooq.test.stage.whole}"/>
                                 <copy file="${nexus.jooq.stamp.dir}/test.cache-complete" tofile="${nexus.jooq.test.stage}/complete"
                                       failonerror="false" if:true="${nexus.jooq.test.stage.whole}"/>
-                                <!-- The staging copy took time: a peer may have published the entry meanwhile. Swap only if the
-                                     entry is still unusable, or this run deliberately replaces it. -->
-                                <condition property="nexus.jooq.test.swap" value="true" else="false">
+                                <!-- nexus-mjudo: the entry is placed by an atomic rename that FAILS when the entry exists (rename(2) onto a
+                                     non-empty directory; MoveFileEx on Windows), so of peers that stage one key at the same moment exactly one
+                                     places it and the rest leave it untouched. Ant's <move> cannot do this: a directory moved onto an existing
+                                     one is merged into it file by file, each file deleted and then renamed over, so a peer that lost the race
+                                     rewrote the live entry in place and a reader saw it without its marker or half its sources. The rename runs
+                                     as a single-file Java program in a forked JVM (about a third of a second, paid only by a publication). -->
+                                <condition property="nexus.jooq.test.ready" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.test.stage.whole}"/>
                                         <available file="${nexus.jooq.test.stage}/complete"/>
                                         <available file="${nexus.jooq.test.stage}/meta.properties"/>
-                                        <or>
-                                            <istrue value="${nexus.jooq.test.fresh}"/>
-                                            <not>
-                                                <and>
-                                                    <available file="${nexus.jooq.test.entry}/complete"/>
-                                                    <length file="${nexus.jooq.test.entry}/complete" when="greater" length="0"/>
-                                                    <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
-                                                    <resourcecount when="greater" count="0">
-                                                        <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
-                                                                 erroronmissingdir="false"/>
-                                                    </resourcecount>
-                                                </and>
-                                            </not>
-                                        </or>
                                     </and>
                                 </condition>
-                                <available property="nexus.jooq.test.entry.exists" file="${nexus.jooq.test.entry}" type="dir"/>
-                                <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.stage}.old" failonerror="false"
-                                      if:true="${nexus.jooq.test.swap}" if:set="nexus.jooq.test.entry.exists"/>
-                                <move file="${nexus.jooq.test.stage}" tofile="${nexus.jooq.test.entry}" failonerror="false"
-                                      if:true="${nexus.jooq.test.swap}"/>
+                                <echo file="${nexus.jooq.stamp.dir}/JooqCacheRename.java" if:true="${nexus.jooq.test.ready}"
+                                      message="public class JooqCacheRename { public static void main(String[] a) { boolean placed; try { java.nio.file.Files.move(java.nio.file.Path.of(a[0]), java.nio.file.Path.of(a[1]), java.nio.file.StandardCopyOption.ATOMIC_MOVE); placed = true; } catch (Exception e) { placed = false; } System.out.print(placed); } }"/>
+                                <!-- A -Dnexus.jooq.regenerate=true run replaces the entry on purpose: what is there goes aside first (a rename to a
+                                     name nobody else uses, so Ant's <move> is a plain rename here). -->
+                                <condition property="nexus.jooq.test.clear" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.ready}"/>
+                                        <istrue value="${nexus.jooq.test.fresh}"/>
+                                        <available file="${nexus.jooq.test.entry}"/>
+                                    </and>
+                                </condition>
+                                <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.stage}.old" failonerror="false" quiet="true"
+                                      if:true="${nexus.jooq.test.clear}"/>
+                                <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
+                                      outputproperty="nexus.jooq.test.placed" if:true="${nexus.jooq.test.ready}">
+                                    <arg file="${nexus.jooq.test.stage}"/>
+                                    <arg file="${nexus.jooq.test.entry}"/>
+                                </java>
+                                <!-- Refused: the entry exists. A usable one is a peer's publication and stays as it is. An unusable one (torn, an
+                                     empty marker, no sources) goes aside and the placement is tried once more. Two runs repairing one unusable
+                                     entry at the same moment can still move each other's placement aside: a reader then finds no entry for an
+                                     instant, never a partial one, since nothing here writes inside a live entry. -->
+                                <condition property="nexus.jooq.test.repair" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.ready}"/>
+                                        <not><equals arg1="${nexus.jooq.test.placed}" arg2="true"/></not>
+                                        <not>
+                                            <and>
+                                                <available file="${nexus.jooq.test.entry}/complete"/>
+                                                <length file="${nexus.jooq.test.entry}/complete" when="greater" length="0"/>
+                                                <isfileselected file="${nexus.jooq.test.entry}/generated"><readable/></isfileselected>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${nexus.jooq.test.entry}/generated" includes="**/*.java"
+                                                             erroronmissingdir="false"/>
+                                                </resourcecount>
+                                            </and>
+                                        </not>
+                                    </and>
+                                </condition>
+                                <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.stage}.torn" failonerror="false" quiet="true"
+                                      if:true="${nexus.jooq.test.repair}"/>
+                                <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
+                                      outputproperty="nexus.jooq.test.replaced" if:true="${nexus.jooq.test.repair}">
+                                    <arg file="${nexus.jooq.test.stage}"/>
+                                    <arg file="${nexus.jooq.test.entry}"/>
+                                </java>
+                                <condition property="nexus.jooq.test.swap" value="true" else="false">
+                                    <or>
+                                        <equals arg1="${nexus.jooq.test.placed}" arg2="true"/>
+                                        <equals arg1="${nexus.jooq.test.replaced}" arg2="true"/>
+                                    </or>
+                                </condition>
                                 <delete dir="${nexus.jooq.test.stage}" quiet="true" if:true="${nexus.jooq.test.publish}"/>
                                 <delete dir="${nexus.jooq.test.stage}.old" quiet="true" if:true="${nexus.jooq.test.publish}"/>
+                                <delete dir="${nexus.jooq.test.stage}.torn" quiet="true" if:true="${nexus.jooq.test.publish}"/>
+                                <echo level="info" if:true="${nexus.jooq.test.swap}" message="jOOQ cache: published the test tree as ${nexus.jooq.test.entry}"/>
                                 <echo level="warning" if:true="${nexus.jooq.test.publish}" unless:true="${nexus.jooq.test.swap}"
                                       message="jOOQ cache: the test tree was not published (the entry is usable already, or the staged copy was incomplete)"/>
                             </target>
