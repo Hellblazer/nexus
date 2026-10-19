@@ -1670,7 +1670,7 @@ class RawSqlGateTest {
     // jOOQ DDL. DenseGateScanBudgetIntegrationTest drops the index through PgContainerHelper.dropIndex, rebuilds the HNSW index
     // through db.changelog-test-hnsw-index.xml, and counts its gate matches through the product's text_gate_probe_384.
     // New test changelogs, each run through runSuperuserTestChangelog behind a PgContainerHelper wrapper where several tests share
-    // it: db.changelog-test-role-search-path.xml (the SharedClusterMutationFalsifyTest poison, ALTER ROLE ... SET),
+    // it: db.changelog-test-role-search-path-poison.xml (the SharedClusterMutationFalsifyTest poison, ALTER ROLE ... SET),
     // -nologin-role.xml (createNologinRole), -schema-usage.xml (grantSchemaUsage), -schema-default-select-acl.xml
     // (grantSchemaDefaultSelectAcl) and -table-owner.xml (alterTableOwner), which take StagingSchemaDropLiquibaseTest's nine
     // CREATE ROLE / GRANT / ALTER DEFAULT PRIVILEGES / OWNER TO / SET ROLE sites to 0 (SET ROLE is the "role" GUC through
@@ -3027,10 +3027,12 @@ class RawSqlGateTest {
     }
 
     /**
-     * Every test changelog (nexus-cbo4a batch 7): a role-level {@code SET search_path TO} may appear
-     * only in db.changelog-test-role-search-path-poison.xml, and only with the poison schema written
-     * literally, so no parameterised changelog can bring back the retired reliance (nexus-zrcj7).
-     * Function-pinned {@code SET search_path = ...} inside a function body is not this shape.
+     * Every test changelog (nexus-cbo4a batch 7): an {@code ALTER ROLE|USER|DATABASE ... SET search_path}
+     * ({@code TO} or {@code =}) in a {@code <sql>} body may appear only in
+     * db.changelog-test-role-search-path-poison.xml, and only with the poison schema written literally, so
+     * no parameterised changelog can bring back the retired reliance (nexus-zrcj7). XML comments are
+     * stripped first, so prose describing the statement is not read as one; a function-pinned
+     * {@code SET search_path = ...} inside a function body has no ALTER ROLE|USER|DATABASE and is not this shape.
      */
     @Test
     void testChangelogs_setSearchPathOnlyToThePoisonSchema() throws IOException {
@@ -3040,18 +3042,24 @@ class RawSqlGateTest {
             xmls = walk.filter(p -> p.toString().endsWith(".xml")).toList();
         }
         assertThat(xmls).as("test changelogs found").hasSizeGreaterThan(20);
-        Pattern setTo = Pattern.compile("(?i)SET\\s+search_path\\s+TO\\s+([^<\\n]*)");
+        Pattern sqlBody = Pattern.compile("(?is)<sql\\b[^>]*>(.*?)</sql>");
+        Pattern roleSet = Pattern.compile(
+            "(?i)ALTER\\s+(?:ROLE|USER|DATABASE)\\b[^;]*?\\bSET\\s+search_path\\s*(?:\\bTO\\b|=)\\s*([^;\\n]*)");
         List<String> offenders = new ArrayList<>();
         int poisonHits = 0;
         for (Path xml : xmls) {
-            Matcher m = setTo.matcher(Files.readString(xml));
-            while (m.find()) {
-                boolean poison = xml.getFileName().toString().equals("db.changelog-test-role-search-path-poison.xml")
-                    && m.group(1).trim().equals("yhmav_poison_schema, public");
-                if (poison) {
-                    poisonHits++;
-                } else {
-                    offenders.add(xml.getFileName() + ": SET search_path TO " + m.group(1).trim());
+            String text = Files.readString(xml).replaceAll("(?s)<!--.*?-->", "");
+            Matcher body = sqlBody.matcher(text);
+            while (body.find()) {
+                Matcher m = roleSet.matcher(body.group(1));
+                while (m.find()) {
+                    boolean poison = xml.getFileName().toString().equals("db.changelog-test-role-search-path-poison.xml")
+                        && m.group(1).trim().equals("yhmav_poison_schema, public");
+                    if (poison) {
+                        poisonHits++;
+                    } else {
+                        offenders.add(xml.getFileName() + ": " + m.group().trim());
+                    }
                 }
             }
         }

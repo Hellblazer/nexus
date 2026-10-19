@@ -450,7 +450,7 @@ class ScratchHandlerTest {
                 .set(SESSION_TOKENS.TENANT_ID, TENANT)
                 .set(SESSION_TOKENS.SESSION_ID, sessionId)
                 .set(SESSION_TOKENS.EXPIRES_AT, java.time.OffsetDateTime.now().plusHours(1))
-                .onConflictDoNothing()
+                .onConflict(SESSION_TOKENS.SESSION_TOKEN_HASH).doNothing()
                 .execute();
         }
     }

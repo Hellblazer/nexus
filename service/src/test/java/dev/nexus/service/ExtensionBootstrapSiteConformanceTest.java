@@ -11,7 +11,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -167,7 +169,7 @@ class ExtensionBootstrapSiteConformanceTest {
     @Test
     void createExtensionInJavaSourcesOnlyAtSanctionedFixtures() throws IOException {
         List<String> violations = new ArrayList<>();
-        int scanned = 0;
+        Map<String, Integer> scanned = new HashMap<>();
 
         // This class's OWN filename is excluded: its positive-case synthetic
         // fixtures (javaStringLiteral_withCreateExtension_flags) deliberately
@@ -189,14 +191,15 @@ class ExtensionBootstrapSiteConformanceTest {
                     }
                     violations.addAll(
                         scanJavaForCreateExtension(filename, Files.readString(file)));
-                    scanned++;
+                    scanned.merge(srcRoot, 1, Integer::sum);
                 }
             }
         }
 
         // With SANCTIONED_JAVA_FILES empty (nexus-cbo4a batch 7) nothing else shows the walk
         // reached the tree; a wrong root would otherwise pass with zero files scanned.
-        assertThat(scanned).as("Java source files scanned under src/{main,test}/java").isGreaterThan(100);
+        assertThat(scanned.getOrDefault("main", 0)).as("Java files scanned under src/main/java").isGreaterThan(100);
+        assertThat(scanned.getOrDefault("test", 0)).as("Java files scanned under src/test/java").isGreaterThan(300);
 
         assertThat(violations)
             .as("CREATE EXTENSION string literal in a Java source file outside "

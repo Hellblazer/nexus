@@ -870,8 +870,16 @@ public final class PgContainerHelper {
      * jOOQ has no CREATE ROLE. Role names are fixed test literals, never input. Leaves {@code su} autoCommit.
      */
     public static void createNologinRole(Connection su, String role) throws Exception {
+        requireTestIdentifier(role);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nologin-role.xml",
             "databasechangelog_test_nologin_role", Map.of("role", role));
+    }
+
+    /** The batch 7 helpers substitute names into changelog SQL unquoted: accept only a plain lowercase identifier. */
+    private static void requireTestIdentifier(String name) {
+        if (name == null || !name.matches("[a-z_][a-z0-9_]*") || name.equals("public")) {
+            throw new IllegalArgumentException("not a plain test identifier: " + name);
+        }
     }
 
     /**
@@ -880,6 +888,8 @@ public final class PgContainerHelper {
      * a schema. Leaves {@code su} autoCommit.
      */
     public static void grantSchemaUsage(Connection su, String schema, String role) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(role);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-usage.xml",
             "databasechangelog_test_schema_usage", Map.of("schema", schema, "role", role));
     }
@@ -890,6 +900,11 @@ public final class PgContainerHelper {
      * Leaves {@code su} autoCommit.
      */
     public static void grantSchemaDefaultSelectAcl(Connection su, String schema, String role) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(role);
+        if (schema.equals("nexus") || schema.equals("public")) {
+            throw new IllegalArgumentException("a default SELECT ACL on " + schema + " would reach every later table");
+        }
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-default-select-acl.xml",
             "databasechangelog_test_schema_default_acl", Map.of("schema", schema, "role", role));
     }
@@ -900,6 +915,7 @@ public final class PgContainerHelper {
      * rendered quoted and schema-qualified. Leaves {@code su} autoCommit.
      */
     public static void alterTableOwner(Connection su, Table<?> table, String owner) throws Exception {
+        requireTestIdentifier(owner);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-table-owner.xml",
             "databasechangelog_test_table_owner",
             Map.of("table", DSL.using(su, SQLDialect.POSTGRES).render(table), "owner", owner));
