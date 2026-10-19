@@ -41,7 +41,9 @@ them. ``check`` on one shard report judges the same four against the same ceilin
 (CI, Linux): ``[python_unit] measured_on`` in the ceiling file is the marker, and the wiring lint
 (tests/scripts/test_ddl_ratchet_wiring.py) keeps ``--advisory`` on the CI fan-in exactly while the marker is
 absent. To arm it: paste the first Linux fan-in line into nexus-ekp7w, set the four ceilings from it, add
-``measured_on = "<ci run url or sha>"`` and drop ``--advisory`` from ci.yml, all in one commit. Java is not
+``measured_on = "<ci run url or sha>"``, drop ``--advisory`` and the three fan-in ``continue-on-error`` lines
+from ci.yml, and the ``continue-on-error`` on the two per-shard ``test`` steps (advisory check, report
+upload), all in one commit. Java is not
 sharded: its totals are near width-invariant but the migration is paid once per fork, so its metrics are
 per fork and the rest (``other_*``: every clone, every dedicated container, the tests' own work) is a
 total.

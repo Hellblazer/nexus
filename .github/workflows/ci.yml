@@ -900,12 +900,19 @@ jobs:
       # 3.12 only: the 3.13 legs (PRs to main) are a second copy of the same suite, and the
       # fan-in expects exactly one report per shard. A shard whose report is missing fails
       # the upload (if-no-files-found), never reads as a clean one.
+      # Both steps are `continue-on-error` exactly while `[python_unit] measured_on` is absent from
+      # tests/ddl_ceiling.toml (tests/scripts/test_ddl_ratchet_wiring.py): until the gate is armed a
+      # missing python3 or script, an exception, a missing report or a transient artifact-upload
+      # failure must not fail the leg and with it pytest-gate. Arming drops both lines (the fan-in
+      # then fails on the missing report instead, exit 12).
       - name: DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)
         if: success() && matrix.python-version == '3.12'
+        continue-on-error: true
         run: python3 scripts/ddl_ratchet.py check --suite python_unit --report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json" --advisory
 
       - name: Upload this shard's DDL report (read by the fan-in in pytest-gate)
         if: success() && matrix.python-version == '3.12'
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ddl-report-shard-${{ matrix.shard }}
@@ -1659,8 +1666,9 @@ jobs:
       # them could turn develop red on a number nobody measured there. It stays advisory exactly while
       # `[python_unit] measured_on` is absent from that file (tests/scripts/test_ddl_ratchet_wiring.py).
       # To arm it, in one commit: paste this step's first Linux line into nexus-ekp7w, set the ceilings,
-      # add measured_on, and delete `--advisory` and the three `continue-on-error` lines below (until then
-      # a wiring slip in the checkout, the download or the glob cannot red the gate job either).
+      # add measured_on, and delete `--advisory` and the three `continue-on-error` lines below, and the
+      # two in the `test` job's DDL steps above (until then a wiring slip in the checkout, the download
+      # or the glob cannot red the gate job either).
       # Fan-in sums every shard's report and judges the whole run against tests/ddl_ceiling.toml:
       # bytes and DDL per test over all tests, and the migration's per booted worker, which do not
       # move with the shard split, with -n (the pool runs 4 workers a shard, a hosted runner one)

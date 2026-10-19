@@ -421,15 +421,17 @@ its verdict step. The Java steps of
 persistent pool workspace's older `service/target/ddl-counts` files are never read; they are `--advisory`
 exactly while their ceilings are still `"measure"` (pending nexus-0ty8z's DDL cut), and
 `tests/scripts/test_ddl_ratchet_wiring.py` fails the commit that sets them and leaves the flag on.
-**The Python fan-in is `--advisory` too until it is armed** (the first review's blocker): the python ceilings
+**The Python fan-in is `--advisory` too until it is armed**: the python ceilings
 were estimated or measured off CI (`wal_bytes_per_test` is a cross-OS estimate; the same tests wrote 1.8x
 more WAL on chas than on the laptop), so an enforced fan-in could turn develop red on a number nobody
 measured there, after the whole shard matrix, with no way to re-run it green. `[python_unit] measured_on`
 in `tests/ddl_ceiling.toml` is the marker; the wiring lint keeps `--advisory` (and `continue-on-error` on
-the fan-in's checkout, download and run) exactly while it is absent. **To arm it, in one commit:** paste the
+the fan-in's checkout, download and run, and on each shard's advisory check and report upload) exactly
+while it is absent. **To arm it, in one commit:** paste the
 first Linux fan-in line (the `pytest-gate` log of a develop run) into nexus-ekp7w, set the four ceilings from
 it, add `measured_on = "<ci run url or sha>"`, and drop `--advisory` and the three `continue-on-error`
-lines from the fan-in steps in `ci.yml`. The fan-in prints the whole comparison either way.
+lines from the fan-in steps in `ci.yml`, plus the `continue-on-error` line on the two per-shard steps in
+the `test` job. The fan-in prints the whole comparison either way.
 **Once armed, a commit that adds a Liquibase changeset bumps `migration_ddl_per_worker` in the same commit**
 (its tolerance is 0, because the migration's DDL count is the changelog's own; the failure message says
 the same). Raising any ceiling needs the reason in that commit's message.

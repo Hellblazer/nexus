@@ -37,7 +37,9 @@
 #   1. paste the first Linux fan-in line (CI run on develop, pytest-gate log) into nexus-ekp7w;
 #   2. set the four python ceilings from that line (DDL and migration are exact; WAL gets its band);
 #   3. add `measured_on = "<ci run url or sha>"` under [python_unit];
-#   4. drop `--advisory` from the fan-in step in .github/workflows/ci.yml.
+#   4. drop `--advisory` and the three `continue-on-error` lines from the fan-in steps in
+#      .github/workflows/ci.yml, and the `continue-on-error` line on each of the two per-shard steps in
+#      the `test` job (the advisory check and the report upload).
 # Once armed, a commit that adds a Liquibase changeset bumps migration_ddl_per_worker (tolerance 0) in the
 # same commit (tests/AGENTS.md says how; the failure message repeats it).
 #

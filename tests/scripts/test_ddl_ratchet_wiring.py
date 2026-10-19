@@ -7,7 +7,9 @@ goes missing, loses the flag that makes it correct, or drifts from the shard mat
 prove each is caught, not merely that today's files are consistent.
 
 * ``ci.yml``: the ``test`` shards write their report to a per-job directory, run ``check --advisory``
-  and upload it; ``pytest-gate`` downloads every shard's report and runs ``fan-in`` with ``--shards``
+  and upload it (both steps ``continue-on-error`` exactly while ``[python_unit] measured_on`` is absent,
+  so a missing script, an exception or a failed artifact upload cannot fail the leg and with it
+  ``pytest-gate`` before the gate is armed); ``pytest-gate`` downloads every shard's report and runs ``fan-in`` with ``--shards``
   equal to the matrix length, after the verdict step. A shard's mix is not the run's, so only the fan-in
   gates, and it gates only once armed: the fan-in is ``--advisory`` (and its checkout, download and run
   steps ``continue-on-error``) exactly while ``[python_unit] measured_on`` is absent from
@@ -82,6 +84,16 @@ def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
             problems.append("test: a shard with no report must fail its upload (if-no-files-found: error)")
         if "3.12" not in str(up.get("if", "")):
             problems.append("test: the upload is not limited to the 3.12 leg, so a 3.13 leg would add a seventh report")
+    # Until the gate is armed, nothing in the per-shard path may fail the leg: a missing python3 or script,
+    # an unexpected exception, a missing report or a transient upload failure would red pytest-gate before
+    # any ceiling was measured. Once armed the fan-in is the gate and a swallowed failure would hide a hole.
+    for step_ in (*shard, *uploads):
+        where = step_.get("name", "?")
+        if armed and step_.get("continue-on-error"):
+            problems.append(f"test: {where!r} is continue-on-error but the gate is armed: a failure here would pass")
+        if not armed and not step_.get("continue-on-error"):
+            problems.append(f"test: {where!r} is not continue-on-error while the gate is advisory: "
+                            "a missing script, a missing report or a failed upload would red the leg and pytest-gate")
 
     gate = _run_steps(doc, "pytest-gate", "ddl_ratchet.py fan-in")
     if len(gate) != 1:
@@ -186,7 +198,8 @@ def _mutate(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
-_CHECK_IF = "if: success() && matrix.python-version == '3.12'\n        run: python3 scripts/ddl_ratchet.py check"
+_CHECK_HEAD = ("- name: DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)\n"
+               "        if: success() && matrix.python-version == '3.12'")
 _UPLOAD_IF = ("- name: Upload this shard's DDL report (read by the fan-in in pytest-gate)\n"
               "        if: success() && matrix.python-version == '3.12'")
 _FAN_IN_IF = "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: needs.changes.outputs.code == 'true'"
@@ -203,7 +216,8 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
         ("name: ddl-report-shard-${{ matrix.shard }}", "name: ddl-report", "expected one ddl-report-shard-* upload"),
         ("          if-no-files-found: error\n          # A re-run", "          if-no-files-found: warn\n          # A re-run", "must fail its upload"),
         ("pattern: ddl-report-shard-*", "pattern: something-else", "does not download ddl-report-shard-*"),
-        (_CHECK_IF, "if: success()\n        run: python3 scripts/ddl_ratchet.py check", "per-shard check is not limited to the 3.12 leg"),
+        (_CHECK_HEAD, "- name: DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)\n        if: success()",
+         "per-shard check is not limited to the 3.12 leg"),
         (_UPLOAD_IF, "- name: Upload this shard's DDL report (read by the fan-in in pytest-gate)\n        if: success()",
          "upload is not limited to the 3.12 leg"),
         (_FAN_IN_IF, "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: success()", "is not limited to runs whose shards ran"),
@@ -212,11 +226,14 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
          "can run after a failed verdict"),
         (_FAN_IN_IF + "\n        continue-on-error: true", _FAN_IN_IF, "is not continue-on-error while the gate is advisory"),
         (_DOWNLOAD_IF + "\n        continue-on-error: true", _DOWNLOAD_IF, "is not continue-on-error while the gate is advisory"),
+        (_CHECK_HEAD + "\n        continue-on-error: true", _CHECK_HEAD, "DDL/bytes ratchet, this shard"),
+        (_UPLOAD_IF + "\n        continue-on-error: true", _UPLOAD_IF, "Upload this shard's DDL report"),
     ],
     ids=["fan-in gone", "shards drift", "shard check enforced", "no report dir", "artifact not a shard report",
          "missing report passes", "download pattern", "shard check on the 3.13 leg", "upload on the 3.13 leg",
          "fan-in runs on a skipped matrix", "download runs on a skipped matrix", "fan-in runs after a red verdict",
-         "advisory fan-in can red the job", "advisory download can red the job"],
+         "advisory fan-in can red the job", "advisory download can red the job",
+         "advisory shard check can red the leg", "advisory report upload can red the leg"],
 )
 def test_the_python_wiring_lint_catches_each_rot(old: str, new: str, expect: str) -> None:
     problems = python_wiring_problems(_mutate(CI_YML.read_text(), old, new), CEILINGS.read_text())
@@ -244,7 +261,7 @@ def _armed_ceilings() -> str:
 
 
 def test_the_python_fan_in_is_advisory_exactly_while_the_ceilings_are_unmeasured_on_ci() -> None:
-    """The blocker of the first review: enforced on estimated ceilings, the fan-in could turn develop red."""
+    """Enforced on estimated ceilings, the fan-in could turn develop red; so could any failing per-shard step."""
     text, ceilings = CI_YML.read_text(), CEILINGS.read_text()
     assert not _armed(ceilings), "arming is a deliberate commit with a Linux measurement; this test pins today's unarmed state"
     assert python_wiring_problems(text, ceilings) == []
@@ -254,7 +271,11 @@ def test_the_python_fan_in_is_advisory_exactly_while_the_ceilings_are_unmeasured
     problems = python_wiring_problems(text, _armed_ceilings())
     assert any("the gate is switched off" in p for p in problems), problems
     assert any("is continue-on-error but the gate is armed" in p for p in problems), problems
+    for name in ("DDL/bytes ratchet, this shard", "Upload this shard's DDL report"):
+        assert any("is continue-on-error but the gate is armed" in p and name in p for p in problems), (name, problems)
     armed_ok = text.replace("--shards 6 --advisory ", "--shards 6 ")
+    for head in (_CHECK_HEAD, _UPLOAD_IF):
+        armed_ok = _mutate(armed_ok, head + "\n        continue-on-error: true", head)
     for step in ("- name: Check out the ratchet and its ceilings", _DOWNLOAD_IF.split("\n")[0], _FAN_IN_IF.split("\n")[0]):
         armed_ok = _mutate(armed_ok, step + "\n        if: needs.changes.outputs.code == 'true'\n        continue-on-error: true\n",
                            step + "\n        if: needs.changes.outputs.code == 'true'\n")
