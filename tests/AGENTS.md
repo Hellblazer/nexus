@@ -229,10 +229,11 @@ catches the error and carries on. Fix it with the mark, or with
 is the point (a resolver-subject test; it is reported stale when it never does). Put the
 mark on the TEST, not only on a fixture parameter: `def test_x(db, t2_service_env)` still
 touches storage in `db` before the tenant exists, and only the mark makes the autouse pin run first.
-A test that spawns a thread or child which touches storage after the test finished fails the
-session (join it inside the test).
+A thread or child that touches storage after its test finished prints a yellow late-touch
+warning naming that test and does not change the exit status, so nothing gates it: join it inside
+the test.
 
-Tests marked `integration` or `slow` keep a tenant per test: the default selection
+Tests marked `integration`, `slow` or `lint` keep a tenant per test: the default selection
 deselects them, so no census has said which of them touch storage.
 
 - `NX_TEST_T2_SUBSTRATE=per-test` (older spelling `engine`) is the escape hatch: a tenant
