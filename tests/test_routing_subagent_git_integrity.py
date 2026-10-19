@@ -311,13 +311,23 @@ def test_the_findings_file_and_state_directories_are_private(box: Box) -> None:
         assert d.stat().st_mode & 0o777 == 0o700, f"{d} is {oct(d.stat().st_mode & 0o777)}"
 
 
-@pytest.mark.t2_tenant
 def test_the_main_conversation_fast_path_imports_nothing_it_does_not_need(box: Box) -> None:
     """With nothing pending the main-conversation call must stay at bare-interpreter cost."""
     payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(box.primary),
                "session_id": SESSION, "tool_use_id": "m"}
+    # This test reads the child's own import list, and the storage-touch guard's child shim
+    # (tests/_storage_touch_shim/sitecustomize.py, on PYTHONPATH in every default run) imports
+    # json itself. The hook script touches no storage, so leave the shim out of this one child.
+    from tests._storage_touch_guard import CHILD_LOG_ENV, SHIM_DIR
+
+    env = {k: v for k, v in box.env.items() if k != CHILD_LOG_ENV}
+    kept = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p and os.path.realpath(p) != str(SHIM_DIR)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("PYTHONPATH", None)
     proc = subprocess.run([sys.executable, "-X", "importtime", str(SCRIPT)], input=json.dumps(payload),
-                          capture_output=True, text=True, env=box.env)
+                          capture_output=True, text=True, env=env)
     assert proc.returncode == 0 and proc.stdout == ""
     imported = {ln.rsplit("|", 1)[-1].strip() for ln in proc.stderr.splitlines() if ln.startswith("import time:")}
     assert imported, "importtime printed nothing: the check below would be vacuous"
