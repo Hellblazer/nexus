@@ -468,7 +468,11 @@ class TestForceRemoveOnEveryPlatform:
 
     Windows rmtree has no fd walk: a directory it cannot list arrives as
     ``os.scandir`` and is removed by one nested rmtree, a read-only file arrives
-    as ``os.unlink``. The read-only bit is the one mode Windows enforces.
+    as ``os.unlink``. The read-only bit is the one mode Windows enforces; the 0o555
+    parents make the same cases need the handler on POSIX too.
+
+    Pins, not red-first: the handler was fixed in 3a5098842 and these pass on that
+    source. They hold its Windows shapes on every host (nexus-yqzpw).
     """
 
     def test_a_directory_that_could_not_be_listed_goes_by_a_nested_rmtree(self, tmp_path: Path) -> None:
@@ -476,17 +480,28 @@ class TestForceRemoveOnEveryPlatform:
         (cache / "d").mkdir(parents=True)
         (cache / "d" / "f").write_text("x", encoding="utf-8")
         (cache / "d" / "f").chmod(0o444)
-        installer._force_remove(os.scandir, str(cache / "d"), PermissionError(13, "denied"), _root=str(cache))
-        assert not (cache / "d").exists()
-        assert cache.is_dir(), "only the entry goes, not the root it sits in"
+        (cache / "d").chmod(0)
+        try:
+            installer._force_remove(os.scandir, str(cache / "d"), PermissionError(13, "denied"), _root=str(cache))
+            assert not (cache / "d").exists()
+            assert cache.is_dir(), "only the entry goes, not the root it sits in"
+        finally:
+            if (cache / "d").exists():
+                (cache / "d").chmod(0o700)
 
     def test_a_read_only_file_is_unlinked_after_one_chmod(self, tmp_path: Path) -> None:
         cache = tmp_path / "nexus"
-        cache.mkdir()
-        (cache / "f").write_text("x", encoding="utf-8")
-        (cache / "f").chmod(0o444)
-        installer._force_remove(os.unlink, str(cache / "f"), PermissionError(13, "denied"), _root=str(cache))
-        assert not (cache / "f").exists()
+        (cache / "ro").mkdir(parents=True)
+        (cache / "ro" / "f").write_text("x", encoding="utf-8")
+        (cache / "ro" / "f").chmod(0o444)
+        (cache / "ro").chmod(0o555)
+        try:
+            installer._force_remove(
+                os.unlink, str(cache / "ro" / "f"), PermissionError(13, "denied"), _root=str(cache)
+            )
+            assert not (cache / "ro" / "f").exists()
+        finally:
+            (cache / "ro").chmod(0o700)
 
     def test_a_vanished_entry_is_not_an_error(self, tmp_path: Path) -> None:
         installer._force_remove(os.unlink, str(tmp_path / "gone"), FileNotFoundError(2, "gone"))
@@ -503,8 +518,16 @@ class TestForceRemoveOnEveryPlatform:
         for name in ("model.onnx", "tokenizer.json"):
             (cache / "m" / "onnx" / name).write_text("x", encoding="utf-8")
             (cache / "m" / "onnx" / name).chmod(0o444)
-        assert installer._remove_model_cache(cache) is None
-        assert not cache.exists()
+        (cache / "m" / "onnx").chmod(0o555)
+        (cache / "m").chmod(0o555)
+        try:
+            assert installer._remove_model_cache(cache) is None
+            assert not cache.exists()
+        finally:
+            if (cache / "m").exists():
+                (cache / "m").chmod(0o700)
+                if (cache / "m" / "onnx").exists():
+                    (cache / "m" / "onnx").chmod(0o700)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")

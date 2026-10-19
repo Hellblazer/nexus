@@ -3460,6 +3460,15 @@ def _mineru_machine_probes_read_nothing(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(health, "semaphores_exhausted", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _sigterm_left_as_found(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Name a test that leaves SIGTERM ignored or blocked, and put it back (tests/_sigterm_guard.py)."""
+    from tests._sigterm_guard import term_left_as_found
+
+    with term_left_as_found(request.node.nodeid):
+        yield
+
+
 # NO _reap_spawned_daemons fixture: it SIGTERMed any T2/T3 daemon a test had
 # spawned into its own tmp NEXUS_CONFIG_DIR (nexus-scoo5 — real `nx upgrade`
 # runs reached `nx daemon t2 ensure-running`, which spawned a DETACHED

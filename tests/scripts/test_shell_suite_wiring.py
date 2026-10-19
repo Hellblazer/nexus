@@ -255,17 +255,19 @@ def _term_default_for_spawn() -> Iterator[None]:
         return
     before = signal.getsignal(signal.SIGTERM)
     reset = False
-    if before is signal.SIG_IGN:
-        try:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            reset = True
-        except ValueError:
-            pass
-    mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
+    mask: set[signal.Signals] | None = None
     try:
+        if before is signal.SIG_IGN:
+            try:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                reset = True
+            except ValueError:
+                pass
+        mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
         yield
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         if reset:
             signal.signal(signal.SIGTERM, before)
 
@@ -286,11 +288,19 @@ def _run_suite(path: Path, *, env: dict[str, str]) -> subprocess.CompletedProces
             argv, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
         )
     with proc:
+        # subprocess.run's own handling: after a timeout POSIX waits on the child only, since
+        # a background lease holder the suite started can keep the pipes open indefinitely.
         try:
             out, err = proc.communicate(timeout=120)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
+            if os.name == "posix":
+                proc.wait()
+            else:
+                proc.communicate()
+            raise
+        except BaseException:
+            proc.kill()
             raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
@@ -298,22 +308,25 @@ def _run_suite(path: Path, *, env: dict[str, str]) -> subprocess.CompletedProces
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signal dispositions and mask")
 def test_a_suite_starts_with_term_at_its_default_even_when_this_worker_leaked_it(tmp_path: Path) -> None:
     """Positive control for _run_suite: a worker with TERM ignored AND blocked still starts a
-    suite that a TERM kills, and the leak is named in a warning. Without the reset the script
-    below survives its own TERM and prints 'survived' (the 5588beead shard 3 shape)."""
+    suite that a TERM kills, and the leak is named in a warning. The negative leg spawns the
+    same script plainly under the same state and it survives its own TERM (the 5588beead
+    shard 3 shape), so the control cannot pass on a host where the state does not carry."""
+    assert _term_state_of_this_worker() is None, "the worker arrived leaked; the control needs a clean start"
     script = tmp_path / "self_term.sh"
     script.write_text('kill -TERM $$\necho survived\n', encoding="utf-8")
     before = signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
     try:
+        plain = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
         with pytest.warns(UserWarning, match="TERM ignored, TERM blocked"):
             result = _run_suite(script, env=dict(os.environ))
         assert _term_state_of_this_worker() == "TERM ignored, TERM blocked", "the spawn must restore the caller's state"
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
         signal.signal(signal.SIGTERM, before)
+    assert (plain.returncode, plain.stdout) == (0, "survived\n"), "negative leg: the leaked state must reach a plain spawn"
     assert result.returncode == -signal.SIGTERM, (result.returncode, result.stdout)
     assert "survived" not in result.stdout
-    assert _term_state_of_this_worker() is None, "the control itself must not leak what it tests"
 
 
 class TestSuitesExist:
