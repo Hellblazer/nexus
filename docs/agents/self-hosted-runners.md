@@ -61,6 +61,49 @@ differ from a GitHub-hosted runner:
   and `build-gate-jar.sh` refuse at once with exit 75 when another build holds the
   lease (nexus-dfg0q); CI jobs keep waiting.
 
+**Standing worktree for verification runs on chas** (nexus-fkhd3, under
+nexus-aca0q). Measured 2026-10-19: once the test phase stopped writing, what a
+verification run still paid per run was setup: a fresh worktree, `uv sync` into
+a new `.venv`, and a gate-jar build whose jOOQ codegen boots Postgres and
+replays the whole Liquibase changelog (~1000 changesets, ~350-410 MB written).
+So a session mints ONE worktree and reuses it:
+
+```bash
+# once per session, as nxtest on chas, from the clone that holds the other worktrees
+git -C ~/src/nexus worktree add --detach ~/src/nexus-wt/<session> <sha>
+# every later run: move the SAME worktree to the commit under test
+git -C ~/src/nexus-wt/<session> fetch origin
+git -C ~/src/nexus-wt/<session> checkout --detach <sha>
+# sync, build and run inside ONE grant; uv sync against the kept .venv is incremental
+cd ~/src/nexus-wt/<session>
+lab-run -c lab-l -- bash -c 'uv sync && scripts/build-gate-jar.sh && uv run pytest -n auto <selection>'
+```
+
+- **Keep the `.venv`.** Never `rm -rf .venv` between runs: `uv sync` against the
+  existing one installs only what the lockfile changed. A new worktree is the
+  only reason to pay a full sync.
+- **Every build runs inside the grant.** `scripts/build-gate-jar.sh` (and any
+  `scripts/mvnw-leased.sh`) is a heavy command; run bare on chas it is invisible
+  to the scheduler. Inside the grant it refuses at once with exit 75 when another
+  build holds the lease, so the caller retries rather than the grant idling.
+- **Why the build is now cheap, and what to check.** The gate-jar cache is keyed
+  on `service/pom.xml`, `service/src/main/**`, `service/mvnw` and `service/.mvn/**`
+  only, so a commit that touches `service/src/test` or docs prints `gate jar cache
+  HIT` and runs no Maven. On a real MISS the jOOQ generated sources come from
+  `<git common dir>/nexus-jooq-cache/` when the changelog, pom and jOOQ/PostgreSQL
+  versions are unchanged since any worktree of this clone generated them, so no
+  codegen container starts; only a changelog or pom edit regenerates. Both caches
+  live in the common dir, so the standing worktrees must be worktrees of ONE
+  clone, not separate clones. `NX_GATE_JAR_CACHE=off` and `NX_JOOQ_CACHE=off`
+  force a rebuild; `-Dnexus.jooq.regenerate=true` forces a regeneration (the
+  floating `pgvector:pg17` image tag is the one input the hash cannot see).
+- **Announce each run to the lab owner session first** (peer-messaging bus):
+  class, selection, and the sha. The pool is shared with CI and with other
+  sessions' runs, and the owner is the one place that sees all of them.
+- **Prune the others.** A worktree no session owns is dead weight (23 sat in
+  `~nxtest/src/nexus-wt` at 13 GB on 2026-10-19): `git worktree remove` it, then
+  `git worktree prune`.
+
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two persistent self-hosted registrations, `hellmini`
 and `win-release`, beside the pool's labels: `qwen-linux` and `gtr-windows` were
