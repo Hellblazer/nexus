@@ -313,6 +313,29 @@ class OrtNativeDirTest {
     }
 
     @Test
+    void aWorldWritableDirectoryRepublishedInTheGapIsJudgedByTheModeRuleNotTrusted(@TempDir Path root)
+            throws Exception {
+        assumePosix(root);
+        Path dir = root.resolve("1.20.0-x");
+        var trust = new java.util.concurrent.atomic.AtomicReference<OrtNativeDir.Trust>();
+
+        // The re-read after a republish runs the unchanged owner and mode rules: a directory another user could
+        // have written into is still never reused.
+        warnings(() -> trust.set(OrtNativeDir.versionDirTrust(dir, OrtNativeDir.Identity.current(), true, d -> {
+            if (!Files.exists(d, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                try {
+                    Files.createDirectory(d);
+                    Files.setPosixFilePermissions(d, PosixFilePermissions.fromString("rwxrwxrwx"));
+                } catch (IOException e) {
+                    throw new AssertionError(e);
+                }
+            }
+        })));
+
+        assertThat(trust.get()).isEqualTo(OrtNativeDir.Trust.WRITABLE_OWNED);
+    }
+
+    @Test
     void aVersionDirectoryThatIsADanglingSymlinkStaysUntrusted(@TempDir Path root) throws Exception {
         assumePosix(root);
         Path dir = Files.createSymbolicLink(root.resolve("1.20.0-x"), root.resolve("missing"));
