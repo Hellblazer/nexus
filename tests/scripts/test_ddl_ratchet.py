@@ -499,6 +499,22 @@ def test_advisory_prints_the_verdict_and_exits_zero(tmp_path, capsys) -> None:
     assert ok == ratchet.EXIT_OK and "ADVISORY" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("shape", ["[]", "null", '"text"', '{"containers": [1]}'])
+@pytest.mark.parametrize("suite", ["python_unit", "java_main"])
+def test_advisory_exits_zero_on_a_report_of_the_wrong_shape(tmp_path, capsys, shape, suite) -> None:
+    """A valid JSON report of the wrong shape must not crash an advisory step into exit 1 (nexus-ekp7w)."""
+    if suite == "python_unit":
+        report = tmp_path / "nx-ddl-report.json"
+        report.write_text(shape)
+    else:
+        report = tmp_path / "ddl-counts"
+        report.mkdir()
+        (report / "ddl-main-r1-1.json").write_text(shape)
+    args = ["check", "--suite", suite, "--report", str(report), "--ceilings", str(_py_ceilings(tmp_path)), "--advisory"]
+    assert ratchet.main(args) == ratchet.EXIT_OK
+    assert "ADVISORY" in capsys.readouterr().out
+
+
 def test_advisory_covers_a_ceiling_still_set_to_measure_and_a_report_that_proves_nothing(tmp_path, capsys) -> None:
     """The Java steps run --advisory while their ceilings are 'measure' (exit 11) and the run must not be red for it."""
     d = tmp_path / "ddl-counts"

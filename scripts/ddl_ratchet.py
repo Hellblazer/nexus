@@ -449,6 +449,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the whole comparison and exit 0 whatever it is: the python ceilings are not yet "
                         "measured on the platform that enforces them (no [python_unit] measured_on)")
     args = parser.parse_args(argv)
+    if args.advisory:
+        # Advisory means exit 0 whatever happens, a malformed report included: a report of the
+        # wrong shape must not red a CI step whose gate is not armed yet (nexus-ekp7w review).
+        try:
+            return _run(args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ADVISORY: the {args.command} step could not judge its input ({type(exc).__name__}: {exc}); "
+                  "not enforced here.")
+            return EXIT_OK
+    return _run(args)
+
+
+def _run(args: argparse.Namespace) -> int:
     if args.command == "check":
         code, message = check(args.suite, args.report, args.ceilings, args.run)
         if args.advisory and code != EXIT_OK:
