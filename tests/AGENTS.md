@@ -388,7 +388,12 @@ measurable. Per-container sum 64-72 KiB in every arm, 17-18 containers a run. co
 45/46 off; dockerd 18/16 on vs 27/27 off (on is lower: Docker's json log shrinks from 4.2 MB to 30 KB);
 systemd-journald 662/436 on vs 690/407 off, host noise that does not follow the counter, written against
 about 2 MB of journal entries (ssh login and veth/network churn, present at idle), so journald's own write
-amplification dominates. Diagnosing a stall: `BOUNDS THAT EXPIRED` in the report lists the docker calls and the loop that
+amplification dominates. The lab owner's nvme0n1 sampler gave 0.84 / 0.66 / 0.51 / 0.52 GB for on / off /
+off / on, so the on arms sit at both ends of the off spread. That refutes the hypothesis the bead opened on,
+that copying the probe script into each container was the writer: a run starts only 17-18 containers, their
+sum is 64-72 KiB, and containerd writes the same on and off. The writer was journald itself; the lab owner
+moved it to RAM on 2026-10-19 (Storage=volatile), so a later A/B should show a near-zero journald row. The
+switch stays so that any later change to the counter can be A/B'd at the same sha. Diagnosing a stall: `BOUNDS THAT EXPIRED` in the report lists the docker calls and the loop that
 were cut off.
 
 Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the
