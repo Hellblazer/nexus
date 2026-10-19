@@ -66,6 +66,7 @@ _ALLOWED: dict[str, str] = {
     "tests/test_local_daemon_client_embed.py": _STUBBED + " (T3Database over a MagicMock client)",
     "tests/test_local_mode.py": _STUBBED + " (in-memory T3Database)",
     "tests/test_service_mode_cli_real_client.py": _STUBBED,
+    "tests/test_tenant_pool.py": "sends one chunk write the engine must refuse (unregistered collection, or no manifest row) as the probe for the tenant reset's collection-registry eviction (nexus-fpwj1); no write can land, the other outcome is a refusal naming the manifest",
     "tests/test_t3.py": _STUBBED + " (in-memory T3Database)",
     "tests/test_vector_retry.py": _STUBBED,
     "tests/test_z0o2p16_store_put_note_writer.py": _SPY,
