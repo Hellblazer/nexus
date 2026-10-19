@@ -237,7 +237,11 @@ def _let_the_throwaway_import_this_checkout(world: World) -> None:
         [str(world.python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
         capture_output=True, text=True, check=True, timeout=60,
     ).stdout.strip()
+    # sys.path, not only sysconfig: a venv layered on a shared dependency tree (CI's
+    # scripts/ci_shared_venv.sh, nexus-dvk18) keeps the dependencies in a second site-packages
+    # that sysconfig does not report.
     site = {sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]}
+    site |= {p for p in sys.path if Path(p).name in ("site-packages", "dist-packages") and Path(p).is_dir()}
     paths = [str(Path(nexus.__file__).resolve().parents[1]), *sorted(site)]
     Path(purelib, "checkout.pth").write_text("\n".join(paths) + "\n", encoding="utf-8")
 
