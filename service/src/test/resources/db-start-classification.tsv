@@ -57,5 +57,6 @@ ChunkLeafAutovacuumReloptionsIntegrationTest	clone	CLONE_OWNER	asserts the state
 TenantPartitionFunctionsIntegrationTest	clone	CLONE_OWNER	tests the vectors-030 objects on scratch parents, as the owner; the walk is the template's (nexus-0ty8z)
 DropTenantPartitionsIntegrationTest	clone	CLONE_OWNER	tests drop_tenant_partitions as the owner on a migrated store; the walk is the template's (nexus-0ty8z)
 PciReconcilerIntegrationTest	clone	CLONE_OWNER	tests the PCI reconciler as the owner on a migrated store; the walk is the template's (nexus-0ty8z)
+LeafBloatCatalogIntegrationTest	clone	CLONE_OWNER	reads leaf statistics and reloptions of a migrated store as the owner and a service role; the walk is the template's (nexus-dxsjc)
 PartitionAccessSelfHealIntegrationTest	clone	CLONE_OWNER	injects drift by owner DDL on a migrated store and re-runs migrate; the first walk is the template's (nexus-0ty8z)
 SchemaMigratorStaleChangelogLockIntegrationTest	clone	CLONE	needs a completed first walk, then drives the lock cases; a template clone is that walk (nexus-0ty8z)

@@ -437,6 +437,10 @@ public class TenantKeyedStateGateTest {
             + "default tenant); it holds no state";
         private static final String PCI_OFF = "PCI index state: populated only when NX_SEARCH_PCI=1, and the tenant "
             + "reset route answers 503 in that mode, so it is never carried across a reset";
+        private static final String LEAF_BLOAT = "leaf bloat view (nexus-dxsjc): the sweep's last read of "
+            + "pg_stat_user_tables, replaced as a whole on every read, so a leaf that is gone (its name carries a hash "
+            + "of the tenant), as after a tenant reset, drops out at the next read; the status route serves counts "
+            + "only";
         private static final String RESULT = "a field of an immutable per-call value (result, parameter, outcome or "
             + "exception) built for one request or one pass and dropped with it; no long-lived structure holds it";
         private static final String COUNTER = "a process-wide counter or flag since boot, or a pass counter; not keyed "
@@ -550,11 +554,12 @@ public class TenantKeyedStateGateTest {
                 + "once at construction from stateless lambdas");
             notKeyed.put("NexusService.TENANT_RESET_ROUTE_ENV", CONSTANT);
             notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
-            // CONFIG (12)
+            // CONFIG (13)
             for (String f : List.of(
                 "Bge768Embedder.admissionGate",
                 "ChunkReaper.Settings.floorExemptCollections",
                 "HttpUtil.gzipper",
+                "NexusService.chunksLeafBloat",
                 "NexusService.embedPosture",
                 "NexusService.perCollectionIndexes",
                 "OwnerlessWriteMode.envReader",
@@ -636,8 +641,12 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, TEST_HOOK);
             }
-            // RESULT (67)
+            // RESULT (71)
             for (String f : List.of(
+                "ChunksLeafAutovacuumCheck.LeafRel.options",
+                "LeafBloatCatalog.Leaf.pciIndexes",
+                "LeafBloatCatalog.Snapshot.leaves",
+                "LeafBloatSweep.Status.leaves",
                 "CatalogRepository.AppendOutcome.sweep",
                 "CatalogRepository.DanglingEndpointException.missing",
                 "CatalogRepository.DeleteOutcome.counts",
@@ -763,6 +772,13 @@ public class TenantKeyedStateGateTest {
                 "OrtNativeDir.UID_WARNED"
             )) {
                 notKeyed.put(f, ORT);
+            }
+            // LEAF_BLOAT (2)
+            for (String f : List.of(
+                "LeafBloatSweep.current",
+                "LeafBloatSweep.loggedProblems"
+            )) {
+                notKeyed.put(f, LEAF_BLOAT);
             }
             // PCI_OFF (17)
             for (String f : List.of(

@@ -3890,6 +3890,19 @@ older engine, or one still starting). An object the row
 cannot read, or a `builder_state` outside `ok`, `auth_failed`, `no_privilege`, `off` and `standby`, warns and names what
 it got. It works in local and managed mode alike, over HTTP only.
 
+**Chunks leaf bloat (nexus-dxsjc, HNSW maintenance policy nexus-4lnn1 R4).** `nx doctor`'s "Chunks leaf bloat" row reads the
+`chunks_leaf_bloat` object of the same `GET /v1/status` body. The object carries **aggregates only**, because the route is
+unauthenticated (Sam's ruling, 2026-10-19): counts over every leaf of `nexus.chunks` (`leaves_total`, `policy_unset`,
+`autovacuum_disabled`, `overdue`, `pinned`, `starved`), `max_overdue_for_seconds`, and the sweep-health fields. It names no leaf. A leaf is
+overdue when its dead rows pass `overdue_base_rows` (1000) plus `overdue_scale_factor` (10%) of its rows, so a small leaf at a high dead
+fraction, which autovacuum leaves alone, is not overdue. The row warns, stating how many leaves are `pinned` (a vacuum finished and the dead
+rows remain) or `starved` (overdue for `overdue_warn_after_seconds` with no vacuum finished), how many lack any of the four autovacuum
+settings, and how many have `autovacuum_enabled` off; a `waiting` leaf passes with a note. The warning says the leaf names are in the
+engine log: grep it for `event=chunks_leaf_bloat_leaf`, one WARN per leaf with its problem, dead rows and live rows. It also warns when the
+engine's view has `expired`, and when its reads have failed since it started and none has succeeded (`ever_read`, `consecutive_failures`).
+Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
+and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
+
 **Prose collections at the index threshold (nexus-qqoak, RDR-227).** `nx doctor`'s "Prose collections at the index
 threshold" row warns when a live collection whose catalog content type is `docs`, `rdr` or `knowledge` holds more than
 `NX_SEARCH_EXACT_MAX_ROWS` rows (default 20,000). At or below that count the router runs the collection exact; above it

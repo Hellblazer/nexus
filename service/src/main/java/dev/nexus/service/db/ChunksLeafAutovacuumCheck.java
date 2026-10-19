@@ -34,7 +34,7 @@ public final class ChunksLeafAutovacuumCheck {
     private static final Logger log = LoggerFactory.getLogger(ChunksLeafAutovacuumCheck.class);
 
     /** Sam's ruling, 2026-10-18. The same texts vectors-034 compares against; a drift test pins them equal. */
-    static final List<String> POLICY = List.of(
+    public static final List<String> POLICY = List.of(
         "autovacuum_vacuum_scale_factor=0.05",
         "autovacuum_vacuum_threshold=1000",
         "autovacuum_vacuum_insert_scale_factor=0.05",
@@ -57,8 +57,49 @@ public final class ChunksLeafAutovacuumCheck {
 
     private record Rel(long oid, String name, String kind, String[] options, Long parent) {}
 
+    /**
+     * One ordinary leaf of the {@code nexus.chunks} tree.
+     *
+     * @param oid     {@code pg_class.oid}, the key into {@code pg_stat_user_tables} and {@code pg_index.indrelid}
+     * @param name    the leaf's relation name, in schema {@code nexus}
+     * @param options {@code pg_class.reloptions}; empty when the leaf has none
+     */
+    public record LeafRel(long oid, String name, List<String> options) {
+        /** True when all four values of {@link #POLICY} are present. */
+        public boolean policySet() {
+            return options.containsAll(POLICY);
+        }
+
+        /** True when {@code autovacuum_enabled} is set to a false spelling, which defeats the policy. */
+        public boolean autovacuumDisabled() {
+            return options.stream().anyMatch(ChunksLeafAutovacuumCheck::disablesAutovacuum);
+        }
+    }
+
     /** Reads the {@code nexus.chunks} tree through {@code pg_inherits} and classifies every ordinary leaf. */
     public static Report inspect(DSLContext ctx) {
+        List<LeafRel> leaves = leaves(ctx);
+        List<String> unset = new ArrayList<>();
+        List<String> disabled = new ArrayList<>();
+        for (LeafRel leaf : leaves) {
+            if (!leaf.policySet()) {
+                unset.add(leaf.name());
+            }
+            if (leaf.autovacuumDisabled()) {
+                disabled.add(leaf.name());
+            }
+        }
+        unset.sort(null);
+        disabled.sort(null);
+        return new Report(leaves.size(), List.copyOf(unset), List.copyOf(disabled));
+    }
+
+    /**
+     * Every ordinary leaf of the {@code nexus.chunks} partition tree, never the partitioned parent or a model
+     * partition (those hold no tuples and are never autovacuumed), in no particular order. Empty when the tree is not
+     * there. The walk is {@code pg_inherits} from the {@code chunks} root, so it holds at any partition depth.
+     */
+    public static List<LeafRel> leaves(DSLContext ctx) {
         var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
         var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
         var i = DSL.table(DSL.name("pg_catalog", "pg_inherits")).as("i");
@@ -82,7 +123,7 @@ public final class ChunksLeafAutovacuumCheck {
         Rel root = byOid.values().stream()
             .filter(r -> r.parent() == null && r.name().equals("chunks")).findFirst().orElse(null);
         if (root == null) {
-            return new Report(0, List.of(), List.of());
+            return List.of();
         }
         Map<Long, List<Rel>> childrenOf = new HashMap<>();
         for (Rel r : byOid.values()) {
@@ -90,7 +131,7 @@ public final class ChunksLeafAutovacuumCheck {
                 childrenOf.computeIfAbsent(r.parent(), k -> new ArrayList<>()).add(r);
             }
         }
-        List<Rel> leaves = new ArrayList<>();
+        List<LeafRel> leaves = new ArrayList<>();
         Set<Long> seen = new HashSet<>();
         List<Rel> stack = new ArrayList<>(List.of(root));
         while (!stack.isEmpty()) {
@@ -99,24 +140,12 @@ public final class ChunksLeafAutovacuumCheck {
                 continue;
             }
             if (r.kind().equals("r") && r.parent() != null) {
-                leaves.add(r);
+                leaves.add(new LeafRel(r.oid(), r.name(),
+                    r.options() == null ? List.of() : List.copyOf(Arrays.asList(r.options()))));
             }
             stack.addAll(childrenOf.getOrDefault(r.oid(), List.of()));
         }
-        List<String> unset = new ArrayList<>();
-        List<String> disabled = new ArrayList<>();
-        for (Rel leaf : leaves) {
-            Set<String> opts = leaf.options() == null ? Set.of() : new HashSet<>(Arrays.asList(leaf.options()));
-            if (!opts.containsAll(POLICY)) {
-                unset.add(leaf.name());
-            }
-            if (opts.stream().anyMatch(ChunksLeafAutovacuumCheck::disablesAutovacuum)) {
-                disabled.add(leaf.name());
-            }
-        }
-        unset.sort(null);
-        disabled.sort(null);
-        return new Report(leaves.size(), List.copyOf(unset), List.copyOf(disabled));
+        return leaves;
     }
 
     private static boolean disablesAutovacuum(String option) {

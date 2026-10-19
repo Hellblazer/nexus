@@ -118,6 +118,8 @@ public final class StatusHandler implements HttpHandler {
     private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
     private final Supplier<Boolean> chunksTenantIsolationIntact; // nullable — key omitted
     private final Supplier<PerCollectionIndexes> perCollectionIndexes; // nullable — key omitted
+    private final Supplier<ChunksLeafBloat> chunksLeafBloat;           // nullable — key omitted
+
     private volatile Supplier<EmbedPosture> embedPosture;              // nullable — keys omitted
 
     /**
@@ -356,6 +358,87 @@ public final class StatusHandler implements HttpHandler {
             Supplier<ReaperStatus> reaperStatus,
             Supplier<Boolean> chunksTenantIsolationIntact,
             Supplier<PerCollectionIndexes> perCollectionIndexes) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, ownerlessWritePolicy, reaperStatus,
+            chunksTenantIsolationIntact, perCollectionIndexes, null);
+    }
+
+    /**
+     * What the leaf bloat view reports on this route (nexus-dxsjc, HNSW maintenance policy nexus-4lnn1 R4,
+     * [additive]): the {@code chunks_leaf_bloat} object. Served from {@link dev.nexus.service.vectors.LeafBloatSweep}'s
+     * cache; the route runs no catalog query (RDR-227).
+     *
+     * <p><b>Aggregates only.</b> This route is unauthenticated, and a cloud engine has a leaf per tenant per model,
+     * so the object carries COUNTS over every leaf and nothing per leaf: no leaf name (it carries a hash of the
+     * tenant), no per-leaf row count, no per-leaf {@code pci_} index. That is Sam's ruling of 2026-10-19. The engine
+     * still computes the per-leaf state (the pinned and starved rules need it) and names a leaf in its log
+     * ({@code event=chunks_leaf_bloat_leaf}, which is not public). Naming leaves over HTTP waits for an
+     * authenticated admin read.
+     *
+     * <p><b>Overdue, not a fraction.</b> A leaf is overdue when {@code dead_rows > overdue_base_rows +
+     * overdue_scale_factor x (live_rows + dead_rows)}: autovacuum's own trigger (1000 + 0.05 x rows, vectors-034) with
+     * the scale doubled. An overdue leaf is {@code waiting} (no vacuum finished since, for less than
+     * {@code overdue_warn_after_seconds}), {@code pinned} (a vacuum finished since the leaf became overdue and the
+     * dead rows remain) or {@code starved} (overdue that long with no vacuum finished). {@code overdue} counts the
+     * leaves in any of the three states.
+     *
+     * @param lastReadAt         when the last successful read finished; null before the first
+     * @param expired            the view is older than three sweep periods plus the read bound; the counts are the
+     *                           last read's and must not be trusted as current
+     * @param sweepSeconds       the read period ({@code NX_SEARCH_PCI_SWEEP_SECONDS}), to judge how old a read may be
+     * @param everRead           a read has succeeded since the engine started
+     * @param consecutiveFailures failed reads since the last successful one (or since boot when none has succeeded)
+     * @param leavesTotal        leaves the last read saw
+     * @param policyUnset        leaves missing at least one of the four autovacuum parameters
+     * @param autovacuumDisabled leaves with {@code autovacuum_enabled} off
+     * @param overdue            leaves overdue on the last read, in any state
+     * @param pinned             leaves in state {@code pinned}
+     * @param starved            leaves in state {@code starved}
+     * @param maxOverdueForSeconds the longest any leaf has been overdue, in whole seconds; 0 when none is
+     */
+    public record ChunksLeafBloat(java.time.Instant lastReadAt, boolean expired, long sweepSeconds, boolean everRead,
+                                  int consecutiveFailures, int leavesTotal, int policyUnset, int autovacuumDisabled,
+                                  int overdue, int pinned, int starved, long maxOverdueForSeconds) {
+
+        /** The object as the sweep's last read says it: counts over every leaf, no leaf named. */
+        public static ChunksLeafBloat of(dev.nexus.service.vectors.LeafBloatSweep.Status sweep, long sweepSeconds) {
+            var all = sweep.leaves();
+            int unset = 0;
+            int disabled = 0;
+            int overdue = 0;
+            int pinned = 0;
+            int starved = 0;
+            long longest = 0;
+            for (var l : all) {
+                unset += l.leaf().policySet() ? 0 : 1;
+                disabled += l.leaf().autovacuumEnabled() ? 0 : 1;
+                if (l.overdue()) {
+                    overdue++;
+                    longest = Math.max(longest, l.overdueForSeconds());
+                }
+                var state = l.state();
+                pinned += state == dev.nexus.service.vectors.LeafBloatSweep.OverdueState.PINNED ? 1 : 0;
+                starved += state == dev.nexus.service.vectors.LeafBloatSweep.OverdueState.STARVED ? 1 : 0;
+            }
+            return new ChunksLeafBloat(sweep.lastReadAt(), sweep.expired(), sweepSeconds, sweep.everRead(),
+                sweep.consecutiveFailures(), all.size(), unset, disabled, overdue, pinned, starved, longest);
+        }
+    }
+
+    /**
+     * @param chunksLeafBloat nexus-dxsjc ([additive]): the {@code chunks_leaf_bloat} object. A null supplier omits the
+     *                     key (an engine, or a wiring, that predates it); a supplier that returns null omits it too
+     *                     (the sweep is not built yet). A client reads a missing key as "cannot tell".
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy,
+            Supplier<ReaperStatus> reaperStatus,
+            Supplier<Boolean> chunksTenantIsolationIntact,
+            Supplier<PerCollectionIndexes> perCollectionIndexes,
+            Supplier<ChunksLeafBloat> chunksLeafBloat) {
+        this.chunksLeafBloat = chunksLeafBloat;
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
@@ -478,6 +561,15 @@ public final class StatusHandler implements HttpHandler {
             }
         }
 
+        // nexus-dxsjc (nexus-4lnn1 R4), [additive]: per-leaf bloat of nexus.chunks and each pci_ index's size, from
+        // the sweep's cache. Absent = an engine that predates it, or a sweep not built yet.
+        if (chunksLeafBloat != null) {
+            ChunksLeafBloat b = chunksLeafBloat.get();
+            if (b != null) {
+                appendChunksLeafBloat(body, b);
+            }
+        }
+
         // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
         // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
         // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
@@ -518,6 +610,30 @@ public final class StatusHandler implements HttpHandler {
         appendSeconds(body, p.thisEngine().passStartedAt());
         body.append(",\"pass_in_progress\":").append(p.thisEngine().passInProgress());
         body.append("}}");
+    }
+
+    private static void appendChunksLeafBloat(StringBuilder body, ChunksLeafBloat b) {
+        body.append(",\"chunks_leaf_bloat\":{\"last_read_at\":");
+        appendSeconds(body, b.lastReadAt());
+        body.append(",\"expired\":").append(b.expired())
+            .append(",\"sweep_seconds\":").append(b.sweepSeconds())
+            .append(",\"ever_read\":").append(b.everRead())
+            .append(",\"consecutive_failures\":").append(b.consecutiveFailures())
+            .append(",\"overdue_base_rows\":")
+            .append(dev.nexus.service.vectors.LeafBloatCatalog.OVERDUE_BASE_ROWS)
+            .append(",\"overdue_scale_factor\":")
+            .append(java.math.BigDecimal.valueOf(dev.nexus.service.vectors.LeafBloatCatalog.OVERDUE_SCALE_FACTOR)
+                .setScale(2, java.math.RoundingMode.HALF_UP).toPlainString())
+            .append(",\"overdue_warn_after_seconds\":")
+            .append(dev.nexus.service.vectors.LeafBloatSweep.OVERDUE_WARN_AFTER.toSeconds())
+            .append(",\"leaves_total\":").append(b.leavesTotal())
+            .append(",\"policy_unset\":").append(b.policyUnset())
+            .append(",\"autovacuum_disabled\":").append(b.autovacuumDisabled())
+            .append(",\"overdue\":").append(b.overdue())
+            .append(",\"pinned\":").append(b.pinned())
+            .append(",\"starved\":").append(b.starved())
+            .append(",\"max_overdue_for_seconds\":").append(b.maxOverdueForSeconds())
+            .append('}');
     }
 
     /** A time in whole seconds, as the reaper's are, or JSON null. */

@@ -264,6 +264,13 @@ public final class NexusService {
     private volatile dev.nexus.service.http.EmbedPosture embedPosture;
 
     /**
+     * nexus-dxsjc: the source of {@code GET /v1/status}'s {@code chunks_leaf_bloat} object, bound late for the same
+     * reason as {@link #perCollectionIndexes}. Null until bound, and the route omits the key until then.
+     */
+    private volatile java.util.function.Supplier<dev.nexus.service.http.StatusHandler.ChunksLeafBloat>
+        chunksLeafBloat;
+
+    /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
      * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
      * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
@@ -583,7 +590,7 @@ public final class NexusService {
                         versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
                         dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
                                 dataSource, java.time.Clock.systemUTC()),
-                        this::perCollectionIndexesStatus)
+                        this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
                         .embedPosture(() -> this.embedPosture)
                         .testTenantResetRoute(tenantResetRoute));
 
@@ -919,6 +926,21 @@ public final class NexusService {
      */
     public void embedPosture(dev.nexus.service.http.EmbedPosture posture) {
         this.embedPosture = posture;
+    }
+
+    /**
+     * Bind the source of {@code chunks_leaf_bloat} on {@code GET /v1/status} (nexus-dxsjc). {@code Main} calls it once
+     * the leaf bloat sweep exists; the supplier must answer from the sweep's cache, with no catalog query.
+     */
+    public void chunksLeafBloat(
+            java.util.function.Supplier<dev.nexus.service.http.StatusHandler.ChunksLeafBloat> supplier) {
+        this.chunksLeafBloat = supplier;
+    }
+
+    /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */
+    dev.nexus.service.http.StatusHandler.ChunksLeafBloat chunksLeafBloatStatus() {
+        var supplier = chunksLeafBloat;
+        return supplier == null ? null : supplier.get();
     }
 
     /** The bound object, or null before {@link #perCollectionIndexes(java.util.function.Supplier)} (key omitted). */

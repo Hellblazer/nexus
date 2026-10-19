@@ -531,6 +531,13 @@ public final class Main {
         service.perCollectionIndexes(() -> dev.nexus.service.http.StatusHandler.PerCollectionIndexes.of(
                 pciSweep.status(), pciReconciler.status()));
 
+        // nexus-dxsjc (nexus-4lnn1 R4): the per-leaf bloat view of nexus.chunks, read on a task of its own (a statistics
+        // read that fails or hangs must not touch the router's index set) and served from its cache by GET /v1/status.
+        var leafBloatSweep = dev.nexus.service.vectors.LeafBloatSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings());
+        leafBloatSweep.start();
+        service.chunksLeafBloat(() -> dev.nexus.service.http.StatusHandler.ChunksLeafBloat.of(
+                leafBloatSweep.status(), leafBloatSweep.periodSeconds()));
+
         log.info("event=service_ready port={}", service.getPort());
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
@@ -608,6 +615,7 @@ public final class Main {
             // never waiting: a read on a silent socket ignores the interrupt, and the reaper has a 10 s grace to
             // keep; closing the pool below aborts that socket.
             pciSweep.stop();
+            leafBloatSweep.stop();
         };
         OrtInitGate.process().onBoundExpired(stopAllButEmbedders);
 

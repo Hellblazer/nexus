@@ -4686,6 +4686,178 @@ def _check_per_collection_indexes(
     return [HealthResult(label=label, ok=True, detail=f"{counts}; builder_state {state}, {ddl_note}{off_note}")]
 
 
+_LEAF_BLOAT_LABEL = "Chunks leaf bloat"
+
+#: The engine log event that names a leaf with its problem, dead rows and live rows (one WARN per leaf per change).
+_LEAF_BLOAT_LOG_EVENT = "event=chunks_leaf_bloat_leaf"
+
+
+def _span(seconds: int) -> str:
+    """A duration in whole seconds as ``1h 30m``, ``45m`` or ``20s``."""
+    if seconds >= 3600:
+        hours, rest = divmod(seconds, 3600)
+        minutes = rest // 60
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-dxsjc (HNSW maintenance policy nexus-4lnn1 R4): has autovacuum let the leaves of ``nexus.chunks`` fall behind?
+
+    Reads the ``chunks_leaf_bloat`` object of ``GET /v1/status``, which the engine fills from a background read of the
+    LEAVES (the partitioned parent holds no tuples and is never autovacuumed, so a probe of ``relname = 'chunks'``
+    reports no bloat for a table that has some). The same status body serves the other engine rows, so a local and a
+    managed engine are judged the same way (HTTP only; this is not the local-only psql tuples-bloat row).
+
+    The object is AGGREGATES ONLY (Sam's ruling, 2026-10-19): the route is unauthenticated, so it carries counts over
+    every leaf and names none. The row therefore says how many leaves are in trouble and where the names are: the
+    engine log, ``event=chunks_leaf_bloat_leaf``.
+
+    A leaf is OVERDUE when its dead rows pass ``overdue_base_rows`` + ``overdue_scale_factor`` of its rows (1000 + 10%):
+    autovacuum's own trigger (1000 + 5%, vectors-034) with the scale doubled, so a small leaf at a high dead fraction,
+    which autovacuum correctly leaves alone, is not overdue. The engine classifies each overdue leaf from the clock and
+    the leaf's vacuum count; this row reads the counts, it does not redo the arithmetic.
+
+    * warn: a leaf ``pinned`` (a vacuum finished since it went overdue and the dead rows are still there) or
+      ``starved`` (overdue for ``overdue_warn_after_seconds`` with no vacuum finished). The advice follows the case.
+      A ``waiting`` leaf (overdue, no vacuum yet, not for long) passes with a note: the dead-tuple count is an estimate
+      and a leaf mid-vacuum shows it until the vacuum ends.
+    * warn, separately: a leaf missing any of the four autovacuum settings (a leaf the ``vectors-034-2`` self-heal
+      skipped) or with ``autovacuum_enabled`` off. Either reads red for a different cause than bloat, so each is
+      counted on its own.
+    * warn: the engine's view is ``expired`` (no successful read for three sweep periods): the counts are the
+      last read's and the row says so.
+    * warn: the engine's reads have failed and none has ever succeeded (``ever_read`` false with
+      ``consecutive_failures`` above 0): nothing is checking for bloat.
+
+    Not applicable (ok, no warning) when the engine cannot be reached, does not report the object (an older engine, or
+    one still starting) or reports no leaves with no failed read (a box with nothing yet to read). A present object
+    that cannot be read warns, as the Per-collection indexes row does.
+    """
+    label = _LEAF_BLOAT_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_chunks_leaf_bloat_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    def _na(why: str) -> list[HealthResult]:
+        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
+
+    if status is None:
+        return _na("the engine's status endpoint could not be read")
+    bloat = status.get("chunks_leaf_bloat")
+    if bloat is None:
+        return _na("this engine's status does not include the chunks leaf bloat object (an older engine, or one "
+                   "that is still starting)")
+
+    def _unreadable(why: str) -> list[HealthResult]:
+        return [HealthResult(
+            label=label, ok=False, warn=True, detail=why,
+            fix_suggestions=["The engine reports a chunks_leaf_bloat object this client does not understand: check "
+                             "that the client and engine versions match (`nx doctor` reports both)"],
+        )]
+
+    leaves_total = bloat.get("leaves_total") if isinstance(bloat, dict) else None
+    if not isinstance(leaves_total, int) or isinstance(leaves_total, bool) or leaves_total < 0:
+        return _unreadable("the engine's chunks_leaf_bloat object could not be read "
+                           f"(leaves_total missing or not a count; got {repr(bloat)[:80]})")
+    total = leaves_total
+    failures = _status_int(bloat.get("consecutive_failures"))
+    if total == 0:
+        if bloat.get("ever_read") is False and failures > 0:
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(f"the engine's leaf bloat read has failed {failures} time{'s' if failures != 1 else ''} since "
+                        "it started and none has succeeded, so nothing is checking the leaves of nexus.chunks for bloat"),
+                fix_suggestions=["Read the engine log for event=chunks_leaf_bloat_read_failed: it names the error "
+                                 "(a statement timeout, a permission on pg_stat_user_tables or pg_index, or the "
+                                 "database unreachable)"],
+            )]
+        return _na("the engine reports no leaves of nexus.chunks yet (nothing has been read)")
+
+    base = _status_int(bloat.get("overdue_base_rows")) or 1000
+    scale = bloat.get("overdue_scale_factor")
+    scale = float(scale) if isinstance(scale, (int, float)) and not isinstance(scale, bool) else 0.10
+    warn_after = _status_int(bloat.get("overdue_warn_after_seconds"))
+    longest = _status_int(bloat.get("max_overdue_for_seconds"))
+    rule = f"dead rows above {base:,} + {scale:.0%} of the leaf's rows"
+
+    def _count(n: int) -> str:
+        return f"{n} leaf" if n == 1 else f"{n} leaves"
+
+    n_pinned = _status_int(bloat.get("pinned"))
+    n_starved = _status_int(bloat.get("starved"))
+    n_overdue = max(_status_int(bloat.get("overdue")), n_pinned + n_starved)
+    n_waiting = n_overdue - n_pinned - n_starved
+    n_persistent = n_pinned + n_starved
+    n_unset = _status_int(bloat.get("policy_unset"))
+    n_disabled = _status_int(bloat.get("autovacuum_disabled"))
+    expired = bloat.get("expired") is True
+
+    summary = f"{_count(total)}, {n_overdue} overdue" if n_overdue else f"{_count(total)}, none overdue"
+
+    if expired or n_persistent or n_unset or n_disabled:
+        parts: list[str] = []
+        if expired:
+            parts.append("the engine's leaf view is expired (no successful read for three sweep periods), so the "
+                         "figures here are the last read's and may be stale")
+        if n_persistent:
+            kinds = []
+            if n_pinned:
+                kinds.append(f"{n_pinned} pinned (a vacuum finished since the leaf went overdue and the dead rows "
+                             "are still there)")
+            if n_starved:
+                after = f" for {_span(warn_after)} or more" if warn_after else ""
+                kinds.append(f"{n_starved} starved (overdue{after} with no vacuum finished)")
+            parts.append(f"dead rows have not come down on {_count(n_persistent)} (overdue = {rule}): "
+                         f"{', '.join(kinds)}; the longest has been overdue {_span(longest)}")
+        if n_unset:
+            parts.append(f"{_count(n_unset)} without all four autovacuum settings (vectors-034)")
+        if n_disabled:
+            parts.append(f"{_count(n_disabled)} with autovacuum_enabled off")
+        starved_after = f" for {_span(warn_after)} or more" if warn_after else ""
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"{'; '.join(parts)} ({summary}); /v1/status carries counts only, the leaf names are in the engine "
+                    f"log ({_LEAF_BLOAT_LOG_EVENT})"),
+            fix_suggestions=[
+                f"Read the engine log for {_LEAF_BLOAT_LOG_EVENT}: one WARN per leaf names it with its problem, dead "
+                "rows and live rows (the status route is unauthenticated, so it names no leaf)",
+                *(["A vacuum finished and a leaf is still overdue, so something holds the dead rows back: look for a "
+                   "long-running or idle-in-transaction session, an unconsumed replication slot or a prepared "
+                   "transaction (pg_stat_activity, pg_replication_slots, pg_prepared_xacts); VACUUM (VERBOSE) on the "
+                   "leaf reports what it could not remove"] if n_pinned else []),
+                *([f"No vacuum has finished on a leaf that stayed overdue{starved_after}: check that autovacuum is on "
+                   "(SHOW autovacuum; the leaf's autovacuum_enabled), whether its workers are busy "
+                   "(pg_stat_progress_vacuum, autovacuum_max_workers) and the cost throttle "
+                   "(autovacuum_vacuum_cost_limit); a manual VACUUM on the leaf clears it"] if n_starved else []),
+                *(["Restart the engine: its migration self-heal (vectors-034-2) sets the four autovacuum settings "
+                   "on every leaf it can lock and own at each boot, and the engine logs "
+                   "event=chunks_leaf_autovacuum_checked naming any it could not"] if n_unset else []),
+                *(["autovacuum_enabled=false is kept on purpose by the self-heal; as the owner of each leaf named in "
+                   "the log, reset that storage parameter on it: RESET (autovacuum_enabled)"] if n_disabled else []),
+                "docs/architecture.md: the nexus.chunks leaf autovacuum policy",
+            ],
+        )]
+    note = ""
+    if n_waiting:
+        until = f", or after {_span(warn_after)} without one" if warn_after else ""
+        note = (f"; {_count(n_waiting)} overdue and waiting for a vacuum (the longest for {_span(longest)}); the row "
+                f"warns if a vacuum finishes and a leaf is still overdue{until}")
+    if failures:
+        note += (f"; the last {failures} read{'s' if failures != 1 else ''} failed, so these figures are from the last "
+                 "good read")
+    return [HealthResult(label=label, ok=True, detail=f"{summary}{note}")]
+
+
 _PROSE_INDEX_LABEL = "Prose collections at the index threshold"
 
 #: The engine's ``NX_SEARCH_EXACT_MAX_ROWS`` default. The setting lives in the engine's environment and the status
@@ -11080,6 +11252,7 @@ def run_health_checks(
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
+    results.extend(_check_chunks_leaf_bloat(engine_status))  # nexus-dxsjc
     results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
     results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())

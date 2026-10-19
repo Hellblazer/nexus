@@ -100,4 +100,37 @@ class NexusServicePciStatusWiringTest {
             .isEqualTo(1);
         assertThat(holder.at("/this_engine/last_ddl_pass_at").asText()).isEqualTo("2026-10-10T07:30:00Z");
     }
+
+    /**
+     * nexus-dxsjc: {@code chunks_leaf_bloat} reaches the wire through the real service route the same way: omitted
+     * until {@code Main} binds a source (a client reads "cannot tell"), then served from the bound supplier on every
+     * request, not from a copy taken at binding time.
+     */
+    @Test
+    void chunksLeafBloatIsOmittedUntilBound_thenServedFromTheBoundSupplierOnEveryRequest() throws Exception {
+        assertThat(status().has("chunks_leaf_bloat")).as("unbound: cannot tell, not no leaves").isFalse();
+
+        var leaf = new dev.nexus.service.vectors.LeafBloatCatalog.Leaf("chunks_wiring_aaaa", 100, 0, null, 0, true,
+            true, java.util.List.of());
+        var view = new java.util.concurrent.atomic.AtomicReference<>(new dev.nexus.service.vectors.LeafBloatSweep.Status(
+            true, Instant.parse("2026-10-10T08:00:00Z"), null, 0, false,
+            java.util.List.of(dev.nexus.service.vectors.LeafBloatSweep.LeafStatus.clean(leaf))));
+        service.chunksLeafBloat(() -> StatusHandler.ChunksLeafBloat.of(view.get(), 600));
+
+        JsonNode first = status().get("chunks_leaf_bloat");
+        assertThat(first.get("leaves_total").asInt()).isEqualTo(1);
+        assertThat(first.get("ever_read").asBoolean()).isTrue();
+        assertThat(first.has("leaves")).as("aggregates only: the route is unauthenticated").isFalse();
+        assertThat(first.get("pinned").asInt()).isZero();
+
+        var bloated = new dev.nexus.service.vectors.LeafBloatCatalog.Leaf("chunks_wiring_aaaa", 80_000, 20_000, null,
+            3, true, true, java.util.List.of());
+        view.set(new dev.nexus.service.vectors.LeafBloatSweep.Status(true, Instant.parse("2026-10-10T08:10:00Z"), null,
+            0, false, java.util.List.of(new dev.nexus.service.vectors.LeafBloatSweep.LeafStatus(
+                bloated, Instant.parse("2026-10-10T08:00:00Z"), 2, 600))));
+        JsonNode second = status().get("chunks_leaf_bloat");
+        assertThat(second.get("pinned").asInt()).as("read per request, not captured at binding").isEqualTo(1);
+        assertThat(second.get("overdue").asInt()).isEqualTo(1);
+        assertThat(second.get("max_overdue_for_seconds").asLong()).isEqualTo(600);
+    }
 }
