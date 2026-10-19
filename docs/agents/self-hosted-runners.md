@@ -79,21 +79,21 @@ git fetch origin
 git checkout --detach <sha>
 test -z "$(git status --porcelain)" || { echo "dirty tree: a stray edit or stamp keys a different jar"; exit 1; }
 
-# (a) the jar, no grant: a HIT copies the cached jar and runs no Maven, so it needs none
-scripts/build-gate-jar.sh
+# (a) the jar, inside a grant; exit 75 means another build holds the lease: wait and rerun, never unwrapped
+lab-run -c lab-m -- scripts/build-gate-jar.sh
 
 # (b) the suite, inside the grant, under the stall watchdog
 lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stall 180 --status ~/pytest-<session>.json -- uv run pytest -n auto <selection>'
 ```
 
-- **The jar is never built inside `lab-run`.** An engine build takes the build
-  lease before the grant, so a build waiting its turn holds no cores
-  (`.claude/rules/ci-and-runners.md`, nexus-iqmih). `scripts/build-gate-jar.sh`
-  takes that lease first and waits for it (`NX_BUILD_LEASE_WAIT`). On a `HIT` it
-  stops there. A `MISS` (the `gate jar cache MISS` line) runs Maven, and until
-  nexus-t6t9f adds `build-gate-jar.sh --lab-run <class>` that build is not under
-  a grant: say so in the announcement rather than wrapping the script in
-  `lab-run`, which would hold the grant while it waits for the lease.
+- **The jar is built inside `lab-run`** (labrun, 2026-10-19: Maven package is
+  heavy work, and no heavy work runs outside a grant). Inside a grant a hand run
+  does not wait for the build lease: it refuses at once with exit 75 when another
+  build holds it (nexus-dfg0q), so the grant never sits idle on a lease. On 75,
+  wait and rerun; never fall back to running unwrapped. A `HIT` (the `gate jar
+  cache HIT` line) copies the cached jar and runs no Maven; a `MISS` runs Maven
+  under the grant. `build-gate-jar.sh --lab-run <class>` (nexus-t6t9f) will take
+  the lease before the grant instead.
 - **The suite goes through `scripts/watched_pytest.py`**, never a bare pytest, and
   you read its status file instead of sleeping and guessing. `uv sync` sits inside
   the grant because it is incremental against the kept `.venv`.
