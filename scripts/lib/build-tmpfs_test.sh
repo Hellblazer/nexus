@@ -220,6 +220,16 @@ build_tmpfs_stop_child
 kill -0 "$kid" 2>/dev/null && bad "the grandchild survived stop_child" || ok "stop_child ended the leader and the grandchild"
 build_tmpfs_stop_child && ok "a second stop_child is a no-op" || bad "second stop_child failed"
 
+echo "Test 12 (stop_child): a leader that ignores TERM is killed, and stop_child returns within a bound"
+set -m; bash -c 'trap "" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+BUILD_TMPFS_CHILD_PID=$!; set +m
+stubborn=$BUILD_TMPFS_CHILD_PID
+sleep 0.3
+t0=$SECONDS
+build_tmpfs_stop_child
+(( SECONDS - t0 <= 15 )) && ok "stop_child returned within 15 s on a TERM-ignoring leader" || bad "stop_child took $(( SECONDS - t0 )) s"
+kill -0 "$stubborn" 2>/dev/null && { bad "the TERM-ignoring leader survived"; kill -KILL "$stubborn" 2>/dev/null; } || ok "the TERM-ignoring leader is gone"
+
 echo
 echo "build-tmpfs_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

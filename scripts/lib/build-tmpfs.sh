@@ -339,12 +339,20 @@ build_tmpfs_stop_child() {
         [[ -z "$state" || "$state" == Z* ]] && break
         sleep 0.1
     done
+    # A leader that outlived TERM (it ignores it, or a slow shutdown) is killed before
+    # the wait, or the wait would block until it exits on its own (nexus-0a1hw review).
+    if [[ -n "$state" && "$state" != Z* ]]; then
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
     for ((i = 0; i < 30; i++)); do
         kill -0 -- "-$pid" 2>/dev/null || break
         sleep 0.1
     done
-    kill -KILL -- "-$pid" 2>/dev/null || true
+    # Only a group that still exists is killed, so a reused pid is never signalled.
+    if kill -0 -- "-$pid" 2>/dev/null; then
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
     return 0
 }
 
