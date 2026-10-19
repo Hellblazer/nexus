@@ -38,6 +38,19 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+class ServiceTokenUnresolvableError(RuntimeError):
+    """``service_url`` is set but no ``service_token`` resolves (env, config
+    or lease): the managed-cloud half of "endpoint not resolvable".
+
+    Deliberately NOT a :class:`ServiceEndpointUnresolvableError`: that type
+    marks the local "worth a bounded lease wait" case, and this one must
+    never be waited on (nexus-7dsgp). A named ``RuntimeError`` subclass so
+    every existing ``except RuntimeError`` still matches, and so the
+    storage-touch test guard can tell a managed-posture touch from an
+    unrelated bare ``RuntimeError`` (nexus-j23ni).
+    """
+
+
 class ServiceEndpointUnresolvableError(RuntimeError):
     """The genuine "no env, no lease, nothing resolvable" failure —
     :func:`resolve_service_config`'s ONE raise site for that exact
@@ -50,8 +63,9 @@ class ServiceEndpointUnresolvableError(RuntimeError):
     config-typo bug, not a respawn-gap symptom) and the managed-cloud
     "``service_url`` is set but no token is resolvable" case (which must
     NEVER wait, by the bead's own "never for the managed-cloud URL path"
-    contract). Both of those stay plain ``RuntimeError`` — this subclass
-    is raised ONLY at the genuine not-resolvable site. Subclassing
+    contract). The malformed port stays a plain ``RuntimeError`` and the
+    managed-cloud case is the sibling :class:`ServiceTokenUnresolvableError`
+    — this subclass is raised ONLY at the genuine not-resolvable site. Subclassing
     ``RuntimeError`` (rather than a fresh ``Exception`` subclass) means
     every existing ``except RuntimeError`` / ``pytest.raises(RuntimeError)``
     call site keeps matching unchanged; only a caller that specifically
@@ -549,7 +563,7 @@ def resolve_service_endpoint(
             # data tokens, then send no bearer and get a named 401.
             return url, ""
         if not token:
-            raise RuntimeError(
+            raise ServiceTokenUnresolvableError(
                 "service_url is set but no service_token is resolvable (neither "
                 "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
                 "with `nx config set service_token <bearer>` (or export "
