@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,7 @@ def _choose(**kw) -> Path | None:
     base = dict(
         env={}, system="Linux", mounts_text=_TMPFS_MOUNTS,
         free_bytes=_roomy, writable=_writable, uid=1000,
+        cgroup_headroom=lambda: None,
     )
     return sub.choose_pg_root(**{**base, **kw})
 
@@ -365,8 +367,8 @@ class TestWalCaps:
 
     def test_boot_appends_the_caps_after_the_fsync_lines(self) -> None:
         src = Path(sub.__file__).read_text()
-        assert "f.write(WAL_CAP_CONF)" in src
-        assert src.index("full_page_writes = off") < src.index("f.write(WAL_CAP_CONF)")
+        assert "f.write(wal_cap_conf(cluster_parent))" in src
+        assert src.index("full_page_writes = off") < src.index("f.write(wal_cap_conf(cluster_parent))")
 
     def test_boot_passes_the_chosen_parent_to_initdb(self) -> None:
         src = Path(sub.__file__).read_text()
@@ -408,7 +410,7 @@ class TestDynamicSharedMemory:
     def test_boot_appends_the_line_after_the_wal_caps(self) -> None:
         src = Path(sub.__file__).read_text()
         assert "f.write(dsm_conf(cluster_parent))" in src
-        assert src.index("f.write(WAL_CAP_CONF)") < src.index("f.write(dsm_conf(cluster_parent))")
+        assert src.index("f.write(wal_cap_conf(cluster_parent))") < src.index("f.write(dsm_conf(cluster_parent))")
 
 
 def test_the_split_shard_probe_keeps_its_clusters_in_its_private_tmpdir() -> None:
@@ -416,3 +418,184 @@ def test_the_split_shard_probe_keeps_its_clusters_in_its_private_tmpdir() -> Non
     NX_TEST_PG_ROOT=default they would land in /dev/shm, unseen and stranded."""
     probe = Path(__file__).with_name("test_mode_declarations_are_explicit.py").read_text()
     assert '"NX_TEST_PG_ROOT": "default"' in probe
+
+
+class TestWalCapOnlyWhereItHelps:
+    """On disk the 64 MB cap only multiplies checkpoints; macOS stays unchanged."""
+
+    def test_caps_for_a_cluster_on_the_tmpfs_root(self) -> None:
+        assert sub.wal_cap_conf(
+            "/dev/shm/nexus-test-pg-1000", env={}, mounts_text=_TMPFS_MOUNTS,
+        ) == sub.WAL_CAP_CONF
+
+    def test_caps_for_an_explicit_root(self) -> None:
+        assert sub.wal_cap_conf(
+            "/data/pgroot", env={"NX_TEST_PG_ROOT": "/data/pgroot"},
+            mounts_text=_NO_TMPFS_MOUNTS,
+        ) == sub.WAL_CAP_CONF
+
+    def test_nothing_for_the_tempdir_fallback(self) -> None:
+        assert sub.wal_cap_conf(None, env={}, mounts_text=_TMPFS_MOUNTS) == ""
+
+    def test_nothing_for_a_disk_root_that_is_not_explicit(self) -> None:
+        assert sub.wal_cap_conf(
+            "/home/nxtest/pgroot", env={}, mounts_text=_TMPFS_MOUNTS,
+        ) == ""
+
+    def test_default_override_is_not_explicit(self) -> None:
+        assert sub.wal_cap_conf(
+            "/home/nxtest/pgroot", env={"NX_TEST_PG_ROOT": "default"},
+            mounts_text=_TMPFS_MOUNTS,
+        ) == ""
+
+    def test_nothing_without_a_mount_table(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_read_mounts", lambda: None)
+        assert sub.wal_cap_conf("/dev/shm/nexus-test-pg-1000", env={}) == ""
+
+    def test_boot_writes_the_helper_not_the_constant(self) -> None:
+        src = Path(sub.__file__).read_text()
+        assert "f.write(wal_cap_conf(cluster_parent))" in src
+        assert "f.write(WAL_CAP_CONF)" not in src
+
+
+class TestFreeSpaceGateSeesTheCgroup:
+    """/dev/shm free is ~60 GB on chas and can never fail; the resource that runs
+    out is the cgroup's memory, which tmpfs pages are charged to."""
+
+    def test_cgroup_headroom_below_the_threshold_refuses(self) -> None:
+        assert _choose(cgroup_headroom=lambda: 1 * 1024**3) is None
+
+    def test_cgroup_headroom_above_the_threshold_allows(self) -> None:
+        assert _choose(cgroup_headroom=lambda: 64 * 1024**3) is not None
+
+    def test_the_minimum_of_the_two_decides(self) -> None:
+        need = sub._TMPFS_MIN_FREE_BYTES
+        assert _choose(free_bytes=lambda _p: need, cgroup_headroom=lambda: need - 1) is None
+        assert _choose(free_bytes=lambda _p: need - 1, cgroup_headroom=lambda: need) is None
+        assert _choose(free_bytes=lambda _p: need, cgroup_headroom=lambda: need) is not None
+
+    def test_no_cgroup_limit_leaves_only_the_tmpfs_gate(self) -> None:
+        assert _choose(cgroup_headroom=lambda: None) is not None
+
+
+class TestCgroupHeadroomReader:
+    def _tree(self, tmp_path, levels: dict[str, tuple[str, int]]) -> Path:
+        root = tmp_path / "cg"
+        for rel, (mx, cur) in levels.items():
+            d = root / rel if rel else root
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "memory.max").write_text(f"{mx}\n")
+            (d / "memory.current").write_text(f"{cur}\n")
+        return root
+
+    def test_own_cgroup_limit_minus_usage(self, tmp_path) -> None:
+        root = self._tree(tmp_path, {"user.slice/s": ("1000", 400)})
+        assert sub._cgroup_headroom(
+            proc_cgroup="0::/user.slice/s\n", cgroup_root=root,
+        ) == 600
+
+    def test_an_ancestor_limit_binds_when_tighter(self, tmp_path) -> None:
+        root = self._tree(tmp_path, {
+            "": ("max", 0), "a": ("500", 450), "a/b": ("max", 10),
+        })
+        assert sub._cgroup_headroom(proc_cgroup="0::/a/b\n", cgroup_root=root) == 50
+
+    def test_unlimited_everywhere_is_none(self, tmp_path) -> None:
+        root = self._tree(tmp_path, {"a": ("max", 5)})
+        assert sub._cgroup_headroom(proc_cgroup="0::/a\n", cgroup_root=root) is None
+
+    def test_cgroup_v1_or_unreadable_is_none(self, tmp_path) -> None:
+        assert sub._cgroup_headroom(
+            proc_cgroup="12:memory:/x\n", cgroup_root=tmp_path,
+        ) is None
+        assert sub._cgroup_headroom(
+            proc_cgroup="0::/missing\n", cgroup_root=tmp_path,
+        ) is None
+
+
+class TestLinuxFallbackIsLoud:
+    def _warns(self, **kw) -> str:
+        with pytest.warns(UserWarning, match="tmpfs") as rec:
+            assert _choose(**kw) is None
+        return str(rec[0].message)
+
+    def test_not_tmpfs_names_the_reason(self) -> None:
+        assert "not tmpfs" in self._warns(mounts_text=_NO_TMPFS_MOUNTS)
+
+    def test_not_writable_names_the_reason(self) -> None:
+        assert "not writable" in self._warns(writable=lambda _p: False)
+
+    def test_low_free_names_the_reason_and_the_numbers(self) -> None:
+        msg = self._warns(free_bytes=_tight)
+        assert "free" in msg and "1024" in msg
+
+    def test_low_cgroup_headroom_names_the_cgroup(self) -> None:
+        assert "cgroup" in self._warns(cgroup_headroom=lambda: 1)
+
+    def test_socket_path_too_long_names_the_reason(self, monkeypatch) -> None:
+        monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 20)
+        assert "socket" in self._warns()
+
+    def test_macos_fallback_is_silent(self, recwarn) -> None:
+        assert _choose(system="Darwin") is None
+        assert not [w for w in recwarn if "tmpfs" in str(w.message)]
+
+    def test_default_override_is_silent(self, recwarn) -> None:
+        assert _choose(env={"NX_TEST_PG_ROOT": "default"}) is None
+        assert not [w for w in recwarn if "tmpfs" in str(w.message)]
+
+    def test_success_is_silent(self, recwarn) -> None:
+        assert _choose() is not None
+        assert not [w for w in recwarn if "tmpfs" in str(w.message)]
+
+
+class TestSidecarlessTmpfsClusterIsReaped:
+    """Killed during initdb: no sidecar. On disk that is inert debris; in tmpfs it
+    pins RAM, so the sweep reaps it once it is clearly abandoned."""
+
+    @pytest.fixture
+    def shm(self, tmp_path, monkeypatch):
+        shm = tmp_path / "shm"
+        monkeypatch.setenv("NX_TEST_PG_SHM_DIR", str(shm))
+        return shm
+
+    def _bare(self, parent: Path, name: str, age_s: float) -> Path:
+        d = parent / name
+        d.mkdir(parents=True)
+        (d / "PG_VERSION").write_text("17\n")
+        t = time.time() - age_s
+        os.utime(d, (t, t))
+        return d
+
+    def test_old_bare_dir_with_no_postmaster_pid_is_reaped(self, shm) -> None:
+        root = shm / "nexus-test-pg-1000"
+        d = self._bare(root, "nexus_t2_substrate_pg_bare0001", 3600)
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert result.reaped == [str(d)]
+        assert not d.exists()
+
+    def test_a_young_bare_dir_is_left_alone(self, shm) -> None:
+        root = shm / "nexus-test-pg-1000"
+        d = self._bare(root, "nexus_t2_substrate_pg_bare0002", 30)
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert result.reaped == []
+        assert d.exists()
+
+    def test_a_bare_dir_with_a_postmaster_pid_is_reported_not_reaped(self, shm) -> None:
+        root = shm / "nexus-test-pg-1000"
+        d = self._bare(root, "nexus_t2_substrate_pg_bare0003", 3600)
+        (d / "postmaster.pid").write_text("1\n")
+        os.utime(d, (time.time() - 3600,) * 2)
+        with pytest.warns(UserWarning, match="legacy"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert result.reaped == []
+        assert result.legacy_reported == [str(d)]
+        assert d.exists()
+
+    def test_the_same_bare_dir_on_disk_stays_inert(self, shm, tmp_path) -> None:
+        disk = tmp_path / "disk"
+        d = self._bare(disk, "nexus_t2_substrate_pg_bare0004", 3600)
+        with pytest.warns(UserWarning, match="legacy"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=disk)
+        assert result.reaped == []
+        assert d.exists()

@@ -162,10 +162,18 @@ _SHM_DIR_SEAM_ENV = "NX_TEST_PG_SHM_DIR"
 _SHM_DIR = Path("/dev/shm")
 _TMPFS_DIR_PREFIX = "nexus-test-pg"
 
-#: Free space a tmpfs must offer before clusters are put on it: 2 GiB plus a
-#: 1 GiB margin. Measured footprint of one booted cluster is in the bead
-#: (nexus-me3gm); 32 chas workers at the 64 MB WAL cap fit inside it.
+#: Headroom required before clusters are put on tmpfs: 2 GiB plus a 1 GiB margin,
+#: checked against the SMALLER of the tmpfs's free space and the process's cgroup
+#: memory headroom (tmpfs pages are charged to the cgroup, and on a 64 GB box
+#: /dev/shm "free" never runs out first). A cluster's footprint is its data
+#: directory PLUS its WAL, about 100 MB at boot and up to ~150-250 MB after a
+#: busy stretch with the 64 MB WAL cap (measured in nexus-me3gm); the threshold is
+#: a floor for starting, not a budget for 32 workers.
 _TMPFS_MIN_FREE_BYTES = 3 * 1024**3
+
+#: A sidecar-less, postmaster-less cluster dir in the tmpfs root older than this
+#: was killed during initdb and is reaped (disk roots keep reporting only).
+_SWEEP_BARE_TMPFS_MIN_AGE_S = 600.0
 
 #: ``sun_path`` is 108 bytes on Linux including the NUL, so a socket path may use
 #: 107. A cluster dir is
@@ -229,6 +237,49 @@ def _socket_path_fits(root: Path) -> bool:
     return len(str(root)) + _SOCKET_SUFFIX_RESERVE <= _SOCKET_PATH_MAX
 
 
+def _cgroup_headroom(
+    *, proc_cgroup: str | None = None, cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> int | None:
+    """Bytes of memory headroom under the tightest cgroup-v2 limit on this
+    process's cgroup path (its own and every ancestor's), or None when there is no
+    limit or the files are unreadable (cgroup v1, macOS)."""
+    try:
+        text = Path("/proc/self/cgroup").read_text() if proc_cgroup is None else proc_cgroup
+    except OSError:
+        return None
+    rel = next((ln[3:] for ln in text.splitlines() if ln.startswith("0::")), None)
+    if rel is None:
+        return None
+    parts = [p for p in rel.strip().split("/") if p]
+    best: int | None = None
+    for depth in range(len(parts), -1, -1):
+        d = cgroup_root.joinpath(*parts[:depth])
+        try:
+            mx = (d / "memory.max").read_text().strip()
+            cur = int((d / "memory.current").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if mx == "max":
+            continue
+        try:
+            room = int(mx) - cur
+        except ValueError:
+            continue
+        best = room if best is None else min(best, room)
+    return best
+
+
+def _tmpfs_refused(reason: str) -> None:
+    """A Linux box that could not use tmpfs says so, once per boot: the NVMe wear
+    this bead exists to stop comes back silently otherwise."""
+    _log.warning("nexus_t2_substrate.tmpfs_root_refused", reason=reason, bead="nexus-me3gm")
+    warnings.warn(
+        f"nexus test substrate: not using tmpfs for clusters: {reason}; "
+        f"falling back to the tempdir (set {_PG_ROOT_ENV} to choose a root)",
+        stacklevel=3,
+    )
+
+
 def choose_pg_root(
     *,
     env: Mapping[str, str] | None = None,
@@ -236,13 +287,15 @@ def choose_pg_root(
     mounts_text: str | None = None,
     free_bytes: Callable[[Path], int] | None = None,
     writable: Callable[[Path], bool] | None = None,
+    cgroup_headroom: Callable[[], int | None] | None = None,
     uid: int | str | None = None,
     shm_dir: Path = _SHM_DIR,
 ) -> Path | None:
     """The directory substrate clusters are created under, or ``None`` for the
     process tempdir. Pure decision: it creates nothing. Every input is injectable
     so the outcomes (override, forced default, tmpfs, no tmpfs, too small) are
-    unit tests, not machine state.
+    unit tests, not machine state. A Linux fallback with no override is warned
+    about by name (:func:`_tmpfs_refused`).
     """
     env = os.environ if env is None else env
     override = (env.get(_PG_ROOT_ENV) or "").strip()
@@ -263,20 +316,73 @@ def choose_pg_root(
     if mounts_text is None:
         mounts_text = _read_mounts()
         if mounts_text is None:
+            _tmpfs_refused("cannot read /proc/mounts")
             return None
-    if _mount_fstype(mounts_text, str(shm_dir)) != "tmpfs":
+    fstype = _mount_fstype(mounts_text, str(shm_dir))
+    if fstype != "tmpfs":
+        _tmpfs_refused(f"{shm_dir} is not tmpfs ({fstype or 'no mount entry'})")
         return None
     can_write = writable or (lambda p: os.access(p, os.W_OK | os.X_OK))
     if not can_write(shm_dir):
+        _tmpfs_refused(f"{shm_dir} is not writable by this user")
         return None
     try:
         free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(shm_dir)
-    except OSError:
+    except OSError as exc:
+        _tmpfs_refused(f"cannot read free space of {shm_dir} ({exc})")
         return None
     if free < _TMPFS_MIN_FREE_BYTES:
+        _tmpfs_refused(
+            f"{shm_dir} has {free // 1024**2} MiB free, below the "
+            f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor"
+        )
+        return None
+    headroom = (cgroup_headroom or _cgroup_headroom)()
+    if headroom is not None and headroom < _TMPFS_MIN_FREE_BYTES:
+        _tmpfs_refused(
+            f"the cgroup memory headroom is {headroom // 1024**2} MiB, below the "
+            f"{_TMPFS_MIN_FREE_BYTES // 1024**2} MiB floor (tmpfs pages are charged to it)"
+        )
         return None
     root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
-    return root if _socket_path_fits(root) else None
+    if not _socket_path_fits(root):
+        _tmpfs_refused(f"a unix socket path under {root} would pass the sun_path limit")
+        return None
+    return root
+
+
+def _on_tmpfs_root(
+    parent: str | None, *, mounts_text: str | None, shm_dir: Path = _SHM_DIR,
+) -> bool:
+    if parent is None:
+        return False
+    if mounts_text is None:
+        mounts_text = _read_mounts()
+        if mounts_text is None:
+            return False
+    return (
+        _mount_fstype(mounts_text, str(shm_dir)) == "tmpfs"
+        and Path(parent).is_relative_to(shm_dir)
+    )
+
+
+def wal_cap_conf(
+    parent: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    mounts_text: str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> str:
+    """:data:`WAL_CAP_CONF` where it helps: a cluster on the tmpfs root, or on an
+    explicit ``NX_TEST_PG_ROOT``. On the tempdir fallback (disk) the 64 MB cap
+    only multiplies checkpoints, and macOS/Windows stay unchanged (nexus-me3gm)."""
+    env = os.environ if env is None else env
+    explicit = (env.get(_PG_ROOT_ENV) or "").strip() not in ("", "default")
+    if parent is not None and (
+        explicit or _on_tmpfs_root(parent, mounts_text=mounts_text, shm_dir=shm_dir)
+    ):
+        return WAL_CAP_CONF
+    return ""
 
 
 def dsm_conf(
@@ -295,15 +401,7 @@ def dsm_conf(
     and which Postgres clears at startup. On a disk root, ``mmap`` would be real
     writes, so the default stays (nexus-me3gm).
     """
-    if parent is None:
-        return ""
-    if mounts_text is None:
-        mounts_text = _read_mounts()
-        if mounts_text is None:
-            return ""
-    if _mount_fstype(mounts_text, str(shm_dir)) != "tmpfs":
-        return ""
-    if not Path(parent).is_relative_to(shm_dir):
+    if not _on_tmpfs_root(parent, mounts_text=mounts_text, shm_dir=shm_dir):
         return ""
     return "dynamic_shared_memory_type = mmap\n"
 
@@ -1289,8 +1387,9 @@ def _boot() -> dict:
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-            # nexus-me3gm: cap pg_wal (default max_wal_size is 1 GB per cluster).
-            f.write(WAL_CAP_CONF)
+            # nexus-me3gm: cap pg_wal (default max_wal_size is 1 GB per cluster) where
+            # the cluster is in RAM or on an explicit root; mmap DSM on tmpfs only.
+            f.write(wal_cap_conf(cluster_parent))
             f.write(dsm_conf(cluster_parent))
         pg_log = os.path.join(pgdata, "pg.log")
         for pg_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
@@ -1624,11 +1723,12 @@ def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResu
     for root in roots:
         if not root.exists():
             continue
+        tmpfs = _is_tmpfs_root(root)
         for cluster_dir in sorted(root.glob(_STRAY_GLOB)):
             if not cluster_dir.is_dir():
                 continue
             try:
-                _sweep_one_cluster(cluster_dir, result)
+                _sweep_one_cluster(cluster_dir, result, tmpfs=tmpfs)
             except Exception as exc:  # noqa: BLE001 - loud, never fatal (nexus-lgdy1)
                 result.errors.append(str(cluster_dir))
                 warnings.warn(
@@ -1639,12 +1739,38 @@ def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResu
     return result
 
 
-def _sweep_one_cluster(cluster_dir: Path, result: SweepResult) -> None:
+def _is_tmpfs_root(root: Path) -> bool:
+    """Is *root* a ``<shm>/nexus-test-pg-<id>`` directory (honouring the sweep's
+    ``NX_TEST_PG_SHM_DIR`` seam)?"""
+    shm = Path(os.environ.get(_SHM_DIR_SEAM_ENV) or _SHM_DIR)
+    return root.name.startswith(f"{_TMPFS_DIR_PREFIX}-") and root.parent == shm
+
+
+def _sweep_one_cluster(
+    cluster_dir: Path, result: SweepResult, *, tmpfs: bool = False,
+) -> None:
     sidecar_path = cluster_dir / _SIDECAR_FILENAME
     if sidecar_path.exists():
         _sweep_sidecar_cluster(cluster_dir, sidecar_path, result)
+    elif tmpfs and _abandoned_bare_dir(cluster_dir):
+        # Killed during initdb, before the first sidecar write. On disk that is
+        # inert debris (and stays reported-only below); in tmpfs it pins RAM.
+        shutil.rmtree(cluster_dir, ignore_errors=True)
+        result.reaped.append(str(cluster_dir))
     else:
         _sweep_legacy_cluster(cluster_dir, result)
+
+
+def _abandoned_bare_dir(cluster_dir: Path) -> bool:
+    """No sidecar, no ``postmaster.pid`` (nothing ever started), and untouched for
+    :data:`_SWEEP_BARE_TMPFS_MIN_AGE_S` -- long past initdb's ~1 s."""
+    if (cluster_dir / "postmaster.pid").exists():
+        return False
+    try:
+        age = time.time() - cluster_dir.stat().st_mtime
+    except OSError:
+        return False
+    return age > _SWEEP_BARE_TMPFS_MIN_AGE_S
 
 
 def _owner_is_live(owner_pid: int, expected_cmdline: str) -> bool:
