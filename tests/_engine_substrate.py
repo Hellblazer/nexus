@@ -193,6 +193,14 @@ def _tmpfs_candidate(uid: int | str, shm_dir: Path = _SHM_DIR) -> Path:
     return shm_dir / f"{_TMPFS_DIR_PREFIX}-{uid}"
 
 
+def _read_mounts() -> str | None:
+    """``/proc/mounts``, or None where there is none (macOS, Windows)."""
+    try:
+        return Path("/proc/mounts").read_text()
+    except OSError:
+        return None
+
+
 def _mount_fstype(mounts_text: str, mountpoint: str) -> str | None:
     """The filesystem type ``/proc/mounts``-style text gives *mountpoint*, last
     entry winning (a later mount shadows an earlier one)."""
@@ -240,9 +248,8 @@ def choose_pg_root(
     if (platform.system() if system is None else system) != "Linux":
         return None
     if mounts_text is None:
-        try:
-            mounts_text = Path("/proc/mounts").read_text()
-        except OSError:
+        mounts_text = _read_mounts()
+        if mounts_text is None:
             return None
     if _mount_fstype(mounts_text, str(shm_dir)) != "tmpfs":
         return None
@@ -257,6 +264,35 @@ def choose_pg_root(
         return None
     root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
     return root if _socket_path_fits(root) else None
+
+
+def dsm_conf(
+    parent: str | None,
+    *,
+    mounts_text: str | None = None,
+    shm_dir: Path = _SHM_DIR,
+) -> str:
+    """The ``dynamic_shared_memory_type`` line for a cluster under *parent*.
+
+    Postgres's default (posix) puts dynamic shared memory in ``/dev/shm`` as
+    ``PostgreSQL.<n>`` files, and a SIGKILLed postmaster leaves them behind with
+    nothing to reap them: chas held 864 of them (444 MB) after two weeks. On a
+    cluster that already lives on tmpfs, ``mmap`` keeps DSM in
+    ``<pgdata>/pg_dynshmem`` instead, which dies with the cluster dir (the sweep)
+    and which Postgres clears at startup. On a disk root, ``mmap`` would be real
+    writes, so the default stays (nexus-me3gm).
+    """
+    if parent is None:
+        return ""
+    if mounts_text is None:
+        mounts_text = _read_mounts()
+        if mounts_text is None:
+            return ""
+    if _mount_fstype(mounts_text, str(shm_dir)) != "tmpfs":
+        return ""
+    if not Path(parent).is_relative_to(shm_dir):
+        return ""
+    return "dynamic_shared_memory_type = mmap\n"
 
 
 def pg_cluster_parent() -> str | None:
@@ -1224,9 +1260,10 @@ def _boot() -> dict:
         # Cleans the dir up if initdb fails, and carries initdb's stderr out
         # (nexus-rbc7k) -- see _initdb_cluster's docstring for both, and for
         # the 21 empty cluster dirs the previous shape stranded here.
+        cluster_parent = pg_cluster_parent()
         pgdata = _initdb_cluster(
             bin_dir, prefix="nexus_t2_substrate_pg_", username=pg_user,
-            parent_dir=pg_cluster_parent(),
+            parent_dir=cluster_parent,
         )
         sidecar_started_at = _write_sidecar(
             pgdata, pg_port=pg_port, svc_port=None,
@@ -1239,6 +1276,7 @@ def _boot() -> dict:
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
             # nexus-me3gm: cap pg_wal (default max_wal_size is 1 GB per cluster).
             f.write(WAL_CAP_CONF)
+            f.write(dsm_conf(cluster_parent))
         pg_log = os.path.join(pgdata, "pg.log")
         for pg_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
             # A lost race leaves its failure in pg.log; start each attempt on a clean log

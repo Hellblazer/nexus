@@ -275,4 +275,42 @@ class TestWalCaps:
 
     def test_boot_passes_the_chosen_parent_to_initdb(self) -> None:
         src = Path(sub.__file__).read_text()
-        assert "parent_dir=pg_cluster_parent()" in src
+        assert "cluster_parent = pg_cluster_parent()" in src
+        assert "parent_dir=cluster_parent" in src
+
+
+class TestDynamicSharedMemory:
+    """posix DSM on a SIGKILLed postmaster leaks /dev/shm/PostgreSQL.<n>; on a
+    tmpfs cluster ``mmap`` keeps it inside the cluster dir (nexus-me3gm)."""
+
+    MMAP = "dynamic_shared_memory_type = mmap\n"
+
+    def test_mmap_for_a_cluster_on_the_tmpfs_root(self) -> None:
+        assert sub.dsm_conf(
+            "/dev/shm/nexus-test-pg-1000", mounts_text=_TMPFS_MOUNTS,
+        ) == self.MMAP
+
+    def test_nothing_for_the_default_root(self) -> None:
+        assert sub.dsm_conf(None, mounts_text=_TMPFS_MOUNTS) == ""
+
+    def test_nothing_for_a_disk_root_even_when_dev_shm_is_tmpfs(self) -> None:
+        # mmap on disk is real writes: the exact thing this bead removes.
+        assert sub.dsm_conf("/home/nxtest/pgroot", mounts_text=_TMPFS_MOUNTS) == ""
+
+    def test_nothing_when_dev_shm_is_not_tmpfs(self) -> None:
+        assert sub.dsm_conf(
+            "/dev/shm/nexus-test-pg-1000", mounts_text=_NO_TMPFS_MOUNTS,
+        ) == ""
+
+    def test_nothing_when_there_is_no_mount_table(self, monkeypatch) -> None:
+        # macOS has no /proc/mounts.
+        monkeypatch.setattr(sub, "_read_mounts", lambda: None)
+        assert sub.dsm_conf("/dev/shm/nexus-test-pg-1000") == ""
+
+    def test_a_sibling_prefix_of_dev_shm_is_not_under_it(self) -> None:
+        assert sub.dsm_conf("/dev/shmx/y", mounts_text=_TMPFS_MOUNTS) == ""
+
+    def test_boot_appends_the_line_after_the_wal_caps(self) -> None:
+        src = Path(sub.__file__).read_text()
+        assert "f.write(dsm_conf(cluster_parent))" in src
+        assert src.index("f.write(WAL_CAP_CONF)") < src.index("f.write(dsm_conf(cluster_parent))")
