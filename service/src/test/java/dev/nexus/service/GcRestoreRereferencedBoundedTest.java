@@ -23,7 +23,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -411,11 +410,9 @@ class GcRestoreRereferencedBoundedTest {
     private void insertManifestRowBypassingFk(String docId, String chashHex, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
             insertManifestRow(su, TENANT, docId, chashHex, collection);
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 

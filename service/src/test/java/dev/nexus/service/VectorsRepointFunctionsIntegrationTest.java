@@ -726,9 +726,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // Re-added NOT VALID (the existing rows are not re-checked); jOOQ's DDL DSL has no NOT VALID,
                 // so this goes through nexus_test.add_fk_not_valid_composite3, whose model-aware body appends
                 // embedding_model to both column lists: the original four-column key.
-                PgContainerHelper.addFkNotValidComposite3(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                    "collection", "chash", CHUNKS, "collection", "chash",
-                    "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+                PgContainerHelper.readdCatalogChunksFkNotValid(conn);
                 assertThat(Routines.gcRestoreRereferenced(ctx.configuration(), 384, TENANT, quarantineFlow, origin))
                     .as("the re-referenced chash must be restored").isEqualTo(1L);
                 assertRowExists(conn, origin, orphanChash,

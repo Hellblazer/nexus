@@ -1551,9 +1551,7 @@ class SchemaMigratorIntegrationTest {
                         .values(tenant, "o8dil29-neg-doc", 0, java.util.HexFormat.of().parseHex(danglingChash),
                             collection)
                         .execute();
-                    PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS,
-                        "fk_catalog_chunks_chunk", "collection", "chash", CHUNKS, "collection", "chash",
-                        "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+                    PgContainerHelper.readdCatalogChunksFkNotValid(su);
                 }
 
                 // The naive two-step shape: VALIDATE alone, skipping remediation.

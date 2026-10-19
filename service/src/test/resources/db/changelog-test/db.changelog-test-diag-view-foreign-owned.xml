@@ -11,7 +11,7 @@
        it never touches the diag view, which stays superuser-owned: the "table owner != view owner" shape
        the bug depends on.
     2. Test-only relaxation (same technique as Taxonomy010BackfillDirectIntegrationTest): drop the
-       migrated diag view, drop taxonomy-012's topic_assignments_chunk_fk (its doc_id leg targets bytea
+       migrated diag view, drop topic_assignments_chunk_fk (added by taxonomy-012, re-added by vectors-030; its doc_id leg targets bytea
        nexus.chunks.chash, so the TEXT revert below would fail on the type mismatch first; the throwaway
        container never re-adds it), revert topic_assignments.doc_id to TEXT so taxonomy-011-1's own
        TEXT-to-bytea SQL replays exactly as authored, and recreate the diag view as a superuser-owned stub

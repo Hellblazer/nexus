@@ -111,6 +111,10 @@ class Catalog013RlsReplayTest {
             // 1. Full changelog as superuser — post-RDR-180 schema (bytea).
             liquibaseUpdate(pg.getJdbcUrl(),
                 PgContainerHelper.USERNAME, PgContainerHelper.PASSWORD);
+            // The nexus_test helper functions seedRow's FK bypass calls (nexus-cbo4a). Journalled in the
+            // superuser-owned public.databasechangelog under their own file name, so the admin replay in
+            // step 5 neither sees nor re-runs them; nexus_test is outside the step-3 ownership loop.
+            PgContainerHelper.installTestObjects(su);
 
             // 2. Seed the REAL mid-migration legacy state: 16-byte decoded
             //    pre-RDR-180 values (what the type conversion leaves before
@@ -236,8 +240,7 @@ class Catalog013RlsReplayTest {
         // FK locally: drop the constraint, insert, then re-add it NOT VALID
         // (catalog-029-0's exact shape) so it is live again (unvalidated) for every
         // subsequent statement on this connection/container.
-        c.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        PgContainerHelper.dropCatalogChunksFk(c);
         seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
             .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "replay-" + tenant)
@@ -247,12 +250,7 @@ class Catalog013RlsReplayTest {
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                 PgContainerHelper.collectionModel(seed, tenant, collection))
             .execute();
-        c.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks "
-            + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-            + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-            + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-            + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        PgContainerHelper.readdCatalogChunksFkNotValid(c);
     }
 
     private static void exec(Connection c, String sql) throws Exception {

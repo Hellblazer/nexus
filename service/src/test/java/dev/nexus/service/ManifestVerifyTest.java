@@ -610,7 +610,7 @@ class ManifestVerifyTest {
         // insert, then re-add it NOT VALID (catalog-029-0's exact shape) so it is
         // live again (unvalidated) for every subsequent statement in this
         // container, including any other test's real inserts.
-        PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+        PgContainerHelper.dropCatalogChunksFk(su);
         seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
             .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
@@ -621,9 +621,7 @@ class ManifestVerifyTest {
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
             .execute();
-        PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-            "collection", "chash", CHUNKS, "collection", "chash",
-            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+        PgContainerHelper.readdCatalogChunksFkNotValid(su);
     }
 
     private static void insertManifestRowNullCollection(Connection su, String tenantId,

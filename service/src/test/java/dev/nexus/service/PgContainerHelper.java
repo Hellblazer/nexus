@@ -1534,6 +1534,28 @@ public final class PgContainerHelper {
     }
 
     /**
+     * First half of the dangling-manifest-row idiom (nexus-cbo4a): {@link #dropConstraint} of
+     * {@code fk_catalog_chunks_chunk}, so the caller can seed a {@code catalog_document_chunks} row with no
+     * matching {@code nexus.chunks} row. Pair it with {@link #readdCatalogChunksFkNotValid} once the row is in.
+     */
+    public static void dropCatalogChunksFk(Connection conn) throws SQLException {
+        dropConstraint(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+    }
+
+    /**
+     * Second half of the dangling-manifest-row idiom (nexus-cbo4a): re-adds {@code fk_catalog_chunks_chunk}
+     * NOT VALID in catalog-029-0's shape through {@link #addFkNotValidComposite3}, so it is live (unvalidated)
+     * again for every later statement. The function appends {@code embedding_model} to both column lists when
+     * both tables carry it, which gives the four-column key (tenant_id, collection, chash, embedding_model).
+     * The ON UPDATE / DEFERRABLE clause is held here once rather than at every call site.
+     */
+    public static void readdCatalogChunksFkNotValid(Connection conn) throws SQLException {
+        addFkNotValidComposite3(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+            "collection", "chash", CHUNKS, "collection", "chash",
+            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+    }
+
+    /**
      * {@code DROP INDEX <schema>.<index>} (nexus-cbo4a batch 13) via
      * {@code nexus_test.drop_index(regclass)} (db.changelog-test-objects.xml).
      * jOOQ's own {@code dropIndex} never schema-qualifies the index name on

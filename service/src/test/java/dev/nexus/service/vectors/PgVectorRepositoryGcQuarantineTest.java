@@ -195,7 +195,7 @@ class PgVectorRepositoryGcQuarantineTest {
             throws Exception {
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(conn);
         }
         if (collectionRegistered(tenant, collection)) {
             seedManifest(tenant, docId, chash, collection);
@@ -223,9 +223,7 @@ class PgVectorRepositoryGcQuarantineTest {
         }
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
-            PgContainerHelper.addFkNotValidComposite3(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(conn);
         }
     }
 

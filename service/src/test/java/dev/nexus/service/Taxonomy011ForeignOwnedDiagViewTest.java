@@ -19,8 +19,6 @@ import org.w3c.dom.NodeList;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -173,11 +171,11 @@ class Taxonomy011ForeignOwnedDiagViewTest {
      */
     private static void migrateThenSeedForeignOwnedView(
             org.testcontainers.containers.PostgreSQLContainer<?> pg, Connection su) throws Exception {
-        // DEDICATED connection for the Liquibase run -- Catalog013RlsReplayTest's
+        // DEDICATED connection for the master-changelog run -- Catalog013RlsReplayTest's
         // own javadoc documents this exact trap: Liquibase flips its connection
-        // to autoCommit=false and leaves that state behind, so reusing `su`
-        // directly here would make the role-creation DDL below "an uncommitted
-        // CREATE ROLE failing password auth" for every later connection.
+        // to autoCommit=false and leaves that state behind, so `su` would be left
+        // mid-transaction for the checks below. (runSuperuserTestChangelog restores
+        // autoCommit itself, so the fixture changelog can run on `su`.)
         try (Connection migrationConn = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(migrationConn));

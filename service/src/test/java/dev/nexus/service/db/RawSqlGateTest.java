@@ -825,9 +825,9 @@ class RawSqlGateTest {
      * probe in {@code PgSessionStatementTimeoutIntegrationTest} (the test is
      * about reusing one JDBC PreparedStatement 8x); the nexus-cbo4a
      * 2026-10-19 review fold-in later converted it through {@code
-     * ResultQuery#keepStatement(true)}. Still kept raw: the {@code DO $$ ... LOOP} DDL blocks in
-     * {@code SharedCluster}/{@code Taxonomy011ForeignOwnedDiagViewTest}
-     * (role/ownership DDL, not reads). Batch 7 also left the ~40 single-site
+     * ResultQuery#keepStatement(true)}. Still kept raw: the {@code DO $$ ... LOOP} DDL block in
+     * {@code SharedCluster} (role/ownership DDL, not reads); {@code Taxonomy011ForeignOwnedDiagViewTest}'s
+     * moved to db.changelog-test-diag-view-foreign-owned.xml on 2026-10-19. Batch 7 also left the ~40 single-site
      * {@code DO $$ CREATE ROLE nexus_svc} bootstraps in files with no other
      * catalog read, and {@code SchemaMigratorIntegrationTest}'s admin/svc role
      * bootstrap, for a later by-shape pass. The nexus-cbo4a pre-walk bootstrap
@@ -912,14 +912,16 @@ class RawSqlGateTest {
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 4), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 6 -> 4
-        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 10), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; nexus-cbo4a 2026-10-19 SELECT probes: 15 -> 10
+        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 8), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; nexus-cbo4a 2026-10-19 SELECT probes: 15 -> 10; FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 10 -> 8
         Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 2), // nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 2
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 5 -> 4; vector seeds 4 -> 2
         // nexus-brxnp fix round: 8 -> 10 (+2, insertManifestRowBypassingFk's
         // two ALTER TABLE DROP/ADD CONSTRAINT execute() calls -- the same
         // FK-bypass idiom GcRestoreRereferencedBoundedTest.java and
-        // PgVectorRepositoryGcQuarantineTest.java already carry entries for).
-        Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 6; vector seeds 6 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropConstraint/addFkNotValidComposite3: 3 -> 1
+        // PgVectorRepositoryGcQuarantineTest.java then carried entries for).
+        // nexus-cbo4a 2026-10-19: that pair is now dropCatalogChunksFk/readdCatalogChunksFkNotValid
+        // in all three files; the one site left here is not the FK pair.
+        Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 6; vector seeds 6 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 3 -> 1
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 4 -> 2
         Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 9), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 17 -> 15; vector seeds 15 -> 13; nexus-cbo4a 2026-10-19 SELECT probes: 13 -> 9
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 3), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 6 -> 3
@@ -948,7 +950,7 @@ class RawSqlGateTest {
         // PgVectorRepositoryGcQuarantineTest.seedManifestBypassingFk already
         // carried raw-SQL entries for (both pairs moved onto the nexus_test functions
         // 2026-10-19; the metadataField read is what stays).
-        Map.entry("dev/nexus/service/GcRestoreRereferencedBoundedTest.java", 1), // nexus-cbo4a 2026-10-19 FK-bypass onto dropConstraint/addFkNotValidComposite3: 3 -> 1
+        Map.entry("dev/nexus/service/GcRestoreRereferencedBoundedTest.java", 1), // nexus-cbo4a 2026-10-19 FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 3 -> 1
         // nexus-cbo4a pre-walk bootstrap fold: 16 -> 2. The admin/svc role, grant, extension and
         // relocation-helper bootstrap is PgContainerHelper.bootstrapNonSuperuserOwner now. What stays raw:
         // the exec() wrapper's own execute(sql) and the one CREATE ROLE nexus_diag ... BYPASSRLS call
@@ -965,8 +967,8 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 7), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 22 -> 20, review fold-in 20 -> 14; vector seeds 14 -> 13; nexus-cbo4a 2026-10-19 SELECT probes: 13 -> 7
         Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 2), // nexus-cbo4a 2026-10-18 vector seeds: 10 -> 9; nexus-cbo4a 2026-10-19 SELECT probes: 9 -> 2
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 2), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 8 -> 7; vector seeds 7 -> 5; nexus-cbo4a 2026-10-19 SELECT probes: 5 -> 2
-        Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 14 -> 12; vector seeds 12 -> 11; nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropConstraint/addFkNotValidComposite3: 3 -> 1
-        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 9; vector seeds 9 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropConstraint/addFkNotValidComposite3: 3 -> 1
+        Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 14 -> 12; vector seeds 12 -> 11; nexus-cbo4a 2026-10-19 SELECT probes: 11 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 3 -> 1
+        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 1), // nexus-cbo4a 2026-10-18 seed INSERTs onto generated tables: 12 -> 9; vector seeds 9 -> 8; nexus-cbo4a 2026-10-19 SELECT probes: 8 -> 3; nexus-cbo4a 2026-10-19 FK-bypass onto dropCatalogChunksFk/readdCatalogChunksFkNotValid: 3 -> 1
         Map.entry("dev/nexus/service/NexusServiceScheduledSweepTest.java", 3),
         // Round-2 verification (CRE pass 2, 2026-09-13, coordinator-directed): a
         // REVOKE/GRANT pair (column-level, to isolate arm 1's full-row SELECT from
@@ -1710,13 +1712,15 @@ class RawSqlGateTest {
     // nexus-7xfh7 2026-10-19: +1 for SharedDatabaseHandle's DO block that revokes and drops a class's exclusive
     // roles when it releases an empty database on the per-fork cluster (no typed jOOQ form for DO).
     // nexus-cbo4a 2026-10-19 FK-bypass and IndexRunFenceTest, 240 -> 217 (75 -> 72 files): the manifest/GC tests'
-    // drop-insert-re-add of fk_catalog_chunks_chunk goes through PgContainerHelper.dropConstraint and
-    // addFkNotValidComposite3 (the nexus_test functions VectorsRepointFunctionsIntegrationTest already uses), in
-    // seven files; Catalog013RlsReplayTest keeps its raw pair because it walks the product changelog itself and
-    // never installs the nexus_test objects. IndexRunFenceTest's journal count, index_state UPDATEs and advisory
-    // lock moved onto jOOQ (qualified-name journal table, generated CATALOG_DOCUMENTS, DSL.function).
+    // drop-insert-re-add of fk_catalog_chunks_chunk goes through PgContainerHelper.dropCatalogChunksFk and
+    // readdCatalogChunksFkNotValid (over the nexus_test drop_constraint / add_fk_not_valid_composite3 functions,
+    // the clause literal held once there; every earlier caller of the pair moved onto them too), in seven files.
+    // IndexRunFenceTest's journal count, index_state UPDATEs and advisory lock moved onto jOOQ (qualified-name
+    // journal table, generated CATALOG_DOCUMENTS, DSL.function).
     // nexus-cbo4a 2026-10-19 Taxonomy011ForeignOwnedDiagViewTest fixture, 217 -> 209: see its entry.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 209;
+    // Review fold-in, 209 -> 207: Catalog013RlsReplayTest installs the nexus_test objects after its superuser
+    // walk and its FK-bypass pair moved onto the same two helpers.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 207;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

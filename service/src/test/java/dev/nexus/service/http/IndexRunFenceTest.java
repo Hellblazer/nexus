@@ -29,12 +29,10 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -163,7 +161,9 @@ class IndexRunFenceTest {
             assertThatThrownBy(() -> setIndexState(su, docId, "bogus-typo"))
                 .as("a typo state must be rejected by the CHECK constraint, not silently stored")
                 .isInstanceOf(org.jooq.exception.DataAccessException.class)
-                .hasRootCauseInstanceOf(SQLException.class);
+                .satisfies(e -> assertThat(((org.jooq.exception.DataAccessException) e).sqlState())
+                    .as("23514 is check_violation: the CHECK constraint, not some other failure")
+                    .isEqualTo("23514"));
         }
     }
 
@@ -174,15 +174,15 @@ class IndexRunFenceTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String state : new String[]{"indexing", "complete", "failed"}) {
-                setIndexState(su, docId, state);
+                assertThat(setIndexState(su, docId, state)).as("state %s must be stored", state).isEqualTo(1);
             }
-            setIndexState(su, docId, null);
+            assertThat(setIndexState(su, docId, null)).as("NULL must be stored").isEqualTo(1);
         }
     }
 
     /** Superuser UPDATE of one document's index_state, so the CHECK constraint (not the repo) judges it. */
-    private static void setIndexState(Connection su, String docId, String state) {
-        DSL.using(su, SQLDialect.POSTGRES)
+    private static int setIndexState(Connection su, String docId, String state) {
+        return DSL.using(su, SQLDialect.POSTGRES)
             .update(CATALOG_DOCUMENTS)
             .set(CATALOG_DOCUMENTS.INDEX_STATE, state)
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT))
@@ -573,7 +573,7 @@ class IndexRunFenceTest {
         // drop/insert/re-add-NOT-VALID idiom used elsewhere in this file).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
 
         Map<String, Object> doc = Map.of(
@@ -582,9 +582,7 @@ class IndexRunFenceTest {
         var result = repo.writeManifestMany(TENANT, List.of(doc), COLLECTION, Map.of(docId, "wmm-refused-hash"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
         assertThat(result.get("docs"))
             .as("the manifest write itself must still succeed — over-work, never under-work")
@@ -644,7 +642,7 @@ class IndexRunFenceTest {
         // the wire, not just at the repo layer.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
 
         var ex = postCatalog("/v1/catalog/manifest/write_many",
@@ -654,9 +652,7 @@ class IndexRunFenceTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
 
         assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
@@ -827,14 +823,12 @@ class IndexRunFenceTest {
     private void writeManifestBypassingFk(String docId, List<Map<String, Object>> rows) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            PgContainerHelper.dropCatalogChunksFk(su);
         }
         repo.writeManifest(TENANT, docId, COLLECTION, rows);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
-                "collection", "chash", CHUNKS, "collection", "chash",
-                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }
     }
 
