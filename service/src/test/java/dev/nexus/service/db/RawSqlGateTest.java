@@ -1175,18 +1175,6 @@ class RawSqlGateTest {
         // TaxonomyCentroidAnnPlanShapeTest idiom -- 3 bulk INSERT...SELECT generate_series
         // seeding statements, 1 EXPLAIN dispatch in the shared explain() helper, 1 raw
         // count-cardinality JDBC query in seededCardinalityIsReal.
-        // Round-2 verification (CRE pass 2, 2026-09-13, coordinator-directed): the
-        // per-row savepoint test seeds a real per-row Postgres error via a genuine
-        // BEFORE UPDATE trigger (CREATE FUNCTION, CREATE TRIGGER, a mid-test DROP
-        // TRIGGER, then DROP TRIGGER IF EXISTS + DROP FUNCTION IF EXISTS in the
-        // finally block) -- 5 raw statements, no jOOQ codegen for CREATE FUNCTION/
-        // TRIGGER exists.
-        // nexus-xapt8 fix round (critique finding 10): 5 -> 6, +1 --
-        // subspaceListPage_realStatementTimeout_raisesCensusTimeoutException's
-        // TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK installs a raw "SELECT
-        // pg_sleep(2)" to force a GENUINE Postgres-side 57014 cancellation
-        // inside the transaction where statement_timeout is already SET
-        // LOCAL -- pg_sleep() has no jOOQ codegen equivalent to convert onto.
         Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 1), // nexus-cbo4a 2026-10-18 vector seeds: 3 -> 2; nexus-cbo4a 2026-10-19 session GUCs via setPlannerGuc: 2 -> 1
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),

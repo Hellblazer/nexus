@@ -84,7 +84,7 @@ class ScratchHandlerTest {
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), OTHER_TOKEN, OTHER_TENANT, "test-bound-other");
             // t1 is a separate schema bootstrapServiceRole never touches (it covers
-            // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
+            // nexus and nexus_test only); grantT1ScratchTo grants it (nexus-cbo4a).
             // No session search_path is set (Sam's directive, nexus-zrcj7): the
             // production ScratchRepository queries t1.scratch via the generated,
             // schema-qualified jOOQ SCRATCH table.

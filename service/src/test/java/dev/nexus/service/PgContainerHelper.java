@@ -852,7 +852,7 @@ public final class PgContainerHelper {
      * Gives {@code role} what the scratch tests need on the t1 schema (nexus-cbo4a): USAGE on the schema,
      * through {@code db.changelog-test-t1-schema-usage.xml} (jOOQ has no GRANT ON SCHEMA), then SELECT,
      * INSERT, UPDATE and DELETE on {@code t1.scratch} through jOOQ. {@link #bootstrapServiceRole} covers
-     * only nexus/staging, so this is the one place t1 is granted. Leaves {@code su} autoCommit.
+     * only nexus and nexus_test, so this is the one place t1 is granted. Leaves {@code su} autoCommit.
      */
     public static void grantT1ScratchTo(Connection su, String role) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-t1-schema-usage.xml",
