@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_storage_touch_guard import assert_exit_failed_for
+
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -132,4 +134,5 @@ def test_an_in_place_state_rewrite_reddens_a_real_run_under_xdist(tmp_path: Path
     rc, out = _run_inner(tmp_path, "state", "-n", "2")
     assert "FAIL: nexus-pfuns" in out, out[-3000:]
     assert "backfill_state.json" in out, out[-3000:]
-    assert rc != 0, f"an in-place state rewrite must fail the run (rc={rc})\n{out[-3000:]}"
+    # a bare `rc != 0` would also pass for any other reason the child session ended non-zero
+    assert_exit_failed_for(rc, out, "FAIL: nexus-pfuns", "backfill_state.json")

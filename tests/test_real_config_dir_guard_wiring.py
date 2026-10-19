@@ -46,6 +46,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.test_storage_touch_guard import assert_session_failed_for
+
 
 def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
     pytester, tmp_path: Path, monkeypatch
@@ -128,10 +130,7 @@ def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
     # The INNER test itself does nothing wrong -- it passes.
     result.assert_outcomes(passed=1)
     # But the guard's pytest_sessionfinish must still fail the OUTER run.
-    assert result.ret != 0, (
-        f"expected non-zero exit from the guard, got {result.ret}; "
-        f"stdout tail: {result.stdout.lines[-15:]}"
-    )
+    assert_session_failed_for(result, "definitely_not_allowlisted.json")
     result.stdout.fnmatch_lines(["*definitely_not_allowlisted.json*"])
 
     # And the seam must be inert by default: nothing here ever touched the

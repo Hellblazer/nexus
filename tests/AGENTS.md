@@ -287,17 +287,30 @@ deselects them, so no census has said which of them touch storage.
   for every test, the guard off. Kept for one release; `none` still provisions nothing.
 - `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
   `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
-  some touch event) and the ratchet below; set it on a full-suite run, not a scoped one.
-- **The saving is ratcheted** (nexus-zv8i7): with `NX_STORAGE_TOUCH_SWEEP=1` the share of tests that
-  minted a tenant (`provisioned_per_test` in the guard summary line) must not exceed the ceiling in
-  `tests/storage_touch_ceiling.toml` by more than its relative `tolerance` (5%). Ceilings are
-  reduce-only; `"measure"` (no full run has set it yet) fails the run and prints the number to commit.
-  Set `NX_STORAGE_TOUCH_CEILING_SUITE=docs_readers` for the docs-readers leg. Marks only get added, so
-  when the share rises, drop marks a test no longer needs before raising the ceiling.
-- A guard test that asserts a nested session FAILED goes through `assert_session_failed_for(result,
-  "<reason>")` (`tests/test_storage_touch_guard.py`), never a bare `ret != 0`: under the default
+  some touch event) and marks the report as a whole-run one for the ratchet below; set it on a
+  full-suite run, not a scoped one.
+- **The saving is ratcheted over the whole run** (nexus-zv8i7): the NUMBER of tests that minted a
+  tenant, summed over the `nx-storage-touch-report.json` of every shard, must not exceed
+  `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) in
+  `tests/storage_touch_ceiling.toml`. Check it with `python -m tests._storage_touch_fan_in
+  <dir holding the reports> --suite python_unit --shards 6` (`--suite docs_readers --shards 1` for that
+  leg). The module is standard library only, because the CI gate runner has no pytest; a test holds
+  that. It exits 1 over the ceiling, when the directory does not hold exactly `--shards` reports (a
+  missing shard would under-count and pass), on a report from a non-sweep run, and on a repeated run id. A session never gates on its share: it sees only its file neighbourhood of the suite, so
+  `provisioned_per_test` in the summary line and the per-report shares in the fan-in output are advice.
+  Ceilings are reduce-only (the fan-in prints when one can be lowered); `"measure"` fails the fan-in and
+  prints the number to commit. **No CI leg runs the fan-in yet, and both ceilings are still `"measure"`**:
+  a full chas run with `NX_STORAGE_TOUCH_SWEEP=1` supplies the number, and exporting SWEEP on the
+  shard legs is nexus-0ite2 item 3. Marks only get added, so when the count rises, drop marks a test
+  no longer needs before raising the ceiling.
+- A guard test that asserts a nested session or child process FAILED goes through
+  `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
+  (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default
   `sweep=True` a body with no provisioned test fails on 'vacuous sweep: provisioned=0' whatever the rule
-  under test did (nexus-j002k). A lint in that file enforces it.
+  under test did (nexus-j002k). A blank reason is refused (`"" in out` is always true). A lint in that
+  file enforces it over the four guard test files: an equality to any exit code but 0 and the usage
+  error 4, truthiness, `!=`, ordering and `in` are flagged, however the status is spelled (`.ret`,
+  `.returncode`, a name bound to one, `bool()` / `int()` of one, inside a nested boolean expression).
 - **Seeding the marks from a census:** run the whole suite as `NX_STORAGE_TOUCH_GUARD_MODE=report
   NX_STORAGE_TOUCH_SWEEP=1 NX_STORAGE_TOUCH_REPORT_DIR=<dir>`, then
   `uv run python scripts/annotate_t2_tenant.py <dir>` (a dry run) and `--apply`. It marks a module

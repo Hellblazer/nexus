@@ -1,34 +1,36 @@
-# What share of a test run may mint a tenant (nexus-zv8i7, epic nexus-aca0q).
+# How many tests of a whole run may mint a tenant (nexus-zv8i7, epic nexus-aca0q).
 #
 # Since the opt-in flip (nexus-j23ni) a test mints a tenant only when it asks for one. Marks only
 # get added and nothing flags a mark that is no longer needed, so the saving erodes one module mark
-# at a time. The storage-touch guard (tests/_storage_touch_guard.py, check_provisioned_ceiling)
-# compares the run's `provisioned_per_test` (tests that minted a tenant / tests recorded, printed
-# in the guard summary line) with the section below and fails the session when it is higher.
+# at a time. The fan-in (tests/_storage_touch_fan_in.py, stdlib only) sums `provisioned` over the
+# nx-storage-touch-report.json of every shard of one run and fails when the total is above
+# `provisioned_tests` + `tolerance_tests`:
 #
-# The check runs only with NX_STORAGE_TOUCH_SWEEP=1, the whole-run mode a full-suite run sets; a
-# scoped run says nothing about the share. CI does not set it yet, so a sharded CI run is not
-# ratcheted until a leg exports it (the sections below are per-shard values for that).
+#   python -m tests._storage_touch_fan_in <dir holding the reports> --suite python_unit --shards 6
 #
-# The metric is INTENSIVE (a share, not a count), so it does not move with how CI splits the suite.
-# A section's ceiling is the WORST share any shard of that suite measured. `tolerance` is relative:
-# the run passes up to ceiling * (1 + tolerance), because a shard's composition shifts a little
-# between runs (the split follows test durations). Ceilings are reduce-only: lower one in the commit
-# that lowers the share; raising one needs a reviewed reason in that commit's message.
+# The metric is a COUNT, summed across shards. A per-shard share against a worst-shard ceiling
+# (the first design) flaps when a file crosses a chunk boundary and lets every lighter shard regress
+# freely (nexus-2rhif recorded the same refutation for the DDL ratchet); the total does not depend
+# on how the run was split. Each shard's own share stays in the fan-in output as advice.
 #
-# "measure" means no full-run measurement exists yet. The check then fails the session and prints
-# the number it measured. A ceiling nobody set must not pass a run. Known measurements, chas lab-m,
-# 55c082c63, NX_STORAGE_TOUCH_SWEEP=1 (2 of 6 shards; the worst of the six is not known):
-#   shard1 409 of 5692 = 0.0719, shard4 868 of 5615 = 0.1546, docs-readers 581 of 1561 = 0.3722.
-# The follow-up commit after the next full chas run replaces each "measure" with the worst shard's
-# `provisioned_per_test`.
+# `tolerance_tests` is an absolute number of tests, an integer from 0 to 50. The count is
+# deterministic for a given selection; the slack only covers tests that count here and skip on
+# another host. Ceilings are reduce-only: the fan-in prints when one can be lowered, lower it in
+# the commit that lowers the count; raising one needs a reviewed reason in that commit's message.
+#
+# "measure" means no full-run measurement exists yet. The fan-in then fails and prints the number
+# to commit (a ceiling nobody set must not pass a run). The follow-up commit after the next full
+# chas run (every report from ONE run, NX_STORAGE_TOUCH_SWEEP=1) replaces each "measure" with that
+# total. No CI leg runs the fan-in yet (bead nexus-0ite2 item 3 owns exporting SWEEP in CI).
+# Earlier per-shard measurements, chas lab-m, 55c082c63, for orientation only (2 of 6 shards):
+#   shard1 409 of 5692, shard4 868 of 5615, docs-readers 581 of 1561.
 
 [python_unit]
-provisioned_per_test = "measure"
-tolerance = 0.05
+provisioned_tests = "measure"
+tolerance_tests = 0
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
-# substrate), so it has its own ceiling; set NX_STORAGE_TOUCH_CEILING_SUITE=docs_readers for it.
+# substrate), so it has its own ceiling: pass `--suite docs_readers --shards 1` for it.
 [docs_readers]
-provisioned_per_test = "measure"
-tolerance = 0.05
+provisioned_tests = "measure"
+tolerance_tests = 0

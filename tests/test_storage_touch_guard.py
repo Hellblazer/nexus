@@ -36,6 +36,14 @@ def t2_tenant():
 def t2_service_env():
     with guard.tenant_active():
         yield "tenant"
+
+
+@pytest.fixture(autouse=True)
+def _pin_t2_substrate(request):
+    # the marker path of tests/conftest.py: an autouse FUNCTION-scoped fixture that fetches the
+    # tenant with getfixturevalue, which the item's static fixture closure does not list
+    if request.node.get_closest_marker("t2_tenant") is not None:
+        request.getfixturevalue("t2_tenant")
 '''
 
 _TOUCH = '''
@@ -56,32 +64,14 @@ def touch_t1_and_swallow():
 '''
 
 
-def _set_ceiling(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch,
-                 value: str = "1.0", *, tolerance: float = 0.0, suite: str = "python_unit") -> Path:
-    """Point the nested session's provisioned-share ratchet (nexus-zv8i7) at a
-    ceiling file of its own. ``value`` is a TOML literal (``0.1`` or ``"measure"``).
-    Without this a sweep session would read the committed ceiling, which is
-    ``"measure"`` until a full run supplies the number, and fail every sweep test."""
-    path = pytester.path / "storage_touch_ceiling.toml"
-    path.write_text(f"[{suite}]\nprovisioned_per_test = {value}\ntolerance = {tolerance}\n")
-    monkeypatch.setenv("NX_STORAGE_TOUCH_CEILING_FILE", str(path))
-    monkeypatch.setenv("NX_STORAGE_TOUCH_CEILING_SUITE", suite)
-    return path
-
-
 def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
          *, mode: str = "fail", optin: bool = True, args: tuple[str, ...] = (),
          extra: dict[str, str] | None = None, substrate: str | None = "",
-         sweep: bool = True, ceiling: str | None = "1.0"):
+         sweep: bool = True):
     """Run ``body`` in a nested session. ``substrate`` names ``NX_TEST_T2_SUBSTRATE``
     (None leaves it unset: the default); by default ``optin`` picks ``optin`` and
     not ``optin`` picks ``per-test``, the escape hatch the guard is inert under.
-    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks.
-    ``ceiling`` is the provisioned-share ceiling those checks compare with (a TOML
-    literal; the default 1.0 can never be exceeded, so a test that is not about
-    the ratchet is not decided by it)."""
-    if ceiling is not None:
-        _set_ceiling(pytester, monkeypatch, ceiling)
+    ``sweep`` sets ``NX_STORAGE_TOUCH_SWEEP``, which asks the whole-run shape checks."""
     if substrate == "":
         substrate = "optin" if optin else "per-test"
     if substrate is None:
@@ -106,20 +96,27 @@ def _run(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, body: str,
     )
 
 
-def assert_session_failed_for(result: pytest.RunResult, *reasons: str) -> None:
-    """The nested session ended non-zero AND printed every ``reason``.
+def assert_exit_failed_for(code: int, output: str, *reasons: str) -> None:
+    """``code`` is non-zero AND ``output`` carries every ``reason``: the form for a child
+    process whose exit status and combined output the test already holds.
 
-    A bare ``ret != 0`` proves nothing under the default ``sweep=True``: a body
+    A bare ``code != 0`` proves nothing under the default ``sweep=True``: a body
     with no provisioned or no clean test fails on 'vacuous sweep: provisioned=0'
     whatever the rule under test did (nexus-j002k: the late-touch tests passed
     on that for a whole phase). ``tests/test_storage_touch_guard.py::
     test_no_fail_mode_test_asserts_a_bare_nonzero_exit`` keeps the bare form out
-    of both guard test files. At least one reason is required."""
+    of the guard test files. At least one reason is required, and a blank one is
+    refused: ``"" in output`` is true of any output."""
     assert reasons, "name what the session must have failed for"
-    assert result.ret != 0, result.stdout.str()
-    out = result.stdout.str() + result.stderr.str()
+    assert all(isinstance(r, str) and r.strip() for r in reasons), f"a blank reason names nothing: {reasons!r}"
+    assert code != 0, output
     for reason in reasons:
-        assert reason in out, (reason, out)
+        assert reason in output, (reason, output)
+
+
+def assert_session_failed_for(result: pytest.RunResult, *reasons: str) -> None:
+    """The nested session ended non-zero AND printed every ``reason`` (see ``assert_exit_failed_for``)."""
+    assert_exit_failed_for(result.ret, result.stdout.str() + result.stderr.str(), *reasons)
 
 
 def _report(result: pytest.RunResult) -> dict:
@@ -265,11 +262,14 @@ def test_tenant_is_gone_before_the_teardown_touch(leaky, t2_tenant):
         lines = _messages(out, test)
         assert lines, test
         assert any(
-            f"The test already requests {asked}, but the fixture above ran after the touch" in line
+            f"The {asked} fixture was set up after fixture seeded touched storage" in line
             and "Put @pytest.mark.t2_tenant on the test" in line
+            and "sets the tenant up first among function-scoped fixtures" in line
+            and "module-, class- or session-scoped" in line
             for line in lines
         ), lines
         assert not any("Request the t2_tenant fixture" in line for line in lines), lines
+        assert not any("the fixture above" in line for line in lines), lines
     never = _messages(out, "test_never_asked")
     assert never and all("already requests" not in line for line in never), never
     assert any("Request the t2_tenant fixture (or mark it t2_tenant)" in line for line in never), never
@@ -283,7 +283,51 @@ def test_tenant_is_gone_before_the_teardown_touch(leaky, t2_tenant):
     assert by_id["test_asks_for_the_service_env_too_late"]["requested_tenant"] == ["t2_service_env"]
     assert by_id["test_asks_for_the_tenant_too_late"]["requested_tenant"] == ["t2_tenant"]
     assert by_id["test_never_asked"]["requested_tenant"] == []
+    assert all(by_id[t]["dynamic_tenant"] == [] for t in by_id)  # a parameter is not a dynamic request
     assert by_id["test_tenant_is_gone_before_the_teardown_touch"]["phases"] == ["teardown"]
+
+
+def test_a_marked_test_is_recorded_as_having_the_tenant_and_told_what_the_marker_cannot_do(pytester, monkeypatch) -> None:
+    """nexus-0lo4l: the marker fetches the tenant with ``getfixturevalue`` from an autouse
+    FUNCTION-scoped fixture, so ``item.fixturenames`` never lists it. A marked test must still count
+    as having the tenant, and the advice must not tell it to add the mark it carries. The marker
+    sets the tenant up first among function-scoped fixtures (a function-scoped touching fixture is
+    clean); a module-scoped fixture runs before it, which no mark can change."""
+    result = _run(pytester, monkeypatch, '''
+import pytest
+from helpers import touch_storage_and_swallow
+
+@pytest.fixture
+def seeded():
+    touch_storage_and_swallow()
+    return 1
+
+@pytest.fixture(scope="module")
+def seeded_for_the_module():
+    touch_storage_and_swallow()
+    return 1
+
+@pytest.mark.t2_tenant
+def test_marked_with_a_function_scoped_touch_is_clean(seeded):
+    assert seeded == 1
+
+@pytest.mark.t2_tenant
+def test_marked_with_a_module_scoped_touch_is_named(seeded_for_the_module):
+    assert seeded_for_the_module == 1
+''')
+    result.assert_outcomes(passed=2, errors=1)
+    out = result.stdout.str()
+    assert not _messages(out, "test_marked_with_a_function_scoped_touch_is_clean")
+    lines = _messages(out, "test_marked_with_a_module_scoped_touch_is_named")
+    assert any(
+        "The test already got t2_tenant from its marker" in line
+        and "fixture seeded_for_the_module touched storage before it" in line
+        and "module-, class- or session-scoped" in line
+        for line in lines
+    ), lines
+    assert not any("Put @pytest.mark.t2_tenant" in line or "Request the t2_tenant fixture" in line for line in lines), lines
+    (finding,) = _report(result)["findings"]
+    assert finding["requested_tenant"] == ["t2_tenant"] and finding["dynamic_tenant"] == ["t2_tenant"]
 
 
 def test_report_mode_names_without_failing_the_test(pytester, monkeypatch) -> None:
@@ -404,97 +448,238 @@ def test_2_sees_no_lease():
 
 # ── a non-zero exit proves nothing on its own (nexus-j002k) ──────────────────
 
-_GUARD_TEST_FILES = ("test_storage_touch_guard.py", "test_storage_touch_guard_report.py")
-_HELPER = "assert_session_failed_for"
-#: Comparisons of ``.ret`` that are not an equality: 'it failed', not 'it failed with this'.
-_LOOSE_OPS = (ast.NotEq, ast.Gt, ast.GtE, ast.Lt, ast.LtE, ast.In, ast.NotIn, ast.IsNot)
+#: The files whose nested or child sessions are expected to FAIL. The first two run the storage-touch
+#: guard under pytester; the last two assert that a guard fails a child session the same way
+#: (``rc != 0`` with a message assert next to it, which nothing kept paired).
+_GUARD_TEST_FILES = (
+    "test_storage_touch_guard.py", "test_storage_touch_guard_report.py",
+    "test_pfuns_guard_wiring.py", "test_real_config_dir_guard_wiring.py",
+)
+_HELPERS = frozenset({"assert_session_failed_for", "assert_exit_failed_for"})
+_EXIT_ATTRS = frozenset({"ret", "returncode"})
+#: Names that read as an exit code when a test unpacks a helper's result (``rc, out = _run_inner(...)``).
+_EXIT_NAMES = frozenset({"rc", "ret", "retcode", "returncode", "exit_code", "exitcode"})
+_WRAPPERS = frozenset({"bool", "int", "abs"})
+#: The only exit codes an equality may name: OK, and USAGE_ERROR (which no sweep verdict can produce).
+#: Any other code, 1/TESTS_FAILED above all, is what a vacuous sweep ends with too.
+_SPECIFIC_CODES = frozenset({0, 4})
+_SPECIFIC_MEMBERS = frozenset({"OK", "USAGE_ERROR"})
 
 
-def _is_ret(node: ast.AST) -> bool:
-    return isinstance(node, ast.Attribute) and node.attr == "ret"
+def _unwrap(node: ast.AST) -> ast.AST:
+    while (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _WRAPPERS
+        and len(node.args) == 1 and not node.keywords
+    ):
+        node = node.args[0]
+    return node
+
+
+def _is_exit(node: ast.AST, aliases: set[str]) -> bool:
+    """An exit status: ``x.ret`` / ``x.returncode``, a name that reads as one or was assigned one,
+    and ``bool()`` / ``int()`` of either."""
+    node = _unwrap(node)
+    return (isinstance(node, ast.Attribute) and node.attr in _EXIT_ATTRS) or (
+        isinstance(node, ast.Name) and (node.id in _EXIT_NAMES or node.id in aliases)
+    )
+
+
+def _is_specific_code(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return type(node.value) is int and node.value in _SPECIFIC_CODES
+    if isinstance(node, ast.Attribute) and node.attr in _SPECIFIC_MEMBERS:
+        base = node.value  # ExitCode.OK or pytest.ExitCode.OK
+        return (isinstance(base, ast.Name) and base.id == "ExitCode") or (
+            isinstance(base, ast.Attribute) and base.attr == "ExitCode"
+        )
+    return False
+
+
+def _compare_is_loose(node: ast.Compare, aliases: set[str]) -> bool:
+    operands = [node.left, *node.comparators]
+    for left, op, right in zip(operands, node.ops, operands[1:]):
+        for mine, other in ((left, right), (right, left)):
+            if _is_exit(mine, aliases) and not (isinstance(op, ast.Eq) and _is_specific_code(other)):
+                return True
+    return False
+
+
+def _is_loose(node: ast.AST, aliases: set[str], bools: set[str]) -> bool:
+    """True when ``node``, read as a condition, passes on 'it failed' without saying why."""
+    if isinstance(node, ast.BoolOp):
+        return any(_is_loose(v, aliases, bools) for v in node.values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _is_loose(node.operand, aliases, bools)
+    if isinstance(node, ast.IfExp):
+        return any(_is_loose(n, aliases, bools) for n in (node.test, node.body, node.orelse))
+    if isinstance(node, ast.Compare):
+        return _compare_is_loose(node, aliases) or any(
+            _compare_is_loose(c, aliases) for c in ast.walk(node) if isinstance(c, ast.Compare) and c is not node
+        )
+    if _is_exit(node, aliases) or (isinstance(node, ast.Name) and node.id in bools):
+        return True  # truthiness of the exit status
+    # a call or a comprehension that wraps a comparison (``any(r.ret != 0 for r in runs)``)
+    return any(_compare_is_loose(c, aliases) for c in ast.walk(node) if isinstance(c, ast.Compare))
+
+
+def _aliases(fn: ast.AST) -> tuple[set[str], set[str]]:
+    """(names assigned an exit status, names assigned a loose condition on one) in ``fn``, followed
+    to a fixed point so ``rc = result.ret`` then ``failed = rc != 0`` is seen."""
+    assigns = sorted(
+        (n for n in ast.walk(fn) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr))),
+        key=lambda n: (n.lineno, n.col_offset),
+    )
+    exits: set[str] = set()
+    bools: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for n in assigns:
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            names = {t.id for t in targets if isinstance(t, ast.Name)}
+            if not names or n.value is None:
+                continue
+            if _is_exit(n.value, exits):
+                grown = names - exits
+                exits |= grown
+            elif _is_loose(n.value, exits, bools):
+                grown = names - bools
+                bools |= grown
+            else:
+                continue
+            changed = changed or bool(grown)
+    return exits, bools
 
 
 def _loose_exit_asserts(source: str) -> tuple[list[str], int]:
-    """(``<test>:<line>`` of every assert on a ``.ret`` that is not an equality,
-    calls of the helper) in ``source``. The helper's own body is exempt. An
-    ``.ret == 0`` and an exact ``.ret == 4`` are specific and pass."""
+    """(``<test>:<line>`` of every assert that accepts an exit status without naming
+    which one, calls of the helpers) in ``source``. The helpers' own bodies are exempt.
+
+    Specific, so passing: ``== 0`` / ``== pytest.ExitCode.OK`` and the usage error
+    ``== 4`` / ``ExitCode.USAGE_ERROR``. Loose, so flagged: truthiness, ``!=``, ordering,
+    ``in``, and an equality to any other code (``== 1`` is exactly what a vacuous
+    sweep ends with); whether the status is spelled ``.ret`` or ``.returncode``, bound to a
+    name first, wrapped in ``bool()`` / ``int()``, or buried in a nested boolean expression."""
+    tree = ast.parse(source)
     flagged: list[str] = []
     calls = 0
-    for fn in ast.walk(ast.parse(source)):
-        if not isinstance(fn, ast.FunctionDef):
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == _HELPER:
-                calls += 1
-        if fn.name == _HELPER:
+        if fn.name in _HELPERS:
             continue
+        calls += sum(
+            1 for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) in _HELPERS
+        )
+        exits, bools = _aliases(fn)
         for node in ast.walk(fn):
-            if not isinstance(node, ast.Assert):
-                continue
-            parts = node.test.values if isinstance(node.test, ast.BoolOp) else [node.test]
-            for part in parts:
-                loose = (
-                    _is_ret(part)  # assert result.ret
-                    or (isinstance(part, ast.UnaryOp) and isinstance(part.op, ast.Not) and _is_ret(part.operand))
-                    or (
-                        isinstance(part, ast.Compare)
-                        and any(_is_ret(n) for n in (part.left, *part.comparators))
-                        and any(isinstance(op, _LOOSE_OPS) for op in part.ops)
-                    )
-                )
-                if loose:
-                    flagged.append(f"{fn.name}:{node.lineno}")
-    return flagged, calls
+            if isinstance(node, ast.Assert) and _is_loose(node.test, exits, bools):
+                flagged.append(f"{fn.name}:{node.lineno}")
+    return list(dict.fromkeys(flagged)), calls
+
+
+#: The live helper-call count over ``_GUARD_TEST_FILES`` at the time of writing, and how far it may
+#: shrink before the scan is taken to have stopped seeing the tests (a rename of the helper, a
+#: restructure). Raise ``_EXPECTED_HELPER_CALLS`` when tests are added; the margin is slack for removals.
+_EXPECTED_HELPER_CALLS = 17
+_HELPER_CALLS_MARGIN = 2
 
 
 def test_no_fail_mode_test_asserts_a_bare_nonzero_exit() -> None:
     """The late-touch tests of the phase-4 fix round asserted ``ret != 0`` under the
     default ``sweep=True`` and passed on 'vacuous sweep: provisioned=0' for a
     whole phase. Every assertion that a nested session FAILED goes through
-    ``assert_session_failed_for``, which also asserts what it failed for."""
+    ``assert_session_failed_for`` (or ``assert_exit_failed_for`` for a child process), which
+    also asserts what it failed for."""
     flagged: list[str] = []
     total_calls = 0
     for name in _GUARD_TEST_FILES:
         found, calls = _loose_exit_asserts((Path(__file__).resolve().parent / name).read_text())
         flagged += [f"{name}::{where}" for where in found]
         total_calls += calls
-    assert not flagged, f"assert the reason the session failed, with {_HELPER}: {flagged}"
+    assert not flagged, f"assert the reason the session failed, with {sorted(_HELPERS)}: {flagged}"
     # non-vacuity: the scan found the tests that assert a failing session
-    assert total_calls >= 6, total_calls
+    assert total_calls >= _EXPECTED_HELPER_CALLS - _HELPER_CALLS_MARGIN, total_calls
 
 
 def test_the_exit_scan_flags_a_bare_failure_and_passes_a_specific_one() -> None:
-    """Positive control for the scan above."""
+    """Positive control for the scan above: each spelling the first version of the scan missed."""
     loose = [
         "def test_a(result):\n    assert result.ret != 0\n",
         "def test_b(result):\n    assert result.ret\n",
         "def test_c(result):\n    assert result.ret != 0 and 'x' in result.stdout.str()\n",
         "def test_d(result):\n    assert result.ret > 0\n",
         "def test_e(result):\n    assert not result.ret\n",
+        # an equality to the exit a vacuous sweep also gives
+        "def test_f(result):\n    assert result.ret == 1\n",
+        "def test_g(result):\n    assert result.ret == pytest.ExitCode.TESTS_FAILED\n",
+        "def test_h(result):\n    assert 2 == result.ret\n",
+        "def test_i(result):\n    assert result.ret in (1, 2)\n",
+        "def test_j(result):\n    assert result.ret == ExitCode.INTERNAL_ERROR\n",
+        "def test_k(result, want):\n    assert result.ret == want\n",
+        # wrapped
+        "def test_l(result):\n    assert bool(result.ret)\n",
+        "def test_m(result):\n    assert int(result.ret) > 0\n",
+        "def test_n(result):\n    assert bool(result.ret) == True\n",
+        # bound to a name first, one level and two
+        "def test_o(result):\n    ret = result.ret\n    assert ret != 0\n",
+        "def test_p(result):\n    code = result.ret\n    again = code\n    assert again\n",
+        "def test_q(result):\n    failed = result.ret != 0\n    assert failed\n",
+        "def test_r(result):\n    code: int = result.ret\n    assert code == 1\n",
+        # .returncode, and a name that reads as an exit code after unpacking
+        "def test_s(proc):\n    assert proc.returncode != 0\n",
+        "def test_t(proc):\n    assert proc.returncode == 1\n",
+        "def test_u(run):\n    rc, out = run()\n    assert rc != 0, out\n",
+        # nested boolean expressions
+        "def test_v(result, a, b):\n    assert (a and b) or result.ret != 0\n",
+        "def test_w(result, a):\n    assert a and not (a and result.ret)\n",
+        "def test_x(result, a):\n    assert (result.ret == 0) or (result.ret == 1)\n",
+        "def test_y(runs):\n    assert any(r.ret != 0 for r in runs)\n",
+        "def test_z(result):\n    assert 'x' in result.stdout.str() if result.ret else True\n",
     ]
     for source in loose:
         assert _loose_exit_asserts(source)[0], source
-    for source in (
+    specific = [
         "def test_a(result):\n    assert result.ret == 0\n",
         "def test_b(result):\n    assert result.ret == 4\n",
         "def test_c(result):\n    assert_session_failed_for(result, 'why')\n",
-    ):
+        "def test_d(result):\n    assert result.ret == pytest.ExitCode.OK\n",
+        "def test_e(result):\n    assert result.ret == ExitCode.USAGE_ERROR\n",
+        "def test_f(result):\n    assert 0 == result.ret\n",
+        "def test_g(proc):\n    assert proc.returncode == 0\n",
+        "def test_h(result):\n    ok = result.ret == 0\n    assert ok\n",
+        "def test_i(result):\n    ret = result.ret\n    assert ret == 0 and 'x' in result.stdout.str()\n",
+        "def test_j(run):\n    rc, out = run()\n    assert rc == 0, out\n",
+        "def test_k(run):\n    rc, out = run()\n    assert_exit_failed_for(rc, out, 'why')\n",
+        "def test_l(out):\n    assert 'x' in out and not out.errors\n",
+    ]
+    for source in specific:
         assert _loose_exit_asserts(source)[0] == [], source
     assert _loose_exit_asserts("def test_c(result):\n    assert_session_failed_for(result, 'why')\n")[1] == 1
+    assert _loose_exit_asserts("def test_k(rc, out):\n    assert_exit_failed_for(rc, out, 'why')\n")[1] == 1
+    # the helpers' own bodies are exempt and are not counted as uses
+    assert _loose_exit_asserts("def assert_session_failed_for(r):\n    assert r.ret != 0\n    assert_exit_failed_for(1, '')\n") == ([], 0)
 
 
 def test_a_failing_session_for_another_reason_is_refused_by_the_helper(pytester, monkeypatch) -> None:
     """The weakness itself, live: a body with nothing provisioned fails the sweep
     under the default ``sweep=True`` whatever any other rule does, so a bare
-    ``ret != 0`` passes for it. The helper refuses it unless the reason it names
-    is the one printed."""
+    exit-status check passes for it. The helper refuses it unless the reason it
+    names is the one printed."""
     result = _run(pytester, monkeypatch, "def test_nothing():\n    pass\n", mode="fail")
-    assert result.ret == pytest.ExitCode.TESTS_FAILED  # a bare "it failed" check passes ...
+    # this session failed, and for a reason no rule under test has anything to do with: any
+    # exit-status check passes for it, so only the named reason tells it apart
     assert_session_failed_for(result, "vacuous sweep: provisioned=0")
     with pytest.raises(AssertionError):  # ... and says nothing about a late touch
         assert_session_failed_for(result, "late storage touch")
     with pytest.raises(AssertionError):
         assert_session_failed_for(result)
+    for empty in ("", " ", "\n\t"):  # '' is a substring of everything, so it would name nothing
+        with pytest.raises(AssertionError):
+            assert_session_failed_for(result, empty)
+        with pytest.raises(AssertionError):
+            assert_session_failed_for(result, "vacuous sweep: provisioned=0", empty)
 
 
 def test_every_marker_the_default_addopts_deselect_is_uncensused() -> None:

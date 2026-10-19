@@ -18,7 +18,7 @@ import pytest
 
 from tests._storage_touch_guard import CHILD_LOG_ENV, REPORT_DIR_ENV, SHIM_DIR
 from tests.test_storage_touch_guard import (
-    REPO_ROOT, _CONFTEST, _TOUCH, _report, _run, _set_ceiling, assert_session_failed_for,
+    REPO_ROOT, _CONFTEST, _TOUCH, _report, _run, assert_exit_failed_for, assert_session_failed_for,
 )
 
 
@@ -835,7 +835,6 @@ def test_a_killed_worker_loses_nothing_and_fail_mode_says_so(pytester, monkeypat
     monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
     monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", "fail")
     pytester.makeconftest(_CONFTEST)
-    _set_ceiling(pytester, monkeypatch)
     pytester.makepyfile(helpers=_TOUCH)
     pytester.makepyfile(test_inner='''
 import os
@@ -880,7 +879,6 @@ def test_fail_mode_accepts_a_whole_xdist_sweep(pytester, monkeypatch, tmp_path) 
     monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "optin")
     monkeypatch.setenv("NX_STORAGE_TOUCH_GUARD_MODE", "fail")
     pytester.makeconftest(_CONFTEST)
-    _set_ceiling(pytester, monkeypatch)
     pytester.makepyfile(helpers=_TOUCH)
     pytester.makepyfile(test_inner='''
 import pytest
@@ -1281,7 +1279,7 @@ def test_xfails_untouched():
     assert result.ret == 0 and "storage touch swallowed by xfail" in result.stdout.str()
 
 
-# ── the tenant saving is ratcheted (nexus-zv8i7) ─────────────────────────────
+# ── the tenant saving is ratcheted over a whole run (nexus-zv8i7) ─────────────
 
 _RATCHET_BODY = '''
 from helpers import touch_storage_and_swallow
@@ -1291,107 +1289,292 @@ def test_provisioned(t2_tenant):
 
 def test_clean():
     pass
-'''  # 1 of 2 tests minted a tenant: provisioned_per_test = 0.5, and the sweep shape is satisfied
+'''  # 1 of 2 tests minted a tenant, and the sweep shape is satisfied
 
 
-def _ceiling_file(tmp_path: Path, value: str, *, tolerance: float = 0.0, suite: str = "python_unit") -> Path:
-    path = tmp_path / "ceiling.toml"
-    path.write_text(f"[{suite}]\nprovisioned_per_test = {value}\ntolerance = {tolerance}\n")
+def _shard_report(root: Path, shard: str, *, tests: int, provisioned: int, run_id: str | None = None,
+                  sweep: bool = True) -> Path:
+    """A session report as one CI shard leaves it: ``<root>/<shard>/nx-storage-touch-report.json``."""
+    from tests._storage_touch_fan_in import REPORT_NAME
+
+    path = root / shard / REPORT_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "counts": {"tests": tests, "provisioned": provisioned}, "run_id": run_id or f"run-{shard}", "sweep": sweep,
+    }))
     return path
 
 
-def test_the_share_of_provisioned_tests_is_compared_with_the_ceiling(tmp_path: Path) -> None:
-    from tests._storage_touch_guard import check_provisioned_ceiling
+def _ceiling_file(tmp_path: Path, ceiling: str, *, tolerance: str = "0", suite: str = "python_unit") -> Path:
+    """``ceiling`` and ``tolerance`` are TOML literals."""
+    path = tmp_path / "ceiling.toml"
+    path.write_text(f"[{suite}]\nprovisioned_tests = {ceiling}\ntolerance_tests = {tolerance}\n")
+    return path
 
-    counts = {"tests": 200, "provisioned": 20}  # 0.1
-    def check(value: str, tolerance: float = 0.0):
-        return check_provisioned_ceiling(counts, suite="python_unit", path=_ceiling_file(tmp_path, value, tolerance=tolerance))
 
-    entry, lines = check("0.1")
-    assert lines == [] and entry["status"] == "ok" and entry["provisioned_per_test"] == 0.1
-    entry, lines = check("0.09")
+def _three_shards(root: Path, counts: tuple[int, int, int] = (100, 300, 50)) -> None:
+    for i, provisioned in enumerate(counts, 1):
+        _shard_report(root, f"shard{i}", tests=1000, provisioned=provisioned)
+
+
+def test_the_total_over_every_shard_is_compared_with_the_ceiling(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import fan_in
+
+    reports = tmp_path / "reports"
+    _three_shards(reports)  # 450 of 3000 minted a tenant
+    entry, lines = fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, "450"))
+    assert lines == [] and entry["status"] == "ok"
+    assert (entry["tests"], entry["provisioned"], len(entry["reports"])) == (3000, 450, 3)
+    # one over the ceiling fails, naming the total; a tolerance of exactly the excess admits it
+    entry, lines = fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, "449"))
     assert entry["status"] == "over" and len(lines) == 1
-    assert "provisioned_per_test=0.100000 (20 of 200 tests minted a tenant) is above the ceiling 0.09" in lines[0]
-    # the tolerance is relative: 0.09 * 1.2 = 0.108 admits 0.1, 0.09 * 1.05 = 0.0945 does not
-    assert check("0.09", 0.2)[1] == [] and check("0.09", 0.2)[0]["limit"] == 0.108
-    assert check("0.09", 0.05)[0]["status"] == "over"
-    entry, lines = check('"measure"')
-    assert entry["status"] == "unset" and "no ceiling set; measured provisioned_per_test=0.100000" in lines[0]
-    # a ratchet that cannot be read passes nothing
-    for bad in ("0", "1.5", "-0.1", '"later"', "true"):
-        entry, lines = check(bad)
-        assert entry["status"] == "unreadable" and lines, bad
-    assert check_provisioned_ceiling(counts, suite="docs_readers", path=_ceiling_file(tmp_path, "0.5"))[0]["status"] == "unreadable"
-    assert check_provisioned_ceiling(counts, suite="python_unit", path=tmp_path / "absent.toml")[0]["status"] == "unreadable"
+    assert "provisioned_tests=450 (450 of 3000 tests minted a tenant across 3 report(s)) is above the ceiling 449" in lines[0]
+    assert fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, "449", tolerance="1"))[1] == []
+    assert fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, "448", tolerance="1"))[0]["status"] == "over"
+
+
+def test_a_light_shard_cannot_regress_freely_and_a_rebalance_is_not_a_regression(tmp_path: Path) -> None:
+    """The per-shard share against the worst shard's ceiling (the first design) failed both ways:
+    shard 1 could triple its mints while staying under shard 2's share, and moving a file across a
+    chunk boundary moved the shares with no code change."""
+    from tests._storage_touch_fan_in import fan_in
+
+    ceiling = _ceiling_file(tmp_path, "450")
+    regress = tmp_path / "regress"
+    _three_shards(regress, (220, 300, 50))  # shard 1 went from 100 to 220 mints, still below shard 2's share
+    entry, lines = fan_in(regress, shards=3, suite="python_unit", path=ceiling)
+    assert entry["status"] == "over" and lines, "a light shard that regresses is caught by the total"
+    assert max(r["provisioned_per_test"] for r in entry["reports"]) == 0.3  # the worst share would have passed it
+    # the same 450 mints split differently across the shards is the same verdict
+    for split in ((450, 0, 0), (150, 150, 150), (0, 200, 250)):
+        moved = tmp_path / f"moved-{'-'.join(map(str, split))}"
+        _three_shards(moved, split)
+        assert fan_in(moved, shards=3, suite="python_unit", path=ceiling)[1] == [], split
+
+
+def test_the_per_report_share_is_advice_and_gates_nothing(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import fan_in
+
+    reports = tmp_path / "reports"
+    _shard_report(reports, "a", tests=10, provisioned=9)  # share 0.9
+    _shard_report(reports, "b", tests=990, provisioned=1)
+    entry, lines = fan_in(reports, shards=2, suite="python_unit", path=_ceiling_file(tmp_path, "10"))
+    assert lines == [] and [r["provisioned_per_test"] for r in entry["reports"]] == [0.9, 0.00101]
+
+
+def test_the_ceiling_follows_the_count_down(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import fan_in
+
+    reports = tmp_path / "reports"
+    _three_shards(reports)
+    assert fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, "450"))[0]["lower_to"] is None
+    entry, lines = fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, "600"))
+    assert lines == [] and entry["lower_to"] == 450
+
+
+def test_an_unset_ceiling_fails_the_fan_in_and_prints_the_number_to_commit(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import fan_in
+
+    reports = tmp_path / "reports"
+    _three_shards(reports)
+    entry, lines = fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, '"measure"'))
+    assert entry["status"] == "unset" and len(lines) == 1
+    assert "no ceiling set; measured provisioned_tests=450" in lines[0] and "Commit provisioned_tests = 450" in lines[0]
+
+
+def test_a_fan_in_over_nothing_fails(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import fan_in
+
+    ceiling = _ceiling_file(tmp_path, "450")
+    (tmp_path / "empty").mkdir()
+    for where in (tmp_path / "empty", tmp_path / "absent"):
+        entry, lines = fan_in(where, shards=1, suite="python_unit", path=ceiling)
+        assert entry["status"] == "no_reports" and "no nx-storage-touch-report.json under" in lines[0], where
+    zero = tmp_path / "zero"
+    _shard_report(zero, "a", tests=0, provisioned=0)
+    entry, lines = fan_in(zero, shards=1, suite="python_unit", path=ceiling)
+    assert entry["status"] == "empty" and lines
+
+
+def test_a_report_that_does_not_count_the_whole_run_is_refused(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import REPORT_NAME, fan_in
+
+    ceiling = _ceiling_file(tmp_path, "450")
+
+    def verdict(make) -> tuple[str, list[str]]:
+        root = tmp_path / f"case{len(list(tmp_path.iterdir()))}"
+        _shard_report(root, "good", tests=1000, provisioned=10)
+        make(root)
+        entry, lines = fan_in(root, shards=2, suite="python_unit", path=ceiling)
+        return entry["status"], lines
+
+    # a scoped run undercounts, so it would loosen the total
+    status, lines = verdict(lambda root: _shard_report(root, "scoped", tests=10, provisioned=1, sweep=False))
+    assert status == "bad_reports" and "not a whole-run report (sweep=False" in lines[0]
+    # the same artifact downloaded twice would double the total
+    status, lines = verdict(lambda root: _shard_report(root, "again", tests=1000, provisioned=10, run_id="run-good"))
+    assert status == "bad_reports" and "repeats run id run-good" in lines[0]
+    status, lines = verdict(lambda root: (root / "junk").mkdir() or (root / "junk" / REPORT_NAME).write_text("{not json"))
+    assert status == "bad_reports" and "cannot read the report" in lines[0]
+    status, lines = verdict(lambda root: (root / "thin").mkdir() or (root / "thin" / REPORT_NAME).write_text('{"counts": {}}'))
+    assert status == "bad_reports" and "KeyError" in lines[0]
+    status, lines = verdict(lambda root: _shard_report(root, "odd", tests=5, provisioned=6))
+    assert status == "bad_reports" and "0 <= provisioned <= tests" in lines[0]
+
+
+def test_a_ceiling_that_is_not_a_bounded_count_is_refused(tmp_path: Path) -> None:
+    from tests._storage_touch_fan_in import MAX_TOLERANCE_TESTS, fan_in
+
+    reports = tmp_path / "reports"
+    _three_shards(reports)
+
+    def status(ceiling: str, tolerance: str = "0") -> str:
+        return fan_in(reports, shards=3, suite="python_unit", path=_ceiling_file(tmp_path, ceiling, tolerance=tolerance))[0]["status"]
+
+    assert status("450", str(MAX_TOLERANCE_TESTS)) == "ok"
+    for bad in ("0", "-1", "0.5", "nan", "inf", "true", '"later"', "450.0"):
+        assert status(bad) == "unreadable", bad  # nan or inf as a ceiling would pass every count
+    for bad in ("-1", str(MAX_TOLERANCE_TESTS + 1), "0.5", "nan", "inf", "true", '"5"'):
+        assert status("450", bad) == "unreadable", bad  # an unbounded tolerance would pass anything
+    # an unset ceiling still validates its tolerance
+    assert status('"measure"', "-1") == "unreadable"
+    absent = tmp_path / "absent.toml"
+    assert fan_in(reports, shards=3, suite="python_unit", path=absent)[0]["status"] == "unreadable"
+    assert fan_in(reports, shards=3, suite="docs_readers", path=_ceiling_file(tmp_path, "450"))[0]["status"] == "unreadable"
     (tmp_path / "broken.toml").write_text("[python_unit\n")
-    assert check_provisioned_ceiling(counts, suite="python_unit", path=tmp_path / "broken.toml")[0]["status"] == "unreadable"
-    (tmp_path / "notol.toml").write_text("[python_unit]\nprovisioned_per_test = 0.5\n")
-    assert check_provisioned_ceiling(counts, suite="python_unit", path=tmp_path / "notol.toml")[0]["status"] == "unreadable"
-    # an empty run is the sweep-shape checks' to name, not the ratchet's
-    assert check_provisioned_ceiling({"tests": 0, "provisioned": 0}, suite="python_unit", path=tmp_path / "absent.toml")[1] == []
+    assert fan_in(reports, shards=3, suite="python_unit", path=tmp_path / "broken.toml")[0]["status"] == "unreadable"
+    (tmp_path / "notol.toml").write_text("[python_unit]\nprovisioned_tests = 450\n")
+    assert fan_in(reports, shards=3, suite="python_unit", path=tmp_path / "notol.toml")[0]["status"] == "unreadable"
 
 
-def test_a_sweep_above_the_ceiling_fails_for_the_ratchet_and_nothing_else(pytester, monkeypatch) -> None:
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling="0.25")
-    result.assert_outcomes(passed=2)
-    assert_session_failed_for(
-        result, "provisioned ratchet [python_unit] in storage_touch_ceiling.toml",
-        "provisioned_per_test=0.500000 (1 of 2 tests minted a tenant) is above the ceiling 0.25",
+def test_a_missing_or_extra_shard_fails_before_any_count_is_read(tmp_path: Path) -> None:
+    """A shard whose artifact never arrived under-counts and would pass; a stray second copy over-counts."""
+    from tests._storage_touch_fan_in import fan_in
+
+    ceiling = _ceiling_file(tmp_path, "450")
+    reports = tmp_path / "reports"
+    _three_shards(reports)
+    assert fan_in(reports, shards=3, suite="python_unit", path=ceiling)[1] == []
+    for expected in (4, 6, 2, 1):
+        entry, lines = fan_in(reports, shards=expected, suite="python_unit", path=ceiling)
+        assert entry["status"] == "shard_count" and f"expected {expected} report(s)" in lines[0] and "found 3" in lines[0], expected
+        assert entry["provisioned"] == 0, "no count is read from a run with the wrong number of reports"
+    # the missing shard is the heavy one: its mints are what the total would have caught
+    (reports / "shard2" / "nx-storage-touch-report.json").unlink()
+    entry, lines = fan_in(reports, shards=3, suite="python_unit", path=ceiling)
+    assert entry["status"] == "shard_count" and "found 2" in lines[0]
+    for bad in (0, -1, True, 2.0):
+        assert fan_in(reports, shards=bad, suite="python_unit", path=ceiling)[0]["status"] == "bad_shards", bad
+
+
+def test_the_fan_in_command_exits_nonzero_over_the_ceiling(tmp_path: Path) -> None:
+    """Run as CI runs it: a child interpreter with pytest unavailable (the gate runner has none)."""
+    import subprocess
+    import sys
+
+    reports = tmp_path / "reports"
+    _three_shards(reports)
+    launcher = (
+        "import runpy, sys; sys.modules['pytest'] = None; sys.path.insert(0, sys.argv.pop(1)); "
+        "runpy.run_module('tests._storage_touch_fan_in', run_name='__main__')"
     )
-    report = _report(result)
-    # the sweep shape is satisfied, so the ratchet is the ONLY thing that failed the session
-    assert len(report["vacuity"]) == 1 and report["vacuity"][0].startswith("provisioned ratchet"), report["vacuity"]
-    assert report["provisioned_ratchet"]["status"] == "over"
-    assert "provisioned_per_test=0.500000" in result.stdout.str()
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-I", "-c", launcher, str(REPO_ROOT), *args],
+            cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        )
+
+    ok = ("--suite", "python_unit", "--shards", "3")
+    within = run(str(reports), *ok, "--ceiling-file", str(_ceiling_file(tmp_path, "450")))
+    assert within.returncode == 0, within.stdout + within.stderr
+    assert "shards=3 reports=3 tests=3000 provisioned=450 ceiling=450" in within.stdout and "(advisory)" in within.stdout
+    over = run(str(reports), *ok, "--ceiling-file", str(_ceiling_file(tmp_path, "449")))
+    assert_exit_failed_for(over.returncode, over.stdout + over.stderr, "above the ceiling 449")
+    nothing = run(str(tmp_path / "absent"), *ok, "--ceiling-file", str(_ceiling_file(tmp_path, "450")))
+    assert_exit_failed_for(nothing.returncode, nothing.stdout, "no nx-storage-touch-report.json under")
+    short = run(str(reports), "--suite", "python_unit", "--shards", "6", "--ceiling-file", str(_ceiling_file(tmp_path, "450")))
+    assert_exit_failed_for(short.returncode, short.stdout, "expected 6 report(s)", "found 3")
+    no_suite = run(str(reports), "--shards", "3")  # no default section to pick wrongly
+    assert_exit_failed_for(no_suite.returncode, no_suite.stderr, "--suite")
+    no_shards = run(str(reports), "--suite", "python_unit")  # no default count to pass a short run
+    assert_exit_failed_for(no_shards.returncode, no_shards.stderr, "--shards")
 
 
-def test_a_sweep_within_the_ceiling_and_its_tolerance_passes(pytester, monkeypatch) -> None:
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling="0.5")
+def test_the_fan_in_module_needs_nothing_outside_the_standard_library() -> None:
+    """The gate runner has no pytest, and importing ``tests._storage_touch_guard`` for the fan-in
+    would pull it in. The module's own imports are checked statically and then by importing it with
+    pytest made unavailable; the guard shares its two constants rather than defining them twice."""
+    import ast
+    import subprocess
+    import sys
+
+    path = REPO_ROOT / "tests" / "_storage_touch_fan_in.py"
+    imported = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "no relative import: the module runs as __main__"
+            imported.add((node.module or "").split(".")[0])
+    assert imported, "the scan saw no import"
+    assert imported <= set(sys.stdlib_module_names) | {"__future__"}, sorted(imported - set(sys.stdlib_module_names))
+    probe = (
+        "import sys; sys.modules['pytest'] = None; sys.path.insert(0, sys.argv[1]); "
+        "import tests._storage_touch_fan_in as m; assert callable(m.fan_in) and callable(m.main); "
+        "assert 'pytest' not in [k for k, v in sys.modules.items() if v is not None]"
+    )
+    done = subprocess.run([sys.executable, "-I", "-c", probe, str(REPO_ROOT)], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    from tests import _storage_touch_fan_in as fan, _storage_touch_guard as guard
+
+    assert (guard.REPORT_NAME, guard.SWEEP_ENV) == (fan.REPORT_NAME, fan.SWEEP_ENV)
+
+
+def test_a_session_reports_its_share_and_never_gates_on_it(pytester, monkeypatch) -> None:
+    """One session sees its file neighbourhood of the suite, so its share is printed and no
+    ceiling, set or unset, can fail it. The report carries what the fan-in needs."""
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail")
     result.assert_outcomes(passed=2)
     assert result.ret == 0, result.stdout.str()
+    out = result.stdout.str()
+    assert "provisioned_per_test=0.500000" in out and "ratchet" not in out and "no ceiling" not in out
     report = _report(result)
-    assert report["vacuity"] == [] and report["provisioned_ratchet"]["status"] == "ok"
-    # 0.45 * (1 + 0.2) = 0.54 admits 0.5
-    _set_ceiling(pytester, monkeypatch, "0.45", tolerance=0.2)
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling=None)
-    assert result.ret == 0, result.stdout.str()
-    assert _report(result)["provisioned_ratchet"]["limit"] == 0.54
+    assert report["vacuity"] == [] and "provisioned_ratchet" not in report
+    assert report["sweep"] is True and isinstance(report["run_id"], str) and report["run_id"]
 
 
-def test_an_unset_ceiling_fails_a_sweep_and_prints_the_number_to_commit(pytester, monkeypatch) -> None:
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", ceiling='"measure"')
-    assert_session_failed_for(result, "no ceiling set; measured provisioned_per_test=0.500000 (1 of 2 tests minted a tenant)")
-    assert _report(result)["provisioned_ratchet"]["status"] == "unset"
+def test_the_fan_in_reads_the_reports_real_sessions_write(pytester, monkeypatch, tmp_path: Path) -> None:
+    """End to end: a sweep session's report is a valid fan-in input, a scoped one is refused."""
+    from tests._storage_touch_fan_in import REPORT_NAME, fan_in
+
+    ceiling = _ceiling_file(tmp_path, "1")
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail")
+    path = Path(re.search(r"storage-touch report: (\S+)", result.stdout.str()).group(1))
+    assert path.name == REPORT_NAME
+    entry, lines = fan_in(path.parent, shards=1, suite="python_unit", path=ceiling)
+    assert lines == [] and (entry["tests"], entry["provisioned"]) == (2, 1)
+    # one more provisioned test than the ceiling allows
+    result = _run(pytester, monkeypatch, _RATCHET_BODY + "\ndef test_provisioned_too(t2_tenant):\n    pass\n", mode="fail")
+    path = Path(re.search(r"storage-touch report: (\S+)", result.stdout.str()).group(1))
+    assert fan_in(path.parent, shards=1, suite="python_unit", path=ceiling)[0]["status"] == "over"
+    # a scoped (non-sweep) run is not a whole run
+    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", sweep=False)
+    path = Path(re.search(r"storage-touch report: (\S+)", result.stdout.str()).group(1))
+    entry, lines = fan_in(path.parent, shards=1, suite="python_unit", path=ceiling)
+    assert entry["status"] == "bad_reports" and "sweep=False" in lines[0]
 
 
-def test_the_ratchet_is_asked_of_a_whole_run_only_and_report_mode_never_fails_on_it(pytester, monkeypatch) -> None:
-    # a scoped run says nothing about the share
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="fail", sweep=False, ceiling="0.1")
-    result.assert_outcomes(passed=2)
-    assert result.ret == 0 and "provisioned ratchet" not in result.stdout.str()
-    assert "provisioned_ratchet" not in _report(result)
-    # report mode prints the verdict and keeps the exit status
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="report", ceiling="0.1")
-    assert result.ret == 0 and "is above the ceiling 0.1" in result.stdout.str()
-    assert _report(result)["provisioned_ratchet"]["status"] == "over"
-
-
-def test_the_committed_ceiling_is_the_default_and_is_well_formed(pytester, monkeypatch) -> None:
+def test_the_committed_ceiling_is_well_formed_and_still_unset() -> None:
     import tomllib
 
-    from tests._storage_touch_guard import DEFAULT_CEILING_FILE
+    from tests._storage_touch_fan_in import CEILING_UNSET, DEFAULT_CEILING_FILE, _ceiling_values
 
     assert DEFAULT_CEILING_FILE == REPO_ROOT / "tests" / "storage_touch_ceiling.toml"
     sections = tomllib.loads(DEFAULT_CEILING_FILE.read_text())
-    assert {"python_unit", "docs_readers"} <= sections.keys()
-    for name, section in sections.items():
-        value = section["provisioned_per_test"]
-        assert value == "measure" or (not isinstance(value, bool) and isinstance(value, (int, float)) and 0 < value <= 1), name
-        assert isinstance(section["tolerance"], (int, float)) and section["tolerance"] >= 0, name
-    # with no override a sweep reads that file and the python_unit section
-    monkeypatch.delenv("NX_STORAGE_TOUCH_CEILING_FILE", raising=False)
-    monkeypatch.delenv("NX_STORAGE_TOUCH_CEILING_SUITE", raising=False)
-    result = _run(pytester, monkeypatch, _RATCHET_BODY, mode="report", ceiling=None)
-    entry = _report(result)["provisioned_ratchet"]
-    assert entry["file"] == str(DEFAULT_CEILING_FILE) and entry["suite"] == "python_unit"
-    assert entry["status"] != "unreadable", entry
+    assert set(sections) == {"python_unit", "docs_readers"}
+    for name in sections:
+        ceiling, _tolerance = _ceiling_values(DEFAULT_CEILING_FILE, name)  # raises on a malformed value
+        # nobody has run the full sweep to completion since the fan-in replaced the per-shard
+        # share: the first number is a reviewed commit, so an int here arrived with its evidence
+        assert ceiling == CEILING_UNSET or (isinstance(ceiling, int) and ceiling >= 1), name
