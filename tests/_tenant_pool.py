@@ -14,13 +14,21 @@ nexus-0bl77):
 2. ``POST /v1/_test/tenant-reset``: the engine evicts every JVM structure keyed by the tenant (token cache, collection
    registry, ghost-sweep marker, rate limiters, parked tuple waiters).
 3. census: at least ``MIN_CENSUS_RELATIONS`` relations examined, every ``REQUIRED_CENSUS_RELATIONS`` member among them,
-   zero rows for the tenant in each, zero ``pci_`` indexes on its leaves.
+   zero rows for the tenant in each, zero ``pci_`` indexes on its leaves. It runs AFTER the wipe in the same teardown,
+   so it proves the wipe completed and the tenant was quiet through the teardown window (a writer committing between
+   the wipe and the census is caught). It cannot see rows a test left before the wipe: the wipe deletes them.
 4. ``POST /v1/tenants/create`` for the same name: the token rows are gone, so this issues a fresh bearer (the
    service_tokens trigger finds the leaves and creates nothing).
 
-A step that fails retires the tenant (best-effort wipe, ``drop_test_tenant``, a fresh mint on the next lease, counted)
-and raises :class:`TenantLeakError` from the fixture teardown, so the test that leaked ERRORS and names the
-relations. Python caches that outlive a test and key on something other than the bearer are reset on every lease.
+A lease also starts with a census (before the test body, the tenant's one allowed token row aside): a row there was
+committed by a writer that fired between the previous lease's teardown and this setup, and the NEW test's setup
+errors naming the PREVIOUS lease's owner as the likely leaker. A writer that fires during the next test's body is still
+undetected here; that residual belongs to the A/B failure-set diff (nexus-7zloy).
+
+ANY failure of a teardown step (a leak verdict, an httpx error, a psql timeout, a malformed re-issue reply) retires the
+tenant (best-effort wipe, ``drop_test_tenant``, a fresh mint on the next lease, counted) and raises
+:class:`TenantLeakError` from the fixture teardown naming the cause, so the test whose teardown failed ERRORS. Python
+caches that outlive a test and key on something other than the bearer are reset on every lease.
 
 Every SQL statement runs as the substrate's bootstrap superuser (the engine roles cannot run it and it must bypass
 FORCE ROW LEVEL SECURITY). A census that examined nothing is a failure, not a pass (the nexus-moht0 doctrine).
@@ -172,6 +180,16 @@ $wipe$;
 COMMIT;
 """
 
+#: Dead and live tuples and bytes over the tenant's ``nexus.chunks_m<model>_t_<tenant>`` leaves (one per embedding model).
+LEAF_BLOAT_SQL = """
+SELECT coalesce(sum(s.n_dead_tup), 0)::text || ' ' || coalesce(sum(s.n_live_tup), 0)::text || ' '
+       || coalesce(sum(pg_catalog.pg_relation_size(c.oid)), 0)::text
+  FROM pg_catalog.pg_class c
+  LEFT JOIN pg_catalog.pg_stat_all_tables s ON s.relid = c.oid
+ WHERE c.relnamespace = 'nexus'::regnamespace AND c.relname LIKE 'chunks\\_m%' AND c.relispartition
+   AND nexus.partition_bound_value(c.oid) = :'tenant';
+"""
+
 #: The census alone, for a caller that wants the verdict on its own (the end-of-session check, the negative control).
 #: ``allow_token`` is the one ``service_tokens.token_hash`` the census does not count: the bearer a reset re-issued,
 #: which the tenant legitimately holds between leases. Empty counts every token row.
@@ -258,24 +276,32 @@ def reset_client_caches() -> None:
         ae._ENGINE_ASPECTS_ENABLED_CACHE.clear()
 
 
+class TenantLeaseBusyError(RuntimeError):
+    """``lease()`` was called while another lease on the same pool was open."""
+
+
 class TenantPool:
-    """One worker's pool: one lazily minted tenant, leased to one test at a time.
+    """One worker's pool: one lazily minted tenant, leased to one test at a time (``lease`` enforces it).
 
     ``evict=False`` skips the engine route (step 2) and exists ONLY so a test can show that the eviction is what
-    makes a collection registered in lease A unknown in lease B. ``http`` is the post function, injectable for
-    the same reason; it defaults to ``httpx.post``.
+    makes a collection registered in lease A unknown in lease B; ``start_census=False`` skips the lease-start census
+    and exists ONLY so a test can show what that census catches.
     """
 
     def __init__(self, state: Mapping[str, Any], *, evict: bool = True,
                  mint: Callable[[Mapping[str, Any]], tuple[str, str]] | None = None,
-                 drop: Callable[[Mapping[str, Any], str], bool] | None = None) -> None:
+                 drop: Callable[[Mapping[str, Any], str], bool] | None = None,
+                 start_census: bool = True) -> None:
         from tests import _engine_substrate  # noqa: PLC0415
 
         self.state = state
         self.evict = evict
+        self.start_census = start_census
+        self._last_owner = ""
         self._mint = mint or _engine_substrate.mint_test_tenant
         self._drop = drop or _engine_substrate.drop_test_tenant
         self._lock = threading.Lock()
+        self._leased = False
         self.tenant: str | None = None
         self.token: str | None = None
         self.leases = 0
@@ -322,7 +348,7 @@ class TenantPool:
 
     def retire(self, reason: str) -> None:
         """Forget the tenant (best-effort wipe and partition drop) so the next lease mints a new one. Counted."""
-        tenant, self.tenant, self.token = self.tenant, None, None
+        tenant, self.tenant, self.token, self._last_owner = self.tenant, None, None, ""
         if tenant is None:
             return
         self.retired += 1
@@ -335,29 +361,77 @@ class TenantPool:
             self._drop(self.state, tenant)
 
     @contextlib.contextmanager
-    def lease(self) -> Iterator[tuple[str, str]]:
-        """Hand out ``(tenant, token)``; reset the tenant however the block ends. The caller's own exception is
-        never replaced by a teardown failure (that is logged and the tenant retired)."""
+    def lease(self, owner: str = "") -> Iterator[tuple[str, str]]:
+        """Hand out ``(tenant, token)``; reset the tenant however the block ends.
+
+        ``owner`` names the leasing test (its node id); the next lease's start census cites it when it finds rows.
+
+        One lease at a time: a second ``lease()`` while one is open raises :class:`TenantLeaseBusyError` (it would
+        otherwise share, and at its end wipe, the other test's rows).
+
+        ANY exception from the reset (a leak verdict, an httpx error, a psql timeout, a malformed re-issue reply)
+        retires the tenant, so the next lease mints a fresh one and never receives a deleted bearer or unwiped rows.
+        When the block ended cleanly the failure is raised, naming its cause, so the leasing test errors at
+        teardown; when the block raised, the block's own exception is the one that propagates and the teardown
+        failure is logged.
+        """
         with self._lock:
-            if self.tenant is None:
-                self.tenant, self.token = self._mint(self.state)
-                self.mints += 1
-            tenant, token = self.tenant, self.token
-            self.leases += 1
-        reset_client_caches()
-        completed = False
-        try:
-            yield tenant, token  # type: ignore[misc]
-            completed = True
-        finally:
-            reset_client_caches()
+            if self._leased:
+                raise TenantLeaseBusyError(
+                    f"tenant {self.tenant}: lease() called while a lease is open; the pool serves one test at a time")
+            self._leased = True
             try:
-                self.token = self.reset(tenant)
-            except TenantLeakError as exc:
-                self.retire(str(exc))
-                if completed:
-                    raise
-                _log.warning("tenant_pool_teardown_failed_after_test_error", error=str(exc))
+                if self.tenant is None:
+                    self.tenant, self.token = self._mint(self.state)
+                    self.mints += 1
+                tenant, token = self.tenant, self.token
+                self.leases += 1
+            except BaseException:
+                self._leased = False
+                raise
+        try:
+            reset_client_caches()
+            self._census_at_start(tenant, token, owner)
+            completed = False
+            try:
+                yield tenant, token  # type: ignore[misc]
+                completed = True
+            finally:
+                try:
+                    reset_client_caches()
+                    self.token = self.reset(tenant)
+                except BaseException as exc:
+                    self.retire(f"{type(exc).__name__}: {exc}")
+                    if not isinstance(exc, Exception):
+                        raise  # KeyboardInterrupt, SystemExit: stop, the tenant is already retired
+                    if completed:
+                        if isinstance(exc, TenantLeakError):
+                            raise
+                        raise TenantLeakError(
+                            f"tenant {tenant}: teardown failed with {type(exc).__name__}: {exc}") from exc
+                    _log.warning("tenant_pool_teardown_failed_after_test_error",
+                                 tenant=tenant, error=f"{type(exc).__name__}: {exc}")
+                else:
+                    self._last_owner = owner
+        finally:
+            self._leased = False
+
+    def _census_at_start(self, tenant: str, token: str | None, owner: str) -> None:
+        """Before the test body: the tenant holds no rows but the bearer it was handed. A row means a writer fired
+        after the previous lease's teardown census; fail THIS setup naming the previous owner, and retire."""
+        if not self.start_census:
+            return
+        try:
+            census(self.state, tenant, allow_token=token or "")
+        except BaseException as exc:
+            previous = self._last_owner or "(none recorded: a freshly minted tenant)"
+            self.retire(f"lease-start census: {exc}")
+            if not isinstance(exc, Exception):
+                raise
+            raise TenantLeakError(
+                f"{exc}; found at the START of the lease for {owner or '(unnamed)'}, before its body ran; the previous "
+                f"lease, held by {previous}, is the likely leaker (a writer that fired after its teardown census)"
+            ) from exc
 
     def final_census(self) -> str | None:
         """The end-of-session verdict on the pool tenant: None when empty or never minted, else the reason."""
@@ -368,6 +442,20 @@ class TenantPool:
         except TenantLeakError as exc:
             return str(exc)
         return None
+
+    def leaf_bloat(self) -> tuple[int, int, int] | None:
+        """``(n_dead_tup, n_live_tup, bytes)`` summed over the pool tenant's ``nexus.chunks`` leaves, or None when
+        there is no tenant or the read failed. Thousands of delete-only resets leave dead tuples a per-test drop never
+        would; the end-of-session line reports them so the A/B can say whether it matters. (``pg_stat`` counters lag
+        a flush interval behind, so the dead count is a floor.)"""
+        if self.tenant is None:
+            return None
+        try:
+            proc = psql(self.state, LEAF_BLOAT_SQL, tenant=self.tenant)
+            dead, live, size = (int(x) for x in proc.stdout.split())
+        except Exception:  # noqa: BLE001 — a failed read is "unknown", never a failed run
+            return None
+        return dead, live, size
 
 
 # -- the process's pool ----------------------------------------------------------------------------------
@@ -395,7 +483,7 @@ def tenant_lease(state: Mapping[str, Any], request: pytest.FixtureRequest | None
     opted_out = request is not None and request.node.get_closest_marker("fresh_tenant") is not None
     if enabled() and not opted_out:
         _entries["pooled"] += 1
-        return get_pool(state).lease()
+        return get_pool(state).lease(owner=request.node.nodeid if request is not None else "")
     if enabled():
         _entries["fresh"] += 1
     return minted_test_tenant(state)
@@ -418,6 +506,7 @@ def worker_report() -> dict[str, Any]:
     if verdict is not None:
         violations.append(f"pid {os.getpid()}: end-of-session census: {verdict}")
     leases = pool.leases if pool is not None else 0
+    bloat = pool.leaf_bloat() if pool is not None else None
     if _entries["pooled"] and leases < 1:
         violations.append(f"pid {os.getpid()}: {_entries['pooled']} tenant tests asked for the pool and no lease was taken")
     if _entries["pooled"] != leases:
@@ -430,15 +519,20 @@ def worker_report() -> dict[str, Any]:
         "retired": pool.retired if pool is not None else 0,
         "mints": pool.mints if pool is not None else 0,
         "evicted": dict(pool.evicted) if pool is not None else {},
+        "leaf_dead_tup": bloat[0] if bloat else 0,
+        "leaf_live_tup": bloat[1] if bloat else 0,
+        "leaf_bytes": bloat[2] if bloat else 0,
         "violations": violations,
     }
 
 
 def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {"workers": len(reports), "leases": 0, "retired": 0, "mints": 0, "fresh_tenant_entries": 0,
-                           "pooled_entries": 0, "evicted": {}, "violations": []}
+                           "pooled_entries": 0, "evicted": {}, "violations": [],
+                           "leaf_dead_tup": 0, "leaf_live_tup": 0, "leaf_bytes": 0}
     for r in reports:
-        for key in ("leases", "retired", "mints", "fresh_tenant_entries", "pooled_entries"):
+        for key in ("leases", "retired", "mints", "fresh_tenant_entries", "pooled_entries", "leaf_dead_tup",
+                    "leaf_live_tup", "leaf_bytes"):
             out[key] += r.get(key, 0)
         for name, n in r.get("evicted", {}).items():
             out["evicted"][name] = out["evicted"].get(name, 0) + n
@@ -449,7 +543,8 @@ def merge_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
 def summary_line(merged: dict[str, Any]) -> str:
     return (
         f"tenant pool: leases={merged['leases']} mints={merged['mints']} retired={merged['retired']} "
-        f"fresh_tenant={merged['fresh_tenant_entries']} workers={merged['workers']}"
+        f"fresh_tenant={merged['fresh_tenant_entries']} workers={merged['workers']} "
+        f"leaf_dead_tup={merged['leaf_dead_tup']} leaf_live_tup={merged['leaf_live_tup']} leaf_bytes={merged['leaf_bytes']}"
         + (f" VIOLATIONS={len(merged['violations'])}" if merged["violations"] else "")
     )
 
@@ -502,6 +597,6 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 __all__ = [
-    "CENSUS_SQL", "ENV_FLAG", "MARKER", "MIN_CENSUS_RELATIONS", "REQUIRED_CENSUS_RELATIONS", "ROUTE_ENV", "TenantLeakError",
-    "TenantPool", "WIPE_SQL", "census", "enabled", "get_pool", "psql", "reset_client_caches", "tenant_lease", "wipe",
+    "CENSUS_SQL", "ENV_FLAG", "LEAF_BLOAT_SQL", "MARKER", "MIN_CENSUS_RELATIONS", "REQUIRED_CENSUS_RELATIONS", "ROUTE_ENV", "TenantLeakError",
+    "TenantLeaseBusyError", "TenantPool", "WIPE_SQL", "census", "enabled", "get_pool", "psql", "reset_client_caches", "tenant_lease", "wipe",
 ]

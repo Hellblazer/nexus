@@ -5,12 +5,16 @@ Each behaviour has a CONTROL where the claim could hold by accident: the same sc
 skipped (``TenantPool(evict=False)``) must show the stale state the eviction exists to remove. A scenario whose
 control does not differ proves nothing about the pool.
 
-The tests build their own :class:`TenantPool` over ``ensure_engine()``; they do not depend on ``NX_TEST_TENANT_POOL``.
-The default-off wiring through the real conftest is ``tests/test_tenant_pool_end_to_end.py``.
+The tests build their own :class:`TenantPool` over ``ensure_engine()``. The engine only registers the reset route, and
+only runs with per-collection index builds off, when ``NX_TEST_TENANT_POOL=1`` (``tests/_engine_substrate.py``), so every
+test that needs the engine skips unless the flag is on, and ``tests/test_tenant_pool_end_to_end.py`` runs this file in a
+child pytest with the flag on and fails unless the child ran and passed every test (non-vacuity). The default-off wiring
+through the real conftest is the same file.
 """
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -19,6 +23,7 @@ from typing import Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 import nexus.aspect_extractor as aspect_extractor
 import nexus.search_engine as search_engine
@@ -27,7 +32,7 @@ from nexus.db import http_vector_client
 from nexus.service_handles import SharedClientSlot
 from tests import _ddl_counter, _engine_substrate, _storage_touch_guard, _tenant_pool
 from tests._engine_substrate import drop_test_tenant, ensure_engine, mint_test_tenant
-from tests._tenant_pool import TenantLeakError, TenantPool
+from tests._tenant_pool import TenantLeakError, TenantLeaseBusyError, TenantPool
 
 COLLECTION = "knowledge__pooltest__bge-base-en-v15-768__v1"
 GHOST_KEY = "rdr204_ghost_sweep_v1"
@@ -36,6 +41,9 @@ UNREGISTERED = "unregistered_collection"
 
 @pytest.fixture(scope="module")
 def state() -> dict[str, Any]:
+    if not _tenant_pool.enabled():
+        pytest.skip(f"needs the engine the pool boots ({_tenant_pool.ENV_FLAG}=1); "
+                    "test_tenant_pool_end_to_end.py runs this file in a child with the flag on")
     return ensure_engine()
 
 
@@ -152,7 +160,7 @@ class _LateWriterPool(TenantPool):
                          "VALUES (:'tenant', 'late', 'writer', 'c', now());", tenant=tenant)
 
 
-def test_a_leak_errors_the_leasing_test_naming_the_relation_and_retires_the_tenant(
+def test_a_row_committed_in_the_wipe_to_census_gap_errors_the_leasing_test_and_retires_the_tenant(
     state: dict[str, Any], make_pool: Callable[..., TenantPool],
 ) -> None:
     pool = make_pool(_LateWriterPool)
@@ -400,6 +408,7 @@ def test_the_slot_clients_are_rebuilt_for_each_lease(
 class _Req:
     def __init__(self, marks: set[str]) -> None:
         self.node = self
+        self.nodeid = "tests/x.py::test_x"
         self._marks = marks
 
     def get_closest_marker(self, name: str) -> object | None:
@@ -411,7 +420,7 @@ def test_the_flag_is_exactly_one_and_the_marker_opts_a_test_out(monkeypatch: pyt
         assert _tenant_pool.enabled({_tenant_pool.ENV_FLAG: value}) is want, value
     assert _tenant_pool.enabled({}) is False, "the pool is off by default"
 
-    monkeypatch.setattr(_tenant_pool, "get_pool", lambda s: type("P", (), {"lease": staticmethod(lambda: "POOL")})())
+    monkeypatch.setattr(_tenant_pool, "get_pool", lambda s: type("P", (), {"lease": staticmethod(lambda owner="": "POOL")})())
     monkeypatch.setattr(_engine_substrate, "minted_test_tenant", lambda s: "MINT")
     monkeypatch.setitem(_tenant_pool._entries, "pooled", 0)
     monkeypatch.setitem(_tenant_pool._entries, "fresh", 0)
@@ -465,3 +474,243 @@ def test_the_end_of_session_report_fails_a_dirty_pool_tenant_and_a_vacuous_run(
     assert merged["workers"] == 3 and merged["leases"] == 2 and len(merged["violations"]) >= 2
     assert "VIOLATIONS=" in _tenant_pool.summary_line(merged)
     assert "VIOLATIONS" not in _tenant_pool.summary_line(_tenant_pool.merge_reports([clean]))
+
+
+# --- a teardown failure of ANY kind retires the tenant (nexus-fpwj1 fix round) -------------------------------
+
+
+class _PostFailsOnce(TenantPool):
+    """A pool whose engine call on ``fail_path`` fails once: raises ``failure`` when it is an exception, else
+    returns it as the response."""
+
+    def __init__(self, state: dict[str, Any], *, fail_path: str, failure: Any, **kwargs: Any) -> None:
+        super().__init__(state, **kwargs)
+        self._fail_path = fail_path
+        self._failure = failure
+        self.failed = False
+
+    def _post(self, path: str, body: dict[str, str]) -> Any:
+        if path == self._fail_path and not self.failed:
+            self.failed = True
+            if isinstance(self._failure, Exception):
+                raise self._failure
+            return self._failure
+        return super()._post(path, body)
+
+
+def _failing_pool(case: str, make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch) -> TenantPool:
+    """A pool whose first reset dies in the way ``case`` names."""
+    if case == "post_raises":
+        return make_pool(_PostFailsOnce, fail_path="/v1/_test/tenant-reset",
+                         failure=httpx.ConnectError("engine unreachable"))
+    if case == "issue_token_bad_reply":
+        return make_pool(_PostFailsOnce, fail_path="/v1/tenants/create",
+                         failure=httpx.Response(200, text="<html>not json</html>"))
+    assert case == "psql_timeout"
+    real = _tenant_pool.psql
+    calls: list[int] = []
+
+    def flaky(state: Any, sql: str, **variables: str) -> Any:
+        # the first call after the lease starts is the wipe of the first reset: the lease-start census has run by then
+        if sql == _tenant_pool.WIPE_SQL and not calls:
+            calls.append(1)
+            raise subprocess.TimeoutExpired(cmd="psql", timeout=60)
+        return real(state, sql, **variables)
+
+    monkeypatch.setattr(_tenant_pool, "psql", flaky)
+    return make_pool()
+
+
+_FAILURE_CASES = [("post_raises", "ConnectError"), ("psql_timeout", "TimeoutExpired"),
+                  ("issue_token_bad_reply", "JSONDecodeError")]
+
+
+def _assert_retired_and_next_lease_is_fresh(state: dict[str, Any], pool: TenantPool, gone: str) -> None:
+    assert pool.retired == 1 and pool.tenant is None and pool.token is None, "the failed tenant is retired"
+    assert _sql(state, "SELECT count(*) FROM pg_catalog.pg_class c WHERE c.relispartition "
+                       "AND nexus.partition_bound_value(c.oid) = :'tenant';", tenant=gone) == "0"
+    with pool.lease() as (fresh, token):
+        assert fresh != gone and pool.mints == 2, "the next lease mints a new tenant"
+        assert _whoami(state, token) == 200, "and its bearer works"
+        assert _register(state, token).status_code == 200
+        assert _write_reason(state, token) != UNREGISTERED
+    assert pool.retired == 1, "a clean lease after the failure resets cleanly"
+
+
+@pytest.mark.parametrize(("case", "cause"), _FAILURE_CASES)
+def test_any_reset_failure_retires_the_tenant_and_errors_the_test_naming_the_cause(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
+    case: str, cause: str,
+) -> None:
+    pool = _failing_pool(case, make_pool, monkeypatch)
+    with pytest.raises(TenantLeakError, match=cause) as exc:
+        with pool.lease() as (gone, token):
+            _register(state, token)
+    assert gone in str(exc.value), "the error names the tenant"
+    _assert_retired_and_next_lease_is_fresh(state, pool, gone)
+
+
+@pytest.mark.parametrize(("case", "cause"), _FAILURE_CASES)
+def test_a_reset_failure_never_replaces_the_tests_own_exception_and_still_retires(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
+    case: str, cause: str,
+) -> None:
+    pool = _failing_pool(case, make_pool, monkeypatch)
+    gone = ""
+    with capture_logs() as logs:
+        with pytest.raises(ZeroDivisionError):
+            with pool.lease() as (gone, _token):
+                1 / 0  # noqa: B018
+    warned = [e for e in logs if e.get("event") == "tenant_pool_teardown_failed_after_test_error"]
+    assert len(warned) == 1 and cause in warned[0]["error"], logs
+    _assert_retired_and_next_lease_is_fresh(state, pool, gone)
+
+
+def test_a_second_concurrent_lease_on_one_pool_raises_and_the_first_lease_is_unharmed(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool],
+) -> None:
+    pool = make_pool()
+    with pool.lease() as (tenant, token):
+        _register(state, token)
+        with pytest.raises(TenantLeaseBusyError):
+            with pool.lease():
+                pytest.fail("a second lease must not be handed out")
+        assert pool.tenant == tenant and pool.token == token, "the refused lease touched nothing"
+        assert _write_reason(state, token) != UNREGISTERED, "the first lease's data is still there"
+    assert pool.retired == 0 and pool.leases == 1
+    with pool.lease() as (again, _t):  # the flag was released: the pool serves the next test
+        assert again == tenant
+
+
+# --- the lease-start census ---------------------------------------------------------------------------------
+
+
+def _late_row(state: dict[str, Any], tenant: str) -> None:
+    _sql(state, "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp) "
+                "VALUES (:'tenant', 'late', 'writer', 'c', now());", tenant=tenant)
+
+
+def test_a_writer_between_one_teardown_and_the_next_setup_errors_the_new_test_naming_the_old_one(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool],
+) -> None:
+    pool = make_pool()
+    with pool.lease(owner="tests/t.py::test_leaky") as (tenant, _t):
+        pass
+    _late_row(state, tenant)  # lands after test_leaky's teardown census, before test_victim's setup
+    with pytest.raises(TenantLeakError, match=r"nexus\.memory=1") as exc:
+        with pool.lease(owner="tests/t.py::test_victim"):
+            pytest.fail("the new test's body must not run on a dirty tenant")
+    text = str(exc.value)
+    assert "tests/t.py::test_victim" in text and "tests/t.py::test_leaky" in text and "START of the lease" in text, text
+    assert pool.retired == 1 and pool.tenant is None
+    with pool.lease(owner="tests/t.py::test_next") as (fresh, _t):  # the retired tenant is replaced, the pool recovers
+        assert fresh != tenant
+
+
+def test_control_without_the_start_census_the_late_row_reaches_the_next_test_and_is_wiped_silently(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool],
+) -> None:
+    """What the pool did before the lease-start census: the next test's body sees the leaked row, and its teardown
+    wipes it before its own census, so nothing is ever reported."""
+    pool = make_pool(start_census=False)
+    with pool.lease(owner="tests/t.py::test_leaky") as (tenant, _t):
+        pass
+    _late_row(state, tenant)
+    with pool.lease(owner="tests/t.py::test_victim") as (same, _t):
+        assert same == tenant
+        assert _sql(state, "SELECT count(*) FROM nexus.memory WHERE tenant_id = :'tenant';", tenant=tenant) == "1"
+    assert pool.retired == 0, "control: no error, no retire; the leak is invisible"
+
+
+def test_a_fresh_mint_and_a_clean_reset_pass_the_start_census(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool],
+) -> None:
+    pool = make_pool()
+    for _ in range(3):
+        with pool.lease(owner="tests/t.py::test_ok"):
+            pass
+    assert pool.retired == 0 and pool.mints == 1 and pool.leases == 3
+
+
+# --- teardown order, the census's pci_ clause, and the substrate posture -----------------------------------
+
+
+class _Resp:
+    status_code = 200
+    text = ""
+
+    def json(self) -> dict[str, Any]:
+        return {"token": "reissued", "evicted": {}}
+
+
+def test_reset_runs_wipe_then_evict_then_census_then_reissue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order is the design: evicting before the wipe lets a request that lands between the two re-register
+    state for rows about to vanish, and a census before the eviction proves nothing about the JVM. Stubbed psql and
+    HTTP, so only the order is under test (no engine needed)."""
+    order: list[str] = []
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_psql(state: Any, sql: str, **variables: str) -> Any:
+        order.append("wipe" if sql == _tenant_pool.WIPE_SQL else "census" if sql == _tenant_pool.CENSUS_SQL else sql[:20])
+        return _Proc()
+
+    class _Recording(TenantPool):
+        def _post(self, path: str, body: dict[str, str]) -> Any:
+            order.append({"/v1/_test/tenant-reset": "evict", "/v1/tenants/create": "reissue"}.get(path, path))
+            return _Resp()
+
+    monkeypatch.setattr(_tenant_pool, "psql", fake_psql)
+    pool = _Recording({"base_url": "http://x", "bearer": "b"}, mint=lambda s: ("t", "tok"), drop=lambda s, t: True)
+    assert pool.reset("t") == "reissued"
+    assert order == ["wipe", "evict", "census", "reissue"]
+
+
+def test_the_census_names_a_pci_index_on_a_tenant_leaf(state: dict[str, Any]) -> None:
+    """Positive control for the census's ``pci_`` clause: this engine runs with PCI off, so no ``pci_`` index ever
+    exists, and a clause that cannot fire proves nothing. Create one by hand on a pool tenant's leaf."""
+    tenant, _ = mint_test_tenant(state)
+    try:
+        _tenant_pool.wipe(state, tenant)
+        _tenant_pool.census(state, tenant)  # control: no pci_ index, the census passes
+        leaf = _sql(state, "SELECT c.oid::regclass::text FROM pg_catalog.pg_class c "
+                           "WHERE c.relnamespace = 'nexus'::regnamespace AND c.relname LIKE 'chunks\\_m%' "
+                           "AND c.relispartition AND nexus.partition_bound_value(c.oid) = :'tenant' ORDER BY 1 LIMIT 1;", tenant=tenant)
+        assert leaf, "the tenant has a nexus.chunks leaf"
+        _sql(state, f"CREATE INDEX pci_fpwj1_probe ON {leaf} (tenant_id);")
+        with pytest.raises(TenantLeakError, match="pci_fpwj1_probe"):
+            _tenant_pool.census(state, tenant)
+        _sql(state, f"DROP INDEX {leaf.rsplit('.', 1)[0]}.pci_fpwj1_probe;")
+        _tenant_pool.census(state, tenant)  # and it passes again once the index is gone
+    finally:
+        drop_test_tenant(state, tenant)
+
+
+def test_the_substrate_engine_runs_with_pci_off_and_the_reset_route_on_when_the_pool_is_on(state: dict[str, Any]) -> None:
+    """With ``NX_TEST_TENANT_POOL=1`` ``tests/_engine_substrate.py`` sets ``NX_SEARCH_PCI=0`` and
+    ``NX_TEST_TENANT_RESET_ROUTE=1``; the pool depends on both (the route answers 503 while PCI is on). Read them
+    off the engine. The off posture (neither flag) is ``test_tenant_pool_end_to_end.py``."""
+    resp = httpx.get(f"{state['base_url']}/v1/status", headers=_hdr(state["bearer"]), timeout=30.0)
+    assert resp.status_code == 200, resp.text
+    status = resp.json()
+    assert status["test_tenant_reset_route"] is True
+    assert status["per_collection_indexes"]["this_engine"]["builder_state"] == "off"
+
+
+def test_the_end_of_session_line_reports_the_pool_tenants_leaf_bloat(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = make_pool()
+    monkeypatch.setattr(_tenant_pool, "_pool", pool)
+    with pool.lease() as (tenant, _t):
+        _sql(state, "SET session_replication_role = replica; "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, embedding_model) "
+                    "VALUES (:'tenant', 'c', decode(repeat('00', 32), 'hex'), 'x', "
+                    "array_fill(0.1::real, ARRAY[768])::nexus.vector(768), 'bge-base-en-v15-768');", tenant=tenant)
+    dead, live, size = pool.leaf_bloat() or (-1, -1, -1)
+    assert dead >= 0 and live >= 0 and size > 0, "the reset left a chunk leaf that once held a row, so it has bytes"
+    report = _tenant_pool.worker_report()
+    assert report["leaf_bytes"] == size and report["leaf_dead_tup"] >= 0
+    line = _tenant_pool.summary_line(_tenant_pool.merge_reports([report]))
+    assert f"leaf_bytes={size}" in line and "leaf_dead_tup=" in line, line
