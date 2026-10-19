@@ -299,8 +299,13 @@ def _plugin(tmp_path, env=None, **decide_kw) -> tuple[tr.TmpRootPlugin, dict]:
     return plug, env
 
 
-def _config(basetemp=None, worker=False) -> SimpleNamespace:
-    cfg = SimpleNamespace(option=SimpleNamespace(basetemp=basetemp))
+def _config(basetemp=None, worker=False, factory_basetemp=None) -> SimpleNamespace:
+    """*factory_basetemp* stands in for the basetemp pytest's tmp_path factory made (the
+    controller's own); None is a run whose controller never made one."""
+    cfg = SimpleNamespace(
+        option=SimpleNamespace(basetemp=basetemp),
+        _tmp_path_factory=SimpleNamespace(_basetemp=factory_basetemp),
+    )
     if worker:
         cfg.workerinput = {}
     return cfg
@@ -382,11 +387,42 @@ class TestPlugin:
         orig = tmp_path / "orig"
         orig.mkdir()
         plug._orig_tempdir = orig
-        plug.pytest_unconfigure(_config())
+        plug.pytest_unconfigure(_config(factory_basetemp=bt))
         home = orig / f"nexus-test-reports-{sub._current_uid()}" / plug.run.name
         assert sorted(f.name for f in home.iterdir()) == ["nx-ddl-report.json", "nx-storage-touch-report.json"]
         assert (home / "nx-ddl-report.json").read_text() == '{"a": 1}'
         assert not plug.run.exists()
+
+    def test_a_nested_runs_reports_never_overwrite_the_controllers(self, tmp_path) -> None:
+        """A nested pytest inherits PYTEST_DEBUG_TEMPROOT and gets the next numbered
+        basetemp; its reports have the same names (nexus-kyujr)."""
+        plug, _env = _plugin(tmp_path)
+        plug.pytest_configure(_config())
+        user = plug.run / "p" / "pytest-of-u"
+        (user / "pytest-0").mkdir(parents=True)
+        (user / "pytest-1").mkdir()
+        (user / "pytest-0" / "nx-storage-touch-report.json").write_text("controller")
+        (user / "pytest-1" / "nx-storage-touch-report.json").write_text("nested")
+        (user / "pytest-1" / "nx-only-nested.json").write_text("nested")
+        orig = tmp_path / "orig"
+        orig.mkdir()
+        plug._orig_tempdir = orig
+        plug.pytest_unconfigure(_config(factory_basetemp=user / "pytest-0"))
+        home = orig / f"nexus-test-reports-{sub._current_uid()}" / plug.run.name
+        assert sorted(f.name for f in home.iterdir()) == ["nx-storage-touch-report.json"]
+        assert (home / "nx-storage-touch-report.json").read_text() == "controller"
+
+    def test_a_controller_without_a_basetemp_harvests_nothing(self, tmp_path) -> None:
+        plug, _env = _plugin(tmp_path)
+        plug.pytest_configure(_config())
+        nested = plug.run / "p" / "pytest-of-u" / "pytest-1"
+        nested.mkdir(parents=True)
+        (nested / "nx-r.json").write_text("nested")
+        orig = tmp_path / "orig"
+        orig.mkdir()
+        plug._orig_tempdir = orig
+        plug.pytest_unconfigure(_config(factory_basetemp=None))
+        assert list(orig.iterdir()) == []
 
     def test_only_the_newest_three_report_runs_are_kept(self, tmp_path) -> None:
         orig = tmp_path / "orig"
@@ -399,7 +435,7 @@ class TestPlugin:
             (bt / "nx-r.json").write_text(str(i))
             orig.mkdir(exist_ok=True)
             plug._orig_tempdir = orig
-            plug.pytest_unconfigure(_config())
+            plug.pytest_unconfigure(_config(factory_basetemp=bt))
             home = plug._report_home()
             os.utime(home, (1_000_000 + i, 1_000_000 + i))
             homes.append(home)
@@ -616,12 +652,32 @@ class TestKeptReportPath:
     def _env(self, run: Path) -> dict[str, str]:
         return {tr.SESSION_ENV: f"tmpfs={run}", tr.ORIG_ENV: "/orig/tmp"}
 
+    @staticmethod
+    def _owned(run: Path, pid: int | None = None) -> Path:
+        """The run dir with the controller's owner record (*pid*, default this process)."""
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "owner.json").write_text(json.dumps({"pid": os.getpid() if pid is None else pid, "starttime": None}))
+        return run
+
     def test_a_basetemp_report_is_named_by_its_disk_copy(self, tmp_path) -> None:
-        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        run = self._owned(tmp_path / "shm" / _ROOT / "rabc12345")
         report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
         assert tr.kept_report_path(report, self._env(run)) == (
             Path("/orig/tmp") / f"nexus-test-reports-{sub._current_uid()}" / "rabc12345" / "nx-ddl-report.json"
         )
+
+    def test_a_nested_runs_report_keeps_its_own_path(self, tmp_path) -> None:
+        """A nested pytest is not the controller: the harvest does not copy its basetemp,
+        so the report-home path it would print never exists (nexus-kyujr)."""
+        run = self._owned(tmp_path / "shm" / _ROOT / "rabc12345", pid=os.getpid() + 1)
+        report = run / "p" / "pytest-of-u" / "pytest-1" / "nx-storage-touch-report.json"
+        assert tr.kept_report_path(report, self._env(run)) == report
+        assert tr.kept_report_path(report, self._env(run), pid=os.getpid() + 1) != report
+
+    def test_a_run_with_no_owner_record_is_not_remapped(self, tmp_path) -> None:
+        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
+        assert tr.kept_report_path(report, self._env(run)) == report
 
     @pytest.mark.parametrize("rel", [
         "p/pytest-of-u/pytest-0/popen-gw0/nx-ddl-worker-1.json",  # not top level: never harvested
@@ -644,7 +700,7 @@ class TestKeptReportPath:
         from tests import _ddl_counter as ddl
         from tests import _storage_touch_guard as guard
 
-        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        run = self._owned(tmp_path / "shm" / _ROOT / "rabc12345")
         report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-x.json"
         monkeypatch.setenv(tr.SESSION_ENV, f"tmpfs={run}")
         monkeypatch.setenv(tr.ORIG_ENV, str(tmp_path / "orig"))

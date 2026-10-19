@@ -48,8 +48,11 @@ def _run_script(
     # NX_TEST_PG_SHM_DIR keeps the sweep off the box's real /dev/shm root
     # (nexus-me3gm), where a concurrent session's live clusters would otherwise
     # show up in this test's counts.
+    # Not the outer run's NX_TEST_TMP_ORIG: inside a lab-run grant it names the box's
+    # real tempdir and wins over TMPDIR, so the sweep would look there instead of at
+    # fake_tmpdir (nexus-kyujr). An operator's shell never has it.
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if k != "NX_TEST_TMP_ORIG"},
         "TMPDIR": str(fake_tmpdir),
         "NX_TEST_PG_ROOT": pg_root,
         # The sweep also reads the tmpfs root regardless of NX_TEST_PG_ROOT;

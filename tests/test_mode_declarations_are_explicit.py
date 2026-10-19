@@ -1381,7 +1381,11 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
                 ],
                 cwd=_REPO_ROOT,
                 env={
-                    **os.environ,
+                    # Not the outer run's NX_TEST_TMP_ORIG: inside a lab-run grant it
+                    # names the box's real tempdir, the nested run's boot slot would go
+                    # there, and the boot-lock check below would look where no boot
+                    # ever lands (nexus-kyujr).
+                    **{k: v for k, v in os.environ.items() if k != "NX_TEST_TMP_ORIG"},
                     "NX_TEST_T2_SUBSTRATE": "none",
                     "TMPDIR": str(probe_tmp),
                     # Without this a Linux nested run puts its clusters on
@@ -1529,12 +1533,13 @@ def test_the_boot_lock_dir_resolves_under_the_running_process_tmpdir() -> None:
     The probe looks for ``nexus_t2_substrate_boot_locks-<uid>`` inside the private TMPDIR it
     handed the nested run. That is only a guard if a boot attempt actually puts it
     there, which is a claim about ``_BOOT_SEMAPHORE_DIR`` -- and that constant is
-    evaluated at IMPORT time from ``tempfile.gettempdir()``, so no in-process TMPDIR
+    evaluated at IMPORT time from ``_original_tempdir()`` (``NX_TEST_TMP_ORIG``, else
+    ``tempfile.gettempdir()``), so no in-process TMPDIR
     change can move it and no call that passes ``lock_dir`` explicitly can observe it.
     A subprocess is the only vantage point: a fresh exec re-imports the module and
     re-resolves the constant against the environment it was given.
 
-    Deleting the ``tempfile.gettempdir()`` in that constant -- hardcoding ``/tmp``, say
+    Deleting the ``tempfile.gettempdir()`` fallback in that resolution -- hardcoding ``/tmp``, say
     -- fails this test and nothing else in the suite, which is the point: without it
     the probe would be checking a location a boot never touches, and would pass whether
     or not the nested run booted an engine.
@@ -1555,7 +1560,13 @@ def test_the_boot_lock_dir_resolves_under_the_running_process_tmpdir() -> None:
                     "print(s._BOOT_SEMAPHORE_DIR)\n",
                 ],
                 cwd=_REPO_ROOT,
-                env={**os.environ, "TMPDIR": str(private)},
+                # The same environment the split-shard probe hands its nested run:
+                # TMPDIR moved and no inherited NX_TEST_TMP_ORIG (which inside a
+                # lab-run grant would win over TMPDIR, nexus-kyujr).
+                env={
+                    **{k: v for k, v in os.environ.items() if k != "NX_TEST_TMP_ORIG"},
+                    "TMPDIR": str(private),
+                },
                 capture_output=True,
                 text=True,
                 # A hang bound, shared with every other nested subprocess in this file.

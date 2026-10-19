@@ -367,15 +367,29 @@ def tree_bytes(path: Path) -> int:
     return total
 
 
-def kept_report_path(path: Path | str, env: Mapping[str, str] | None = None) -> Path:
+def _is_run_controller(run: Path, pid: int) -> bool:
+    """True when *pid* is the controller that made *run* (its ``owner.json``). A nested
+    pytest inherits the session variable and writes its reports into its own numbered
+    basetemp under the same ``p``, but only the controller's basetemp is harvested."""
+    try:
+        rec = json.loads((run / _OWNER_FILE).read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict) and rec.get("pid") == pid
+
+
+def kept_report_path(
+    path: Path | str, env: Mapping[str, str] | None = None, *, pid: int | None = None,
+) -> Path:
     """Where a top-level ``nx-*`` report written to *path* will be after the run.
 
     A report plugin prints its path in the terminal summary, but the run's basetemp
     is deleted at unconfigure and the report is copied to the report home first
     (:meth:`TmpRootPlugin._harvest`). Printing the tmpfs path would name a file that
     is gone by the time anyone reads the line. Anything the harvest does not copy
-    (a report in a directory the operator chose, a run that is not on tmpfs) comes
-    back unchanged."""
+    (a report in a directory the operator chose, a run that is not on tmpfs, a NESTED
+    pytest's report, which the harvest leaves alone and which exists until the outer
+    run ends) comes back unchanged."""
     path = Path(path)
     env = os.environ if env is None else env
     session = env.get(SESSION_ENV) or ""
@@ -388,6 +402,8 @@ def kept_report_path(path: Path | str, env: Mapping[str, str] | None = None) -> 
         return path
     if len(rel.parts) != 3 or not path.name.startswith("nx-"):
         return path  # the harvest copies only <p>/pytest-of-<user>/pytest-<n>/nx-*
+    if not _is_run_controller(run, os.getpid() if pid is None else pid):
+        return path  # a nested run's own basetemp: never harvested (nexus-kyujr)
     orig = Path(env.get(ORIG_ENV) or tempfile.gettempdir())
     return orig / f"{_REPORT_DIR_PREFIX}-{sub._current_uid()}" / run.name / path.name
 
@@ -561,6 +577,9 @@ class TmpRootPlugin:
         self.evidence_notes: list[str] = []
         self._orig_tempdir = sub._original_tempdir()
         self._given_basetemp: str | None = None
+        #: The controller's own basetemp (pytest's tmp_path factory), read at unconfigure;
+        #: only its top-level ``nx-*`` reports are harvested.
+        self._basetemp: Path | None = None
         self._saved: dict[str, str | None] = {}
 
     # -- decision --
@@ -644,12 +663,19 @@ class TmpRootPlugin:
         return self.exitstatus is not None and self.exitstatus not in _CLEAN_EXITS
 
     def _report_files(self) -> list[Path]:
-        if self.run is None:
+        """The top-level ``nx-*`` files of the CONTROLLER's basetemp. A nested pytest run
+        inherits ``PYTEST_DEBUG_TEMPROOT`` and gets the next numbered basetemp under the
+        same ``p``; its reports carry the same names and copying them too would overwrite
+        the controller's (nexus-kyujr). No basetemp (the controller never made one) means
+        no reports of its own."""
+        bt = self._basetemp
+        if self.run is None or bt is None or not bt.is_dir() or bt.is_symlink():
             return []
-        return [
-            f for pd in (self.run / "p").glob("pytest-of-*") for bt in pd.glob("pytest-*")
-            if bt.is_dir() and not bt.is_symlink() for f in bt.glob("nx-*") if f.is_file()
-        ]
+        try:
+            bt.relative_to(self.run / "p")
+        except ValueError:
+            return []  # a --basetemp outside the run dir is not removed, so not harvested
+        return [f for f in bt.glob("nx-*") if f.is_file()]
 
     def _harvest(self) -> int:
         """Copy what must outlive the run to the disk report home and keep the newest
@@ -697,6 +723,8 @@ class TmpRootPlugin:
         environment back."""
         if not self.decided or self.run is None or self.decision is None or self.decision.forced:
             return
+        bt = getattr(getattr(config, "_tmp_path_factory", None), "_basetemp", None)
+        self._basetemp = Path(bt) if bt is not None else None
         self._harvest()
         _rm_tree(self.run)
         env = self._env

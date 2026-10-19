@@ -83,14 +83,16 @@ class TestClusterConf:
         lines = set(conf.splitlines())
         assert lines == {"fsync = off", "synchronous_commit = off", "full_page_writes = off"}
 
-    def test_the_conf_follows_the_pgdata_parent(self, tmp_path) -> None:
+    def test_the_conf_follows_the_pgdata_parent(self) -> None:
         pgdata = str(Path("/dev/shm/nexus-test-pg-1000") / "nexus_x_pg_abc")
         conf = sub.integration_cluster_conf(
             pgdata, env={}, mounts_text=_TMPFS_MOUNTS, shm_dir=_SHM,
         )
         assert "wal_level = minimal" in conf
+        # A fixed disk path, not tmp_path: inside a lab-run grant tmp_path is itself on
+        # /dev/shm (nexus-kyujr), where the tmpfs conf is the right answer.
         disk = sub.integration_cluster_conf(
-            str(tmp_path / "nexus_x_pg_abc"), env={}, mounts_text=_TMPFS_MOUNTS,
+            "/home/nxtest/tmp/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS, shm_dir=_SHM,
         )
         assert "wal_level" not in disk and "fsync = off" in disk
 
@@ -178,12 +180,13 @@ class TestPgDataTempdirRouting:
         assert path.parent == root and path.name.startswith("nexus_foo_pg_")
 
     def test_no_chosen_root_means_the_tempdir(self, monkeypatch) -> None:
-        import tempfile
-
+        # The ORIGINAL tempdir: inside a lab-run grant TMPDIR is the run's tmpfs and a
+        # cluster whose root decided on disk must not land in RAM (nexus-kyujr). Outside a
+        # grant the two are the same directory.
         monkeypatch.setattr(sub, "pg_cluster_parent", lambda: None)
         path = Path(cp.pg_data_tempdir("nexus_foo_pg_"))
         try:
-            assert path.parent == Path(tempfile.gettempdir())
+            assert path.parent == sub._original_tempdir()
         finally:
             path.rmdir()
 
