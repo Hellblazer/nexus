@@ -61,7 +61,9 @@ class PgContainerTmpfsGateTest {
      * strings and drops the comments, so prose that names a pattern does not trip the scan.
      */
     private static final Pattern COMMENTS = Pattern.compile(
-        "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])'|//[^\\n]*|/\\*.*?\\*/", Pattern.DOTALL);
+        // Unrolled string branch: one recursion per escape, not per character (the per-character form
+        // overflows the stack on a long literal; DbStartClassificationGateTest, Service CI 39328496341).
+        "\"[^\"\\\\]*+(?:\\\\.[^\"\\\\]*+)*+\"|'(?:\\\\.|[^'\\\\])'|//[^\\n]*|/\\*.*?\\*/", Pattern.DOTALL);
 
     static String stripComments(String src) {
         return COMMENTS.matcher(src).replaceAll(
@@ -206,5 +208,12 @@ class PgContainerTmpfsGateTest {
         return DSL.using(conn, SQLDialect.POSTGRES)
             .select(DSL.function("current_setting", String.class, DSL.val(setting)))
             .fetchOne(0, String.class);
+    }
+
+    /** A 200k-character string survives and a comment after it goes, without a StackOverflowError: the per-character (?:a|b)* form overflowed the stack on long input (Service CI 39328496341) */
+    @Test
+    void stripComments_handlesAHugeLiteralWithoutOverflowingTheStack() {
+        String big = "x".repeat(200_000);
+        assertThat(stripComments("String a = \"" + big + "\"; // gone")).isEqualTo("String a = \"" + big + "\"; ");
     }
 }

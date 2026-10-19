@@ -567,7 +567,7 @@ class EngineOwnedPredicateIntegrationTest {
 
     /** A {@code COMMENT ON FUNCTION ... IS '...'} statement is documentation, and names the keys in prose. */
     private static final Pattern COMMENT_ON_FUNCTION = Pattern.compile(
-        "(?is)COMMENT\\s+ON\\s+FUNCTION\\b.*?\\bIS\\s+'(?:[^']|'')*'\\s*;");
+        "(?is)COMMENT\\s+ON\\s+FUNCTION\\b.*?\\bIS\\s+'(?:[^']++|'')*+'\\s*;");
 
     /** The body of the one definition, so a read inside it is not an offender. */
     private static final Pattern DEFINITION = Pattern.compile(

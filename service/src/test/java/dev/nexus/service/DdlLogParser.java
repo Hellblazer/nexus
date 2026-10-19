@@ -65,7 +65,7 @@ final class DdlLogParser {
             + "|^(?:GRANT|REVOKE)\\b(?:(?!\\bON\\b).)*\\bON\\s+(?:DATABASE|TABLESPACE|PARAMETER)\\b",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern START_MARK = Pattern.compile("\\bnx_ddl_mark: " + START_LABEL + "\\b");
-    private static final Pattern COMMENT = Pattern.compile("\\A(?:\\s+|--[^\\n]*\\n?|/\\*.*?\\*/)+", Pattern.DOTALL);
+    private static final Pattern COMMENT = Pattern.compile("\\A(?:\\s++|--[^\\n]*+\\n?+|/\\*.*?\\*/)++", Pattern.DOTALL);
     private static final Pattern WORD = Pattern.compile("[A-Za-z_]+");
 
     private DdlLogParser() {}

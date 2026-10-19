@@ -2281,8 +2281,8 @@ class RawSqlGateTest {
      * (see the section header above): fixed protocol constants
      * hardcoded in-file, never caller/user-derived values. */
     private static final Pattern COMPILE_TIME_LITERAL = Pattern.compile(
-        "^\"([^\"\\\\]|\\\\.)*\"$"
-        + "|^'([^'\\\\]|\\\\.)*'$"
+        "^\"[^\"\\\\]*+(?:\\\\.[^\"\\\\]*+)*+\"$"
+        + "|^'[^'\\\\]*+(?:\\\\.[^'\\\\]*+)*+'$"
         + "|^-?[0-9][0-9_]*(\\.[0-9_]+)?[fFdDlL]?$"
         + "|^(true|false|null)$");
 
@@ -3413,5 +3413,13 @@ class RawSqlGateTest {
                 + "RAW_SQL_WRAPPER_METHODS deletion (nexus-zrcj7 step 4) for the mechanism "
                 + "to write back before this can pass again")
             .isEmpty();
+    }
+
+    /** A 200k-character literal is still a compile-time literal, without a StackOverflowError: the per-character (?:a|b)* form overflowed the stack on long input (Service CI 39328496341) */
+    @Test
+    void isCompileTimeLiteral_acceptsAHugeLiteralWithoutOverflowingTheStack() {
+        String big = "x\\\"".repeat(70_000);
+        assertThat(isCompileTimeLiteral("\"" + big + "\"")).isTrue();
+        assertThat(isCompileTimeLiteral("'" + "y".repeat(200_000) + "'")).isTrue();
     }
 }

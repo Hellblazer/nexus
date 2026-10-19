@@ -77,9 +77,13 @@ class DbStartClassificationGateTest {
     private static final Pattern TAKES_OWNER_CLONE =
         Pattern.compile("\\bPgContainerHelper\\s*(?:\\.\\s*startMigratedByOwner\\s*\\(\\s*\\)|::\\s*startMigratedByOwner\\b)");
 
-    /** Text blocks, string and char literals, line and block comments, dropped in one pass. */
+    /** Text blocks, string and char literals, line and block comments, dropped in one pass. The literal
+     *  branches are unrolled loops with possessive runs, so the matcher recurses once per escape, not once
+     *  per character: the old {@code (?:\\.|[^..])*} form overflowed the stack on a long literal (Service CI
+     *  39328496341). Same output as the old pattern on every test source. */
     private static final Pattern NOT_CODE = Pattern.compile(
-        "\"\"\"(?:\\\\.|[^\\\\])*?\"\"\"|\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])'|//[^\\n]*|/\\*.*?\\*/",
+        "\"\"\"[^\"\\\\]*+(?:(?:\\\\.|\"(?!\"\"))[^\"\\\\]*+)*+\"\"\"|\"[^\"\\\\\\n]*+(?:\\\\.[^\"\\\\\\n]*+)*+\""
+            + "|'(?:\\\\.|[^'\\\\])'|//[^\\n]*|/\\*.*?\\*/",
         Pattern.DOTALL);
 
     record Row(String clazz, String call, String kind, String reason) {
@@ -282,5 +286,13 @@ class DbStartClassificationGateTest {
             found.add(m.group(1));
         }
         assertThat(found).containsExactly("startEmptyDatabase");
+    }
+
+    /** A 200k-character string and text block strip without a StackOverflowError: the per-character (?:a|b)* form overflowed the stack on long input (Service CI 39328496341) */
+    @Test
+    void codeOnly_stripsAHugeLiteralWithoutOverflowingTheStack() {
+        String big = "x".repeat(200_000);
+        String src = "class X { String a = \"" + big + "\"; String b = \"\"\"\n" + big + "\"\"\"; }";
+        assertThat(codeOnly(src)).isEqualTo("class X { String a = ; String b = ; }");
     }
 }

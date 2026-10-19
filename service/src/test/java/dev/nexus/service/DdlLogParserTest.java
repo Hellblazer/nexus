@@ -232,4 +232,11 @@ class DdlLogParserTest {
         // The probe is installed once only: the template1 half of the file is not in the block.
         assertThat(block.split("CREATE EVENT TRIGGER", -1)).hasSize(2);
     }
+
+    /** A statement behind 100k whitespace and comment tokens reads its head without a StackOverflowError: the per-character (?:a|b)* form overflowed the stack on long input (Service CI 39328496341) */
+    @Test
+    void head_skipsAHugeCommentPrefixWithoutOverflowingTheStack() {
+        String prefix = " \n".repeat(50_000) + "-- c\n".repeat(25_000) + "/* c */".repeat(25_000);
+        assertThat(DdlLogParser.head(prefix + "CREATE TABLE t (a int)")).isEqualTo("CREATE TABLE t (a int)");
+    }
 }
