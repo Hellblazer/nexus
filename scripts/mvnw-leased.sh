@@ -77,16 +77,15 @@ if [[ "${1:-}" == "--lab-run" ]]; then
         echo "mvnw-leased.sh: --lab-run $lab_class given but lab-run is not on PATH" >&2
         exit 127
     fi
-elif [[ -n "${LAB_CPUS:-}" ]]; then
-    # Already inside a lab-run grant: a wait for the lease from here holds
-    # the grant's cores. Say so once; the build still runs.
-    holder_pid="$(cat "$(_build_lease_dir service)/pid" 2>/dev/null || true)"
-    if [[ -n "$holder_pid" ]] && _build_lease_pid_alive "$holder_pid"; then
-        echo "mvnw-leased.sh: WARNING: waiting for the build lease (held by pid $holder_pid) inside a lab-run grant holds its cores; run 'scripts/mvnw-leased.sh --lab-run <class> ...' outside lab-run instead" >&2
-    fi
 fi
 
-build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" ./mvnw "$@"
+# Inside a lab-run grant a hand run refuses at once instead of waiting
+# (build_lease_caller_wait, nexus-dfg0q).
+build_lease_acquire_wait service "$(build_lease_caller_wait)" ./mvnw "$@" || {
+    rc=$?
+    build_lease_grant_refusal_hint mvnw-leased.sh
+    exit "$rc"
+}
 
 # Test Postgres containers are labelled dev.nexus.test.run=$NX_TEST_RUN_ID
 # (nexus-xynce) so a host can count one build's containers; name this build

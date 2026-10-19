@@ -449,6 +449,35 @@ build_lease_acquire_wait() {
 }
 
 # build_lease_release <name>
+# build_lease_hand_run_in_grant — true for a hand run inside a lab-run grant:
+# LAB_CPUS is set (every grant exports it) and this is not a GitHub Actions job.
+# A CI job on the pool also has LAB_CPUS, and waiting its turn there is how the
+# scheduler serialises builds that share a lease root, so CI keeps its wait.
+build_lease_hand_run_in_grant() {
+    [[ -n "${LAB_CPUS:-}" && "${GITHUB_ACTIONS:-}" != "true" ]]
+}
+
+# build_lease_caller_wait — the wait bound a caller should pass to
+# build_lease_acquire_wait: NX_BUILD_LEASE_WAIT (default 3600), but 0 for a hand
+# run inside a lab-run grant (nexus-dfg0q, Sam 2026-10-19: refuse at once).
+# Waiting there holds the grant's cores while another build runs, and mixed with
+# callers that take the lease before their grant, the two lock orders can wedge
+# a full pool until the wait expires.
+build_lease_caller_wait() {
+    if build_lease_hand_run_in_grant; then
+        echo 0
+    else
+        echo "${NX_BUILD_LEASE_WAIT:-3600}"
+    fi
+}
+
+# build_lease_grant_refusal_hint <script> — one stderr line saying why a hand run
+# inside a grant refused instead of waiting, and what to run instead.
+build_lease_grant_refusal_hint() {
+    build_lease_hand_run_in_grant || return 0
+    echo "$1: refusing to wait for the build lease inside a lab-run grant: waiting would hold the grant's cores while another build runs (nexus-dfg0q). Take the lease before the grant: scripts/mvnw-leased.sh --lab-run <class> ..., or run this outside lab-run once the holder is done." >&2
+}
+
 build_lease_release() {
     local name="${1:?build_lease_release: usage: build_lease_release <name>}"
     local dir

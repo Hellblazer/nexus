@@ -16,7 +16,7 @@ set -u -o pipefail
 unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
 # A lab-run grant exports LAB_CPUS, which changes the wrapper's behaviour
 # (nexus-iqmih); the cases that want it set it themselves.
-unset LAB_CPUS
+unset LAB_CPUS GITHUB_ACTIONS
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -197,11 +197,20 @@ else
     rc2=$?
     if [[ $rc2 -eq 75 ]]; then ok "wrapper refused with rc 75"; else bad "wrapper returned rc $rc2 (expected 75): $out2"; fi
     if [[ ! -f "$marker2" ]]; then ok "fake mvnw was never invoked while lease was held"; else bad "fake mvnw ran despite the lease being held"; fi
-    # nexus-iqmih: inside a lab-run grant (LAB_CPUS set), waiting on a live
-    # holder is named on stderr; outside one it is not.
-    out2w="$(LAB_CPUS=8 NX_BUILD_LEASE_WAIT=0 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
-    if [[ "$out2w" == *"inside a lab-run grant holds its cores"* ]]; then ok "inside a grant, a held lease is warned about"; else bad "no inside-grant warning: $out2w"; fi
-    if [[ "$out2" != *"inside a lab-run grant"* ]]; then ok "outside a grant, no warning"; else bad "warned outside a grant: $out2"; fi
+    # nexus-dfg0q (Sam 2026-10-19): a hand run inside a lab-run grant (LAB_CPUS
+    # set, not GitHub Actions) REFUSES at once instead of waiting, whatever
+    # NX_BUILD_LEASE_WAIT says: waiting there holds the grant's cores.
+    t0=$SECONDS
+    out2w="$(LAB_CPUS=8 NX_BUILD_LEASE_WAIT=60 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+    rc2w=$?
+    if [[ $rc2w -eq 75 && $((SECONDS - t0)) -lt 15 ]]; then ok "inside a grant, a held lease refuses at once with rc 75"; else bad "inside a grant: rc $rc2w after $((SECONDS - t0)) s (expected 75 at once): $out2w"; fi
+    if [[ "$out2w" == *"--lab-run <class>"* ]]; then ok "the refusal names the --lab-run form"; else bad "refusal does not name --lab-run: $out2w"; fi
+    if [[ ! -f "$marker2" ]]; then ok "no mvnw run inside the grant"; else bad "mvnw ran inside the grant"; fi
+    if [[ "$out2" != *"inside a lab-run grant"* ]]; then ok "outside a grant, no grant wording"; else bad "grant wording outside a grant: $out2"; fi
+    # A CI job on the pool also has LAB_CPUS, and waiting its turn there is the
+    # scheduler's own serialisation: GitHub Actions keeps the configured wait.
+    out2c="$(GITHUB_ACTIONS=true LAB_CPUS=8 NX_BUILD_LEASE_WAIT=0 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+    if [[ "$out2c" != *"inside a lab-run grant"* ]]; then ok "a CI job inside a grant keeps the plain wait semantics"; else bad "CI job got the hand-run refusal: $out2c"; fi
 fi
 kill -9 "$holder_pid" 2>/dev/null
 wait "$holder_pid" 2>/dev/null
@@ -538,6 +547,57 @@ else
     fi
 fi
 wait "$wrapper4b" 2>/dev/null
+
+# ── Tests 4c/4d (nexus-dfg0q, from the iqmih confirmation): under --lab-run a
+# non-zero build exit propagates, and a TERM while lab-run is still queued for
+# its grant releases the lease without ever starting the build.
+echo "Test 4c: a non-zero mvnw exit propagates under --lab-run"
+cat > "$stubbin/lab-run" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == "-c" && "$3" == "--" ]] || exit 64
+shift 3
+exec "$@"
+STUB
+chmod +x "$stubbin/lab-run"
+cat > "$repo/service/mvnw" <<'STUB'
+#!/usr/bin/env bash
+exit 7
+STUB
+chmod +x "$repo/service/mvnw"
+PATH="$stubbin:$PATH" "$repo/scripts/mvnw-leased.sh" --lab-run lab-s build >/dev/null 2>&1
+rc4c=$?
+if [[ $rc4c -eq 7 ]]; then ok "exit 7 from mvnw comes back as 7"; else bad "rc $rc4c (expected 7)"; fi
+if [[ ! -d "$leasedir" ]]; then ok "lease released after the failed build"; else bad "lease left held after a failed build"; fi
+
+echo "Test 4d: TERM while lab-run is queued releases the lease and never starts the build"
+queued="$WORKDIR/stub4d-queued.txt"; started4d="$WORKDIR/stub4d-started.txt"
+rm -f "$queued" "$started4d"
+cat > "$stubbin/lab-run" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == "-c" && "\$3" == "--" ]] || exit 64
+shift 3
+touch "$queued"
+sleep 30    # queued for a grant
+exec "\$@"
+STUB
+chmod +x "$stubbin/lab-run"
+cat > "$repo/service/mvnw" <<STUB
+#!/usr/bin/env bash
+touch "$started4d"
+STUB
+chmod +x "$repo/service/mvnw"
+set -m
+PATH="$stubbin:$PATH" "$repo/scripts/mvnw-leased.sh" --lab-run lab-s build >/dev/null 2>&1 &
+wrapper4d=$!
+set +m
+for _ in $(seq 1 100); do [[ -f "$queued" ]] && break; sleep 0.1; done
+kill -s TERM "$wrapper4d" 2>/dev/null
+for _ in $(seq 1 200); do kill -0 "$wrapper4d" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$wrapper4d" 2>/dev/null; then bad "wrapper still alive 20 s after TERM while queued"; kill -9 "$wrapper4d" 2>/dev/null; else ok "wrapper exited on TERM while queued"; fi
+sleep 0.5
+if [[ ! -f "$started4d" ]]; then ok "the build never started"; else bad "the build started after TERM"; fi
+if [[ ! -d "$leasedir" ]]; then ok "lease released"; else bad "lease left held after TERM while queued"; bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_release service" 2>/dev/null; fi
+wait "$wrapper4d" 2>/dev/null
 
 echo
 echo "mvnw-leased_test.sh: $PASS passed, $FAIL failed, $SKIP skipped"

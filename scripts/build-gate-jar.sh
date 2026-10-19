@@ -86,7 +86,13 @@ source "$repo_root/scripts/lib/build-lease.sh"
 source "$repo_root/scripts/lib/release-props-lease.sh"
 # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
 source "$repo_root/scripts/lib/gate-jar-cache.sh"
-build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-gate-jar.sh "$@"
+# Inside a lab-run grant a hand run refuses at once instead of waiting
+# (build_lease_caller_wait, nexus-dfg0q).
+build_lease_acquire_wait service "$(build_lease_caller_wait)" build-gate-jar.sh "$@" || {
+    rc=$?
+    build_lease_grant_refusal_hint build-gate-jar.sh
+    exit "$rc"
+}
 # Release on every exit path from here on; the props-restore trap below
 # replaces this once there is a stamp to restore. Without it a failure in
 # the key computation would leak the lease until stale reclaim.

@@ -13,7 +13,7 @@ set -u -o pipefail
 # waits on that holder instead of finishing (nexus-mntbl). Scrubbed here, like the
 # suites that already do, and pinned by test_shell_suite_wiring.py's
 # TestSuitesIgnoreAnInheritedLeaseRoot.
-unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY LAB_CPUS GITHUB_ACTIONS
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_gate_jar_test.XXXXXX")"
@@ -109,6 +109,19 @@ out5="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc5=$?
 [[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 3 ]] && ok "mvnw rebuilt" || bad "mvnw count $(wc -l < "$MVNW_COUNT")"
 out6="$(cd "$repo" && NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh 2>&1)"; rc6=$?
 [[ $rc6 -eq 0 && "$out6" == *"MISS"* && "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == 4 ]] && ok "cache off: builds every time" || bad "cache off misbehaved: $out6"
+
+echo "Test 6: inside a lab-run grant a held lease refuses at once (nexus-dfg0q)"
+(cd "$repo" && bash -c "source scripts/lib/build-lease.sh; build_lease_acquire service || exit 9; sleep 15") &
+holder6=$!
+for _ in $(seq 1 50); do [[ -f "$repo/.git/nexus-build-lease/service/pid" ]] && break; sleep 0.1; done
+before6="$(wc -l < "$MVNW_COUNT" | tr -d ' ')"
+t0=$SECONDS
+out7="$(cd "$repo" && LAB_CPUS=8 NX_BUILD_LEASE_WAIT=60 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh 2>&1)"; rc7=$?
+[[ $rc7 -eq 75 && $((SECONDS - t0)) -lt 15 ]] && ok "refused with rc 75 at once" || bad "rc $rc7 after $((SECONDS - t0)) s: $out7"
+[[ "$out7" == *"inside a lab-run grant"* ]] && ok "the refusal says why" || bad "refusal text: $out7"
+[[ "$(wc -l < "$MVNW_COUNT" | tr -d ' ')" == "$before6" ]] && ok "mvnw not invoked" || bad "mvnw ran inside the grant"
+kill -9 "$holder6" 2>/dev/null; wait "$holder6" 2>/dev/null
+rm -rf "$repo/.git/nexus-build-lease/service"
 
 echo
 echo "build-gate-jar_test.sh: $PASS passed, $FAIL failed"
