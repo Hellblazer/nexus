@@ -1554,13 +1554,14 @@ public final class PgContainerHelper {
             "databasechangelog_test_octet_checks", Map.of());
         // The changelog's preconditions skip a constraint that is present; check the post-state outright so a
         // skipped or failed re-add cannot leave a caller's seed window open unnoticed.
-        int notValid = DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("pg_catalog", "pg_constraint")),
-            DSL.field(DSL.name("conname"), String.class)
-                .in("chunks_chash_octet_check", "catalog_document_chunks_chash_octet_check")
-                .and(DSL.field(DSL.name("convalidated"), Boolean.class).isFalse()));
-        if (notValid != 2) {
-            throw new IllegalStateException("chash octet CHECKs present and NOT VALID after re-add: expected 2, found "
-                + notValid);
+        // constraintValidated reads the declaring table's own row, not the copies each chunks partition inherits.
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        for (String conname : new String[]{"chunks_chash_octet_check", "catalog_document_chunks_chash_octet_check"}) {
+            Boolean validated = PgCatalogProbes.constraintValidated(ctx, conname);
+            if (!Boolean.FALSE.equals(validated)) {
+                throw new IllegalStateException(conname + " after re-add: expected present and NOT VALID, convalidated="
+                    + validated);
+            }
         }
     }
 
