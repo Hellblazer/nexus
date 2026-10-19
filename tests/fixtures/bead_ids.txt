@@ -6413,6 +6413,7 @@ nexus-syez2
 nexus-syfes
 nexus-syga3
 nexus-sz89e
+nexus-szyun
 nexus-t0dt8
 nexus-t0dt8.1
 nexus-t0nrd
@@ -6445,6 +6446,7 @@ nexus-t5q2
 nexus-t5uol
 nexus-t62jy
 nexus-t6p0
+nexus-t6t9f
 nexus-t76bp
 nexus-t7jeo
 nexus-t7k0h
@@ -6762,6 +6764,7 @@ nexus-uaovy
 nexus-uaq23
 nexus-uar6
 nexus-uavok
+nexus-ub4ge
 nexus-ubmed
 nexus-ubnwk
 nexus-ubnwk.1
