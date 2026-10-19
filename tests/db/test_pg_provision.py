@@ -1803,6 +1803,16 @@ class TestEndToEndProvisionMigrateDML:
         _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
                  _APP_SCHEMA_DDL)
 
+    def test_ddl_reapplies_on_a_migrated_cluster(self, e2e_migrated, bins):
+        """Both DDL blocks run a second time on a cluster ``e2e_migrated`` already applied them to.
+
+        The DDL tests and the fixture can share a worker's cluster in any order, so the DDL must be
+        re-runnable; without this test that is exercised only when xdist happens to co-locate them."""
+        result, config_dir = e2e_migrated
+        creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+        for ddl in (_LIQUIBASE_TRACKING_DDL, _APP_SCHEMA_DDL):
+            _psql_as(bins, result.port, "nexus_admin", creds["NX_DB_ADMIN_PASS"], NEXUS_DB_NAME, ddl)
+
     def test_nexus_svc_insert_under_rls(self, e2e_migrated, bins):
         """nexus_svc can INSERT rows when the tenant GUC is stamped."""
         result, config_dir = e2e_migrated
