@@ -103,6 +103,11 @@ import java.util.function.Supplier;
  * track activity (the MiniLM ONNX fallback, test fakes) is simply absent
  * from the map, never reported with a fabricated value. Empty {@code {}}
  * when {@code embedderRouter} is null or reports nothing.
+ *
+ * <p>{@code embedding_profile}, {@code reranker} and {@code embedding_degraded} (RDR-210 Phase 2 Step 4,
+ * bead nexus-un7vj, ADDITIVE, after {@code embedder_activity}; see {@link EmbedPosture}) say which family
+ * new collections get, which reranker serves search, and what a choice the boot cannot serve is missing.
+ * Omitted when no posture is bound. {@code local_embed_activity} is non-null whenever bge is built.
  */
 public final class StatusHandler implements HttpHandler {
 
@@ -113,6 +118,18 @@ public final class StatusHandler implements HttpHandler {
     private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
     private final Supplier<Boolean> chunksTenantIsolationIntact; // nullable — key omitted
     private final Supplier<PerCollectionIndexes> perCollectionIndexes; // nullable — key omitted
+    private volatile Supplier<EmbedPosture> embedPosture;              // nullable — keys omitted
+
+    /**
+     * RDR-210 Phase 2 Step 4 (bead nexus-un7vj), [additive]: bind the boot posture ({@link EmbedPosture}:
+     * {@code embedding_profile}, {@code reranker}, {@code embedding_degraded}). Unbound, or a supplier that
+     * returns null, omits the three keys; a client reads that as "cannot tell". A setter, not another
+     * constructor tier, because the handler is built before the posture exists.
+     */
+    public StatusHandler embedPosture(Supplier<EmbedPosture> embedPosture) {
+        this.embedPosture = embedPosture;
+        return this;
+    }
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -363,6 +380,14 @@ public final class StatusHandler implements HttpHandler {
             appendSnapshot(body, e.getValue());
         }
         body.append('}');
+
+        // RDR-210 Phase 2 Step 4 (bead nexus-un7vj), [additive]: the profile, the reranker and the degraded-boot
+        // description, the same three keys /version reports.
+        Supplier<EmbedPosture> postureSource = embedPosture;
+        EmbedPosture posture = postureSource != null ? postureSource.get() : null;
+        if (posture != null) {
+            posture.appendFields(body);
+        }
 
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
         // counter, not per-embedder — see this class's own javadoc. Counts raced embeds of

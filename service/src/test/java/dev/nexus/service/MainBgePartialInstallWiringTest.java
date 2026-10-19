@@ -11,15 +11,25 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-210 TD1, bead nexus-ngvxb (Sam, 2026-10-18): the three-way boot decision on the bge install state.
- * {@code Main.main} cannot run in a test, so the decision is pinned on its text:
+ * The DECISION (build bge / Voyage-only degraded / fail loud) is made by value in {@code BootPlan} since
+ * RDR-210 Phase 2 Step 4 (nexus-un7vj) and asserted in {@code BootPlanTest}; {@code Main.main} cannot run in a
+ * test, so this class only pins that Main ACTS on each answer, in order, and builds nothing local on the paths
+ * that must not:
  * <ul>
- *   <li>both files present: build bge (the only place ORT is touched);</li>
- *   <li>partial + Voyage key: WARN {@code bge_partial_install_degraded} naming the files and {@code nx init},
- *       build Voyage-only, no ORT, no {@code Bge768Embedder};</li>
+ *   <li>both files present: build bge ({@code plan.buildsBge()});</li>
+ *   <li>partial + Voyage key: WARN {@code bge_partial_install_degraded} naming the files and the remedy,
+ *       build Voyage-only, no {@code Bge768Embedder};</li>
  *   <li>partial + no key: fail the boot loudly, no ORT.</li>
  * </ul>
  */
 class MainBgePartialInstallWiringTest {
+
+    private static final String FAIL_PARTIAL =
+            "if (plan.bge() == dev.nexus.service.vectors.BootPlan.Bge.FAIL_PARTIAL_NO_KEY) {";
+    private static final String DEGRADED_PARTIAL =
+            "if (plan.bge() == dev.nexus.service.vectors.BootPlan.Bge.PARTIAL_DEGRADED) {";
+    private static final String FAIL_NONE =
+            "if (plan.bge() == dev.nexus.service.vectors.BootPlan.Bge.FAIL_NO_EMBEDDER) {";
 
     private static String main() throws Exception {
         // Maven runs a module's tests with the module directory as cwd.
@@ -91,9 +101,9 @@ class MainBgePartialInstallWiringTest {
     @Test
     void theKeylessPartialInstallFailsTheBoot_withoutTouchingOrtOrTheEmbedder() throws Exception {
         String src = main();
-        int probe = src.indexOf("LocalModelProbe.probe(");
-        String body = block(src, "if (!voyagePresent) {", src.indexOf("if (presence.bgePartial()) {", probe));
-        assertThat(body).contains("event=bge_partial_install_no_voyage_key").contains("nx init");
+        int decide = src.indexOf("BootPlan.decide(");
+        String body = block(src, FAIL_PARTIAL, decide);
+        assertThat(body).contains("event=bge_partial_install_no_voyage_key").contains("BootPlan.PROVISION_COMMAND");
         assertThat(body.strip()).as("the branch ends the process as its last statement").endsWith("System.exit(1);");
         assertThat(body).doesNotContain("Bge768Embedder").doesNotContain("applyAtBoot");
     }
@@ -101,50 +111,56 @@ class MainBgePartialInstallWiringTest {
     @Test
     void theKeyedPartialInstallDegradesLoudly_namingTheFilesAndTheRemedy_andBuildsNothingLocal() throws Exception {
         String src = main();
-        int probe = src.indexOf("LocalModelProbe.probe(");
-        int partial = src.indexOf("if (presence.bgePartial()) {", probe);
-        assertThat(partial).isGreaterThan(probe);
-        String whole = block(src, "if (presence.bgePartial()) {", probe);
-        int warn = whole.indexOf("log.warn(\"event=bge_partial_install_degraded");
-        assertThat(warn).as("the degrade is a WARN").isPositive();
-        String degraded = whole.substring(warn);
-        assertThat(degraded).contains("presence.bgeDetail()").contains("presence.bgeMissing()").contains("nx init");
-        assertThat(whole).as("no ORT use and no embedder on either partial path")
-                .doesNotContain("Bge768Embedder").doesNotContain("applyAtBoot").doesNotContain("EmbedderRouter(");
-        assertThat(degraded).as("the keyed path continues the boot").doesNotContain("System.exit");
-        assertThat(whole.indexOf("if (!voyagePresent) {")).as("the keyless exit comes first")
-                .isPositive().isLessThan(warn);
+        int decide = src.indexOf("BootPlan.decide(");
+        String whole = block(src, DEGRADED_PARTIAL, decide);
+        assertThat(whole).as("the degrade is a WARN").contains("log.warn(\"event=bge_partial_install_degraded");
+        assertThat(whole).contains("presence.bgeDetail()").contains("presence.bgeMissing()")
+                .contains("BootPlan.PROVISION_COMMAND");
+        assertThat(whole).as("no ORT use, no embedder and no exit on the partial-with-a-key path")
+                .doesNotContain("Bge768Embedder").doesNotContain("applyAtBoot").doesNotContain("EmbedderRouter(")
+                .doesNotContain("System.exit");
     }
 
     @Test
     void theDecisionRunsBeforeTheNoEmbedderCheck_soAPartialKeylessBoxGetsItsOwnMessage() throws Exception {
         String src = main();
-        int probe = src.indexOf("LocalModelProbe.probe(");
-        int partial = src.indexOf("if (presence.bgePartial()) {", probe);
-        int none = src.indexOf("if (!presence.any()) {", probe);
-        int build = src.indexOf("if (presence.bgePresent()) {", probe);
-        assertThat(probe).isPositive();
-        assertThat(partial).isGreaterThan(probe);
-        assertThat(none).isGreaterThan(partial);
+        int decide = src.indexOf("BootPlan.decide(");
+        int partialFail = src.indexOf(FAIL_PARTIAL, decide);
+        int partialDegraded = src.indexOf(DEGRADED_PARTIAL, decide);
+        int none = src.indexOf(FAIL_NONE, decide);
+        int build = src.indexOf("if (plan.buildsBge()) {", decide);
+        assertThat(decide).isPositive();
+        assertThat(partialFail).isGreaterThan(decide);
+        assertThat(partialDegraded).isGreaterThan(partialFail);
+        assertThat(none).isGreaterThan(partialDegraded);
         assertThat(build).isGreaterThan(none);
     }
 
     @Test
-    void bgeAndOrtAreBuiltOnlyInsideTheBothFilesPresentGuard() throws Exception {
+    void theBgeEmbedderIsBuiltOnlyInsideThePlansBuildGuard_andOrtOnlyInsideTheFilesPresentGuard() throws Exception {
         String src = main();
-        int guard = src.indexOf("if (presence.bgePresent()) {");
+        int guard = src.indexOf("if (plan.buildsBge()) {");
         assertThat(guard).as("one guard").isPositive();
-        assertThat(src.indexOf("if (presence.bgePresent()) {", guard + 1)).isNegative();
+        assertThat(src.indexOf("if (plan.buildsBge()) {", guard + 1)).isNegative();
         int open = src.indexOf('{', guard);
         int close = matchingClose(src, open);
-        for (String needle : new String[] {"new Bge768Embedder()", "OrtNativeDir.applyAtBoot();"}) {
-            int at = src.indexOf(needle);
-            assertThat(at).as(needle).isPositive();
-            assertThat(src.indexOf(needle, at + 1)).as(needle + " appears once").isNegative();
-            assertThat(at).as(needle + " sits inside the both-files guard").isBetween(open, close);
-        }
-        assertThat(src).as("the guard is not widened to partial installs")
+        int bge = src.indexOf("new Bge768Embedder()");
+        assertThat(bge).isPositive();
+        assertThat(src.indexOf("new Bge768Embedder()", bge + 1)).as("built once").isNegative();
+        assertThat(bge).as("sits inside the build guard").isBetween(open, close);
+
+        int ortGuard = src.indexOf("if (plan.loadsOrtNativeDir()) {");
+        assertThat(ortGuard).isPositive();
+        int ortOpen = src.indexOf('{', ortGuard);
+        int ortClose = matchingClose(src, ortOpen);
+        int apply = src.indexOf("OrtNativeDir.applyAtBoot();");
+        assertThat(apply).isPositive();
+        assertThat(src.indexOf("OrtNativeDir.applyAtBoot();", apply + 1)).as("applied once").isNegative();
+        assertThat(apply).as("applyAtBoot sits inside the files-present guard").isBetween(ortOpen, ortClose);
+        assertThat(ortClose).as("and the ORT directory is set before the first embedder is built").isLessThan(bge);
+        assertThat(src).as("the guards are plan answers, not a re-derivation from the probe in Main")
                 .doesNotContain("bgePresent() || presence.bgePartial()")
-                .doesNotContain("bgePartial() || presence.bgePresent()");
+                .doesNotContain("bgePartial() || presence.bgePresent()")
+                .doesNotContain("if (presence.bgePresent()) {");
     }
 }

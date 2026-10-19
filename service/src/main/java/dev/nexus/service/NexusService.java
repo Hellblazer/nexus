@@ -253,6 +253,14 @@ public final class NexusService {
         perCollectionIndexes;
 
     /**
+     * RDR-210 Phase 2 Step 4 (bead nexus-un7vj): the boot posture {@code /version} and {@code GET /v1/status}
+     * report beside the embedding mode (profile, reranker, degraded-boot description). Bound late, by
+     * {@link #embedPosture(dev.nexus.service.http.EmbedPosture)}, because both routes are registered in the
+     * constructor. Null until bound; both routes then omit the three keys.
+     */
+    private volatile dev.nexus.service.http.EmbedPosture embedPosture;
+
+    /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
      * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
      * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
@@ -505,7 +513,8 @@ public final class NexusService {
 
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
-        var versionHandler = new VersionHandler(dataSource, docEmbedderRouter);
+        var versionHandler = new VersionHandler(dataSource, docEmbedderRouter)
+                .embedPosture(() -> this.embedPosture);
         server.createContext("/version", versionHandler);
 
         // /v1/status — unauthenticated live embed-activity counters (bead
@@ -521,7 +530,8 @@ public final class NexusService {
                         versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
                         dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
                                 dataSource, java.time.Clock.systemUTC()),
-                        this::perCollectionIndexesStatus));
+                        this::perCollectionIndexesStatus)
+                        .embedPosture(() -> this.embedPosture));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -797,6 +807,15 @@ public final class NexusService {
     public void perCollectionIndexes(
             java.util.function.Supplier<dev.nexus.service.http.StatusHandler.PerCollectionIndexes> supplier) {
         this.perCollectionIndexes = supplier;
+    }
+
+    /**
+     * Bind the boot posture ({@code embedding_profile}, {@code reranker}, {@code embedding_degraded}) that
+     * {@code /version} and {@code GET /v1/status} report (nexus-un7vj). {@code Main} calls it once, before
+     * {@link #start()}; null unbinds, and both routes then omit the keys.
+     */
+    public void embedPosture(dev.nexus.service.http.EmbedPosture posture) {
+        this.embedPosture = posture;
     }
 
     /** The bound object, or null before {@link #perCollectionIndexes(java.util.function.Supplier)} (key omitted). */

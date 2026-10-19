@@ -92,7 +92,8 @@ public enum EmbeddingProfile {
 
     /**
      * The profile this boot seeds. A set value wins. Unset keeps today's rule: keyed means
-     * Voyage, keyless means bge (an engine started without the supervisor).
+     * Voyage, keyless means bge (an engine started without the supervisor). This is the ONE copy
+     * of that rule: {@link EmbedderRouter}'s constructors that take no profile call this method.
      *
      * @throws IllegalArgumentException for an invalid value, whatever the key
      */
@@ -136,7 +137,7 @@ public enum EmbeddingProfile {
             ? "the bge model files are not usable (" + presence.bgeDetail() + ")"
             : "the bge model files are missing: " + String.join(", ", presence.bgeMissing());
         return Optional.of(new Degradation(BGE, missing,
-            "run `nx init` to provision the bge model, then restart the service",
+            "run `" + BootPlan.PROVISION_COMMAND + "` to provision the bge model, then restart the service",
             VOYAGE, BGE.label));
     }
 }

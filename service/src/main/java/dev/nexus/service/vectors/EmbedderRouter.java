@@ -167,8 +167,8 @@ public final class EmbedderRouter implements Embedder {
         }
         this.localEmbedder = localEmbedder;
         this.inputType     = inputType;
-        this.profile       = profile != null ? profile
-                           : voyage ? EmbeddingProfile.VOYAGE : EmbeddingProfile.BGE;
+        // The unset rule (keyed means Voyage, keyless means bge) has one copy: EmbeddingProfile.resolve.
+        this.profile       = profile != null ? profile : EmbeddingProfile.resolve(null, voyage);
         Map<String, Embedder> table = new LinkedHashMap<>();
         if (localEmbedder != null) {
             table.put(localEmbedder.modelToken(), localEmbedder);
@@ -337,8 +337,9 @@ public final class EmbedderRouter implements Embedder {
      * router's mode has no dedicated mapping for (a test fixture's
      * {@code "prose"}, a {@code quarantine-<ct>} content type, or any other
      * caller-invented value). Such a content type gets the SAME CCE bucket
-     * token {@code "unknown"} gets (bge-768 in ONNX mode, {@code
-     * voyage-context-3} in Voyage mode) — never a hard refusal. Registration
+     * token {@code "unknown"} gets (bge-768 under the {@code bge} profile, {@code
+     * voyage-context-3} under the {@code voyage} profile; RDR-210 Phase 2 Step 3:
+     * the PROFILE decides, not which embedders were built) — never a hard refusal. Registration
      * is a request the engine must be able to honour; the 422 this profile
      * enables (bead nexus-ft04v.8) is reserved for a request that NAMES a
      * model disagreeing with the profile, never for an unrecognised content

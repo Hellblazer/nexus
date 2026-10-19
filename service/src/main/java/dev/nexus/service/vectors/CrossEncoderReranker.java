@@ -139,8 +139,8 @@ public final class CrossEncoderReranker implements Reranker {
                 if (!Files.isRegularFile(Path.of(req[0]))) {
                     throw new RerankUpstreamException(
                             "local cross-encoder unavailable: " + req[1] + " not found at " + req[0]
-                            + ". Provision the ms-marco-MiniLM-L-6-v2 artifacts via `nx init` /"
-                            + " `nx upgrade` (RDR-188 P1.3), or set -Dnexus.crossencoder.modelPath"
+                            + ". Provision the ms-marco-MiniLM-L-6-v2 artifacts via `"
+                            + BootPlan.PROVISION_COMMAND + "` (RDR-188 P1.3), or set -Dnexus.crossencoder.modelPath"
                             + " / -Dnexus.crossencoder.tokenizerPath.");
                 }
             }
@@ -181,7 +181,8 @@ public final class CrossEncoderReranker implements Reranker {
                 if (sess != null) { try { sess.close(); } catch (Exception ignored) {} }
                 throw new RerankUpstreamException(
                         "local cross-encoder failed to initialise from " + modelPath + ": "
-                        + e.getMessage() + ". Re-provision via `nx init` (the artifact may be"
+                        + e.getMessage() + ". Re-provision via `" + BootPlan.PROVISION_COMMAND
+                        + "` (the artifact may be"
                         + " truncated or a fused export onnxruntime-java cannot run).", e);
             } finally {
                 initScope.close();

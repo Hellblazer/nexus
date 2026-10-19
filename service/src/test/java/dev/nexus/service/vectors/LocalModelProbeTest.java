@@ -136,6 +136,66 @@ class LocalModelProbeTest {
         assertThat(root + LocalModelProbe.BGE_TOKENIZER_SUFFIX).isEqualTo(Bge768Embedder.DEFAULT_TOKENIZER_PATH);
     }
 
+    // ── the cross-encoder's files (RDR-210 Phase 2 Step 4, nexus-un7vj) ─────────────────────────
+
+    @Test
+    void theCrossEncoderFilesAreProbedApartFromBge() throws Exception {
+        String none = dir.resolve("none").toString();
+        Path ceModel = touch("ce-model.onnx", 8);
+        Path ceTok = touch("ce-tokenizer.json", 8);
+        var ceOnly = LocalModelProbe.probe(none, none, ceModel.toString(), ceTok.toString(), "k");
+        assertThat(ceOnly.crossEncoderPresent()).isTrue();
+        assertThat(ceOnly.crossEncoderMissing()).isEmpty();
+        assertThat(ceOnly.crossEncoderDetail()).contains("model=present").contains("tokenizer=present");
+        assertThat(ceOnly.bgePresent()).as("the cross-encoder says nothing about bge").isFalse();
+
+        var bgeOnly = LocalModelProbe.probe(ceModel.toString(), ceTok.toString(), none, none, "k");
+        assertThat(bgeOnly.bgePresent()).isTrue();
+        assertThat(bgeOnly.crossEncoderPresent()).as("bge files are not cross-encoder files").isFalse();
+        assertThat(bgeOnly.crossEncoderMissing()).containsExactly(none, none);
+    }
+
+    @Test
+    void oneCrossEncoderFileIsNotPresent_andNamesTheMissingOne() throws Exception {
+        String none = dir.resolve("none").toString();
+        Path ceModel = touch("ce-model.onnx", 8);
+        Path noTok = dir.resolve("ce-none.json");
+        var p = LocalModelProbe.probe(none, none, ceModel.toString(), noTok.toString(), null);
+        assertThat(p.crossEncoderPresent()).isFalse();
+        assertThat(p.crossEncoderMissing()).containsExactly(noTok.toString());
+    }
+
+    @Test
+    void theThreePathFormDoesNotProbeTheCrossEncoder() throws Exception {
+        var p = LocalModelProbe.probe(touch("m.onnx", 8).toString(), touch("t.json", 8).toString(), "k");
+        assertThat(p.crossEncoderPresent()).as("never read from the machine's canonical paths").isFalse();
+        assertThat(p.crossEncoderMissing()).isEmpty();
+        assertThat(p.crossEncoderDetail()).isEqualTo("not probed");
+    }
+
+    @Test
+    void aMalformedCrossEncoderPathNeverThrows() {
+        String none = dir.resolve("none").toString();
+        var p = LocalModelProbe.probe(none, none, "a\0b", "c\0d", "k");
+        assertThat(p.crossEncoderPresent()).isFalse();
+        assertThat(p.crossEncoderDetail()).startsWith("probe_error=");
+    }
+
+    @Test
+    void theCanonicalProbeFillsTheCrossEncoderFromTheModelRoot() {
+        var p = LocalModelProbe.probe("k");
+        assertThat(p.crossEncoderDetail()).contains(OnnxModelPaths.root() + LocalModelProbe.CROSS_ENCODER_MODEL_SUFFIX)
+                .contains(OnnxModelPaths.root() + LocalModelProbe.CROSS_ENCODER_TOKENIZER_SUFFIX);
+    }
+
+    @Test
+    void theProbesCrossEncoderPathsEqualTheRerankersDefaults() {
+        String root = OnnxModelPaths.root();
+        assertThat(root + LocalModelProbe.CROSS_ENCODER_MODEL_SUFFIX).isEqualTo(CrossEncoderReranker.DEFAULT_MODEL_PATH);
+        assertThat(root + LocalModelProbe.CROSS_ENCODER_TOKENIZER_SUFFIX)
+                .isEqualTo(CrossEncoderReranker.DEFAULT_TOKENIZER_PATH);
+    }
+
     @Test
     void theProbeSourceNeverReferencesTheOnnxRuntime() throws Exception {
         // Constructing a session on a missing model segfaults, and the native-library

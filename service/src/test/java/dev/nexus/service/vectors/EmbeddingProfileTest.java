@@ -196,6 +196,32 @@ class EmbeddingProfileTest {
         assertThat(d.remedy()).contains("nx init");
     }
 
+    /** RDR-210 Phase 2 Step 4 (nexus-un7vj): one provisioning command in every remedy, the no-embedder text included. */
+    @Test
+    void degraded_bgeProfile_remedyIsTheOneProvisionCommand() {
+        for (boolean partial : new boolean[] {false, true}) {
+            var d = EmbeddingProfile.BGE.degradation(presence(false, partial, true)).orElseThrow();
+            assertThat(d.remedy()).contains("`" + BootPlan.PROVISION_COMMAND + "`");
+        }
+    }
+
+    // ── one copy of the unset rule (nexus-un7vj) ────────────────────────────────
+
+    @Test
+    void aRouterBuiltWithNoProfile_followsTheSameUnsetRuleAsResolve() {
+        for (boolean key : new boolean[] {true, false}) {
+            EmbedderRouter noProfile = new EmbedderRouter(new FakeBge(), key ? "dummy-key" : null, "document");
+            assertThat(noProfile.profile()).as("key=%s", key).isEqualTo(EmbeddingProfile.resolve(null, key));
+            noProfile.close();
+        }
+        EmbedderRouter voyageOnly = new EmbedderRouter("dummy-key", "document");
+        assertThat(voyageOnly.profile()).isEqualTo(EmbeddingProfile.resolve(null, true));
+        voyageOnly.close();
+        EmbedderRouter bgeOnly = new EmbedderRouter(new FakeBge(), "document");
+        assertThat(bgeOnly.profile()).isEqualTo(EmbeddingProfile.resolve(null, false));
+        bgeOnly.close();
+    }
+
     // ── an unservable choice: the servable family serves, the other gets the 422 ─
 
     @Test

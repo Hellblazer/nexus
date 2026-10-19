@@ -32,8 +32,11 @@ import java.util.List;
  * decides — degrade to Voyage-only with a loud WARN on a keyed box, fail the boot on a
  * keyless one. The probe never builds the embedder for either answer.
  *
- * <p>The Phase 2 cross-encoder placement (Step 4) adds its own files to this probe
- * when it needs them; Step 1 builds no cross-encoder on a path without bge.
+ * <p>The local cross-encoder reranker's files (model and tokenizer, apart from the bge files) are
+ * probed the same way (RDR-210 Phase 2 Step 4, bead nexus-un7vj): the cross-encoder takes no
+ * embedder argument and constructs lazily, so {@code Main} builds it whether or not bge is present,
+ * and widens the ONNX native-library setup to {@code bgePresent || crossEncoderPresent}, keyed on
+ * the files that are PRESENT, so the cloud shape (key, no model files) still creates nothing.
  */
 public final class LocalModelProbe {
 
@@ -47,9 +50,24 @@ public final class LocalModelProbe {
      * @param bgeDetail        human-readable file state (or the probe error), for the boot log
      * @param bgeMissing       the absent bge file paths ({@code bgePartial}: the one missing;
      *                         neither present: both; both present or a probe error: empty)
+     * @param crossEncoderPresent BOTH the cross-encoder model and tokenizer files exist (presence,
+     *                         not validity: its lazy init fails loud per request on a bad file)
+     * @param crossEncoderDetail  human-readable file state of the cross-encoder, for the boot log
+     * @param crossEncoderMissing the absent cross-encoder file paths (empty when both are present,
+     *                         on a probe error, or when the cross-encoder was not probed)
      */
     public record Presence(boolean bgePresent, boolean bgePartial, boolean voyageKeyPresent,
-                           String bgeDetail, List<String> bgeMissing) {
+                           String bgeDetail, List<String> bgeMissing,
+                           boolean crossEncoderPresent, String crossEncoderDetail,
+                           List<String> crossEncoderMissing) {
+
+        /** A presence that says nothing about the cross-encoder (reported absent, "not probed"). */
+        public Presence(boolean bgePresent, boolean bgePartial, boolean voyageKeyPresent,
+                        String bgeDetail, List<String> bgeMissing) {
+            this(bgePresent, bgePartial, voyageKeyPresent, bgeDetail, bgeMissing,
+                    false, NOT_PROBED, List.of());
+        }
+
         /** True when at least one embedder family can be built (a partial bge install is not one). */
         public boolean any() {
             return bgePresent || voyageKeyPresent;
@@ -66,35 +84,70 @@ public final class LocalModelProbe {
     static final String BGE_MODEL_SUFFIX = "/bge-base-en-v1.5/onnx/model.onnx";
     static final String BGE_TOKENIZER_SUFFIX = "/bge-base-en-v1.5/onnx/tokenizer.json";
 
-    /** Probe the canonical bge artifact paths. Never throws. */
+    /**
+     * Canonical cross-encoder layout, derived from {@link OnnxModelPaths} for the same reason as the
+     * bge suffixes: {@link CrossEncoderReranker} imports the runtime's classes, and this probe may not
+     * load them. {@code LocalModelProbeTest} pins these equal to the reranker's defaults.
+     */
+    static final String CROSS_ENCODER_MODEL_SUFFIX = "/ms-marco-minilm-l6-v2/onnx/model.onnx";
+    static final String CROSS_ENCODER_TOKENIZER_SUFFIX = "/ms-marco-minilm-l6-v2/onnx/tokenizer.json";
+
+    private static final String NOT_PROBED = "not probed";
+
+    /** Probe the canonical bge and cross-encoder artifact paths. Never throws. */
     public static Presence probe(String voyageKey) {
         String root;
         try {
             root = OnnxModelPaths.root();
         } catch (RuntimeException e) {
-            return new Presence(false, false, voyageKey != null && !voyageKey.isBlank(),
-                    "probe_error=" + e.getClass().getSimpleName() + ": " + e.getMessage(), List.of());
+            String detail = "probe_error=" + e.getClass().getSimpleName() + ": " + e.getMessage();
+            return new Presence(false, false, voyageKey != null && !voyageKey.isBlank(), detail, List.of(),
+                    false, detail, List.of());
         }
-        return probe(root + BGE_MODEL_SUFFIX, root + BGE_TOKENIZER_SUFFIX, voyageKey);
+        return probe(root + BGE_MODEL_SUFFIX, root + BGE_TOKENIZER_SUFFIX,
+                root + CROSS_ENCODER_MODEL_SUFFIX, root + CROSS_ENCODER_TOKENIZER_SUFFIX, voyageKey);
     }
 
     /**
      * Probe explicit bge paths (tests, non-default provisioning). Never throws: an
      * unreadable or malformed path reads as absent, with the cause in {@code bgeDetail}.
+     * The cross-encoder is not probed (reported absent): use the five-path form.
      */
     public static Presence probe(String bgeModelPath, String bgeTokenizerPath, String voyageKey) {
+        return probe(bgeModelPath, bgeTokenizerPath, null, null, voyageKey);
+    }
+
+    /**
+     * Probe explicit bge and cross-encoder paths. Never throws. {@code null} cross-encoder paths
+     * mean "not probed": absent, with nothing listed as missing.
+     */
+    public static Presence probe(String bgeModelPath, String bgeTokenizerPath,
+                                 String crossEncoderModelPath, String crossEncoderTokenizerPath,
+                                 String voyageKey) {
         boolean key = voyageKey != null && !voyageKey.isBlank();
+        FileState bge = fileState(bgeModelPath, bgeTokenizerPath);
+        FileState ce = crossEncoderModelPath == null && crossEncoderTokenizerPath == null
+                ? new FileState(false, false, NOT_PROBED, List.of())
+                : fileState(crossEncoderModelPath, crossEncoderTokenizerPath);
+        return new Presence(bge.both(), bge.partial(), key, bge.detail(), bge.missing(),
+                ce.both(), ce.detail(), ce.missing());
+    }
+
+    /** What the two files of one model are on disk. */
+    private record FileState(boolean both, boolean partial, String detail, List<String> missing) {}
+
+    private static FileState fileState(String modelPath, String tokenizerPath) {
         try {
-            boolean model = Files.isRegularFile(Path.of(bgeModelPath));
-            boolean tokenizer = Files.isRegularFile(Path.of(bgeTokenizerPath));
-            String detail = "model=" + (model ? "present" : "absent") + " path=" + bgeModelPath
-                    + " tokenizer=" + (tokenizer ? "present" : "absent") + " path=" + bgeTokenizerPath;
+            boolean model = Files.isRegularFile(Path.of(modelPath));
+            boolean tokenizer = Files.isRegularFile(Path.of(tokenizerPath));
+            String detail = "model=" + (model ? "present" : "absent") + " path=" + modelPath
+                    + " tokenizer=" + (tokenizer ? "present" : "absent") + " path=" + tokenizerPath;
             List<String> missing = new ArrayList<>(2);
-            if (!model) missing.add(bgeModelPath);
-            if (!tokenizer) missing.add(bgeTokenizerPath);
-            return new Presence(model && tokenizer, model != tokenizer, key, detail, List.copyOf(missing));
+            if (!model) missing.add(modelPath);
+            if (!tokenizer) missing.add(tokenizerPath);
+            return new FileState(model && tokenizer, model != tokenizer, detail, List.copyOf(missing));
         } catch (RuntimeException e) {
-            return new Presence(false, false, key, "probe_error=" + e.getClass().getSimpleName()
+            return new FileState(false, false, "probe_error=" + e.getClass().getSimpleName()
                     + ": " + e.getMessage(), List.of());
         }
     }

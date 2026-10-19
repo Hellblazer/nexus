@@ -1268,28 +1268,36 @@ class OrtNativeDirTest {
     }
 
     @Test
-    void mainSetsThePathOnlyWhenBgeIsPresentBeforeTheFirstEmbedderIsBuilt() throws Exception {
+    void mainSetsThePathOnlyWhenALocalOnnxModelIsPresentBeforeAnyOnnxMemberIsBuilt() throws Exception {
         String main = withoutComments(Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java")));
         int gate = main.indexOf("OrtInitGate.process().installSignalHandlers();");
         int apply = main.indexOf("OrtNativeDir.applyAtBoot();");
-        // RDR-210 P2.1: the presence probe decides; the Voyage-only (cloud) shape never
-        // enters the guarded block, so it extracts nothing and creates no ONNX session.
+        // RDR-210 P2.4 (nexus-un7vj): the condition is a BootPlan answer, "any local ONNX model file is present"
+        // (bge OR cross-encoder), decided by value in BootPlanTest. The Voyage-only (cloud) shape has no such
+        // file, so it never enters the guarded block: it extracts nothing and creates no ONNX session. Keyed on
+        // files present, not on what will be constructed, because the cross-encoder is built lazily AFTER this.
         int probe = main.indexOf("LocalModelProbe.probe(");
-        int guard = main.lastIndexOf("if (presence.bgePresent()) {", apply);
+        int decide = main.indexOf("BootPlan.decide(");
+        int guard = main.lastIndexOf("if (plan.loadsOrtNativeDir()) {", apply);
         int local = main.indexOf("OnnxModelPaths.resolved()");
         int firstEmbedder = main.indexOf("new Bge768Embedder()");
+        int crossEncoder = main.indexOf("CrossEncoderReranker::new");
         int firstRouter = main.indexOf("new EmbedderRouter(");
         assertThat(gate).isPositive();
         assertThat(apply).as("Main calls OrtNativeDir.applyAtBoot() (not in a comment)").isPositive();
         assertThat(main.indexOf("OrtNativeDir.applyAtBoot();", apply + 1)).as("exactly one call").isEqualTo(-1);
         assertThat(probe).as("Main probes presence").isPositive();
-        assertThat(guard).as("applyAtBoot sits inside the bge-present guard").isPositive();
+        assertThat(decide).as("and decides the boot from it").isGreaterThan(probe);
+        assertThat(guard).as("applyAtBoot sits inside the files-present guard").isPositive();
+        assertThat(main).as("the guard is the plan's answer, not the old bge-only condition")
+                .doesNotContain("if (presence.bgePresent()) {");
         assertThat(local).isPositive();
         assertThat(firstEmbedder).isPositive();
+        assertThat(crossEncoder).isPositive();
         assertThat(firstRouter).isPositive();
         assertThat(apply).as("after the signal gate is installed, which Main does first thing")
                 .isGreaterThan(gate);
-        assertThat(guard).as("the guard follows the probe").isGreaterThan(probe);
+        assertThat(guard).as("the guard follows the plan").isGreaterThan(decide);
         assertThat(main.substring(guard, apply))
                 .as("nothing between the guard and the call opens another block or builds a router")
                 .doesNotContain("new EmbedderRouter(")
@@ -1297,6 +1305,7 @@ class OrtNativeDirTest {
         assertThat(apply).as("with the model-root resolution").isGreaterThan(local);
         assertThat(apply).as("before ONNX Runtime is first touched, or the property is read too late")
                 .isLessThan(firstEmbedder);
+        assertThat(apply).as("and before the cross-encoder can lazily load it").isLessThan(crossEncoder);
         assertThat(apply).as("before any router is built from an ONNX member")
                 .isLessThan(firstRouter);
     }

@@ -39,8 +39,64 @@ class MainEmbedProfileWiringTest {
         assertThat(docRouter).as("doc router carries the profile").isGreaterThan(degraded);
         assertThat(qryRouter).as("query router carries the profile").isGreaterThan(degraded);
         assertThat(seed).as("seed runs after the routers").isGreaterThan(qryRouter);
-        assertThat(src).as("the degraded decision is the pure function's")
-            .contains("embedProfile.degradation(presence)");
+        assertThat(src).as("the degraded decision is the pure function's, carried by the boot plan")
+            .contains("plan.degradation()");
+    }
+
+    /**
+     * RDR-210 Phase 2 Step 4 (bead nexus-un7vj). The decisions are asserted by value in {@code BootPlanTest}
+     * and {@code RerankStageBootPlanTest}; this proves Main builds the reranker through the plan, after the routers
+     * and the admission gate, and reports the posture.
+     */
+    @Test
+    void mainBuildsTheRerankerThroughThePlan_notFromTheKey_andReportsThePosture() throws Exception {
+        String src = main();
+        int docRouter = src.indexOf("new EmbedderRouter(docLocal, routerKey, \"document\", embedProfile)");
+        int gate = src.indexOf("LocalOnnxAdmission.fromEnv()");
+        int build = src.indexOf("plan.buildReranker(");
+        int posture = src.indexOf("EmbedPosture.of(plan, reranker)");
+        int start = src.indexOf("service.start();");
+
+        assertThat(build).as("the reranker comes from the plan").isPositive();
+        assertThat(src.indexOf("plan.buildReranker(", build + 1)).as("once").isNegative();
+        assertThat(gate).as("the gate exists before the reranker that shares it").isPositive().isLessThan(build);
+        assertThat(build).as("after the routers").isGreaterThan(docRouter);
+        assertThat(src).as("the choice is the plan's, not a re-derivation from the key")
+            .doesNotContain("if (voyagePresent) {");
+        int voyageReranker = src.indexOf("new dev.nexus.service.vectors.VoyageReranker(");
+        assertThat(voyageReranker).as("the Voyage reranker is only ever built inside the plan's supplier")
+            .isGreaterThan(build).isLessThan(src.indexOf("localOnnxAdmission);", build));
+        assertThat(src.indexOf("new dev.nexus.service.vectors.VoyageReranker(", voyageReranker + 1)).isNegative();
+        assertThat(posture).as("the posture is bound before the listener starts").isPositive().isLessThan(start);
+    }
+
+    @Test
+    void theAdmissionGateIsBuiltWhenThePlanSaysSo_notInsideTheBgeBlock() throws Exception {
+        String src = main();
+        int gate = src.indexOf("LocalOnnxAdmission.fromEnv()");
+        assertThat(gate).isPositive();
+        assertThat(src.indexOf("LocalOnnxAdmission.fromEnv()", gate + 1)).as("one construction site").isNegative();
+        assertThat(src.substring(src.lastIndexOf("localOnnxAdmission =", gate), gate))
+            .as("guarded by the plan's answer, which is bge OR the cross-encoder").contains("plan.buildsAdmissionGate()");
+        assertThat(gate).as("built before the bge embedder, so the cross-encoder can have it with no bge")
+            .isLessThan(src.indexOf("new Bge768Embedder()"));
+        int bgeBlock = src.indexOf("if (plan.buildsBge()) {");
+        assertThat(gate).as("outside the bge-present block").isLessThan(bgeBlock);
+    }
+
+    @Test
+    void theBannerNamesBothFamiliesTheProfileAndTheReranker_onEveryLevel() throws Exception {
+        String src = main();
+        int loud = src.indexOf("log.warn(\"event=embedding_mode_banner");
+        int quiet = src.indexOf("log.info(\"event=embedding_mode_banner");
+        assertThat(loud).isPositive();
+        assertThat(quiet).isGreaterThan(loud);
+        for (String banner : new String[] {src.substring(loud, quiet), src.substring(quiet, src.indexOf(";", quiet + 400))}) {
+            assertThat(banner).contains("mode={}").contains("profile={}").contains("reranker={}")
+                .contains("bge={}").contains("voyage={}");
+        }
+        assertThat(src.substring(loud, quiet)).as("the loud banner carries the remedy").contains("plan.bannerHint()");
+        assertThat(src).as("native-smoke.sh greps this prefix").contains("\"event=embedding_mode_banner mode={}");
     }
 
     @Test
