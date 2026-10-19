@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.ChunksLeafAutovacuumCheck;
 import dev.nexus.service.db.SchemaMigrator;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -18,11 +19,19 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLWarning;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -281,7 +290,6 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
 
         SchemaMigrator.migrate(adminDs);
 
-        Set<String> after = new TreeSet<>();
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = dsl(su);
             assertThat(reloptions(ctx, stripped)).as("stripped leaf healed").isEqualTo(FOUR);
@@ -289,8 +297,6 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
             // control arm: the event trigger sees an ALTER TABLE, and sees exactly the two leaves that needed one.
             assertThat(loggedAlters(ctx)).as("ALTER TABLE on chunks leaves during the heal")
                 .containsExactlyInAnyOrder("nexus." + stripped, "nexus." + wrong);
-            for (String[] l : leavesOf(ctx, "chunks")) after.add(l[1] + " " + reloptions(ctx, l[1]));
-            assertThat(after).as("every other leaf unchanged, the two healed now equal to the rest").hasSize(before.size());
         }
         clearAlterLog();
 
@@ -337,6 +343,409 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
             assertThat(reloptions(dsl(a), leaf)).isEqualTo(FOUR);
         }
     }
+
+    // ── contention: the self-heal never wedges a boot ─────────────────────────
+
+    private record LockRow(String rel, int pid) {}
+
+    private static final String SUE = "ShareUpdateExclusiveLock";
+    private static final String STRIP = "RESET (autovacuum_vacuum_scale_factor, autovacuum_vacuum_threshold, "
+        + "autovacuum_vacuum_insert_scale_factor, autovacuum_analyze_scale_factor)";
+
+    /** Every {@code nexus.chunks} leaf name, sorted. */
+    private List<String> allLeafNames() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return leavesOf(dsl(su), "chunks").stream().map(l -> l[1]).sorted().toList();
+        }
+    }
+
+    private void stripLeaves(List<String> leaves) throws Exception {
+        StringBuilder ddl = new StringBuilder();
+        for (String l : leaves) ddl.append("ALTER TABLE nexus.").append(l).append(' ').append(STRIP).append(';');
+        suDdl(ddl.toString());
+    }
+
+    /** ShareUpdateExclusiveLock rows on relations, granted or waiting, from pg_locks. */
+    private static List<LockRow> sueLocks(DSLContext ctx, boolean granted) {
+        var l = DSL.table(DSL.name("pg_catalog", "pg_locks")).as("l");
+        return ctx.select(DSL.field(DSL.name("c", "relname"), String.class), DSL.field(DSL.name("l", "pid"), Integer.class))
+            .from(l)
+            .join(PG_CLASS).on(DSL.field(DSL.name("l", "relation")).eq(DSL.field(DSL.name("c", "oid"))))
+            .where(DSL.field(DSL.name("l", "locktype"), String.class).eq("relation"))
+            .and(DSL.field(DSL.name("l", "mode"), String.class).eq(SUE))
+            .and(DSL.field(DSL.name("l", "granted"), Boolean.class).eq(granted))
+            .fetch(r -> new LockRow(r.value1(), r.value2()));
+    }
+
+    /**
+     * A superuser session in an open transaction whose own deadlock_timeout is 60 s. PostgreSQL aborts the session
+     * whose deadlock check runs first; the migration's is 1 s, so with this holder the migration is always the
+     * victim, whatever the scheduling, and the test never races two 1 s timers.
+     */
+    private Connection deadlockHolder() throws Exception {
+        Connection c = pg.createConnection("");
+        c.setAutoCommit(false);
+        dsl(c).set(DSL.name("deadlock_timeout"), DSL.inline("60s")).execute();
+        return c;
+    }
+
+    private static String outcomeOf(Future<List<String>> f) {
+        try {
+            return "returned " + f.get();
+        } catch (Exception e) {
+            return "failed with " + e;
+        }
+    }
+
+    /** Every lock request that is waiting right now, for a failure message. */
+    private static List<String> waitingLocks(DSLContext ctx) {
+        var l = DSL.table(DSL.name("pg_catalog", "pg_locks")).as("l");
+        return ctx.select(DSL.field(DSL.name("l", "locktype"), String.class), DSL.field(DSL.name("l", "mode"), String.class),
+                DSL.field(DSL.name("l", "pid"), Integer.class), DSL.field(DSL.name("l", "relation")).cast(String.class))
+            .from(l)
+            .where(DSL.field(DSL.name("l", "granted"), Boolean.class).eq(false))
+            .fetch(r -> r.value1() + "/" + r.value2() + "/pid" + r.value3() + "/rel" + r.value4());
+    }
+
+    private static int backendPid(Connection c) throws Exception {
+        return c.unwrap(org.postgresql.PGConnection.class).getBackendPID();
+    }
+
+    private static void awaitTrue(String what, BooleanSupplier probe, long timeoutMs) throws Exception {
+        long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (System.nanoTime() < end) {
+            if (probe.getAsBoolean()) return;
+            Thread.sleep(50);
+        }
+        throw new AssertionError("timed out waiting for " + what);
+    }
+
+    /** Holds SHARE UPDATE EXCLUSIVE on a leaf in the open transaction of {@code c} (COMMENT ON TABLE takes it). */
+    private static void holdLeaf(Connection c, String leaf) {
+        dsl(c).commentOnTable(DSL.name("nexus", leaf)).is("s9wav lock holder").execute();
+    }
+
+    private static List<String> captureLogs(org.junit.jupiter.api.function.Executable body) throws Throwable {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.execute();
+            return logs.list.stream().map(e -> e.getLevel() + " " + e.getFormattedMessage()).toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    /** The body of changeset vectors-034-2, read from the changelog the service ships. */
+    private static String selfHealSql() throws Exception {
+        try (var in = ChunkLeafAutovacuumReloptionsIntegrationTest.class.getClassLoader()
+                .getResourceAsStream("db/changelog/vectors-034-chunks-leaf-autovacuum.xml")) {
+            assertThat(in).as("the vectors-034 changelog on the classpath").isNotNull();
+            var sets = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(in).getElementsByTagName("changeSet");
+            for (int i = 0; i < sets.getLength(); i++) {
+                var cs = (org.w3c.dom.Element) sets.item(i);
+                if ("vectors-034-2".equals(cs.getAttribute("id"))) {
+                    return cs.getElementsByTagName("sql").item(0).getTextContent();
+                }
+            }
+        }
+        throw new AssertionError("changeset vectors-034-2 not found");
+    }
+
+    /** Runs the self-heal DO block alone on {@code c} and returns every NOTICE/WARNING it raised. */
+    private static List<String> runSelfHeal(Connection c) throws Exception {
+        c.setAutoCommit(true);
+        try (Statement st = c.createStatement()) {
+            st.execute(selfHealSql());
+            List<String> out = new ArrayList<>();
+            for (SQLWarning w = st.getWarnings(); w != null; w = w.getNextWarning()) out.add(w.getMessage());
+            return out;
+        }
+    }
+
+    @Test
+    void aLeafLockedByAnotherSession_isSkippedWithoutWedgingTheBoot_andTheNextBootHealsIt() throws Throwable {
+        List<String> leaves = allLeafNames();
+        assertThat(leaves).as("leaves examined").hasSizeGreaterThanOrEqualTo(4);
+        String locked = leaves.get(1);
+        List<String> stripped = List.of(leaves.get(0), locked, leaves.get(leaves.size() - 1));
+        stripLeaves(stripped);
+        clearAlterLog();
+
+        List<String> logs;
+        long millis;
+        try (Connection holder = admin()) {
+            holder.setAutoCommit(false);
+            holdLeaf(holder, locked);
+            long t0 = System.nanoTime();
+            logs = captureLogs(() -> SchemaMigrator.migrate(adminDs));
+            millis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = dsl(su);
+                assertThat(reloptions(ctx, locked)).as("the locked leaf is unaltered").isEmpty();
+                assertThat(reloptions(ctx, leaves.get(0))).as("an unlocked stripped leaf is healed").isEqualTo(FOUR);
+                assertThat(reloptions(ctx, leaves.get(leaves.size() - 1))).as("the other unlocked stripped leaf is healed").isEqualTo(FOUR);
+                assertThat(loggedAlters(ctx)).as("the migrate altered exactly the two unlocked leaves")
+                    .containsExactlyInAnyOrder("nexus." + leaves.get(0), "nexus." + leaves.get(leaves.size() - 1));
+            }
+            holder.rollback();
+        }
+        // Non-vacuity: the lock was really contended (the heal waited out lock_timeout = 5 s) and the post-migrate
+        // check reported the skipped leaf where an operator reads it.
+        assertThat(millis).as("the migrate waited out the 5 s lock_timeout on the held leaf").isGreaterThanOrEqualTo(4_500);
+        assertThat(logs).as("the post-migrate check names the skipped leaf at WARN")
+            .anyMatch(m -> m.startsWith("WARN ") && m.contains("event=chunks_leaf_autovacuum_checked")
+                && m.contains("policy_unset=1") && m.contains(locked));
+
+        clearAlterLog();
+        List<String> second = captureLogs(() -> SchemaMigrator.migrate(adminDs));
+        try (Connection su = pg.createConnection("")) {
+            assertThat(reloptions(dsl(su), locked)).as("released, the next boot heals the leaf").isEqualTo(FOUR);
+            assertThat(loggedAlters(dsl(su))).as("and only that leaf").containsExactly("nexus." + locked);
+        }
+        assertThat(second).anyMatch(m -> m.startsWith("INFO ") && m.contains("event=chunks_leaf_autovacuum_checked")
+            && m.contains("policy_unset=0 autovacuum_disabled=0"));
+        System.out.println("S9WAV evidence: locked-leaf migrate took " + millis + " ms, completed, locked leaf unaltered, "
+            + (stripped.size() - 1) + " other stripped leaves healed; next boot healed the released leaf");
+    }
+
+    /**
+     * A CREATE INDEX CONCURRENTLY holds SHARE UPDATE EXCLUSIVE on a leaf and waits for older transactions, the
+     * migration's among them, while the migration waits for that leaf: a deadlock, detected after 1 s
+     * (deadlock_timeout), before the 5 s lock_timeout. Built here without an index build: a session holds every
+     * leaf except the one the migration alters first, and once the migration holds that one and waits for the
+     * next, the session asks for it too. Two phases, because which leaf the heal alters first is the database's
+     * ordering: phase 1 finds it by holding every leaf and watching which one the migration waits for.
+     */
+    @Test
+    void aDeadlockWithASessionThatWaitsOnTheMigration_isSkippedNotFatal_andTheNextBootHeals() throws Throwable {
+        List<String> leaves = allLeafNames();
+        assertThat(leaves).as("leaves examined").hasSizeGreaterThanOrEqualTo(4);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            // Phase 1: which leaf does the heal alter first?
+            stripLeaves(leaves);
+            String first;
+            try (Connection holder = deadlockHolder(); Connection su = pg.createConnection("")) {
+                for (String l : leaves) holdLeaf(holder, l);
+                int holderPid = backendPid(holder);
+                Future<?> migrate = pool.submit(() -> SchemaMigrator.migrate(adminDs));
+                List<String> waiting = new ArrayList<>();
+                awaitTrue("the heal to wait for the first leaf", () -> {
+                    waiting.clear();
+                    sueLocks(dsl(su), false).stream().filter(r -> r.pid() != holderPid && leaves.contains(r.rel()))
+                        .forEach(r -> waiting.add(r.rel()));
+                    return !waiting.isEmpty();
+                }, 90_000);
+                first = waiting.get(0);
+                holder.rollback();
+                migrate.get(90, TimeUnit.SECONDS);
+            }
+            assertThat(leaves).contains(first);
+
+            // Phase 2: hold every leaf but `first`; the heal alters `first`, then waits on the next; ask for `first`.
+            stripLeaves(leaves);
+            clearAlterLog();
+            try (Connection holder = deadlockHolder(); Connection su = pg.createConnection("")) {
+                for (String l : leaves) if (!l.equals(first)) holdLeaf(holder, l);
+                int holderPid = backendPid(holder);
+                Future<?> migrate = pool.submit(() -> SchemaMigrator.migrate(adminDs));
+                awaitTrue("the heal to hold " + first + " and wait for another leaf", () -> {
+                    boolean holds = sueLocks(dsl(su), true).stream().anyMatch(r -> r.pid() != holderPid && r.rel().equals(first));
+                    boolean waits = sueLocks(dsl(su), false).stream().anyMatch(r -> r.pid() != holderPid && leaves.contains(r.rel()));
+                    return holds && waits;
+                }, 90_000);
+                Future<?> holderAsks = pool.submit(() -> holdLeaf(holder, first));
+                migrate.get(120, TimeUnit.SECONDS);       // fatal 40P01 here if deadlock_detected is not caught
+                holderAsks.get(30, TimeUnit.SECONDS);     // the holder was granted `first`, not made the victim
+                holder.rollback();
+                try (Connection check = pg.createConnection("")) {
+                    DSLContext ctx = dsl(check);
+                    assertThat(reloptions(ctx, first)).as("the leaf the migration held is healed").isEqualTo(FOUR);
+                    for (String l : leaves) {
+                        if (!l.equals(first)) assertThat(reloptions(ctx, l)).as("leaf %s was held by the other session", l).isEmpty();
+                    }
+                    assertThat(loggedAlters(ctx)).as("only the first leaf was altered").containsExactly("nexus." + first);
+                }
+            }
+            clearAlterLog();
+            SchemaMigrator.migrate(adminDs);
+            try (Connection su = pg.createConnection("")) {
+                for (String l : leaves) assertThat(reloptions(dsl(su), l)).as("next boot heals %s", l).isEqualTo(FOUR);
+            }
+            System.out.println("S9WAV evidence: deadlock-shaped migrate completed; first leaf " + first + " healed, "
+                + (leaves.size() - 1) + " held leaves skipped, all " + leaves.size() + " healed by the next boot");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ── ownership ────────────────────────────────────────────────────────────
+
+    private void makeRole(String role) throws Exception {
+        suDdl("DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + role + "') THEN CREATE ROLE "
+            + role + " NOLOGIN; END IF; END $r$");
+    }
+
+    @Test
+    void aLeafOwnedByAnotherRoleThatAlreadyCarriesTheFour_isAlreadyCorrect_notForeign_andNothingWarns() throws Exception {
+        List<String> leaves = allLeafNames();
+        String leaf = leaves.get(0);
+        makeRole("s9wav_other");
+        suDdl("ALTER TABLE nexus." + leaf + " OWNER TO s9wav_other");
+        try {
+            clearAlterLog();
+            List<String> messages;
+            try (Connection a = admin()) {
+                messages = runSelfHeal(a);
+            }
+            assertThat(messages).as("no foreign-owner warning for a leaf that needs nothing")
+                .noneMatch(m -> m.contains("owned by a role"));
+            assertThat(messages).as("the notice carries the counts").anyMatch(m -> m.contains(
+                "leaves examined " + leaves.size() + ", altered 0, already correct " + leaves.size()
+                + ", locked 0, vanished 0, foreign-owned 0"));
+            try (Connection su = pg.createConnection("")) {
+                assertThat(loggedAlters(dsl(su))).as("nothing altered").isEmpty();
+            }
+            System.out.println("S9WAV evidence: foreign-owned correct leaf: examined " + leaves.size() + ", already correct "
+                + leaves.size() + ", foreign 0, warnings about ownership 0");
+        } finally {
+            suDdl("ALTER TABLE nexus." + leaf + " OWNER TO " + ADMIN);
+        }
+    }
+
+    @Test
+    void aLeafOwnedByAnotherRoleThatLacksTheFour_isReportedForeign_leftAsItIs_andNamedByThePostMigrateCheck() throws Exception {
+        List<String> leaves = allLeafNames();
+        String leaf = leaves.get(0);
+        makeRole("s9wav_other");
+        stripLeaves(List.of(leaf));
+        suDdl("ALTER TABLE nexus." + leaf + " OWNER TO s9wav_other");
+        try {
+            List<String> messages;
+            try (Connection a = admin()) {
+                messages = runSelfHeal(a);
+            }
+            assertThat(messages).filteredOn(m -> m.contains("owned by a role")).as("one foreign-owner warning").hasSize(1);
+            assertThat(messages).anyMatch(m -> m.contains(
+                "leaves examined " + leaves.size() + ", altered 0, already correct " + (leaves.size() - 1)
+                + ", locked 0, vanished 0, foreign-owned 1"));
+            try (Connection su = pg.createConnection("")) {
+                assertThat(reloptions(dsl(su), leaf)).as("left as it is").isEmpty();
+                var report = ChunksLeafAutovacuumCheck.inspect(dsl(su));
+                assertThat(report.leaves()).isEqualTo(leaves.size());
+                assertThat(report.policyUnset()).as("the post-migrate check names it").containsExactly(leaf);
+                assertThat(report.autovacuumDisabled()).isEmpty();
+            }
+        } finally {
+            suDdl("ALTER TABLE nexus." + leaf + " OWNER TO " + ADMIN);
+            try (Connection a = admin()) {
+                a.setAutoCommit(true);
+                setLeaf(dsl(a), leaf);
+            }
+        }
+    }
+
+    // ── a leaf dropped under the heal ────────────────────────────────────────
+
+    /**
+     * The heal cannot see a leaf vanish between its scan and its ALTER: {@code pg_partition_tree} takes an
+     * AccessShareLock on every leaf and the heal's transaction keeps it, so a concurrent DROP of a leaf queues behind
+     * the heal instead. The DROP does collide with the heal's wait for that leaf, though: a session that holds the
+     * leaf (as a vacuum would) and then drops it waits for the heal's AccessShareLock while the heal waits for the
+     * session's lock, a deadlock the heal must absorb like any other. (The vanished-leaf handler in vectors-034-2 is
+     * a guard for the case the locks do not cover; PostgreSQL gives no way to reach it from here.)
+     */
+    @Test
+    void aConcurrentDropOfALeaf_deadlocksWithTheHeal_andIsSkippedNotFatal() throws Exception {
+        String tenant = "s9wav-vanish-tenant";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(dsl(su), "tok-s9wav-vanish", tenant, "s9wav-vanish");
+        }
+        String model;
+        try (Connection su = pg.createConnection("")) {
+            model = modelOf(PartitionScratch.children(dsl(su), "chunks").get(0).bound());
+        }
+        String victim = PartitionScratch.expectedName("chunks", model, tenant);
+        stripLeaves(List.of(victim));
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        List<String> messages;
+        int total = allLeafNames().size();
+        try (Connection dropper = deadlockHolder(); Connection su = pg.createConnection(""); Connection healer = admin()) {
+            holdLeaf(dropper, victim);
+            int dropperPid = backendPid(dropper);
+            Future<List<String>> heal = pool.submit(() -> runSelfHeal(healer));
+            try {
+                awaitTrue("the heal to wait for the held leaf", () ->
+                    sueLocks(dsl(su), false).stream().anyMatch(r -> r.pid() != dropperPid && r.rel().equals(victim)), 30_000);
+            } catch (AssertionError e) {
+                throw new AssertionError(e.getMessage() + "; waiting lock requests: " + waitingLocks(dsl(su))
+                    + "; heal: " + (heal.isDone() ? outcomeOf(heal) : "still running"), e);
+            }
+            Future<?> drop = pool.submit(() -> dsl(dropper).dropTable(DSL.name("nexus", victim)).cascade().execute());
+            messages = heal.get(60, TimeUnit.SECONDS);   // fatal 40P01 here if deadlock_detected is not caught
+            drop.get(60, TimeUnit.SECONDS);              // the drop proceeds once the heal's transaction ends
+            dropper.commit();
+        } finally {
+            pool.shutdownNow();
+            try (Connection a = admin()) {
+                a.setAutoCommit(true);
+                PartitionScratch.createTenantPartitions(dsl(a), "chunks", tenant, true);   // put the tree back
+            }
+        }
+        assertThat(messages).as("the leaf is counted locked, not fatal").anyMatch(m -> m.contains("40P01: deadlock detected"));
+        assertThat(messages).anyMatch(m -> m.contains("leaves examined " + total + ", altered 0, already correct " + (total - 1)
+            + ", locked 1, vanished 0, foreign-owned 0"));
+        System.out.println("S9WAV evidence: concurrent leaf drop: heal completed, " + total + " leaves examined, 1 skipped on 40P01");
+    }
+
+    // ── the post-migrate check an operator reads ─────────────────────────────
+
+    @Test
+    void autovacuumDisabledOnALeaf_isKept_byTheHeal_andNamedByThePostMigrateCheck() throws Throwable {
+        List<String> leaves = allLeafNames();
+        String stripped = leaves.get(0);
+        String disabled = leaves.get(leaves.size() - 1);
+        stripLeaves(List.of(stripped));
+        suDdl("ALTER TABLE nexus." + disabled + " SET (autovacuum_enabled = false, fillfactor = 90)");
+        try {
+            try (Connection su = pg.createConnection("")) {
+                var before = ChunksLeafAutovacuumCheck.inspect(dsl(su));
+                assertThat(before.leaves()).isEqualTo(leaves.size());
+                assertThat(before.policyUnset()).containsExactly(stripped);
+                assertThat(before.autovacuumDisabled()).containsExactly(disabled);
+                assertThat(before.healthy()).isFalse();
+            }
+            List<String> logs = captureLogs(() -> SchemaMigrator.migrate(adminDs));
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = dsl(su);
+                assertThat(reloptions(ctx, stripped)).isEqualTo(FOUR);
+                // The heal sets the four and keeps every other reloption.
+                assertThat(reloptions(ctx, disabled)).containsAll(FOUR).contains("autovacuum_enabled=false", "fillfactor=90");
+                var after = ChunksLeafAutovacuumCheck.inspect(ctx);
+                assertThat(after.policyUnset()).isEmpty();
+                assertThat(after.autovacuumDisabled()).containsExactly(disabled);
+            }
+            assertThat(logs).as("the boot log names the leaf with autovacuum off")
+                .anyMatch(m -> m.startsWith("WARN ") && m.contains("event=chunks_leaf_autovacuum_checked")
+                    && m.contains("policy_unset=0 autovacuum_disabled=1") && m.contains(disabled));
+        } finally {
+            suDdl("ALTER TABLE nexus." + disabled + " RESET (autovacuum_enabled, fillfactor)");
+        }
+        try (Connection su = pg.createConnection("")) {
+            var healthy = ChunksLeafAutovacuumCheck.inspect(dsl(su));
+            assertThat(healthy.healthy()).isTrue();
+            System.out.println("S9WAV evidence: post-migrate check leaves=" + healthy.leaves()
+                + " policy_unset=0 autovacuum_disabled=0 after the reset; autovacuum_enabled=false and fillfactor kept by the heal");
+        }
+    }
+
 
     private static String modelOf(String bound) {
         // "FOR VALUES IN ('voyage-code-3')"

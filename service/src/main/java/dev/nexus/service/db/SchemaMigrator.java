@@ -616,6 +616,9 @@ public final class SchemaMigrator {
                 liquibase.update(new Contexts(), new LabelExpression());
                 afterUpdateHook.run();
                 repairPartitionAccessDrift(conn);
+                // nexus-s9wav: the operator-visible outcome of vectors-034-2 (a skipped leaf, a leaf with
+                // autovacuum disabled); Liquibase drops notices and a WARNING reaches only the server log.
+                ChunksLeafAutovacuumCheck.checkAndLog(conn);
 
                 if (orderExecutedWatermark == null) {
                     return countsUnavailableOutcome(pending);

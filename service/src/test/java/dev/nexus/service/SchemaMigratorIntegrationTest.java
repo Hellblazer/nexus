@@ -1982,8 +1982,8 @@ class SchemaMigratorIntegrationTest {
     // Liquibase's RERAN path (MarkChangeSetRanGenerator) issues one
     // UPDATE ... WHERE id=? AND author=? AND filename=? per changeset, with no
     // row-count limit, so it re-stamps every matching physical row while
-    // Liquibase itself believes it processed one changeset: 12 genuine
-    // runAlways identities + 13 duplicate extra rows = 25. The origin of the
+    // Liquibase itself believes it processed one changeset: 13 genuine
+    // runAlways identities (12 at v0.1.118, 25 rows then) + 13 duplicate extra rows = 26. The origin of the
     // duplicates is not recoverable -- every RERAN overwrites each copy's own
     // dateexecuted/deployment_id alike -- and conexus will not delete them
     // without Sam's decision, so SchemaMigrator must count correctly with them
@@ -2017,11 +2017,11 @@ class SchemaMigratorIntegrationTest {
      * IDENTITIES, not rows). A RETIRED dateexecuted-clock-window
      * reconstruction, and independently a non-distinct
      * {@code COUNT(*) WHERE deployment_id=?} over this walk's own deployment
-     * id, must BOTH reproduce the v0.1.118 anomaly verbatim (25) against this
+     * id, must BOTH reproduce the v0.1.118 anomaly verbatim (26 with today's 13 runAlways identities; 25 with the 12 of v0.1.118) against this
      * hermetic duplicate shape — proving the bug is real and that scoping by
      * deployment_id alone does not fix it. {@code reexecutedChangesets} on the
      * FIXED {@code MigrationOutcome} must equal EXACTLY the runAlways set's
-     * size (12) — the identity-based counting a duplicate row cannot inflate.
+     * size (13) — the identity-based counting a duplicate row cannot inflate.
      */
     @Test
     @Order(18)
@@ -2172,14 +2172,14 @@ class SchemaMigratorIntegrationTest {
                         + "unaffected by duplicate rows elsewhere")
                     .isEqualTo(5L);
 
-                // ── Assert: pending_at_start = new (5) + runAlways (12),
+                // ── Assert: pending_at_start = new (5) + runAlways (13),
                 // unaffected by row duplication (listUnrunChangeSets() counts
                 // identities, never rows).
                 assertThat(outcome.pendingAtStart())
                     .as("nexus-jl08t: listUnrunChangeSets() before the walk counts "
                         + "the 5 genuinely-pending changesets PLUS the full "
                         + "runAlways set (always considered unrun regardless of "
-                        + "prior execution) -- 5 + 12 = 17 on the v0.1.118 walk")
+                        + "prior execution) -- 5 + 13 = 18 on today's changelog (17 on the v0.1.118 walk)")
                     .isEqualTo(5L + runAlwaysIds.size());
 
                 // ── Assert: every runAlways row's dateexecuted actually moved
@@ -2202,8 +2202,8 @@ class SchemaMigratorIntegrationTest {
                 // ── Assert: the RETIRED dateexecuted-clock-window algorithm,
                 // reconstructed independently here against this exact
                 // production duplicate shape, reproduces the v0.1.118 anomaly
-                // verbatim -- 12 genuine runAlways identities + 13 duplicate
-                // extra rows = 25, not 12. This is the "old code" wrong value:
+                // verbatim -- 13 genuine runAlways identities + 13 duplicate
+                // extra rows = 26, not 13. This is the "old code" wrong value:
                 // a test that could not produce it would prove nothing.
                 long oldStyleTouched;
                 try (Connection conn = agedDs.getConnection()) {
@@ -2264,7 +2264,7 @@ class SchemaMigratorIntegrationTest {
                 // assertion nexus-jl08t exists to pin.
                 assertThat(outcome.reexecutedChangesets())
                     .as("nexus-jl08t: reexecuted_changesets must count exactly "
-                        + "the runAlways set touched by this walk (12), "
+                        + "the runAlways set touched by this walk (13), "
                         + "de-duplicated by identity -- immune to the 13 extra "
                         + "physical rows seeded for grants-nexus-diag-1/-2")
                     .isEqualTo((long) runAlwaysIds.size());
