@@ -23,9 +23,9 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
-import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -142,7 +142,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // RDR-194 critical fix round (2026-08-17, nexus-i3k3e/Sig-2):
             // startAll()'s full migration now ALSO runs taxonomy-011-8,
             // which Liquibase-owns a LIVE nexus.diag_chash_conformance view
-            // depending on doc_id. The ALTER below would now hit the exact
+            // depending on doc_id. The doc_id ALTER below (revertTopicAssignmentsDocIdToText) would now hit the exact
             // "cannot alter type of a column used by a view or rule" error
             // taxonomy-011-1's own forward pass exists to dodge -- drop the
             // view first (same test-only-relaxation shape as the two
@@ -152,7 +152,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // RDR-194 P3d (nexus-tk070.p3d): startAll()'s full migration now ALSO
             // runs taxonomy-012, which ADDs topic_assignments_chunk_fk -- a
             // composite FK whose (source_collection, doc_id) leg targets
-            // nexus.chunks(collection, chash), bytea. The ALTER below would now
+            // nexus.chunks(collection, chash), bytea. The doc_id ALTER below (revertTopicAssignmentsDocIdToText) would now
             // hit "foreign key constraint ... cannot be implemented" (a bytea-vs-
             // TEXT type mismatch on the referencing column) the moment doc_id
             // stops being bytea -- same test-only-relaxation shape as the view
@@ -349,17 +349,11 @@ class Taxonomy010BackfillDirectIntegrationTest {
             .fetchOne(TOPICS.ID);
     }
 
-    /**
-     * {@code doc_id} as TEXT: the generated {@code TOPIC_ASSIGNMENTS.DOC_ID} is bytea, but this class reverts
-     * the column to TEXT before seeding (see the test body), so the seeds bind the hex string by name.
-     */
-    private static final org.jooq.Field<String> TEXT_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
-
     private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
             throws Exception {
         DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
             .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
-            .set(TEXT_DOC_ID, docId)
+            .set(TA_DOC_ID, docId)
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
             .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, "bge-base-en-v15-768")
@@ -379,7 +373,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             throws Exception {
         DSL.using(c, SQLDialect.POSTGRES).insertInto(TOPIC_ASSIGNMENTS)
             .set(TOPIC_ASSIGNMENTS.TENANT_ID, tenant)
-            .set(TEXT_DOC_ID, docId)
+            .set(TA_DOC_ID, docId)
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
             .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)

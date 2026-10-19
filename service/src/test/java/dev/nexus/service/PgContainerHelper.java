@@ -1552,6 +1552,16 @@ public final class PgContainerHelper {
     public static void readdChashOctetChecksNotValid(Connection su) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-chash-octet-checks-readd.xml",
             "databasechangelog_test_octet_checks", Map.of());
+        // The changelog's preconditions skip a constraint that is present; check the post-state outright so a
+        // skipped or failed re-add cannot leave a caller's seed window open unnoticed.
+        int notValid = DSL.using(su, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("pg_catalog", "pg_constraint")),
+            DSL.field(DSL.name("conname"), String.class)
+                .in("chunks_chash_octet_check", "catalog_document_chunks_chash_octet_check")
+                .and(DSL.field(DSL.name("convalidated"), Boolean.class).isFalse()));
+        if (notValid != 2) {
+            throw new IllegalStateException("chash octet CHECKs present and NOT VALID after re-add: expected 2, found "
+                + notValid);
+        }
     }
 
     /**

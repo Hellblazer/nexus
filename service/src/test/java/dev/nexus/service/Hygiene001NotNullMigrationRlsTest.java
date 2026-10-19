@@ -413,10 +413,6 @@ class Hygiene001NotNullMigrationRlsTest {
      * {@code indexed_at} is already timestamptz at this walk point (catalog-031
      * precedes hygiene-001 in the master changelog), so the two seeded values are
      * real instants and {@code min(d.indexed_at)} is a chronological minimum.
-     *
-     * <p>The catalog_collections rows stay raw SQL: that table is outside the
-     * shape cbo4a batch 12 converted (catalog_documents, catalog_document_chunks,
-     * catalog_owners, catalog_links, topics, topic_assignments, document_aspects).
      */
     private static void seedCollectionCreatedAtScenario(PostgreSQLContainer<?> pg, String tenant)
             throws Exception {
@@ -446,8 +442,9 @@ class Hygiene001NotNullMigrationRlsTest {
     }
 
     /**
-     * A {@code catalog_collections} row with only tenant and name, the columns the mid-walk schema has at
-     * this point; PgContainerHelper.insertCollection sets columns later changesets add.
+     * A {@code catalog_collections} row with only tenant and name. PgContainerHelper.insertCollection makes
+     * the same bare insert when the mid-walk schema has no lifecycle_state yet, but otherwise also creates
+     * tenant partitions and sets later columns; this seed stays the plain two-column row it always was.
      */
     private static void insertBareCollection(Connection su, String tenant, String name) {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_COLLECTIONS)

@@ -188,8 +188,8 @@ class Rdr71gw2CollectionNotNullTest {
      *  rollback. Idempotent: DROP NOT NULL on an already-nullable column is a
      *  no-op, so tests may run in any order. */
     private static void dropNotNullForTest(Connection su) throws Exception {
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection DROP NOT NULL");
+        DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENT_CHUNKS)
+            .alterColumn(CATALOG_DOCUMENT_CHUNKS.COLLECTION).dropNotNull().execute();
     }
 
     /** Runs the changeset's SQL as ONE explicit transaction (autoCommit off
