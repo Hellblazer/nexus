@@ -4692,8 +4692,10 @@ _LEAF_BLOAT_LABEL = "Chunks leaf bloat"
 _LEAF_BLOAT_LOG_EVENT = "event=chunks_leaf_bloat_leaf"
 
 
-def _compact_span(seconds: int) -> str:
-    """A duration in whole seconds as ``1h 30m``, ``45m`` or ``20s``."""
+def _compact_span(seconds: float) -> str:
+    """A duration in whole seconds as ``1h 30m``, ``45m`` or ``20s``; a float from the status JSON is truncated, so
+    it never reads ``1.0h 30.0m``."""
+    seconds = max(0, int(seconds))
     if seconds >= 3600:
         hours, rest = divmod(seconds, 3600)
         minutes = rest // 60
