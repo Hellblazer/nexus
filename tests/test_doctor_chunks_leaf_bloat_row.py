@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -260,6 +261,7 @@ def test_a_status_passed_in_is_used_and_nothing_is_fetched() -> None:
         assert r.ok is True and "not applicable" in r.detail
 
 
+@pytest.mark.t2_tenant
 def test_the_default_sweep_makes_one_status_request_and_prints_the_row(monkeypatch) -> None:
     calls = {"n": 0}
 

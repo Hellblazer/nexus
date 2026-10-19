@@ -4692,7 +4692,7 @@ _LEAF_BLOAT_LABEL = "Chunks leaf bloat"
 _LEAF_BLOAT_LOG_EVENT = "event=chunks_leaf_bloat_leaf"
 
 
-def _span(seconds: int) -> str:
+def _compact_span(seconds: int) -> str:
     """A duration in whole seconds as ``1h 30m``, ``45m`` or ``20s``."""
     if seconds >= 3600:
         hours, rest = divmod(seconds, 3600)
@@ -4816,15 +4816,15 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
                 kinds.append(f"{n_pinned} pinned (a vacuum finished since the leaf went overdue and the dead rows "
                              "are still there)")
             if n_starved:
-                after = f" for {_span(warn_after)} or more" if warn_after else ""
+                after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
                 kinds.append(f"{n_starved} starved (overdue{after} with no vacuum finished)")
             parts.append(f"dead rows have not come down on {_count(n_persistent)} (overdue = {rule}): "
-                         f"{', '.join(kinds)}; the longest has been overdue {_span(longest)}")
+                         f"{', '.join(kinds)}; the longest has been overdue {_compact_span(longest)}")
         if n_unset:
             parts.append(f"{_count(n_unset)} without all four autovacuum settings (vectors-034)")
         if n_disabled:
             parts.append(f"{_count(n_disabled)} with autovacuum_enabled off")
-        starved_after = f" for {_span(warn_after)} or more" if warn_after else ""
+        starved_after = f" for {_compact_span(warn_after)} or more" if warn_after else ""
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(f"{'; '.join(parts)} ({summary}); /v1/status carries counts only, the leaf names are in the engine "
@@ -4850,8 +4850,8 @@ def _check_chunks_leaf_bloat(engine_status: object = _ENGINE_STATUS_UNSET) -> li
         )]
     note = ""
     if n_waiting:
-        until = f", or after {_span(warn_after)} without one" if warn_after else ""
-        note = (f"; {_count(n_waiting)} overdue and waiting for a vacuum (the longest for {_span(longest)}); the row "
+        until = f", or after {_compact_span(warn_after)} without one" if warn_after else ""
+        note = (f"; {_count(n_waiting)} overdue and waiting for a vacuum (the longest for {_compact_span(longest)}); the row "
                 f"warns if a vacuum finishes and a leaf is still overdue{until}")
     if failures:
         note += (f"; the last {failures} read{'s' if failures != 1 else ''} failed, so these figures are from the last "
