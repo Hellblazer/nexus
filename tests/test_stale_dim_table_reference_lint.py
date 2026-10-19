@@ -519,7 +519,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "own caution about SchemaMigratorIntegrationTest."
     ),
     "service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java": (
-        21,
+        20,  # nexus-cbo4a 2026-10-18: 21 -> 20, the typed-jOOQ conversion dropped one per-dim name
         "nexus-4m6i0.6 upgrade-rehearsal suite: injects a pre-unify schema "
         "divergence and upgrades it to HEAD across the vectors-004/"
         "taxonomy-007 changesets, then asserts the per-dim tables are GONE "
