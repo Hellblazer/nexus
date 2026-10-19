@@ -279,4 +279,39 @@ class TupleWaitRegistryAbortTenantTest {
             pool.shutdownNow();
         }
     }
+
+    /**
+     * Bead nexus-vr8wk: {@code admitWaiter} is the third registration path that must refuse a flagged group
+     * ({@code register} and {@code registerMulti} are pinned above). A token admitted inside the abort window must
+     * land in a FRESH group that survives the abort's removal of the old one; admitted into the flagged group it
+     * would be dropped with it, and the next reader with an OLDER token would be let through (superseded fencing
+     * silently lost across a reset).
+     */
+    @Test
+    void aWaiterTokenAdmittedWhileTheAbortIsStillWaitingSurvivesInAFreshGroup() throws Exception {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        TupleWaitRegistry.Waiter stuck = registry.register(X, "s1");
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<TupleWaitRegistry.AbortResult> abort = pool.submit(() -> registry.abortTenant(X, BOUND_NANOS));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!stuck.aborted() && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(stuck.aborted()).as("the abort has flagged the group and is waiting").isTrue();
+
+            assertThat(registry.admitWaiter(X, "s1", "sub", "500-aaa")).as("admitted").isTrue();
+
+            stuck.release();
+            assertThat(abort.get(2, TimeUnit.SECONDS)).isEqualTo(new TupleWaitRegistry.AbortResult(1, 0));
+            assertThat(registry.groupCount()).as("the admit made a fresh group; the abort left it").isEqualTo(1);
+            assertThat(registry.admitWaiter(X, "s1", "sub", "100-aaa"))
+                .as("an older token is still fenced after the abort: the newer token was not dropped with the "
+                    + "flagged group").isFalse();
+            assertThat(registry.isCurrentWaiter(X, "s1", "sub", "100-aaa")).isFalse();
+            assertThat(registry.isCurrentWaiter(X, "s1", "sub", "500-aaa")).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
 }

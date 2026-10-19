@@ -186,6 +186,117 @@ class TupleRepositoryTenantResetAbortTest {
         assertThat(p.value.get()).isNull();
     }
 
+    // ── an abort that lands between register and the first query, or at the deadline (nexus-vr8wk) ──────
+    //
+    // Both windows sit inside the park loop's own time, not in a wake, so the post-wake check above never sees
+    // them. Each is made deterministic with a hook on the waiting thread that plants the next test's tuple (through
+    // the second repository, so nothing signals the waiter) and aborts the tenant at exactly that point. Without
+    // the check the wait queries, and returns or claims the row; with it the wait throws and the row is untouched.
+
+    /** Plants the row and aborts {@code tenant}'s waits from the waiting thread (bound 0: the caller is the waiter). */
+    private void plantAndAbort(TupleRepository waiter, String tenant, String to) {
+        plant(tenant, to);
+        waiter.testOnlyWaitRegistry().abortTenant(tenant, 0);
+    }
+
+    /** Runs {@code action} once per call of the hook, at most once overall. */
+    private static Runnable once(Runnable action) {
+        var fired = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (fired.compareAndSet(false, true)) {
+                action.run();
+            }
+        };
+    }
+
+    /** At the park loop's top on its first pass: the next test's row appears, the tenant is aborted, and the wait's
+     *  one-second deadline passes, all before the loop's own checks run. */
+    private Runnable abortAtTheDeadline(TupleRepository waiter, String tenant, String to) {
+        return once(() -> {
+            plantAndAbort(waiter, tenant, to);
+            try {
+                Thread.sleep(1_300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    @Test
+    void anRdAbortedBetweenRegisterAndItsFirstQueryThrowsWithoutQuerying() {
+        String tenant = "reset-rd-first-" + UUID.randomUUID();
+        String to = "agent-rd-first-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        waiter.testOnlyAfterRegister = once(() -> plantAndAbort(waiter, tenant, to));
+
+        assertThatThrownBy(() ->
+            waiter.rd(tenant, "mailbox/" + to, Map.of("to", to), 10, null, PARK_SECONDS))
+            .isInstanceOf(TenantResetException.class);
+    }
+
+    @Test
+    void anInAbortedBetweenRegisterAndItsFirstClaimThrowsAndLeavesTheTuple() {
+        String tenant = "reset-in-first-" + UUID.randomUUID();
+        String to = "agent-in-first-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        waiter.testOnlyAfterRegister = once(() -> plantAndAbort(waiter, tenant, to));
+
+        assertThatThrownBy(() ->
+            waiter.in(tenant, "mailbox/" + to, Map.of("to", to), "dead-test-worker", 60L, PARK_SECONDS))
+            .isInstanceOf(TenantResetException.class);
+        assertThat(writer.inp(tenant, "mailbox/" + to, Map.of("to", to), "next-test-worker", 60L))
+            .as("the next test's tuple was not claimed by the dead waiter").isPresent();
+    }
+
+    @Test
+    void aWaitAnyAbortedBetweenRegisterAndItsFirstQueryThrowsWithoutQuerying() {
+        String tenant = "reset-wait-first-" + UUID.randomUUID();
+        String to = "agent-wait-first-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        var spec = new TupleRepository.WaitSpec("mailbox/" + to, Map.of("to", to), 10, null);
+        waiter.testOnlyAfterRegister = once(() -> plantAndAbort(waiter, tenant, to));
+
+        assertThatThrownBy(() -> waiter.waitAny(tenant, List.of(spec), PARK_SECONDS))
+            .isInstanceOf(TenantResetException.class);
+    }
+
+    @Test
+    void anRdWhoseDeadlinePassesWithTheAbortThrowsInsteadOfRunningItsFinalQuery() {
+        String tenant = "reset-rd-deadline-" + UUID.randomUUID();
+        String to = "agent-rd-deadline-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        waiter.testOnlyAtParkLoopTop = abortAtTheDeadline(waiter, tenant, to);
+
+        assertThatThrownBy(() -> waiter.rd(tenant, "mailbox/" + to, Map.of("to", to), 10, null, 1))
+            .isInstanceOf(TenantResetException.class);
+    }
+
+    @Test
+    void anInWhoseDeadlinePassesWithTheAbortThrowsInsteadOfClaiming() {
+        String tenant = "reset-in-deadline-" + UUID.randomUUID();
+        String to = "agent-in-deadline-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        waiter.testOnlyAtParkLoopTop = abortAtTheDeadline(waiter, tenant, to);
+
+        assertThatThrownBy(() ->
+            waiter.in(tenant, "mailbox/" + to, Map.of("to", to), "dead-test-worker", 60L, 1))
+            .isInstanceOf(TenantResetException.class);
+        assertThat(writer.inp(tenant, "mailbox/" + to, Map.of("to", to), "next-test-worker", 60L))
+            .as("the next test's tuple was not claimed by the dead waiter").isPresent();
+    }
+
+    @Test
+    void aWaitAnyWhoseDeadlinePassesWithTheAbortThrowsInsteadOfRunningItsFinalQuery() {
+        String tenant = "reset-wait-deadline-" + UUID.randomUUID();
+        String to = "agent-wait-deadline-" + UUID.randomUUID();
+        TupleRepository waiter = repo();
+        var spec = new TupleRepository.WaitSpec("mailbox/" + to, Map.of("to", to), 10, null);
+        waiter.testOnlyAtParkLoopTop = abortAtTheDeadline(waiter, tenant, to);
+
+        assertThatThrownBy(() -> waiter.waitAny(tenant, List.of(spec), 1))
+            .isInstanceOf(TenantResetException.class);
+    }
+
     // ── the evictor reports a tenant that did not quiesce (critic S3) ─────────────────────────────────────
 
     @Test

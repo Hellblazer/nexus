@@ -218,16 +218,8 @@ class TenantResetRouteTest {
         NexusService.verifyTenantResetRouteBind(Map.of("NX_TEST_TENANT_RESET_ROUTE", "0", "NX_SERVICE_BIND", "0.0.0.0")::get);
     }
 
-    @Test
-    void mainChecksTheBindBeforeItOpensTheDatabasePool() throws Exception {
-        String src = java.nio.file.Files.readString(
-            java.nio.file.Path.of("src/main/java/dev/nexus/service/Main.java"));
-        int check = src.indexOf("NexusService.verifyTenantResetRouteBind(System::getenv)");
-        int pool = src.indexOf("new HikariDataSource(hikari)");
-        assertThat(check).as("Main calls the bind check").isPositive();
-        assertThat(src.indexOf("event=tenant_reset_route_bind_refused")).as("and exits on it").isPositive();
-        assertThat(check).as("before the pool is created").isLessThan(pool);
-    }
+    // The Main-level refusal (exit 1 before the pool and the migration) is a real boot in a child JVM:
+    // MainBootEnvValidationIntegrationTest.theTenantResetRouteOnANonLoopbackBind_*.
 
     // ── the reset ────────────────────────────────────────────────────────────────────────────────
 

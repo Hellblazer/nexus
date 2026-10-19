@@ -46,6 +46,9 @@ import java.util.stream.Stream;
  * <p>Keys are {@code TopLevelClass[.Nested].field}. The live check that the route's response names exactly the
  * {@link #TENANT_KEYED} evictors is {@code TenantResetRouteTest}; this class also checks each evictor name is wired as
  * a literal in {@code NexusService.java}.
+ *
+ * <p>This gate proves acknowledgment, not clearance. The behavioural counterpart, which drives a workload, resets and
+ * walks the live object graph for the tenant's name, is {@code TenantResetLeakCanaryTest} (nexus-vr8wk).
  */
 public class TenantKeyedStateGateTest {
 
@@ -65,6 +68,22 @@ public class TenantKeyedStateGateTest {
     /** The distinct evictor names the table lists: what the route's response must name, no more and no fewer. */
     public static Set<String> evictorNames() {
         return new TreeSet<>(TENANT_KEYED.values());
+    }
+
+    /**
+     * The classes that declare a field either table lists, as {@code TopLevel[.Nested]} names (the key minus its last
+     * segment). Every field the census examined has an owner here, so a walk that reads these classes' statics
+     * reads every static holder the census knows of (nexus-vr8wk: the behavioural leak canary).
+     */
+    public static Set<String> catalogedOwnerNames() {
+        var owners = new TreeSet<String>();
+        for (String key : TENANT_KEYED.keySet()) {
+            owners.add(key.substring(0, key.lastIndexOf('.')));
+        }
+        for (String key : NOT_TENANT_KEYED.keySet()) {
+            owners.add(key.substring(0, key.lastIndexOf('.')));
+        }
+        return owners;
     }
 
     // ── the scanner ──────────────────────────────────────────────────────────────────────────────
@@ -619,7 +638,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, COUNTER);
             }
-            // TEST_HOOK (17)
+            // TEST_HOOK (19)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
@@ -637,6 +656,8 @@ public class TenantKeyedStateGateTest {
                 "TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY",
                 "TupleRepository.TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY",
                 "TupleRepository.TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK",
+                "TupleRepository.testOnlyAfterRegister",
+                "TupleRepository.testOnlyAtParkLoopTop",
                 "TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK"
             )) {
                 notKeyed.put(f, TEST_HOOK);

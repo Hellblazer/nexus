@@ -74,6 +74,11 @@ class MainBootEnvValidationIntegrationTest {
     }
 
     private Boot boot(String variable, String value, String stopOn) throws IOException, InterruptedException {
+        return bootWith(variable == null ? java.util.Map.of() : java.util.Map.of(variable, value), stopOn);
+    }
+
+    private Boot bootWith(java.util.Map<String, String> extraEnv, String stopOn)
+            throws IOException, InterruptedException {
         String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         ProcessBuilder pb = new ProcessBuilder(java, "-cp", System.getProperty("java.class.path"),
             "dev.nexus.service.Main");
@@ -83,9 +88,7 @@ class MainBootEnvValidationIntegrationTest {
         env.put("NX_DB_PASS", pg.getPassword());
         env.put("NX_SERVICE_PORT", "0");
         env.remove("NX_VOYAGE_API_KEY");
-        if (variable != null) {
-            env.put(variable, value);
-        }
+        env.putAll(extraEnv);
         pb.redirectErrorStream(true);
         Process p = pb.start();
         // Drain on a thread of its own so a full pipe cannot stall the child while we wait on it.
@@ -183,5 +186,43 @@ class MainBootEnvValidationIntegrationTest {
     @Test
     void aMalformedSweepSeconds_pastTheNewMaximum_exitsOne() throws Exception {
         assertRefusedAtValidation(boot("NX_SEARCH_PCI_SWEEP_SECONDS", "3601"), "NX_SEARCH_PCI_SWEEP_SECONDS");
+    }
+
+    // ── the test-only tenant reset route's bind check (nexus-0bl77, behavioural in nexus-vr8wk) ──────────
+
+    private static final String BIND_REFUSED = "event=tenant_reset_route_bind_refused";
+
+    /**
+     * A real boot with {@code NX_TEST_TENANT_RESET_ROUTE=1} on a non-loopback bind exits 1 with the refusal event,
+     * and never reaches the schema migration. A source-text check cannot tell this from a Main whose
+     * {@code System.exit(1)} was removed: the event would still be logged, the boot would carry on to open the pool
+     * and migrate, and only the missing exit makes this test red.
+     */
+    @Test
+    void theTenantResetRouteOnANonLoopbackBind_exitsOneBeforeThePoolOrTheMigration() throws Exception {
+        for (String bind : new String[] {"0.0.0.0", "10.1.2.3"}) {
+            Boot boot = bootWith(java.util.Map.of("NX_TEST_TENANT_RESET_ROUTE", "1", "NX_SERVICE_BIND", bind),
+                MIGRATION_START);
+
+            assertThat(boot.reachedMigration()).as("bind " + bind + " never reaches the migration:\n" + boot.output())
+                .isFalse();
+            assertThat(boot.exitCode()).as(boot.output()).isEqualTo(1);
+            assertThat(lines(boot, BIND_REFUSED)).as("exactly one refusal event:\n" + boot.output()).hasSize(1);
+            assertThat(lines(boot, BIND_REFUSED).get(0)).contains("NX_TEST_TENANT_RESET_ROUTE").contains(bind);
+        }
+    }
+
+    /** The controls: the flag on a loopback bind boots through to the migration, and a non-loopback bind
+     *  without the flag does too. A refusal that fired on either would make the test above vacuous. */
+    @Test
+    void theBindCheckLetsLoopbackWithTheFlag_andAnyBindWithoutIt_throughToTheMigration() throws Exception {
+        Boot loopback = bootWith(java.util.Map.of("NX_TEST_TENANT_RESET_ROUTE", "1", "NX_SERVICE_BIND", "127.0.0.1"),
+            MIGRATION_START);
+        assertThat(loopback.reachedMigration()).as(loopback.output()).isTrue();
+        assertThat(loopback.output()).doesNotContain(BIND_REFUSED);
+
+        Boot noFlag = bootWith(java.util.Map.of("NX_SERVICE_BIND", "0.0.0.0"), MIGRATION_START);
+        assertThat(noFlag.reachedMigration()).as(noFlag.output()).isTrue();
+        assertThat(noFlag.output()).doesNotContain(BIND_REFUSED);
     }
 }

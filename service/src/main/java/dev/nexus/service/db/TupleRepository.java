@@ -296,6 +296,20 @@ public final class TupleRepository {
         return waitRegistry;
     }
 
+    /** Test-only (nexus-vr8wk): runs on the waiting thread right after {@code rd}/{@code in}/{@code waitAny}
+     *  registers its wait and BEFORE the first query, so a test can land a tenant abort in that window. Null in
+     *  production. */
+    volatile Runnable testOnlyAfterRegister;
+    /** Test-only (nexus-vr8wk): runs at the top of every park-loop iteration, BEFORE the abort and deadline checks,
+     *  so a test can land a tenant abort in the same instant the wait's deadline passes. Null in production. */
+    volatile Runnable testOnlyAtParkLoopTop;
+
+    private static void runHook(Runnable hook) {
+        if (hook != null) {
+            hook.run();
+        }
+    }
+
     /** Production boot call: reads every setting via {@code System.getenv} directly. */
     public static TupleRepository fromEnv(TenantScope tenantScope, TemplateRegistry registry) {
         return new TupleRepository(tenantScope, registry,
@@ -867,6 +881,10 @@ public final class TupleRepository {
         // the first park is not lost (RDR-205 §Technical Design "Wake").
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
         try {
+            runHook(testOnlyAfterRegister);
+            if (waiter.aborted()) {
+                throw new TenantResetException(tenant);   // nexus-vr8wk: reset landed between register and first query
+            }
             List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since, null, order);
             if (!found.isEmpty()) {
                 return found;
@@ -875,6 +893,10 @@ public final class TupleRepository {
             try {
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
                 while (true) {
+                    runHook(testOnlyAtParkLoopTop);
+                    if (waiter.aborted()) {
+                        throw new TenantResetException(tenant);   // nexus-vr8wk: not even the deadline's final query
+                    }
                     if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
                         return queryOnce(tenant, subspace, pattern, n, since, null, order);
                     }
@@ -1465,6 +1487,10 @@ public final class TupleRepository {
         // contract rd/in already honour).
         TupleWaitRegistry.MultiWaiter waiter = waitRegistry.registerMulti(tenant, subspaces);
         try {
+            runHook(testOnlyAfterRegister);
+            if (waiter.aborted()) {
+                throw new TenantResetException(tenant);   // nexus-vr8wk: reset landed between register and first query
+            }
             List<WaitResult> found = queryEachOnceFenced(tenant, specs);
             if (!found.isEmpty()) {
                 return found;
@@ -1475,6 +1501,10 @@ public final class TupleRepository {
             try {
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
                 while (true) {
+                    runHook(testOnlyAtParkLoopTop);
+                    if (waiter.aborted()) {
+                        throw new TenantResetException(tenant);   // nexus-vr8wk: not even the deadline's final query
+                    }
                     if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
                         return queryEachOnceFenced(tenant, specs);
                     }
@@ -1597,6 +1627,10 @@ public final class TupleRepository {
         }
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
         try {
+            runHook(testOnlyAfterRegister);
+            if (waiter.aborted()) {
+                throw new TenantResetException(tenant);   // nexus-vr8wk: reset landed between register and first claim
+            }
             Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
             if (found.isPresent()) {
                 return found;
@@ -1605,6 +1639,10 @@ public final class TupleRepository {
             try {
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
                 while (true) {
+                    runHook(testOnlyAtParkLoopTop);
+                    if (waiter.aborted()) {
+                        throw new TenantResetException(tenant);   // nexus-vr8wk: not even the deadline's final claim
+                    }
                     if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
                         return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
                     }
