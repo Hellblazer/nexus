@@ -101,10 +101,14 @@ seconds combined — incidental, not the reason they belong here.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import signal
 import subprocess
 import time
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -219,6 +223,99 @@ def _env_without_lease_vars() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith(_LEASE_ENV_PREFIXES)}
 
 
+def _term_state_of_this_worker() -> str | None:
+    """How this process would pass SIGTERM to a child, or None when at the default.
+
+    build-lease_test.sh Test 4 failed in CI (5588beead) because its suite started with
+    TERM ignored or blocked. A child inherits both across exec, and the suites start from
+    this xdist worker, so an earlier test that left either in place is the candidate.
+    Windows has no signal mask, so it answers None there.
+    """
+    if os.name != "posix":
+        return None
+    found = []
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_IGN:
+        found.append("TERM ignored")
+    if signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
+        found.append("TERM blocked")
+    return ", ".join(found) or None
+
+
+@contextlib.contextmanager
+def _term_default_for_spawn() -> Iterator[None]:
+    """Hold TERM at its default and unblocked in this thread while a child is spawned.
+
+    A child inherits an ignored TERM and the spawning thread's mask across exec. The reset
+    is done here in the parent, not in a ``preexec_fn``, because a ``preexec_fn`` forces
+    the fork path that tests/_posix_spawn.py exists to avoid on macOS. Off the main thread
+    ``signal.signal`` raises ValueError, and the disposition is left as it is.
+    """
+    if os.name != "posix":
+        yield
+        return
+    before = signal.getsignal(signal.SIGTERM)
+    reset = False
+    if before is signal.SIG_IGN:
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            reset = True
+        except ValueError:
+            pass
+    mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if reset:
+            signal.signal(signal.SIGTERM, before)
+
+
+def _run_suite(path: Path, *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run one suite with TERM reset, naming a leaked TERM state in a warning first.
+
+    Suites that signal their own children (build-lease_test.sh, mvnw-leased_test.sh) test
+    the scripts, not whatever an earlier test in this worker left behind. Reported, not
+    failed: the suite runs with TERM reset either way, and the warning names the state for
+    whoever traces the test that left it (nexus-yqzpw).
+    """
+    if (leaked := _term_state_of_this_worker()) is not None:
+        warnings.warn(f"{path.name}: this pytest worker has {leaked}", stacklevel=2)
+    argv = ["bash", str(path)]
+    with _term_default_for_spawn():
+        proc = subprocess.Popen(
+            argv, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+        )
+    with proc:
+        try:
+            out, err = proc.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal dispositions and mask")
+def test_a_suite_starts_with_term_at_its_default_even_when_this_worker_leaked_it(tmp_path: Path) -> None:
+    """Positive control for _run_suite: a worker with TERM ignored AND blocked still starts a
+    suite that a TERM kills, and the leak is named in a warning. Without the reset the script
+    below survives its own TERM and prints 'survived' (the 5588beead shard 3 shape)."""
+    script = tmp_path / "self_term.sh"
+    script.write_text('kill -TERM $$\necho survived\n', encoding="utf-8")
+    before = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
+    try:
+        with pytest.warns(UserWarning, match="TERM ignored, TERM blocked"):
+            result = _run_suite(script, env=dict(os.environ))
+        assert _term_state_of_this_worker() == "TERM ignored, TERM blocked", "the spawn must restore the caller's state"
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
+        signal.signal(signal.SIGTERM, before)
+    assert result.returncode == -signal.SIGTERM, (result.returncode, result.stdout)
+    assert "survived" not in result.stdout
+    assert _term_state_of_this_worker() is None, "the control itself must not leak what it tests"
+
+
 class TestSuitesExist:
     """Non-vacuity for the wrapper itself: a suite whose path went stale
     (renamed, moved) must fail loud here, not be silently skipped."""
@@ -232,14 +329,7 @@ class TestSuitesAreGreen:
     @pytest.mark.parametrize("suite", SUITES, ids=lambda s: s.id)
     def test_suite_runs_clean(self, suite: _Suite) -> None:
         start = time.monotonic()
-        result = subprocess.run(
-            ["bash", str(suite.path)],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=_env_without_lease_vars(),
-        )
+        result = _run_suite(suite.path, env=_env_without_lease_vars())
         elapsed = time.monotonic() - start
 
         summary_re = re.compile(_SUMMARY_RE_TEMPLATE.format(name=re.escape(suite.id)))
@@ -301,9 +391,7 @@ class TestSuitesIgnoreAnInheritedLeaseRoot:
         env["NX_BUILD_LEASE_ROOT"] = str(shared)
         env["NX_SUITE_LEASE_WAIT"] = "1"
         path = REPO_ROOT / relpath
-        result = subprocess.run(
-            ["bash", str(path)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120, env=env
-        )
+        result = _run_suite(path, env=env)
         assert result.returncode == 0, (
             f"{path.name} failed with NX_BUILD_LEASE_ROOT exported\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"

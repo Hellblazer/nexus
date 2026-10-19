@@ -463,6 +463,50 @@ def _unreadable_cache(cache: Path) -> None:
     (cache / "ro").chmod(0o500)
 
 
+class TestForceRemoveOnEveryPlatform:
+    """Shapes Windows hands the handler, driven directly so they run on every host.
+
+    Windows rmtree has no fd walk: a directory it cannot list arrives as
+    ``os.scandir`` and is removed by one nested rmtree, a read-only file arrives
+    as ``os.unlink``. The read-only bit is the one mode Windows enforces.
+    """
+
+    def test_a_directory_that_could_not_be_listed_goes_by_a_nested_rmtree(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "d").mkdir(parents=True)
+        (cache / "d" / "f").write_text("x", encoding="utf-8")
+        (cache / "d" / "f").chmod(0o444)
+        installer._force_remove(os.scandir, str(cache / "d"), PermissionError(13, "denied"), _root=str(cache))
+        assert not (cache / "d").exists()
+        assert cache.is_dir(), "only the entry goes, not the root it sits in"
+
+    def test_a_read_only_file_is_unlinked_after_one_chmod(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        cache.mkdir()
+        (cache / "f").write_text("x", encoding="utf-8")
+        (cache / "f").chmod(0o444)
+        installer._force_remove(os.unlink, str(cache / "f"), PermissionError(13, "denied"), _root=str(cache))
+        assert not (cache / "f").exists()
+
+    def test_a_vanished_entry_is_not_an_error(self, tmp_path: Path) -> None:
+        installer._force_remove(os.unlink, str(tmp_path / "gone"), FileNotFoundError(2, "gone"))
+
+    def test_a_second_failure_on_the_same_path_propagates(self, tmp_path: Path) -> None:
+        refused = PermissionError(13, "denied")
+        with pytest.raises(PermissionError) as raised:
+            installer._force_remove(os.unlink, str(tmp_path / "f"), refused, _retried={str(tmp_path / "f")})
+        assert raised.value is refused
+
+    def test_a_read_only_tree_is_removed_by_remove_model_cache(self, tmp_path: Path) -> None:
+        cache = tmp_path / "nexus"
+        (cache / "m" / "onnx").mkdir(parents=True)
+        for name in ("model.onnx", "tokenizer.json"):
+            (cache / "m" / "onnx" / name).write_text("x", encoding="utf-8")
+            (cache / "m" / "onnx" / name).chmod(0o444)
+        assert installer._remove_model_cache(cache) is None
+        assert not cache.exists()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
 class TestAnUnreadableCacheEntryIsRemoved:
     def test_the_whole_cache_goes_and_its_parent_keeps_its_mode(self, tmp_path: Path) -> None:

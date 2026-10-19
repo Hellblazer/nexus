@@ -704,9 +704,13 @@ class Host:
 def remove_tree(path: Path) -> None:
     """Delete a build directory, never raising: a failure to clean up must not turn a
     finished build red. Clears the read-only bit first (git's object files carry it, and
-    Windows refuses to delete them otherwise)."""
+    Windows refuses to delete them otherwise). Only ``os.unlink`` and ``os.rmdir`` are
+    re-called: rmtree also hands over ``os.open``, ``os.scandir`` and ``os.lstat``, which
+    need more than a path on POSIX, and a TypeError would escape this handler."""
 
     def clear_and_retry(func: Callable[[str], object], name: str, _exc: BaseException) -> None:
+        if func not in (os.unlink, os.rmdir):
+            return
         try:
             os.chmod(name, stat.S_IWRITE)
             func(name)
