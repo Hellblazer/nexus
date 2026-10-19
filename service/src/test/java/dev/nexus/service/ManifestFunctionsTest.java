@@ -463,8 +463,7 @@ class ManifestFunctionsTest {
         // bead's scope). Bypass locally: drop the constraint, insert, then re-add
         // it NOT VALID (catalog-029-0's exact shape) so it is live again
         // (unvalidated) for every subsequent statement in this container.
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
         // The 32-character chash is the bytea's ASCII bytes, exactly as the raw chunk seed's text
         // literal is read into the bytea column (catalog-002-hygiene CHECK).
         DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
@@ -479,12 +478,9 @@ class ManifestFunctionsTest {
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
             .execute();
         // RDR-225: the foreign key is four columns (the chunk's model is part of its identity).
-        su.createStatement().execute(
-            "ALTER TABLE nexus.catalog_document_chunks " +
-            "ADD CONSTRAINT fk_catalog_chunks_chunk " +
-            "FOREIGN KEY (tenant_id, collection, chash, embedding_model) " +
-            "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) " +
-            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+            "collection", "chash", CHUNKS, "collection", "chash",
+            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
     }
 
     /**

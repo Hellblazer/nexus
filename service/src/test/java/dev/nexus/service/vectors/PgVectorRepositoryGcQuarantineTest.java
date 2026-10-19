@@ -195,8 +195,7 @@ class PgVectorRepositoryGcQuarantineTest {
             throws Exception {
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
-            conn.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropConstraint(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
         }
         if (collectionRegistered(tenant, collection)) {
             seedManifest(tenant, docId, chash, collection);
@@ -224,12 +223,9 @@ class PgVectorRepositoryGcQuarantineTest {
         }
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
-            conn.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.addFkNotValidComposite3(conn, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
     }
 

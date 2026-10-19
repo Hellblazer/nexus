@@ -1942,17 +1942,13 @@ class PgVectorRepositoryContractTest {
     private void seedManifestRowBypassingFk(String tenant, String docId, int position,
                                              String chash, String collection) throws SQLException {
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
         }
         seedManifestRow(tenant, docId, position, chash, collection);
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
-                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
     }
 
