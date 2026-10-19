@@ -605,6 +605,17 @@ def test_an_entry_whose_marker_is_empty_is_not_usable_and_is_repaired(cached: Pr
 #: peers racing to publish one absent entry in the test below
 _RACING_PEERS = 4
 
+#: Per-peer JVM option variables whose "Picked up ..." banner lands on stderr of every JVM the peer starts,
+#: the placement helper's included (GitHub's ubuntu images export JAVA_TOOL_OPTIONS). The pom must read the
+#: helper's exit code, never its output: peer 0 sees the banner on one variable, peer 1 on the other, peer 2
+#: on both, peer 3 on neither (nexus-mjudo review).
+_BANNER_ENVS: tuple[dict[str, str], ...] = (
+    {"JAVA_TOOL_OPTIONS": "-Dnx.probe=1"},
+    {"JDK_JAVA_OPTIONS": "-Dnx.probe=1"},
+    {"JAVA_TOOL_OPTIONS": "-Dnx.probe=1", "JDK_JAVA_OPTIONS": "-Dnx.probe=1"},
+    {},
+)
+
 
 def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Path) -> None:
     """Publication is a rename from a staging dir: a reader that sees <kind>-<hash> sees all of it."""
@@ -657,7 +668,9 @@ def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Pat
              f"-Dnexus.jooq.cache.dir={peer.cache}", f"-Dnexus.jooq.main.hash={a.hash['main']}",
              f"-Dnexus.jooq.producer={_PRODUCER}",
              "-Dnexus.jooq.main.skip=true", "-Djooq.version=3.20.11", "stamp-main"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=peer.root.parent) for peer in peers]
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=peer.root.parent,
+            env={k: v for k, v in os.environ.items() if k not in ("NX_JOOQ_CACHE", *_BANNER_ENVS[2])}
+                | _BANNER_ENVS[i % len(_BANNER_ENVS)]) for i, peer in enumerate(peers)]
         deadline = time.monotonic() + 120
         while not all((peer.root / "ready").is_file() for peer in peers):
             assert time.monotonic() < deadline and all(pr.poll() is None for pr in procs), \
@@ -679,9 +692,36 @@ def test_publishing_never_exposes_a_partial_entry(cached: Project, tmp_path: Pat
     # the reader: Ant's <move> merged into it file by file, or moved the usable entry aside for its own copy.
     placed = [o for o in outs if "jOOQ cache: published the main tree" in o]
     assert len(placed) == 1, f"{len(placed)} of {len(peers)} peers published the same absent entry:\n" + "\n".join(outs)
+    assert sum("Picked up" in o for o in outs) >= 3, "the JVM option banner never reached a peer: the check is vacuous"
     assert sum("the main tree was not published" in o for o in outs) == len(peers) - 1, outs
     assert (entry / "complete").is_file() and _sources(entry / "generated") == want
     assert [c.name for c in Path(cached.cache).iterdir() if c.name.startswith(".")] == [], "staging dirs left behind"
+
+
+def test_a_placement_helper_that_cannot_run_is_reported_as_that_not_as_a_usable_entry(cached: Project) -> None:
+    """The rename runs as a source-launcher program, which needs jdk.compiler. A JVM without it (or a failed
+    fork) exits non-zero with no verdict; the build must say the helper could not run, naming the cause class,
+    and not claim "the entry is usable already" (nexus-mjudo review)."""
+    a = cached.build()
+    entry = _entry(cached, "main", a.hash["main"])
+    shutil.rmtree(entry)
+    peer = _other_worktree(cached, "peer-nohelper")
+    shutil.copytree(cached.target, peer.target)
+    build = peer.root / "build.xml"
+    text = build.read_text(encoding="utf-8")
+    args = re.findall(r'<arg file="\$\{nexus\.jooq\.main\.stage\}"/>', text)
+    assert len(args) == 2, "the pom's two placement calls were not found in stamp-main: the forced failure would be vacuous"
+    # a JVM that does not have the compiler module: the source launcher refuses to start
+    build.write_text(text.replace(args[0], '<jvmarg value="--limit-modules=java.base"/>' + args[0]), encoding="utf-8")
+    done = peer.ant("stamp-main", props={
+        "nexus.jooq.main.hash": a.hash["main"], "nexus.jooq.producer": _PRODUCER,
+        "nexus.jooq.main.skip": "true", "nexus.jooq.cache.dir": peer.cache})
+    out = done.stdout + done.stderr
+    assert done.returncode == 0, out
+    assert "placement helper could not run" in out, out
+    assert "usable already" not in out, "a helper that could not run was reported as a refused placement:\n" + out
+    assert not entry.exists(), "nothing could have placed the entry"
+    assert [c.name for c in Path(peer.cache).iterdir() if c.name.startswith(".")] == [], "staging dirs left behind"
 
 
 def test_cache_off_touches_no_directory(proj: Project) -> None:

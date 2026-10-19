@@ -1188,10 +1188,11 @@
                                       failonerror="false" if:true="${nexus.jooq.main.stage.whole}"/>
                                 <copy file="${nexus.jooq.stamp.dir}/main.cache-complete" tofile="${nexus.jooq.main.stage}/complete"
                                       failonerror="false" if:true="${nexus.jooq.main.stage.whole}"/>
-                                <!-- nexus-mjudo: the entry is placed by an atomic rename that FAILS when the entry exists (rename(2) onto a
-                                     non-empty directory; MoveFileEx on Windows), so of peers that stage one key at the same moment exactly one
-                                     places it and the rest leave it untouched. Ant's <move> cannot do this: a directory moved onto an existing
-                                     one is merged into it file by file, each file deleted and then renamed over, so a peer that lost the race
+                                <!-- nexus-mjudo: the entry is placed by an atomic rename that FAILS when the entry exists and is NON-EMPTY (rename(2)
+                                     onto a non-empty directory; MoveFileEx on Windows). An EMPTY directory at the entry is replaced on POSIX,
+                                     but no step here ever creates an empty entry: an entry only appears by the rename of a whole staged copy. So
+                                     of peers that stage one key at the same moment exactly one places it and the rest leave it untouched.
+                                     Ant's <move> cannot do this: a directory moved onto an existing one is merged into it file by file, each file deleted and then renamed over, so a peer that lost the race
                                      rewrote the live entry in place and a reader saw it without its marker or half its sources. The rename runs
                                      as a single-file Java program in a forked JVM (about a third of a second, paid only by a publication). -->
                                 <condition property="nexus.jooq.main.ready" value="true" else="false">
@@ -1202,7 +1203,7 @@
                                     </and>
                                 </condition>
                                 <echo file="${nexus.jooq.stamp.dir}/JooqCacheRename.java" if:true="${nexus.jooq.main.ready}"
-                                      message="public class JooqCacheRename { public static void main(String[] a) { boolean placed; try { java.nio.file.Files.move(java.nio.file.Path.of(a[0]), java.nio.file.Path.of(a[1]), java.nio.file.StandardCopyOption.ATOMIC_MOVE); placed = true; } catch (Exception e) { placed = false; } System.out.print(placed); } }"/>
+                                      message="public class JooqCacheRename { public static void main(String[] a) { int rc; try { java.nio.file.Files.move(java.nio.file.Path.of(a[0]), java.nio.file.Path.of(a[1]), java.nio.file.StandardCopyOption.ATOMIC_MOVE); rc = 0; } catch (Exception e) { rc = 3; } System.exit(rc); } }"/>
                                 <!-- A -Dnexus.jooq.regenerate=true run replaces the entry on purpose: what is there goes aside first (a rename to a
                                      name nobody else uses, so Ant's <move> is a plain rename here). -->
                                 <condition property="nexus.jooq.main.clear" value="true" else="false">
@@ -1215,18 +1216,18 @@
                                 <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.stage}.old" failonerror="false" quiet="true"
                                       if:true="${nexus.jooq.main.clear}"/>
                                 <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
-                                      outputproperty="nexus.jooq.main.placed" if:true="${nexus.jooq.main.ready}">
+                                      resultproperty="nexus.jooq.main.placed.rc" if:true="${nexus.jooq.main.ready}">
                                     <arg file="${nexus.jooq.main.stage}"/>
                                     <arg file="${nexus.jooq.main.entry}"/>
                                 </java>
-                                <!-- Refused: the entry exists. A usable one is a peer's publication and stays as it is. An unusable one (torn, an
-                                     empty marker, no sources) goes aside and the placement is tried once more. Two runs repairing one unusable
+                                <!-- Refused (exit 3; any other exit, or none, is a helper that could not run): the entry exists and is non-empty.
+                                     A usable one is a peer's publication and stays as it is. An unusable one (torn, an empty marker, no sources) goes aside and the placement is tried once more. Two runs repairing one unusable
                                      entry at the same moment can still move each other's placement aside: a reader then finds no entry for an
                                      instant, never a partial one, since nothing here writes inside a live entry. -->
                                 <condition property="nexus.jooq.main.repair" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.main.ready}"/>
-                                        <not><equals arg1="${nexus.jooq.main.placed}" arg2="true"/></not>
+                                        <equals arg1="${nexus.jooq.main.placed.rc}" arg2="3"/>
                                         <not>
                                             <and>
                                                 <available file="${nexus.jooq.main.entry}/complete"/>
@@ -1243,21 +1244,54 @@
                                 <move file="${nexus.jooq.main.entry}" tofile="${nexus.jooq.main.stage}.torn" failonerror="false" quiet="true"
                                       if:true="${nexus.jooq.main.repair}"/>
                                 <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
-                                      outputproperty="nexus.jooq.main.replaced" if:true="${nexus.jooq.main.repair}">
+                                      resultproperty="nexus.jooq.main.replaced.rc" if:true="${nexus.jooq.main.repair}">
                                     <arg file="${nexus.jooq.main.stage}"/>
                                     <arg file="${nexus.jooq.main.entry}"/>
                                 </java>
                                 <condition property="nexus.jooq.main.swap" value="true" else="false">
                                     <or>
-                                        <equals arg1="${nexus.jooq.main.placed}" arg2="true"/>
-                                        <equals arg1="${nexus.jooq.main.replaced}" arg2="true"/>
+                                        <equals arg1="${nexus.jooq.main.placed.rc}" arg2="0"/>
+                                        <equals arg1="${nexus.jooq.main.replaced.rc}" arg2="0"/>
                                     </or>
+                                </condition>
+                                <!-- A helper that could not run (a failed fork, a JVM without jdk.compiler, which the source launcher needs) exits
+                                     with neither verdict, and is said to be that, apart from a refused placement. -->
+                                <condition property="nexus.jooq.main.helperfail" value="true" else="false">
+                                    <or>
+                                        <and>
+                                            <istrue value="${nexus.jooq.main.ready}"/>
+                                            <not>
+                                                <or>
+                                                    <equals arg1="${nexus.jooq.main.placed.rc}" arg2="0"/>
+                                                    <equals arg1="${nexus.jooq.main.placed.rc}" arg2="3"/>
+                                                </or>
+                                            </not>
+                                        </and>
+                                        <and>
+                                            <istrue value="${nexus.jooq.main.repair}"/>
+                                            <not>
+                                                <or>
+                                                    <equals arg1="${nexus.jooq.main.replaced.rc}" arg2="0"/>
+                                                    <equals arg1="${nexus.jooq.main.replaced.rc}" arg2="3"/>
+                                                </or>
+                                            </not>
+                                        </and>
+                                    </or>
+                                </condition>
+                                <condition property="nexus.jooq.main.refused" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.main.publish}"/>
+                                        <isfalse value="${nexus.jooq.main.swap}"/>
+                                        <isfalse value="${nexus.jooq.main.helperfail}"/>
+                                    </and>
                                 </condition>
                                 <delete dir="${nexus.jooq.main.stage}" quiet="true" if:true="${nexus.jooq.main.publish}"/>
                                 <delete dir="${nexus.jooq.main.stage}.old" quiet="true" if:true="${nexus.jooq.main.publish}"/>
                                 <delete dir="${nexus.jooq.main.stage}.torn" quiet="true" if:true="${nexus.jooq.main.publish}"/>
                                 <echo level="info" if:true="${nexus.jooq.main.swap}" message="jOOQ cache: published the main tree as ${nexus.jooq.main.entry}"/>
-                                <echo level="warning" if:true="${nexus.jooq.main.publish}" unless:true="${nexus.jooq.main.swap}"
+                                <echo level="warning" if:true="${nexus.jooq.main.helperfail}"
+                                      message="jOOQ cache: the main tree was not published: the placement helper could not run (a failed fork, or a JVM without jdk.compiler); the build goes on without it"/>
+                                <echo level="warning" if:true="${nexus.jooq.main.refused}"
                                       message="jOOQ cache: the main tree was not published (the entry is usable already, or the staged copy was incomplete)"/>
                             </target>
                         </configuration>
@@ -1392,10 +1426,11 @@
                                       failonerror="false" if:true="${nexus.jooq.test.stage.whole}"/>
                                 <copy file="${nexus.jooq.stamp.dir}/test.cache-complete" tofile="${nexus.jooq.test.stage}/complete"
                                       failonerror="false" if:true="${nexus.jooq.test.stage.whole}"/>
-                                <!-- nexus-mjudo: the entry is placed by an atomic rename that FAILS when the entry exists (rename(2) onto a
-                                     non-empty directory; MoveFileEx on Windows), so of peers that stage one key at the same moment exactly one
-                                     places it and the rest leave it untouched. Ant's <move> cannot do this: a directory moved onto an existing
-                                     one is merged into it file by file, each file deleted and then renamed over, so a peer that lost the race
+                                <!-- nexus-mjudo: the entry is placed by an atomic rename that FAILS when the entry exists and is NON-EMPTY (rename(2)
+                                     onto a non-empty directory; MoveFileEx on Windows). An EMPTY directory at the entry is replaced on POSIX,
+                                     but no step here ever creates an empty entry: an entry only appears by the rename of a whole staged copy. So
+                                     of peers that stage one key at the same moment exactly one places it and the rest leave it untouched.
+                                     Ant's <move> cannot do this: a directory moved onto an existing one is merged into it file by file, each file deleted and then renamed over, so a peer that lost the race
                                      rewrote the live entry in place and a reader saw it without its marker or half its sources. The rename runs
                                      as a single-file Java program in a forked JVM (about a third of a second, paid only by a publication). -->
                                 <condition property="nexus.jooq.test.ready" value="true" else="false">
@@ -1406,7 +1441,7 @@
                                     </and>
                                 </condition>
                                 <echo file="${nexus.jooq.stamp.dir}/JooqCacheRename.java" if:true="${nexus.jooq.test.ready}"
-                                      message="public class JooqCacheRename { public static void main(String[] a) { boolean placed; try { java.nio.file.Files.move(java.nio.file.Path.of(a[0]), java.nio.file.Path.of(a[1]), java.nio.file.StandardCopyOption.ATOMIC_MOVE); placed = true; } catch (Exception e) { placed = false; } System.out.print(placed); } }"/>
+                                      message="public class JooqCacheRename { public static void main(String[] a) { int rc; try { java.nio.file.Files.move(java.nio.file.Path.of(a[0]), java.nio.file.Path.of(a[1]), java.nio.file.StandardCopyOption.ATOMIC_MOVE); rc = 0; } catch (Exception e) { rc = 3; } System.exit(rc); } }"/>
                                 <!-- A -Dnexus.jooq.regenerate=true run replaces the entry on purpose: what is there goes aside first (a rename to a
                                      name nobody else uses, so Ant's <move> is a plain rename here). -->
                                 <condition property="nexus.jooq.test.clear" value="true" else="false">
@@ -1419,18 +1454,18 @@
                                 <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.stage}.old" failonerror="false" quiet="true"
                                       if:true="${nexus.jooq.test.clear}"/>
                                 <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
-                                      outputproperty="nexus.jooq.test.placed" if:true="${nexus.jooq.test.ready}">
+                                      resultproperty="nexus.jooq.test.placed.rc" if:true="${nexus.jooq.test.ready}">
                                     <arg file="${nexus.jooq.test.stage}"/>
                                     <arg file="${nexus.jooq.test.entry}"/>
                                 </java>
-                                <!-- Refused: the entry exists. A usable one is a peer's publication and stays as it is. An unusable one (torn, an
-                                     empty marker, no sources) goes aside and the placement is tried once more. Two runs repairing one unusable
+                                <!-- Refused (exit 3; any other exit, or none, is a helper that could not run): the entry exists and is non-empty.
+                                     A usable one is a peer's publication and stays as it is. An unusable one (torn, an empty marker, no sources) goes aside and the placement is tried once more. Two runs repairing one unusable
                                      entry at the same moment can still move each other's placement aside: a reader then finds no entry for an
                                      instant, never a partial one, since nothing here writes inside a live entry. -->
                                 <condition property="nexus.jooq.test.repair" value="true" else="false">
                                     <and>
                                         <istrue value="${nexus.jooq.test.ready}"/>
-                                        <not><equals arg1="${nexus.jooq.test.placed}" arg2="true"/></not>
+                                        <equals arg1="${nexus.jooq.test.placed.rc}" arg2="3"/>
                                         <not>
                                             <and>
                                                 <available file="${nexus.jooq.test.entry}/complete"/>
@@ -1447,21 +1482,54 @@
                                 <move file="${nexus.jooq.test.entry}" tofile="${nexus.jooq.test.stage}.torn" failonerror="false" quiet="true"
                                       if:true="${nexus.jooq.test.repair}"/>
                                 <java sourcefile="${nexus.jooq.stamp.dir}/JooqCacheRename.java" fork="true" failonerror="false"
-                                      outputproperty="nexus.jooq.test.replaced" if:true="${nexus.jooq.test.repair}">
+                                      resultproperty="nexus.jooq.test.replaced.rc" if:true="${nexus.jooq.test.repair}">
                                     <arg file="${nexus.jooq.test.stage}"/>
                                     <arg file="${nexus.jooq.test.entry}"/>
                                 </java>
                                 <condition property="nexus.jooq.test.swap" value="true" else="false">
                                     <or>
-                                        <equals arg1="${nexus.jooq.test.placed}" arg2="true"/>
-                                        <equals arg1="${nexus.jooq.test.replaced}" arg2="true"/>
+                                        <equals arg1="${nexus.jooq.test.placed.rc}" arg2="0"/>
+                                        <equals arg1="${nexus.jooq.test.replaced.rc}" arg2="0"/>
                                     </or>
+                                </condition>
+                                <!-- A helper that could not run (a failed fork, a JVM without jdk.compiler, which the source launcher needs) exits
+                                     with neither verdict, and is said to be that, apart from a refused placement. -->
+                                <condition property="nexus.jooq.test.helperfail" value="true" else="false">
+                                    <or>
+                                        <and>
+                                            <istrue value="${nexus.jooq.test.ready}"/>
+                                            <not>
+                                                <or>
+                                                    <equals arg1="${nexus.jooq.test.placed.rc}" arg2="0"/>
+                                                    <equals arg1="${nexus.jooq.test.placed.rc}" arg2="3"/>
+                                                </or>
+                                            </not>
+                                        </and>
+                                        <and>
+                                            <istrue value="${nexus.jooq.test.repair}"/>
+                                            <not>
+                                                <or>
+                                                    <equals arg1="${nexus.jooq.test.replaced.rc}" arg2="0"/>
+                                                    <equals arg1="${nexus.jooq.test.replaced.rc}" arg2="3"/>
+                                                </or>
+                                            </not>
+                                        </and>
+                                    </or>
+                                </condition>
+                                <condition property="nexus.jooq.test.refused" value="true" else="false">
+                                    <and>
+                                        <istrue value="${nexus.jooq.test.publish}"/>
+                                        <isfalse value="${nexus.jooq.test.swap}"/>
+                                        <isfalse value="${nexus.jooq.test.helperfail}"/>
+                                    </and>
                                 </condition>
                                 <delete dir="${nexus.jooq.test.stage}" quiet="true" if:true="${nexus.jooq.test.publish}"/>
                                 <delete dir="${nexus.jooq.test.stage}.old" quiet="true" if:true="${nexus.jooq.test.publish}"/>
                                 <delete dir="${nexus.jooq.test.stage}.torn" quiet="true" if:true="${nexus.jooq.test.publish}"/>
                                 <echo level="info" if:true="${nexus.jooq.test.swap}" message="jOOQ cache: published the test tree as ${nexus.jooq.test.entry}"/>
-                                <echo level="warning" if:true="${nexus.jooq.test.publish}" unless:true="${nexus.jooq.test.swap}"
+                                <echo level="warning" if:true="${nexus.jooq.test.helperfail}"
+                                      message="jOOQ cache: the test tree was not published: the placement helper could not run (a failed fork, or a JVM without jdk.compiler); the build goes on without it"/>
+                                <echo level="warning" if:true="${nexus.jooq.test.refused}"
                                       message="jOOQ cache: the test tree was not published (the entry is usable already, or the staged copy was incomplete)"/>
                             </target>
                         </configuration>

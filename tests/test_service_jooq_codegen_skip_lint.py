@@ -368,17 +368,27 @@ def test_publishing_is_best_effort_and_stages_beside_the_entry_marker_last(kind:
     rename = text.index(f'<java sourcefile="${{nexus.jooq.stamp.dir}}/JooqCacheRename.java"')
     assert text.index("<echo file=") < probe < tree_copy < meta < marker < rename, (
         f"{kind}: stamp, writability probe, tree copy, meta, the completeness marker, then the rename")
-    # nexus-mjudo: the entry is placed only by a rename that fails when it exists. Ant's <move> onto an existing
-    # directory merges into it file by file, so racing peers rewrote a live entry under its readers.
+    # nexus-mjudo: the entry is placed only by a rename that fails when the entry exists and is NON-EMPTY (an empty
+    # directory is replaced on POSIX; no step creates an empty entry). Ant's <move> onto an existing directory
+    # merges into it file by file, so racing peers rewrote a live entry under its readers.
     assert not [t for t in _open_tags(text, "move") if f'tofile="{entry}"' in t], (
         f"{kind}: an Ant <move> onto the entry merges into a live one; place it with the exclusive rename")
     placements = re.findall(r'<java sourcefile="\$\{nexus\.jooq\.stamp\.dir\}/JooqCacheRename\.java".*?</java>', text, re.DOTALL)
     assert len(placements) == 2, f"{kind}: the placement and the one retry after an unusable entry is moved aside"
     for call in placements:
         assert re.search(rf'<arg file="{re.escape(stage)}"/>\s*<arg file="{re.escape(entry)}"/>', call), call
+        # the verdict is the helper's exit code: a stdout/stderr property would swallow a JVM option banner
+        assert "outputproperty" not in call and "errorproperty" not in call and "resultproperty=" in call, (
+            f"{kind}: the placement result must be read from the exit code, not from the forked JVM's output: {call}")
     helper = re.search(r'<echo file="\$\{nexus\.jooq\.stamp\.dir\}/JooqCacheRename\.java"[^>]*message="([^"]*)"', text)
     assert helper and "StandardCopyOption.ATOMIC_MOVE" in helper.group(1) and "REPLACE_EXISTING" not in helper.group(1), (
         f"{kind}: the rename must be atomic and must not replace an existing entry")
+    assert "System.exit(rc)" in helper.group(1) and "rc = 3" in helper.group(1) and "rc = 0" in helper.group(1), (
+        f"{kind}: the helper must exit 0 placed, 3 refused, so any other exit is 'could not run'")
+    assert re.search(rf'<echo level="warning" if:true="\$\{{nexus\.jooq\.{kind}\.helperfail\}}"[^>]*placement helper could not run', text), (
+        f"{kind}: a helper that could not run must be said apart from a refused placement")
+    assert "NON-EMPTY" in _target_text(_stamp_execution(root, EXEC_OF[kind])), (
+        f"{kind}: the pom must say the placement fails when the entry is NON-EMPTY, not merely when it exists")
     assert text.index(f'<condition property="nexus.jooq.{kind}.stage.whole"') < marker, "the staged tree is verified before it is marked complete"
     whole = re.search(rf'<condition property="nexus\.jooq\.{kind}\.stage\.whole".*?</condition>', text, re.DOTALL).group()
     assert f'<equals arg1="${{nexus.jooq.{kind}.stage.hash}}" arg2="${{nexus.jooq.{kind}.tree.hash}}"/>' in whole, (
