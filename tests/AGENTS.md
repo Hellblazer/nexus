@@ -411,6 +411,17 @@ migration-process classes' own walks; nexus-7xfh7) and `dedicated` (a container 
 `template0` database has no event trigger, so `acquireEmptyDatabase` installs the probe into each one
 inside a `DO` block, which the count does not see.
 
+Which Java test classes may build their own schema is a checked table, not a habit
+(nexus-0ty8z). A schema-only class takes a clone of the migrated template: `PgContainerHelper.start()`,
+or `startMigratedByOwner()` for production's ownership shape (a non-superuser owner of every relation,
+cloned from a second template built once per fork). A class that calls `startEmptyDatabase`,
+`startDedicated` or `newContainer` is listed in
+`service/src/test/resources/db-start-classification.tsv` with a kind and a reason, and
+`DbStartClassificationGateTest` fails on an unlisted caller, a stale row or a kind that does not fit the
+call. The first `PgContainerHelper.applyProductSchema` on an untouched clone is a no-op, because the
+template already holds the walk, its runAlways grants and the `nexus_test` objects; a second call, an empty
+database or `-Dnexus.test.pg.shared=false` runs the changelog.
+
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
 The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and

@@ -4,7 +4,6 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import dev.nexus.service.db.SchemaMigrator;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
@@ -48,7 +47,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * with 4-column foreign keys onto the parent, and the composite outbound foreign key onto catalog_collections.
  *
  * <p><b>The migrating role is a non-superuser owner</b> (production's nexus_admin shape), through a
- * dedicated container, so the SECURITY DEFINER function runs as an owner who is subject to row-level
+ * clone of the owner-migrated template (nexus-0ty8z), so the SECURITY DEFINER function runs as an owner who is subject to row-level
  * security and holds no BYPASSRLS. A superuser-migrated template would let a definer function bypass
  * everything and prove nothing about production (vectors-029's header makes the same point).
  *
@@ -59,25 +58,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TenantPartitionFunctionsIntegrationTest {
 
-    private static final String ADMIN_ROLE = "nexus_admin_p225";
-    private static final String ADMIN_PASS = "nexus_admin_p225_pass";
+    private static final String ADMIN_ROLE = PgContainerHelper.TEMPLATE_OWNER;
+    private static final String ADMIN_PASS = PgContainerHelper.TEMPLATE_OWNER_PASSWORD;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource adminDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startEmptyDatabase();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
-        }
+        pg = PgContainerHelper.startMigratedByOwner();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(ADMIN_ROLE);
         cfg.setPassword(ADMIN_PASS);
         cfg.setMaximumPoolSize(3);
         adminDs = new HikariDataSource(cfg);
-        SchemaMigrator.migrate(adminDs);
         try (Connection a = adminDs.getConnection()) {
             var ctx = dsl(a);
             // The walk (vectors-030-1) has attached its trigger and partitioned the live tables; this class tests the

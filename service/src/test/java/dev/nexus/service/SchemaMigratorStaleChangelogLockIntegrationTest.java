@@ -45,7 +45,9 @@ class SchemaMigratorStaleChangelogLockIntegrationTest {
 
     @BeforeAll
     void bootstrap() throws Exception {
-        pg = PgContainerHelper.startEmptyDatabase();
+        // A clone of the migrated template is the "completed first walk" the lock cases below need: the
+        // lock table exists and every later walk is the no-op re-walk a restarted engine performs.
+        pg = PgContainerHelper.start();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(pg.getUsername());
@@ -53,9 +55,6 @@ class SchemaMigratorStaleChangelogLockIntegrationTest {
         cfg.setMaximumPoolSize(2);
         cfg.setAutoCommit(true);
         ds = new HikariDataSource(cfg);
-        // A completed first walk, so the lock table exists and later walks are the no-op re-walk a
-        // restarted engine performs.
-        SchemaMigrator.migrate(ds);
     }
 
     @AfterAll

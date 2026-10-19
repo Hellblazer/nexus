@@ -130,6 +130,14 @@ public final class PgContainerHelper {
     /** Password for {@link #SVC_USERNAME}. */
     public static final String SVC_PASSWORD = "nexus_svc_pass";
 
+    /**
+     * The non-superuser schema owner of the owner-migrated template ({@link #startMigratedByOwner()}), the
+     * production {@code nexus_admin} shape: NOSUPERUSER, NOBYPASSRLS, owner of every relation the walk made.
+     * A cluster-wide role, created once per fork, shared by every class that takes that template.
+     */
+    public static final String TEMPLATE_OWNER = "nexus_admin_tmpl";
+    public static final String TEMPLATE_OWNER_PASSWORD = "nexus_admin_tmpl_pass";
+
     private PgContainerHelper() {}
 
     /**
@@ -426,6 +434,60 @@ public final class PgContainerHelper {
         }
     }
 
+    /**
+     * A database already migrated to HEAD BY {@link #TEMPLATE_OWNER}, cloned from the per-fork owner-migrated
+     * template (nexus-0ty8z), in place of {@link #startEmptyDatabase}'s bootstrap-then-{@code SchemaMigrator.migrate}.
+     * For a class whose subject is not the walk but needs production's ownership shape: a SECURITY DEFINER function
+     * that must run as a role subject to row-level security, a leaf only its owner may alter. A class that asserts
+     * the provisioning or the walk itself (ownership from scratch, a changeset count, a part-way state) stays on
+     * {@link #startEmptyDatabase}; {@code EmptyDatabaseClassificationGateTest} records which is which.
+     *
+     * <p>The clone has the owner's relations and grants but not the owner's database-level privilege
+     * ({@code CREATE DATABASE ... TEMPLATE} does not copy a database ACL), so the owner provisioning is re-run
+     * here, once, for every caller: it is idempotent and costs a handful of statements, and a second
+     * {@code SchemaMigrator.migrate} by the owner finds the database as a restarted engine would. Connect as
+     * {@link #TEMPLATE_OWNER}/{@link #TEMPLATE_OWNER_PASSWORD}.
+     *
+     * <p>With {@code -Dnexus.test.pg.shared=false} this boots a dedicated container and does the bootstrap and
+     * the walk itself, so the opt-out still gives the class the same database.
+     */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startMigratedByOwner() {
+        if ("false".equals(System.getProperty(SHARED_PROPERTY))) {
+            PostgreSQLContainer<?> c = startDedicated();
+            try (Connection su = c.createConnection("")) {
+                bootstrapNonSuperuserOwner(su, TEMPLATE_OWNER, TEMPLATE_OWNER_PASSWORD);
+                var cfg = new HikariConfig();
+                cfg.setJdbcUrl(c.getJdbcUrl());
+                cfg.setUsername(TEMPLATE_OWNER);
+                cfg.setPassword(TEMPLATE_OWNER_PASSWORD);
+                cfg.setMaximumPoolSize(2);
+                try (HikariDataSource owner = new HikariDataSource(cfg)) {
+                    dev.nexus.service.db.SchemaMigrator.migrate(owner);
+                    try (Connection oc = owner.getConnection()) {
+                        installTestObjects(oc);
+                    }
+                }
+                return c;
+            } catch (Exception e) {
+                c.stop();
+                throw new IllegalStateException("nexus-0ty8z dedicated owner-migrated database failed: " + e.getMessage(), e);
+            }
+        }
+        try {
+            PostgreSQLContainer<?> c = SharedCluster.acquireOwnedDatabase();
+            try (Connection su = c.createConnection("")) {
+                bootstrapNonSuperuserOwner(su, TEMPLATE_OWNER, TEMPLATE_OWNER_PASSWORD);
+            } catch (Exception e) {
+                c.stop();
+                throw new IllegalStateException("nexus-0ty8z owner provisioning on the clone failed: " + e.getMessage(), e);
+            }
+            return c;
+        } catch (SQLException e) {
+            throw new IllegalStateException("nexus-0ty8z owner-migrated acquire failed: " + e.getMessage(), e);
+        }
+    }
+
     /** {@link #startDedicated()} with a larger tmpfs and memory limit (see the sized {@link #newContainer}). */
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDedicated(String tmpfsSize, long memoryBytes) {
@@ -478,6 +540,16 @@ public final class PgContainerHelper {
      * @param su superuser connection to run the migration under
      */
     public static void applyProductSchema(Connection su) throws Exception {
+        // nexus-0ty8z: the first call on an untouched clone of the shared template has nothing to apply. The
+        // template is migrated to HEAD (every runAlways grant applied) and carries the nexus_test objects, and a
+        // clone copies all of that. Running the changelog anyway replayed ~150 runAlways statements per class
+        // (a no-op by construction) for no assertion. Only the FIRST call is skipped, and only on a clone made
+        // by SharedCluster.acquireDatabase(): a class that changed the schema and calls this again, an empty
+        // database, a dedicated container, or -Dnexus.test.pg.shared=false all run the changelog as before.
+        if (SharedCluster.takePristine(su.getCatalog())) {
+            su.setAutoCommit(true);
+            return;
+        }
         Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
         Liquibase liquibase = new Liquibase(
             "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);

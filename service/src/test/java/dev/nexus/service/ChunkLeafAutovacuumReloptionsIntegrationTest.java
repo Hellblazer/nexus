@@ -47,16 +47,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * parent and the model partitions carry none; {@link #theParentRefusesStorageParametersItself} pins that premise
  * rather than trusting the docs. {@code taxonomy_centroids} is deliberately untouched.
  *
- * <p>An empty database on the shared cluster (the event trigger is database-local), migrated by a non-superuser owner (production's nexus_admin shape): the leaves are
- * owned by that role, and a superuser-migrated cluster would prove nothing about who may alter them. The
+ * <p>A clone of the owner-migrated template (nexus-0ty8z; the event trigger is database-local), migrated by a non-superuser owner (production's nexus_admin shape): the leaves are
+ * owned by that role, and a superuser-migrated cluster would prove nothing about who may alter them. The walk is the
+ * template's; this class tests the state it leaves and the later boots, which {@code SchemaMigrator.migrate} below runs. The
  * "touches only what needs it" claim is measured with an event trigger that logs every {@code ALTER TABLE} on a
  * chunks leaf, with a control arm (a stripped leaf IS logged) so a trigger that never fires cannot pass.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChunkLeafAutovacuumReloptionsIntegrationTest {
 
-    private static final String ADMIN = "nexus_admin_s9wav";
-    private static final String ADMIN_PASS = "nexus_admin_s9wav_pass";
+    private static final String ADMIN = PgContainerHelper.TEMPLATE_OWNER;
+    private static final String ADMIN_PASS = PgContainerHelper.TEMPLATE_OWNER_PASSWORD;
 
     /** Sam's ruling, 2026-10-18 (T2 nexus/4lnn1-decisions-2026-10-18). Written out again here on purpose. */
     private static final Set<String> FOUR = new TreeSet<>(List.of(
@@ -76,17 +77,13 @@ class ChunkLeafAutovacuumReloptionsIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startEmptyDatabase();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASS);
-        }
+        pg = PgContainerHelper.startMigratedByOwner();
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(ADMIN);
         cfg.setPassword(ADMIN_PASS);
         cfg.setMaximumPoolSize(3);
         adminDs = new HikariDataSource(cfg);
-        SchemaMigrator.migrate(adminDs);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // SECURITY DEFINER: the migrating role may not insert into this table of the superuser's.

@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.SchemaMigrator;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -18,6 +21,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
@@ -47,9 +52,10 @@ import java.util.function.BooleanSupplier;
  *       full, current list and each entry's specific reason.</li>
  *   <li><b>Liquibase's own {@code update()} is idempotent</b> against an
  *       already-migrated database (its {@code DATABASECHANGELOG} table -- itself part
- *       of the template clone -- makes every changeset a skip). A class's own
- *       {@code startAll()} re-running the master changelog against a freshly cloned,
- *       already-migrated database costs a changelog-table scan, not real DDL.</li>
+ *       of the template clone -- makes every run-once changeset a skip). The runAlways
+ *       changesets (the grants blocks, self-heals) are NOT skipped: each replay re-issues
+ *       its statements, which is why {@link PgContainerHelper#applyProductSchema} treats the
+ *       first call on an untouched clone as a no-op (nexus-0ty8z) instead of replaying them.</li>
  *   <li><b>Advisory locks and {@code ALTER DATABASE ... SET} are PostgreSQL
  *       database-scoped</b>, not cluster-scoped ({@code pg_locks}/{@code pg_advisory_*}
  *       key on the connected database's OID) -- sweep-gate tests
@@ -102,7 +108,27 @@ final class SharedCluster {
      *  connections" rule for {@code CREATE DATABASE ... TEMPLATE}. */
     private static final String TEMPLATE_DB = "nexus_template";
 
+    /** The owner-migrated twin of {@link #TEMPLATE_DB} (nexus-0ty8z): the same product schema walked by the
+     *  non-superuser {@link PgContainerHelper#TEMPLATE_OWNER}, so every relation is owned by it, as
+     *  production's nexus_admin owns them. Built on first use, then only ever a clone source. */
+    private static final String OWNED_TEMPLATE_DB = "nexus_template_owned";
+
+    /** How a clone is made: the server's default strategy (WAL_LOG), which logs every page of the template
+     *  (about 7.5 MB) for each of ~430 clones a run. {@code STRATEGY FILE_COPY} writes about 56 times less WAL
+     *  per clone but checkpoints twice per CREATE DATABASE and added about 1 min 17 s to a 2-fork main run
+     *  (measured 2026-10-19, nexus-0ty8z); the data files are copied either way. Left at the default. */
+    private static final String CLONE_CLAUSE = "TEMPLATE \"" + TEMPLATE_DB + "\"";
+    private static final String OWNED_CLONE_CLAUSE = "TEMPLATE \"" + OWNED_TEMPLATE_DB + "\"";
+
     private static volatile PostgreSQLContainer<?> CONTAINER;
+    private static volatile boolean OWNED_TEMPLATE_READY;
+    private static final Object OWNED_TEMPLATE_LOCK = new Object();
+
+    /** Clones of {@link #TEMPLATE_DB} that nothing has touched yet (nexus-0ty8z). A clone starts at the
+     *  template's state: master changelog at HEAD, test objects installed, every runAlways grant already
+     *  applied. {@link #takePristine} hands that fact to the FIRST {@code applyProductSchema} on it, which
+     *  then has nothing to apply; any later call runs the changelog for real. */
+    private static final Set<String> PRISTINE_CLONES = ConcurrentHashMap.newKeySet();
     private static final Object BOOTSTRAP_LOCK = new Object();
     private static final AtomicInteger DB_COUNTER = new AtomicInteger();
 
@@ -134,7 +160,7 @@ final class SharedCluster {
      *  A future class that needs both must re-issue its {@code ALTER ROLE} after its
      *  final acquire. */
     static SharedDatabaseHandle acquireDatabase() throws SQLException {
-        return createDatabase("TEMPLATE \"" + TEMPLATE_DB + "\"", false);
+        return createDatabase(CLONE_CLAUSE, false);
     }
 
     /** Allocate a fresh, EMPTY per-class database on this fork's shared cluster
@@ -157,6 +183,26 @@ final class SharedCluster {
      *  whose assertion is "this role does not exist yet" stays dedicated. */
     static SharedDatabaseHandle acquireEmptyDatabase(String... exclusiveRoles) throws SQLException {
         return createDatabase("TEMPLATE template0", true, exclusiveRoles);
+    }
+
+    /** Allocate a fresh per-class database cloned from the OWNER-migrated template (nexus-0ty8z): the product
+     *  schema at HEAD, walked by {@link PgContainerHelper#TEMPLATE_OWNER} (NOSUPERUSER, NOBYPASSRLS, owner of
+     *  every relation it created), plus the {@code nexus_test} objects installed by that owner. For a class
+     *  whose subject is NOT the walk but needs production's ownership shape (a SECURITY DEFINER function
+     *  that must run as a role subject to row-level security, a leaf only its owner may alter).
+     *
+     *  <p>The template is built once per fork, on first call, so a fork that never asks pays nothing.
+     *  Database-level privileges are not copied by {@code CREATE DATABASE ... TEMPLATE} (the owner's
+     *  {@code GRANT CREATE ON DATABASE} is on the template, not the clone), so the caller re-runs the owner
+     *  provisioning on the clone; {@link PgContainerHelper#startMigratedByOwner()} does. */
+    static SharedDatabaseHandle acquireOwnedDatabase() throws SQLException {
+        ensureOwnedTemplate();
+        return createDatabase(OWNED_CLONE_CLAUSE, false);
+    }
+
+    /** True once, for the first caller on a clone nobody has handed out to a changelog run yet. */
+    static boolean takePristine(String dbName) {
+        return PRISTINE_CLONES.remove(dbName);
     }
 
     /** The shared cluster's container (booting and migrating the template on first use). */
@@ -204,6 +250,9 @@ final class SharedCluster {
             installDdlProbe(c, dbName);
         }
         DdlCounts.noteDatabase(dbName, DdlCounts.callerClass(), empty, startLsn);
+        if (templateClause.equals(CLONE_CLAUSE)) {
+            PRISTINE_CLONES.add(dbName);
+        }
         for (String role : exclusiveRoles) {
             EXCLUSIVE_HOLDERS.put(role, holder);
         }
@@ -347,6 +396,87 @@ final class SharedCluster {
         return root.getClass().getSimpleName() + ": " + root.getMessage();
     }
 
+    /** The one statement that makes an empty, default-template database (a clone source). */
+    private static void createBareDatabase(Connection su, String name) throws SQLException {
+        try (var st = su.createStatement()) {
+            st.execute("CREATE DATABASE \"" + name + "\"");
+        }
+    }
+
+    /**
+     * Build {@link #OWNED_TEMPLATE_DB} once per fork: bootstrap the non-superuser owner, walk the product
+     * changelog as that owner through {@link SchemaMigrator} (production's path), and install the
+     * {@code nexus_test} objects as that owner (it owns {@code databasechangelog}, so the superuser must not
+     * create it first; see {@link PgContainerHelper#installTestObjects}). The pool is closed and its backends
+     * awaited gone before the first clone, because {@code CREATE DATABASE ... TEMPLATE} refuses a source that
+     * has another session.
+     */
+    private static void ensureOwnedTemplate() throws SQLException {
+        if (OWNED_TEMPLATE_READY) {
+            return;
+        }
+        PostgreSQLContainer<?> c = ensureBootstrapped();
+        synchronized (OWNED_TEMPLATE_LOCK) {
+            if (OWNED_TEMPLATE_READY) {
+                return;
+            }
+            long start = System.nanoTime();
+            try (Connection admin = controlConnection(c)) {
+                admin.setAutoCommit(true);
+                createBareDatabase(admin, OWNED_TEMPLATE_DB);
+            }
+            try {
+                try (Connection su = rawConnect(c, OWNED_TEMPLATE_DB)) {
+                    su.setAutoCommit(true);
+                    PgContainerHelper.bootstrapNonSuperuserOwner(su, PgContainerHelper.TEMPLATE_OWNER,
+                        PgContainerHelper.TEMPLATE_OWNER_PASSWORD);
+                }
+                var cfg = new HikariConfig();
+                cfg.setJdbcUrl("jdbc:postgresql://" + c.getHost() + ":"
+                    + c.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT) + "/" + OWNED_TEMPLATE_DB + "?sslmode=disable");
+                cfg.setUsername(PgContainerHelper.TEMPLATE_OWNER);
+                cfg.setPassword(PgContainerHelper.TEMPLATE_OWNER_PASSWORD);
+                cfg.setMaximumPoolSize(2);
+                try (HikariDataSource owner = new HikariDataSource(cfg)) {
+                    SchemaMigrator.migrate(owner);
+                    try (Connection oc = owner.getConnection()) {
+                        PgContainerHelper.installTestObjects(oc);
+                    }
+                }
+                awaitNoSessions(c, OWNED_TEMPLATE_DB);
+            } catch (Exception e) {
+                throw new SQLException("nexus-0ty8z owner-migrated template build failed", e);
+            }
+            OWNED_TEMPLATE_READY = true;
+            LOG.info("nexus-0ty8z owner-migrated template built for this fork in {}ms",
+                (System.nanoTime() - start) / 1_000_000);
+        }
+    }
+
+    /** Wait (bounded) for every backend on {@code dbName} to be gone: a pool's close returns before its backends exit. */
+    private static void awaitNoSessions(PostgreSQLContainer<?> c, String dbName) throws SQLException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        try (Connection admin = controlConnection(c)) {
+            var datname = DSL.field(DSL.name("datname"), String.class);
+            while (true) {
+                int open = DSL.using(admin, SQLDialect.POSTGRES).fetchCount(
+                    DSL.table(DSL.name("pg_stat_activity")), datname.eq(dbName));
+                if (open == 0) {
+                    return;
+                }
+                if (System.nanoTime() - deadline >= 0) {
+                    throw new SQLException("nexus-0ty8z: " + open + " session(s) still on " + dbName + " after 15 s");
+                }
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new SQLException("interrupted waiting for " + dbName + " to go idle", ie);
+                }
+            }
+        }
+    }
+
     private static PostgreSQLContainer<?> ensureBootstrapped() throws SQLException {
         PostgreSQLContainer<?> c = CONTAINER;
         if (c != null) {
@@ -369,26 +499,24 @@ final class SharedCluster {
             try {
                 try (Connection su = rawConnect(fresh, PgContainerHelper.DATABASE)) {
                     su.setAutoCommit(true);
-                    try (var st = su.createStatement()) {
-                        st.execute("CREATE DATABASE \"" + TEMPLATE_DB + "\"");
-                        // nexus_svc is NOT pre-created here (nexus-v80f2, 2026-08-15, critic
-                        // finding S2 -- was previously a redundant `CREATE ROLE ... IF NOT
-                        // EXISTS` without NOINHERIT). role-001-nexus-svc.xml is documented as
-                        // the FIRST include in the master changelog, so its own idempotent
-                        // CREATE ROLE (which DOES carry NOINHERIT) is guaranteed to run before
-                        // any later changeset that needs nexus_svc to exist -- this pre-create
-                        // was an optimization only (per the removed comment: "not a correctness
-                        // requirement"), never load-bearing. Keeping it meant two independent
-                        // CREATE ROLE literals had to be hand-kept in lockstep; the shared-
-                        // cluster copy silently omitting NOINHERIT is exactly the drift class
-                        // that produced this finding -- since this pre-create ran first, it
-                        // won the IF-NOT-EXISTS race and role-001's NOINHERIT clause never
-                        // executed against this template at all. Removing the duplicate
-                        // makes role-001-nexus-svc.xml the SOLE source of truth for every
-                        // shared-cluster test: dropping NOINHERIT from its CREATE ROLE now
-                        // flips CatalogSchemaLiquibaseTest#nexusSvcRoleIsNoinherit red, where
-                        // before it would have had no effect on this path whatsoever.
-                    }
+                    createBareDatabase(su, TEMPLATE_DB);
+                    // nexus_svc is NOT pre-created here (nexus-v80f2, 2026-08-15, critic
+                    // finding S2 -- was previously a redundant `CREATE ROLE ... IF NOT
+                    // EXISTS` without NOINHERIT). role-001-nexus-svc.xml is documented as
+                    // the FIRST include in the master changelog, so its own idempotent
+                    // CREATE ROLE (which DOES carry NOINHERIT) is guaranteed to run before
+                    // any later changeset that needs nexus_svc to exist -- this pre-create
+                    // was an optimization only (per the removed comment: "not a correctness
+                    // requirement"), never load-bearing. Keeping it meant two independent
+                    // CREATE ROLE literals had to be hand-kept in lockstep; the shared-
+                    // cluster copy silently omitting NOINHERIT is exactly the drift class
+                    // that produced this finding -- since this pre-create ran first, it
+                    // won the IF-NOT-EXISTS race and role-001's NOINHERIT clause never
+                    // executed against this template at all. Removing the duplicate
+                    // makes role-001-nexus-svc.xml the SOLE source of truth for every
+                    // shared-cluster test: dropping NOINHERIT from its CREATE ROLE now
+                    // flips CatalogSchemaLiquibaseTest#nexusSvcRoleIsNoinherit red, where
+                    // before it would have had no effect on this path whatsoever.
                 }
 
                 // Migrate TEMPLATE_DB itself, once. Connect directly to it (not the
@@ -402,6 +530,10 @@ final class SharedCluster {
                         DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
                             new JdbcConnection(tsu)));
                     lb.update(new Contexts());
+                    // nexus-0ty8z: the nexus_test objects every class installs after the master walk
+                    // (PgContainerHelper#applyProductSchema) are part of the template, so a clone that asks for
+                    // them again finds them done. They are the same superuser-run changelog a class would run.
+                    PgContainerHelper.installTestObjects(tsu);
                     // nexus-sz651: DDL and WAL logged before this line are the template's
                     // migration; after it, the clones and the tests' own. Best effort: a missing
                     // mark leaves the run unmeasured (the ratchet refuses it), never fails the boot.

@@ -82,8 +82,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PciReconcilerIntegrationTest {
 
-    static final String ADMIN_ROLE = "pcirec_admin";
-    static final String ADMIN_PASS = "pcirec_admin_pass";
+    static final String ADMIN_ROLE = PgContainerHelper.TEMPLATE_OWNER;
+    static final String ADMIN_PASS = PgContainerHelper.TEMPLATE_OWNER_PASSWORD;
     static final String M384 = "minilm-l6-v2-384";
     static final String NONCE = "b1c2d3e4";
     static final int B = 200;
@@ -103,17 +103,13 @@ class PciReconcilerIntegrationTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.startEmptyDatabase();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
-        }
+        pg = PgContainerHelper.startMigratedByOwner();
         var adminCfg = new HikariConfig();
         adminCfg.setJdbcUrl(pg.getJdbcUrl());
         adminCfg.setUsername(ADMIN_ROLE);
         adminCfg.setPassword(ADMIN_PASS);
         adminCfg.setMaximumPoolSize(2);
         adminDs = new HikariDataSource(adminCfg);
-        SchemaMigrator.migrate(adminDs);
         var svcCfg = new HikariConfig();
         svcCfg.setJdbcUrl(pg.getJdbcUrl());
         svcCfg.setUsername(PgContainerHelper.SVC_USERNAME);
