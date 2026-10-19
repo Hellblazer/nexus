@@ -2374,10 +2374,28 @@ def _owner_pgdata_refusal(d: Path, root: Path) -> str | None:
         return "a symlink"
     if d.exists() and d.resolve().parent != root.resolve():
         return f"outside {root}"
+    if (d / _NESTED_PGDATA).is_symlink():
+        # postmaster.pid is read through it and the postmaster it names is signalled.
+        return f"holding a symlinked {_NESTED_PGDATA}/"
     return None
 
 
+#: ``pg_provision.provision(config_dir)`` puts the cluster at ``<config_dir>/postgres``. A test that
+#: provisions on a recorded dir (nexus-0ajjm) leaves its postmaster.pid one level below the dir the
+#: record names.
+_NESTED_PGDATA = "postgres"
+
+
+def _owner_pgdata_candidates(d: Path) -> list[Path]:
+    """The directories under a recorded cluster dir that can hold a ``postmaster.pid``: *d* itself (a cluster
+    ``initdb`` made there) and ``<d>/postgres`` (one ``provision(d)`` made)."""
+    nested = d / _NESTED_PGDATA
+    return [d, nested] if nested.is_dir() else [d]
+
+
 def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
+    from nexus.daemon.service_registry import pid_running  # noqa: PLC0415 — deferred: keep this module's import light
+
     untrusted = _owner_record_untrusted(rec, result)
     if untrusted is None or untrusted:
         return
@@ -2428,11 +2446,14 @@ def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
         pid = child.get("pid") if isinstance(child, dict) else None
         if isinstance(pid, int) and pid > 0:
             engines.append((pid, child.get("cmdline", "") or ""))
-    postmasters: list[tuple[int, Path]] = []
+    postmasters: list[tuple[int, Path]] = []  # (postmaster pid, the pgdata its pid file sits in)
+    pm_dir: dict[Path, Path] = {}  # that pgdata -> the recorded dir that holds it
     for d in dirs:
-        pm = _read_postmaster_pid(str(d))
-        if pm is not None:
-            postmasters.append((pm, d))
+        for pgdata in _owner_pgdata_candidates(d):
+            pm = _read_postmaster_pid(str(pgdata))
+            if pm is not None:
+                postmasters.append((pm, pgdata))
+                pm_dir[pgdata] = d
 
     # Identify EVERY leg before signalling any (as _reap_cluster does).
     engine_status = {pid: _identify_leg(pid, cmd) for pid, cmd in engines}
@@ -2453,12 +2474,26 @@ def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
     for pid, _cmd in engines:
         if engine_status[pid] == "ok":
             _kill_engine_leg(pid)
-    for pid, d in postmasters:
+    for pid, pgdata in postmasters:
         if pm_status[pid] == "ok":
-            _kill_postmaster_leg(pid, d)
+            _kill_postmaster_leg(pid, pgdata)
+    # A postmaster that survived its stop keeps its dir: removing the tree under it is the hazard this sweep
+    # exists to avoid (and it would take a nested <dir>/postgres with it). The record stays for the next sweep.
+    survivors = {pm_dir[pgdata]: pid for pid, pgdata in postmasters if pid_running(pid)}
     for d in dirs:
+        if d in survivors:
+            continue
         shutil.rmtree(d, ignore_errors=True)
         result.reaped.append(str(d))
+    if survivors:
+        result.errors.append(str(rec))
+        warnings.warn(
+            f"nexus test substrate sweep: postmaster pid(s) {sorted(set(survivors.values()))} "
+            f"still running after a stop attempt -- leaving {sorted(str(d) for d in survivors)} "
+            f"and {rec} in place",
+            stacklevel=2,
+        )
+        return
     rec.unlink(missing_ok=True)
 
 

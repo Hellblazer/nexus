@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import pg_data_tempdir, stop_and_remove_cluster
 from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     CREDENTIALS_FILENAME,
@@ -128,15 +129,12 @@ def _role_attr(bins: PgBinaries, port: int, os_user: str, rolname: str, attr: st
     )
 
 
-def _stop_pg(bins: PgBinaries, pgdata: Path) -> None:
-    """Stop the cluster (for fixture teardown)."""
-    try:
-        subprocess.run(
-            [str(bins.pg_ctl), "-D", str(pgdata), "-m", "immediate", "stop"],
-            capture_output=True, check=False, timeout=10,
-        )
-    except Exception:  # noqa: BLE001 — teardown must not reraise
-        pass
+def _remove_cluster(bins: PgBinaries, config_dir: Path) -> None:
+    """Fixture teardown: stop ``<config_dir>/postgres`` and remove ``config_dir``.
+
+    ``config_dir`` comes from ``pg_data_tempdir`` (the run's tmpfs root), which pytest does not
+    clean up, and provision() nests the cluster one level below it (nexus-0ajjm)."""
+    stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
 
 
 # ── Module-scoped fixtures ─────────────────────────────────────────────────────
@@ -148,7 +146,7 @@ def bins() -> PgBinaries:
 
 
 @pytest.fixture(scope="module")
-def provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Path]:
+def provisioned(bins: PgBinaries) -> tuple[ProvisionResult, Path]:
     """Provision a hermetic cluster in a tmp directory (module-scoped).
 
     The cluster is torn down after all tests in this module complete.
@@ -157,28 +155,26 @@ def provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Pa
 
     Yields ``(result, config_dir)``.
     """
-    config_dir = tmp_path_factory.mktemp("nexus_provision_test")
-    os_user = bootstrap_superuser()
-
-    # Override NEXUS_CONFIG_DIR so provision() uses the tmp dir.
-    old_env = os.environ.get("NEXUS_CONFIG_DIR")
-    os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+    config_dir = Path(pg_data_tempdir("nexus_provision_pg_"))
     try:
-        result = provision(config_dir, force_new_port=True)
+        # Override NEXUS_CONFIG_DIR so provision() uses the tmp dir.
+        old_env = os.environ.get("NEXUS_CONFIG_DIR")
+        os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+        try:
+            result = provision(config_dir, force_new_port=True)
+        finally:
+            if old_env is None:
+                os.environ.pop("NEXUS_CONFIG_DIR", None)
+            else:
+                os.environ["NEXUS_CONFIG_DIR"] = old_env
+
+        # nexus-ja4pq: the cluster demands passwords; the raw psql calls in this
+        # module present the superuser's recorded one through PGPASSFILE.
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
     finally:
-        if old_env is None:
-            os.environ.pop("NEXUS_CONFIG_DIR", None)
-        else:
-            os.environ["NEXUS_CONFIG_DIR"] = old_env
-
-    # nexus-ja4pq: the cluster demands passwords; the raw psql calls in this
-    # module present the superuser's recorded one through PGPASSFILE.
-    with superuser_pgpass(config_dir):
-        yield result, config_dir
-
-    # Teardown: stop the cluster.
-    pgdata = config_dir / "postgres"
-    _stop_pg(bins, pgdata)
+        # Teardown: stop the cluster and remove its dir, even when provision() raised.
+        _remove_cluster(bins, config_dir)
 
 
 # ── Test 1: cluster, db, and roles created ────────────────────────────────────
@@ -1185,23 +1181,25 @@ class TestFreshProvisionCreatesVectorDirectly:
     pytestmark = pytest.mark.no_service_jar
 
     @pytest.fixture(scope="class")
-    def provisioned(self, bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Path]:
+    def provisioned(self, bins: PgBinaries) -> tuple[ProvisionResult, Path]:
         """Shadows the module-scoped ``provisioned`` fixture for every test
         in this class — same shape, but this class's OWN cluster, touched
         by nothing except the fresh provision() call itself."""
-        config_dir = tmp_path_factory.mktemp("nexus_provision_test_fresh")
-        old_env = os.environ.get("NEXUS_CONFIG_DIR")
-        os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+        config_dir = Path(pg_data_tempdir("nexus_provision_fresh_pg_"))
         try:
-            result = provision(config_dir, force_new_port=True)
+            old_env = os.environ.get("NEXUS_CONFIG_DIR")
+            os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+            try:
+                result = provision(config_dir, force_new_port=True)
+            finally:
+                if old_env is None:
+                    os.environ.pop("NEXUS_CONFIG_DIR", None)
+                else:
+                    os.environ["NEXUS_CONFIG_DIR"] = old_env
+            with superuser_pgpass(config_dir):
+                yield result, config_dir
         finally:
-            if old_env is None:
-                os.environ.pop("NEXUS_CONFIG_DIR", None)
-            else:
-                os.environ["NEXUS_CONFIG_DIR"] = old_env
-        with superuser_pgpass(config_dir):
-            yield result, config_dir
-        _stop_pg(bins, config_dir / "postgres")
+            _remove_cluster(bins, config_dir)
 
     def test_vector_is_owned_by_os_user_after_fresh_provision(self, provisioned, bins):
         result, _ = provisioned
@@ -1723,18 +1721,19 @@ def _psql_as(bins: PgBinaries, port: int, user: str, password: str, db: str, sql
 
 
 @pytest.fixture(scope="module")
-def e2e_provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Path]:
+def e2e_provisioned(bins: PgBinaries) -> tuple[ProvisionResult, Path]:
     """Separate hermetic cluster for the end-to-end test (module-scoped).
 
     This fixture provisions its own cluster so the DDL changes in the end-to-end
     test do not interfere with the role-attribute / credentials tests above.
     """
-    config_dir = tmp_path_factory.mktemp("nexus_e2e_test")
-    result = provision(config_dir, force_new_port=True)
-    with superuser_pgpass(config_dir):
-        yield result, config_dir
-    pgdata = config_dir / "postgres"
-    _stop_pg(bins, pgdata)
+    config_dir = Path(pg_data_tempdir("nexus_e2e_pg_"))
+    try:
+        result = provision(config_dir, force_new_port=True)
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
+    finally:
+        _remove_cluster(bins, config_dir)
 
 
 class TestEndToEndProvisionMigrateDML:
@@ -1826,18 +1825,19 @@ class TestEndToEndProvisionMigrateDML:
 
 
 @pytest.fixture(scope="module")
-def grant_proof_cluster(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Path]:
+def grant_proof_cluster(bins: PgBinaries) -> tuple[ProvisionResult, Path]:
     """Hermetic cluster used ONLY for the grant-revocation proof.
 
     Separate fixture so the revoke/regrant cycle does not disturb the other
     module-scoped clusters.
     """
-    config_dir = tmp_path_factory.mktemp("nexus_grant_proof")
-    result = provision(config_dir, force_new_port=True)
-    with superuser_pgpass(config_dir):
-        yield result, config_dir
-    pgdata = config_dir / "postgres"
-    _stop_pg(bins, pgdata)
+    config_dir = Path(pg_data_tempdir("nexus_grant_pg_"))
+    try:
+        result = provision(config_dir, force_new_port=True)
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
+    finally:
+        _remove_cluster(bins, config_dir)
 
 
 class TestPublicSchemaGrantIsLoadBearing:

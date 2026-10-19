@@ -4,7 +4,7 @@
 # mkdtemp writes its data and WAL to the CI host's disk instead of the run's tmpfs root; every file with an
 # initdb / pg_ctl_start site is either proven to use the helper, or listed here with the reason it cannot.
 # The tables may only shrink: tests/_ddl_cluster_sites.py::NOT_A_CLUSTER_CEILING and DISK_REQUIRED_CEILING
-# pin today's counts. Every disk_required reason names the bead that drains it.
+# pin today's counts (9 and 0). Every disk_required reason names the bead that drains it.
 
 # The file names initdb, pg_ctl_start, _init_cluster or provision() but never runs a postmaster: no data dir exists to place.
 [not_a_cluster]
@@ -18,15 +18,9 @@
 "tests/db/test_pg_provision_root_guard.py" = "provision(config_dir=tmp_path) is stopped by a faked root-user guard or a tripwire before bootstrap_superuser; no initdb or postmaster runs"
 "tests/test_smart_app_control.py" = "provision(config_dir=tmp_path) is refused by a faked Smart App Control probe before the bundle is touched; no initdb or postmaster runs"
 
-# Real clusters that stay on disk. Reason shared by the provision()-driven group:
-#   pg_provision.provision(config_dir) puts the cluster at <config_dir>/postgres, one level under the directory
-#   the test supplies, and writes credentials beside it. The owner-record sweep reads postmaster.pid only at the
-#   top of a recorded dir, so recording config_dir would let a crash sweep rmtree it under a live orphan
-#   postmaster. These move once the sweep understands a nested pgdata (nexus-0ajjm, tests/_engine_substrate.py).
-#   provision() on a pg_data_tempdir() dir is NOT the way out: the lint rejects it until nexus-0ajjm lands.
+# Real clusters that stay on disk. Empty since nexus-0ajjm: the five provision()-driven files (test_pg_provision,
+# test_pg_provision_ca3_bundle, test_pg_bundle_relocation, test_pg_scram_auth and the storage-service pg_monitor
+# backfill test) take their config_dir from pg_data_tempdir(), because the owner-record sweep now reads the nested
+# <dir>/postgres/postmaster.pid. DISK_REQUIRED_CEILING in tests/_ddl_cluster_sites.py is 0: an entry here is a
+# decision to put a cluster on the CI host's disk, made on purpose, in a diff a reviewer reads.
 [disk_required]
-"tests/db/test_pg_provision.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"
-"tests/db/test_pg_provision_ca3_bundle.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"
-"tests/db/test_pg_bundle_relocation.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested); the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"
-"tests/db/test_pg_scram_auth.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the tests re-provision the same config_dir; the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path"
-"tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py" = "provision(config_dir) puts pgdata at <config_dir>/postgres (nested) and the supervisor under test reads config_dir; the owner-record sweep cannot reap a nested pgdata (drained by nexus-0ajjm), so config_dir stays on tmp_path_factory"

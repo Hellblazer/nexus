@@ -33,10 +33,13 @@ on tmpfs N, on disk M" summary). :func:`data_dir_uses` finds every ``initdb`` / 
 ``pg_ctl_start`` and ``provision(<dir>)`` call (also through ``from m import x as y``) and traces its data-dir
 argument back to ``tests._child_process.pg_data_tempdir``; an argv it cannot read (splat, ``-Dx`` / ``--pgdata=x``,
 shell string, a variable argv in a file that starts a cluster) is itself a use to list. ``provision(<dir>)`` nests the
-cluster at ``<dir>/postgres``, so a helper-made ``<dir>`` is rejected (the crash sweep cannot reap a nested pgdata,
-nexus-0ajjm) and any other ``<dir>`` must be listed. :func:`provenance_problems` is what
+cluster at ``<dir>/postgres``; the crash sweep reads that nested ``postmaster.pid`` (nexus-0ajjm), so ``<dir>`` itself
+must be the helper's result (a traced use, like an initdb data dir), a join under it is rejected, and any other
+``<dir>`` must be listed. A ``provision(x)`` whose ``x`` is a parameter, or unpacked from one, re-provisions a dir
+another function made, and is accepted in a file that makes one through the helper. :func:`provenance_problems` is what
 ``tests/test_ddl_uncounted_clusters_lint.py`` asserts is empty. The files that do not (or cannot) use the helper are
-listed WITH A REASON in ``tests/pg_data_dir_exceptions.toml``, whose two tables have ceilings and may only shrink.
+listed WITH A REASON in ``tests/pg_data_dir_exceptions.toml``, whose two tables have ceilings and may only shrink
+(``disk_required`` is empty and its ceiling 0 since nexus-0ajjm).
 :func:`docker_pg_problems` checks that a ``docker run`` of a postgres image mounts its data dir as tmpfs. What none of
 this scans is itemised in the lint test's docstring.
 """
@@ -142,12 +145,16 @@ _SUBPROCESS_CALLS = frozenset({
     "run", "Popen", "check_call", "check_output", "call", "create_subprocess_exec", "create_subprocess_shell",
 })
 
-#: Ceilings on the exceptions table: it may only shrink. ``disk_required`` is the five nested-pgdata
-#: ``provision()`` files that nexus-0ajjm (teach the owner-record sweep a nested ``postmaster.pid``)
-#: drains; ``not_a_cluster`` is the files that name initdb / ``provision`` but never run a postmaster.
-#: Raising either number is a decision to make on purpose, in a diff a reviewer reads.
+#: Ceilings on the exceptions table: it may only shrink. ``disk_required`` held the five nested-pgdata
+#: ``provision()`` files until nexus-0ajjm taught the owner-record sweep a nested ``postmaster.pid`` and moved them
+#: to the helper; it is empty. ``not_a_cluster`` is the files that name initdb / ``provision`` but never run a
+#: postmaster. Raising either number is a decision to make on purpose, in a diff a reviewer reads.
 NOT_A_CLUSTER_CEILING = 9
-DISK_REQUIRED_CEILING = 5
+DISK_REQUIRED_CEILING = 0
+
+#: Names pytest hands a test as a directory: a ``provision()`` on one is a new cluster on disk, never a dir a
+#: fixture made through the helper.
+_PYTEST_DIR_FIXTURES = frozenset({"tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory"})
 
 #: A bead id: every ``disk_required`` reason names the follow-up that drains it.
 _BEAD_ID = re.compile(r"\bnexus-[0-9a-z]{4,}\b")
@@ -155,8 +162,8 @@ _BEAD_ID = re.compile(r"\bnexus-[0-9a-z]{4,}\b")
 #: The ``DataDirUse.kind`` values. ``init_cluster`` and ``pg_ctl_start`` are calls; ``initdb``,
 #: ``pg_ctl_start_argv`` and ``postgres_argv`` are literal argv lists with a ``-D DIR`` (or
 #: ``--pgdata DIR``); ``provision`` is the product's ``provision(config_dir)``, which nests the cluster at
-#: ``<config_dir>/postgres``; ``opaque_argv`` is an initdb / ``pg_ctl start`` / ``postgres`` argv whose data
-#: dir cannot be read from it (splat, ``-Dx`` / ``--pgdata=x`` attached, shell string, no ``-D``);
+#: ``<config_dir>/postgres`` (the owner-record sweep reads that nested pid file, nexus-0ajjm); ``opaque_argv`` is an
+#: initdb / ``pg_ctl start`` / ``postgres`` argv whose data dir cannot be read from it (splat, ``-Dx`` / ``--pgdata=x`` attached, shell string, no ``-D``);
 #: ``unknown_argv`` is a subprocess call whose argv is not a literal list, seen only in files that start a
 #: cluster.
 USE_KINDS: tuple[str, ...] = (
@@ -175,8 +182,12 @@ class DataDirUse:
     line: int
     expr: str
     from_helper: bool
-    #: ``provision`` only: the directory handed in is (or contains) the helper's result, a nested pgdata.
+    #: ``provision`` only: the directory handed in is built UNDER the helper's result (``Path(h()) / "cfg"``), a
+    #: pgdata nested deeper than the recorded dir, which the owner-record sweep does not read.
     nests_helper: bool = False
+    #: ``provision`` only: the directory is a parameter, or unpacked from one (a fixture's yield), so the call
+    #: re-provisions a dir another function made. It is not a new cluster and is not counted as a traced use.
+    handed_in: bool = False
 
 
 def _call_name(call: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
@@ -201,7 +212,8 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
 @functools.lru_cache(maxsize=8192)
 def _scope_assignments(scope: ast.AST) -> dict[str, list[ast.expr | None]]:
     """name -> every value assigned to it directly in *scope* (not in nested defs); ``None`` marks an
-    assignment whose value is not a single expression (tuple unpacking, ``for``/``with`` targets, ``+=``).
+    assignment whose value is not a single expression (``for``/``with`` targets, ``+=``, unpacking a literal tuple);
+    unpacking any other value binds each name to ``value[i]``.
     Read-only: the result is cached per scope node."""
     out: dict[str, list[ast.expr | None]] = {}
 
@@ -209,8 +221,13 @@ def _scope_assignments(scope: ast.AST) -> dict[str, list[ast.expr | None]]:
         if isinstance(target, ast.Name):
             out.setdefault(target.id, []).append(value)
         elif isinstance(target, (ast.Tuple, ast.List)):
-            for elt in target.elts:
-                bind(elt, None)
+            for i, elt in enumerate(target.elts):
+                # `a, b = fixture_value` binds each name to an element of it; a literal tuple on the right,
+                # a `for` and a `with` target stay unknown.
+                if value is not None and not isinstance(value, (ast.Tuple, ast.List)):
+                    bind(elt, ast.Subscript(value=value, slice=ast.Constant(i), ctx=ast.Load()))
+                else:
+                    bind(elt, None)
         elif isinstance(target, ast.Starred):
             bind(target.value, None)
 
@@ -275,14 +292,42 @@ def _from_helper(
     return False
 
 
+def _handed_in(
+    expr: ast.expr | None, scopes: list[ast.AST], aliases: dict[str, str], seen: frozenset[str] = frozenset(),
+) -> bool:
+    """True when *expr* is a bare name or attribute chain (through ``str``/``Path`` and subscripts) rooted at a
+    parameter of the use's function or module-level scope, or at a name bound only to such a chain: a dir some other
+    function made, handed in. A pytest dir fixture (``tmp_path``), a ``/`` join, an f-string, a call, a ``for``/``with``
+    target and anything unknown are all False."""
+    while True:
+        if isinstance(expr, ast.Call) and _call_name(expr, aliases) in _PATH_WRAPPERS and len(expr.args) == 1 and not expr.keywords:
+            expr = expr.args[0]
+        elif isinstance(expr, (ast.Attribute, ast.Subscript)):
+            expr = expr.value
+        else:
+            break
+    if not isinstance(expr, ast.Name) or expr.id in _PYTEST_DIR_FIXTURES or expr.id in seen:
+        return False
+    for scope in scopes:  # innermost first
+        values = _scope_assignments(scope).get(expr.id)
+        if values:  # a reassigned parameter is judged by what it is reassigned to
+            return all(v is not None and _handed_in(v, scopes, aliases, seen | {expr.id}) for v in values)
+        if expr.id in _params(scope):
+            return True
+    return False
+
+
 def _mentions_helper(expr: ast.expr | None, scopes: list[ast.AST], aliases: dict[str, str]) -> bool:
-    """True when *expr* is the helper's result or is built from a call to it (``Path(h()) / "cfg"``)."""
+    """True when *expr* is the helper's result or is built from it: a call to it inside the expression
+    (``Path(h()) / "cfg"``) or a name bound to its result (``d = h(); Path(d) / "cfg"``)."""
     if expr is None:
         return False
     if _from_helper(expr, scopes, aliases):
         return True
     return any(
-        isinstance(n, ast.Call) and _call_name(n, aliases) == DATA_DIR_HELPER for n in ast.walk(expr)
+        (isinstance(n, ast.Call) and _call_name(n, aliases) == DATA_DIR_HELPER)
+        or (isinstance(n, ast.Name) and _from_helper(n, scopes, aliases))
+        for n in ast.walk(expr)
     )
 
 
@@ -414,7 +459,8 @@ def data_dir_uses(repo: Path = REPO) -> list[DataDirUse]:
                     ))
                 elif name == "provision" and (node.args or "config_dir" in kw):
                     cfg = node.args[0] if node.args else kw["config_dir"]
-                    found.append(("provision", cfg, _mentions_helper(cfg, scopes, aliases)))
+                    made = _from_helper(cfg, scopes, aliases)
+                    found.append(("provision", cfg, _mentions_helper(cfg, scopes, aliases) and not made))
                 for arg in (*node.args, *(k.value for k in node.keywords)):
                     first_of_subprocess = name in _SUBPROCESS_CALLS and bool(node.args) and arg is node.args[0]
                     hit = _classify_argv(_resolve_list(arg, scopes), 1 if first_of_subprocess else 2)
@@ -434,11 +480,12 @@ def data_dir_uses(repo: Path = REPO) -> list[DataDirUse]:
                         kind=kind,
                         line=node.lineno,
                         expr=ast.unparse(expr) if expr is not None else "<missing>",
-                        from_helper=(
-                            kind not in ("provision", "opaque_argv", "unknown_argv")
-                            and _from_helper(expr, scopes, aliases)
-                        ),
+                        from_helper=kind not in ("opaque_argv", "unknown_argv") and _from_helper(expr, scopes, aliases),
                         nests_helper=nests,
+                        handed_in=(
+                            kind == "provision" and not nests
+                            and not _from_helper(expr, scopes, aliases) and _handed_in(expr, scopes, aliases)
+                        ),
                     ))
                 self.generic_visit(node)
 
@@ -463,12 +510,15 @@ def provenance_problems(
        ``not_a_cluster``. That covers a literal initdb / ``pg_ctl start`` / ``postgres`` argv, an argv whose
        data dir cannot be read (``opaque_argv``), a variable argv in a file that starts a cluster
        (``unknown_argv``), ``_init_cluster``, ``pg_ctl_start`` and ``provision(<dir>)``.
-    2. ``provision(<dir>)`` where the dir is, or is built from, the helper's result: ``provision`` nests the
-       cluster at ``<dir>/postgres`` and the owner-record sweep reads ``postmaster.pid`` at the top of a
-       recorded dir only, so this is a problem (listing does not excuse it) until nexus-0ajjm teaches the sweep
-       the nested pid file.
+    2. ``provision(<dir>)`` where the dir is built UNDER the helper's result (``Path(h()) / "cfg"``): ``provision``
+       nests the cluster at ``<dir>/postgres`` and the owner-record sweep reads ``postmaster.pid`` at the recorded
+       dir and at its ``postgres/`` child only, so a deeper nest is a problem (listing does not excuse it).
+       ``provision(h())`` itself is fine: a traced use, as an initdb data dir is (nexus-0ajjm). A dir that is a
+       parameter, or unpacked from one, re-provisions a dir another function made and is accepted only in a file
+       that also makes one through the helper.
     3. An unlisted file with fewer traced (helper-made) uses than census sites: each ``pg_ctl_start`` call and
-       each ``exe_name("initdb")`` lookup is a cluster the scan must have traced, not one proof per file.
+       each ``exe_name("initdb")`` lookup is a cluster the scan must have traced, not one proof per file. A
+       ``provision(h())`` is one traced use.
     4. A listed file that is gone, whose reason is not a sentence, whose ``disk_required`` reason names no
        bead, or that has no cluster start, ``provision`` or ``_init_cluster`` CALL left (the AST decides, so a
        word in a docstring or comment keeps nothing alive).
@@ -486,6 +536,7 @@ def provenance_problems(
     census_files = set(sites_per_file)
     listed = set(not_cluster) | set(disk)
     problems: list[str] = []
+    made_by_helper = {u.file for u in uses if u.kind == "provision" and u.from_helper}
     for both in sorted(set(not_cluster) & set(disk)):
         problems.append(f"{both}: listed in both not_a_cluster and disk_required")
     for u in uses:
@@ -494,14 +545,22 @@ def provenance_problems(
         if u.kind == "provision":
             if u.nests_helper:
                 problems.append(
-                    f"{where}: provision(`{u.expr}`) nests the cluster at <dir>/postgres inside a {DATA_DIR_HELPER}() "
-                    f"dir, which the owner-record sweep cannot reap (it reads postmaster.pid at the top of a recorded "
-                    f"dir only); not allowed until nexus-0ajjm teaches the sweep a nested pid file"
+                    f"{where}: provision(`{u.expr}`) nests the cluster at <dir>/postgres under a {DATA_DIR_HELPER}() "
+                    f"dir; the owner-record sweep reads postmaster.pid at the recorded dir and its postgres/ child "
+                    f"only, so pass the helper's result itself"
                 )
+            elif u.from_helper:
+                pass
+            elif u.handed_in:
+                if u.file not in made_by_helper and u.file not in listed:
+                    problems.append(
+                        f"{where}: provision(`{u.expr}`) re-provisions a dir handed in by a parameter or fixture, but "
+                        f"no provision() in this file takes its dir from {DATA_DIR_HELPER}(); make it there, or {listing}"
+                    )
             elif u.file not in listed:
                 problems.append(
                     f"{where}: provision(`{u.expr}`) puts a cluster on a dir that is not made by {DATA_DIR_HELPER}(); "
-                    f"{listing} (disk_required, naming nexus-0ajjm) or not_a_cluster"
+                    f"use it, or {listing} (not_a_cluster, or disk_required naming the bead that drains it)"
                 )
         elif u.kind == "unknown_argv":
             if u.file not in listed:
@@ -531,7 +590,7 @@ def provenance_problems(
             if len(reason.split()) < 4 or len(reason.strip()) < 20:
                 problems.append(f"{table}: {f} has no real reason ({reason!r})")
             if table == "disk_required" and not _BEAD_ID.search(reason):
-                problems.append(f"{table}: {f} names no bead in its reason; name the follow-up that drains it (nexus-0ajjm)")
+                problems.append(f"{table}: {f} names no bead in its reason; name the follow-up that drains it")
             if f not in has_call:
                 problems.append(f"{table}: {f} has no cluster start, provision() or _init_cluster() call left to except")
     for table, entries, ceiling in (

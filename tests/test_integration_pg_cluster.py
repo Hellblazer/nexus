@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
+import structlog.testing
 
 from nexus.daemon.service_registry import pid_alive, process_command
 from tests import _child_process as cp
@@ -524,6 +525,146 @@ class TestSweepOwnerRecordTrust:
         assert result.errors == [] and result.untrusted == [] and result.reaped == []
 
 
+class TestSweepReadsANestedProvisionPgdata:
+    """``pg_provision.provision(config_dir)`` puts the cluster at ``<config_dir>/postgres``. A test that
+    provisions on a recorded dir (nexus-0ajjm) leaves ``postmaster.pid`` one level below the recorded path, so a
+    sweep that reads only the top would ``rmtree`` the dir under a live orphan postmaster."""
+
+    def _nested(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        root = tmp_path / "nexus-test-pg-1000"
+        config_dir = root / "nexus_provision_pg_abc"
+        nested = config_dir / "postgres"
+        nested.mkdir(parents=True)
+        (config_dir / "pg_credentials").write_text("PG_PORT=1\n")
+        return root, config_dir, nested
+
+    def test_a_dead_owners_live_nested_postmaster_is_stopped_by_its_nested_path_then_the_dir_reaped(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        root, config_dir, nested = self._nested(tmp_path)
+        pm = _sleeper(owned_children, str(nested))  # `postgres -D <nested>`: the path is in its own cmdline
+        (nested / "postmaster.pid").write_text(f"{pm.pid}\n{nested}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
+        stopped: list[tuple[int, Path]] = []
+
+        def _kill(pid, cluster_dir, **_k):
+            stopped.append((pid, cluster_dir))
+            os.kill(pid, 9)
+            pm.wait(timeout=5)
+
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", _kill)
+
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert stopped == [(pm.pid, nested)], "pg_ctl must be pointed at the nested pgdata"
+        assert result.reaped == [str(config_dir)]
+        assert not config_dir.exists() and not rec.exists()
+
+    def test_a_nested_postmaster_that_survives_its_stop_keeps_the_dir_and_the_record(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        root, config_dir, nested = self._nested(tmp_path)
+        pm = _sleeper(owned_children, str(nested))
+        (nested / "postmaster.pid").write_text(f"{pm.pid}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: None)  # the stop did nothing
+
+        with pytest.warns(UserWarning, match="still running"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert pid_alive(pm.pid)
+        assert (nested / "postmaster.pid").exists() and config_dir.is_dir(), "removed under a live postmaster"
+        assert rec.exists() and result.reaped == [] and result.errors == [str(rec)]
+
+    def test_a_dead_nested_postmaster_is_reaped_without_a_kill(self, tmp_path, monkeypatch) -> None:
+        root, config_dir, nested = self._nested(tmp_path)
+        (nested / "postmaster.pid").write_text(f"{_dead_pid()}\n{nested}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: pytest.fail("killed"))
+
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert result.reaped == [str(config_dir)] and result.errors == []
+        assert not config_dir.exists() and not rec.exists()
+
+    def test_a_nested_pid_that_names_a_stranger_refuses_the_record(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        root, config_dir, nested = self._nested(tmp_path)
+        stranger = _sleeper(owned_children)  # its cmdline does not name the nested pgdata
+        (nested / "postmaster.pid").write_text(f"{stranger.pid}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: pytest.fail("killed"))
+
+        with pytest.warns(UserWarning, match="refusing"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert result.mismatch_refused == [str(rec)]
+        assert config_dir.is_dir() and rec.exists() and pid_alive(stranger.pid)
+
+    def test_the_nested_postmaster_is_identified_by_the_nested_path_not_the_recorded_dir(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        """A process that names only the recorded dir (not ``<dir>/postgres``) is not this cluster's postmaster."""
+        root, config_dir, nested = self._nested(tmp_path)
+        other = _sleeper(owned_children, str(config_dir))
+        (nested / "postmaster.pid").write_text(f"{other.pid}\n")
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: pytest.fail("killed"))
+
+        with pytest.warns(UserWarning, match="refusing"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert result.mismatch_refused == [str(rec)] and pid_alive(other.pid)
+
+    def test_a_live_owners_nested_cluster_is_never_touched(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        root, config_dir, nested = self._nested(tmp_path)
+        pm = _sleeper(owned_children, str(nested))
+        (nested / "postmaster.pid").write_text(f"{pm.pid}\n")
+        rec = _write_record(root, owner=os.getpid(), pgdatas=[config_dir])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: pytest.fail("killed"))
+
+        result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert result.live_untouched == [str(rec)] and nested.is_dir() and pid_alive(pm.pid)
+
+    def test_a_symlinked_nested_pgdata_is_refused_and_nothing_is_read_through_it(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        root, config_dir, nested = self._nested(tmp_path)
+        nested.rmdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        pm = _sleeper(owned_children, str(nested))
+        (elsewhere / "postmaster.pid").write_text(f"{pm.pid}\n")
+        nested.symlink_to(elsewhere)
+        rec = _write_record(root, owner=_dead_pid(), pgdatas=[config_dir])
+        monkeypatch.setattr(sub, "_kill_postmaster_leg", lambda *a, **k: pytest.fail("killed"))
+
+        with pytest.warns(UserWarning, match="symlink"):
+            result = sub.sweep_stale_substrate_clusters(tmp_root=root)
+
+        assert result.errors == [str(rec)] and config_dir.is_dir() and rec.exists() and pid_alive(pm.pid)
+
+    def test_a_top_level_cluster_still_reads_its_own_pid_file(self, tmp_path, monkeypatch, owned_children) -> None:
+        """The control: a dir with no ``postgres/`` child is read at its top, as before."""
+        root = tmp_path / "nexus-test-pg-1000"
+        pgdata = root / "nexus_inttest_pg_abc"
+        pgdata.mkdir(parents=True)
+        assert sub._owner_pgdata_candidates(pgdata) == [pgdata]
+        pm = _sleeper(owned_children, str(pgdata))
+        (pgdata / "postmaster.pid").write_text(f"{pm.pid}\n")
+        _write_record(root, owner=_dead_pid(), pgdatas=[pgdata])
+        killed: list[Path] = []
+        monkeypatch.setattr(
+            sub, "_kill_postmaster_leg", lambda pid, d, **k: (killed.append(d), os.kill(pid, 9), pm.wait(timeout=5)),
+        )
+        sub.sweep_stale_substrate_clusters(tmp_root=root)
+        assert killed == [pgdata] and not pgdata.exists()
+
+
 class TestSocketPathReserve:
     """The reserve covers the longest cluster prefix in use, and the actual path is
     checked when the dir is made (nexus-942h9 review)."""
@@ -641,15 +782,34 @@ class TestEveryIntegrationClusterGetsTheConf:
     #: provenance scan covers for every real caller.
     _NOT_FIXTURES = {"_child_process.py", "test_integration_pg_cluster.py", "test_ddl_uncounted_clusters_lint.py"}
 
+    #: The five files whose cluster is made by ``pg_provision.provision(config_dir)`` on a ``pg_data_tempdir``
+    #: dir (nexus-0ajjm). provision() runs initdb and starts the cluster inside one call, so there is no moment
+    #: to append the conf before the first start, and a restart afterwards would change what these tests test
+    #: (the fast path needs the running port; the stopped-cluster legs stop it themselves). They keep default
+    #: fsync: only the directory moved to the run's tmpfs root. Each must really call ``provision(``.
+    _PROVISION_DRIVEN = {
+        "db/test_pg_provision.py",
+        "db/test_pg_provision_ca3_bundle.py",
+        "db/test_pg_bundle_relocation.py",
+        "db/test_pg_scram_auth.py",
+        "daemon/test_storage_service_daemon_pg_monitor_backfill.py",
+    }
+
     def test_every_caller_appends_the_conf(self) -> None:
         counts: dict[str, tuple[int, int]] = {}
+        exempt: set[str] = set()
         for p in sorted(_TESTS.rglob("*.py")):
             if p.name in self._NOT_FIXTURES:
                 continue
             code = _code_only(p.read_text())
             makes = code.count("pg_data_tempdir(")
-            if makes:
-                counts[str(p.relative_to(_TESTS))] = (makes, code.count("integration_pg_conf("))
+            rel = str(p.relative_to(_TESTS))
+            if makes and rel in self._PROVISION_DRIVEN:
+                assert "provision(" in code, f"{rel}: exempt as provision()-driven but never calls provision("
+                exempt.add(rel)
+            elif makes:
+                counts[rel] = (makes, code.count("integration_pg_conf("))
+        assert exempt == self._PROVISION_DRIVEN, f"exemption list and tree disagree: {exempt ^ self._PROVISION_DRIVEN}"
         assert len(counts) >= 20, f"census saw only {len(counts)} callers: scan is vacuous"
         short = {f: c for f, c in counts.items() if c[1] < c[0]}
         assert short == {}, f"(clusters made, conf calls) per file: {short}"
@@ -688,6 +848,50 @@ class TestStopAndRemoveCluster:
         with pytest.raises(subprocess.TimeoutExpired):
             cp.stop_and_remove_cluster("pg_ctl", pgdata, run=hung_stop)
         assert not pgdata.exists(), "a hung pg_ctl stop left the cluster dir on the shared tmpfs root"
+
+    def test_a_stop_that_times_out_is_logged_before_the_removal(self, tmp_path: Path) -> None:
+        pgdata = tmp_path / "cluster"
+        pgdata.mkdir()
+
+        def hung_stop(argv: list[str], **kw: object) -> None:
+            raise subprocess.TimeoutExpired(argv, 30)
+
+        with structlog.testing.capture_logs() as logs, pytest.raises(subprocess.TimeoutExpired):
+            cp.stop_and_remove_cluster("pg_ctl", pgdata, run=hung_stop)
+        events = [e for e in logs if e["event"] == "stop_and_remove_cluster.stop_timed_out"]
+        assert len(events) == 1 and events[0]["pgdata"] == str(pgdata) and events[0]["log_level"] == "warning", logs
+
+    def test_a_provisioned_cluster_is_stopped_at_its_nested_pgdata_and_its_config_dir_removed(
+        self, tmp_path: Path,
+    ) -> None:
+        """``provision(dir)`` nests the cluster at ``<dir>/postgres`` beside its credentials file: the stop
+        targets the nested dir and the removal takes the whole ``<dir>``, or the credentials are left on the tmpfs
+        root (nexus-0ajjm)."""
+        config_dir = tmp_path / "cfg"
+        (config_dir / "postgres" / "base").mkdir(parents=True)
+        (config_dir / "pg_credentials").write_text("PG_PORT=1\n")
+        calls: list[list[str]] = []
+
+        def fake_stop(argv: list[str], **kw: object) -> None:
+            assert (config_dir / "postgres").is_dir(), "the nested dir must still exist while pg_ctl stop runs"
+            calls.append(argv)
+
+        cp.stop_and_remove_cluster(
+            "pg_ctl", config_dir / "postgres", remove_dir=config_dir, run=fake_stop,
+        )
+        assert calls == [["pg_ctl", "-D", str(config_dir / "postgres"), "stop", "-m", "immediate"]]
+        assert not config_dir.exists()
+
+    def test_a_remove_dir_is_removed_even_when_the_stop_times_out(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "cfg"
+        (config_dir / "postgres").mkdir(parents=True)
+
+        def hung_stop(argv: list[str], **kw: object) -> None:
+            raise subprocess.TimeoutExpired(argv, 30)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            cp.stop_and_remove_cluster("pg_ctl", config_dir / "postgres", remove_dir=config_dir, run=hung_stop)
+        assert not config_dir.exists()
 
     def test_a_pg_ctl_that_cannot_launch_still_removes_the_dir(self, tmp_path: Path) -> None:
         pgdata = tmp_path / "cluster"

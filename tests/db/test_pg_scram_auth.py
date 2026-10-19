@@ -32,6 +32,7 @@ from nexus._install.layout_core import exe_name
 from nexus._winsec import owner_only_problem
 from nexus.db import pg_provision as pp
 from nexus.db.pg_auth import cluster_auth_state, hba_has_trust
+from tests._child_process import pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
 
 _PG_BIN = pg_bin_dir()
@@ -151,11 +152,20 @@ class _Box:
 
 
 def _stop(bins: pp.PgBinaries, pgdata: Path) -> None:
+    """Stop the cluster mid-test (to exercise provision()'s stopped-cluster path); the dir stays."""
     try:
         subprocess.run([str(bins.pg_ctl), "-D", str(pgdata), "-m", "immediate", "stop"],
                        capture_output=True, check=False, timeout=30)
     except Exception:  # noqa: BLE001 — teardown must not reraise
         pass
+
+
+def _remove(bins: pp.PgBinaries, config_dir: Path) -> None:
+    """Teardown: stop ``<config_dir>/postgres`` and remove ``config_dir``.
+
+    ``config_dir`` comes from ``pg_data_tempdir`` (the run's tmpfs root), which pytest does not clean
+    up, and provision() nests the cluster one level below it (nexus-0ajjm)."""
+    stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
 
 
 @pytest.fixture(scope="module")
@@ -164,22 +174,20 @@ def bins() -> pp.PgBinaries:
 
 
 @pytest.fixture
-def box(bins: pp.PgBinaries, tmp_path: Path):
+def box(bins: pp.PgBinaries):
     """A freshly provisioned cluster, one per test."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir()
+    config_dir = Path(pg_data_tempdir("nexus_scram_pg_"))
     try:
-        pp.provision(config_dir, force_new_port=True)
-    except subprocess.CalledProcessError as exc:
-        # CalledProcessError's str() omits stderr, which is the part that says why.
-        pg_log = config_dir / "postgres" / "pg.log"
-        tail = pg_log.read_text()[-2000:] if pg_log.exists() else "(no pg.log)"
-        raise AssertionError(f"provision failed: {exc}\nstderr: {exc.stderr!r}\npg.log tail:\n{tail}") from exc
-    b = _Box(config_dir, bins)
-    try:
-        yield b
+        try:
+            pp.provision(config_dir, force_new_port=True)
+        except subprocess.CalledProcessError as exc:
+            # CalledProcessError's str() omits stderr, which is the part that says why.
+            pg_log = config_dir / "postgres" / "pg.log"
+            tail = pg_log.read_text()[-2000:] if pg_log.exists() else "(no pg.log)"
+            raise AssertionError(f"provision failed: {exc}\nstderr: {exc.stderr!r}\npg.log tail:\n{tail}") from exc
+        yield _Box(config_dir, bins)
     finally:
-        _stop(bins, b.pgdata)
+        _remove(bins, config_dir)
 
 
 # ── a fresh cluster ────────────────────────────────────────────────────────────
@@ -253,43 +261,42 @@ class TestSecretFilesArePrivateWhileInUse:
     check runs on the real file the real initdb and psql open."""
 
     def test_pwfile_and_sql_files_are_owner_only_in_use_and_deleted_after(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, bins: pp.PgBinaries, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        config_dir = tmp_path / "cfg"
-        config_dir.mkdir()
-        seen: list[tuple[str, Path, bool, str | None]] = []
-        real_run = pp._run
-
-        def spy(cmd, **kw):
-            for i, arg in enumerate(cmd):
-                path: Path | None = None
-                kind = ""
-                if arg.startswith("--pwfile="):
-                    kind, path = "pwfile", Path(arg.split("=", 1)[1])
-                elif arg == "-f" and i + 1 < len(cmd):
-                    kind, path = "sql", Path(cmd[i + 1])
-                if path is not None:
-                    present = path.exists()
-                    problem = _not_owner_only(path) if present else "missing"
-                    seen.append((kind, path, present, problem))
-            return real_run(cmd, **kw)
-
-        monkeypatch.setattr(pp, "_run", spy)
-        pgdata = config_dir / "postgres"
+        config_dir = Path(pg_data_tempdir("nexus_scram_pg_"))
         try:
-            pp.provision(config_dir, force_new_port=True)
-        finally:
-            _stop(pp.discover_pg_binaries(), pgdata)
+            seen: list[tuple[str, Path, bool, str | None]] = []
+            real_run = pp._run
 
-        kinds = [k for k, *_ in seen]
-        assert kinds.count("pwfile") == 1, seen
-        assert kinds.count("sql") >= 1, "CREATE ROLE ... PASSWORD must go through _psql_secret"
-        for kind, path, present, problem in seen:
-            assert present, f"{kind} {path} absent when the client read it"
-            assert problem is None, f"{kind} {path}: {problem}"
-            assert not path.exists(), f"{kind} {path} left behind"
-            if kind == "pwfile":
-                assert path.parent == pgdata.parent, "beside the data directory, never inside it"
+            def spy(cmd, **kw):
+                for i, arg in enumerate(cmd):
+                    path: Path | None = None
+                    kind = ""
+                    if arg.startswith("--pwfile="):
+                        kind, path = "pwfile", Path(arg.split("=", 1)[1])
+                    elif arg == "-f" and i + 1 < len(cmd):
+                        kind, path = "sql", Path(cmd[i + 1])
+                    if path is not None:
+                        present = path.exists()
+                        problem = _not_owner_only(path) if present else "missing"
+                        seen.append((kind, path, present, problem))
+                return real_run(cmd, **kw)
+
+            monkeypatch.setattr(pp, "_run", spy)
+            pgdata = config_dir / "postgres"
+            pp.provision(config_dir, force_new_port=True)
+
+            kinds = [k for k, *_ in seen]
+            assert kinds.count("pwfile") == 1, seen
+            assert kinds.count("sql") >= 1, "CREATE ROLE ... PASSWORD must go through _psql_secret"
+            for kind, path, present, problem in seen:
+                assert present, f"{kind} {path} absent when the client read it"
+                assert problem is None, f"{kind} {path}: {problem}"
+                assert not path.exists(), f"{kind} {path} left behind"
+                if kind == "pwfile":
+                    assert path.parent == pgdata.parent, "beside the data directory, never inside it"
+        finally:
+            _remove(bins, config_dir)
 
 
 # ── an existing trust cluster ──────────────────────────────────────────────────
@@ -381,20 +388,19 @@ class TestLegacyTrustClusterIsMigrated:
 
 class TestPasswordIsNeverStranded:
     def test_a_crash_after_initdb_keeps_the_superuser_password(
-        self, bins: pp.PgBinaries, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, bins: pp.PgBinaries, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        config_dir = tmp_path / "cfg"
-        config_dir.mkdir()
-        pgdata = config_dir / "postgres"
-
-        def crash(*a, **k):
-            raise RuntimeError("simulated crash after initdb")
-
-        with monkeypatch.context() as m:
-            m.setattr(pp, "_create_db", crash)
-            with pytest.raises(RuntimeError, match="simulated crash"):
-                pp.provision(config_dir, force_new_port=True)
+        config_dir = Path(pg_data_tempdir("nexus_scram_pg_"))
         try:
+            pgdata = config_dir / "postgres"
+
+            def crash(*a, **k):
+                raise RuntimeError("simulated crash after initdb")
+
+            with monkeypatch.context() as m:
+                m.setattr(pp, "_create_db", crash)
+                with pytest.raises(RuntimeError, match="simulated crash"):
+                    pp.provision(config_dir, force_new_port=True)
             pending = pp._read_credentials(config_dir / "pg_credentials")
             assert pending["PG_SUPERUSER_PASS"], "recorded before initdb baked it in"
             assert "PG_PORT" not in pending, "must not look provisioned to the fast path"
@@ -410,7 +416,7 @@ class TestPasswordIsNeverStranded:
             assert _login(bins, port, "nexus_svc", final["NX_DB_PASS"], db="nexus").returncode == 0
             assert res.cluster_created is False
         finally:
-            _stop(bins, pgdata)
+            _remove(bins, config_dir)
 
     def test_a_scram_cluster_with_no_recorded_password_is_refused_not_loosened(self, box: _Box) -> None:
         lines = [ln for ln in box.creds_path.read_text().splitlines() if not ln.startswith("PG_SUPERUSER_PASS=")]

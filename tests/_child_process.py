@@ -34,9 +34,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from nexus._install.layout_core import exe_name
 from nexus._winsec import grant_user_tree_access
 from nexus.util import process_group, win_job
+
+_log = structlog.get_logger(__name__)
 
 #: True where process groups exist (every POSIX host). Windows has no ``os.killpg``.
 _POSIX: bool = getattr(os, "killpg", None) is not None
@@ -234,20 +238,31 @@ def stop_and_remove_cluster(
     pg_ctl: str | os.PathLike[str],
     pgdata: str | os.PathLike[str],
     *,
+    remove_dir: str | os.PathLike[str] | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> None:
     """Teardown of a cluster made by :func:`pg_data_tempdir`: ``pg_ctl stop -m immediate``, then remove
     the directory. The removal is in a ``finally``: a ``pg_ctl`` that hangs past its 30 s timeout
     (``TimeoutExpired``) or cannot be launched must not leave the directory on the run's shared tmpfs
     root, where it holds RAM until the crash sweep (nexus-szyun). The exception still propagates, so a
-    stuck postmaster is a loud teardown error, not a silent one."""
+    stuck postmaster is a loud teardown error, not a silent one.
+
+    A timed-out stop is logged: the removal that follows then runs under a postmaster that may still be
+    alive. It exits by itself once its ``postmaster.pid`` is gone, and nothing here waits for that.
+
+    *remove_dir* is the directory to remove when it is not *pgdata* itself: ``pg_provision.provision(dir)``
+    puts the cluster at ``<dir>/postgres`` and its credentials beside it, so a test that provisions on a
+    :func:`pg_data_tempdir` dir stops ``<dir>/postgres`` and removes ``<dir>`` (nexus-0ajjm)."""
     try:
         run(
             [str(pg_ctl), "-D", str(pgdata), "stop", "-m", "immediate"],
             capture_output=True, text=True, timeout=30, check=False,
         )
+    except subprocess.TimeoutExpired:
+        _log.warning("stop_and_remove_cluster.stop_timed_out", pgdata=str(pgdata), removing=str(remove_dir or pgdata))
+        raise
     finally:
-        shutil.rmtree(pgdata, ignore_errors=True)
+        shutil.rmtree(remove_dir if remove_dir is not None else pgdata, ignore_errors=True)
 
 
 def integration_pg_conf(pgdata: str) -> str:
